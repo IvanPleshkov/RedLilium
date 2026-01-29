@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check:*)",
+      "Bash(cargo build:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(dir:*)",
+      "Bash(rustup target list:*)",
+      "Bash(findstr:*)",
+      "Bash(rustup target add:*)",
+      "Bash(wasm-pack build:*)"
+    ]
+  }
+}
