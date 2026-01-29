@@ -23,7 +23,7 @@ use graphics_engine::{
         Camera, CameraController, CameraInput, FreeFlyController, MainCamera, MeshRenderer,
         OrbitController, PointLight, DirectionalLight, Transform,
     },
-    BackendType, WgpuEguiIntegration, VulkanEguiIntegration, Engine, EngineConfig,
+    BackendType, WgpuEguiIntegration, VulkanEguiIntegration, Engine, EngineConfig, GBufferDebugMode,
 };
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -66,6 +66,8 @@ struct AppState {
     ui_color: [f32; 3],
     ui_dropdown_selection: usize,
     ui_click_count: u32,
+    /// G-buffer debug visualization mode index
+    gbuffer_mode: usize,
 }
 
 impl AppState {
@@ -89,6 +91,7 @@ impl AppState {
             ui_color: [0.2, 0.6, 1.0],
             ui_dropdown_selection: 0,
             ui_click_count: 0,
+            gbuffer_mode: 0, // Default to final lit output
         }
     }
 
@@ -337,6 +340,7 @@ fn build_egui_ui(
     color: &mut [f32; 3],
     dropdown_selection: &mut usize,
     click_count: &mut u32,
+    gbuffer_mode: &mut usize,
 ) {
     // Build debug UI
     egui::Window::new("Debug")
@@ -356,6 +360,17 @@ fn build_egui_ui(
             ui.heading("Scene");
             ui.label(format!("Objects: {}", object_count));
             ui.label(format!("Lights: {}", light_count));
+            ui.separator();
+
+            // G-Buffer Debug Visualization
+            ui.heading("G-Buffer Debug");
+            egui::ComboBox::from_label("View")
+                .selected_text(GBufferDebugMode::ALL[*gbuffer_mode].name())
+                .show_ui(ui, |ui| {
+                    for (i, mode) in GBufferDebugMode::ALL.iter().enumerate() {
+                        ui.selectable_value(gbuffer_mode, i, mode.name());
+                    }
+                });
             ui.separator();
 
             // Camera info
@@ -495,6 +510,7 @@ fn render_frame(engine: &mut Engine, state: &mut AppState, window: &winit::windo
         let mut color = state.ui_color;
         let mut dropdown_selection = state.ui_dropdown_selection;
         let mut click_count = state.ui_click_count;
+        let mut gbuffer_mode = state.gbuffer_mode;
 
         // Begin frame, build UI, end frame
         match &mut state.egui {
@@ -503,7 +519,7 @@ fn render_frame(engine: &mut Engine, state: &mut AppState, window: &winit::windo
                 build_egui_ui(
                     egui.context(), fps, controller_name, object_count, light_count, cam_pos,
                     &mut slider_value, &mut checkbox, &mut radio_selection, &mut text_input,
-                    &mut color, &mut dropdown_selection, &mut click_count,
+                    &mut color, &mut dropdown_selection, &mut click_count, &mut gbuffer_mode,
                 );
                 egui.end_frame(window);
             }
@@ -512,7 +528,7 @@ fn render_frame(engine: &mut Engine, state: &mut AppState, window: &winit::windo
                 build_egui_ui(
                     egui.context(), fps, controller_name, object_count, light_count, cam_pos,
                     &mut slider_value, &mut checkbox, &mut radio_selection, &mut text_input,
-                    &mut color, &mut dropdown_selection, &mut click_count,
+                    &mut color, &mut dropdown_selection, &mut click_count, &mut gbuffer_mode,
                 );
                 egui.end_frame(window);
             }
@@ -527,6 +543,10 @@ fn render_frame(engine: &mut Engine, state: &mut AppState, window: &winit::windo
         state.ui_color = color;
         state.ui_dropdown_selection = dropdown_selection;
         state.ui_click_count = click_count;
+        state.gbuffer_mode = gbuffer_mode;
+
+        // Apply G-buffer debug mode to engine
+        engine.set_gbuffer_debug_mode(GBufferDebugMode::ALL[gbuffer_mode]);
     }
 
     // Render main scene (without presenting)

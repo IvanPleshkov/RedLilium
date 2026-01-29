@@ -28,13 +28,10 @@ pub use bevy_ecs::prelude::*;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
 
-#[cfg(target_arch = "wasm32")]
-mod web_demo;
-
 pub use egui_integration::WgpuEguiIntegration;
 #[cfg(not(target_arch = "wasm32"))]
 pub use egui_integration::VulkanEguiIntegration;
-pub use engine::Engine;
+pub use engine::{Engine, GBufferDebugMode};
 pub use window::Window;
 
 // Re-export wgpu backend for direct access

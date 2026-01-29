@@ -4,6 +4,7 @@
 //! Build with: cargo build --example demo_web --target wasm32-unknown-unknown --no-default-features --features web
 
 #![cfg(target_arch = "wasm32")]
+#![no_main]
 
 use glam::Vec3;
 use graphics_engine::{
@@ -14,7 +15,7 @@ use graphics_engine::{
         MeshRenderer, OrbitController, PointLight, Transform,
     },
     web::{console_log, setup_canvas, spawn_local},
-    BackendType, EguiIntegration, Engine, EngineConfig,
+    BackendType, WgpuEguiIntegration, Engine, EngineConfig, GBufferDebugMode,
 };
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -37,7 +38,7 @@ struct AppState {
     orbit: OrbitController,
     active_controller: usize,
     cursor_grabbed: bool,
-    egui: Option<EguiIntegration>,
+    egui: Option<WgpuEguiIntegration>,
     show_debug_ui: bool,
     frame_times: VecDeque<f32>,
     fps: f32,
@@ -50,6 +51,8 @@ struct AppState {
     ui_color: [f32; 3],
     ui_dropdown_selection: usize,
     ui_click_count: u32,
+    /// G-buffer debug visualization mode index
+    gbuffer_mode: usize,
 }
 
 impl AppState {
@@ -72,6 +75,7 @@ impl AppState {
             ui_color: [0.2, 0.6, 1.0],
             ui_dropdown_selection: 0,
             ui_click_count: 0,
+            gbuffer_mode: 0, // Default to final lit output
         }
     }
 
@@ -265,7 +269,7 @@ async fn async_main() {
 
     // Initialize egui
     if let Some(wgpu_backend) = engine.backend().as_wgpu() {
-        state.egui = Some(EguiIntegration::new(wgpu_backend, &window));
+        state.egui = Some(WgpuEguiIntegration::new(wgpu_backend, &window));
         console_log("egui debug UI initialized (press F1 to toggle)");
     }
 
@@ -361,7 +365,7 @@ fn handle_window_event(
     state: &mut AppState,
     engine: &mut Engine,
     window: &winit::window::Window,
-    elwt: &winit::event_loop::ActiveEventLoop,
+    elwt: &winit::event_loop::EventLoopWindowTarget<()>,
 ) {
     match event {
         WindowEvent::CloseRequested => {
@@ -468,6 +472,7 @@ fn render_frame(
         let mut color = state.ui_color;
         let mut dropdown_selection = state.ui_dropdown_selection;
         let mut click_count = state.ui_click_count;
+        let mut gbuffer_mode = state.gbuffer_mode;
 
         let egui = state.egui.as_mut().unwrap();
         egui.begin_frame(window);
@@ -484,6 +489,17 @@ fn render_frame(
                 ui.heading("Scene");
                 ui.label(format!("Objects: {}", object_count));
                 ui.label(format!("Lights: {}", light_count));
+                ui.separator();
+
+                // G-Buffer Debug Visualization
+                ui.heading("G-Buffer Debug");
+                egui::ComboBox::from_label("View")
+                    .selected_text(GBufferDebugMode::ALL[gbuffer_mode].name())
+                    .show_ui(ui, |ui| {
+                        for (i, mode) in GBufferDebugMode::ALL.iter().enumerate() {
+                            ui.selectable_value(&mut gbuffer_mode, i, mode.name());
+                        }
+                    });
                 ui.separator();
 
                 ui.heading("Camera");
@@ -556,6 +572,10 @@ fn render_frame(
         state.ui_color = color;
         state.ui_dropdown_selection = dropdown_selection;
         state.ui_click_count = click_count;
+        state.gbuffer_mode = gbuffer_mode;
+
+        // Apply G-buffer debug mode to engine
+        engine.set_gbuffer_debug_mode(GBufferDebugMode::ALL[gbuffer_mode]);
     }
 
     // Render scene

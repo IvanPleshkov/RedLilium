@@ -21,6 +21,55 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use winit::window::Window as WinitWindow;
 
+/// Debug visualization mode for G-buffer inspection
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GBufferDebugMode {
+    /// Normal lit output (default)
+    #[default]
+    Final,
+    /// Show albedo/base color
+    Albedo,
+    /// Show world-space normals
+    Normal,
+    /// Show metallic (R) and roughness (G)
+    Material,
+    /// Show depth buffer (linearized)
+    Depth,
+}
+
+impl GBufferDebugMode {
+    /// Get all available modes for UI display
+    pub const ALL: &'static [GBufferDebugMode] = &[
+        GBufferDebugMode::Final,
+        GBufferDebugMode::Albedo,
+        GBufferDebugMode::Normal,
+        GBufferDebugMode::Material,
+        GBufferDebugMode::Depth,
+    ];
+
+    /// Get the display name for this mode
+    pub fn name(&self) -> &'static str {
+        match self {
+            GBufferDebugMode::Final => "Final (Lit)",
+            GBufferDebugMode::Albedo => "Albedo",
+            GBufferDebugMode::Normal => "Normal",
+            GBufferDebugMode::Material => "Material (M/R)",
+            GBufferDebugMode::Depth => "Depth",
+        }
+    }
+
+    /// Get the shader mode value (0-4)
+    pub fn shader_value(&self) -> u32 {
+        match self {
+            GBufferDebugMode::Final => 0,
+            GBufferDebugMode::Albedo => 1,
+            GBufferDebugMode::Normal => 2,
+            GBufferDebugMode::Material => 3,
+            GBufferDebugMode::Depth => 4,
+        }
+    }
+}
+
 /// Backend wrapper to abstract over different backends
 pub enum Backend {
     Wgpu(WgpuBackend),
@@ -159,6 +208,10 @@ struct LightingUniform {
     ambient: Vec4,      // RGB ambient, A unused
     light_dir: Vec4,    // XYZ direction, W unused
     light_color: Vec4,  // RGB color, W intensity
+    debug_mode: u32,    // 0=Final, 1=Albedo, 2=Normal, 3=Material, 4=Depth
+    near_plane: f32,    // Camera near plane for depth visualization
+    far_plane: f32,     // Camera far plane for depth visualization
+    _padding: f32,
 }
 
 /// GPU resources for a mesh
@@ -234,6 +287,8 @@ pub struct Engine {
     height: u32,
     config: EngineConfig,
     render_state: Option<RenderState>,
+    /// Current G-buffer debug visualization mode
+    gbuffer_debug_mode: GBufferDebugMode,
 }
 
 // G-Buffer shader for deferred rendering - outputs to multiple render targets
@@ -317,8 +372,9 @@ fn fs_main(in: VertexOutput) -> GBufferOutput {
 "#;
 
 // Deferred lighting shader - renders fullscreen quad and computes lighting
+// Supports debug visualization of G-buffer contents
 const DEFERRED_LIGHTING_SHADER: &str = r#"
-// Deferred lighting shader
+// Deferred lighting shader with G-buffer debug visualization
 
 struct CameraUniform {
     view: mat4x4<f32>,
@@ -334,6 +390,10 @@ struct LightingUniform {
     ambient: vec4<f32>,
     light_dir: vec4<f32>,
     light_color: vec4<f32>,
+    debug_mode: u32,    // 0=Final, 1=Albedo, 2=Normal, 3=Material, 4=Depth
+    near_plane: f32,
+    far_plane: f32,
+    _padding: f32,
 }
 
 @group(0) @binding(0) var gbuffer_albedo: texture_2d<f32>;
@@ -369,6 +429,12 @@ fn reconstruct_world_position(uv: vec2<f32>, depth: f32) -> vec3<f32> {
     return world_pos.xyz / world_pos.w;
 }
 
+// Linearize depth for visualization
+fn linearize_depth(depth: f32, near: f32, far: f32) -> f32 {
+    let z = depth;
+    return (2.0 * near * far) / (far + near - z * (far - near));
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let pixel_coord = vec2<i32>(in.position.xy);
@@ -379,6 +445,44 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let material_data = textureLoad(gbuffer_material, pixel_coord, 0);
     let depth = textureLoad(gbuffer_depth, pixel_coord, 0);
 
+    // Debug mode: Albedo
+    if lighting.debug_mode == 1u {
+        if depth >= 1.0 {
+            return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        }
+        return vec4<f32>(albedo, 1.0);
+    }
+
+    // Debug mode: Normal
+    if lighting.debug_mode == 2u {
+        if depth >= 1.0 {
+            return vec4<f32>(0.5, 0.5, 1.0, 1.0);
+        }
+        // Normal is stored as [0,1], show as-is for visualization
+        return vec4<f32>(normal_encoded, 1.0);
+    }
+
+    // Debug mode: Material (Metallic=R, Roughness=G)
+    if lighting.debug_mode == 3u {
+        if depth >= 1.0 {
+            return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        }
+        let metallic = material_data.r;
+        let roughness = material_data.g;
+        return vec4<f32>(metallic, roughness, 0.0, 1.0);
+    }
+
+    // Debug mode: Depth (linearized)
+    if lighting.debug_mode == 4u {
+        if depth >= 1.0 {
+            return vec4<f32>(1.0, 1.0, 1.0, 1.0);
+        }
+        let linear_depth = linearize_depth(depth, lighting.near_plane, lighting.far_plane);
+        let normalized = saturate(linear_depth / lighting.far_plane);
+        return vec4<f32>(vec3<f32>(normalized), 1.0);
+    }
+
+    // Default: Final lit output (mode 0)
     // Early out for sky
     if depth >= 1.0 {
         return vec4<f32>(0.05, 0.05, 0.08, 1.0);
@@ -469,6 +573,7 @@ impl Engine {
             height,
             config,
             render_state: None,
+            gbuffer_debug_mode: GBufferDebugMode::default(),
         })
     }
 
@@ -868,6 +973,16 @@ impl Engine {
         self.materials.get(id)
     }
 
+    /// Get the current G-buffer debug visualization mode
+    pub fn gbuffer_debug_mode(&self) -> GBufferDebugMode {
+        self.gbuffer_debug_mode
+    }
+
+    /// Set the G-buffer debug visualization mode
+    pub fn set_gbuffer_debug_mode(&mut self, mode: GBufferDebugMode) {
+        self.gbuffer_debug_mode = mode;
+    }
+
     /// Handle window resize
     pub fn resize(&mut self, width: u32, height: u32) {
         if width > 0 && height > 0 {
@@ -1028,11 +1143,24 @@ impl Engine {
                         .map(|a| a.0)
                         .unwrap_or(Vec3::splat(0.03));
 
-                    // Update lighting uniform
+                    // Get camera near/far planes for depth visualization
+                    let (near_plane, far_plane) = {
+                        let mut query = self.world.query::<(&Camera, &MainCamera)>();
+                        query.iter(&self.world)
+                            .next()
+                            .map(|(camera, _)| (camera.projection.near(), camera.projection.far()))
+                            .unwrap_or((0.1, 1000.0))
+                    };
+
+                    // Update lighting uniform with debug mode
                     let lighting_uniform = LightingUniform {
                         ambient: Vec4::new(ambient.x, ambient.y, ambient.z, 1.0),
                         light_dir: Vec4::new(0.5, 1.0, 0.3, 0.0).normalize(),
                         light_color: Vec4::new(1.0, 0.98, 0.95, 1.0),
+                        debug_mode: self.gbuffer_debug_mode.shader_value(),
+                        near_plane,
+                        far_plane,
+                        _padding: 0.0,
                     };
                     backend.write_buffer(
                         state.lighting_uniform_buffer,
