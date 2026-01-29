@@ -1,9 +1,9 @@
 //! Render pass definitions for the render graph
 
+use bevy_ecs::prelude::*;
 use crate::backend::traits::*;
 use crate::backend::types::*;
 use crate::render_graph::resource::*;
-use crate::scene::Scene;
 use std::any::Any;
 
 /// Unique identifier for a render pass
@@ -92,7 +92,7 @@ impl<'a> PassSetupContext<'a> {
 /// Context for executing a render pass
 pub struct PassExecuteContext<'a> {
     pub backend: &'a mut dyn std::any::Any,
-    pub scene: &'a Scene,
+    pub world: &'a World,
     pub width: u32,
     pub height: u32,
     pub resource_textures: &'a std::collections::HashMap<ResourceId, TextureViewHandle>,

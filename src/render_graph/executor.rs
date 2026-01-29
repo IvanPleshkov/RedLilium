@@ -1,11 +1,10 @@
 //! Render graph executor
 
+use bevy_ecs::prelude::*;
 use crate::backend::traits::*;
-use crate::backend::types::*;
 use crate::render_graph::graph::*;
 use crate::render_graph::pass::*;
 use crate::render_graph::resource::*;
-use crate::scene::Scene;
 use std::collections::HashMap;
 
 /// Executor for running the compiled render graph
@@ -75,7 +74,7 @@ impl RenderGraphExecutor {
         graph: &RenderGraph,
         compiled: &CompiledGraph,
         backend: &mut B,
-        scene: &Scene,
+        world: &World,
         width: u32,
         height: u32,
     ) {
@@ -93,7 +92,7 @@ impl RenderGraphExecutor {
             if let Some(pass) = graph.get_pass(pass_id) {
                 let mut ctx = PassExecuteContext {
                     backend: backend as &mut dyn std::any::Any,
-                    scene,
+                    world,
                     width,
                     height,
                     resource_textures: &texture_views,

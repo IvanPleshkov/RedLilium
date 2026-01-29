@@ -10,6 +10,7 @@
 //! - Post-processing effects (bloom, tonemapping)
 //! - Flexible resource management
 //! - Web support via WebAssembly and WebGPU
+//! - Entity Component System (ECS) based scene management using Bevy ECS
 
 pub mod backend;
 pub mod egui_integration;
@@ -19,6 +20,9 @@ pub mod render_graph;
 pub mod resources;
 pub mod scene;
 pub mod window;
+
+// Re-export Bevy ECS prelude for users
+pub use bevy_ecs::prelude::*;
 
 // Web-specific modules
 #[cfg(target_arch = "wasm32")]

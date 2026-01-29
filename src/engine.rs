@@ -1,5 +1,6 @@
 //! Main engine orchestrator
 
+use bevy_ecs::prelude::*;
 use crate::backend::traits::*;
 use crate::backend::types::*;
 use crate::backend::wgpu_backend::WgpuBackend;
@@ -8,7 +9,7 @@ use crate::backend::vulkan::VulkanBackend;
 use crate::pipeline::{build_forward_plus_graph, ForwardPlusConfig};
 use crate::render_graph::{RenderGraph, RenderGraphExecutor};
 use crate::resources::{Material, Mesh};
-use crate::scene::{Scene, CameraUniformData, TransformUniformData};
+use crate::scene::{Camera, MainCamera, MeshRenderer, Transform, CameraUniformData, TransformUniformData, AmbientLight};
 use crate::{BackendType, EngineConfig};
 use bytemuck::{Pod, Zeroable};
 use glam::Vec4;
@@ -181,8 +182,8 @@ struct RenderState {
     // GPU meshes
     gpu_meshes: HashMap<usize, GpuMesh>,
 
-    // Per-object resources
-    gpu_objects: Vec<GpuObject>,
+    // Per-entity GPU resources (maps entity to transform buffer/bind group)
+    entity_gpu_objects: HashMap<Entity, GpuObject>,
 
     // Depth buffer
     depth_texture: TextureHandle,
@@ -194,7 +195,7 @@ pub struct Engine {
     backend: Backend,
     render_graph: RenderGraph,
     graph_executor: RenderGraphExecutor,
-    scene: Scene,
+    world: World,
     meshes: Vec<Mesh>,
     materials: Vec<Material>,
     width: u32,
@@ -323,11 +324,21 @@ impl Engine {
 
         let (render_graph, _resources) = build_forward_plus_graph(width, height, &forward_plus_config);
 
+        // Create ECS world with default camera
+        let mut world = World::new();
+        world.insert_resource(AmbientLight::default());
+
+        // Spawn default camera entity
+        world.spawn((
+            Camera::default(),
+            MainCamera,
+        ));
+
         Ok(Self {
             backend,
             render_graph,
             graph_executor: RenderGraphExecutor::new(),
-            scene: Scene::new(),
+            world,
             meshes: Vec::new(),
             materials: Vec::new(),
             width,
@@ -485,17 +496,18 @@ impl Engine {
             material_bind_groups.insert(id, bind_group);
         }
 
-        // Create per-object resources
-        let mut gpu_objects = Vec::new();
-        for (id, obj) in self.scene.objects.iter().enumerate() {
+        // Create per-entity resources using ECS query
+        let mut entity_gpu_objects = HashMap::new();
+        let mut query = self.world.query::<(Entity, &MeshRenderer, &Transform)>();
+        for (entity, _renderer, transform) in query.iter(&self.world) {
             let transform_buffer = backend.create_buffer_init(
                 &BufferDescriptor {
-                    label: Some(format!("Transform Buffer {}", id)),
+                    label: Some(format!("Transform Buffer {:?}", entity)),
                     size: std::mem::size_of::<TransformUniformData>() as u64,
                     usage: BufferUsage::UNIFORM | BufferUsage::COPY_DST,
                     mapped_at_creation: false,
                 },
-                bytemuck::bytes_of(&obj.transform.uniform_data()),
+                bytemuck::bytes_of(&transform.uniform_data()),
             )?;
 
             let transform_bind_group = backend.create_bind_group(object_layout, &[(
@@ -507,7 +519,7 @@ impl Engine {
                 },
             )])?;
 
-            gpu_objects.push(GpuObject {
+            entity_gpu_objects.insert(entity, GpuObject {
                 transform_buffer,
                 transform_bind_group,
             });
@@ -523,7 +535,7 @@ impl Engine {
             material_buffers,
             material_bind_groups,
             gpu_meshes,
-            gpu_objects,
+            entity_gpu_objects,
             depth_texture,
             depth_view,
         });
@@ -531,14 +543,14 @@ impl Engine {
         Ok(())
     }
 
-    /// Get mutable reference to the scene
-    pub fn scene_mut(&mut self) -> &mut Scene {
-        &mut self.scene
+    /// Get mutable reference to the ECS world
+    pub fn world_mut(&mut self) -> &mut World {
+        &mut self.world
     }
 
-    /// Get reference to the scene
-    pub fn scene(&self) -> &Scene {
-        &self.scene
+    /// Get reference to the ECS world
+    pub fn world(&self) -> &World {
+        &self.world
     }
 
     /// Add a mesh and return its ID
@@ -581,8 +593,11 @@ impl Engine {
             self.width = actual_width;
             self.height = actual_height;
 
-            // Update camera aspect ratio
-            self.scene.camera.set_aspect(actual_width as f32, actual_height as f32);
+            // Update camera aspect ratio using ECS query
+            let mut query = self.world.query::<(&mut Camera, &MainCamera)>();
+            for (mut camera, _) in query.iter_mut(&mut self.world) {
+                camera.set_aspect(actual_width as f32, actual_height as f32);
+            }
 
             // Rebuild render graph for new size
             let forward_plus_config = ForwardPlusConfig {
@@ -644,8 +659,14 @@ impl Engine {
         match &mut self.backend {
             Backend::Wgpu(backend) => {
                 if let Some(ref state) = self.render_state {
-                    // Update camera uniform
-                    let camera_uniform = self.scene.camera.uniform_data();
+                    // Get camera uniform from ECS query
+                    let camera_uniform = {
+                        let mut query = self.world.query::<(&Camera, &MainCamera)>();
+                        query.iter(&self.world)
+                            .next()
+                            .map(|(camera, _)| camera.uniform_data())
+                            .unwrap_or_else(|| Camera::default().uniform_data())
+                    };
                     backend.write_buffer(
                         state.camera_buffer,
                         0,
@@ -681,25 +702,22 @@ impl Engine {
                     backend.set_render_pipeline(state.pipeline);
                     backend.set_bind_group(0, state.camera_bind_group);
 
-                    // Draw each object
-                    for (obj_idx, obj) in self.scene.objects.iter().enumerate() {
+                    // Draw each entity with MeshRenderer and Transform using ECS query
+                    let mut query = self.world.query::<(Entity, &MeshRenderer, &Transform)>();
+                    for (entity, renderer, _transform) in query.iter(&self.world) {
                         // Get GPU resources
-                        let gpu_mesh = match state.gpu_meshes.get(&obj.mesh_id) {
+                        let gpu_mesh = match state.gpu_meshes.get(&renderer.mesh_id) {
                             Some(m) => m,
                             None => continue,
                         };
-                        let material_bind_group = match state.material_bind_groups.get(&obj.material_id) {
+                        let material_bind_group = match state.material_bind_groups.get(&renderer.material_id) {
                             Some(bg) => *bg,
                             None => continue,
                         };
-                        let gpu_object = match state.gpu_objects.get(obj_idx) {
+                        let gpu_object = match state.entity_gpu_objects.get(&entity) {
                             Some(o) => o,
                             None => continue,
                         };
-
-                        // Update object transform (write outside render pass for proper timing)
-                        // The transform is already initialized, but we update it here for dynamic objects
-                        // Note: In a real engine you'd only update if transform changed
 
                         backend.set_bind_group(1, gpu_object.transform_bind_group);
                         backend.set_bind_group(2, material_bind_group);

@@ -1,10 +1,11 @@
 //! Transform component
 
+use bevy_ecs::prelude::*;
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Quat, Vec3};
 
 /// Transform component for positioning objects in 3D space
-#[derive(Debug, Clone, Copy)]
+#[derive(Component, Debug, Clone, Copy)]
 pub struct Transform {
     pub position: Vec3,
     pub rotation: Quat,

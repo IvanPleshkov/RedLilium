@@ -10,7 +10,8 @@ use graphics_engine::{
     init_web_logging,
     resources::{Material, Mesh},
     scene::{
-        CameraController, CameraInput, FreeFlyController, OrbitController, RenderObject, Transform,
+        Camera, CameraController, CameraInput, DirectionalLight, FreeFlyController, MainCamera,
+        MeshRenderer, OrbitController, PointLight, Transform,
     },
     web::{console_log, setup_canvas, spawn_local},
     BackendType, EguiIntegration, Engine, EngineConfig,
@@ -87,7 +88,7 @@ impl AppState {
         console_log(&format!("Camera mode: {}", self.active_controller_name()));
     }
 
-    fn update_camera(&mut self, camera: &mut graphics_engine::scene::Camera, dt: f32) {
+    fn update_camera(&mut self, camera: &mut Camera, dt: f32) {
         match self.active_controller {
             0 => self.free_fly.update(camera, &self.camera_input, dt),
             1 => self.orbit.update(camera, &self.camera_input, dt),
@@ -123,55 +124,78 @@ fn setup_scene(engine: &mut Engine) {
             .with_roughness(0.8),
     );
 
+    // Setup camera (update the existing MainCamera entity)
     {
-        let scene = engine.scene_mut();
-        scene.camera.position = Vec3::new(5.0, 5.0, 10.0);
-        scene.camera.look_at(Vec3::ZERO);
+        let mut query = engine.world_mut().query::<(&mut Camera, &MainCamera)>();
+        for (mut camera, _) in query.iter_mut(engine.world_mut()) {
+            camera.position = Vec3::new(5.0, 5.0, 10.0);
+            camera.look_at(Vec3::ZERO);
+        }
     }
 
-    engine.scene_mut().add_object(
-        RenderObject::new(plane_id, floor_id).with_position(Vec3::new(0.0, -1.0, 0.0)),
+    // Add floor
+    engine.world_mut().spawn((
+        MeshRenderer::new(plane_id, floor_id),
+        Transform::from_position(Vec3::new(0.0, -1.0, 0.0)),
+    ));
+
+    // Add cubes
+    engine.world_mut().spawn((
+        MeshRenderer::new(cube_id, gold_id),
+        Transform::from_position(Vec3::new(-2.0, 0.0, 0.0)),
+    ));
+
+    engine.world_mut().spawn((
+        MeshRenderer::new(cube_id, silver_id),
+        Transform::from_position(Vec3::new(2.0, 0.0, 0.0)),
+    ));
+
+    // Add spheres
+    engine.world_mut().spawn((
+        MeshRenderer::new(sphere_id, plastic_red_id),
+        Transform::from_position(Vec3::new(0.0, 0.5, 2.0)),
+    ));
+
+    engine.world_mut().spawn((
+        MeshRenderer::new(sphere_id, plastic_green_id),
+        Transform::from_position(Vec3::new(0.0, 0.5, -2.0)),
+    ));
+
+    // Add lights
+    // Main directional light (sun)
+    engine.world_mut().spawn(
+        DirectionalLight::new(Vec3::new(-0.5, -1.0, -0.3), Vec3::new(1.0, 0.95, 0.9), 2.0),
     );
 
-    engine.scene_mut().add_object(
-        RenderObject::new(cube_id, gold_id)
-            .with_transform(Transform::from_position(Vec3::new(-2.0, 0.0, 0.0))),
-    );
+    // Point lights for local illumination
+    engine.world_mut().spawn((
+        Transform::from_position(Vec3::new(3.0, 2.0, 3.0)),
+        PointLight::new(Vec3::new(1.0, 0.7, 0.4), 10.0, 15.0),
+    ));
+    engine.world_mut().spawn((
+        Transform::from_position(Vec3::new(-3.0, 2.0, 3.0)),
+        PointLight::new(Vec3::new(0.4, 0.7, 1.0), 10.0, 15.0),
+    ));
+    engine.world_mut().spawn((
+        Transform::from_position(Vec3::new(0.0, 3.0, -3.0)),
+        PointLight::new(Vec3::new(0.7, 1.0, 0.7), 8.0, 12.0),
+    ));
 
-    engine.scene_mut().add_object(
-        RenderObject::new(cube_id, silver_id)
-            .with_transform(Transform::from_position(Vec3::new(2.0, 0.0, 0.0))),
-    );
-
-    engine.scene_mut().add_object(
-        RenderObject::new(sphere_id, plastic_red_id)
-            .with_transform(Transform::from_position(Vec3::new(0.0, 0.5, 2.0))),
-    );
-
-    engine.scene_mut().add_object(
-        RenderObject::new(sphere_id, plastic_green_id)
-            .with_transform(Transform::from_position(Vec3::new(0.0, 0.5, -2.0))),
-    );
-
-    {
-        let scene = engine.scene_mut();
-        scene.add_directional_light(Vec3::new(-0.5, -1.0, -0.3), Vec3::new(1.0, 0.95, 0.9), 2.0);
-        scene.add_point_light(Vec3::new(3.0, 2.0, 3.0), Vec3::new(1.0, 0.7, 0.4), 10.0, 15.0);
-        scene.add_point_light(Vec3::new(-3.0, 2.0, 3.0), Vec3::new(0.4, 0.7, 1.0), 10.0, 15.0);
-        scene.add_point_light(Vec3::new(0.0, 3.0, -3.0), Vec3::new(0.7, 1.0, 0.7), 8.0, 12.0);
-
-        for i in 0..10 {
-            let angle = (i as f32 / 10.0) * std::f32::consts::TAU;
-            let radius = 6.0;
-            let x = angle.cos() * radius;
-            let z = angle.sin() * radius;
-            let color = Vec3::new(
-                (i as f32 * 0.1).sin().abs(),
-                (i as f32 * 0.15 + 1.0).sin().abs(),
-                (i as f32 * 0.2 + 2.0).sin().abs(),
-            );
-            scene.add_point_light(Vec3::new(x, 0.5, z), color, 3.0, 5.0);
-        }
+    // Add more lights to demonstrate Forward+
+    for i in 0..10 {
+        let angle = (i as f32 / 10.0) * std::f32::consts::TAU;
+        let radius = 6.0;
+        let x = angle.cos() * radius;
+        let z = angle.sin() * radius;
+        let color = Vec3::new(
+            (i as f32 * 0.1).sin().abs(),
+            (i as f32 * 0.15 + 1.0).sin().abs(),
+            (i as f32 * 0.2 + 2.0).sin().abs(),
+        );
+        engine.world_mut().spawn((
+            Transform::from_position(Vec3::new(x, 0.5, z)),
+            PointLight::new(color, 3.0, 5.0),
+        ));
     }
 }
 
@@ -245,13 +269,24 @@ async fn async_main() {
         console_log("egui debug UI initialized (press F1 to toggle)");
     }
 
-    state.free_fly.sync_with_camera(&engine.scene().camera);
-    state.orbit.sync_with_camera(&engine.scene().camera);
+    // Sync controllers with initial camera position
+    {
+        let mut query = engine.world_mut().query::<(&Camera, &MainCamera)>();
+        if let Some((camera, _)) = query.iter(engine.world()).next() {
+            state.free_fly.sync_with_camera(camera);
+            state.orbit.sync_with_camera(camera);
+        }
+    }
+
+    // Count objects and lights
+    let object_count = engine.world_mut().query::<&MeshRenderer>().iter(engine.world()).count();
+    let light_count = engine.world_mut().query::<&PointLight>().iter(engine.world()).count()
+        + engine.world_mut().query::<&DirectionalLight>().iter(engine.world()).count();
 
     console_log(&format!(
         "Scene setup complete: {} objects, {} lights",
-        engine.scene().objects.len(),
-        engine.scene().lights.len()
+        object_count,
+        light_count
     ));
 
     // Use Rc<RefCell> for shared mutable state in the web event loop
@@ -305,7 +340,11 @@ async fn async_main() {
                         .unwrap_or(false);
 
                     if !egui_wants_keyboard {
-                        state.update_camera(&mut engine.scene_mut().camera, dt);
+                        // Get mutable camera from ECS
+                        let mut query = engine.world_mut().query::<(&mut Camera, &MainCamera)>();
+                        for (mut camera, _) in query.iter_mut(engine.world_mut()) {
+                            state.update_camera(&mut camera, dt);
+                        }
                     }
                 }
 
@@ -411,9 +450,16 @@ fn render_frame(
     if state.show_debug_ui && state.egui.is_some() {
         let fps = state.fps;
         let controller_name = state.active_controller_name();
-        let object_count = engine.scene().objects.len();
-        let light_count = engine.scene().lights.len();
-        let cam_pos = engine.scene().camera.position;
+        let object_count = engine.world_mut().query::<&MeshRenderer>().iter(engine.world()).count();
+        let light_count = engine.world_mut().query::<&PointLight>().iter(engine.world()).count()
+            + engine.world_mut().query::<&DirectionalLight>().iter(engine.world()).count();
+        let cam_pos = {
+            let mut query = engine.world_mut().query::<(&Camera, &MainCamera)>();
+            query.iter(engine.world())
+                .next()
+                .map(|(c, _)| c.position)
+                .unwrap_or(Vec3::ZERO)
+        };
 
         let mut slider_value = state.ui_slider_value;
         let mut checkbox = state.ui_checkbox;

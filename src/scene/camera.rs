@@ -1,5 +1,6 @@
 //! Camera system
 
+use bevy_ecs::prelude::*;
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3, Vec4};
 
@@ -97,7 +98,7 @@ impl Projection {
 }
 
 /// Camera for viewing the scene
-#[derive(Debug, Clone)]
+#[derive(Component, Debug, Clone)]
 pub struct Camera {
     pub position: Vec3,
     pub target: Vec3,
