@@ -9,7 +9,8 @@
       "Bash(rustup target list:*)",
       "Bash(findstr:*)",
       "Bash(rustup target add:*)",
-      "Bash(wasm-pack build:*)"
+      "Bash(wasm-pack build:*)",
+      "WebFetch(domain:docs.rs)"
     ]
   }
 }
