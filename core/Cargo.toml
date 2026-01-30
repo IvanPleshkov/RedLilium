@@ -1,0 +1,9 @@
+[package]
+name = "redlilium-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core crate for RedLilium Engine"
+
+[dependencies]
+log.workspace = true

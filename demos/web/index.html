@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RedLilium Engine - Window Demo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #1a1a2e;
+        }
+
+        canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #eee;
+            font-family: system-ui, sans-serif;
+            font-size: 1.5rem;
+        }
+    </style>
+</head>
+<body>
+    <div id="loading">Loading RedLilium Engine...</div>
+
+    <script type="module">
+        import init from './pkg/redlilium_demos.js';
+
+        async function run() {
+            try {
+                await init();
+                document.getElementById('loading').style.display = 'none';
+            } catch (error) {
+                console.error('Failed to initialize:', error);
+                document.getElementById('loading').textContent = 'Failed to load: ' + error.message;
+            }
+        }
+
+        run();
+    </script>
+</body>
+</html>

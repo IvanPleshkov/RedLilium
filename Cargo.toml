@@ -1,88 +1,28 @@
-[package]
-name = "graphics-engine"
-version = "0.1.0"
-edition = "2021"
-description = "A render graph-based graphics engine with Forward+ lighting supporting Vulkan and wgpu backends"
-license = "MIT"
-
-[lib]
-crate-type = ["cdylib", "rlib"]
-
-[features]
-default = ["native"]
-native = []
-web = []
-
-[dependencies]
-# Core (all platforms)
-bevy_ecs = "0.15"
-winit = { version = "0.29", features = ["rwh_06"] }
-raw-window-handle = "0.6"
-log = "0.4"
-thiserror = "1.0"
-bytemuck = { version = "1.14", features = ["derive"] }
-glam = { version = "0.25", features = ["bytemuck"] }
-parking_lot = "0.12"
-
-# wgpu backend (all platforms, webgl feature for web support)
-wgpu = { version = "0.20", features = ["webgl"] }
-
-# GUI (all platforms)
-egui = "0.28"
-egui-wgpu = "0.28"
-
-# Image loading (all platforms)
-image = "0.24"
-
-# Native-only dependencies
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-pollster = "0.3"
-env_logger = "0.11"
-egui-winit = { version = "0.28", default-features = true }
-
-# Vulkan backend (native only)
-ash = "0.38"
-ash-window = "0.13"
-gpu-allocator = { version = "0.27", features = ["vulkan"] }
-
-# egui Vulkan renderer (native only) - version 0.7.0 for egui 0.28 compatibility
-egui-ash-renderer = { version = "0.7", features = ["gpu-allocator"] }
-
-# Shader compilation (WGSL to SPIR-V)
-naga = { version = "22.0", features = ["wgsl-in", "spv-out"] }
-
-# Web-only dependencies
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = "0.2"
-wasm-bindgen-futures = "0.4"
-js-sys = "0.3"
-console_log = "1.0"
-console_error_panic_hook = "0.1"
-egui-winit = { version = "0.28", default-features = false, features = ["links"] }
-getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
-getrandom = { version = "0.3", features = ["wasm_js"] }
-
-[target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
-version = "0.3"
-features = [
-    "Window",
-    "Document",
-    "Element",
-    "HtmlCanvasElement",
-    "CssStyleDeclaration",
-    "Navigator",
-    "Gpu",
-    "console",
-    "Performance",
+[workspace]
+resolver = "2"
+members = [
+    "core",
+    "graphics",
+    "demos",
 ]
 
-[dev-dependencies]
-clap = { version = "4.4", features = ["derive"] }
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/IvanPleshkov/RedLilium"
 
-[[example]]
-name = "demo"
-path = "examples/demo.rs"
+[workspace.dependencies]
+# Window and input handling
+winit = "0.30.12"
 
-[[example]]
-name = "demo_web"
-path = "examples/demo_web.rs"
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Web support
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = "0.3"
+console_log = "1.0"
+console_error_panic_hook = "0.1"

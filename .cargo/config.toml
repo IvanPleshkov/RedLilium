@@ -1,3 +1,0 @@
-# Configuration for WASM builds
-[target.wasm32-unknown-unknown]
-rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]

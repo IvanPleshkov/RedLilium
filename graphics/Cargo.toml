@@ -1,0 +1,9 @@
+[package]
+name = "redlilium-graphics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "RedLilium engine graphics"
+
+[dependencies]
+log.workspace = true

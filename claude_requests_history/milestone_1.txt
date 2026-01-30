@@ -1,0 +1,17 @@
+This document is a list of requests made to Claude Code.
+
+Request #1:
+Lets start! I want to create a FPS videogame as the result of the project.
+We dont create the entire game right now, but we will create the basic structure.
+Start with an empty project structure. The lauguage is RUST. Graphics engine will be custom.
+Create the workspace with the following crates:
+- core: This crate will contain the core logic of the game, including game loop, entity management, and basic utilities.
+- graphics: This crate will handle custom rendering engine.
+- demos: This crate will contain demo scenes to showcase the capabilities of the engine.
+Project contains a single demo with just window creation using winit crate version `0.30.12`.
+Demo supports also web target. Keep the web files like html and js in a separate folder inside demos crate.
+Provide also a basic README.md file for each crate explaining its purpose. Add to readme the instructions on how configure enviromnent, build and run the demo.
+Everything else will be added later.
+Imagine also how to handle the documentation for the project. and how to connect the code with the documentation. While creating the documentation, 
+think about the best practices to keep the documentation updated with the code changes.
+And also keep in mind that claude code can read the documentation and use it to answer questions about the codebase.
