@@ -29,6 +29,8 @@ pub struct VulkanEguiIntegration {
     textures_delta: egui::TexturesDelta,
     /// Scale factor for input coordinates
     input_scale: f32,
+    /// Framebuffer from previous paint call to be destroyed (deferred destruction)
+    previous_framebuffer: Option<vk::Framebuffer>,
 }
 
 impl VulkanEguiIntegration {
@@ -81,6 +83,7 @@ impl VulkanEguiIntegration {
             paint_jobs: Vec::new(),
             textures_delta: egui::TexturesDelta::default(),
             input_scale: 1.0,
+            previous_framebuffer: None,
         }
     }
 
@@ -90,6 +93,11 @@ impl VulkanEguiIntegration {
         unsafe {
             // Wait for GPU to finish all operations
             let _ = backend.device().device_wait_idle();
+
+            // Destroy any deferred framebuffer
+            if let Some(fb) = self.previous_framebuffer.take() {
+                backend.device().destroy_framebuffer(fb, None);
+            }
         }
 
         // Drop renderer first (it uses the allocator)
@@ -185,6 +193,13 @@ impl VulkanEguiIntegration {
         let device = backend.device();
         let render_pass = backend.egui_render_pass();
 
+        // Destroy the previous framebuffer (deferred from last frame)
+        if let Some(fb) = self.previous_framebuffer.take() {
+            unsafe {
+                device.destroy_framebuffer(fb, None);
+            }
+        }
+
         // Create a temporary framebuffer for this swapchain image
         let framebuffer_info = vk::FramebufferCreateInfo {
             render_pass,
@@ -251,9 +266,8 @@ impl VulkanEguiIntegration {
         // End render pass - transitions to PRESENT_SRC_KHR
         device.cmd_end_render_pass(command_buffer);
 
-        // Destroy temporary framebuffer
-        // Note: This is safe because the command buffer hasn't been submitted yet
-        device.destroy_framebuffer(framebuffer, None);
+        // Defer framebuffer destruction until next paint call (after command buffer is submitted)
+        self.previous_framebuffer = Some(framebuffer);
 
         // Free old textures
         if let Some(ref mut renderer) = self.renderer {

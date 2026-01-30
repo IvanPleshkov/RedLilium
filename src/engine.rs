@@ -579,11 +579,11 @@ impl Engine {
 
     /// Initialize rendering resources (must be called after adding meshes/materials)
     fn initialize_render_state(&mut self) -> BackendResult<()> {
-        let backend = match &mut self.backend {
-            Backend::Wgpu(b) => b,
-            #[cfg(not(target_arch = "wasm32"))]
-            Backend::Vulkan(_) => return Ok(()), // Skip for Vulkan for now
-        };
+        // Use a macro to generate the initialization code for both backends
+        // This avoids the borrow checker issue with passing both backend and self
+        macro_rules! do_init {
+            ($backend:expr) => {{
+                let backend = $backend;
 
         // === Bind group layouts ===
 
@@ -936,7 +936,15 @@ impl Engine {
             lighting_bind_group,
         });
 
-        Ok(())
+                Ok(())
+            }};
+        }
+
+        match &mut self.backend {
+            Backend::Wgpu(b) => do_init!(b),
+            #[cfg(not(target_arch = "wasm32"))]
+            Backend::Vulkan(b) => do_init!(b),
+        }
     }
 
     /// Get mutable reference to the ECS world
@@ -1212,6 +1220,7 @@ impl Engine {
                         0.0,
                         1.0,
                     );
+                    backend.set_scissor_rect(0, 0, frame.width, frame.height);
 
                     backend.set_render_pipeline(state.gbuffer_pipeline);
                     backend.set_bind_group(0, state.camera_bind_group);
@@ -1242,6 +1251,14 @@ impl Engine {
 
                     backend.end_render_pass();
 
+                    // Transition G-buffer textures from render target to shader read
+                    backend.transition_textures_for_sampling(&[
+                        state.gbuffer_albedo_view,
+                        state.gbuffer_normal_view,
+                        state.gbuffer_material_view,
+                        state.depth_view,
+                    ]);
+
                     // ============================================
                     // PASS 2: Lighting Pass (fullscreen deferred shading)
                     // ============================================
@@ -1264,6 +1281,7 @@ impl Engine {
                         0.0,
                         1.0,
                     );
+                    backend.set_scissor_rect(0, 0, frame.width, frame.height);
 
                     backend.set_render_pipeline(state.lighting_pipeline);
                     backend.set_bind_group(0, state.gbuffer_bind_group);
@@ -1290,8 +1308,182 @@ impl Engine {
                 }
             }
             #[cfg(not(target_arch = "wasm32"))]
-            Backend::Vulkan(_backend) => {
-                // Vulkan rendering not implemented yet
+            Backend::Vulkan(backend) => {
+                if let Some(ref state) = self.render_state {
+                    // Get camera uniform from ECS query
+                    let camera_uniform = {
+                        let mut query = self.world.query::<(&Camera, &MainCamera)>();
+                        query.iter(&self.world)
+                            .next()
+                            .map(|(camera, _)| camera.uniform_data())
+                            .unwrap_or_else(|| Camera::default().uniform_data())
+                    };
+                    backend.write_buffer(
+                        state.camera_buffer,
+                        0,
+                        bytemuck::bytes_of(&camera_uniform),
+                    );
+
+                    // Get ambient light from ECS resource
+                    let ambient = self.world.get_resource::<AmbientLight>()
+                        .map(|a| a.0)
+                        .unwrap_or(Vec3::splat(0.03));
+
+                    // Get camera near/far planes for depth visualization
+                    let (near_plane, far_plane) = {
+                        let mut query = self.world.query::<(&Camera, &MainCamera)>();
+                        query.iter(&self.world)
+                            .next()
+                            .map(|(camera, _)| (camera.projection.near(), camera.projection.far()))
+                            .unwrap_or((0.1, 1000.0))
+                    };
+
+                    // Update lighting uniform with debug mode
+                    let lighting_uniform = LightingUniform {
+                        ambient: Vec4::new(ambient.x, ambient.y, ambient.z, 1.0),
+                        light_dir: Vec4::new(0.5, 1.0, 0.3, 0.0).normalize(),
+                        light_color: Vec4::new(1.0, 0.98, 0.95, 1.0),
+                        debug_mode: self.gbuffer_debug_mode.shader_value(),
+                        near_plane,
+                        far_plane,
+                        _padding: 0.0,
+                    };
+                    backend.write_buffer(
+                        state.lighting_uniform_buffer,
+                        0,
+                        bytemuck::bytes_of(&lighting_uniform),
+                    );
+
+                    // ============================================
+                    // PASS 1: G-Buffer Pass (render geometry to MRT)
+                    // ============================================
+                    backend.begin_render_pass(&RenderPassDescriptor {
+                        label: Some("G-Buffer Pass".into()),
+                        color_attachments: vec![
+                            // Albedo
+                            ColorAttachment {
+                                view: state.gbuffer_albedo_view,
+                                resolve_target: None,
+                                load_op: LoadOp::Clear([0.0, 0.0, 0.0, 0.0]),
+                                store_op: StoreOp::Store,
+                            },
+                            // Normal
+                            ColorAttachment {
+                                view: state.gbuffer_normal_view,
+                                resolve_target: None,
+                                load_op: LoadOp::Clear([0.0, 0.0, 0.0, 0.0]),
+                                store_op: StoreOp::Store,
+                            },
+                            // Material (metallic, roughness)
+                            ColorAttachment {
+                                view: state.gbuffer_material_view,
+                                resolve_target: None,
+                                load_op: LoadOp::Clear([0.0, 0.5, 0.0, 0.0]), // Default roughness 0.5
+                                store_op: StoreOp::Store,
+                            },
+                        ],
+                        depth_stencil_attachment: Some(DepthStencilAttachment {
+                            view: state.depth_view,
+                            depth_load_op: LoadOp::Clear([1.0, 0.0, 0.0, 0.0]),
+                            depth_store_op: StoreOp::Store,
+                            depth_clear_value: 1.0,
+                        }),
+                    });
+
+                    backend.set_viewport(
+                        0.0,
+                        0.0,
+                        frame.width as f32,
+                        frame.height as f32,
+                        0.0,
+                        1.0,
+                    );
+                    backend.set_scissor_rect(0, 0, frame.width, frame.height);
+
+                    backend.set_render_pipeline(state.gbuffer_pipeline);
+                    backend.set_bind_group(0, state.camera_bind_group);
+
+                    // Draw each entity with MeshRenderer and Transform to G-buffers
+                    let mut query = self.world.query::<(Entity, &MeshRenderer, &Transform)>();
+                    for (entity, renderer, _transform) in query.iter(&self.world) {
+                        // Get GPU resources
+                        let gpu_mesh = match state.gpu_meshes.get(&renderer.mesh_id) {
+                            Some(m) => m,
+                            None => continue,
+                        };
+                        let material_bind_group = match state.material_bind_groups.get(&renderer.material_id) {
+                            Some(bg) => *bg,
+                            None => continue,
+                        };
+                        let gpu_object = match state.entity_gpu_objects.get(&entity) {
+                            Some(o) => o,
+                            None => continue,
+                        };
+
+                        backend.set_bind_group(1, gpu_object.transform_bind_group);
+                        backend.set_bind_group(2, material_bind_group);
+                        backend.set_vertex_buffer(0, gpu_mesh.vertex_buffer, 0);
+                        backend.set_index_buffer(gpu_mesh.index_buffer, 0, IndexFormat::Uint32);
+                        backend.draw_indexed(0..gpu_mesh.index_count, 0, 0..1);
+                    }
+
+                    backend.end_render_pass();
+
+                    // Transition G-buffer textures from render target to shader read
+                    backend.transition_textures_for_sampling(&[
+                        state.gbuffer_albedo_view,
+                        state.gbuffer_normal_view,
+                        state.gbuffer_material_view,
+                        state.depth_view,
+                    ]);
+
+                    // ============================================
+                    // PASS 2: Lighting Pass (fullscreen deferred shading)
+                    // ============================================
+                    backend.begin_render_pass(&RenderPassDescriptor {
+                        label: Some("Deferred Lighting Pass".into()),
+                        color_attachments: vec![ColorAttachment {
+                            view: frame.swapchain_view,
+                            resolve_target: None,
+                            load_op: LoadOp::Clear([0.0, 0.0, 0.0, 1.0]),
+                            store_op: StoreOp::Store,
+                        }],
+                        depth_stencil_attachment: None,
+                    });
+
+                    backend.set_viewport(
+                        0.0,
+                        0.0,
+                        frame.width as f32,
+                        frame.height as f32,
+                        0.0,
+                        1.0,
+                    );
+                    backend.set_scissor_rect(0, 0, frame.width, frame.height);
+
+                    backend.set_render_pipeline(state.lighting_pipeline);
+                    backend.set_bind_group(0, state.gbuffer_bind_group);
+                    backend.set_bind_group(1, state.lighting_bind_group);
+                    backend.set_bind_group(2, state.camera_bind_group);
+
+                    // Draw fullscreen triangle (3 vertices, no vertex buffer)
+                    backend.draw(0..3, 0..1);
+
+                    backend.end_render_pass();
+                } else {
+                    // No render state yet, just clear
+                    backend.begin_render_pass(&RenderPassDescriptor {
+                        label: Some("Clear Pass".into()),
+                        color_attachments: vec![ColorAttachment {
+                            view: frame.swapchain_view,
+                            resolve_target: None,
+                            load_op: LoadOp::Clear([0.1, 0.1, 0.15, 1.0]),
+                            store_op: StoreOp::Store,
+                        }],
+                        depth_stencil_attachment: None,
+                    });
+                    backend.end_render_pass();
+                }
             }
         }
 

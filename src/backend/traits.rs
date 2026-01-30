@@ -350,6 +350,10 @@ pub trait GraphicsBackend: Sized {
     /// Dispatch compute work
     fn dispatch_compute(&mut self, x: u32, y: u32, z: u32);
 
+    /// Transition textures from render target to shader read layout
+    /// This is a no-op for wgpu but required for Vulkan
+    fn transition_textures_for_sampling(&mut self, _texture_views: &[TextureViewHandle]) {}
+
     // Resource cleanup
 
     /// Destroy a buffer

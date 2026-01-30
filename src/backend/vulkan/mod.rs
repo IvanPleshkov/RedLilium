@@ -74,6 +74,28 @@ pub struct VulkanBackend {
 
     // egui render pass
     egui_render_pass: vk::RenderPass,
+
+    // Render pass and framebuffer caches
+    render_passes: HashMap<RenderPassKey, vk::RenderPass>,
+    framebuffers: HashMap<FramebufferKey, vk::Framebuffer>,
+
+    // Framebuffers to destroy after the current frame is submitted
+    framebuffers_to_destroy: Vec<vk::Framebuffer>,
+
+    // Pending passes (command buffering)
+    pending_render_pass: Option<PendingVkRenderPass>,
+    pending_compute_pass: Option<PendingVkComputePass>,
+
+    // Current pipeline for bind group binding
+    current_render_pipeline: Option<RenderPipelineHandle>,
+    current_compute_pipeline: Option<ComputePipelineHandle>,
+
+    // Track texture view formats for render pass creation
+    texture_view_formats: HashMap<u64, vk::Format>,
+    texture_view_parents: HashMap<u64, TextureHandle>,
+
+    // Track which views are for swapchain images
+    swapchain_view_id: Option<u64>,
 }
 
 struct VkBuffer {
@@ -97,6 +119,60 @@ struct VkRenderPipeline {
 struct VkComputePipeline {
     pipeline: vk::Pipeline,
     layout: vk::PipelineLayout,
+}
+
+/// Buffered render pass command (deferred execution pattern matching wgpu)
+#[derive(Clone)]
+enum VkRenderCommand {
+    SetPipeline(RenderPipelineHandle),
+    SetBindGroup { index: u32, bind_group: BindGroupHandle },
+    SetVertexBuffer { slot: u32, buffer: BufferHandle, offset: u64 },
+    SetIndexBuffer { buffer: BufferHandle, offset: u64, format: IndexFormat },
+    SetViewport { x: f32, y: f32, width: f32, height: f32, min_depth: f32, max_depth: f32 },
+    SetScissorRect { x: u32, y: u32, width: u32, height: u32 },
+    Draw { vertices: std::ops::Range<u32>, instances: std::ops::Range<u32> },
+    DrawIndexed { indices: std::ops::Range<u32>, base_vertex: i32, instances: std::ops::Range<u32> },
+}
+
+/// Buffered compute pass command
+#[derive(Clone)]
+enum VkComputeCommand {
+    SetPipeline(ComputePipelineHandle),
+    SetBindGroup { index: u32, bind_group: BindGroupHandle },
+    Dispatch { x: u32, y: u32, z: u32 },
+}
+
+/// Pending render pass with buffered commands
+struct PendingVkRenderPass {
+    descriptor: RenderPassDescriptor,
+    commands: Vec<VkRenderCommand>,
+}
+
+/// Pending compute pass with buffered commands
+struct PendingVkComputePass {
+    _label: Option<String>,
+    commands: Vec<VkComputeCommand>,
+}
+
+/// Key for render pass cache
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct RenderPassKey {
+    color_formats: Vec<vk::Format>,
+    depth_format: Option<vk::Format>,
+    color_load_ops: Vec<bool>, // true = clear, false = load
+    depth_load_op: Option<bool>,
+    color_store_ops: Vec<bool>, // true = store, false = discard
+    depth_store_op: Option<bool>,
+    is_present_pass: bool, // final layout is PRESENT_SRC_KHR
+}
+
+/// Key for framebuffer cache
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct FramebufferKey {
+    render_pass: vk::RenderPass,
+    attachments: Vec<vk::ImageView>,
+    width: u32,
+    height: u32,
 }
 
 impl VulkanBackend {
@@ -165,11 +241,11 @@ impl VulkanBackend {
         let attachment = vk::AttachmentDescription {
             format,
             samples: vk::SampleCountFlags::TYPE_1,
-            load_op: vk::AttachmentLoadOp::CLEAR, // Clear to background color
+            load_op: vk::AttachmentLoadOp::LOAD, // Preserve scene content rendered before egui
             store_op: vk::AttachmentStoreOp::STORE,
             stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
             stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
-            initial_layout: vk::ImageLayout::UNDEFINED, // Don't care about previous content
+            initial_layout: vk::ImageLayout::PRESENT_SRC_KHR, // Lighting pass left it in present layout
             final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
             ..Default::default()
         };
@@ -272,6 +348,335 @@ impl VulkanBackend {
         }
     }
 
+    fn convert_topology(topology: PrimitiveTopology) -> vk::PrimitiveTopology {
+        match topology {
+            PrimitiveTopology::PointList => vk::PrimitiveTopology::POINT_LIST,
+            PrimitiveTopology::LineList => vk::PrimitiveTopology::LINE_LIST,
+            PrimitiveTopology::LineStrip => vk::PrimitiveTopology::LINE_STRIP,
+            PrimitiveTopology::TriangleList => vk::PrimitiveTopology::TRIANGLE_LIST,
+            PrimitiveTopology::TriangleStrip => vk::PrimitiveTopology::TRIANGLE_STRIP,
+        }
+    }
+
+    fn convert_cull_mode(mode: CullMode) -> vk::CullModeFlags {
+        match mode {
+            CullMode::None => vk::CullModeFlags::NONE,
+            CullMode::Front => vk::CullModeFlags::FRONT,
+            CullMode::Back => vk::CullModeFlags::BACK,
+        }
+    }
+
+    fn convert_front_face(face: FrontFace) -> vk::FrontFace {
+        // Invert front face because we flip Y via negative viewport height
+        // This is needed to match wgpu/WebGPU coordinate system
+        match face {
+            FrontFace::Ccw => vk::FrontFace::CLOCKWISE,
+            FrontFace::Cw => vk::FrontFace::COUNTER_CLOCKWISE,
+        }
+    }
+
+    fn convert_blend_factor(factor: BlendFactor) -> vk::BlendFactor {
+        match factor {
+            BlendFactor::Zero => vk::BlendFactor::ZERO,
+            BlendFactor::One => vk::BlendFactor::ONE,
+            BlendFactor::Src => vk::BlendFactor::SRC_COLOR,
+            BlendFactor::OneMinusSrc => vk::BlendFactor::ONE_MINUS_SRC_COLOR,
+            BlendFactor::SrcAlpha => vk::BlendFactor::SRC_ALPHA,
+            BlendFactor::OneMinusSrcAlpha => vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+            BlendFactor::Dst => vk::BlendFactor::DST_COLOR,
+            BlendFactor::OneMinusDst => vk::BlendFactor::ONE_MINUS_DST_COLOR,
+            BlendFactor::DstAlpha => vk::BlendFactor::DST_ALPHA,
+            BlendFactor::OneMinusDstAlpha => vk::BlendFactor::ONE_MINUS_DST_ALPHA,
+        }
+    }
+
+    fn convert_blend_op(op: BlendOperation) -> vk::BlendOp {
+        match op {
+            BlendOperation::Add => vk::BlendOp::ADD,
+            BlendOperation::Subtract => vk::BlendOp::SUBTRACT,
+            BlendOperation::ReverseSubtract => vk::BlendOp::REVERSE_SUBTRACT,
+            BlendOperation::Min => vk::BlendOp::MIN,
+            BlendOperation::Max => vk::BlendOp::MAX,
+        }
+    }
+
+    fn convert_vertex_format(format: VertexFormat) -> vk::Format {
+        match format {
+            VertexFormat::Float32 => vk::Format::R32_SFLOAT,
+            VertexFormat::Float32x2 => vk::Format::R32G32_SFLOAT,
+            VertexFormat::Float32x3 => vk::Format::R32G32B32_SFLOAT,
+            VertexFormat::Float32x4 => vk::Format::R32G32B32A32_SFLOAT,
+            VertexFormat::Uint32 => vk::Format::R32_UINT,
+            VertexFormat::Sint32 => vk::Format::R32_SINT,
+        }
+    }
+
+    /// Compile WGSL shader to SPIR-V using naga
+    fn compile_wgsl_to_spirv(wgsl_source: &str) -> BackendResult<Vec<u32>> {
+        use naga::front::wgsl;
+        use naga::back::spv;
+        use naga::valid::{Capabilities, ValidationFlags, Validator};
+
+        // Parse WGSL
+        let module = wgsl::parse_str(wgsl_source)
+            .map_err(|e| BackendError::ShaderCreationFailed(format!("WGSL parse error: {}", e)))?;
+
+        // Validate
+        let mut validator = Validator::new(ValidationFlags::all(), Capabilities::all());
+        let info = validator.validate(&module)
+            .map_err(|e| BackendError::ShaderCreationFailed(format!("Shader validation error: {:?}", e)))?;
+
+        // Generate SPIR-V
+        let options = spv::Options {
+            lang_version: (1, 3),
+            ..Default::default()
+        };
+
+        let spv = spv::write_vec(&module, &info, &options, None)
+            .map_err(|e| BackendError::ShaderCreationFailed(format!("SPIR-V generation error: {:?}", e)))?;
+
+        Ok(spv)
+    }
+
+    /// Create a Vulkan shader module from SPIR-V bytecode
+    fn create_shader_module(&self, spirv: &[u32]) -> BackendResult<vk::ShaderModule> {
+        let create_info = vk::ShaderModuleCreateInfo {
+            code_size: spirv.len() * 4,
+            p_code: spirv.as_ptr(),
+            ..Default::default()
+        };
+
+        unsafe {
+            self.device
+                .create_shader_module(&create_info, None)
+                .map_err(|e| BackendError::ShaderCreationFailed(e.to_string()))
+        }
+    }
+
+    /// Get or create a render pass for the given attachment configuration
+    fn get_or_create_render_pass(
+        &mut self,
+        color_formats: &[vk::Format],
+        depth_format: Option<vk::Format>,
+        color_load_ops: &[bool],
+        depth_load_op: Option<bool>,
+        color_store_ops: &[bool],
+        depth_store_op: Option<bool>,
+        is_present_pass: bool,
+    ) -> BackendResult<vk::RenderPass> {
+        let key = RenderPassKey {
+            color_formats: color_formats.to_vec(),
+            depth_format,
+            color_load_ops: color_load_ops.to_vec(),
+            depth_load_op,
+            color_store_ops: color_store_ops.to_vec(),
+            depth_store_op,
+            is_present_pass,
+        };
+
+        if let Some(&render_pass) = self.render_passes.get(&key) {
+            return Ok(render_pass);
+        }
+
+        // Create new render pass
+        let mut attachments = Vec::new();
+        let mut color_refs = Vec::new();
+
+        // Color attachments
+        for (i, format) in color_formats.iter().enumerate() {
+            let load_op = if color_load_ops.get(i).copied().unwrap_or(true) {
+                vk::AttachmentLoadOp::CLEAR
+            } else {
+                vk::AttachmentLoadOp::LOAD
+            };
+            let store_op = if color_store_ops.get(i).copied().unwrap_or(true) {
+                vk::AttachmentStoreOp::STORE
+            } else {
+                vk::AttachmentStoreOp::DONT_CARE
+            };
+
+            let final_layout = if is_present_pass && i == 0 {
+                vk::ImageLayout::PRESENT_SRC_KHR
+            } else {
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+            };
+
+            attachments.push(vk::AttachmentDescription {
+                format: *format,
+                samples: vk::SampleCountFlags::TYPE_1,
+                load_op,
+                store_op,
+                stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
+                stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+                initial_layout: if load_op == vk::AttachmentLoadOp::LOAD {
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL
+                } else {
+                    vk::ImageLayout::UNDEFINED
+                },
+                final_layout,
+                ..Default::default()
+            });
+
+            color_refs.push(vk::AttachmentReference {
+                attachment: i as u32,
+                layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            });
+        }
+
+        // Depth attachment
+        let depth_ref = if let Some(format) = depth_format {
+            let load_op = if depth_load_op.unwrap_or(true) {
+                vk::AttachmentLoadOp::CLEAR
+            } else {
+                vk::AttachmentLoadOp::LOAD
+            };
+            let store_op = if depth_store_op.unwrap_or(true) {
+                vk::AttachmentStoreOp::STORE
+            } else {
+                vk::AttachmentStoreOp::DONT_CARE
+            };
+
+            attachments.push(vk::AttachmentDescription {
+                format,
+                samples: vk::SampleCountFlags::TYPE_1,
+                load_op,
+                store_op,
+                stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
+                stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+                initial_layout: if load_op == vk::AttachmentLoadOp::LOAD {
+                    vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                } else {
+                    vk::ImageLayout::UNDEFINED
+                },
+                final_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                ..Default::default()
+            });
+
+            Some(vk::AttachmentReference {
+                attachment: attachments.len() as u32 - 1,
+                layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            })
+        } else {
+            None
+        };
+
+        let subpass = vk::SubpassDescription {
+            pipeline_bind_point: vk::PipelineBindPoint::GRAPHICS,
+            color_attachment_count: color_refs.len() as u32,
+            p_color_attachments: if color_refs.is_empty() { std::ptr::null() } else { color_refs.as_ptr() },
+            p_depth_stencil_attachment: depth_ref
+                .as_ref()
+                .map(|r| r as *const _)
+                .unwrap_or(std::ptr::null()),
+            ..Default::default()
+        };
+
+        // Subpass dependencies
+        let dependencies = [
+            vk::SubpassDependency {
+                src_subpass: vk::SUBPASS_EXTERNAL,
+                dst_subpass: 0,
+                src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+                dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                    | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+                src_access_mask: vk::AccessFlags::empty(),
+                dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                ..Default::default()
+            },
+        ];
+
+        let render_pass_info = vk::RenderPassCreateInfo {
+            attachment_count: attachments.len() as u32,
+            p_attachments: if attachments.is_empty() { std::ptr::null() } else { attachments.as_ptr() },
+            subpass_count: 1,
+            p_subpasses: &subpass,
+            dependency_count: dependencies.len() as u32,
+            p_dependencies: dependencies.as_ptr(),
+            ..Default::default()
+        };
+
+        let render_pass = unsafe {
+            self.device
+                .create_render_pass(&render_pass_info, None)
+                .map_err(|e| BackendError::PipelineCreationFailed(e.to_string()))?
+        };
+
+        self.render_passes.insert(key, render_pass);
+        Ok(render_pass)
+    }
+
+    /// Get or create a framebuffer for the given render pass and attachments
+    fn get_or_create_framebuffer(
+        &mut self,
+        render_pass: vk::RenderPass,
+        attachments: &[vk::ImageView],
+        width: u32,
+        height: u32,
+    ) -> BackendResult<vk::Framebuffer> {
+        let key = FramebufferKey {
+            render_pass,
+            attachments: attachments.to_vec(),
+            width,
+            height,
+        };
+
+        if let Some(&framebuffer) = self.framebuffers.get(&key) {
+            return Ok(framebuffer);
+        }
+
+        let framebuffer_info = vk::FramebufferCreateInfo {
+            render_pass,
+            attachment_count: attachments.len() as u32,
+            p_attachments: attachments.as_ptr(),
+            width,
+            height,
+            layers: 1,
+            ..Default::default()
+        };
+
+        let framebuffer = unsafe {
+            self.device
+                .create_framebuffer(&framebuffer_info, None)
+                .map_err(|e| BackendError::PipelineCreationFailed(e.to_string()))?
+        };
+
+        self.framebuffers.insert(key, framebuffer);
+        Ok(framebuffer)
+    }
+
+    /// Build vertex input state from vertex layouts
+    fn build_vertex_input_state(layouts: &[VertexBufferLayout]) -> (
+        Vec<vk::VertexInputBindingDescription>,
+        Vec<vk::VertexInputAttributeDescription>,
+    ) {
+        let mut binding_descs = Vec::new();
+        let mut attribute_descs = Vec::new();
+
+        for (binding, layout) in layouts.iter().enumerate() {
+            binding_descs.push(vk::VertexInputBindingDescription {
+                binding: binding as u32,
+                stride: layout.array_stride as u32,
+                input_rate: match layout.step_mode {
+                    VertexStepMode::Vertex => vk::VertexInputRate::VERTEX,
+                    VertexStepMode::Instance => vk::VertexInputRate::INSTANCE,
+                },
+            });
+
+            for attr in &layout.attributes {
+                attribute_descs.push(vk::VertexInputAttributeDescription {
+                    location: attr.location,
+                    binding: binding as u32,
+                    format: Self::convert_vertex_format(attr.format),
+                    offset: attr.offset as u32,
+                });
+            }
+        }
+
+        (binding_descs, attribute_descs)
+    }
+
     fn find_queue_family(
         instance: &ash::Instance,
         physical_device: vk::PhysicalDevice,
@@ -306,6 +711,16 @@ impl VulkanBackend {
             }
             if self.swapchain != vk::SwapchainKHR::null() {
                 self.swapchain_fn.destroy_swapchain(self.swapchain, None);
+            }
+
+            // Clear framebuffer cache (they reference old swapchain views)
+            for (_, fb) in self.framebuffers.drain() {
+                self.device.destroy_framebuffer(fb, None);
+            }
+
+            // Also clear any deferred framebuffers
+            for fb in self.framebuffers_to_destroy.drain(..) {
+                self.device.destroy_framebuffer(fb, None);
             }
 
             // Query surface capabilities
@@ -490,10 +905,34 @@ impl GraphicsBackend for VulkanBackend {
             let window_handle = window.window_handle()
                 .map_err(|e| BackendError::InitializationFailed(e.to_string()))?;
 
-            let extensions = ash_window::enumerate_required_extensions(display_handle.as_raw())
+            let mut extensions = ash_window::enumerate_required_extensions(display_handle.as_raw())
                 .map_err(|e| BackendError::InitializationFailed(e.to_string()))?
                 .to_vec();
 
+            // Enable validation layers in debug builds
+            #[cfg(debug_assertions)]
+            let validation_layer_name = CStr::from_bytes_with_nul(b"VK_LAYER_KHRONOS_validation\0").unwrap();
+
+            #[cfg(debug_assertions)]
+            let layer_names = [validation_layer_name.as_ptr()];
+
+            #[cfg(debug_assertions)]
+            {
+                // Add debug utils extension for validation messages
+                extensions.push(ash::ext::debug_utils::NAME.as_ptr());
+            }
+
+            #[cfg(debug_assertions)]
+            let instance_info = vk::InstanceCreateInfo {
+                p_application_info: &app_info,
+                enabled_extension_count: extensions.len() as u32,
+                pp_enabled_extension_names: extensions.as_ptr(),
+                enabled_layer_count: layer_names.len() as u32,
+                pp_enabled_layer_names: layer_names.as_ptr(),
+                ..Default::default()
+            };
+
+            #[cfg(not(debug_assertions))]
             let instance_info = vk::InstanceCreateInfo {
                 p_application_info: &app_info,
                 enabled_extension_count: extensions.len() as u32,
@@ -503,7 +942,7 @@ impl GraphicsBackend for VulkanBackend {
 
             let instance = entry
                 .create_instance(&instance_info, None)
-                .map_err(|e| BackendError::InitializationFailed(e.to_string()))?;
+                .map_err(|e| BackendError::InitializationFailed(format!("Failed to create Vulkan instance: {}. Make sure Vulkan drivers are installed.", e)))?;
 
             // Create surface
             let surface_fn = surface::Instance::new(&entry, &instance);
@@ -632,6 +1071,14 @@ impl GraphicsBackend for VulkanBackend {
                     descriptor_count: 1000,
                 },
                 vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::SAMPLED_IMAGE,
+                    descriptor_count: 1000,
+                },
+                vk::DescriptorPoolSize {
+                    ty: vk::DescriptorType::SAMPLER,
+                    descriptor_count: 1000,
+                },
+                vk::DescriptorPoolSize {
                     ty: vk::DescriptorType::STORAGE_IMAGE,
                     descriptor_count: 1000,
                 },
@@ -695,6 +1142,16 @@ impl GraphicsBackend for VulkanBackend {
                 next_compute_pipeline_id: 1,
                 vsync,
                 egui_render_pass,
+                render_passes: HashMap::new(),
+                framebuffers: HashMap::new(),
+                framebuffers_to_destroy: Vec::new(),
+                pending_render_pass: None,
+                pending_compute_pass: None,
+                current_render_pipeline: None,
+                current_compute_pipeline: None,
+                texture_view_formats: HashMap::new(),
+                texture_view_parents: HashMap::new(),
+                swapchain_view_id: None,
             };
 
             let size = window.inner_size();
@@ -719,6 +1176,11 @@ impl GraphicsBackend for VulkanBackend {
             self.device
                 .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
                 .map_err(|e| BackendError::AcquireImageFailed(e.to_string()))?;
+
+            // Clean up framebuffers that were deferred from the previous frame
+            for fb in self.framebuffers_to_destroy.drain(..) {
+                self.device.destroy_framebuffer(fb, None);
+            }
 
             let (image_index, _) = self
                 .swapchain_fn
@@ -750,13 +1212,15 @@ impl GraphicsBackend for VulkanBackend {
 
             self.is_recording = true;
 
-            // Store swapchain view handle
+            // Store swapchain view handle and track it for render pass creation
             let view_id = self.next_view_id;
             self.next_view_id += 1;
             self.texture_views.insert(
                 view_id,
                 self.swapchain_image_views[image_index as usize],
             );
+            self.texture_view_formats.insert(view_id, self.swapchain_format);
+            self.swapchain_view_id = Some(view_id);
 
             Ok(FrameContext {
                 swapchain_view: TextureViewHandle(view_id),
@@ -1050,6 +1514,8 @@ impl GraphicsBackend for VulkanBackend {
         let id = self.next_view_id;
         self.next_view_id += 1;
         self.texture_views.insert(id, view);
+        self.texture_view_formats.insert(id, tex.format);
+        self.texture_view_parents.insert(id, texture);
 
         Ok(TextureViewHandle(id))
     }
@@ -1100,7 +1566,7 @@ impl GraphicsBackend for VulkanBackend {
                 let descriptor_type = match &e.ty {
                     BindingType::UniformBuffer => vk::DescriptorType::UNIFORM_BUFFER,
                     BindingType::StorageBuffer { .. } => vk::DescriptorType::STORAGE_BUFFER,
-                    BindingType::Texture { .. } => vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                    BindingType::Texture { .. } => vk::DescriptorType::SAMPLED_IMAGE,
                     BindingType::StorageTexture { .. } => vk::DescriptorType::STORAGE_IMAGE,
                     BindingType::Sampler { .. } => vk::DescriptorType::SAMPLER,
                 };
@@ -1148,7 +1614,7 @@ impl GraphicsBackend for VulkanBackend {
     fn create_bind_group(
         &mut self,
         layout: BindGroupLayoutHandle,
-        _entries: &[(u32, BindGroupEntry)],
+        entries: &[(u32, BindGroupEntry)],
     ) -> BackendResult<BindGroupHandle> {
         let layout_handle = self
             .descriptor_set_layouts
@@ -1168,6 +1634,116 @@ impl GraphicsBackend for VulkanBackend {
                 .map_err(|e| BackendError::PipelineCreationFailed(e.to_string()))?[0]
         };
 
+        // Build descriptor writes
+        let mut buffer_infos: Vec<vk::DescriptorBufferInfo> = Vec::new();
+        let mut image_infos: Vec<vk::DescriptorImageInfo> = Vec::new();
+
+        // Pre-allocate to ensure pointers remain valid
+        for (_, entry) in entries {
+            match entry {
+                BindGroupEntry::Buffer { .. } => buffer_infos.push(vk::DescriptorBufferInfo::default()),
+                BindGroupEntry::Texture(_) | BindGroupEntry::StorageTexture(_) | BindGroupEntry::Sampler(_) => {
+                    image_infos.push(vk::DescriptorImageInfo::default())
+                }
+            }
+        }
+
+        let mut buffer_idx = 0;
+        let mut image_idx = 0;
+        let mut writes: Vec<vk::WriteDescriptorSet> = Vec::new();
+
+        for (binding, entry) in entries {
+            match entry {
+                BindGroupEntry::Buffer { buffer, offset, size } => {
+                    if let Some(vk_buffer) = self.buffers.get(&buffer.0) {
+                        buffer_infos[buffer_idx] = vk::DescriptorBufferInfo {
+                            buffer: vk_buffer.buffer,
+                            offset: *offset,
+                            range: size.unwrap_or(vk::WHOLE_SIZE),
+                        };
+
+                        writes.push(vk::WriteDescriptorSet {
+                            dst_set: descriptor_set,
+                            dst_binding: *binding,
+                            dst_array_element: 0,
+                            descriptor_count: 1,
+                            descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+                            p_buffer_info: &buffer_infos[buffer_idx],
+                            ..Default::default()
+                        });
+                        buffer_idx += 1;
+                    }
+                }
+                BindGroupEntry::Texture(view) => {
+                    if let Some(&image_view) = self.texture_views.get(&view.0) {
+                        image_infos[image_idx] = vk::DescriptorImageInfo {
+                            image_view,
+                            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                            sampler: vk::Sampler::null(), // Not needed for SAMPLED_IMAGE
+                        };
+
+                        writes.push(vk::WriteDescriptorSet {
+                            dst_set: descriptor_set,
+                            dst_binding: *binding,
+                            dst_array_element: 0,
+                            descriptor_count: 1,
+                            descriptor_type: vk::DescriptorType::SAMPLED_IMAGE,
+                            p_image_info: &image_infos[image_idx],
+                            ..Default::default()
+                        });
+                        image_idx += 1;
+                    }
+                }
+                BindGroupEntry::StorageTexture(view) => {
+                    if let Some(&image_view) = self.texture_views.get(&view.0) {
+                        image_infos[image_idx] = vk::DescriptorImageInfo {
+                            image_view,
+                            image_layout: vk::ImageLayout::GENERAL,
+                            sampler: vk::Sampler::null(),
+                        };
+
+                        writes.push(vk::WriteDescriptorSet {
+                            dst_set: descriptor_set,
+                            dst_binding: *binding,
+                            dst_array_element: 0,
+                            descriptor_count: 1,
+                            descriptor_type: vk::DescriptorType::STORAGE_IMAGE,
+                            p_image_info: &image_infos[image_idx],
+                            ..Default::default()
+                        });
+                        image_idx += 1;
+                    }
+                }
+                BindGroupEntry::Sampler(sampler) => {
+                    if let Some(&vk_sampler) = self.samplers.get(&sampler.0) {
+                        image_infos[image_idx] = vk::DescriptorImageInfo {
+                            sampler: vk_sampler,
+                            image_view: vk::ImageView::null(),
+                            image_layout: vk::ImageLayout::UNDEFINED,
+                        };
+
+                        writes.push(vk::WriteDescriptorSet {
+                            dst_set: descriptor_set,
+                            dst_binding: *binding,
+                            dst_array_element: 0,
+                            descriptor_count: 1,
+                            descriptor_type: vk::DescriptorType::SAMPLER,
+                            p_image_info: &image_infos[image_idx],
+                            ..Default::default()
+                        });
+                        image_idx += 1;
+                    }
+                }
+            }
+        }
+
+        // Update descriptor sets
+        if !writes.is_empty() {
+            unsafe {
+                self.device.update_descriptor_sets(&writes, &[]);
+            }
+        }
+
         let id = self.next_bind_group_id;
         self.next_bind_group_id += 1;
         self.descriptor_sets.insert(id, descriptor_set);
@@ -1179,6 +1755,138 @@ impl GraphicsBackend for VulkanBackend {
         &mut self,
         desc: &RenderPipelineDescriptor,
     ) -> BackendResult<RenderPipelineHandle> {
+        // Compile shaders
+        let vert_spirv = Self::compile_wgsl_to_spirv(&desc.vertex_shader)?;
+        let vert_module = self.create_shader_module(&vert_spirv)?;
+
+        let frag_module = if let Some(ref frag_src) = desc.fragment_shader {
+            let frag_spirv = Self::compile_wgsl_to_spirv(frag_src)?;
+            Some(self.create_shader_module(&frag_spirv)?)
+        } else {
+            None
+        };
+
+        // Entry point names - naga preserves original WGSL entry point names
+        let vs_entry_point = std::ffi::CString::new("vs_main").unwrap();
+        let fs_entry_point = std::ffi::CString::new("fs_main").unwrap();
+
+        let mut shader_stages = vec![
+            vk::PipelineShaderStageCreateInfo {
+                stage: vk::ShaderStageFlags::VERTEX,
+                module: vert_module,
+                p_name: vs_entry_point.as_ptr(),
+                ..Default::default()
+            },
+        ];
+
+        if let Some(frag) = frag_module {
+            shader_stages.push(vk::PipelineShaderStageCreateInfo {
+                stage: vk::ShaderStageFlags::FRAGMENT,
+                module: frag,
+                p_name: fs_entry_point.as_ptr(),
+                ..Default::default()
+            });
+        }
+
+        // Vertex input state
+        let (binding_descs, attribute_descs) = Self::build_vertex_input_state(&desc.vertex_layouts);
+
+        let vertex_input_info = vk::PipelineVertexInputStateCreateInfo {
+            vertex_binding_description_count: binding_descs.len() as u32,
+            p_vertex_binding_descriptions: if binding_descs.is_empty() { std::ptr::null() } else { binding_descs.as_ptr() },
+            vertex_attribute_description_count: attribute_descs.len() as u32,
+            p_vertex_attribute_descriptions: if attribute_descs.is_empty() { std::ptr::null() } else { attribute_descs.as_ptr() },
+            ..Default::default()
+        };
+
+        // Input assembly
+        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo {
+            topology: Self::convert_topology(desc.primitive_topology),
+            primitive_restart_enable: vk::FALSE,
+            ..Default::default()
+        };
+
+        // Viewport and scissor (dynamic)
+        let viewport_state = vk::PipelineViewportStateCreateInfo {
+            viewport_count: 1,
+            scissor_count: 1,
+            ..Default::default()
+        };
+
+        // Rasterization
+        let rasterizer = vk::PipelineRasterizationStateCreateInfo {
+            depth_clamp_enable: vk::FALSE,
+            rasterizer_discard_enable: vk::FALSE,
+            polygon_mode: vk::PolygonMode::FILL,
+            line_width: 1.0,
+            cull_mode: Self::convert_cull_mode(desc.cull_mode),
+            front_face: Self::convert_front_face(desc.front_face),
+            depth_bias_enable: vk::FALSE,
+            ..Default::default()
+        };
+
+        // Multisampling
+        let multisampling = vk::PipelineMultisampleStateCreateInfo {
+            sample_shading_enable: vk::FALSE,
+            rasterization_samples: vk::SampleCountFlags::TYPE_1,
+            ..Default::default()
+        };
+
+        // Depth stencil
+        let depth_stencil = desc.depth_stencil.as_ref().map(|ds| {
+            vk::PipelineDepthStencilStateCreateInfo {
+                depth_test_enable: vk::TRUE,
+                depth_write_enable: if ds.depth_write_enabled { vk::TRUE } else { vk::FALSE },
+                depth_compare_op: Self::convert_compare_op(ds.depth_compare),
+                depth_bounds_test_enable: vk::FALSE,
+                stencil_test_enable: vk::FALSE,
+                ..Default::default()
+            }
+        });
+
+        // Color blend attachments
+        let color_blend_attachments: Vec<vk::PipelineColorBlendAttachmentState> = desc
+            .color_targets
+            .iter()
+            .map(|target| {
+                if let Some(blend) = &target.blend {
+                    vk::PipelineColorBlendAttachmentState {
+                        blend_enable: vk::TRUE,
+                        src_color_blend_factor: Self::convert_blend_factor(blend.color.src_factor),
+                        dst_color_blend_factor: Self::convert_blend_factor(blend.color.dst_factor),
+                        color_blend_op: Self::convert_blend_op(blend.color.operation),
+                        src_alpha_blend_factor: Self::convert_blend_factor(blend.alpha.src_factor),
+                        dst_alpha_blend_factor: Self::convert_blend_factor(blend.alpha.dst_factor),
+                        alpha_blend_op: Self::convert_blend_op(blend.alpha.operation),
+                        color_write_mask: vk::ColorComponentFlags::from_raw(target.write_mask.0),
+                        ..Default::default()
+                    }
+                } else {
+                    vk::PipelineColorBlendAttachmentState {
+                        blend_enable: vk::FALSE,
+                        color_write_mask: vk::ColorComponentFlags::from_raw(target.write_mask.0),
+                        ..Default::default()
+                    }
+                }
+            })
+            .collect();
+
+        let color_blending = vk::PipelineColorBlendStateCreateInfo {
+            logic_op_enable: vk::FALSE,
+            attachment_count: color_blend_attachments.len() as u32,
+            p_attachments: if color_blend_attachments.is_empty() { std::ptr::null() } else { color_blend_attachments.as_ptr() },
+            ..Default::default()
+        };
+
+        // Dynamic state
+        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let dynamic_state = vk::PipelineDynamicStateCreateInfo {
+            dynamic_state_count: dynamic_states.len() as u32,
+            p_dynamic_states: dynamic_states.as_ptr(),
+            ..Default::default()
+        };
+
+        // Pipeline layout
         let layouts: Vec<vk::DescriptorSetLayout> = desc
             .bind_group_layouts
             .iter()
@@ -1187,7 +1895,7 @@ impl GraphicsBackend for VulkanBackend {
 
         let pipeline_layout_info = vk::PipelineLayoutCreateInfo {
             set_layout_count: layouts.len() as u32,
-            p_set_layouts: layouts.as_ptr(),
+            p_set_layouts: if layouts.is_empty() { std::ptr::null() } else { layouts.as_ptr() },
             ..Default::default()
         };
 
@@ -1197,12 +1905,68 @@ impl GraphicsBackend for VulkanBackend {
                 .map_err(|e| BackendError::PipelineCreationFailed(e.to_string()))?
         };
 
+        // Create compatible render pass for pipeline
+        let color_formats: Vec<vk::Format> = desc.color_targets
+            .iter()
+            .map(|t| Self::convert_format(t.format))
+            .collect();
+        let depth_format = desc.depth_stencil.as_ref().map(|ds| Self::convert_format(ds.format));
+        let color_load_ops = vec![true; color_formats.len()]; // clear
+        let color_store_ops = vec![true; color_formats.len()]; // store
+        let depth_load_op = depth_format.map(|_| true);
+        let depth_store_op = depth_format.map(|_| true);
+
+        let render_pass = self.get_or_create_render_pass(
+            &color_formats,
+            depth_format,
+            &color_load_ops,
+            depth_load_op,
+            &color_store_ops,
+            depth_store_op,
+            false, // not a present pass
+        )?;
+
+        // Create pipeline
+        let pipeline_info = vk::GraphicsPipelineCreateInfo {
+            stage_count: shader_stages.len() as u32,
+            p_stages: shader_stages.as_ptr(),
+            p_vertex_input_state: &vertex_input_info,
+            p_input_assembly_state: &input_assembly,
+            p_viewport_state: &viewport_state,
+            p_rasterization_state: &rasterizer,
+            p_multisample_state: &multisampling,
+            p_depth_stencil_state: depth_stencil
+                .as_ref()
+                .map(|ds| ds as *const _)
+                .unwrap_or(std::ptr::null()),
+            p_color_blend_state: &color_blending,
+            p_dynamic_state: &dynamic_state,
+            layout: pipeline_layout,
+            render_pass,
+            subpass: 0,
+            ..Default::default()
+        };
+
+        let pipeline = unsafe {
+            self.device
+                .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+                .map_err(|(_, e)| BackendError::PipelineCreationFailed(e.to_string()))?[0]
+        };
+
+        // Cleanup shader modules
+        unsafe {
+            self.device.destroy_shader_module(vert_module, None);
+            if let Some(frag) = frag_module {
+                self.device.destroy_shader_module(frag, None);
+            }
+        }
+
         let id = self.next_render_pipeline_id;
         self.next_render_pipeline_id += 1;
         self.render_pipelines.insert(
             id,
             VkRenderPipeline {
-                pipeline: vk::Pipeline::null(),
+                pipeline,
                 layout: pipeline_layout,
             },
         );
@@ -1245,50 +2009,384 @@ impl GraphicsBackend for VulkanBackend {
         Ok(ComputePipelineHandle(id))
     }
 
-    fn begin_render_pass(&mut self, _desc: &RenderPassDescriptor) {}
-    fn end_render_pass(&mut self) {}
-    fn begin_compute_pass(&mut self, _label: Option<&str>) {}
-    fn end_compute_pass(&mut self) {}
+    fn begin_render_pass(&mut self, desc: &RenderPassDescriptor) {
+        // Store the descriptor for deferred execution (command buffering pattern)
+        self.pending_render_pass = Some(PendingVkRenderPass {
+            descriptor: desc.clone(),
+            commands: Vec::new(),
+        });
+    }
 
-    fn set_render_pipeline(&mut self, _pipeline: RenderPipelineHandle) {}
-    fn set_compute_pipeline(&mut self, _pipeline: ComputePipelineHandle) {}
-    fn set_bind_group(&mut self, _index: u32, _bind_group: BindGroupHandle) {}
-    fn set_vertex_buffer(&mut self, _slot: u32, _buffer: BufferHandle, _offset: u64) {}
-    fn set_index_buffer(&mut self, _buffer: BufferHandle, _offset: u64, _format: IndexFormat) {}
+    fn end_render_pass(&mut self) {
+        let Some(pending) = self.pending_render_pass.take() else {
+            return;
+        };
+
+        let desc = &pending.descriptor;
+
+        // Collect image views and formats for attachments
+        let mut attachment_views: Vec<vk::ImageView> = Vec::new();
+        let mut color_formats: Vec<vk::Format> = Vec::new();
+        let mut color_load_ops: Vec<bool> = Vec::new();
+        let mut color_store_ops: Vec<bool> = Vec::new();
+        let mut clear_values: Vec<vk::ClearValue> = Vec::new();
+        let mut is_present_pass = false;
+
+        for att in &desc.color_attachments {
+            // Check if this is the swapchain view
+            if Some(att.view.0) == self.swapchain_view_id {
+                attachment_views.push(self.swapchain_image_views[self.current_image_index as usize]);
+                color_formats.push(self.swapchain_format);
+                is_present_pass = true;
+            } else if let Some(&view) = self.texture_views.get(&att.view.0) {
+                attachment_views.push(view);
+                let format = self.texture_view_formats.get(&att.view.0).copied()
+                    .unwrap_or(vk::Format::R8G8B8A8_UNORM);
+                color_formats.push(format);
+            } else {
+                continue;
+            }
+
+            let is_clear = matches!(&att.load_op, LoadOp::Clear(_));
+            color_load_ops.push(is_clear);
+            color_store_ops.push(matches!(att.store_op, StoreOp::Store));
+
+            match &att.load_op {
+                LoadOp::Clear(color) => {
+                    clear_values.push(vk::ClearValue {
+                        color: vk::ClearColorValue {
+                            float32: *color,
+                        },
+                    });
+                }
+                LoadOp::Load => {
+                    clear_values.push(vk::ClearValue::default());
+                }
+            }
+        }
+
+        let mut depth_format = None;
+        let mut depth_load_op = None;
+        let mut depth_store_op = None;
+
+        if let Some(depth_att) = &desc.depth_stencil_attachment {
+            if let Some(&view) = self.texture_views.get(&depth_att.view.0) {
+                attachment_views.push(view);
+                let format = self.texture_view_formats.get(&depth_att.view.0).copied()
+                    .unwrap_or(vk::Format::D32_SFLOAT);
+                depth_format = Some(format);
+                depth_load_op = Some(matches!(&depth_att.depth_load_op, LoadOp::Clear(_)));
+                depth_store_op = Some(matches!(depth_att.depth_store_op, StoreOp::Store));
+
+                clear_values.push(vk::ClearValue {
+                    depth_stencil: vk::ClearDepthStencilValue {
+                        depth: depth_att.depth_clear_value,
+                        stencil: 0,
+                    },
+                });
+            }
+        }
+
+        if attachment_views.is_empty() {
+            return;
+        }
+
+        // Get or create render pass
+        let render_pass = match self.get_or_create_render_pass(
+            &color_formats,
+            depth_format,
+            &color_load_ops,
+            depth_load_op,
+            &color_store_ops,
+            depth_store_op,
+            is_present_pass,
+        ) {
+            Ok(rp) => rp,
+            Err(_) => return,
+        };
+
+        // Get or create framebuffer
+        let (width, height) = (self.swapchain_extent.width, self.swapchain_extent.height);
+        let framebuffer = match self.get_or_create_framebuffer(render_pass, &attachment_views, width, height) {
+            Ok(fb) => fb,
+            Err(_) => return,
+        };
+
+        // Begin render pass
+        let render_pass_begin = vk::RenderPassBeginInfo {
+            render_pass,
+            framebuffer,
+            render_area: vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: vk::Extent2D { width, height },
+            },
+            clear_value_count: clear_values.len() as u32,
+            p_clear_values: clear_values.as_ptr(),
+            ..Default::default()
+        };
+
+        unsafe {
+            self.device.cmd_begin_render_pass(
+                self.command_buffer,
+                &render_pass_begin,
+                vk::SubpassContents::INLINE,
+            );
+        }
+
+        // Execute buffered commands
+        for cmd in &pending.commands {
+            match cmd {
+                VkRenderCommand::SetPipeline(handle) => {
+                    if let Some(pipeline) = self.render_pipelines.get(&handle.0) {
+                        unsafe {
+                            self.device.cmd_bind_pipeline(
+                                self.command_buffer,
+                                vk::PipelineBindPoint::GRAPHICS,
+                                pipeline.pipeline,
+                            );
+                        }
+                        self.current_render_pipeline = Some(*handle);
+                    }
+                }
+                VkRenderCommand::SetBindGroup { index, bind_group } => {
+                    if let Some(&descriptor_set) = self.descriptor_sets.get(&bind_group.0) {
+                        if let Some(pipeline_handle) = self.current_render_pipeline {
+                            if let Some(pipeline) = self.render_pipelines.get(&pipeline_handle.0) {
+                                unsafe {
+                                    self.device.cmd_bind_descriptor_sets(
+                                        self.command_buffer,
+                                        vk::PipelineBindPoint::GRAPHICS,
+                                        pipeline.layout,
+                                        *index,
+                                        &[descriptor_set],
+                                        &[],
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                VkRenderCommand::SetVertexBuffer { slot, buffer, offset } => {
+                    if let Some(vk_buffer) = self.buffers.get(&buffer.0) {
+                        unsafe {
+                            self.device.cmd_bind_vertex_buffers(
+                                self.command_buffer,
+                                *slot,
+                                &[vk_buffer.buffer],
+                                &[*offset],
+                            );
+                        }
+                    }
+                }
+                VkRenderCommand::SetIndexBuffer { buffer, offset, format } => {
+                    if let Some(vk_buffer) = self.buffers.get(&buffer.0) {
+                        let index_type = match format {
+                            IndexFormat::Uint16 => vk::IndexType::UINT16,
+                            IndexFormat::Uint32 => vk::IndexType::UINT32,
+                        };
+                        unsafe {
+                            self.device.cmd_bind_index_buffer(
+                                self.command_buffer,
+                                vk_buffer.buffer,
+                                *offset,
+                                index_type,
+                            );
+                        }
+                    }
+                }
+                VkRenderCommand::SetViewport { x, y, width, height, min_depth, max_depth } => {
+                    // Flip Y coordinate to match wgpu/WebGPU coordinate system
+                    // Vulkan has Y pointing down, but wgpu expects Y pointing up
+                    let viewport = vk::Viewport {
+                        x: *x,
+                        y: *y + *height, // Start from bottom
+                        width: *width,
+                        height: -*height, // Negative height to flip Y
+                        min_depth: *min_depth,
+                        max_depth: *max_depth,
+                    };
+                    unsafe {
+                        self.device.cmd_set_viewport(self.command_buffer, 0, &[viewport]);
+                    }
+                }
+                VkRenderCommand::SetScissorRect { x, y, width, height } => {
+                    let scissor = vk::Rect2D {
+                        offset: vk::Offset2D { x: *x as i32, y: *y as i32 },
+                        extent: vk::Extent2D { width: *width, height: *height },
+                    };
+                    unsafe {
+                        self.device.cmd_set_scissor(self.command_buffer, 0, &[scissor]);
+                    }
+                }
+                VkRenderCommand::Draw { vertices, instances } => {
+                    unsafe {
+                        self.device.cmd_draw(
+                            self.command_buffer,
+                            vertices.end - vertices.start,
+                            instances.end - instances.start,
+                            vertices.start,
+                            instances.start,
+                        );
+                    }
+                }
+                VkRenderCommand::DrawIndexed { indices, base_vertex, instances } => {
+                    unsafe {
+                        self.device.cmd_draw_indexed(
+                            self.command_buffer,
+                            indices.end - indices.start,
+                            instances.end - instances.start,
+                            indices.start,
+                            *base_vertex,
+                            instances.start,
+                        );
+                    }
+                }
+            }
+        }
+
+        // End render pass
+        unsafe {
+            self.device.cmd_end_render_pass(self.command_buffer);
+        }
+
+        self.current_render_pipeline = None;
+    }
+
+    fn begin_compute_pass(&mut self, label: Option<&str>) {
+        self.pending_compute_pass = Some(PendingVkComputePass {
+            _label: label.map(|s| s.to_string()),
+            commands: Vec::new(),
+        });
+    }
+
+    fn end_compute_pass(&mut self) {
+        let Some(pending) = self.pending_compute_pass.take() else {
+            return;
+        };
+
+        // Execute buffered compute commands
+        for cmd in &pending.commands {
+            match cmd {
+                VkComputeCommand::SetPipeline(handle) => {
+                    if let Some(pipeline) = self.compute_pipelines.get(&handle.0) {
+                        unsafe {
+                            self.device.cmd_bind_pipeline(
+                                self.command_buffer,
+                                vk::PipelineBindPoint::COMPUTE,
+                                pipeline.pipeline,
+                            );
+                        }
+                        self.current_compute_pipeline = Some(*handle);
+                    }
+                }
+                VkComputeCommand::SetBindGroup { index, bind_group } => {
+                    if let Some(&descriptor_set) = self.descriptor_sets.get(&bind_group.0) {
+                        if let Some(pipeline_handle) = self.current_compute_pipeline {
+                            if let Some(pipeline) = self.compute_pipelines.get(&pipeline_handle.0) {
+                                unsafe {
+                                    self.device.cmd_bind_descriptor_sets(
+                                        self.command_buffer,
+                                        vk::PipelineBindPoint::COMPUTE,
+                                        pipeline.layout,
+                                        *index,
+                                        &[descriptor_set],
+                                        &[],
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                VkComputeCommand::Dispatch { x, y, z } => {
+                    unsafe {
+                        self.device.cmd_dispatch(self.command_buffer, *x, *y, *z);
+                    }
+                }
+            }
+        }
+
+        self.current_compute_pipeline = None;
+    }
+
+    fn set_render_pipeline(&mut self, pipeline: RenderPipelineHandle) {
+        if let Some(ref mut pending) = self.pending_render_pass {
+            pending.commands.push(VkRenderCommand::SetPipeline(pipeline));
+        }
+    }
+
+    fn set_compute_pipeline(&mut self, pipeline: ComputePipelineHandle) {
+        if let Some(ref mut pending) = self.pending_compute_pass {
+            pending.commands.push(VkComputeCommand::SetPipeline(pipeline));
+        }
+    }
+
+    fn set_bind_group(&mut self, index: u32, bind_group: BindGroupHandle) {
+        if let Some(ref mut pending) = self.pending_render_pass {
+            pending.commands.push(VkRenderCommand::SetBindGroup { index, bind_group });
+        } else if let Some(ref mut pending) = self.pending_compute_pass {
+            pending.commands.push(VkComputeCommand::SetBindGroup { index, bind_group });
+        }
+    }
+
+    fn set_vertex_buffer(&mut self, slot: u32, buffer: BufferHandle, offset: u64) {
+        if let Some(ref mut pending) = self.pending_render_pass {
+            pending.commands.push(VkRenderCommand::SetVertexBuffer { slot, buffer, offset });
+        }
+    }
+
+    fn set_index_buffer(&mut self, buffer: BufferHandle, offset: u64, format: IndexFormat) {
+        if let Some(ref mut pending) = self.pending_render_pass {
+            pending.commands.push(VkRenderCommand::SetIndexBuffer { buffer, offset, format });
+        }
+    }
 
     fn set_viewport(&mut self, x: f32, y: f32, width: f32, height: f32, min_depth: f32, max_depth: f32) {
-        let viewport = vk::Viewport {
-            x,
-            y,
-            width,
-            height,
-            min_depth,
-            max_depth,
-        };
-        unsafe {
-            self.device.cmd_set_viewport(self.command_buffer, 0, &[viewport]);
+        if let Some(ref mut pending) = self.pending_render_pass {
+            pending.commands.push(VkRenderCommand::SetViewport { x, y, width, height, min_depth, max_depth });
+        } else {
+            // Direct command if not in render pass
+            // Flip Y coordinate to match wgpu/WebGPU coordinate system
+            let viewport = vk::Viewport {
+                x,
+                y: y + height, // Start from bottom
+                width,
+                height: -height, // Negative height to flip Y
+                min_depth,
+                max_depth
+            };
+            unsafe {
+                self.device.cmd_set_viewport(self.command_buffer, 0, &[viewport]);
+            }
         }
     }
 
     fn set_scissor_rect(&mut self, x: u32, y: u32, width: u32, height: u32) {
-        let scissor = vk::Rect2D {
-            offset: vk::Offset2D { x: x as i32, y: y as i32 },
-            extent: vk::Extent2D { width, height },
-        };
-        unsafe {
-            self.device.cmd_set_scissor(self.command_buffer, 0, &[scissor]);
+        if let Some(ref mut pending) = self.pending_render_pass {
+            pending.commands.push(VkRenderCommand::SetScissorRect { x, y, width, height });
+        } else {
+            let scissor = vk::Rect2D {
+                offset: vk::Offset2D { x: x as i32, y: y as i32 },
+                extent: vk::Extent2D { width, height },
+            };
+            unsafe {
+                self.device.cmd_set_scissor(self.command_buffer, 0, &[scissor]);
+            }
         }
     }
 
     fn draw(&mut self, vertices: std::ops::Range<u32>, instances: std::ops::Range<u32>) {
-        unsafe {
-            self.device.cmd_draw(
-                self.command_buffer,
-                vertices.end - vertices.start,
-                instances.end - instances.start,
-                vertices.start,
-                instances.start,
-            );
+        if let Some(ref mut pending) = self.pending_render_pass {
+            pending.commands.push(VkRenderCommand::Draw { vertices, instances });
+        } else {
+            unsafe {
+                self.device.cmd_draw(
+                    self.command_buffer,
+                    vertices.end - vertices.start,
+                    instances.end - instances.start,
+                    vertices.start,
+                    instances.start,
+                );
+            }
         }
     }
 
@@ -1298,21 +2396,103 @@ impl GraphicsBackend for VulkanBackend {
         base_vertex: i32,
         instances: std::ops::Range<u32>,
     ) {
-        unsafe {
-            self.device.cmd_draw_indexed(
-                self.command_buffer,
-                indices.end - indices.start,
-                instances.end - instances.start,
-                indices.start,
-                base_vertex,
-                instances.start,
-            );
+        if let Some(ref mut pending) = self.pending_render_pass {
+            pending.commands.push(VkRenderCommand::DrawIndexed { indices, base_vertex, instances });
+        } else {
+            unsafe {
+                self.device.cmd_draw_indexed(
+                    self.command_buffer,
+                    indices.end - indices.start,
+                    instances.end - instances.start,
+                    indices.start,
+                    base_vertex,
+                    instances.start,
+                );
+            }
         }
     }
 
     fn dispatch_compute(&mut self, x: u32, y: u32, z: u32) {
-        unsafe {
-            self.device.cmd_dispatch(self.command_buffer, x, y, z);
+        if let Some(ref mut pending) = self.pending_compute_pass {
+            pending.commands.push(VkComputeCommand::Dispatch { x, y, z });
+        } else {
+            unsafe {
+                self.device.cmd_dispatch(self.command_buffer, x, y, z);
+            }
+        }
+    }
+
+    fn transition_textures_for_sampling(&mut self, texture_views: &[TextureViewHandle]) {
+        if texture_views.is_empty() {
+            return;
+        }
+
+        let mut barriers = Vec::new();
+
+        for view_handle in texture_views {
+            // Get the parent texture
+            let Some(&texture_handle) = self.texture_view_parents.get(&view_handle.0) else {
+                continue;
+            };
+            let Some(texture) = self.textures.get(&texture_handle.0) else {
+                continue;
+            };
+            let Some(&format) = self.texture_view_formats.get(&view_handle.0) else {
+                continue;
+            };
+
+            let is_depth = matches!(
+                format,
+                vk::Format::D32_SFLOAT | vk::Format::D24_UNORM_S8_UINT | vk::Format::D16_UNORM
+            );
+
+            let (old_layout, src_access_mask, src_stage, aspect_mask) = if is_depth {
+                (
+                    vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                    vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                    vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                    vk::ImageAspectFlags::DEPTH,
+                )
+            } else {
+                (
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::ImageAspectFlags::COLOR,
+                )
+            };
+
+            barriers.push(vk::ImageMemoryBarrier {
+                old_layout,
+                new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                image: texture.image,
+                subresource_range: vk::ImageSubresourceRange {
+                    aspect_mask,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+                src_access_mask,
+                dst_access_mask: vk::AccessFlags::SHADER_READ,
+                ..Default::default()
+            });
+        }
+
+        if !barriers.is_empty() {
+            unsafe {
+                self.device.cmd_pipeline_barrier(
+                    self.command_buffer,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &barriers,
+                );
+            }
         }
     }
 
@@ -1328,8 +2508,45 @@ impl GraphicsBackend for VulkanBackend {
     }
 
     fn destroy_texture(&mut self, texture: TextureHandle) {
-        if let Some(vk_texture) = self.textures.remove(&texture.0) {
-            unsafe {
+        // First, find all views that belong to this texture
+        let views_to_remove: Vec<u64> = self.texture_view_parents
+            .iter()
+            .filter(|(_, &t)| t == texture)
+            .map(|(&v, _)| v)
+            .collect();
+
+        // Remove framebuffers that use any of these views
+        let views_set: std::collections::HashSet<_> = views_to_remove.iter().copied().collect();
+        let framebuffers_to_remove: Vec<FramebufferKey> = self.framebuffers
+            .keys()
+            .filter(|key| {
+                key.attachments.iter().any(|&view| {
+                    // Check if this view corresponds to any of the texture views being destroyed
+                    self.texture_views.iter().any(|(id, &v)| v == view && views_set.contains(id))
+                })
+            })
+            .cloned()
+            .collect();
+
+        // Defer framebuffer destruction until after the frame is submitted
+        for key in framebuffers_to_remove {
+            if let Some(fb) = self.framebuffers.remove(&key) {
+                self.framebuffers_to_destroy.push(fb);
+            }
+        }
+
+        unsafe {
+            // Destroy the views
+            for view_id in &views_to_remove {
+                if let Some(view) = self.texture_views.remove(view_id) {
+                    self.device.destroy_image_view(view, None);
+                }
+                self.texture_view_formats.remove(view_id);
+                self.texture_view_parents.remove(view_id);
+            }
+
+            // Finally destroy the texture itself
+            if let Some(vk_texture) = self.textures.remove(&texture.0) {
                 self.device.destroy_image(vk_texture.image, None);
                 if let Some(ref allocator) = self.allocator {
                     let _ = allocator.lock().free(vk_texture.allocation);
@@ -1395,6 +2612,16 @@ impl Drop for VulkanBackend {
             self.device.destroy_semaphore(self.image_available_semaphore, None);
             self.device.destroy_semaphore(self.render_finished_semaphore, None);
             self.device.destroy_fence(self.in_flight_fence, None);
+
+            // Destroy cached framebuffers
+            for (_, framebuffer) in self.framebuffers.drain() {
+                self.device.destroy_framebuffer(framebuffer, None);
+            }
+
+            // Destroy cached render passes
+            for (_, render_pass) in self.render_passes.drain() {
+                self.device.destroy_render_pass(render_pass, None);
+            }
 
             // Destroy egui render pass
             self.device.destroy_render_pass(self.egui_render_pass, None);
