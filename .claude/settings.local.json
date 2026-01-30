@@ -11,7 +11,10 @@
       "Bash(rustup target add:*)",
       "Bash(wasm-pack build:*)",
       "WebFetch(domain:docs.rs)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(cat:*)",
+      "Bash(cargo test:*)",
+      "Bash(powershell -ExecutionPolicy Bypass -File scripts/test-all.ps1)"
     ]
   }
 }

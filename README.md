@@ -48,6 +48,35 @@ miniserve demos/web --port 8080
 # Then open http://localhost:8080/index.html in your browser
 ```
 
+## Testing
+
+Run all tests (native build, web build, unit tests, and clippy) with the cross-platform test script:
+
+### Linux / macOS
+
+```bash
+./scripts/test-all.sh
+```
+
+### Windows (PowerShell)
+
+```powershell
+.\scripts\test-all.ps1
+```
+
+### Options
+
+| Bash Flag | PowerShell Flag | Description |
+|-----------|-----------------|-------------|
+| `--skip-native` | `-SkipNative` | Skip native build test |
+| `--skip-web` | `-SkipWeb` | Skip web build test |
+| `--skip-tests` | `-SkipTests` | Skip unit tests |
+| `--skip-clippy` | `-SkipClippy` | Skip clippy linter |
+| `--verbose` | `-Verbose` | Show verbose output |
+| `--help` | `-Help` | Show help message |
+
+See [docs/TESTING.md](docs/TESTING.md) for detailed testing documentation.
+
 ## Documentation Strategy
 
 This project uses a layered documentation approach designed for both human developers and AI assistants:

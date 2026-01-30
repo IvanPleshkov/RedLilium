@@ -23,3 +23,14 @@ Error: crate-type must be cdylib to compile to wasm32-unknown-unknown. Add the f
 
 Request:
 Please change Readme file and provide web run instructions using cargo modules instead of python http server.
+
+Request:
+I develop this project using AI agent systems. I need some script to help bots to test the project after each change.
+Create a folder scripts/ with a script to do steps:
+- Test the build for native target
+- Test the build for web target
+- Run unit tests in all crates of the workspace
+- Run clippy as a linter
+Also provide instructions in the Readme file and docs folder on how to use this script.
+It's important that the script works in all major operating systems: Linux, Windows and MacOS.
+Try to change docs so that claude code will use this script to test the project after each change.
