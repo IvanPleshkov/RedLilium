@@ -78,15 +78,20 @@ jobs:
           # Add Mesa directory to PATH (prepend so it takes precedence)
           echo "$mesaLocalDir" | Out-File -FilePath $env:GITHUB_PATH -Append
 
-          # Download and install Vulkan SDK for vulkan runtime
-          $vulkanSdkVersion = "1.3.290.0"
-          $vulkanSdkUrl = "https://sdk.lunarg.com/sdk/download/$vulkanSdkVersion/windows/VulkanSDK-$vulkanSdkVersion-Installer.exe"
-          Invoke-WebRequest -Uri $vulkanSdkUrl -OutFile "$env:TEMP\vulkan-sdk.exe"
-          Start-Process -FilePath "$env:TEMP\vulkan-sdk.exe" -ArgumentList "/S" -Wait
+          # Download Vulkan Runtime (lightweight, no installer needed)
+          # Using the runtime redistributable instead of full SDK to avoid installer hangs in CI
+          $vulkanRuntimeUrl = "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-runtime.zip"
+          Invoke-WebRequest -Uri $vulkanRuntimeUrl -OutFile "$env:TEMP\vulkan-runtime.zip"
+          Expand-Archive -Path "$env:TEMP\vulkan-runtime.zip" -DestinationPath "$env:TEMP\vulkan-runtime" -Force
 
-          # Add Vulkan SDK to PATH
-          $vulkanPath = "C:\VulkanSDK\$vulkanSdkVersion\Bin"
-          echo "$vulkanPath" | Out-File -FilePath $env:GITHUB_PATH -Append
+          # Copy vulkan-1.dll to the mesa-dll directory (already in PATH)
+          $vulkanDll = Get-ChildItem -Path "$env:TEMP\vulkan-runtime" -Recurse -Filter "vulkan-1.dll" | Where-Object { $_.Directory.Name -eq "x64" } | Select-Object -First 1
+          if ($vulkanDll) {
+            Copy-Item $vulkanDll.FullName -Destination $mesaLocalDir -Force
+            Write-Host "Copied vulkan-1.dll to $mesaLocalDir"
+          } else {
+            Write-Host "Warning: vulkan-1.dll not found in runtime package"
+          }
 
       - name: Install Vulkan SDK (macOS)
         if: runner.os == 'macOS'
