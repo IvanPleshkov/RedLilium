@@ -34,3 +34,8 @@ Create a folder scripts/ with a script to do steps:
 Also provide instructions in the Readme file and docs folder on how to use this script.
 It's important that the script works in all major operating systems: Linux, Windows and MacOS.
 Try to change docs so that claude code will use this script to test the project after each change.
+
+Request:
+Add a git hook to check cargo fmt before each commit.
+Because docs are used by claude code, skip the formatting check for docs folder.
+Add a new file Contributing.md with instructions on how to setup the git hooks and mention that code must be formatted before each commit.
