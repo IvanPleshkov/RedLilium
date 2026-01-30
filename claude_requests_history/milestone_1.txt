@@ -20,3 +20,6 @@ Request:
 I try to build the web target using instructions from Readme but I get this error. It seems Corgo.toml is missing something. Fix it.
 asm-pack build demos --target web --out-dir web/pkg
 Error: crate-type must be cdylib to compile to wasm32-unknown-unknown. Add the following to your Cargo.toml file:
+
+Request:
+Please change Readme file and provide web run instructions using cargo modules instead of python http server.

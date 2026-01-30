@@ -23,7 +23,7 @@ redlilium/
 ### Web Build
 
 - [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/)
-- A local web server (e.g., `python -m http.server` or `npx serve`)
+- [miniserve](https://github.com/svenstaro/miniserve) - Install with `cargo install miniserve`
 
 ## Building & Running
 
@@ -43,10 +43,9 @@ cargo run -p redlilium-demos --bin window_demo
 # Build for web
 wasm-pack build demos --target web --out-dir web/pkg
 
-# Serve the web files (from demos/web directory)
-cd demos/web
-python -m http.server 8080
-# Then open http://localhost:8080 in your browser
+# Serve the web files
+miniserve demos/web --port 8080
+# Then open http://localhost:8080/index.html in your browser
 ```
 
 ## Documentation Strategy
