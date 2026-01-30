@@ -8,6 +8,12 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Force software rendering for graphics tests in CI
+  LIBGL_ALWAYS_SOFTWARE: 1
+  MESA_GL_VERSION_OVERRIDE: 4.5
+  MESA_GLSL_VERSION_OVERRIDE: 450
+  # Vulkan ICD loader settings (helps find software Vulkan drivers)
+  VK_LOADER_DEBUG: all
 
 jobs:
   test:
@@ -21,6 +27,73 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # =========================================
+      # Graphics Drivers (Software Rendering)
+      # =========================================
+
+      - name: Install Mesa OpenGL and Vulkan (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            mesa-utils \
+            libgl1-mesa-dri \
+            libgl1-mesa-dev \
+            libegl1-mesa-dev \
+            mesa-vulkan-drivers \
+            vulkan-tools \
+            libvulkan1 \
+            libvulkan-dev
+          # Verify installations
+          echo "=== OpenGL Info ==="
+          glxinfo -B || true
+          echo "=== Vulkan Info ==="
+          vulkaninfo --summary || true
+
+      - name: Install Mesa OpenGL and Vulkan (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Download Mesa for Windows (software OpenGL via llvmpipe)
+          $mesaVersion = "24.2.4"
+          $mesaUrl = "https://github.com/pal1000/mesa-dist-win/releases/download/$mesaVersion/mesa3d-$mesaVersion-release-msvc.7z"
+
+          # Create directory and download
+          New-Item -ItemType Directory -Force -Path "$env:TEMP\mesa"
+          Invoke-WebRequest -Uri $mesaUrl -OutFile "$env:TEMP\mesa\mesa.7z"
+
+          # Extract using 7z (available on GitHub runners)
+          7z x "$env:TEMP\mesa\mesa.7z" -o"$env:TEMP\mesa" -y
+
+          # Copy OpenGL DLLs to system directory (x64)
+          $mesaDir = "$env:TEMP\mesa\x64"
+          Copy-Item "$mesaDir\opengl32.dll" -Destination "C:\Windows\System32\" -Force -ErrorAction SilentlyContinue
+          Copy-Item "$mesaDir\libgallium_wgl.dll" -Destination "C:\Windows\System32\" -Force -ErrorAction SilentlyContinue
+          Copy-Item "$mesaDir\libglapi.dll" -Destination "C:\Windows\System32\" -Force -ErrorAction SilentlyContinue
+
+          # Download and install Vulkan SDK for vulkan runtime
+          $vulkanSdkVersion = "1.3.290.0"
+          $vulkanSdkUrl = "https://sdk.lunarg.com/sdk/download/$vulkanSdkVersion/windows/VulkanSDK-$vulkanSdkVersion-Installer.exe"
+          Invoke-WebRequest -Uri $vulkanSdkUrl -OutFile "$env:TEMP\vulkan-sdk.exe"
+          Start-Process -FilePath "$env:TEMP\vulkan-sdk.exe" -ArgumentList "/S" -Wait
+
+          # Add Vulkan SDK to PATH
+          $vulkanPath = "C:\VulkanSDK\$vulkanSdkVersion\Bin"
+          echo "$vulkanPath" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Install Vulkan SDK (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          # Install MoltenVK via Homebrew (Vulkan on Metal)
+          brew install molten-vk vulkan-loader vulkan-tools
+
+          # Verify Vulkan installation
+          echo "=== Vulkan Info ==="
+          vulkaninfo --summary || true
+
+          # Note: macOS has deprecated OpenGL but still provides it via system frameworks
+          # No additional OpenGL installation needed
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

@@ -53,3 +53,8 @@ Request:
 There is a problem with the github CI workflow.
 There is an error in github CI:
 Error: Unable to resolve action dtolnay/rust-action, repository not found
+
+Request:
+Because the project is a graphics engine, it's important to include graphical tests in the CI workflow.
+Please add a CI step with installing a hardware accelerated OpenGL driver on each OS used in the workflow.
+And also vulkan emulator.
