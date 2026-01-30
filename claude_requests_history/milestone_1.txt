@@ -39,3 +39,12 @@ Request:
 Add a git hook to check cargo fmt before each commit.
 Because docs are used by claude code, skip the formatting check for docs folder.
 Add a new file Contributing.md with instructions on how to setup the git hooks and mention that code must be formatted before each commit.
+
+Request:
+I need a github actions workflow to test the project on each push and pull request.
+There is already a script to test the project, look at Readme and docs for instructions about the script.
+The workflow must run on ubuntu-latest, windows-latest and macos-latest.
+The workflow should be triggered on each changes to main branch and also on each pull request to any branch.
+
+Request:
+Add please a CI step with cargo fmt check to the github actions workflow.
