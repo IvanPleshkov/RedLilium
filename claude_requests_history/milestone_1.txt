@@ -1,6 +1,6 @@
 This document is a list of requests made to Claude Code.
 
-Request #1:
+Request:
 Lets start! I want to create a FPS videogame as the result of the project.
 We dont create the entire game right now, but we will create the basic structure.
 Start with an empty project structure. The lauguage is RUST. Graphics engine will be custom.
@@ -15,3 +15,8 @@ Everything else will be added later.
 Imagine also how to handle the documentation for the project. and how to connect the code with the documentation. While creating the documentation, 
 think about the best practices to keep the documentation updated with the code changes.
 And also keep in mind that claude code can read the documentation and use it to answer questions about the codebase.
+
+Request:
+I try to build the web target using instructions from Readme but I get this error. It seems Corgo.toml is missing something. Fix it.
+asm-pack build demos --target web --out-dir web/pkg
+Error: crate-type must be cdylib to compile to wasm32-unknown-unknown. Add the following to your Cargo.toml file:
