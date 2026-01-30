@@ -104,3 +104,54 @@ Compressed: 71852727
     Directory: D:\a\vibeengine\vibeengine
 Mode                 LastWriteTime         Length Name
 d----           1/30/2026 10:00 PM                mesa-dll
+
+Request:
+I see the error in the windows github CI log. Please fix the problem.
+Run # Download Mesa for Windows (software OpenGL via llvmpipe)
+    Directory: C:\Users\RUNNER~1\AppData\Local\Temp
+Mode                 LastWriteTime         Length Name
+d----           1/30/2026 10:19 PM                mesa
+Scanning the drive for archives:
+1 file, 71852727 bytes (69 MiB)
+Extracting archive: C:\Users\RUNNER~1\AppData\Local\Temp\mesa\mesa.7z
+Path = C:\Users\RUNNER~1\AppData\Local\Temp\mesa\mesa.7z
+Type = 7z
+Physical Size = 71852727
+Headers Size = 1132
+Method = LZMA2:26 LZMA:20 BCJ2
+Solid = +
+Blocks = 2
+Everything is Ok
+Files: 49
+Size:       656958979
+Compressed: 71852727
+    Directory: D:\a\vibeengine\vibeengine
+Mode                 LastWriteTime         Length Name
+d----           1/30/2026 10:19 PM                mesa-dll
+CodeBase            : file:///C:/Program Files/PowerShell/7/WindowsBase.dll
+FullName            : WindowsBase, Version=8.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35
+EntryPoint          : 
+DefinedTypes        : {Interop, FxResources.WindowsBase.SR, MS.Win32.ExternDll, MS.Win32.HandleCollector…}
+IsCollectible       : False
+ManifestModule      : WindowsBase.dll
+ReflectionOnly      : False
+Location            : C:\Program Files\PowerShell\7\WindowsBase.dll
+ImageRuntimeVersion : v4.0.30319
+GlobalAssemblyCache : False
+HostContext         : 0
+IsDynamic           : False
+ExportedTypes       : {System.Security.RightsManagement.ContentGrant, 
+                      System.Security.RightsManagement.SecureEnvironment, 
+                      System.Security.RightsManagement.CryptoProvider, 
+                      System.Security.RightsManagement.UnsignedPublishLicense…}
+IsFullyTrusted      : True
+CustomAttributes    : {[System.Runtime.CompilerServices.ExtensionAttribute()], 
+                      [System.Runtime.CompilerServices.CompilationRelaxationsAttribute((Int32)8)], 
+                      [System.Runtime.CompilerServices.RuntimeCompatibilityAttribute(WrapNonExceptionThrows = True)], [
+                      System.Diagnostics.DebuggableAttribute((System.Diagnostics.DebuggableAttribute+DebuggingModes)2)]
+                      …}
+EscapedCodeBase     : file:///C:/Program%20Files/PowerShell/7/WindowsBase.dll
+Modules             : {WindowsBase.dll}
+SecurityRuleSet     : None
+OperationStopped: 
+Error: Process completed with exit code 1.

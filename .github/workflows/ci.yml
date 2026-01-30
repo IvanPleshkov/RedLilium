@@ -55,12 +55,14 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           # Download Mesa for Windows (software OpenGL via llvmpipe)
           $mesaVersion = "24.2.4"
           $mesaUrl = "https://github.com/pal1000/mesa-dist-win/releases/download/$mesaVersion/mesa3d-$mesaVersion-release-msvc.7z"
 
           # Create directory and download
-          New-Item -ItemType Directory -Force -Path "$env:TEMP\mesa"
+          New-Item -ItemType Directory -Force -Path "$env:TEMP\mesa" | Out-Null
           Invoke-WebRequest -Uri $mesaUrl -OutFile "$env:TEMP\mesa\mesa.7z"
 
           # Extract using 7z (available on GitHub runners)
@@ -69,7 +71,7 @@ jobs:
           # Copy OpenGL DLLs to a local directory (can't write to System32 in CI)
           # Applications will find these DLLs via PATH
           $mesaLocalDir = "${{ github.workspace }}\mesa-dll"
-          New-Item -ItemType Directory -Force -Path $mesaLocalDir
+          New-Item -ItemType Directory -Force -Path $mesaLocalDir | Out-Null
           $mesaDir = "$env:TEMP\mesa\x64"
           Copy-Item "$mesaDir\opengl32.dll" -Destination $mesaLocalDir -Force
           Copy-Item "$mesaDir\libgallium_wgl.dll" -Destination $mesaLocalDir -Force
@@ -80,17 +82,22 @@ jobs:
 
           # Download Vulkan Runtime (lightweight, no installer needed)
           # Using the runtime redistributable instead of full SDK to avoid installer hangs in CI
-          $vulkanRuntimeUrl = "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-runtime.zip"
-          Invoke-WebRequest -Uri $vulkanRuntimeUrl -OutFile "$env:TEMP\vulkan-runtime.zip"
-          Expand-Archive -Path "$env:TEMP\vulkan-runtime.zip" -DestinationPath "$env:TEMP\vulkan-runtime" -Force
+          try {
+            $vulkanRuntimeUrl = "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-runtime.zip"
+            Invoke-WebRequest -Uri $vulkanRuntimeUrl -OutFile "$env:TEMP\vulkan-runtime.zip" -MaximumRedirection 5
+            Expand-Archive -Path "$env:TEMP\vulkan-runtime.zip" -DestinationPath "$env:TEMP\vulkan-runtime" -Force
 
-          # Copy vulkan-1.dll to the mesa-dll directory (already in PATH)
-          $vulkanDll = Get-ChildItem -Path "$env:TEMP\vulkan-runtime" -Recurse -Filter "vulkan-1.dll" | Where-Object { $_.Directory.Name -eq "x64" } | Select-Object -First 1
-          if ($vulkanDll) {
-            Copy-Item $vulkanDll.FullName -Destination $mesaLocalDir -Force
-            Write-Host "Copied vulkan-1.dll to $mesaLocalDir"
-          } else {
-            Write-Host "Warning: vulkan-1.dll not found in runtime package"
+            # Copy vulkan-1.dll to the mesa-dll directory (already in PATH)
+            $vulkanDll = Get-ChildItem -Path "$env:TEMP\vulkan-runtime" -Recurse -Filter "vulkan-1.dll" -ErrorAction SilentlyContinue | Where-Object { $_.Directory.Name -eq "x64" } | Select-Object -First 1
+            if ($vulkanDll) {
+              Copy-Item $vulkanDll.FullName -Destination $mesaLocalDir -Force
+              Write-Host "Copied vulkan-1.dll to $mesaLocalDir"
+            } else {
+              Write-Host "Warning: vulkan-1.dll not found in runtime package"
+            }
+          } catch {
+            Write-Host "Warning: Vulkan runtime installation failed: $_"
+            Write-Host "Continuing without Vulkan support..."
           }
 
       - name: Install Vulkan SDK (macOS)
