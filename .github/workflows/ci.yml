@@ -66,11 +66,17 @@ jobs:
           # Extract using 7z (available on GitHub runners)
           7z x "$env:TEMP\mesa\mesa.7z" -o"$env:TEMP\mesa" -y
 
-          # Copy OpenGL DLLs to system directory (x64)
+          # Copy OpenGL DLLs to a local directory (can't write to System32 in CI)
+          # Applications will find these DLLs via PATH
+          $mesaLocalDir = "${{ github.workspace }}\mesa-dll"
+          New-Item -ItemType Directory -Force -Path $mesaLocalDir
           $mesaDir = "$env:TEMP\mesa\x64"
-          Copy-Item "$mesaDir\opengl32.dll" -Destination "C:\Windows\System32\" -Force -ErrorAction SilentlyContinue
-          Copy-Item "$mesaDir\libgallium_wgl.dll" -Destination "C:\Windows\System32\" -Force -ErrorAction SilentlyContinue
-          Copy-Item "$mesaDir\libglapi.dll" -Destination "C:\Windows\System32\" -Force -ErrorAction SilentlyContinue
+          Copy-Item "$mesaDir\opengl32.dll" -Destination $mesaLocalDir -Force
+          Copy-Item "$mesaDir\libgallium_wgl.dll" -Destination $mesaLocalDir -Force
+          Copy-Item "$mesaDir\libglapi.dll" -Destination $mesaLocalDir -Force
+
+          # Add Mesa directory to PATH (prepend so it takes precedence)
+          echo "$mesaLocalDir" | Out-File -FilePath $env:GITHUB_PATH -Append
 
           # Download and install Vulkan SDK for vulkan runtime
           $vulkanSdkVersion = "1.3.290.0"
