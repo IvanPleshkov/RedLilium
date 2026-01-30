@@ -48,3 +48,8 @@ The workflow should be triggered on each changes to main branch and also on each
 
 Request:
 Add please a CI step with cargo fmt check to the github actions workflow.
+
+Request:
+There is a problem with the github CI workflow.
+There is an error in github CI:
+Error: Unable to resolve action dtolnay/rust-action, repository not found
