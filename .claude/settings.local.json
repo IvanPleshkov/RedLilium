@@ -19,7 +19,8 @@
       "Bash(cargo clippy:*)",
       "Bash(gh api:*)",
       "Bash(curl:*)",
-      "Bash(cargo doc:*)"
+      "Bash(cargo doc:*)",
+      "Bash(./scripts/test-all.sh:*)"
     ],
     "deny": [
       "Read(claude_requests_history/**)",

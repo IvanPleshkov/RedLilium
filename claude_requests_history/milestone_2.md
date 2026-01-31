@@ -43,3 +43,9 @@ I guess the system may be implemented in graphics crate and camera component is 
 Camera component has a render target.
 Camera system handles the rendering by a separate function. This system merges all render graphs from each camera. Camera with surface tagrets (may be multiple because of view) are applied last.
 Rendering to texture feature has a priority to set explicitly which cameras should be rendered first.
+
+## Request 5:
+Let's refactor resources usage in graphics crate.
+I dont like the approach, where render graph has a resource creation methods.
+Let's create a graphics instance and graphics device. Instance can handle multiple devices.
+Device can create resources. Resources are handled by `Arc`.

@@ -12,8 +12,8 @@ use redlilium_ecs::bevy_ecs::prelude::*;
 #[allow(unused_imports)]
 use redlilium_ecs::prelude::*;
 use redlilium_graphics::{
-    CameraSystem, DummyBackend, ExtractedCamera, ExtractedMaterial, ExtractedMesh,
-    ExtractedTransform, RenderWorld,
+    CameraSystem, ExtractedCamera, ExtractedMaterial, ExtractedMesh, ExtractedTransform,
+    RenderWorld,
 };
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -29,8 +29,6 @@ struct App {
     camera_system: CameraSystem,
     /// Shared render world for all cameras.
     render_world: RenderWorld,
-    /// Graphics backend (dummy for now).
-    backend: DummyBackend,
     /// Current window size.
     window_size: (u32, u32),
 }
@@ -45,7 +43,6 @@ impl App {
             world,
             camera_system: CameraSystem::new(),
             render_world: RenderWorld::with_capacity(1024, 64, 64),
-            backend: DummyBackend::new(),
             window_size: (1280, 720),
         }
     }
@@ -161,7 +158,7 @@ impl App {
         self.camera_system.prepare(&self.render_world);
 
         // Render phase - execute all camera graphs
-        if let Err(e) = self.camera_system.render(&self.backend) {
+        if let Err(e) = self.camera_system.render() {
             log::error!("Render error: {}", e);
         }
 

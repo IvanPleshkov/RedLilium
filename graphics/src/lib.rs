@@ -5,30 +5,43 @@
 //! ## Overview
 //!
 //! This crate provides:
+//! - [`GraphicsInstance`] - Top-level graphics system entry point
+//! - [`GraphicsDevice`] - Device for creating GPU resources
 //! - [`RenderGraph`] - Declarative description of render passes and dependencies
-//! - [`Backend`] - Trait for graphics backend implementations
 //! - [`scene`] - ECS to render graph integration
-//! - Multiple backend support: Vulkan, wgpu, and Dummy (for testing)
 //!
 //! ## Example
 //!
 //! ```ignore
-//! use redlilium_graphics::{RenderGraph, Backend};
+//! use redlilium_graphics::{GraphicsInstance, GraphicsDevice, RenderGraph};
 //!
-//! let mut renderer = SceneRenderer::new();
-//! renderer.begin_frame();
-//! // Extract from ECS, prepare, render...
-//! renderer.end_frame();
+//! let instance = GraphicsInstance::new()?;
+//! let device = instance.create_device()?;
+//!
+//! let texture = device.create_texture(&TextureDescriptor::new_2d(
+//!     1920, 1080,
+//!     TextureFormat::Rgba8Unorm,
+//!     TextureUsage::RENDER_ATTACHMENT,
+//! ))?;
+//!
+//! let mut graph = RenderGraph::new();
+//! let handle = graph.import_texture(texture);
 //! ```
 
-pub mod backend;
+pub mod device;
+pub mod error;
 pub mod graph;
+pub mod instance;
+pub mod resources;
 pub mod scene;
 pub mod types;
 
 // Re-export main types for convenience
-pub use backend::{Backend, BackendError, DummyBackend};
-pub use graph::{PassHandle, RenderGraph, RenderPass, ResourceHandle};
+pub use device::{DeviceCapabilities, GraphicsDevice};
+pub use error::GraphicsError;
+pub use graph::{BufferHandle, PassHandle, RenderGraph, RenderPass, ResourceHandle, TextureHandle};
+pub use instance::{AdapterInfo, AdapterType, GraphicsInstance};
+pub use resources::{Buffer, Sampler, Texture};
 pub use scene::{
     CameraRenderContext, CameraSystem, ExtractedCamera, ExtractedMaterial, ExtractedMesh,
     ExtractedTransform, RenderWorld,
@@ -64,8 +77,36 @@ mod tests {
     }
 
     #[test]
-    fn test_dummy_backend() {
-        let backend = DummyBackend::new();
-        assert!(backend.name() == "Dummy");
+    fn test_instance_creation() {
+        let instance = GraphicsInstance::new().unwrap();
+        assert_eq!(instance.device_count(), 0);
+    }
+
+    #[test]
+    fn test_device_creation() {
+        let instance = GraphicsInstance::new().unwrap();
+        let device = instance.create_device().unwrap();
+        assert!(!device.name().is_empty());
+    }
+
+    #[test]
+    fn test_resource_creation() {
+        let instance = GraphicsInstance::new().unwrap();
+        let device = instance.create_device().unwrap();
+
+        let buffer = device
+            .create_buffer(&BufferDescriptor::new(1024, BufferUsage::VERTEX))
+            .unwrap();
+        assert_eq!(buffer.size(), 1024);
+
+        let texture = device
+            .create_texture(&TextureDescriptor::new_2d(
+                512,
+                512,
+                TextureFormat::Rgba8Unorm,
+                TextureUsage::TEXTURE_BINDING,
+            ))
+            .unwrap();
+        assert_eq!(texture.width(), 512);
     }
 }

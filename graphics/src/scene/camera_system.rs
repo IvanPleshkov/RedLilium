@@ -17,7 +17,7 @@
 
 use std::cmp::Ordering;
 
-use crate::backend::{Backend, BackendError};
+use crate::error::GraphicsError;
 use crate::graph::{PassType, RenderGraph};
 
 use super::render_world::RenderWorld;
@@ -314,20 +314,23 @@ impl CameraSystem {
         );
     }
 
-    /// Executes all camera render graphs in order.
-    pub fn render<B: Backend>(&mut self, backend: &B) -> Result<(), BackendError> {
+    /// Compiles and validates all camera render graphs.
+    ///
+    /// This prepares the graphs for execution. In the future, this will
+    /// also execute the graphs on the GPU.
+    pub fn render(&mut self) -> Result<(), GraphicsError> {
         for context in &mut self.cameras {
-            // Compile and execute this camera's render graph
-            let compiled = context.graph.compile().map_err(|e| {
+            // Compile this camera's render graph
+            let _compiled = context.graph.compile().map_err(|e| {
                 log::error!(
                     "Failed to compile camera {} graph: {}",
                     context.camera.entity_id,
                     e
                 );
-                BackendError::Internal(format!("Graph compilation failed: {}", e))
+                GraphicsError::Internal(format!("Graph compilation failed: {e}"))
             })?;
 
-            backend.execute_graph(&compiled)?;
+            // TODO: Execute the compiled graph on the GPU
 
             log::trace!(
                 "Rendered camera {} ({}) with {} opaque, {} masked, {} transparent items",
@@ -381,9 +384,8 @@ impl CameraSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::DummyBackend;
-    use crate::scene::RenderWorld;
     use crate::scene::extracted::{ExtractedMaterial, ExtractedMesh, ExtractedTransform};
+    use crate::scene::RenderWorld;
     use glam::Vec4;
 
     fn make_camera(entity_id: u64, priority: i32, is_texture: bool) -> ExtractedCamera {
@@ -416,7 +418,6 @@ mod tests {
     #[test]
     fn camera_system_lifecycle() {
         let mut system = CameraSystem::new();
-        let backend = DummyBackend::new();
 
         system.begin_frame();
         system.add_camera(make_camera(1, 0, false));
@@ -424,7 +425,7 @@ mod tests {
         let render_world = RenderWorld::new();
         system.prepare(&render_world);
 
-        assert!(system.render(&backend).is_ok());
+        assert!(system.render().is_ok());
         system.end_frame();
 
         assert_eq!(system.frame_count(), 1);
