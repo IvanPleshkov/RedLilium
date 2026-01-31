@@ -108,3 +108,7 @@ Please decide the proper place of this file or keep as is if you think that the 
 ## Request 17:
 Please take a loot to the render graph implementation. It seems usage of Arc is not optimimal because it produces a lot of allocations each frame.
 Discuss please options how to fix it. Is it possible to reuse dead `Arc`s from prev frame?
+
+## Request 18:
+Each `Pass` in render graph from graphics crate has a vector of dependencies. It looks not efficient because it produces allocations for each pass.
+Please refactror is and let render graph keep dependencies instead of pass.

@@ -1,6 +1,5 @@
 //! Render pass types.
 
-use super::PassHandle;
 use super::target::RenderTargetConfig;
 use super::transfer::TransferConfig;
 
@@ -25,24 +24,6 @@ impl Pass {
             Pass::Graphics(p) => p.name(),
             Pass::Transfer(p) => p.name(),
             Pass::Compute(p) => p.name(),
-        }
-    }
-
-    /// Get the pass dependencies as handles.
-    pub fn dependencies(&self) -> &[PassHandle] {
-        match self {
-            Pass::Graphics(p) => p.dependencies(),
-            Pass::Transfer(p) => p.dependencies(),
-            Pass::Compute(p) => p.dependencies(),
-        }
-    }
-
-    /// Add a dependency on another pass (internal use).
-    pub(crate) fn add_dependency(&mut self, handle: PassHandle) {
-        match self {
-            Pass::Graphics(p) => p.add_dependency(handle),
-            Pass::Transfer(p) => p.add_dependency(handle),
-            Pass::Compute(p) => p.add_dependency(handle),
         }
     }
 
@@ -127,7 +108,6 @@ impl Pass {
 #[derive(Debug)]
 pub struct GraphicsPass {
     name: String,
-    dependencies: Vec<PassHandle>,
     render_targets: Option<RenderTargetConfig>,
 }
 
@@ -136,7 +116,6 @@ impl GraphicsPass {
     pub fn new(name: String) -> Self {
         Self {
             name,
-            dependencies: Vec::new(),
             render_targets: None,
         }
     }
@@ -144,18 +123,6 @@ impl GraphicsPass {
     /// Get the pass name.
     pub fn name(&self) -> &str {
         &self.name
-    }
-
-    /// Get the pass dependencies.
-    pub fn dependencies(&self) -> &[PassHandle] {
-        &self.dependencies
-    }
-
-    /// Add a dependency on another pass.
-    pub(crate) fn add_dependency(&mut self, handle: PassHandle) {
-        if !self.dependencies.contains(&handle) {
-            self.dependencies.push(handle);
-        }
     }
 
     /// Get the render target configuration.
@@ -187,7 +154,6 @@ impl GraphicsPass {
 #[derive(Debug)]
 pub struct TransferPass {
     name: String,
-    dependencies: Vec<PassHandle>,
     transfer_config: Option<TransferConfig>,
 }
 
@@ -196,7 +162,6 @@ impl TransferPass {
     pub fn new(name: String) -> Self {
         Self {
             name,
-            dependencies: Vec::new(),
             transfer_config: None,
         }
     }
@@ -204,18 +169,6 @@ impl TransferPass {
     /// Get the pass name.
     pub fn name(&self) -> &str {
         &self.name
-    }
-
-    /// Get the pass dependencies.
-    pub fn dependencies(&self) -> &[PassHandle] {
-        &self.dependencies
-    }
-
-    /// Add a dependency on another pass.
-    pub(crate) fn add_dependency(&mut self, handle: PassHandle) {
-        if !self.dependencies.contains(&handle) {
-            self.dependencies.push(handle);
-        }
     }
 
     /// Get the transfer configuration.
@@ -247,33 +200,17 @@ impl TransferPass {
 #[derive(Debug)]
 pub struct ComputePass {
     name: String,
-    dependencies: Vec<PassHandle>,
     // Future: compute-specific configuration (dispatch size, etc.)
 }
 
 impl ComputePass {
     /// Create a new compute pass.
     pub fn new(name: String) -> Self {
-        Self {
-            name,
-            dependencies: Vec::new(),
-        }
+        Self { name }
     }
 
     /// Get the pass name.
     pub fn name(&self) -> &str {
         &self.name
-    }
-
-    /// Get the pass dependencies.
-    pub fn dependencies(&self) -> &[PassHandle] {
-        &self.dependencies
-    }
-
-    /// Add a dependency on another pass.
-    pub(crate) fn add_dependency(&mut self, handle: PassHandle) {
-        if !self.dependencies.contains(&handle) {
-            self.dependencies.push(handle);
-        }
     }
 }

@@ -78,6 +78,9 @@ pub use transfer::{
 pub struct RenderGraph {
     /// All passes in the graph (direct storage, no Arc).
     passes: Vec<Pass>,
+    /// Dependency edges stored as (dependent, dependency) pairs.
+    /// Using edge list avoids per-pass Vec allocations.
+    edges: Vec<(PassHandle, PassHandle)>,
 }
 
 impl RenderGraph {
@@ -130,7 +133,32 @@ impl RenderGraph {
         );
         assert!(dependent != dependency, "Pass cannot depend on itself");
 
-        self.passes[dependent.index()].add_dependency(dependency);
+        // Check for duplicates
+        let exists = self
+            .edges
+            .iter()
+            .any(|&(d, dep)| d == dependent && dep == dependency);
+        if !exists {
+            self.edges.push((dependent, dependency));
+        }
+    }
+
+    /// Get dependencies of a pass.
+    ///
+    /// Returns an iterator over the dependency handles.
+    pub fn dependencies(&self, handle: PassHandle) -> impl Iterator<Item = PassHandle> + '_ {
+        self.edges
+            .iter()
+            .filter(move |&&(dependent, _)| dependent == handle)
+            .map(|&(_, dependency)| dependency)
+    }
+
+    /// Get the number of dependencies for a pass.
+    pub fn dependency_count(&self, handle: PassHandle) -> usize {
+        self.edges
+            .iter()
+            .filter(|&&(dependent, _)| dependent == handle)
+            .count()
     }
 
     /// Get a pass by handle.
@@ -168,6 +196,7 @@ impl RenderGraph {
     /// Clear all passes from the graph.
     pub fn clear(&mut self) {
         self.passes.clear();
+        self.edges.clear();
     }
 }
 
@@ -292,7 +321,8 @@ mod tests {
 
         graph.add_dependency(pass2, pass1);
 
-        assert_eq!(graph.get(pass2).unwrap().dependencies().len(), 1);
+        assert_eq!(graph.dependency_count(pass2), 1);
+        assert_eq!(graph.dependencies(pass2).next(), Some(pass1));
     }
 
     #[test]
@@ -376,7 +406,7 @@ mod tests {
         graph.add_dependency(render, upload);
 
         assert_eq!(graph.pass_count(), 2);
-        assert_eq!(graph.get(render).unwrap().dependencies().len(), 1);
+        assert_eq!(graph.dependency_count(render), 1);
     }
 
     #[test]
