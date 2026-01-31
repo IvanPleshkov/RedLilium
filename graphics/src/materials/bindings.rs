@@ -1,36 +1,8 @@
 //! Binding layout definitions for materials.
 //!
-//! Bindings are organized by frequency to minimize GPU state changes during rendering.
-
-/// Frequency at which a binding group is updated.
-///
-/// This determines which bind group slot (0, 1, 2) the bindings belong to,
-/// enabling efficient batching by update frequency.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum BindingFrequency {
-    /// Updated once per frame (bind group 0).
-    /// Examples: camera matrices, global lighting, time uniforms.
-    PerFrame,
-
-    /// Updated once per material (bind group 1).
-    /// Examples: material textures, material properties buffer.
-    PerMaterial,
-
-    /// Updated once per object/draw call (bind group 2).
-    /// Examples: model matrix, object-specific properties.
-    PerObject,
-}
-
-impl BindingFrequency {
-    /// Get the bind group index for this frequency.
-    pub fn group_index(&self) -> u32 {
-        match self {
-            Self::PerFrame => 0,
-            Self::PerMaterial => 1,
-            Self::PerObject => 2,
-        }
-    }
-}
+//! Bindings describe what resources a shader expects. Layouts are shared via `Arc`
+//! to enable efficient batching - the renderer can compare `Arc` pointers to group
+//! draw calls that share the same binding layouts.
 
 /// Type of resource that can be bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -104,12 +76,12 @@ bitflags::bitflags! {
     }
 }
 
-/// Describes the layout of bindings for a specific frequency group.
+/// Describes the layout of bindings for a bind group.
+///
+/// Layouts are typically wrapped in `Arc` and shared between materials
+/// to enable efficient batching by pointer comparison.
 #[derive(Debug, Clone)]
 pub struct BindingLayout {
-    /// Which frequency group this layout belongs to.
-    pub frequency: BindingFrequency,
-
     /// The binding entries in this layout.
     pub entries: Vec<BindingLayoutEntry>,
 
@@ -118,10 +90,9 @@ pub struct BindingLayout {
 }
 
 impl BindingLayout {
-    /// Create a new binding layout for the given frequency.
-    pub fn new(frequency: BindingFrequency) -> Self {
+    /// Create a new empty binding layout.
+    pub fn new() -> Self {
         Self {
-            frequency,
             entries: Vec::new(),
             label: None,
         }
@@ -161,10 +132,11 @@ impl BindingLayout {
         self.label = Some(label.into());
         self
     }
+}
 
-    /// Get the bind group index for this layout.
-    pub fn group_index(&self) -> u32 {
-        self.frequency.group_index()
+impl Default for BindingLayout {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -173,21 +145,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_binding_frequency_indices() {
-        assert_eq!(BindingFrequency::PerFrame.group_index(), 0);
-        assert_eq!(BindingFrequency::PerMaterial.group_index(), 1);
-        assert_eq!(BindingFrequency::PerObject.group_index(), 2);
-    }
-
-    #[test]
     fn test_binding_layout_builder() {
-        let layout = BindingLayout::new(BindingFrequency::PerMaterial)
+        let layout = BindingLayout::new()
             .with_uniform_buffer(0)
             .with_texture(1)
             .with_sampler(2)
             .with_label("material_bindings");
 
-        assert_eq!(layout.frequency, BindingFrequency::PerMaterial);
         assert_eq!(layout.entries.len(), 3);
         assert_eq!(layout.label, Some("material_bindings".to_string()));
     }

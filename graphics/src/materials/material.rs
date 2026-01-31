@@ -2,6 +2,9 @@
 //!
 //! A [`Material`] defines the shader and binding layouts used for rendering.
 //! It is created by [`GraphicsDevice`] and can be shared across many [`MaterialInstance`]s.
+//!
+//! Binding layouts are stored as `Arc<BindingLayout>` to enable efficient batching -
+//! the renderer can compare `Arc` pointers to group draw calls that share layouts.
 
 use std::sync::Arc;
 
@@ -59,14 +62,14 @@ impl ShaderSource {
 }
 
 /// Descriptor for creating a material.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MaterialDescriptor {
     /// Shaders used by this material.
     pub shaders: Vec<ShaderSource>,
 
-    /// Binding layouts organized by frequency.
-    /// Should contain at most one layout per frequency level.
-    pub binding_layouts: Vec<BindingLayout>,
+    /// Binding layouts for bind groups.
+    /// Layouts are wrapped in `Arc` to enable sharing and efficient batching.
+    pub binding_layouts: Vec<Arc<BindingLayout>>,
 
     /// Optional label for debugging.
     pub label: Option<String>,
@@ -75,11 +78,7 @@ pub struct MaterialDescriptor {
 impl MaterialDescriptor {
     /// Create a new material descriptor.
     pub fn new() -> Self {
-        Self {
-            shaders: Vec::new(),
-            binding_layouts: Vec::new(),
-            label: None,
-        }
+        Self::default()
     }
 
     /// Add a shader to the material.
@@ -89,7 +88,7 @@ impl MaterialDescriptor {
     }
 
     /// Add a binding layout.
-    pub fn with_binding_layout(mut self, layout: BindingLayout) -> Self {
+    pub fn with_binding_layout(mut self, layout: Arc<BindingLayout>) -> Self {
         self.binding_layouts.push(layout);
         self
     }
@@ -101,12 +100,6 @@ impl MaterialDescriptor {
     }
 }
 
-impl Default for MaterialDescriptor {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// A material defines the shader and binding layout for rendering.
 ///
 /// Materials are created by [`GraphicsDevice::create_material`] and hold
@@ -115,12 +108,14 @@ impl Default for MaterialDescriptor {
 /// # Example
 ///
 /// ```ignore
+/// let layout = Arc::new(BindingLayout::new()
+///     .with_uniform_buffer(0)
+///     .with_combined_texture_sampler(1));
+///
 /// let material = device.create_material(&MaterialDescriptor::new()
 ///     .with_shader(ShaderSource::vertex(vs_source, "vs_main"))
 ///     .with_shader(ShaderSource::fragment(fs_source, "fs_main"))
-///     .with_binding_layout(BindingLayout::new(BindingFrequency::PerMaterial)
-///         .with_uniform_buffer(0)
-///         .with_combined_texture_sampler(1))
+///     .with_binding_layout(layout)
 ///     .with_label("pbr_material"))?;
 /// ```
 pub struct Material {
@@ -150,7 +145,7 @@ impl Material {
     }
 
     /// Get the binding layouts.
-    pub fn binding_layouts(&self) -> &[BindingLayout] {
+    pub fn binding_layouts(&self) -> &[Arc<BindingLayout>] {
         &self.descriptor.binding_layouts
     }
 
@@ -217,5 +212,30 @@ mod tests {
 
         let fs = ShaderSource::fragment(b"code".to_vec(), "fs_main");
         assert_eq!(fs.stage, ShaderStage::Fragment);
+    }
+
+    #[test]
+    fn test_binding_layout_sharing() {
+        let device = create_test_device();
+
+        // Create a shared layout
+        let shared_layout = Arc::new(BindingLayout::new().with_uniform_buffer(0));
+
+        let desc1 = MaterialDescriptor::new()
+            .with_shader(ShaderSource::vertex(b"vs".to_vec(), "main"))
+            .with_binding_layout(shared_layout.clone());
+
+        let desc2 = MaterialDescriptor::new()
+            .with_shader(ShaderSource::vertex(b"vs".to_vec(), "main"))
+            .with_binding_layout(shared_layout.clone());
+
+        let material1 = Material::new(device.clone(), desc1);
+        let material2 = Material::new(device, desc2);
+
+        // Both materials share the same layout
+        assert!(Arc::ptr_eq(
+            &material1.binding_layouts()[0],
+            &material2.binding_layouts()[0]
+        ));
     }
 }

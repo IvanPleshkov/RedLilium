@@ -64,3 +64,15 @@ I wish to have a `Material` and `MaterialInstance`. Let me describe both.
 `Material` is a structure, created by devide and it holds the material related stuff like shader, bindings, etc.
 `MaterialInstance` contains the reuired data to perform actual rendering like `Arc<Buffer>` etc. `MaterialInstance` contains `Arc` to related `Material`.
 Also `MaterialInstance` bindings are described by separate structure to contain layout - we will make it complicated later and optimized to minimize render state switches (like camera uniform is definetly must be shared between scene objects draw calls). But keep in mind while designing that se wish to reduce unnecessary binding changes.
+
+## Request 9:
+In material system from graphics crate I wish to remove `BindingFrequency`.
+I don't like this approach because I don't want to rely on high level rendering decisions in the base graphics crate.
+I have another approach instead of `BindingFrequency`.
+Please change `MaterialInstance::binding_groups` type to `Vec<Arc<BindingGroup>>`. The same for `MaterialDescriptor::binding_layouts`, the new type is `Vec<Arc<BindingLayout>>`.
+Instead of sorting by binding frequency, we will implement later a resolver, which compares `Arc` pointers to group objects and reduce render state changes.
+
+## Request 10:
+Let's refactor render graph in graphics crate.
+We added recently the material system to the graphics crate.
+Let's remove `add_buffer` and `add_texture`. Now we can rely on material system.

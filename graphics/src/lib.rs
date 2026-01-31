@@ -43,8 +43,8 @@ pub use error::GraphicsError;
 pub use graph::{PassHandle, RenderGraph, RenderPass, ResourceHandle};
 pub use instance::{AdapterInfo, AdapterType, GraphicsInstance};
 pub use materials::{
-    BindingFrequency, BindingLayout, BindingLayoutEntry, BindingType, BoundResource, Material,
-    MaterialDescriptor, MaterialInstance, ShaderSource, ShaderStage,
+    BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BoundResource, Material,
+    MaterialDescriptor, MaterialInstance, ShaderSource, ShaderStage, ShaderStageFlags,
 };
 pub use resources::{Buffer, Sampler, Texture};
 pub use scene::{

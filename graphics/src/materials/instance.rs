@@ -2,12 +2,14 @@
 //!
 //! A [`MaterialInstance`] contains the actual GPU resources bound for rendering.
 //! Multiple instances can share the same [`Material`].
+//!
+//! Binding groups are wrapped in `Arc` to enable efficient batching - the renderer
+//! can compare `Arc` pointers to group draw calls that share the same bindings.
 
 use std::sync::Arc;
 
 use crate::resources::{Buffer, Sampler, Texture};
 
-use super::bindings::BindingFrequency;
 use super::material::Material;
 
 /// A bound resource for a specific binding slot.
@@ -70,22 +72,25 @@ impl BindingEntry {
     }
 }
 
-/// A group of bindings for a specific frequency.
+/// A group of bound resources.
+///
+/// Binding groups are typically wrapped in `Arc` and shared between material instances
+/// to enable efficient batching by pointer comparison.
 #[derive(Debug, Clone)]
 pub struct BindingGroup {
-    /// The frequency/group this belongs to.
-    pub frequency: BindingFrequency,
-
     /// The bound entries.
     pub entries: Vec<BindingEntry>,
+
+    /// Optional label for debugging.
+    pub label: Option<String>,
 }
 
 impl BindingGroup {
-    /// Create a new binding group.
-    pub fn new(frequency: BindingFrequency) -> Self {
+    /// Create a new empty binding group.
+    pub fn new() -> Self {
         Self {
-            frequency,
             entries: Vec::new(),
+            label: None,
         }
     }
 
@@ -114,6 +119,18 @@ impl BindingGroup {
     pub fn with_combined(self, binding: u32, texture: Arc<Texture>, sampler: Arc<Sampler>) -> Self {
         self.with_entry(binding, BoundResource::combined(texture, sampler))
     }
+
+    /// Set a debug label.
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+}
+
+impl Default for BindingGroup {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// A material instance with bound resources for rendering.
@@ -124,22 +141,23 @@ impl BindingGroup {
 ///
 /// # Binding Groups
 ///
-/// Bindings are organized by frequency:
-/// - **PerFrame** (group 0): Shared across all draws (camera, lights)
-/// - **PerMaterial** (group 1): Shared per material (textures, properties)
-/// - **PerObject** (group 2): Per draw call (transforms)
+/// Binding groups are stored as `Arc<BindingGroup>` to enable efficient batching.
+/// The renderer can compare `Arc` pointers to group draw calls that share bindings,
+/// minimizing GPU state changes.
 ///
 /// # Example
 ///
 /// ```ignore
+/// let binding_group = Arc::new(BindingGroup::new()
+///     .with_buffer(0, properties_buffer)
+///     .with_combined(1, albedo_texture, linear_sampler));
+///
 /// let instance = MaterialInstance::new(material.clone())
-///     .with_binding_group(BindingGroup::new(BindingFrequency::PerMaterial)
-///         .with_buffer(0, properties_buffer)
-///         .with_combined(1, albedo_texture, linear_sampler));
+///     .with_binding_group(binding_group);
 /// ```
 pub struct MaterialInstance {
     material: Arc<Material>,
-    binding_groups: Vec<BindingGroup>,
+    binding_groups: Vec<Arc<BindingGroup>>,
     label: Option<String>,
 }
 
@@ -154,17 +172,8 @@ impl MaterialInstance {
     }
 
     /// Add a binding group.
-    pub fn with_binding_group(mut self, group: BindingGroup) -> Self {
-        // Replace existing group with same frequency, or add new one
-        if let Some(existing) = self
-            .binding_groups
-            .iter_mut()
-            .find(|g| g.frequency == group.frequency)
-        {
-            *existing = group;
-        } else {
-            self.binding_groups.push(group);
-        }
+    pub fn with_binding_group(mut self, group: Arc<BindingGroup>) -> Self {
+        self.binding_groups.push(group);
         self
     }
 
@@ -180,15 +189,13 @@ impl MaterialInstance {
     }
 
     /// Get all binding groups.
-    pub fn binding_groups(&self) -> &[BindingGroup] {
+    pub fn binding_groups(&self) -> &[Arc<BindingGroup>] {
         &self.binding_groups
     }
 
-    /// Get a binding group by frequency.
-    pub fn binding_group(&self, frequency: BindingFrequency) -> Option<&BindingGroup> {
-        self.binding_groups
-            .iter()
-            .find(|g| g.frequency == frequency)
+    /// Get a binding group by index.
+    pub fn binding_group(&self, index: usize) -> Option<&Arc<BindingGroup>> {
+        self.binding_groups.get(index)
     }
 
     /// Get the instance label, if set.
@@ -196,17 +203,14 @@ impl MaterialInstance {
         self.label.as_deref()
     }
 
-    /// Set a binding group (mutable version).
-    pub fn set_binding_group(&mut self, group: BindingGroup) {
-        if let Some(existing) = self
-            .binding_groups
-            .iter_mut()
-            .find(|g| g.frequency == group.frequency)
-        {
-            *existing = group;
-        } else {
-            self.binding_groups.push(group);
-        }
+    /// Add a binding group (mutable version).
+    pub fn add_binding_group(&mut self, group: Arc<BindingGroup>) {
+        self.binding_groups.push(group);
+    }
+
+    /// Set binding groups, replacing all existing ones.
+    pub fn set_binding_groups(&mut self, groups: Vec<Arc<BindingGroup>>) {
+        self.binding_groups = groups;
     }
 }
 
@@ -259,10 +263,12 @@ mod tests {
     #[test]
     fn test_binding_group() {
         let buffer = create_test_buffer();
-        let group = BindingGroup::new(BindingFrequency::PerMaterial).with_buffer(0, buffer);
+        let group = BindingGroup::new()
+            .with_buffer(0, buffer)
+            .with_label("test_group");
 
-        assert_eq!(group.frequency, BindingFrequency::PerMaterial);
         assert_eq!(group.entries.len(), 1);
+        assert_eq!(group.label, Some("test_group".to_string()));
     }
 
     #[test]
@@ -270,38 +276,30 @@ mod tests {
         let material = create_test_material();
         let buffer = create_test_buffer();
 
-        let instance = MaterialInstance::new(material).with_binding_group(
-            BindingGroup::new(BindingFrequency::PerMaterial).with_buffer(0, buffer),
-        );
+        let group = Arc::new(BindingGroup::new().with_buffer(0, buffer));
+        let instance = MaterialInstance::new(material).with_binding_group(group);
 
-        assert!(
-            instance
-                .binding_group(BindingFrequency::PerMaterial)
-                .is_some()
-        );
-        assert!(instance.binding_group(BindingFrequency::PerFrame).is_none());
+        assert_eq!(instance.binding_groups().len(), 1);
+        assert!(instance.binding_group(0).is_some());
+        assert!(instance.binding_group(1).is_none());
     }
 
     #[test]
-    fn test_binding_group_replacement() {
+    fn test_binding_group_sharing() {
         let material = create_test_material();
-        let buffer1 = create_test_buffer();
-        let buffer2 = create_test_buffer();
+        let buffer = create_test_buffer();
 
-        let mut instance = MaterialInstance::new(material).with_binding_group(
-            BindingGroup::new(BindingFrequency::PerMaterial).with_buffer(0, buffer1),
-        );
+        // Create a shared binding group
+        let shared_group = Arc::new(BindingGroup::new().with_buffer(0, buffer));
 
-        // Replace the binding group
-        instance.set_binding_group(
-            BindingGroup::new(BindingFrequency::PerMaterial)
-                .with_buffer(0, buffer2.clone())
-                .with_buffer(1, buffer2),
-        );
+        let instance1 =
+            MaterialInstance::new(material.clone()).with_binding_group(shared_group.clone());
+        let instance2 = MaterialInstance::new(material).with_binding_group(shared_group.clone());
 
-        let group = instance
-            .binding_group(BindingFrequency::PerMaterial)
-            .unwrap();
-        assert_eq!(group.entries.len(), 2);
+        // Both instances share the same binding group
+        assert!(Arc::ptr_eq(
+            instance1.binding_group(0).unwrap(),
+            instance2.binding_group(0).unwrap()
+        ));
     }
 }

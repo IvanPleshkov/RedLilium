@@ -5,21 +5,16 @@
 //! - [`Material`] - Defines the shader and binding layout (created by device)
 //! - [`MaterialInstance`] - Contains actual bound resources for rendering
 //!
-//! # Binding Frequency Optimization
+//! # Efficient Batching via Arc Sharing
 //!
-//! Bindings are organized by update frequency to minimize state changes:
-//!
-//! - **PerFrame** (Group 0) - Camera, lighting, time - shared across all objects
-//! - **PerMaterial** (Group 1) - Material textures, properties - shared per material
-//! - **PerObject** (Group 2) - Transform, object-specific data - per draw call
-//!
-//! This organization allows efficient batching: sort by material, bind once,
-//! draw many objects with only per-object bindings changing.
+//! Binding layouts and groups are wrapped in `Arc` to enable efficient batching.
+//! The renderer can compare `Arc` pointers to group draw calls that share the same
+//! layouts or bindings, minimizing GPU state changes.
 
 mod bindings;
 mod instance;
 mod material;
 
-pub use bindings::{BindingFrequency, BindingLayout, BindingLayoutEntry, BindingType};
-pub use instance::{BoundResource, MaterialInstance};
+pub use bindings::{BindingLayout, BindingLayoutEntry, BindingType, ShaderStageFlags};
+pub use instance::{BindingGroup, BoundResource, MaterialInstance};
 pub use material::{Material, MaterialDescriptor, ShaderSource, ShaderStage};
