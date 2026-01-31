@@ -13,7 +13,7 @@
 //! ## Example
 //!
 //! ```ignore
-//! use redlilium_graphics::{RenderGraph, Backend, SceneRenderer};
+//! use redlilium_graphics::{RenderGraph, Backend};
 //!
 //! let mut renderer = SceneRenderer::new();
 //! renderer.begin_frame();
@@ -29,7 +29,10 @@ pub mod types;
 // Re-export main types for convenience
 pub use backend::{Backend, BackendError, DummyBackend};
 pub use graph::{PassHandle, RenderGraph, RenderPass, ResourceHandle};
-pub use scene::{ExtractedMaterial, ExtractedMesh, ExtractedTransform, RenderWorld, SceneRenderer};
+pub use scene::{
+    CameraRenderContext, CameraSystem, ExtractedCamera, ExtractedMaterial, ExtractedMesh,
+    ExtractedTransform, RenderWorld,
+};
 pub use types::{
     BufferDescriptor, BufferUsage, ClearValue, Extent3d, SamplerDescriptor, TextureDescriptor,
     TextureFormat, TextureUsage,

@@ -8,7 +8,9 @@
 //! - [`render_mesh`]: Mesh geometry references
 //! - [`collision`]: Physics collision shapes and rigid bodies
 //! - [`hierarchy`]: Parent-child entity relationships
+//! - [`camera`]: Camera viewpoints and render targets
 
+mod camera;
 mod collision;
 mod hierarchy;
 mod material;
@@ -16,6 +18,7 @@ mod render_mesh;
 mod transform;
 
 // Re-export all components at the module level for convenience
+pub use camera::{Camera, CameraProjection, CameraViewport, RenderTarget};
 pub use collision::{
     Collider, ColliderShape, CollisionLayer, CompoundChild, RigidBody, RigidBodyType,
 };

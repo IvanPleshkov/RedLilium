@@ -20,6 +20,10 @@
       "Bash(gh api:*)",
       "Bash(curl:*)",
       "Bash(cargo doc:*)"
+    ],
+    "deny": [
+      "Read(claude_requests_history/**)",
+      "Read(target/**)"
     ]
   }
 }

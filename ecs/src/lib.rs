@@ -68,6 +68,10 @@ pub mod prelude {
         Aabb,
         // Material
         AlphaMode,
+        // Camera
+        Camera,
+        CameraProjection,
+        CameraViewport,
         // Hierarchy
         ChildOf,
         Children,
@@ -83,6 +87,7 @@ pub mod prelude {
         MeshHandle,
         RenderLayers,
         RenderMesh,
+        RenderTarget,
         RigidBody,
         RigidBodyType,
         TextureHandle,

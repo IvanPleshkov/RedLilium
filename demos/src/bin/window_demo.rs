@@ -2,12 +2,18 @@
 //!
 //! Basic window creation demo with ECS and rendering integration.
 //! Supports both native and web targets.
+//!
+//! This demo showcases the camera-based rendering architecture:
+//! - Camera entities define viewpoints and render targets
+//! - CameraSystem orchestrates per-camera render graphs
+//! - Multiple cameras can render to textures or the main window
 
 use redlilium_ecs::bevy_ecs::prelude::*;
 #[allow(unused_imports)]
 use redlilium_ecs::prelude::*;
 use redlilium_graphics::{
-    DummyBackend, ExtractedMaterial, ExtractedMesh, ExtractedTransform, SceneRenderer,
+    CameraSystem, DummyBackend, ExtractedCamera, ExtractedMaterial, ExtractedMesh,
+    ExtractedTransform, RenderWorld,
 };
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -19,10 +25,14 @@ struct App {
     window: Option<Window>,
     /// ECS world containing all entities and components.
     world: World,
-    /// Scene renderer managing the render graph.
-    scene_renderer: SceneRenderer,
+    /// Camera system managing per-camera render graphs.
+    camera_system: CameraSystem,
+    /// Shared render world for all cameras.
+    render_world: RenderWorld,
     /// Graphics backend (dummy for now).
     backend: DummyBackend,
+    /// Current window size.
+    window_size: (u32, u32),
 }
 
 impl App {
@@ -33,15 +43,58 @@ impl App {
         Self {
             window: None,
             world,
-            scene_renderer: SceneRenderer::new(),
+            camera_system: CameraSystem::new(),
+            render_world: RenderWorld::with_capacity(1024, 64, 64),
             backend: DummyBackend::new(),
+            window_size: (1280, 720),
+        }
+    }
+
+    /// Extracts camera data from ECS world into the camera system.
+    fn extract_cameras(&mut self) {
+        let mut query = self.world.query::<(Entity, &Camera, &GlobalTransform)>();
+
+        for (entity, camera, global_transform) in query.iter(&self.world) {
+            if !camera.is_active {
+                continue;
+            }
+
+            let position = global_transform.translation();
+            let view_matrix = camera.compute_view_matrix(global_transform);
+
+            // Determine target size and ID
+            let (target_size, target_id, is_texture_target) = match &camera.target {
+                RenderTarget::Surface { window_id } => (self.window_size, *window_id as u64, false),
+                RenderTarget::Texture { texture_id, size } => {
+                    ((size.x as u32, size.y as u32), *texture_id, true)
+                }
+            };
+
+            let projection_matrix = camera.compute_projection_matrix(target_size.0, target_size.1);
+
+            let viewport = camera.viewport.to_pixels(target_size.0, target_size.1);
+
+            let extracted = ExtractedCamera {
+                entity_id: entity.to_bits(),
+                view_matrix,
+                projection_matrix,
+                view_projection: projection_matrix * view_matrix,
+                position,
+                priority: camera.priority,
+                is_texture_target,
+                target_id,
+                target_size,
+                clear_color: camera.clear_color.map(|c| [c.x, c.y, c.z, c.w]),
+                render_layers: camera.render_layers,
+                viewport,
+            };
+
+            self.camera_system.add_camera(extracted);
         }
     }
 
     /// Extracts render data from ECS world into the render world.
     fn extract_render_data(&mut self) {
-        let render_world = self.scene_renderer.render_world_mut();
-
         // Query all entities with Transform, GlobalTransform, RenderMesh, and Material
         let mut query = self
             .world
@@ -81,45 +134,48 @@ impl App {
                     .unwrap_or(0),
             };
 
-            render_world.add(entity.to_bits(), transform, mesh, extracted_material);
+            self.render_world
+                .add(entity.to_bits(), transform, mesh, extracted_material);
         }
     }
 
     /// Runs the transform propagation systems.
     fn update_transforms(&mut self) {
-        // Run transform propagation systems
         run_transform_systems(&mut self.world);
     }
 
     /// Renders a single frame.
     fn render_frame(&mut self) {
-        // Begin frame
-        self.scene_renderer.begin_frame();
+        // Begin frame - clear render world and camera system
+        self.render_world.clear();
+        self.camera_system.begin_frame();
 
         // Update transforms first
         self.update_transforms();
 
-        // Extract render data from ECS
+        // Extract phase
+        self.extract_cameras();
         self.extract_render_data();
 
-        // Prepare and render
-        self.scene_renderer.prepare();
-        self.scene_renderer.setup_basic_graph();
+        // Prepare phase - sort cameras, filter items, setup graphs
+        self.camera_system.prepare(&self.render_world);
 
-        if let Err(e) = self.scene_renderer.render(&self.backend) {
+        // Render phase - execute all camera graphs
+        if let Err(e) = self.camera_system.render(&self.backend) {
             log::error!("Render error: {}", e);
         }
 
         // End frame
-        self.scene_renderer.end_frame();
+        self.camera_system.end_frame();
 
         // Log frame info periodically
-        let frame = self.scene_renderer.frame_count();
+        let frame = self.camera_system.frame_count();
         if frame.is_multiple_of(60) {
             log::debug!(
-                "Frame {}: {} render items",
+                "Frame {}: {} cameras, {} render items",
                 frame,
-                self.scene_renderer.render_world().total_items()
+                self.camera_system.camera_count(),
+                self.render_world.total_items()
             );
         }
     }
@@ -132,6 +188,15 @@ impl App {
 /// proper hierarchy synchronization systems.
 fn setup_scene(world: &mut World) {
     log::info!("Setting up scene...");
+
+    // Main camera looking at the scene
+    world.spawn((
+        Camera::new()
+            .with_priority(0)
+            .with_clear_color(Vec4::new(0.1, 0.1, 0.15, 1.0)),
+        Transform::from_xyz(0.0, 3.0, 8.0).looking_at(Vec3::new(0.0, 0.0, -5.0), Vec3::Y),
+        GlobalTransform::IDENTITY,
+    ));
 
     // Create a red cube in the center
     world.spawn((
@@ -181,14 +246,14 @@ fn setup_scene(world: &mut World) {
             .with_alpha_mode(AlphaMode::Blend),
     ));
 
-    log::info!("Scene setup complete: 5 entities created");
+    log::info!("Scene setup complete: 1 camera + 5 renderable entities");
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
             let window_attributes = Window::default_attributes()
-                .with_title("RedLilium Engine - Scene Demo")
+                .with_title("RedLilium Engine - Camera Demo")
                 .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
 
             match event_loop.create_window(window_attributes) {
@@ -212,6 +277,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Resized(size) => {
                 log::info!("Window resized to {}x{}", size.width, size.height);
+                self.window_size = (size.width, size.height);
             }
             WindowEvent::RedrawRequested => {
                 // Render the frame
@@ -231,7 +297,7 @@ impl ApplicationHandler for App {
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    log::info!("Starting RedLilium Engine Scene Demo");
+    log::info!("Starting RedLilium Engine Camera Demo");
     log::info!("Core version: {}", redlilium_core::VERSION);
     log::info!("Graphics version: {}", redlilium_graphics::VERSION);
 
@@ -256,7 +322,7 @@ pub fn start() {
     console_error_panic_hook::set_once();
     console_log::init_with_level(log::Level::Info).expect("Failed to initialize logger");
 
-    log::info!("Starting RedLilium Engine Scene Demo (Web)");
+    log::info!("Starting RedLilium Engine Camera Demo (Web)");
     log::info!("Core version: {}", redlilium_core::VERSION);
     log::info!("Graphics version: {}", redlilium_graphics::VERSION);
 

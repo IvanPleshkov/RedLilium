@@ -3,7 +3,8 @@
 //! This module provides the glue between ECS worlds and the render graph system:
 //!
 //! - [`RenderWorld`] - Extracted render data from an ECS world
-//! - [`SceneRenderer`] - Manages rendering an ECS world through a render graph
+//! - [`CameraSystem`] - Manages per-camera render graphs and orchestrates rendering
+//! - [`SceneRenderer`] - Simple single-camera renderer (legacy, prefer CameraSystem)
 //! - Extract/Prepare/Render phases for efficient data flow
 //!
 //! # Architecture
@@ -17,15 +18,22 @@
 //! This separation allows the main ECS world to continue simulation while
 //! rendering uses a snapshot of the previous frame's state.
 //!
+//! # Camera System
+//!
+//! The [`CameraSystem`] handles multiple cameras with priority-based ordering:
+//! - Texture-target cameras render first (for render-to-texture)
+//! - Surface-target cameras render last
+//! - Each camera has its own render graph and visibility filtering
+//!
 //! # Multiple Worlds
 //!
 //! A process can contain multiple ECS worlds, each with their own render graphs.
 //! The backend is shared across all worlds for efficient GPU resource usage.
 
+mod camera_system;
 mod extracted;
 mod render_world;
-mod scene_renderer;
 
+pub use camera_system::{CameraRenderContext, CameraSystem, ExtractedCamera};
 pub use extracted::{ExtractedMaterial, ExtractedMesh, ExtractedTransform};
 pub use render_world::RenderWorld;
-pub use scene_renderer::SceneRenderer;
