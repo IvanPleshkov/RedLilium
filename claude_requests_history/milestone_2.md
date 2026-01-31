@@ -100,3 +100,7 @@ Add please support of data transferring. Think first, is data transferring a pas
 Lets refactor render graph in graphics crate.
 I wish to rename `RenderPass` into `Pass`.
 Make please `Pass` as an enum with pass variants: graphics, transfer, compute.
+
+## Request 16:
+I'm not sure if `target.rs` file is placed correctly.
+Please decide the proper place of this file or keep as is if you think that the current file place is a best option.
