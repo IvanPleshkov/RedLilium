@@ -387,3 +387,63 @@ Instead, `end_frame()` extracts the fence internally.
 - ✅ `FrameSchedule::new()` is `pub(crate)` - can't create directly
 - ⚠️ Slightly more opinionated API
 - ⚠️ Must call `present()` even for off-screen rendering (may revisit)
+
+---
+
+## ADR-014: Debounced Window Resize with Strategies
+
+**Date**: 2025-01-31
+**Status**: Accepted
+
+### Context
+Window resize is problematic for real-time rendering:
+
+1. OS sends many resize events during drag (30+ per second)
+2. Each resize requires swapchain recreation
+3. Swapchain recreation requires GPU synchronization
+4. Naive approach: recreate on every event → severe stuttering
+
+Professional engines need smooth resize without visible hitches.
+
+### Decision
+Implement `ResizeManager` with three components:
+
+**1. Debouncing**: Buffer resize events, only apply after quiet period (50-100ms)
+
+```rust
+let mut manager = ResizeManager::new((1920, 1080), 50, strategy);
+
+// Events buffered
+manager.on_resize_event(800, 600);
+manager.on_resize_event(900, 700);
+manager.on_resize_event(1000, 800);
+
+// Only applied after 50ms quiet
+if let Some(event) = manager.update() {
+    // Single resize to 1000x800
+}
+```
+
+**2. Per-Slot Waiting**: `wait_current_slot()` instead of `wait_idle()`
+
+- `wait_idle()`: waits for ALL frames (2-3 frame times)
+- `wait_current_slot()`: waits for ONE frame
+- Result: 2-3x faster resize
+
+**3. Render Strategies**: Configurable behavior during resize
+
+| Strategy | Description |
+|----------|-------------|
+| `Stretch` | Render at old size, OS stretches |
+| `IntermediateTarget` | Fixed-size render target |
+| `DynamicResolution` | Reduced resolution during resize |
+
+### Consequences
+- ✅ Smooth resize without stuttering
+- ✅ Single swapchain recreation per resize gesture
+- ✅ Configurable quality/performance tradeoff
+- ✅ `wait_current_slot()` minimizes GPU stall
+- ✅ Works with any windowing library
+- ⚠️ 50-100ms delay before resize takes effect
+- ⚠️ `DynamicResolution` requires upscaling support
+- ⚠️ Application must integrate with event loop

@@ -163,3 +163,10 @@ Can you please move the global vision of the rendering process to the follow lis
 Read the graphics architecture in `docs\ARCHITECTURE.md`.
 I think it's a good decision to create a frame pipeline as a method of device, frame scheduler as a method of pipeline.
 But scheduler is created separately. WDYT?
+
+## Request 24:
+Read the graphics architecture in `docs\ARCHITECTURE.md`.
+There is a solution how to stop gracefully.
+Think please if such architecture is okay in case of window resize?
+Which strategies are there about window resize and can current approach handle it?
+It's not required to do a realtime resizing. But very long waiting for the resize which is common in toy engines, it not acceptable, we develop a professional high-end solution.

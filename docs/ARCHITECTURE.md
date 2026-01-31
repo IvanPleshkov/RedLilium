@@ -249,6 +249,55 @@ while !window.should_close() {
 pipeline.wait_idle();  // Wait for GPU before cleanup
 ```
 
+### Window Resize Handling
+
+Window resize requires special handling because the swapchain must be recreated.
+Naive approaches that recreate on every resize event cause visible stuttering.
+
+The `ResizeManager` provides debounced resize with configurable strategies:
+
+```rust
+use redlilium_graphics::resize::{ResizeManager, ResizeStrategy};
+
+let mut resize_manager = ResizeManager::new(
+    (1920, 1080),
+    50,  // 50ms debounce
+    ResizeStrategy::DynamicResolution { scale_during_resize: 0.5 },
+);
+
+// Event handling
+match event {
+    WindowEvent::Resized(size) => {
+        resize_manager.on_resize_event(size.width, size.height);
+    }
+    _ => {}
+}
+
+// Each frame
+if let Some(event) = resize_manager.update() {
+    // Wait only for current slot (not wait_idle!)
+    pipeline.wait_current_slot();
+    surface.resize(event.width, event.height);
+}
+
+let render_size = resize_manager.render_size();
+// Render at render_size (may be scaled during resize)
+```
+
+**Resize Strategies:**
+
+| Strategy | Behavior | Use Case |
+|----------|----------|----------|
+| `Stretch` | Render at old size, OS stretches | Simplest, acceptable quality |
+| `IntermediateTarget` | Render to fixed-size texture | Consistent quality |
+| `DynamicResolution` | Reduced resolution during resize | Best UX, smoothest |
+
+**Why `wait_current_slot()` instead of `wait_idle()`?**
+
+- `wait_idle()` waits for ALL frame slots (2-3 frames = 33-50ms)
+- `wait_current_slot()` waits for ONE slot (~16ms)
+- Result: 2-3x faster resize response
+
 ## ECS-Rendering Integration
 
 The engine uses a three-phase rendering approach:

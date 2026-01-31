@@ -66,6 +66,7 @@ pub mod graph;
 pub mod instance;
 pub mod materials;
 pub mod pipeline;
+pub mod resize;
 pub mod resources;
 pub mod scene;
 pub mod scheduler;
@@ -87,6 +88,7 @@ pub use materials::{
     MaterialDescriptor, MaterialInstance, ShaderSource, ShaderStage, ShaderStageFlags,
 };
 pub use pipeline::FramePipeline;
+pub use resize::{ResizeEvent, ResizeManager, ResizeStrategy};
 pub use resources::{Buffer, Sampler, Texture};
 pub use scene::{
     CameraRenderContext, CameraSystem, ExtractedCamera, ExtractedMaterial, ExtractedMesh,

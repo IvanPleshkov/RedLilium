@@ -255,6 +255,53 @@ impl FramePipeline {
         self.current_slot = (self.current_slot + 1) % self.frames_in_flight;
     }
 
+    /// Wait for the current frame slot to be ready.
+    ///
+    /// This blocks until the current slot's fence is signaled. This is more
+    /// efficient than [`wait_idle`](Self::wait_idle) when you only need to
+    /// ensure one frame slot is available.
+    ///
+    /// # When to Call
+    ///
+    /// - Before resizing swapchain (only current slot needed)
+    /// - Before modifying resources used by current frame slot
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Resize handling - only wait for current slot
+    /// if let Some(event) = resize_manager.update() {
+    ///     pipeline.wait_current_slot();
+    ///     surface.resize(event.width, event.height);
+    /// }
+    /// ```
+    pub fn wait_current_slot(&self) {
+        if let Some(fence) = &self.frame_fences[self.current_slot] {
+            log::trace!("Waiting for current slot {}...", self.current_slot);
+            fence.wait();
+        }
+    }
+
+    /// Wait for the current frame slot with a timeout.
+    ///
+    /// Like [`wait_current_slot`](Self::wait_current_slot), but returns `false`
+    /// if the timeout elapses before the slot becomes available.
+    ///
+    /// # Arguments
+    ///
+    /// * `timeout` - Maximum time to wait.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the slot is ready, `false` if timeout elapsed.
+    pub fn wait_current_slot_timeout(&self, timeout: std::time::Duration) -> bool {
+        if let Some(fence) = &self.frame_fences[self.current_slot] {
+            fence.wait_timeout(timeout)
+        } else {
+            true // No fence means slot is ready
+        }
+    }
+
     /// Wait for all in-flight GPU work to complete.
     ///
     /// This blocks until every frame slot's fence is signaled. Call this
@@ -264,8 +311,10 @@ impl FramePipeline {
     ///
     /// - Application shutdown (window close)
     /// - Before hot-reloading shaders
-    /// - Before resizing swapchain
     /// - Any time you need to ensure GPU is completely idle
+    ///
+    /// For swapchain resize, prefer [`wait_current_slot`](Self::wait_current_slot)
+    /// which is faster (waits for 1 frame instead of all frames).
     ///
     /// # Example
     ///
