@@ -117,3 +117,28 @@ Please refactror is and let render graph keep dependencies instead of pass.
 Please change `RenderGraph` functions: `add_graphics_pass`, `add_transfer_pass`, `add_compute_pass`.
 Provide as arguments `GraphicsPass`, `TransferPass`, `ComputePass` instead of just a name with getters.
 You can also remove getters because I expect, that getters are not required.
+
+## Request 20:
+I have a question about usage of RenderGraph in graphics project.
+If I have for instance a depth prepass and shadow map, do I need two separate render graphs and sync between then?
+Or the common practice is a collecting everything into a huge single render graph?
+I guess multiple render graphs are better because small pieces are much easier to compile,
+no any mutex is required because each graph is constructed separately.
+If I'm right please provide a solution to handle a dependencied between multiple render graphs.
+Is it a good idea to add additional variant to `Pass` enum? It's easy to use. On another hand, another render graph is not a render pass, isnt it?
+
+### In addition to 20:
+Before my decision, answer please my questions about frame schedule. Can frame sheduler sync shadow map and the light resolver?
+It seems some barrier is required in between and it's not clear how to find such dependency.
+Second question: is compiled graph executed immediately after push to frame scheule?
+And next, I want to use modern graphics approach where we dont wait for swapchain and start working on the next frame before current is shown.
+Is it possible with frame scheduler?
+
+### In addition to 20:
+I like the idea about frame schedule. Regarding to my question about sync between graphs, I would like to use an approach to analyse reads and writes.
+I think it's not expensive if compiled graph has a map from resource to usages. But skip it for now.
+Before we start, Also explain me more about immediate execution.
+In your approach I guess there is a problem: where shadow render graph is ready to draw, is still waits for all other graphs.
+
+### In addition to 20:
+I would like to use streaming approach and start immediately. Let's rock! please use separate folder in graphics crate to implement render scheduler.

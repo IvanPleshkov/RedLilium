@@ -32,6 +32,7 @@ pub mod instance;
 pub mod materials;
 pub mod resources;
 pub mod scene;
+pub mod scheduler;
 pub mod swapchain;
 pub mod types;
 
@@ -54,6 +55,7 @@ pub use scene::{
     CameraRenderContext, CameraSystem, ExtractedCamera, ExtractedMaterial, ExtractedMesh,
     ExtractedTransform, RenderWorld,
 };
+pub use scheduler::{Fence, FenceStatus, FrameSchedule, GraphHandle, Semaphore};
 pub use swapchain::{PresentMode, Surface, SurfaceConfiguration, SurfaceTexture};
 pub use types::{
     BufferDescriptor, BufferUsage, ClearValue, Extent3d, SamplerDescriptor, TextureDescriptor,
