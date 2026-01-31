@@ -30,6 +30,7 @@ pub mod error;
 pub mod graph;
 pub mod instance;
 pub mod materials;
+pub mod pipeline;
 pub mod resources;
 pub mod scene;
 pub mod scheduler;
@@ -50,6 +51,7 @@ pub use materials::{
     BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BoundResource, Material,
     MaterialDescriptor, MaterialInstance, ShaderSource, ShaderStage, ShaderStageFlags,
 };
+pub use pipeline::FramePipeline;
 pub use resources::{Buffer, Sampler, Texture};
 pub use scene::{
     CameraRenderContext, CameraSystem, ExtractedCamera, ExtractedMaterial, ExtractedMesh,

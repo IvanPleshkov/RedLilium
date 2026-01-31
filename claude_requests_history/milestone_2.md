@@ -142,3 +142,12 @@ In your approach I guess there is a problem: where shadow render graph is ready 
 
 ### In addition to 20:
 I would like to use streaming approach and start immediately. Let's rock! please use separate folder in graphics crate to implement render scheduler.
+
+## Request 21:
+Please take a look of render schelured in graphics crate.
+Explain please how to cover window close event? Is it looks fine for gracefully end of the game loop?
+
+### In addition to 21:
+Yes, implement please the frame pipeline in the graphics crate in the separate folder.
+Please make a lot of attention to documentation.
+It seems there are a gap of render pipeline, render scheduler and render graph
