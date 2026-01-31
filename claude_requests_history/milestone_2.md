@@ -170,3 +170,8 @@ There is a solution how to stop gracefully.
 Think please if such architecture is okay in case of window resize?
 Which strategies are there about window resize and can current approach handle it?
 It's not required to do a realtime resizing. But very long waiting for the resize which is common in toy engines, it not acceptable, we develop a professional high-end solution.
+
+## Request 25:
+Let's start to implement render graph compilation.
+As a first step, move please the CompiledGraph to the separate folder in the graphics crate.
+Then, create in this folder a compile function without implementation for now.

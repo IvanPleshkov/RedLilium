@@ -60,6 +60,7 @@
 //! pipeline.wait_idle();  // Graceful shutdown
 //! ```
 
+pub mod compiler;
 pub mod device;
 pub mod error;
 pub mod graph;
@@ -77,10 +78,10 @@ pub mod types;
 pub use device::{DeviceCapabilities, GraphicsDevice};
 pub use error::GraphicsError;
 pub use graph::{
-    BufferCopyRegion, BufferTextureCopyRegion, BufferTextureLayout, ColorAttachment, ComputePass,
-    DepthStencilAttachment, GraphicsPass, LoadOp, Pass, PassHandle, RenderGraph, RenderTarget,
-    RenderTargetConfig, StoreOp, TextureCopyLocation, TextureCopyRegion, TextureOrigin,
-    TransferConfig, TransferOperation, TransferPass,
+    BufferCopyRegion, BufferTextureCopyRegion, BufferTextureLayout, ColorAttachment, CompiledGraph,
+    ComputePass, DepthStencilAttachment, GraphError, GraphicsPass, LoadOp, Pass, PassHandle,
+    RenderGraph, RenderTarget, RenderTargetConfig, StoreOp, TextureCopyLocation, TextureCopyRegion,
+    TextureOrigin, TransferConfig, TransferOperation, TransferPass,
 };
 pub use instance::{AdapterInfo, AdapterType, GraphicsInstance};
 pub use materials::{

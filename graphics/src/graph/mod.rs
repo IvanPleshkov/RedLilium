@@ -44,6 +44,9 @@ mod transfer;
 
 pub use pass::{ComputePass, GraphicsPass, Pass, TransferPass};
 
+// Re-export compiler types for convenience
+pub use crate::compiler::{CompiledGraph, GraphError, compile};
+
 /// Handle to a pass in the render graph.
 ///
 /// `PassHandle` is `Copy` and cheap to pass around. It is only valid within
@@ -52,11 +55,11 @@ pub use pass::{ComputePass, GraphicsPass, Pass, TransferPass};
 pub struct PassHandle(u32);
 
 impl PassHandle {
-    fn new(index: u32) -> Self {
+    pub(crate) fn new(index: u32) -> Self {
         Self(index)
     }
 
-    fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         self.0 as usize
     }
 }
@@ -191,10 +194,10 @@ impl RenderGraph {
     /// - Topological sorting of passes
     /// - Resource lifetime analysis
     /// - Barrier placement optimization
+    ///
+    /// See [`crate::compiler`] module for implementation details.
     pub fn compile(&self) -> Result<CompiledGraph, GraphError> {
-        // TODO: Implement proper topological sort
-        let pass_order = (0..self.passes.len() as u32).map(PassHandle::new).collect();
-        Ok(CompiledGraph { pass_order })
+        compile(self)
     }
 
     /// Clear all passes from the graph.
@@ -203,37 +206,6 @@ impl RenderGraph {
         self.edges.clear();
     }
 }
-
-/// A compiled render graph ready for execution.
-#[derive(Debug)]
-pub struct CompiledGraph {
-    /// Optimized pass execution order as handles.
-    pass_order: Vec<PassHandle>,
-}
-
-impl CompiledGraph {
-    /// Get the optimized pass execution order as handles.
-    pub fn pass_order(&self) -> &[PassHandle] {
-        &self.pass_order
-    }
-}
-
-/// Errors that can occur during graph construction or compilation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GraphError {
-    /// The graph contains a cycle.
-    CyclicDependency,
-}
-
-impl std::fmt::Display for GraphError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::CyclicDependency => write!(f, "render graph contains cyclic dependency"),
-        }
-    }
-}
-
-impl std::error::Error for GraphError {}
 
 #[cfg(test)]
 mod tests {
