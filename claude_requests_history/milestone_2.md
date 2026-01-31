@@ -184,3 +184,6 @@ Reead also `docs\ARCHITECTURE.md` to understand the graphics architecture before
 I can say that the list of execution is not very optimal.
 On another hand, there are multiple graphs and for effective parallel drawing maybe render scheduler works fine
 and it's not required to make an graphics engine overcomplicated and pay CPU price for the advanced compilation.
+
+## Request 26:
+It's time to implement graph render compilation.

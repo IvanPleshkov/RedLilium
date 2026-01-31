@@ -188,6 +188,14 @@ impl RenderGraph {
         self.passes.len()
     }
 
+    /// Get all dependency edges in the graph.
+    ///
+    /// Each edge is `(dependent, dependency)` meaning the dependent pass
+    /// must execute after the dependency pass.
+    pub fn edges(&self) -> &[(PassHandle, PassHandle)] {
+        &self.edges
+    }
+
     /// Compile the graph for execution.
     ///
     /// This performs:

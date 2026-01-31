@@ -37,13 +37,15 @@
 //! // compiled.pass_order() returns execution order respecting dependencies
 //! ```
 
+use std::collections::VecDeque;
+
 use crate::graph::{PassHandle, RenderGraph};
 
 /// A compiled render graph ready for execution.
 ///
 /// Contains a topologically sorted pass order that respects all dependencies.
 /// Passes are executed sequentially in this order within a single command buffer.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct CompiledGraph {
     /// Optimized pass execution order as handles.
     pass_order: Vec<PassHandle>,
@@ -127,18 +129,61 @@ impl std::error::Error for GraphError {}
 /// assert_eq!(compiled.pass_order(), &[pass1, pass2]);
 /// ```
 pub fn compile(graph: &RenderGraph) -> Result<CompiledGraph, GraphError> {
-    // TODO: Implement proper topological sort with cycle detection
-    // For now, return passes in insertion order
-    let pass_order = (0..graph.pass_count() as u32)
+    let n = graph.pass_count();
+
+    // Empty graph compiles to empty result
+    if n == 0 {
+        return Ok(CompiledGraph::new(Vec::new()));
+    }
+
+    // Kahn's algorithm for topological sort
+    //
+    // 1. Compute in-degree for each pass (number of dependencies)
+    // 2. Start with passes that have no dependencies (in-degree = 0)
+    // 3. Process them, reducing in-degree of passes that depend on them
+    // 4. If we can't process all passes, there's a cycle
+
+    // Compute in-degree for each pass
+    // Edge (dependent, dependency) means dependent has one more in-degree
+    let mut in_degree = vec![0u32; n];
+    for &(dependent, _dependency) in graph.edges() {
+        in_degree[dependent.index()] += 1;
+    }
+
+    // Queue passes with no dependencies
+    let mut queue: VecDeque<PassHandle> = (0..n as u32)
         .map(PassHandle::new)
+        .filter(|&h| in_degree[h.index()] == 0)
         .collect();
-    Ok(CompiledGraph::new(pass_order))
+
+    let mut result = Vec::with_capacity(n);
+
+    while let Some(handle) = queue.pop_front() {
+        result.push(handle);
+
+        // Find passes that depend on this one and reduce their in-degree
+        for &(dependent, dependency) in graph.edges() {
+            if dependency == handle {
+                in_degree[dependent.index()] -= 1;
+                if in_degree[dependent.index()] == 0 {
+                    queue.push_back(dependent);
+                }
+            }
+        }
+    }
+
+    // If we didn't process all passes, there's a cycle
+    if result.len() != n {
+        return Err(GraphError::CyclicDependency);
+    }
+
+    Ok(CompiledGraph::new(result))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::GraphicsPass;
+    use crate::graph::{ComputePass, GraphicsPass, TransferPass};
 
     #[test]
     fn test_compile_empty_graph() {
@@ -159,15 +204,151 @@ mod tests {
     }
 
     #[test]
-    fn test_compile_with_dependencies() {
+    fn test_compile_linear_chain() {
+        // A -> B -> C (A must come first, then B, then C)
         let mut graph = RenderGraph::new();
-        let pass1 = graph.add_graphics_pass(GraphicsPass::new("geometry".into()));
-        let pass2 = graph.add_graphics_pass(GraphicsPass::new("lighting".into()));
-        graph.add_dependency(pass2, pass1);
+        let a = graph.add_graphics_pass(GraphicsPass::new("A".into()));
+        let b = graph.add_graphics_pass(GraphicsPass::new("B".into()));
+        let c = graph.add_graphics_pass(GraphicsPass::new("C".into()));
+
+        graph.add_dependency(b, a); // B depends on A
+        graph.add_dependency(c, b); // C depends on B
 
         let compiled = compile(&graph).unwrap();
-        assert_eq!(compiled.pass_count(), 2);
-        // After proper implementation, pass1 should come before pass2
+        assert_eq!(compiled.pass_order(), &[a, b, c]);
+    }
+
+    #[test]
+    fn test_compile_diamond_dependency() {
+        //     A
+        //    / \
+        //   B   C
+        //    \ /
+        //     D
+        let mut graph = RenderGraph::new();
+        let a = graph.add_graphics_pass(GraphicsPass::new("A".into()));
+        let b = graph.add_graphics_pass(GraphicsPass::new("B".into()));
+        let c = graph.add_graphics_pass(GraphicsPass::new("C".into()));
+        let d = graph.add_graphics_pass(GraphicsPass::new("D".into()));
+
+        graph.add_dependency(b, a); // B depends on A
+        graph.add_dependency(c, a); // C depends on A
+        graph.add_dependency(d, b); // D depends on B
+        graph.add_dependency(d, c); // D depends on C
+
+        let compiled = compile(&graph).unwrap();
+        let order = compiled.pass_order();
+
+        // A must come first
+        assert_eq!(order[0], a);
+        // D must come last
+        assert_eq!(order[3], d);
+        // B and C must be in the middle (either order is valid)
+        assert!(order[1] == b || order[1] == c);
+        assert!(order[2] == b || order[2] == c);
+        assert_ne!(order[1], order[2]);
+    }
+
+    #[test]
+    fn test_compile_independent_passes() {
+        // No dependencies - any order is valid, but all passes must be present
+        let mut graph = RenderGraph::new();
+        let a = graph.add_graphics_pass(GraphicsPass::new("A".into()));
+        let b = graph.add_graphics_pass(GraphicsPass::new("B".into()));
+        let c = graph.add_graphics_pass(GraphicsPass::new("C".into()));
+
+        let compiled = compile(&graph).unwrap();
+        let order = compiled.pass_order();
+
+        assert_eq!(order.len(), 3);
+        assert!(order.contains(&a));
+        assert!(order.contains(&b));
+        assert!(order.contains(&c));
+    }
+
+    #[test]
+    fn test_compile_cycle_two_nodes() {
+        // A -> B -> A (cycle)
+        let mut graph = RenderGraph::new();
+        let a = graph.add_graphics_pass(GraphicsPass::new("A".into()));
+        let b = graph.add_graphics_pass(GraphicsPass::new("B".into()));
+
+        graph.add_dependency(b, a); // B depends on A
+        graph.add_dependency(a, b); // A depends on B (creates cycle)
+
+        let result = compile(&graph);
+        assert_eq!(result, Err(GraphError::CyclicDependency));
+    }
+
+    #[test]
+    fn test_compile_cycle_three_nodes() {
+        // A -> B -> C -> A (cycle)
+        let mut graph = RenderGraph::new();
+        let a = graph.add_graphics_pass(GraphicsPass::new("A".into()));
+        let b = graph.add_graphics_pass(GraphicsPass::new("B".into()));
+        let c = graph.add_graphics_pass(GraphicsPass::new("C".into()));
+
+        graph.add_dependency(b, a); // B depends on A
+        graph.add_dependency(c, b); // C depends on B
+        graph.add_dependency(a, c); // A depends on C (creates cycle)
+
+        let result = compile(&graph);
+        assert_eq!(result, Err(GraphError::CyclicDependency));
+    }
+
+    #[test]
+    fn test_compile_partial_cycle() {
+        // D is independent, but A-B-C form a cycle
+        //     D
+        //   A -> B -> C -> A
+        let mut graph = RenderGraph::new();
+        let a = graph.add_graphics_pass(GraphicsPass::new("A".into()));
+        let b = graph.add_graphics_pass(GraphicsPass::new("B".into()));
+        let c = graph.add_graphics_pass(GraphicsPass::new("C".into()));
+        let _d = graph.add_graphics_pass(GraphicsPass::new("D".into()));
+
+        graph.add_dependency(b, a);
+        graph.add_dependency(c, b);
+        graph.add_dependency(a, c); // Creates cycle in A-B-C
+
+        let result = compile(&graph);
+        assert_eq!(result, Err(GraphError::CyclicDependency));
+    }
+
+    #[test]
+    fn test_compile_mixed_pass_types() {
+        // Transfer -> Compute -> Graphics
+        let mut graph = RenderGraph::new();
+        let upload = graph.add_transfer_pass(TransferPass::new("upload".into()));
+        let simulate = graph.add_compute_pass(ComputePass::new("simulate".into()));
+        let render = graph.add_graphics_pass(GraphicsPass::new("render".into()));
+
+        graph.add_dependency(simulate, upload);
+        graph.add_dependency(render, simulate);
+
+        let compiled = compile(&graph).unwrap();
+        assert_eq!(compiled.pass_order(), &[upload, simulate, render]);
+    }
+
+    #[test]
+    fn test_compile_multiple_roots() {
+        // Two independent chains: A->B and C->D
+        let mut graph = RenderGraph::new();
+        let a = graph.add_graphics_pass(GraphicsPass::new("A".into()));
+        let b = graph.add_graphics_pass(GraphicsPass::new("B".into()));
+        let c = graph.add_graphics_pass(GraphicsPass::new("C".into()));
+        let d = graph.add_graphics_pass(GraphicsPass::new("D".into()));
+
+        graph.add_dependency(b, a);
+        graph.add_dependency(d, c);
+
+        let compiled = compile(&graph).unwrap();
+        let order = compiled.pass_order();
+
+        // A must come before B
+        assert!(order.iter().position(|&x| x == a) < order.iter().position(|&x| x == b));
+        // C must come before D
+        assert!(order.iter().position(|&x| x == c) < order.iter().position(|&x| x == d));
     }
 
     #[test]
