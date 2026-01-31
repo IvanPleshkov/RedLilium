@@ -18,19 +18,11 @@ use std::sync::Arc;
 
 use crate::resources::{Buffer, Texture};
 
-/// Handle to a texture resource in the render graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TextureHandle(ResourceHandle);
-
-/// Handle to a buffer resource in the render graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BufferHandle(ResourceHandle);
-
 /// The render graph describes a frame's rendering operations.
 ///
 /// # Construction
 ///
-/// Build a graph by importing resources and adding passes:
+/// Build a graph by adding resources and passes:
 ///
 /// ```ignore
 /// let mut graph = RenderGraph::new();
@@ -41,7 +33,7 @@ pub struct BufferHandle(ResourceHandle);
 ///     TextureUsage::RENDER_ATTACHMENT,
 /// ))?;
 ///
-/// let depth = graph.import_texture(depth_texture);
+/// graph.add_texture(depth_texture);
 ///
 /// graph.add_pass("geometry", PassType::Graphics);
 /// ```
@@ -57,9 +49,9 @@ pub struct BufferHandle(ResourceHandle);
 pub struct RenderGraph {
     /// All passes in the graph.
     passes: Vec<RenderPass>,
-    /// Imported textures.
+    /// Textures used by the graph.
     textures: Vec<Arc<Texture>>,
-    /// Imported buffers.
+    /// Buffers used by the graph.
     buffers: Vec<Arc<Buffer>>,
 }
 
@@ -69,38 +61,32 @@ impl RenderGraph {
         Self::default()
     }
 
-    /// Import a texture resource into the graph.
+    /// Add a texture resource to the graph.
     ///
     /// The texture must have been created by a [`GraphicsDevice`].
-    /// Returns a handle that can be used to reference the texture in passes.
     ///
     /// [`GraphicsDevice`]: crate::GraphicsDevice
-    pub fn import_texture(&mut self, texture: Arc<Texture>) -> TextureHandle {
-        let index = self.textures.len();
+    pub fn add_texture(&mut self, texture: Arc<Texture>) {
         self.textures.push(texture);
-        TextureHandle(ResourceHandle::new(index as u32))
     }
 
-    /// Import a buffer resource into the graph.
+    /// Add a buffer resource to the graph.
     ///
     /// The buffer must have been created by a [`GraphicsDevice`].
-    /// Returns a handle that can be used to reference the buffer in passes.
     ///
     /// [`GraphicsDevice`]: crate::GraphicsDevice
-    pub fn import_buffer(&mut self, buffer: Arc<Buffer>) -> BufferHandle {
-        let index = self.buffers.len();
+    pub fn add_buffer(&mut self, buffer: Arc<Buffer>) {
         self.buffers.push(buffer);
-        BufferHandle(ResourceHandle::new(index as u32))
     }
 
-    /// Get a texture by handle.
-    pub fn texture(&self, handle: TextureHandle) -> Option<&Arc<Texture>> {
-        self.textures.get(handle.0.index() as usize)
+    /// Check if the graph contains a texture.
+    pub fn contains_texture(&self, texture: &Arc<Texture>) -> bool {
+        self.textures.iter().any(|t| Arc::ptr_eq(t, texture))
     }
 
-    /// Get a buffer by handle.
-    pub fn buffer(&self, handle: BufferHandle) -> Option<&Arc<Buffer>> {
-        self.buffers.get(handle.0.index() as usize)
+    /// Check if the graph contains a buffer.
+    pub fn contains_buffer(&self, buffer: &Arc<Buffer>) -> bool {
+        self.buffers.iter().any(|b| Arc::ptr_eq(b, buffer))
     }
 
     /// Add a render pass to the graph.
@@ -233,21 +219,21 @@ mod tests {
     }
 
     #[test]
-    fn test_import_texture() {
+    fn test_add_texture() {
         let mut graph = RenderGraph::new();
         let texture = create_test_texture();
-        let handle = graph.import_texture(texture);
+        graph.add_texture(texture.clone());
         assert_eq!(graph.texture_count(), 1);
-        assert!(graph.texture(handle).is_some());
+        assert!(graph.contains_texture(&texture));
     }
 
     #[test]
-    fn test_import_buffer() {
+    fn test_add_buffer() {
         let mut graph = RenderGraph::new();
         let buffer = create_test_buffer();
-        let handle = graph.import_buffer(buffer);
+        graph.add_buffer(buffer.clone());
         assert_eq!(graph.buffer_count(), 1);
-        assert!(graph.buffer(handle).is_some());
+        assert!(graph.contains_buffer(&buffer));
     }
 
     #[test]
@@ -260,8 +246,8 @@ mod tests {
     #[test]
     fn test_clear() {
         let mut graph = RenderGraph::new();
-        graph.import_texture(create_test_texture());
-        graph.import_buffer(create_test_buffer());
+        graph.add_texture(create_test_texture());
+        graph.add_buffer(create_test_buffer());
         graph.add_pass("test_pass", PassType::Graphics);
 
         graph.clear();

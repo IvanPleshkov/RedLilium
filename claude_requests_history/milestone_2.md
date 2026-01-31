@@ -53,3 +53,7 @@ Device can create resources. Resources are handled by `Arc`.
 ## Request 6:
 Please change `Texture::device` to `Arc`. Do it also for `Buffer`, `Sampler`. Change also `GraphicsDevice::instance` to `Arc`.
 The motivation is keeping device and instance alive when depend resource is alive.
+
+
+## Request 7:
+Let's refactor render graph in graphics crate. `TextureHandle` and `BufferHandle` are not needed anymore. Please use `Arc<Buffer>` and `Arc<Texture>` instead.

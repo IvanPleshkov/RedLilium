@@ -25,7 +25,7 @@
 //! ))?;
 //!
 //! let mut graph = RenderGraph::new();
-//! let handle = graph.import_texture(texture);
+//! graph.add_texture(texture);
 //! ```
 
 pub mod device;
@@ -39,7 +39,7 @@ pub mod types;
 // Re-export main types for convenience
 pub use device::{DeviceCapabilities, GraphicsDevice};
 pub use error::GraphicsError;
-pub use graph::{BufferHandle, PassHandle, RenderGraph, RenderPass, ResourceHandle, TextureHandle};
+pub use graph::{PassHandle, RenderGraph, RenderPass, ResourceHandle};
 pub use instance::{AdapterInfo, AdapterType, GraphicsInstance};
 pub use resources::{Buffer, Sampler, Texture};
 pub use scene::{

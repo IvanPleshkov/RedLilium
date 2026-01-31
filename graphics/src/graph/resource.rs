@@ -1,7 +1,5 @@
 //! Resource handles for the render graph.
 
-use std::sync::atomic::{AtomicU32, Ordering};
-
 /// Generic handle to a resource in the render graph.
 ///
 /// Handles use a generation counter to detect stale references.
@@ -14,15 +12,6 @@ pub struct ResourceHandle {
 }
 
 impl ResourceHandle {
-    /// Create a new resource handle.
-    pub(crate) fn new(index: u32) -> Self {
-        static GENERATION: AtomicU32 = AtomicU32::new(0);
-        Self {
-            index,
-            generation: GENERATION.fetch_add(1, Ordering::Relaxed),
-        }
-    }
-
     /// Get the index of this resource.
     pub fn index(&self) -> u32 {
         self.index
