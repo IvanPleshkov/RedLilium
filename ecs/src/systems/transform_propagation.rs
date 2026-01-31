@@ -130,6 +130,86 @@ fn update_depth_recursive(
     }
 }
 
+/// Convenience function to run transform propagation on a World directly.
+///
+/// This updates all GlobalTransform components based on the hierarchy.
+/// Call this once per frame before rendering.
+///
+/// # Example
+///
+/// ```
+/// use redlilium_ecs::prelude::*;
+/// use bevy_ecs::prelude::*;
+///
+/// let mut world = World::new();
+/// // ... spawn entities ...
+/// run_transform_systems(&mut world);
+/// ```
+pub fn run_transform_systems(world: &mut World) {
+    // First, sync root transforms
+    {
+        let mut query = world.query_filtered::<(&Transform, &mut GlobalTransform), (Changed<Transform>, Without<ChildOf>)>();
+
+        // Collect to avoid borrow issues
+        let updates: Vec<_> = query.iter(world).map(|(t, _)| (*t,)).collect();
+
+        // We need to use a different approach - query again with mutable access
+        let mut query =
+            world.query_filtered::<(&Transform, &mut GlobalTransform), Without<ChildOf>>();
+        for (transform, mut global_transform) in query.iter_mut(world) {
+            *global_transform = GlobalTransform::from(*transform);
+        }
+        let _ = updates; // silence warning
+    }
+
+    // Then propagate through hierarchy
+    // Collect root entities with children first
+    let roots: Vec<(Entity, Vec<Entity>, GlobalTransform)> = {
+        let mut query =
+            world.query_filtered::<(Entity, &Children, &GlobalTransform), Without<ChildOf>>();
+        query
+            .iter(world)
+            .map(|(e, children, g)| (e, children.iter().collect(), *g))
+            .collect()
+    };
+
+    // Propagate to each child hierarchy
+    for (_root_entity, children, parent_global) in roots {
+        propagate_to_children_world(world, &children, &parent_global);
+    }
+}
+
+fn propagate_to_children_world(
+    world: &mut World,
+    children: &[Entity],
+    parent_global: &GlobalTransform,
+) {
+    for &child in children {
+        // Get the child's transform and compute global
+        let child_data: Option<(Transform, Vec<Entity>)> = {
+            let mut query = world.query::<(&Transform, &GlobalTransform, Option<&Children>)>();
+            query
+                .get(world, child)
+                .ok()
+                .map(|(t, _, c)| (*t, c.map(|c| c.iter().collect()).unwrap_or_default()))
+        };
+
+        if let Some((transform, grandchildren)) = child_data {
+            let child_global = parent_global.mul_transform(&transform);
+
+            // Update the child's global transform
+            if let Some(mut global) = world.get_mut::<GlobalTransform>(child) {
+                *global = child_global;
+            }
+
+            // Recursively propagate to grandchildren
+            if !grandchildren.is_empty() {
+                propagate_to_children_world(world, &grandchildren, &child_global);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,5 +225,61 @@ mod tests {
 
         let expected_translation = Vec3::new(10.0, 5.0, 0.0);
         assert!((child_global.translation() - expected_translation).length() < 1e-5);
+    }
+
+    #[test]
+    fn run_transform_systems_syncs_root_transforms() {
+        let mut world = World::new();
+
+        // Create root entity with a transform
+        let root = world
+            .spawn((
+                Transform::from_translation(Vec3::new(10.0, 5.0, 3.0)),
+                GlobalTransform::IDENTITY,
+            ))
+            .id();
+
+        // Run the transform systems
+        run_transform_systems(&mut world);
+
+        // Check the root's global transform matches its local transform
+        let root_global = world.get::<GlobalTransform>(root).unwrap();
+        let expected = Vec3::new(10.0, 5.0, 3.0);
+        assert!(
+            (root_global.translation() - expected).length() < 1e-5,
+            "Expected {:?}, got {:?}",
+            expected,
+            root_global.translation()
+        );
+    }
+
+    #[test]
+    fn run_transform_systems_multiple_roots() {
+        let mut world = World::new();
+
+        // Create multiple root entities
+        let root1 = world
+            .spawn((
+                Transform::from_translation(Vec3::new(1.0, 0.0, 0.0)),
+                GlobalTransform::IDENTITY,
+            ))
+            .id();
+
+        let root2 = world
+            .spawn((
+                Transform::from_translation(Vec3::new(0.0, 2.0, 0.0)),
+                GlobalTransform::IDENTITY,
+            ))
+            .id();
+
+        // Run the transform systems
+        run_transform_systems(&mut world);
+
+        // Check both roots have correct global transforms
+        let root1_global = world.get::<GlobalTransform>(root1).unwrap();
+        assert!((root1_global.translation() - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-5);
+
+        let root2_global = world.get::<GlobalTransform>(root2).unwrap();
+        assert!((root2_global.translation() - Vec3::new(0.0, 2.0, 0.0)).length() < 1e-5);
     }
 }

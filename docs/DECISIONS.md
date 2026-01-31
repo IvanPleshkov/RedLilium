@@ -221,3 +221,45 @@ Design the render graph for thread-safety:
 - ⚠️ Requires careful API design to prevent data races
 - ⚠️ Per-thread resource pools increase memory usage
 - ⚠️ Debugging parallel execution is harder
+
+---
+
+## ADR-009: Multiple Render Graphs per Backend
+
+**Date**: 2025-01-31
+**Status**: Accepted
+
+### Context
+A process may contain multiple ECS worlds (e.g., game world, editor world, preview worlds). Each world may require different rendering pipelines or render graphs. The rendering backend (GPU device, command queues) is expensive to create and should be shared.
+
+### Decision
+Support a one-to-many relationship between backends and render graphs:
+
+1. **Single Backend Instance**
+   - One backend per process manages GPU resources
+   - All render graphs share the same GPU device and memory pools
+   - Synchronization primitives are shared across graphs
+
+2. **Multiple Render Graphs**
+   - Each ECS world can own one or more render graphs
+   - Render graphs are independent and can have different pass configurations
+   - No direct communication between render graphs (isolation)
+
+3. **ECS World Independence**
+   - Multiple ECS worlds can coexist in a process
+   - Each world extracts render data independently
+   - Worlds can target different render graphs
+
+4. **Resource Sharing**
+   - GPU resources (buffers, textures) can be shared via handles
+   - Backend manages resource lifetimes across all graphs
+   - Synchronization patterns (fences, semaphores) are shared
+
+### Consequences
+- ✅ Efficient GPU resource utilization across worlds
+- ✅ Flexible multi-world architecture (game + editor)
+- ✅ Render graphs can be created/destroyed independently
+- ✅ Supports split-screen, picture-in-picture, previews
+- ⚠️ Need careful resource lifetime management
+- ⚠️ Backend complexity increases with shared state
+- ⚠️ Cross-graph synchronization requires explicit barriers

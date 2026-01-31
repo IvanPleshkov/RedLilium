@@ -9,3 +9,4 @@ description = "RedLilium engine graphics"
 log.workspace = true
 bitflags.workspace = true
 static_assertions.workspace = true
+glam = "0.31"

@@ -89,7 +89,9 @@ pub mod prelude {
         Transform,
     };
 
-    pub use crate::systems::{propagate_transforms, sync_root_transforms, update_hierarchy_depth};
+    pub use crate::systems::{
+        propagate_transforms, run_transform_systems, sync_root_transforms, update_hierarchy_depth,
+    };
 
     // Re-export glam for convenience
     pub use glam::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4};

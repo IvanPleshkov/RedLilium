@@ -18,7 +18,8 @@
       "Bash(powershell:*)",
       "Bash(cargo clippy:*)",
       "Bash(gh api:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(cargo doc:*)"
     ]
   }
 }

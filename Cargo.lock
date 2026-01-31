@@ -1317,6 +1317,7 @@ dependencies = [
  "env_logger",
  "log",
  "redlilium-core",
+ "redlilium-ecs",
  "redlilium-graphics",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -1338,6 +1339,7 @@ name = "redlilium-graphics"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.10.0",
+ "glam",
  "log",
  "static_assertions",
 ]

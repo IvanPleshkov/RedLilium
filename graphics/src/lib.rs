@@ -7,24 +7,29 @@
 //! This crate provides:
 //! - [`RenderGraph`] - Declarative description of render passes and dependencies
 //! - [`Backend`] - Trait for graphics backend implementations
+//! - [`scene`] - ECS to render graph integration
 //! - Multiple backend support: Vulkan, wgpu, and Dummy (for testing)
 //!
 //! ## Example
 //!
 //! ```ignore
-//! use redlilium_graphics::{RenderGraph, Backend};
+//! use redlilium_graphics::{RenderGraph, Backend, SceneRenderer};
 //!
-//! let mut graph = RenderGraph::new();
-//! // Add passes and resources...
+//! let mut renderer = SceneRenderer::new();
+//! renderer.begin_frame();
+//! // Extract from ECS, prepare, render...
+//! renderer.end_frame();
 //! ```
 
 pub mod backend;
 pub mod graph;
+pub mod scene;
 pub mod types;
 
 // Re-export main types for convenience
 pub use backend::{Backend, BackendError, DummyBackend};
 pub use graph::{PassHandle, RenderGraph, RenderPass, ResourceHandle};
+pub use scene::{ExtractedMaterial, ExtractedMesh, ExtractedTransform, RenderWorld, SceneRenderer};
 pub use types::{
     BufferDescriptor, BufferUsage, ClearValue, Extent3d, SamplerDescriptor, TextureDescriptor,
     TextureFormat, TextureUsage,

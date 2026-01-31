@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 redlilium-core = { path = "../core" }
+redlilium-ecs = { path = "../ecs" }
 redlilium-graphics = { path = "../graphics" }
 winit.workspace = true
 log.workspace = true
