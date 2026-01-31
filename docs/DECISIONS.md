@@ -114,3 +114,110 @@ Use a layered documentation approach:
 - ✅ AI can read markdown files for context
 - ✅ Architecture docs separate from API docs
 - ⚠️ Requires discipline to keep docs updated
+
+---
+
+## ADR-006: Render Graph Architecture
+
+**Date**: 2025-01-30
+**Status**: Accepted
+
+### Context
+Need a flexible and efficient way to describe rendering operations that:
+- Works across multiple graphics backends
+- Handles synchronization automatically
+- Supports both simple and complex rendering pipelines
+- Allows optimization at the graph level
+
+### Decision
+Implement an abstract render graph system where:
+1. Users declare passes and their resource dependencies
+2. The graph compiler determines optimal execution order
+3. The executor handles synchronization and resource management
+4. Backend implementations translate to native API calls
+
+### Consequences
+- ✅ Declarative API is easier to use than manual barriers
+- ✅ Graph-level optimizations (memory aliasing, barrier batching)
+- ✅ Backend-agnostic rendering code
+- ✅ Automatic resource lifetime management
+- ⚠️ Initial overhead for graph compilation
+- ⚠️ Less control over low-level details
+- ⚠️ Additional abstraction layer complexity
+
+---
+
+## ADR-007: Triple Backend Strategy (Vulkan, wgpu, Dummy)
+
+**Date**: 2025-01-30
+**Status**: Accepted
+
+### Context
+Need to support multiple platforms with different graphics capabilities:
+- Desktop platforms with Vulkan support need maximum performance
+- Web and platforms without Vulkan need cross-platform support
+- Testing requires graphics-free execution
+
+### Decision
+Implement three backends behind a common trait:
+
+1. **Vulkan Backend** (via `ash` crate)
+   - Direct Vulkan API access for maximum performance
+   - Full access to Vulkan extensions (ray tracing, mesh shaders)
+   - Explicit memory management with `gpu-allocator`
+   - Target: Windows, Linux desktop
+
+2. **wgpu Backend** (version 28.0.0)
+   - Cross-platform via WebGPU abstraction
+   - Automatic fallback to Vulkan/Metal/DX12
+   - WebAssembly support for browsers
+   - Target: All platforms including Web
+
+3. **Dummy Backend**
+   - No-op implementation for testing
+   - Validates API usage without GPU
+   - Enables CI testing without graphics hardware
+
+### Consequences
+- ✅ Maximum performance on desktop via Vulkan
+- ✅ Web support via wgpu
+- ✅ Testability without GPU hardware
+- ✅ Future extensibility (can add Metal backend, etc.)
+- ⚠️ Three implementations to maintain
+- ⚠️ Need to ensure feature parity across backends
+- ⚠️ wgpu limits available features to common denominator
+
+---
+
+## ADR-008: Multithreaded Render Graph Execution
+
+**Date**: 2025-01-30
+**Status**: Accepted
+
+### Context
+Modern games need to utilize multiple CPU cores efficiently. The render graph should support parallel command recording to maximize performance.
+
+### Decision
+Design the render graph for thread-safety:
+
+1. **Construction Phase** (Single-threaded)
+   - Graph building is single-threaded for determinism
+   - Clear ownership during setup
+
+2. **Execution Phase** (Multi-threaded)
+   - Command buffers recorded in parallel per pass
+   - Each thread gets its own command buffer pool
+   - Graph data is immutable during execution
+
+3. **Synchronization Primitives**
+   - Use `Arc` for shared resource references
+   - Use `parking_lot` for fast mutexes where needed
+   - Lock-free handle allocation via atomics
+
+### Consequences
+- ✅ Scales with CPU core count
+- ✅ Reduced frame latency via parallel recording
+- ✅ Clear threading model (build single, execute parallel)
+- ⚠️ Requires careful API design to prevent data races
+- ⚠️ Per-thread resource pools increase memory usage
+- ⚠️ Debugging parallel execution is harder

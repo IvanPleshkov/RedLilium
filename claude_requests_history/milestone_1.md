@@ -1,4 +1,6 @@
-This document is a list of requests made to Claude Code.
+## Milestone 1: Foundation
+
+This file describes all requests to claude code related to the milestone.
 
 Request:
 Lets start! I want to create a FPS videogame as the result of the project.

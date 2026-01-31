@@ -20,6 +20,10 @@ winit = "0.30.12"
 log = "0.4"
 env_logger = "0.11"
 
+# Utilities
+bitflags = "2.10"
+static_assertions = "1.1"
+
 # Web support
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

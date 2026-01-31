@@ -14,7 +14,9 @@
       "Bash(find:*)",
       "Bash(cat:*)",
       "Bash(cargo test:*)",
-      "Bash(powershell -ExecutionPolicy Bypass -File scripts/test-all.ps1)"
+      "Bash(powershell -ExecutionPolicy Bypass -File scripts/test-all.ps1)",
+      "Bash(powershell:*)",
+      "Bash(cargo clippy:*)"
     ]
   }
 }

@@ -7,3 +7,5 @@ description = "RedLilium engine graphics"
 
 [dependencies]
 log.workspace = true
+bitflags.workspace = true
+static_assertions.workspace = true
