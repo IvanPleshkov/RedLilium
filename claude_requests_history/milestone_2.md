@@ -175,3 +175,12 @@ It's not required to do a realtime resizing. But very long waiting for the resiz
 Let's start to implement render graph compilation.
 As a first step, move please the CompiledGraph to the separate folder in the graphics crate.
 Then, create in this folder a compile function without implementation for now.
+
+## Request 25:
+Take a look to the compiled graph in the graphics crate.
+There is a `Vec` with ordered list of execution.
+Are you sure that render graph sould be compiled into the ordered command list to a single command buffer?
+Reead also `docs\ARCHITECTURE.md` to understand the graphics architecture before decision.
+I can say that the list of execution is not very optimal.
+On another hand, there are multiple graphs and for effective parallel drawing maybe render scheduler works fine
+and it's not required to make an graphics engine overcomplicated and pay CPU price for the advanced compilation.

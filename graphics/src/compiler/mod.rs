@@ -1,16 +1,27 @@
 //! Render graph compilation.
 //!
 //! This module handles the compilation of a [`RenderGraph`](crate::graph::RenderGraph)
-//! into an optimized execution plan ([`CompiledGraph`]).
+//! into an execution plan ([`CompiledGraph`]).
 //!
-//! # Compilation Process
+//! # Design Philosophy
 //!
-//! The compiler performs several optimization passes:
+//! The compiler is intentionally simple. It performs:
 //!
 //! 1. **Topological Sort** - Order passes respecting dependencies
-//! 2. **Resource Lifetime Analysis** - Track when resources are first/last used
-//! 3. **Barrier Optimization** - Batch and minimize synchronization points
-//! 4. **Memory Aliasing** - Identify resources that can share memory
+//! 2. **Cycle Detection** - Validate the graph is a DAG
+//!
+//! **Why not more optimization?**
+//!
+//! GPU parallelism in this engine happens at the *graph level*, not the *pass level*.
+//! The [`FrameSchedule`](crate::scheduler::FrameSchedule) submits multiple graphs
+//! with semaphore dependencies, enabling streaming submission and GPU overlap.
+//!
+//! Within a single graph, passes execute sequentially. Advanced per-pass optimization
+//! (barrier batching, memory aliasing) would add CPU cost every frame for marginal
+//! benefit when:
+//! - Graphs are typically small (3-10 passes)
+//! - GPU drivers already perform their own optimization
+//! - Real parallelism is via multiple graphs, not within one graph
 //!
 //! # Example
 //!
@@ -23,15 +34,15 @@
 //! graph.add_dependency(lighting, geometry);
 //!
 //! let compiled = graph.compile()?;
-//! // compiled.pass_order() returns optimized execution order
+//! // compiled.pass_order() returns execution order respecting dependencies
 //! ```
 
 use crate::graph::{PassHandle, RenderGraph};
 
 /// A compiled render graph ready for execution.
 ///
-/// The compiled graph contains an optimized pass execution order that
-/// respects all dependencies while minimizing synchronization overhead.
+/// Contains a topologically sorted pass order that respects all dependencies.
+/// Passes are executed sequentially in this order within a single command buffer.
 #[derive(Debug)]
 pub struct CompiledGraph {
     /// Optimized pass execution order as handles.
@@ -90,11 +101,10 @@ impl std::fmt::Display for GraphError {
 
 impl std::error::Error for GraphError {}
 
-/// Compile a render graph into an optimized execution plan.
+/// Compile a render graph into an execution plan.
 ///
-/// This function performs:
-/// - Topological sorting of passes based on dependencies
-/// - Validation that the graph is a valid DAG (no cycles)
+/// Performs topological sorting to produce a pass order that respects
+/// all dependencies. Detects cycles and returns an error if found.
 ///
 /// # Arguments
 ///
@@ -102,8 +112,8 @@ impl std::error::Error for GraphError {}
 ///
 /// # Returns
 ///
-/// * `Ok(CompiledGraph)` - The optimized execution plan
-/// * `Err(GraphError)` - If compilation fails (e.g., cyclic dependency)
+/// * `Ok(CompiledGraph)` - Pass order ready for sequential execution
+/// * `Err(GraphError::CyclicDependency)` - If the graph contains a cycle
 ///
 /// # Example
 ///
