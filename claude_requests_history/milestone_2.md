@@ -86,3 +86,10 @@ In graphics crate there is a render graph.
 It seems render graph passes do not support render targets.
 I let you modify render graph to enable rendering targets.
 Rendering to surface and to texture of course must be supported.
+
+## Request 13:
+Lets refactor render graph in graphics crate.
+How it relies on the Hander with index.
+Let's change is to using `Arc` like all other resources in graphics crate.
+
+## Request 14:

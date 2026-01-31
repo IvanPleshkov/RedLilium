@@ -19,17 +19,17 @@
 //! let pass = graph.add_pass("main", PassType::Graphics);
 //!
 //! // Configure to render to surface
-//! graph.set_render_targets(pass, RenderTargetConfig::new()
+//! pass.set_render_targets(RenderTargetConfig::new()
 //!     .with_color(ColorAttachment::from_surface(&surface_texture)
 //!         .with_clear_color(0.0, 0.0, 0.0, 1.0)));
 //! ```
 
 mod pass;
-mod resource;
 mod target;
 
-pub use pass::{PassHandle, PassType, RenderPass};
-pub use resource::ResourceHandle;
+use std::sync::Arc;
+
+pub use pass::{PassType, RenderPass};
 pub use target::{
     ColorAttachment, DepthStencilAttachment, LoadOp, RenderTarget, RenderTargetConfig, StoreOp,
 };
@@ -42,8 +42,9 @@ pub use target::{
 ///
 /// ```ignore
 /// let mut graph = RenderGraph::new();
-/// graph.add_pass("geometry", PassType::Graphics);
-/// graph.add_pass("lighting", PassType::Graphics);
+/// let pass1 = graph.add_pass("geometry", PassType::Graphics);
+/// let pass2 = graph.add_pass("lighting", PassType::Graphics);
+/// pass2.add_dependency(&pass1);
 /// ```
 ///
 /// # Execution
@@ -56,7 +57,7 @@ pub use target::{
 #[derive(Debug, Default)]
 pub struct RenderGraph {
     /// All passes in the graph.
-    passes: Vec<RenderPass>,
+    passes: Vec<Arc<RenderPass>>,
 }
 
 impl RenderGraph {
@@ -67,15 +68,15 @@ impl RenderGraph {
 
     /// Add a render pass to the graph.
     ///
-    /// Returns a handle to the pass for dependency tracking.
-    pub fn add_pass(&mut self, name: impl Into<String>, pass_type: PassType) -> PassHandle {
-        let index = self.passes.len();
-        self.passes.push(RenderPass::new(name.into(), pass_type));
-        PassHandle::new(index as u32)
+    /// Returns an `Arc<RenderPass>` for direct manipulation and dependency tracking.
+    pub fn add_pass(&mut self, name: impl Into<String>, pass_type: PassType) -> Arc<RenderPass> {
+        let pass = Arc::new(RenderPass::new(name.into(), pass_type));
+        self.passes.push(Arc::clone(&pass));
+        pass
     }
 
     /// Get all passes in the graph.
-    pub fn passes(&self) -> &[RenderPass] {
+    pub fn passes(&self) -> &[Arc<RenderPass>] {
         &self.passes
     }
 
@@ -84,68 +85,16 @@ impl RenderGraph {
         self.passes.len()
     }
 
-    /// Get a mutable reference to a pass by handle.
-    pub fn get_pass_mut(&mut self, handle: PassHandle) -> Option<&mut RenderPass> {
-        self.passes.get_mut(handle.index() as usize)
-    }
-
-    /// Get a reference to a pass by handle.
-    pub fn get_pass(&self, handle: PassHandle) -> Option<&RenderPass> {
-        self.passes.get(handle.index() as usize)
-    }
-
-    /// Set render targets for a graphics pass.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the pass handle is invalid.
-    pub fn set_render_targets(
-        &mut self,
-        handle: PassHandle,
-        config: RenderTargetConfig,
-    ) -> Result<(), GraphError> {
-        let pass = self
-            .passes
-            .get_mut(handle.index() as usize)
-            .ok_or(GraphError::InvalidPass)?;
-        pass.set_render_targets(config);
-        Ok(())
-    }
-
-    /// Add a dependency between passes.
-    ///
-    /// The dependent pass will execute after the dependency.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if either pass handle is invalid.
-    pub fn add_dependency(
-        &mut self,
-        dependent: PassHandle,
-        dependency: PassHandle,
-    ) -> Result<(), GraphError> {
-        // Validate both handles exist
-        if self.passes.get(dependency.index() as usize).is_none() {
-            return Err(GraphError::InvalidPass);
-        }
-        let pass = self
-            .passes
-            .get_mut(dependent.index() as usize)
-            .ok_or(GraphError::InvalidPass)?;
-        pass.add_dependency(dependency);
-        Ok(())
-    }
-
     /// Compile the graph for execution.
     ///
     /// This performs:
     /// - Topological sorting of passes
     /// - Resource lifetime analysis
     /// - Barrier placement optimization
-    pub fn compile(&mut self) -> Result<CompiledGraph, GraphError> {
-        // TODO: Implement graph compilation
+    pub fn compile(&self) -> Result<CompiledGraph, GraphError> {
+        // TODO: Implement proper topological sort
         Ok(CompiledGraph {
-            pass_order: (0..self.passes.len()).collect(),
+            pass_order: self.passes.clone(),
         })
     }
 
@@ -159,12 +108,12 @@ impl RenderGraph {
 #[derive(Debug)]
 pub struct CompiledGraph {
     /// Optimized pass execution order.
-    pass_order: Vec<usize>,
+    pass_order: Vec<Arc<RenderPass>>,
 }
 
 impl CompiledGraph {
     /// Get the optimized pass execution order.
-    pub fn pass_order(&self) -> &[usize] {
+    pub fn pass_order(&self) -> &[Arc<RenderPass>] {
         &self.pass_order
     }
 }
@@ -174,18 +123,12 @@ impl CompiledGraph {
 pub enum GraphError {
     /// The graph contains a cycle.
     CyclicDependency,
-    /// A resource handle is invalid.
-    InvalidResource,
-    /// A pass handle is invalid.
-    InvalidPass,
 }
 
 impl std::fmt::Display for GraphError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::CyclicDependency => write!(f, "render graph contains cyclic dependency"),
-            Self::InvalidResource => write!(f, "invalid resource handle"),
-            Self::InvalidPass => write!(f, "invalid pass handle"),
         }
     }
 }
@@ -201,8 +144,9 @@ mod tests {
     #[test]
     fn test_add_pass() {
         let mut graph = RenderGraph::new();
-        let _handle = graph.add_pass("test_pass", PassType::Graphics);
+        let pass = graph.add_pass("test_pass", PassType::Graphics);
         assert_eq!(graph.pass_count(), 1);
+        assert_eq!(pass.name(), "test_pass");
     }
 
     #[test]
@@ -235,10 +179,9 @@ mod tests {
             ColorAttachment::from_texture(texture).with_clear_color(0.0, 0.0, 0.0, 1.0),
         );
 
-        graph.set_render_targets(pass, config).unwrap();
+        pass.set_render_targets(config);
 
-        let render_pass = graph.get_pass(pass).unwrap();
-        assert!(render_pass.has_render_targets());
+        assert!(pass.has_render_targets());
     }
 
     #[test]
@@ -247,21 +190,19 @@ mod tests {
         let pass1 = graph.add_pass("geometry", PassType::Graphics);
         let pass2 = graph.add_pass("lighting", PassType::Graphics);
 
-        graph.add_dependency(pass2, pass1).unwrap();
+        pass2.add_dependency(&pass1);
 
-        let lighting_pass = graph.get_pass(pass2).unwrap();
-        assert_eq!(lighting_pass.dependencies().len(), 1);
+        assert_eq!(pass2.dependencies().len(), 1);
     }
 
     #[test]
-    fn test_invalid_pass_handle() {
+    fn test_compile() {
         let mut graph = RenderGraph::new();
-        let pass = graph.add_pass("test", PassType::Graphics);
+        let pass1 = graph.add_pass("geometry", PassType::Graphics);
+        let pass2 = graph.add_pass("lighting", PassType::Graphics);
+        pass2.add_dependency(&pass1);
 
-        // Clear the graph, making the handle invalid
-        graph.clear();
-
-        let result = graph.set_render_targets(pass, RenderTargetConfig::new());
-        assert!(result.is_err());
+        let compiled = graph.compile().unwrap();
+        assert_eq!(compiled.pass_order().len(), 2);
     }
 }

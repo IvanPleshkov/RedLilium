@@ -21,7 +21,8 @@
       "Bash(curl:*)",
       "Bash(cargo doc:*)",
       "Bash(./scripts/test-all.sh:*)",
-      "Bash(bash scripts/test-all.sh:*)"
+      "Bash(bash scripts/test-all.sh:*)",
+      "Bash(wc:*)"
     ],
     "deny": [
       "Read(claude_requests_history/**)",
