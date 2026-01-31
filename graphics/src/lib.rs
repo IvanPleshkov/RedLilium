@@ -14,14 +14,15 @@
 //! ## Example
 //!
 //! ```ignore
-//! use redlilium_graphics::{GraphicsInstance, RenderGraph, PassType};
+//! use redlilium_graphics::{GraphicsInstance, RenderGraph};
 //!
 //! let instance = GraphicsInstance::new()?;
 //! let device = instance.create_device()?;
 //!
 //! let mut graph = RenderGraph::new();
-//! graph.add_pass("geometry", PassType::Graphics);
-//! graph.add_pass("lighting", PassType::Graphics);
+//! let geometry = graph.add_graphics_pass("geometry");
+//! let lighting = graph.add_graphics_pass("lighting");
+//! lighting.add_dependency(&geometry);
 //! ```
 
 pub mod device;
@@ -38,10 +39,10 @@ pub mod types;
 pub use device::{DeviceCapabilities, GraphicsDevice};
 pub use error::GraphicsError;
 pub use graph::{
-    BufferCopyRegion, BufferTextureCopyRegion, BufferTextureLayout, ColorAttachment,
-    DepthStencilAttachment, LoadOp, PassType, RenderGraph, RenderPass, RenderTarget,
+    BufferCopyRegion, BufferTextureCopyRegion, BufferTextureLayout, ColorAttachment, ComputePass,
+    DepthStencilAttachment, GraphicsPass, LoadOp, Pass, RenderGraph, RenderTarget,
     RenderTargetConfig, StoreOp, TextureCopyLocation, TextureCopyRegion, TextureOrigin,
-    TransferConfig, TransferOperation,
+    TransferConfig, TransferOperation, TransferPass,
 };
 pub use instance::{AdapterInfo, AdapterType, GraphicsInstance};
 pub use materials::{

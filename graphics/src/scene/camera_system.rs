@@ -18,7 +18,7 @@
 use std::cmp::Ordering;
 
 use crate::error::GraphicsError;
-use crate::graph::{PassType, RenderGraph};
+use crate::graph::RenderGraph;
 
 use super::render_world::RenderWorld;
 use glam::{Mat4, Vec3};
@@ -106,32 +106,28 @@ impl CameraRenderContext {
     pub fn setup_forward_graph(&mut self) {
         // Clear pass (if camera has clear color)
         if self.camera.clear_color.is_some() {
-            let _clear_pass = self.graph.add_pass(
-                format!("camera_{}_clear", self.camera.entity_id),
-                PassType::Graphics,
-            );
+            let _clear_pass = self
+                .graph
+                .add_graphics_pass(format!("camera_{}_clear", self.camera.entity_id));
         }
 
         // Geometry pass for opaque objects
-        let _geometry_pass = self.graph.add_pass(
-            format!("camera_{}_geometry", self.camera.entity_id),
-            PassType::Graphics,
-        );
+        let _geometry_pass = self
+            .graph
+            .add_graphics_pass(format!("camera_{}_geometry", self.camera.entity_id));
 
         // Masked pass for alpha-masked objects
         if !self.visible_masked.is_empty() {
-            let _masked_pass = self.graph.add_pass(
-                format!("camera_{}_masked", self.camera.entity_id),
-                PassType::Graphics,
-            );
+            let _masked_pass = self
+                .graph
+                .add_graphics_pass(format!("camera_{}_masked", self.camera.entity_id));
         }
 
         // Transparent pass
         if !self.visible_transparent.is_empty() {
-            let _transparent_pass = self.graph.add_pass(
-                format!("camera_{}_transparent", self.camera.entity_id),
-                PassType::Graphics,
-            );
+            let _transparent_pass = self
+                .graph
+                .add_graphics_pass(format!("camera_{}_transparent", self.camera.entity_id));
         }
     }
 
