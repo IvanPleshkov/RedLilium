@@ -1341,7 +1341,9 @@ dependencies = [
  "bitflags 2.10.0",
  "glam",
  "log",
+ "raw-window-handle",
  "static_assertions",
+ "winit",
 ]
 
 [[package]]

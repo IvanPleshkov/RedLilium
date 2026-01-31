@@ -19,6 +19,10 @@ pub enum GraphicsError {
     InvalidParameter(String),
     /// An internal error occurred.
     Internal(String),
+    /// The surface is outdated and needs to be reconfigured.
+    SurfaceOutdated,
+    /// The surface was lost and needs to be recreated.
+    SurfaceLost,
 }
 
 impl fmt::Display for GraphicsError {
@@ -31,6 +35,8 @@ impl fmt::Display for GraphicsError {
             Self::DeviceLost => write!(f, "GPU device lost"),
             Self::InvalidParameter(msg) => write!(f, "invalid parameter: {msg}"),
             Self::Internal(msg) => write!(f, "internal error: {msg}"),
+            Self::SurfaceOutdated => write!(f, "surface outdated, needs reconfiguration"),
+            Self::SurfaceLost => write!(f, "surface lost, needs recreation"),
         }
     }
 }

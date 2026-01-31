@@ -8,6 +8,7 @@
 //! - [`GraphicsInstance`] - Top-level graphics system entry point
 //! - [`GraphicsDevice`] - Device for creating GPU resources
 //! - [`RenderGraph`] - Declarative description of render passes and dependencies
+//! - [`Surface`] - Swapchain abstraction for presenting to windows
 //! - [`scene`] - ECS to render graph integration
 //!
 //! ## Example
@@ -30,6 +31,7 @@ pub mod instance;
 pub mod materials;
 pub mod resources;
 pub mod scene;
+pub mod swapchain;
 pub mod types;
 
 // Re-export main types for convenience
@@ -46,6 +48,7 @@ pub use scene::{
     CameraRenderContext, CameraSystem, ExtractedCamera, ExtractedMaterial, ExtractedMesh,
     ExtractedTransform, RenderWorld,
 };
+pub use swapchain::{PresentMode, Surface, SurfaceConfiguration, SurfaceTexture};
 pub use types::{
     BufferDescriptor, BufferUsage, ClearValue, Extent3d, SamplerDescriptor, TextureDescriptor,
     TextureFormat, TextureUsage,

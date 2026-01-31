@@ -76,3 +76,13 @@ Instead of sorting by binding frequency, we will implement later a resolver, whi
 Let's refactor render graph in graphics crate.
 We added recently the material system to the graphics crate.
 Let's remove `add_buffer` and `add_texture`. Now we can rely on material system.
+
+## Request 11:
+To render basic scene using graphics crate, there is swapchain abstraction required.
+Please add swapchain. You must rely on the fact, that only `winit` crate is used to handle windowing and surface.
+
+## Request 12:
+In graphics crate there is a render graph.
+It seems render graph passes do not support render targets.
+I let you modify render graph to enable rendering targets.
+Rendering to surface and to texture of course must be supported.

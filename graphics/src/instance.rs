@@ -5,8 +5,11 @@
 
 use std::sync::{Arc, RwLock, Weak};
 
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+
 use crate::device::GraphicsDevice;
 use crate::error::GraphicsError;
+use crate::swapchain::Surface;
 
 /// Information about a graphics adapter.
 #[derive(Debug, Clone)]
@@ -153,6 +156,34 @@ impl GraphicsInstance {
     /// Get the number of devices created by this instance.
     pub fn device_count(&self) -> usize {
         self.devices.read().map(|d| d.len()).unwrap_or(0)
+    }
+
+    /// Create a surface for presenting to a window.
+    ///
+    /// # Arguments
+    ///
+    /// * `window` - A window that implements the raw-window-handle traits
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if surface creation fails.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let surface = instance.create_surface(&window)?;
+    /// surface.configure(&device, &SurfaceConfiguration::new(800, 600));
+    /// ```
+    pub fn create_surface<W>(&self, window: &W) -> Result<Arc<Surface>, GraphicsError>
+    where
+        W: HasWindowHandle + HasDisplayHandle,
+    {
+        let instance = self.arc_self().ok_or_else(|| {
+            GraphicsError::ResourceCreationFailed("instance has been dropped".to_string())
+        })?;
+
+        let surface = Surface::new(instance, window)?;
+        Ok(Arc::new(surface))
     }
 }
 
