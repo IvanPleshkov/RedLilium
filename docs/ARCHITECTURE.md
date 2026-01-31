@@ -223,23 +223,26 @@ When the application exits, call `FramePipeline::wait_idle()` before destroying 
 
 ```rust
 // Initialization
-let mut pipeline = FramePipeline::new(2);  // 2 frames in flight
+let instance = GraphicsInstance::new()?;
+let device = instance.create_device()?;
+let mut pipeline = device.create_pipeline(2);  // 2 frames in flight
 
 // Main loop
 while !window.should_close() {
-    pipeline.begin_frame();  // Wait for frame slot
+    // begin_frame waits for frame slot AND returns a schedule
+    let mut schedule = pipeline.begin_frame();
 
     // Build render graphs
     let shadow_graph = build_shadow_graph();
     let main_graph = build_main_graph();
 
     // Submit via streaming schedule
-    let mut schedule = FrameSchedule::new();
     let shadows = schedule.submit("shadows", shadow_graph.compile()?, &[]);
     let main = schedule.submit("main", main_graph.compile()?, &[shadows]);
-    let fence = schedule.submit_and_present("present", post_graph.compile()?, &[main]);
+    schedule.present("present", post_graph.compile()?, &[main]);
 
-    pipeline.end_frame(fence);
+    // end_frame takes ownership of schedule
+    pipeline.end_frame(schedule);
 }
 
 // Shutdown

@@ -158,3 +158,8 @@ Can you please move the global vision of the rendering process to the follow lis
 - `lib.rs` of the graphics crate
 - `docs\ARCHITECTURE.md`
 - `docs\DECISIONS.md`
+
+## Request 23:
+Read the graphics architecture in `docs\ARCHITECTURE.md`.
+I think it's a good decision to create a frame pipeline as a method of device, frame scheduler as a method of pipeline.
+But scheduler is created separately. WDYT?

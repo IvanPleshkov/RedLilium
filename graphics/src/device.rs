@@ -8,6 +8,7 @@ use std::sync::{Arc, RwLock, Weak};
 use crate::error::GraphicsError;
 use crate::instance::GraphicsInstance;
 use crate::materials::{Material, MaterialDescriptor};
+use crate::pipeline::FramePipeline;
 use crate::resources::{Buffer, Sampler, Texture};
 use crate::types::{BufferDescriptor, SamplerDescriptor, TextureDescriptor};
 
@@ -227,6 +228,42 @@ impl GraphicsDevice {
         log::trace!("GraphicsDevice: created material {:?}", descriptor.label);
 
         Ok(material)
+    }
+
+    /// Create a frame pipeline for managing multiple frames in flight.
+    ///
+    /// The pipeline coordinates CPU-GPU synchronization and enables frame overlap
+    /// for maximum throughput.
+    ///
+    /// # Arguments
+    ///
+    /// * `frames_in_flight` - Number of frames that can be in flight simultaneously.
+    ///   Typically 2 or 3. Must be at least 1.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `frames_in_flight` is 0.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut pipeline = device.create_pipeline(2);
+    ///
+    /// while running {
+    ///     let mut schedule = pipeline.begin_frame();
+    ///     // ... submit graphs ...
+    ///     schedule.present("present", graph, &[deps]);
+    ///     pipeline.end_frame(schedule);
+    /// }
+    ///
+    /// pipeline.wait_idle();
+    /// ```
+    pub fn create_pipeline(&self, frames_in_flight: usize) -> FramePipeline {
+        log::trace!(
+            "GraphicsDevice: created pipeline with {} frames in flight",
+            frames_in_flight
+        );
+        FramePipeline::new(frames_in_flight)
     }
 
     /// Get the number of live buffers created by this device.

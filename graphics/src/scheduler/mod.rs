@@ -27,9 +27,8 @@
 //! # Example
 //!
 //! ```ignore
-//! use redlilium_graphics::scheduler::FrameSchedule;
-//!
-//! let mut schedule = FrameSchedule::new();
+//! // FrameSchedule is created by FramePipeline::begin_frame()
+//! let mut schedule = pipeline.begin_frame();
 //!
 //! // Submit shadow graph immediately - GPU starts working
 //! let shadows = schedule.submit("shadows", shadow_graph, &[]);
@@ -40,8 +39,11 @@
 //! // Main pass waits for both shadows and depth
 //! let main = schedule.submit("main", main_graph, &[shadows, depth]);
 //!
-//! // Present to screen
-//! let fence = schedule.submit_and_present(post_graph, &[main], &mut swapchain);
+//! // Present to screen (marks schedule as complete)
+//! schedule.present("present", post_graph, &[main]);
+//!
+//! // Return schedule to pipeline
+//! pipeline.end_frame(schedule);
 //! ```
 
 mod sync;
@@ -85,34 +87,47 @@ struct SubmittedGraph {
 /// rather than batching all submissions at frame end. This maximizes
 /// CPU-GPU parallelism.
 ///
+/// # Creation
+///
+/// `FrameSchedule` is created by [`FramePipeline::begin_frame`](crate::pipeline::FramePipeline::begin_frame).
+/// Do not create it directly.
+///
 /// # Lifecycle
 ///
 /// ```ignore
 /// // Each frame:
-/// let mut schedule = FrameSchedule::new();
+/// let mut schedule = pipeline.begin_frame();
 ///
 /// // Submit graphs as they're ready
 /// let a = schedule.submit("graph_a", graph_a, &[]);
 /// let b = schedule.submit("graph_b", graph_b, &[a]);
 ///
-/// // Present and get fence
-/// let fence = schedule.submit_and_present(final_graph, &[b], swapchain);
+/// // Present to screen (marks schedule as complete)
+/// schedule.present("present", final_graph, &[b]);
 ///
-/// // Store fence for later synchronization
-/// frame_fences[current_frame] = fence;
+/// // Return schedule to pipeline
+/// pipeline.end_frame(schedule);
 /// ```
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct FrameSchedule {
     /// Submitted graphs with their completion semaphores.
     submitted: Vec<SubmittedGraph>,
     /// Counter for generating semaphore IDs.
     semaphore_counter: u64,
+    /// Fence signaled when frame completes (set by present()).
+    fence: Option<Fence>,
 }
 
 impl FrameSchedule {
     /// Create a new frame schedule.
-    pub fn new() -> Self {
-        Self::default()
+    ///
+    /// This is called internally by [`FramePipeline::begin_frame`](crate::pipeline::FramePipeline::begin_frame).
+    pub(crate) fn new() -> Self {
+        Self {
+            submitted: Vec::new(),
+            semaphore_counter: 0,
+            fence: None,
+        }
     }
 
     /// Submit a graph for immediate execution.
@@ -186,7 +201,8 @@ impl FrameSchedule {
     /// the specified dependencies, executes the graph, and presents
     /// the result to the swapchain.
     ///
-    /// Returns a fence that will be signaled when the GPU completes this frame.
+    /// After calling this, the schedule is considered complete and should
+    /// be returned to the pipeline via [`FramePipeline::end_frame`](crate::pipeline::FramePipeline::end_frame).
     ///
     /// # Arguments
     ///
@@ -194,21 +210,29 @@ impl FrameSchedule {
     /// * `graph` - The compiled render graph to execute
     /// * `wait_for` - Graphs that must complete before this one starts
     ///
+    /// # Panics
+    ///
+    /// Panics if `present` has already been called on this schedule.
+    ///
     /// # Example
     ///
     /// ```ignore
-    /// let fence = schedule.submit_and_present(
-    ///     "present",
-    ///     final_graph,
-    ///     &[main_pass],
-    /// );
+    /// let mut schedule = pipeline.begin_frame();
+    /// let main = schedule.submit("main", main_graph, &[]);
+    /// schedule.present("present", final_graph, &[main]);
+    /// pipeline.end_frame(schedule);
     /// ```
-    pub fn submit_and_present(
+    pub fn present(
         &mut self,
         name: impl Into<String>,
         graph: CompiledGraph,
         wait_for: &[GraphHandle],
-    ) -> Fence {
+    ) {
+        assert!(
+            self.fence.is_none(),
+            "present() has already been called on this schedule"
+        );
+
         let name = name.into();
 
         // Validate wait_for handles
@@ -244,7 +268,7 @@ impl FrameSchedule {
             waited_for: wait_for.to_vec(),
         });
 
-        fence
+        self.fence = Some(fence);
     }
 
     /// Get the number of submitted graphs.
@@ -257,18 +281,27 @@ impl FrameSchedule {
         self.submitted.is_empty()
     }
 
+    /// Check if the schedule has been presented.
+    pub fn is_presented(&self) -> bool {
+        self.fence.is_some()
+    }
+
     /// Get debug names of all submitted graphs in submission order.
     pub fn submitted_names(&self) -> impl Iterator<Item = &str> {
         self.submitted.iter().map(|s| s.name.as_str())
     }
 
-    /// Reset the schedule for a new frame.
+    /// Extract the fence from this schedule.
     ///
-    /// This clears all submitted graphs. Call this at the start of each frame
-    /// after ensuring the previous frame's work is complete.
-    pub fn reset(&mut self) {
-        self.submitted.clear();
-        // Note: semaphore_counter intentionally not reset for unique IDs
+    /// This is called internally by [`FramePipeline::end_frame`](crate::pipeline::FramePipeline::end_frame).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `present()` was not called.
+    pub(crate) fn take_fence(&mut self) -> Fence {
+        self.fence
+            .take()
+            .expect("present() must be called before end_frame()")
     }
 
     /// Generate a unique semaphore ID.
@@ -370,26 +403,45 @@ mod tests {
     }
 
     #[test]
-    fn test_submit_and_present() {
+    fn test_present() {
         let mut schedule = FrameSchedule::new();
 
         let main = schedule.submit("main", make_test_graph("main"), &[]);
-        let fence = schedule.submit_and_present("present", make_test_graph("present"), &[main]);
+        assert!(!schedule.is_presented());
+
+        schedule.present("present", make_test_graph("present"), &[main]);
 
         assert_eq!(schedule.submitted_count(), 2);
-        assert_eq!(fence.status(), FenceStatus::Unsignaled);
+        assert!(schedule.is_presented());
     }
 
     #[test]
-    fn test_reset() {
+    fn test_take_fence() {
         let mut schedule = FrameSchedule::new();
 
-        schedule.submit("test", make_test_graph("test"), &[]);
-        assert_eq!(schedule.submitted_count(), 1);
+        let main = schedule.submit("main", make_test_graph("main"), &[]);
+        schedule.present("present", make_test_graph("present"), &[main]);
 
-        schedule.reset();
-        assert_eq!(schedule.submitted_count(), 0);
-        assert!(schedule.is_empty());
+        let fence = schedule.take_fence();
+        assert_eq!(fence.status(), FenceStatus::Unsignaled);
+        assert!(!schedule.is_presented()); // Fence was taken
+    }
+
+    #[test]
+    #[should_panic(expected = "present() has already been called")]
+    fn test_double_present_panics() {
+        let mut schedule = FrameSchedule::new();
+
+        schedule.present("present1", make_test_graph("present1"), &[]);
+        schedule.present("present2", make_test_graph("present2"), &[]); // Panics
+    }
+
+    #[test]
+    #[should_panic(expected = "present() must be called before end_frame()")]
+    fn test_take_fence_without_present_panics() {
+        let mut schedule = FrameSchedule::new();
+        schedule.submit("main", make_test_graph("main"), &[]);
+        schedule.take_fence(); // Panics
     }
 
     #[test]
@@ -398,7 +450,7 @@ mod tests {
 
         schedule.submit("shadows", make_test_graph("shadow"), &[]);
         schedule.submit("main", make_test_graph("main"), &[]);
-        schedule.submit("post", make_test_graph("post"), &[]);
+        schedule.present("post", make_test_graph("post"), &[]);
 
         let names: Vec<_> = schedule.submitted_names().collect();
         assert_eq!(names, vec!["shadows", "main", "post"]);
@@ -431,8 +483,9 @@ mod tests {
         let depth = schedule.submit("depth", make_test_graph("depth"), &[shadows]);
         let gbuffer = schedule.submit("gbuffer", make_test_graph("gbuffer"), &[shadows]);
         let main = schedule.submit("main", make_test_graph("main"), &[depth, gbuffer]);
-        let _fence = schedule.submit_and_present("post", make_test_graph("post"), &[main]);
+        schedule.present("post", make_test_graph("post"), &[main]);
 
         assert_eq!(schedule.submitted_count(), 5);
+        assert!(schedule.is_presented());
     }
 }

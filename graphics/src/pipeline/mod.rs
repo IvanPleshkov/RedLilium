@@ -17,6 +17,10 @@
 //!
 //! For the full architecture documentation, see `docs/ARCHITECTURE.md`.
 //!
+//! # Creation
+//!
+//! `FramePipeline` is created by [`GraphicsDevice::create_pipeline`](crate::device::GraphicsDevice::create_pipeline).
+//!
 //! # Synchronization
 //!
 //! - **Fences** (this level): CPU waits for GPU across frames
@@ -26,20 +30,20 @@
 //! # Example
 //!
 //! ```ignore
-//! use redlilium_graphics::pipeline::FramePipeline;
-//! use redlilium_graphics::scheduler::FrameSchedule;
+//! use redlilium_graphics::{GraphicsInstance, FramePipeline};
 //!
-//! let mut pipeline = FramePipeline::new(2);  // 2 frames in flight
+//! let instance = GraphicsInstance::new()?;
+//! let device = instance.create_device()?;
+//! let mut pipeline = device.create_pipeline(2);  // 2 frames in flight
 //!
 //! while !window.should_close() {
-//!     pipeline.begin_frame();  // Wait for frame slot
+//!     let mut schedule = pipeline.begin_frame();  // Wait + get schedule
 //!
-//!     let mut schedule = FrameSchedule::new();
 //!     let shadows = schedule.submit("shadows", shadow_graph, &[]);
 //!     let main = schedule.submit("main", main_graph, &[shadows]);
-//!     let fence = schedule.submit_and_present("present", post_graph, &[main]);
+//!     schedule.present("present", post_graph, &[main]);
 //!
-//!     pipeline.end_frame(fence);
+//!     pipeline.end_frame(schedule);  // Store fence, advance slot
 //! }
 //!
 //! pipeline.wait_idle();  // Graceful shutdown
@@ -55,7 +59,7 @@
 //!
 //! More frames = higher throughput but more input latency and memory usage.
 
-use crate::scheduler::Fence;
+use crate::scheduler::{Fence, FrameSchedule};
 use std::time::Duration;
 
 /// Manages multiple frames in flight for CPU-GPU parallelism.
@@ -63,6 +67,14 @@ use std::time::Duration;
 /// `FramePipeline` coordinates the overlap between CPU frame preparation and
 /// GPU frame execution. It tracks fences for each frame slot and ensures
 /// the CPU doesn't overwrite resources that the GPU is still using.
+///
+/// # Creation
+///
+/// Created via [`GraphicsDevice::create_pipeline`](crate::device::GraphicsDevice::create_pipeline):
+///
+/// ```ignore
+/// let pipeline = device.create_pipeline(2);
+/// ```
 ///
 /// # Frame Slots
 ///
@@ -99,6 +111,8 @@ pub struct FramePipeline {
 impl FramePipeline {
     /// Create a new frame pipeline.
     ///
+    /// This is called internally by [`GraphicsDevice::create_pipeline`](crate::device::GraphicsDevice::create_pipeline).
+    ///
     /// # Arguments
     ///
     /// * `frames_in_flight` - Number of frames that can be in flight simultaneously.
@@ -107,16 +121,7 @@ impl FramePipeline {
     /// # Panics
     ///
     /// Panics if `frames_in_flight` is 0.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use redlilium_graphics::pipeline::FramePipeline;
-    ///
-    /// let pipeline = FramePipeline::new(2);
-    /// assert_eq!(pipeline.frames_in_flight(), 2);
-    /// ```
-    pub fn new(frames_in_flight: usize) -> Self {
+    pub(crate) fn new(frames_in_flight: usize) -> Self {
         assert!(frames_in_flight > 0, "frames_in_flight must be at least 1");
 
         Self {
@@ -127,27 +132,27 @@ impl FramePipeline {
         }
     }
 
-    /// Begin a new frame.
+    /// Begin a new frame and return a schedule for graph submission.
     ///
     /// This waits for the current frame slot to become available. If the GPU
     /// is still processing a previous frame in this slot, this call blocks
     /// until that work completes.
     ///
-    /// Call this at the start of each frame, before building render graphs.
+    /// Returns a [`FrameSchedule`] for submitting render graphs.
     ///
     /// # Example
     ///
     /// ```ignore
     /// loop {
-    ///     pipeline.begin_frame();  // May block if GPU is behind
+    ///     let mut schedule = pipeline.begin_frame();  // Wait + get schedule
     ///
-    ///     // Build and submit frame...
-    ///     let fence = schedule.submit_and_present(...);
+    ///     let main = schedule.submit("main", main_graph, &[]);
+    ///     schedule.present("present", post_graph, &[main]);
     ///
-    ///     pipeline.end_frame(fence);
+    ///     pipeline.end_frame(schedule);
     /// }
     /// ```
-    pub fn begin_frame(&mut self) {
+    pub fn begin_frame(&mut self) -> FrameSchedule {
         // Wait for previous work in this slot to complete
         if let Some(fence) = &self.frame_fences[self.current_slot] {
             fence.wait();
@@ -160,11 +165,13 @@ impl FramePipeline {
             self.frame_count,
             self.current_slot
         );
+
+        FrameSchedule::new()
     }
 
     /// Begin a new frame with a timeout.
     ///
-    /// Like [`begin_frame`](Self::begin_frame), but returns `false` if the
+    /// Like [`begin_frame`](Self::begin_frame), but returns `None` if the
     /// timeout elapses before the frame slot becomes available.
     ///
     /// # Arguments
@@ -173,23 +180,30 @@ impl FramePipeline {
     ///
     /// # Returns
     ///
-    /// `true` if the frame slot is ready, `false` if timeout elapsed.
+    /// `Some(schedule)` if the frame slot is ready, `None` if timeout elapsed.
     ///
     /// # Example
     ///
     /// ```ignore
     /// use std::time::Duration;
     ///
-    /// if !pipeline.begin_frame_timeout(Duration::from_millis(100)) {
-    ///     log::warn!("GPU is falling behind!");
-    ///     // Handle the timeout (skip frame, reduce quality, etc.)
+    /// match pipeline.begin_frame_timeout(Duration::from_millis(100)) {
+    ///     Some(schedule) => {
+    ///         // Normal frame processing
+    ///         schedule.present("present", graph, &[]);
+    ///         pipeline.end_frame(schedule);
+    ///     }
+    ///     None => {
+    ///         log::warn!("GPU is falling behind!");
+    ///         // Handle the timeout (skip frame, reduce quality, etc.)
+    ///     }
     /// }
     /// ```
-    pub fn begin_frame_timeout(&mut self, timeout: Duration) -> bool {
+    pub fn begin_frame_timeout(&mut self, timeout: Duration) -> Option<FrameSchedule> {
         if let Some(fence) = &self.frame_fences[self.current_slot]
             && !fence.wait_timeout(timeout)
         {
-            return false;
+            return None;
         }
 
         self.frame_count += 1;
@@ -200,32 +214,34 @@ impl FramePipeline {
             self.current_slot
         );
 
-        true
+        Some(FrameSchedule::new())
     }
 
     /// End the current frame.
     ///
-    /// Records the fence for this frame and advances to the next frame slot.
-    /// Call this after submitting all work for the frame.
+    /// Takes ownership of the schedule, extracts its fence, and advances
+    /// to the next frame slot.
     ///
     /// # Arguments
     ///
-    /// * `fence` - The fence returned from [`FrameSchedule::submit_and_present`].
+    /// * `schedule` - The schedule returned from [`begin_frame`](Self::begin_frame),
+    ///   after calling [`present`](FrameSchedule::present) on it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`present`](FrameSchedule::present) was not called on the schedule.
     ///
     /// # Example
     ///
     /// ```ignore
-    /// pipeline.begin_frame();
-    ///
-    /// let mut schedule = FrameSchedule::new();
-    /// // ... submit graphs ...
-    /// let fence = schedule.submit_and_present("present", graph, &[deps]);
-    ///
-    /// pipeline.end_frame(fence);  // Records fence, advances slot
+    /// let mut schedule = pipeline.begin_frame();
+    /// let main = schedule.submit("main", main_graph, &[]);
+    /// schedule.present("present", post_graph, &[main]);
+    /// pipeline.end_frame(schedule);  // Takes ownership
     /// ```
-    ///
-    /// [`FrameSchedule::submit_and_present`]: crate::scheduler::FrameSchedule::submit_and_present
-    pub fn end_frame(&mut self, fence: Fence) {
+    pub fn end_frame(&mut self, mut schedule: FrameSchedule) {
+        let fence = schedule.take_fence();
+
         log::trace!(
             "End frame {} (slot {})",
             self.frame_count,
@@ -256,9 +272,9 @@ impl FramePipeline {
     /// ```ignore
     /// // Main loop
     /// while !window.should_close() {
-    ///     pipeline.begin_frame();
+    ///     let mut schedule = pipeline.begin_frame();
     ///     // ... render ...
-    ///     pipeline.end_frame(fence);
+    ///     pipeline.end_frame(schedule);
     /// }
     ///
     /// // Shutdown
@@ -310,7 +326,7 @@ impl FramePipeline {
 
     /// Get the number of frames in flight.
     ///
-    /// This is the value passed to [`new`](Self::new).
+    /// This is the value passed to [`GraphicsDevice::create_pipeline`](crate::device::GraphicsDevice::create_pipeline).
     pub fn frames_in_flight(&self) -> usize {
         self.frames_in_flight
     }
@@ -351,18 +367,28 @@ impl FramePipeline {
             .iter()
             .all(|f| f.as_ref().is_none_or(|fence| fence.is_signaled()))
     }
-}
 
-impl Default for FramePipeline {
-    /// Creates a pipeline with 2 frames in flight (recommended default).
-    fn default() -> Self {
-        Self::new(2)
+    /// Signal all pending fences (for testing).
+    ///
+    /// This simulates GPU completion for all frame slots.
+    #[cfg(test)]
+    pub(crate) fn signal_all_fences(&self) {
+        for fence in self.frame_fences.iter().flatten() {
+            fence.signal();
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::{GraphicsPass, RenderGraph};
+
+    fn make_test_graph(name: &str) -> crate::graph::CompiledGraph {
+        let mut graph = RenderGraph::new();
+        graph.add_graphics_pass(GraphicsPass::new(name.into()));
+        graph.compile().unwrap()
+    }
 
     #[test]
     fn test_new() {
@@ -373,27 +399,19 @@ mod tests {
     }
 
     #[test]
-    fn test_default() {
-        let pipeline = FramePipeline::default();
-        assert_eq!(pipeline.frames_in_flight(), 2);
-    }
-
-    #[test]
     #[should_panic(expected = "frames_in_flight must be at least 1")]
     fn test_zero_frames_panics() {
         FramePipeline::new(0);
     }
 
     #[test]
-    fn test_begin_frame_increments_count() {
+    fn test_begin_frame_returns_schedule() {
         let mut pipeline = FramePipeline::new(2);
-        assert_eq!(pipeline.frame_count(), 0);
+        let schedule = pipeline.begin_frame();
 
-        pipeline.begin_frame();
         assert_eq!(pipeline.frame_count(), 1);
-
-        pipeline.begin_frame();
-        assert_eq!(pipeline.frame_count(), 2);
+        assert!(schedule.is_empty());
+        assert!(!schedule.is_presented());
     }
 
     #[test]
@@ -401,16 +419,24 @@ mod tests {
         let mut pipeline = FramePipeline::new(3);
         assert_eq!(pipeline.current_slot(), 0);
 
-        pipeline.begin_frame();
-        pipeline.end_frame(Fence::default());
+        let mut schedule = pipeline.begin_frame();
+        schedule.present("present", make_test_graph("present"), &[]);
+        pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 1);
 
-        pipeline.begin_frame();
-        pipeline.end_frame(Fence::default());
+        // Signal fences so next begin_frame doesn't block
+        pipeline.signal_all_fences();
+
+        let mut schedule = pipeline.begin_frame();
+        schedule.present("present", make_test_graph("present"), &[]);
+        pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 2);
 
-        pipeline.begin_frame();
-        pipeline.end_frame(Fence::default());
+        pipeline.signal_all_fences();
+
+        let mut schedule = pipeline.begin_frame();
+        schedule.present("present", make_test_graph("present"), &[]);
+        pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 0); // Wraps around
     }
 
@@ -435,50 +461,34 @@ mod tests {
     }
 
     #[test]
-    fn test_wait_idle_with_signaled_fences() {
-        let mut pipeline = FramePipeline::new(2);
-
-        // Create already-signaled fences
-        let fence1 = Fence::default();
-        fence1.signal();
-        let fence2 = Fence::default();
-        fence2.signal();
-
-        pipeline.begin_frame();
-        pipeline.end_frame(fence1);
-
-        pipeline.begin_frame();
-        pipeline.end_frame(fence2);
-
-        // Should return immediately since fences are signaled
-        pipeline.wait_idle();
-        assert!(pipeline.is_idle());
-    }
-
-    #[test]
     fn test_frame_lifecycle() {
         let mut pipeline = FramePipeline::new(2);
 
         // Frame 0
-        pipeline.begin_frame();
+        let mut schedule = pipeline.begin_frame();
         assert_eq!(pipeline.frame_count(), 1);
-        let fence0 = Fence::default();
-        fence0.signal(); // Simulate GPU completion
-        pipeline.end_frame(fence0);
+        schedule.present("present", make_test_graph("present"), &[]);
+        pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 1);
 
+        // Simulate GPU completing frame 0
+        pipeline.signal_all_fences();
+
         // Frame 1
-        pipeline.begin_frame();
+        let mut schedule = pipeline.begin_frame();
         assert_eq!(pipeline.frame_count(), 2);
-        let fence1 = Fence::default();
-        fence1.signal();
-        pipeline.end_frame(fence1);
+        schedule.present("present", make_test_graph("present"), &[]);
+        pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 0);
 
+        // Simulate GPU completing frame 1
+        pipeline.signal_all_fences();
+
         // Frame 2 (reuses slot 0)
-        pipeline.begin_frame(); // Would wait for fence0 if not signaled
+        let schedule = pipeline.begin_frame();
         assert_eq!(pipeline.frame_count(), 3);
         assert_eq!(pipeline.current_slot(), 0);
+        assert!(schedule.is_empty()); // Fresh schedule
     }
 
     #[test]
@@ -486,7 +496,8 @@ mod tests {
         let mut pipeline = FramePipeline::new(2);
 
         // Should succeed immediately (no fence to wait on)
-        assert!(pipeline.begin_frame_timeout(Duration::from_millis(1)));
+        let schedule = pipeline.begin_frame_timeout(Duration::from_millis(1));
+        assert!(schedule.is_some());
         assert_eq!(pipeline.frame_count(), 1);
     }
 
@@ -503,5 +514,31 @@ mod tests {
     fn test_is_slot_ready_invalid() {
         let pipeline = FramePipeline::new(2);
         pipeline.is_slot_ready(5); // Invalid
+    }
+
+    #[test]
+    #[should_panic(expected = "present() must be called before end_frame()")]
+    fn test_end_frame_without_present_panics() {
+        let mut pipeline = FramePipeline::new(2);
+        let schedule = pipeline.begin_frame();
+        pipeline.end_frame(schedule); // Panics - no present() called
+    }
+
+    #[test]
+    fn test_full_frame_with_graphs() {
+        let mut pipeline = FramePipeline::new(2);
+
+        let mut schedule = pipeline.begin_frame();
+
+        // Build a simple dependency chain
+        let shadows = schedule.submit("shadows", make_test_graph("shadow"), &[]);
+        let main = schedule.submit("main", make_test_graph("main"), &[shadows]);
+        schedule.present("present", make_test_graph("present"), &[main]);
+
+        assert_eq!(schedule.submitted_count(), 3);
+        assert!(schedule.is_presented());
+
+        pipeline.end_frame(schedule);
+        assert_eq!(pipeline.current_slot(), 1);
     }
 }

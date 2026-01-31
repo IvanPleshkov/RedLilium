@@ -309,19 +309,20 @@ With streaming submission, we don't want the CPU to wait for the GPU after each 
 Implement `FramePipeline` to manage N frames in flight:
 
 1. Each frame slot has a fence for CPU-GPU synchronization
-2. `begin_frame()` waits only if reusing a slot still in use
-3. `end_frame()` stores the fence and advances to next slot
+2. `begin_frame()` waits only if reusing a slot still in use, returns `FrameSchedule`
+3. `end_frame(schedule)` takes ownership of schedule, extracts fence, advances slot
 4. `wait_idle()` ensures graceful shutdown
 
 ```rust
-let mut pipeline = FramePipeline::new(2);  // 2 frames in flight
+let mut pipeline = device.create_pipeline(2);  // Device creates pipeline
 
 while running {
-    pipeline.begin_frame();   // Waits if slot still in use
-    // ... render ...
-    pipeline.end_frame(fence);
+    let mut schedule = pipeline.begin_frame();  // Waits + returns schedule
+    // ... submit graphs to schedule ...
+    schedule.present("present", graph, &[deps]);
+    pipeline.end_frame(schedule);               // Takes ownership
 }
-pipeline.wait_idle();         // Graceful shutdown
+pipeline.wait_idle();                           // Graceful shutdown
 ```
 
 ### Consequences
@@ -332,3 +333,57 @@ pipeline.wait_idle();         // Graceful shutdown
 - ⚠️ Higher input latency (frames queued ahead)
 - ⚠️ Each frame slot needs its own resources (uniform buffers, etc.)
 - ⚠️ 2-3 frames typical; more increases memory usage
+
+---
+
+## ADR-013: Hierarchical API for Pipeline and Schedule
+
+**Date**: 2025-01-31
+**Status**: Accepted
+
+### Context
+The initial API allowed creating `FramePipeline` and `FrameSchedule` independently:
+
+```rust
+let pipeline = FramePipeline::new(2);
+let mut schedule = FrameSchedule::new();
+// ... submit graphs ...
+let fence = schedule.submit_and_present(...);
+pipeline.end_frame(fence);
+```
+
+This had issues:
+- No clear ownership hierarchy
+- Users could accidentally use a schedule from a different frame
+- Fence extraction was manual and error-prone
+- Pipeline and Schedule lifetimes weren't enforced
+
+### Decision
+Establish a clear creation hierarchy:
+
+1. **Device creates Pipeline**: `device.create_pipeline(frames_in_flight)`
+2. **Pipeline creates Schedule**: `pipeline.begin_frame()` returns `FrameSchedule`
+3. **Schedule consumed by Pipeline**: `pipeline.end_frame(schedule)`
+
+```rust
+let mut pipeline = device.create_pipeline(2);
+
+while running {
+    let mut schedule = pipeline.begin_frame();  // Returns schedule
+    let main = schedule.submit("main", graph, &[]);
+    schedule.present("present", post, &[main]);   // Marks complete
+    pipeline.end_frame(schedule);                 // Takes ownership
+}
+```
+
+The `present()` method replaces `submit_and_present()` and doesn't return a fence.
+Instead, `end_frame()` extracts the fence internally.
+
+### Consequences
+- ✅ Clear ownership: Device → Pipeline → Schedule
+- ✅ Prevents misuse (can't mix schedules between pipelines)
+- ✅ Cleaner API (no manual fence handling)
+- ✅ `present()` must be called before `end_frame()` (enforced with panic)
+- ✅ `FrameSchedule::new()` is `pub(crate)` - can't create directly
+- ⚠️ Slightly more opinionated API
+- ⚠️ Must call `present()` even for off-screen rendering (may revisit)

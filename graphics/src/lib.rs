@@ -6,10 +6,11 @@
 //!
 //! This crate provides:
 //! - [`GraphicsInstance`] - Top-level graphics system entry point
-//! - [`GraphicsDevice`] - Device for creating GPU resources
+//! - [`GraphicsDevice`] - Device for creating GPU resources and pipelines
+//! - [`FramePipeline`] - Frame-level CPU-GPU synchronization
+//! - [`FrameSchedule`] - Streaming graph submission within a frame
 //! - [`RenderGraph`] - Declarative description of render passes and dependencies
 //! - [`Surface`] - Swapchain abstraction for presenting to windows
-//! - [`scene`] - ECS to render graph integration
 //!
 //! ## Rendering Architecture
 //!
@@ -21,6 +22,10 @@
 //! | Graph | [`RenderGraph`] + [`PassHandle`] | Passes and dependencies for one task |
 //! | Schedule | [`FrameSchedule`] + [`GraphHandle`] | Streaming submission of graphs in one frame |
 //! | Pipeline | [`FramePipeline`] | Multiple frames in flight for CPU-GPU overlap |
+//!
+//! **Creation hierarchy:**
+//! - [`GraphicsDevice::create_pipeline`] → [`FramePipeline`]
+//! - [`FramePipeline::begin_frame`] → [`FrameSchedule`]
 //!
 //! **Synchronization primitives:**
 //! - Pass → Pass: Barriers (automatic, within a graph)
@@ -36,11 +41,23 @@
 //!
 //! let instance = GraphicsInstance::new()?;
 //! let device = instance.create_device()?;
+//! let mut pipeline = device.create_pipeline(2);  // 2 frames in flight
 //!
+//! // Build a render graph
 //! let mut graph = RenderGraph::new();
 //! let geometry = graph.add_graphics_pass(GraphicsPass::new("geometry".into()));
 //! let lighting = graph.add_graphics_pass(GraphicsPass::new("lighting".into()));
 //! graph.add_dependency(lighting, geometry);
+//!
+//! // Frame loop
+//! while running {
+//!     let mut schedule = pipeline.begin_frame();
+//!     let main = schedule.submit("main", graph.compile()?, &[]);
+//!     schedule.present("present", post_graph.compile()?, &[main]);
+//!     pipeline.end_frame(schedule);
+//! }
+//!
+//! pipeline.wait_idle();  // Graceful shutdown
 //! ```
 
 pub mod device;
