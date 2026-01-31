@@ -97,6 +97,155 @@ Key abstractions:
 - **Backend trait**: Graphics API abstraction (Vulkan, wgpu, Dummy)
 - **SceneRenderer**: Connects ECS world to render graph
 
+## Rendering Pipeline Architecture
+
+The rendering system is organized in four layers, from low-level to high-level:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          FramePipeline                                  │
+│  Manages multiple frames in flight. Handles CPU-GPU synchronization     │
+│  via fences. Enables frame overlap for maximum throughput.              │
+│                                                                         │
+│  Responsibilities:                                                      │
+│  - Track fences for N frames in flight                                  │
+│  - Wait for frame slot availability (begin_frame)                       │
+│  - Graceful shutdown (wait_idle)                                        │
+├─────────────────────────────────────────────────────────────────────────┤
+│                          FrameSchedule                                  │
+│  Orchestrates multiple render graphs within ONE frame. Enables          │
+│  streaming submission (submit graphs as they're ready).                 │
+│                                                                         │
+│  Responsibilities:                                                      │
+│  - Accept compiled graphs and submit immediately to GPU                 │
+│  - Track dependencies between graphs via semaphores                     │
+│  - Return fence for frame completion                                    │
+├─────────────────────────────────────────────────────────────────────────┤
+│                           RenderGraph                                   │
+│  Describes a set of passes and their dependencies. Represents one       │
+│  logical rendering task (e.g., "shadow rendering", "main scene").       │
+│                                                                         │
+│  Responsibilities:                                                      │
+│  - Store passes (graphics, transfer, compute)                           │
+│  - Track pass-to-pass dependencies                                      │
+│  - Compile to execution order                                           │
+├─────────────────────────────────────────────────────────────────────────┤
+│                              Pass                                       │
+│  A single unit of GPU work (draw calls, copies, dispatches).            │
+│                                                                         │
+│  Types:                                                                 │
+│  - GraphicsPass: vertex/fragment shaders, rasterization                 │
+│  - TransferPass: buffer/texture copies                                  │
+│  - ComputePass: compute shaders                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Synchronization Model
+
+Different synchronization primitives are used at different levels:
+
+| Level | Primitive | Purpose |
+|-------|-----------|---------|
+| Pass → Pass | Barriers | Resource state transitions within a graph |
+| Graph → Graph | Semaphores | GPU-GPU sync within a frame |
+| Frame → Frame | Fences | CPU-GPU sync across frames |
+
+### Frame Overlap (Pipelining)
+
+With 2 frames in flight, the CPU and GPU work in parallel:
+
+```
+Frame 0: [CPU build] [submit] ─────────────────────────────────────────────►
+                              [GPU execute frame 0] ───────────────────────►
+
+Frame 1:              [CPU build] [submit] ────────────────────────────────►
+                                           [GPU execute frame 1] ──────────►
+
+Frame 2:                          [wait F0] [CPU build] [submit] ──────────►
+                                                        [GPU execute F2] ──►
+
+Time ──────────────────────────────────────────────────────────────────────►
+```
+
+- CPU doesn't wait for GPU unless it's reusing a frame slot
+- GPU processes frames in order via semaphores
+- Fences ensure we don't overwrite in-use resources
+
+### Streaming Submission
+
+Unlike batch submission (where all work is queued then submitted), streaming submission
+sends graphs to the GPU immediately as they're ready:
+
+```
+Batch (traditional):
+  [build shadow] [build depth] [build main] [submit all]
+                                                  │
+                                                  ▼ GPU starts here
+
+Streaming (this engine):
+  [build shadow] ──► [submit shadow] ──────────────────────────────►
+                 │                       [GPU: shadow]
+                 └► [build depth] ──► [submit depth] ──────────────►
+                                  │              [GPU: depth]
+                                  └► [build main] ──► [submit main]►
+                                                            [GPU: main]
+```
+
+Benefits:
+- GPU starts earlier while CPU continues building
+- Better CPU-GPU parallelism
+- Lower frame latency
+
+### Graceful Shutdown
+
+When the application exits, call `FramePipeline::wait_idle()` before destroying resources:
+
+```
+[Window Close Event]
+        │
+        ▼
+┌───────────────────┐
+│  Stop rendering   │  Don't start new frames
+└─────────┬─────────┘
+          │
+          ▼
+┌───────────────────┐
+│ pipeline.wait_idle│  Wait for all in-flight GPU work
+└─────────┬─────────┘
+          │
+          ▼
+┌───────────────────┐
+│  Drop resources   │  Safe to destroy GPU objects
+└───────────────────┘
+```
+
+### Typical Frame Flow
+
+```rust
+// Initialization
+let mut pipeline = FramePipeline::new(2);  // 2 frames in flight
+
+// Main loop
+while !window.should_close() {
+    pipeline.begin_frame();  // Wait for frame slot
+
+    // Build render graphs
+    let shadow_graph = build_shadow_graph();
+    let main_graph = build_main_graph();
+
+    // Submit via streaming schedule
+    let mut schedule = FrameSchedule::new();
+    let shadows = schedule.submit("shadows", shadow_graph.compile()?, &[]);
+    let main = schedule.submit("main", main_graph.compile()?, &[shadows]);
+    let fence = schedule.submit_and_present("present", post_graph.compile()?, &[main]);
+
+    pipeline.end_frame(fence);
+}
+
+// Shutdown
+pipeline.wait_idle();  // Wait for GPU before cleanup
+```
+
 ## ECS-Rendering Integration
 
 The engine uses a three-phase rendering approach:

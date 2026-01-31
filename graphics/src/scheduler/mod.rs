@@ -6,6 +6,19 @@
 //!
 //! # Architecture
 //!
+//! `FrameSchedule` is the middle layer of the rendering architecture:
+//!
+//! | Layer | Type | Purpose |
+//! |-------|------|---------|
+//! | Pipeline | [`FramePipeline`](crate::pipeline::FramePipeline) | Multiple frames in flight |
+//! | **Schedule** | [`FrameSchedule`] | Streaming graph submission (this module) |
+//! | Graph | [`RenderGraph`](crate::graph::RenderGraph) | Pass dependencies |
+//! | Pass | [`GraphicsPass`](crate::graph::GraphicsPass), etc. | Single GPU operation |
+//!
+//! For the full architecture documentation, see `docs/ARCHITECTURE.md`.
+//!
+//! # Module Contents
+//!
 //! - [`FrameSchedule`] - Manages streaming submission for a single frame
 //! - [`GraphHandle`] - Handle to a submitted graph, used for dependencies
 //! - [`Semaphore`] - GPU synchronization primitive for graph ordering

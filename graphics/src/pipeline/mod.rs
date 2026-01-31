@@ -4,103 +4,24 @@
 //! across multiple frames, enabling efficient frame overlap (the CPU prepares frame N+1
 //! while the GPU renders frame N).
 //!
-//! # Rendering Architecture Overview
+//! # Architecture
 //!
-//! The rendering system is organized in layers, from low-level to high-level:
+//! `FramePipeline` is the top layer of the rendering architecture:
 //!
-//! ```text
-//! ┌─────────────────────────────────────────────────────────────────────────┐
-//! │                          FramePipeline                                  │
-//! │  Manages multiple frames in flight. Handles CPU-GPU synchronization     │
-//! │  via fences. Enables frame overlap for maximum throughput.              │
-//! │                                                                         │
-//! │  Responsibilities:                                                      │
-//! │  - Track fences for N frames in flight                                  │
-//! │  - Wait for frame slot availability (begin_frame)                       │
-//! │  - Graceful shutdown (wait_idle)                                        │
-//! ├─────────────────────────────────────────────────────────────────────────┤
-//! │                          FrameSchedule                                  │
-//! │  Orchestrates multiple render graphs within ONE frame. Enables          │
-//! │  streaming submission (submit graphs as they're ready).                 │
-//! │                                                                         │
-//! │  Responsibilities:                                                      │
-//! │  - Accept compiled graphs and submit immediately to GPU                 │
-//! │  - Track dependencies between graphs via semaphores                     │
-//! │  - Return fence for frame completion                                    │
-//! ├─────────────────────────────────────────────────────────────────────────┤
-//! │                           RenderGraph                                   │
-//! │  Describes a set of passes and their dependencies. Represents one       │
-//! │  logical rendering task (e.g., "shadow rendering", "main scene").       │
-//! │                                                                         │
-//! │  Responsibilities:                                                      │
-//! │  - Store passes (graphics, transfer, compute)                           │
-//! │  - Track pass-to-pass dependencies                                      │
-//! │  - Compile to execution order                                           │
-//! ├─────────────────────────────────────────────────────────────────────────┤
-//! │                              Pass                                       │
-//! │  A single unit of GPU work (draw calls, copies, dispatches).            │
-//! │                                                                         │
-//! │  Types:                                                                 │
-//! │  - GraphicsPass: vertex/fragment shaders, rasterization                 │
-//! │  - TransferPass: buffer/texture copies                                  │
-//! │  - ComputePass: compute shaders                                         │
-//! └─────────────────────────────────────────────────────────────────────────┘
-//! ```
+//! | Layer | Type | Purpose |
+//! |-------|------|---------|
+//! | **Pipeline** | [`FramePipeline`] | Multiple frames in flight (this module) |
+//! | Schedule | [`FrameSchedule`](crate::scheduler::FrameSchedule) | Streaming graph submission |
+//! | Graph | [`RenderGraph`](crate::graph::RenderGraph) | Pass dependencies |
+//! | Pass | [`GraphicsPass`](crate::graph::GraphicsPass), etc. | Single GPU operation |
 //!
-//! # Synchronization Model
+//! For the full architecture documentation, see `docs/ARCHITECTURE.md`.
 //!
-//! Different synchronization primitives are used at different levels:
+//! # Synchronization
 //!
-//! | Level | Primitive | Purpose |
-//! |-------|-----------|---------|
-//! | Pass → Pass | Barriers | Resource state transitions within a graph |
-//! | Graph → Graph | Semaphores | GPU-GPU sync within a frame |
-//! | Frame → Frame | Fences | CPU-GPU sync across frames |
-//!
-//! # Frame Overlap (Pipelining)
-//!
-//! With 2 frames in flight, the CPU and GPU work in parallel:
-//!
-//! ```text
-//! Frame 0: [CPU build] [submit] ─────────────────────────────────────────────►
-//!                               [GPU execute frame 0] ───────────────────────►
-//!
-//! Frame 1:              [CPU build] [submit] ────────────────────────────────►
-//!                                            [GPU execute frame 1] ──────────►
-//!
-//! Frame 2:                          [wait F0] [CPU build] [submit] ──────────►
-//!                                                         [GPU execute F2] ──►
-//!
-//! Time ──────────────────────────────────────────────────────────────────────►
-//! ```
-//!
-//! - CPU doesn't wait for GPU unless it's reusing a frame slot
-//! - GPU processes frames in order via semaphores
-//! - Fences ensure we don't overwrite in-use resources
-//!
-//! # Graceful Shutdown
-//!
-//! When the application exits (e.g., window close), call [`FramePipeline::wait_idle`]
-//! to ensure all GPU work completes before destroying resources:
-//!
-//! ```text
-//! [Window Close Event]
-//!         │
-//!         ▼
-//! ┌───────────────────┐
-//! │  Stop rendering   │  Don't start new frames
-//! └─────────┬─────────┘
-//!           │
-//!           ▼
-//! ┌───────────────────┐
-//! │ pipeline.wait_idle│  Wait for all in-flight GPU work
-//! └─────────┬─────────┘
-//!           │
-//!           ▼
-//! ┌───────────────────┐
-//! │  Drop resources   │  Safe to destroy GPU objects
-//! └───────────────────┘
-//! ```
+//! - **Fences** (this level): CPU waits for GPU across frames
+//! - **Semaphores** (schedule level): GPU-GPU sync within a frame
+//! - **Barriers** (graph level): Resource transitions within a graph
 //!
 //! # Example
 //!
@@ -108,28 +29,20 @@
 //! use redlilium_graphics::pipeline::FramePipeline;
 //! use redlilium_graphics::scheduler::FrameSchedule;
 //!
-//! // Create pipeline with 2 frames in flight
-//! let mut pipeline = FramePipeline::new(2);
+//! let mut pipeline = FramePipeline::new(2);  // 2 frames in flight
 //!
-//! // Main loop
 //! while !window.should_close() {
-//!     // Wait for frame slot (blocks if GPU is behind)
-//!     pipeline.begin_frame();
+//!     pipeline.begin_frame();  // Wait for frame slot
 //!
-//!     // Build and submit this frame's work
 //!     let mut schedule = FrameSchedule::new();
 //!     let shadows = schedule.submit("shadows", shadow_graph, &[]);
 //!     let main = schedule.submit("main", main_graph, &[shadows]);
 //!     let fence = schedule.submit_and_present("present", post_graph, &[main]);
 //!
-//!     // Record fence for this frame
 //!     pipeline.end_frame(fence);
 //! }
 //!
-//! // Graceful shutdown - wait for all GPU work
-//! pipeline.wait_idle();
-//!
-//! // Now safe to destroy device, resources, etc.
+//! pipeline.wait_idle();  // Graceful shutdown
 //! ```
 //!
 //! # Choosing Frames in Flight
@@ -137,11 +50,10 @@
 //! | Count | Behavior |
 //! |-------|----------|
 //! | 1 | CPU waits for GPU every frame. Simple but slow. |
-//! | 2 | Good balance. CPU can work on N+1 while GPU renders N. |
+//! | 2 | Good balance. CPU can work on N+1 while GPU renders N. (Recommended) |
 //! | 3 | More overlap, higher latency. Useful for VR or heavy CPU work. |
 //!
-//! More frames = more throughput but higher input latency and memory usage
-//! (each frame needs its own resources like uniform buffers).
+//! More frames = higher throughput but more input latency and memory usage.
 
 use crate::scheduler::Fence;
 use std::time::Duration;

@@ -8,6 +8,19 @@
 //! - Synchronization and barrier insertion
 //! - Memory aliasing opportunities
 //!
+//! # Architecture
+//!
+//! `RenderGraph` is the graph layer of the rendering architecture:
+//!
+//! | Layer | Type | Purpose |
+//! |-------|------|---------|
+//! | Pipeline | [`FramePipeline`](crate::pipeline::FramePipeline) | Multiple frames in flight |
+//! | Schedule | [`FrameSchedule`](crate::scheduler::FrameSchedule) | Streaming graph submission |
+//! | **Graph** | [`RenderGraph`] | Pass dependencies (this module) |
+//! | Pass | [`GraphicsPass`], [`TransferPass`], [`ComputePass`] | Single GPU operation |
+//!
+//! For the full architecture documentation, see `docs/ARCHITECTURE.md`.
+//!
 //! # Example
 //!
 //! ```ignore

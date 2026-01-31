@@ -263,3 +263,72 @@ Support a one-to-many relationship between backends and render graphs:
 - ⚠️ Need careful resource lifetime management
 - ⚠️ Backend complexity increases with shared state
 - ⚠️ Cross-graph synchronization requires explicit barriers
+
+---
+
+## ADR-010: Streaming Graph Submission
+
+**Date**: 2025-01-31
+**Status**: Accepted
+
+### Context
+Traditional render systems batch all work and submit at frame end. This leaves the GPU idle while the CPU builds subsequent passes. We wanted to maximize CPU-GPU parallelism.
+
+### Decision
+Implement streaming submission via `FrameSchedule`:
+
+1. Each `submit()` call immediately sends work to the GPU
+2. GPU semaphores synchronize dependencies between graphs
+3. CPU continues building while GPU executes
+
+```rust
+let shadows = schedule.submit("shadows", shadow_graph, &[]);     // GPU starts now
+let main = schedule.submit("main", main_graph, &[shadows]);      // Waits on shadow
+```
+
+### Consequences
+- ✅ GPU starts earlier, reducing frame latency
+- ✅ Better CPU-GPU parallelism
+- ✅ Natural expression of rendering dependencies
+- ✅ Semaphores handle GPU-side ordering
+- ⚠️ More complex than batch submission
+- ⚠️ Dependency graph must be acyclic
+- ⚠️ Submitted graphs cannot be modified
+
+---
+
+## ADR-011: Frame Pipelining with Fences
+
+**Date**: 2025-01-31
+**Status**: Accepted
+
+### Context
+With streaming submission, we don't want the CPU to wait for the GPU after each frame. Multiple frames should be "in flight" simultaneously for maximum throughput.
+
+### Decision
+Implement `FramePipeline` to manage N frames in flight:
+
+1. Each frame slot has a fence for CPU-GPU synchronization
+2. `begin_frame()` waits only if reusing a slot still in use
+3. `end_frame()` stores the fence and advances to next slot
+4. `wait_idle()` ensures graceful shutdown
+
+```rust
+let mut pipeline = FramePipeline::new(2);  // 2 frames in flight
+
+while running {
+    pipeline.begin_frame();   // Waits if slot still in use
+    // ... render ...
+    pipeline.end_frame(fence);
+}
+pipeline.wait_idle();         // Graceful shutdown
+```
+
+### Consequences
+- ✅ CPU can work on frame N+1 while GPU renders frame N
+- ✅ Higher throughput (better GPU utilization)
+- ✅ Clean separation from scheduling logic
+- ✅ Graceful shutdown prevents resource destruction races
+- ⚠️ Higher input latency (frames queued ahead)
+- ⚠️ Each frame slot needs its own resources (uniform buffers, etc.)
+- ⚠️ 2-3 frames typical; more increases memory usage

@@ -151,3 +151,10 @@ Explain please how to cover window close event? Is it looks fine for gracefully 
 Yes, implement please the frame pipeline in the graphics crate in the separate folder.
 Please make a lot of attention to documentation.
 It seems there are a gap of render pipeline, render scheduler and render graph
+
+## Request 22:
+The file `graphics\src\pipeline\mod.rs` has a great description of rendering architecture of the graphics crate.
+Can you please move the global vision of the rendering process to the follow list of targets (decide if its needed to be shorted for each target):
+- `lib.rs` of the graphics crate
+- `docs\ARCHITECTURE.md`
+- `docs\DECISIONS.md`

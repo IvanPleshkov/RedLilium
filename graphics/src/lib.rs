@@ -11,6 +11,24 @@
 //! - [`Surface`] - Swapchain abstraction for presenting to windows
 //! - [`scene`] - ECS to render graph integration
 //!
+//! ## Rendering Architecture
+//!
+//! The rendering system is organized in layers, from low-level to high-level:
+//!
+//! | Layer | Type | Purpose |
+//! |-------|------|---------|
+//! | Pass | [`GraphicsPass`], [`TransferPass`], [`ComputePass`] | Single unit of GPU work |
+//! | Graph | [`RenderGraph`] + [`PassHandle`] | Passes and dependencies for one task |
+//! | Schedule | [`FrameSchedule`] + [`GraphHandle`] | Streaming submission of graphs in one frame |
+//! | Pipeline | [`FramePipeline`] | Multiple frames in flight for CPU-GPU overlap |
+//!
+//! **Synchronization primitives:**
+//! - Pass → Pass: Barriers (automatic, within a graph)
+//! - Graph → Graph: [`Semaphore`] (GPU-GPU sync within a frame)
+//! - Frame → Frame: [`Fence`] (CPU-GPU sync across frames)
+//!
+//! For detailed architecture documentation, see `docs/ARCHITECTURE.md`.
+//!
 //! ## Example
 //!
 //! ```ignore
