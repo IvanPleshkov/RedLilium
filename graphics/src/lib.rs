@@ -37,7 +37,10 @@ pub mod types;
 // Re-export main types for convenience
 pub use device::{DeviceCapabilities, GraphicsDevice};
 pub use error::GraphicsError;
-pub use graph::{PassHandle, PassType, RenderGraph, RenderPass, ResourceHandle};
+pub use graph::{
+    ColorAttachment, DepthStencilAttachment, LoadOp, PassHandle, PassType, RenderGraph, RenderPass,
+    RenderTarget, RenderTargetConfig, ResourceHandle, StoreOp,
+};
 pub use instance::{AdapterInfo, AdapterType, GraphicsInstance};
 pub use materials::{
     BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BoundResource, Material,

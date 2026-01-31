@@ -7,12 +7,32 @@
 //! - Resource lifetime analysis
 //! - Synchronization and barrier insertion
 //! - Memory aliasing opportunities
+//!
+//! # Render Targets
+//!
+//! Graphics passes can have render targets configured to specify where they render:
+//!
+//! ```ignore
+//! use redlilium_graphics::{RenderGraph, PassType, ColorAttachment, RenderTargetConfig, LoadOp};
+//!
+//! let mut graph = RenderGraph::new();
+//! let pass = graph.add_pass("main", PassType::Graphics);
+//!
+//! // Configure to render to surface
+//! graph.set_render_targets(pass, RenderTargetConfig::new()
+//!     .with_color(ColorAttachment::from_surface(&surface_texture)
+//!         .with_clear_color(0.0, 0.0, 0.0, 1.0)));
+//! ```
 
 mod pass;
 mod resource;
+mod target;
 
 pub use pass::{PassHandle, PassType, RenderPass};
 pub use resource::ResourceHandle;
+pub use target::{
+    ColorAttachment, DepthStencilAttachment, LoadOp, RenderTarget, RenderTargetConfig, StoreOp,
+};
 
 /// The render graph describes a frame's rendering operations.
 ///
@@ -62,6 +82,58 @@ impl RenderGraph {
     /// Get the number of passes in the graph.
     pub fn pass_count(&self) -> usize {
         self.passes.len()
+    }
+
+    /// Get a mutable reference to a pass by handle.
+    pub fn get_pass_mut(&mut self, handle: PassHandle) -> Option<&mut RenderPass> {
+        self.passes.get_mut(handle.index() as usize)
+    }
+
+    /// Get a reference to a pass by handle.
+    pub fn get_pass(&self, handle: PassHandle) -> Option<&RenderPass> {
+        self.passes.get(handle.index() as usize)
+    }
+
+    /// Set render targets for a graphics pass.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pass handle is invalid.
+    pub fn set_render_targets(
+        &mut self,
+        handle: PassHandle,
+        config: RenderTargetConfig,
+    ) -> Result<(), GraphError> {
+        let pass = self
+            .passes
+            .get_mut(handle.index() as usize)
+            .ok_or(GraphError::InvalidPass)?;
+        pass.set_render_targets(config);
+        Ok(())
+    }
+
+    /// Add a dependency between passes.
+    ///
+    /// The dependent pass will execute after the dependency.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if either pass handle is invalid.
+    pub fn add_dependency(
+        &mut self,
+        dependent: PassHandle,
+        dependency: PassHandle,
+    ) -> Result<(), GraphError> {
+        // Validate both handles exist
+        if self.passes.get(dependency.index() as usize).is_none() {
+            return Err(GraphError::InvalidPass);
+        }
+        let pass = self
+            .passes
+            .get_mut(dependent.index() as usize)
+            .ok_or(GraphError::InvalidPass)?;
+        pass.add_dependency(dependency);
+        Ok(())
     }
 
     /// Compile the graph for execution.
@@ -123,6 +195,8 @@ impl std::error::Error for GraphError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::instance::GraphicsInstance;
+    use crate::types::{TextureDescriptor, TextureFormat, TextureUsage};
 
     #[test]
     fn test_add_pass() {
@@ -139,5 +213,55 @@ mod tests {
         graph.clear();
 
         assert_eq!(graph.pass_count(), 0);
+    }
+
+    #[test]
+    fn test_set_render_targets() {
+        let instance = GraphicsInstance::new().unwrap();
+        let device = instance.create_device().unwrap();
+        let texture = device
+            .create_texture(&TextureDescriptor::new_2d(
+                1920,
+                1080,
+                TextureFormat::Rgba8Unorm,
+                TextureUsage::RENDER_ATTACHMENT,
+            ))
+            .unwrap();
+
+        let mut graph = RenderGraph::new();
+        let pass = graph.add_pass("main", PassType::Graphics);
+
+        let config = RenderTargetConfig::new().with_color(
+            ColorAttachment::from_texture(texture).with_clear_color(0.0, 0.0, 0.0, 1.0),
+        );
+
+        graph.set_render_targets(pass, config).unwrap();
+
+        let render_pass = graph.get_pass(pass).unwrap();
+        assert!(render_pass.has_render_targets());
+    }
+
+    #[test]
+    fn test_add_dependency() {
+        let mut graph = RenderGraph::new();
+        let pass1 = graph.add_pass("geometry", PassType::Graphics);
+        let pass2 = graph.add_pass("lighting", PassType::Graphics);
+
+        graph.add_dependency(pass2, pass1).unwrap();
+
+        let lighting_pass = graph.get_pass(pass2).unwrap();
+        assert_eq!(lighting_pass.dependencies().len(), 1);
+    }
+
+    #[test]
+    fn test_invalid_pass_handle() {
+        let mut graph = RenderGraph::new();
+        let pass = graph.add_pass("test", PassType::Graphics);
+
+        // Clear the graph, making the handle invalid
+        graph.clear();
+
+        let result = graph.set_render_targets(pass, RenderTargetConfig::new());
+        assert!(result.is_err());
     }
 }

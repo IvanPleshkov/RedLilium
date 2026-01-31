@@ -2,6 +2,8 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use super::target::RenderTargetConfig;
+
 /// Handle to a render pass in the graph.
 ///
 /// Handles are lightweight and can be copied freely.
@@ -42,6 +44,8 @@ pub enum PassType {
 /// A render pass in the graph.
 ///
 /// Render passes describe a unit of GPU work with its resource dependencies.
+/// For graphics passes, render targets can be configured to specify where
+/// the pass renders to.
 #[derive(Debug)]
 pub struct RenderPass {
     /// Debug name for the pass.
@@ -50,6 +54,8 @@ pub struct RenderPass {
     pass_type: PassType,
     /// Passes that must execute before this one.
     dependencies: Vec<PassHandle>,
+    /// Render targets for graphics passes.
+    render_targets: Option<RenderTargetConfig>,
 }
 
 impl RenderPass {
@@ -59,6 +65,7 @@ impl RenderPass {
             name,
             pass_type,
             dependencies: Vec::new(),
+            render_targets: None,
         }
     }
 
@@ -82,5 +89,25 @@ impl RenderPass {
         if !self.dependencies.contains(&pass) {
             self.dependencies.push(pass);
         }
+    }
+
+    /// Get the render target configuration.
+    pub fn render_targets(&self) -> Option<&RenderTargetConfig> {
+        self.render_targets.as_ref()
+    }
+
+    /// Set the render target configuration.
+    ///
+    /// This is only meaningful for graphics passes.
+    pub fn set_render_targets(&mut self, config: RenderTargetConfig) {
+        self.render_targets = Some(config);
+    }
+
+    /// Check if this pass has render targets configured.
+    pub fn has_render_targets(&self) -> bool {
+        self.render_targets
+            .as_ref()
+            .map(|c| c.has_attachments())
+            .unwrap_or(false)
     }
 }
