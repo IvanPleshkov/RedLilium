@@ -7,6 +7,7 @@ use std::sync::{Arc, RwLock, Weak};
 
 use crate::error::GraphicsError;
 use crate::instance::GraphicsInstance;
+use crate::materials::{Material, MaterialDescriptor};
 use crate::resources::{Buffer, Sampler, Texture};
 use crate::types::{BufferDescriptor, SamplerDescriptor, TextureDescriptor};
 
@@ -68,6 +69,7 @@ pub struct GraphicsDevice {
     buffers: RwLock<Vec<Weak<Buffer>>>,
     textures: RwLock<Vec<Weak<Texture>>>,
     samplers: RwLock<Vec<Weak<Sampler>>>,
+    materials: RwLock<Vec<Weak<Material>>>,
 }
 
 impl GraphicsDevice {
@@ -80,6 +82,7 @@ impl GraphicsDevice {
             buffers: RwLock::new(Vec::new()),
             textures: RwLock::new(Vec::new()),
             samplers: RwLock::new(Vec::new()),
+            materials: RwLock::new(Vec::new()),
         }
     }
 
@@ -204,6 +207,28 @@ impl GraphicsDevice {
         Ok(sampler)
     }
 
+    /// Create a material.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if material creation fails.
+    pub fn create_material(
+        self: &Arc<Self>,
+        descriptor: &MaterialDescriptor,
+    ) -> Result<Arc<Material>, GraphicsError> {
+        // Create the material
+        let material = Arc::new(Material::new(Arc::clone(self), descriptor.clone()));
+
+        // Track it
+        if let Ok(mut materials) = self.materials.write() {
+            materials.push(Arc::downgrade(&material));
+        }
+
+        log::trace!("GraphicsDevice: created material {:?}", descriptor.label);
+
+        Ok(material)
+    }
+
     /// Get the number of live buffers created by this device.
     pub fn buffer_count(&self) -> usize {
         self.buffers
@@ -228,6 +253,14 @@ impl GraphicsDevice {
             .unwrap_or(0)
     }
 
+    /// Get the number of live materials created by this device.
+    pub fn material_count(&self) -> usize {
+        self.materials
+            .read()
+            .map(|m| m.iter().filter(|w| w.strong_count() > 0).count())
+            .unwrap_or(0)
+    }
+
     /// Clean up dead weak references to released resources.
     pub fn cleanup_dead_resources(&self) {
         if let Ok(mut buffers) = self.buffers.write() {
@@ -238,6 +271,9 @@ impl GraphicsDevice {
         }
         if let Ok(mut samplers) = self.samplers.write() {
             samplers.retain(|w| w.strong_count() > 0);
+        }
+        if let Ok(mut materials) = self.materials.write() {
+            materials.retain(|w| w.strong_count() > 0);
         }
     }
 }
@@ -257,6 +293,7 @@ static_assertions::assert_impl_all!(GraphicsDevice: Send, Sync);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::materials::ShaderSource;
     use crate::types::{BufferUsage, TextureFormat, TextureUsage};
 
     fn create_test_device() -> Arc<GraphicsDevice> {
@@ -335,5 +372,19 @@ mod tests {
         // Buffer dropped
         device.cleanup_dead_resources();
         assert_eq!(device.buffer_count(), 0);
+    }
+
+    #[test]
+    fn test_create_material() {
+        let device = create_test_device();
+        let material = device
+            .create_material(
+                &MaterialDescriptor::new()
+                    .with_shader(ShaderSource::vertex(b"vs".to_vec(), "main"))
+                    .with_label("test_material"),
+            )
+            .unwrap();
+        assert_eq!(material.label(), Some("test_material"));
+        assert_eq!(device.material_count(), 1);
     }
 }

@@ -57,3 +57,10 @@ The motivation is keeping device and instance alive when depend resource is aliv
 
 ## Request 7:
 Let's refactor render graph in graphics crate. `TextureHandle` and `BufferHandle` are not needed anymore. Please use `Arc<Buffer>` and `Arc<Texture>` instead.
+
+## Request 8:
+Let's add material to the graphics crate.
+I wish to have a `Material` and `MaterialInstance`. Let me describe both.
+`Material` is a structure, created by devide and it holds the material related stuff like shader, bindings, etc.
+`MaterialInstance` contains the reuired data to perform actual rendering like `Arc<Buffer>` etc. `MaterialInstance` contains `Arc` to related `Material`.
+Also `MaterialInstance` bindings are described by separate structure to contain layout - we will make it complicated later and optimized to minimize render state switches (like camera uniform is definetly must be shared between scene objects draw calls). But keep in mind while designing that se wish to reduce unnecessary binding changes.

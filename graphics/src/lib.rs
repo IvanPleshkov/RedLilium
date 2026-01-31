@@ -32,6 +32,7 @@ pub mod device;
 pub mod error;
 pub mod graph;
 pub mod instance;
+pub mod materials;
 pub mod resources;
 pub mod scene;
 pub mod types;
@@ -41,6 +42,10 @@ pub use device::{DeviceCapabilities, GraphicsDevice};
 pub use error::GraphicsError;
 pub use graph::{PassHandle, RenderGraph, RenderPass, ResourceHandle};
 pub use instance::{AdapterInfo, AdapterType, GraphicsInstance};
+pub use materials::{
+    BindingFrequency, BindingLayout, BindingLayoutEntry, BindingType, BoundResource, Material,
+    MaterialDescriptor, MaterialInstance, ShaderSource, ShaderStage,
+};
 pub use resources::{Buffer, Sampler, Texture};
 pub use scene::{
     CameraRenderContext, CameraSystem, ExtractedCamera, ExtractedMaterial, ExtractedMesh,
