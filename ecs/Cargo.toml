@@ -1,0 +1,11 @@
+[package]
+name = "redlilium-ecs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ECS components and systems for RedLilium Engine"
+
+[dependencies]
+log.workspace = true
+bevy_ecs = { version = "0.18.0", default-features = false }
+glam = "0.31"

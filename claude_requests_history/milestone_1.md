@@ -2,7 +2,7 @@
 
 This file describes all requests to claude code related to the milestone.
 
-Request:
+### Request:
 Lets start! I want to create a FPS videogame as the result of the project.
 We dont create the entire game right now, but we will create the basic structure.
 Start with an empty project structure. The lauguage is RUST. Graphics engine will be custom.
@@ -18,15 +18,15 @@ Imagine also how to handle the documentation for the project. and how to connect
 think about the best practices to keep the documentation updated with the code changes.
 And also keep in mind that claude code can read the documentation and use it to answer questions about the codebase.
 
-Request:
+### Request:
 I try to build the web target using instructions from Readme but I get this error. It seems Corgo.toml is missing something. Fix it.
 asm-pack build demos --target web --out-dir web/pkg
 Error: crate-type must be cdylib to compile to wasm32-unknown-unknown. Add the following to your Cargo.toml file:
 
-Request:
+### Request:
 Please change Readme file and provide web run instructions using cargo modules instead of python http server.
 
-Request:
+### Request:
 I develop this project using AI agent systems. I need some script to help bots to test the project after each change.
 Create a folder scripts/ with a script to do steps:
 - Test the build for native target
@@ -37,31 +37,31 @@ Also provide instructions in the Readme file and docs folder on how to use this 
 It's important that the script works in all major operating systems: Linux, Windows and MacOS.
 Try to change docs so that claude code will use this script to test the project after each change.
 
-Request:
+### Request:
 Add a git hook to check cargo fmt before each commit.
 Because docs are used by claude code, skip the formatting check for docs folder.
 Add a new file Contributing.md with instructions on how to setup the git hooks and mention that code must be formatted before each commit.
 
-Request:
+### Request:
 I need a github actions workflow to test the project on each push and pull request.
 There is already a script to test the project, look at Readme and docs for instructions about the script.
 The workflow must run on ubuntu-latest, windows-latest and macos-latest.
 The workflow should be triggered on each changes to main branch and also on each pull request to any branch.
 
-Request:
+### Request:
 Add please a CI step with cargo fmt check to the github actions workflow.
 
-Request:
+### Request:
 There is a problem with the github CI workflow.
 There is an error in github CI:
 Error: Unable to resolve action dtolnay/rust-action, repository not found
 
-Request:
+### Request:
 Because the project is a graphics engine, it's important to include graphical tests in the CI workflow.
 Please add a CI step with installing a hardware accelerated OpenGL driver on each OS used in the workflow.
 And also vulkan emulator.
 
-Request:
+### Request:
 Windows github CI cannot install graphics emulators, there is an error:
 Extracting archive: C:\Users\RUNNER~1\AppData\Local\Temp\mesa\mesa.7z
 Path = C:\Users\RUNNER~1\AppData\Local\Temp\mesa\mesa.7z
@@ -82,7 +82,7 @@ Line |
      | Access to the path 'C:\Windows\System32\opengl32.dll' is denied.
 Error: Process completed with exit code 1.
 
-Request:
+### Request:
 It seems windows github CI is stucked and cannot be finished, here is the full log. Please check is log is correct and fix the problem if it is a problem on our side.
 Run # Download Mesa for Windows (software OpenGL via llvmpipe)
     Directory: C:\Users\RUNNER~1\AppData\Local\Temp
@@ -107,7 +107,7 @@ Compressed: 71852727
 Mode                 LastWriteTime         Length Name
 d----           1/30/2026 10:00 PM                mesa-dll
 
-Request:
+### Request:
 I see the error in the windows github CI log. Please fix the problem.
 Run # Download Mesa for Windows (software OpenGL via llvmpipe)
     Directory: C:\Users\RUNNER~1\AppData\Local\Temp
