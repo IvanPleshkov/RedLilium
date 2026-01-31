@@ -13,19 +13,14 @@
 //! ## Example
 //!
 //! ```ignore
-//! use redlilium_graphics::{GraphicsInstance, GraphicsDevice, RenderGraph};
+//! use redlilium_graphics::{GraphicsInstance, RenderGraph, PassType};
 //!
 //! let instance = GraphicsInstance::new()?;
 //! let device = instance.create_device()?;
 //!
-//! let texture = device.create_texture(&TextureDescriptor::new_2d(
-//!     1920, 1080,
-//!     TextureFormat::Rgba8Unorm,
-//!     TextureUsage::RENDER_ATTACHMENT,
-//! ))?;
-//!
 //! let mut graph = RenderGraph::new();
-//! graph.add_texture(texture);
+//! graph.add_pass("geometry", PassType::Graphics);
+//! graph.add_pass("lighting", PassType::Graphics);
 //! ```
 
 pub mod device;
@@ -40,7 +35,7 @@ pub mod types;
 // Re-export main types for convenience
 pub use device::{DeviceCapabilities, GraphicsDevice};
 pub use error::GraphicsError;
-pub use graph::{PassHandle, RenderGraph, RenderPass, ResourceHandle};
+pub use graph::{PassHandle, PassType, RenderGraph, RenderPass, ResourceHandle};
 pub use instance::{AdapterInfo, AdapterType, GraphicsInstance};
 pub use materials::{
     BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BoundResource, Material,

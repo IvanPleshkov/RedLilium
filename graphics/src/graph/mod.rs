@@ -14,28 +14,16 @@ mod resource;
 pub use pass::{PassHandle, PassType, RenderPass};
 pub use resource::ResourceHandle;
 
-use std::sync::Arc;
-
-use crate::resources::{Buffer, Texture};
-
 /// The render graph describes a frame's rendering operations.
 ///
 /// # Construction
 ///
-/// Build a graph by adding resources and passes:
+/// Build a graph by adding passes:
 ///
 /// ```ignore
 /// let mut graph = RenderGraph::new();
-///
-/// let depth_texture = device.create_texture(&TextureDescriptor::new_2d(
-///     1920, 1080,
-///     TextureFormat::Depth32Float,
-///     TextureUsage::RENDER_ATTACHMENT,
-/// ))?;
-///
-/// graph.add_texture(depth_texture);
-///
 /// graph.add_pass("geometry", PassType::Graphics);
+/// graph.add_pass("lighting", PassType::Graphics);
 /// ```
 ///
 /// # Execution
@@ -49,44 +37,12 @@ use crate::resources::{Buffer, Texture};
 pub struct RenderGraph {
     /// All passes in the graph.
     passes: Vec<RenderPass>,
-    /// Textures used by the graph.
-    textures: Vec<Arc<Texture>>,
-    /// Buffers used by the graph.
-    buffers: Vec<Arc<Buffer>>,
 }
 
 impl RenderGraph {
     /// Create a new empty render graph.
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Add a texture resource to the graph.
-    ///
-    /// The texture must have been created by a [`GraphicsDevice`].
-    ///
-    /// [`GraphicsDevice`]: crate::GraphicsDevice
-    pub fn add_texture(&mut self, texture: Arc<Texture>) {
-        self.textures.push(texture);
-    }
-
-    /// Add a buffer resource to the graph.
-    ///
-    /// The buffer must have been created by a [`GraphicsDevice`].
-    ///
-    /// [`GraphicsDevice`]: crate::GraphicsDevice
-    pub fn add_buffer(&mut self, buffer: Arc<Buffer>) {
-        self.buffers.push(buffer);
-    }
-
-    /// Check if the graph contains a texture.
-    pub fn contains_texture(&self, texture: &Arc<Texture>) -> bool {
-        self.textures.iter().any(|t| Arc::ptr_eq(t, texture))
-    }
-
-    /// Check if the graph contains a buffer.
-    pub fn contains_buffer(&self, buffer: &Arc<Buffer>) -> bool {
-        self.buffers.iter().any(|b| Arc::ptr_eq(b, buffer))
     }
 
     /// Add a render pass to the graph.
@@ -103,29 +59,9 @@ impl RenderGraph {
         &self.passes
     }
 
-    /// Get all imported textures.
-    pub fn textures(&self) -> &[Arc<Texture>] {
-        &self.textures
-    }
-
-    /// Get all imported buffers.
-    pub fn buffers(&self) -> &[Arc<Buffer>] {
-        &self.buffers
-    }
-
     /// Get the number of passes in the graph.
     pub fn pass_count(&self) -> usize {
         self.passes.len()
-    }
-
-    /// Get the number of imported textures.
-    pub fn texture_count(&self) -> usize {
-        self.textures.len()
-    }
-
-    /// Get the number of imported buffers.
-    pub fn buffer_count(&self) -> usize {
-        self.buffers.len()
     }
 
     /// Compile the graph for execution.
@@ -141,11 +77,9 @@ impl RenderGraph {
         })
     }
 
-    /// Clear all passes and resources from the graph.
+    /// Clear all passes from the graph.
     pub fn clear(&mut self) {
         self.passes.clear();
-        self.textures.clear();
-        self.buffers.clear();
     }
 }
 
@@ -189,52 +123,6 @@ impl std::error::Error for GraphError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::instance::GraphicsInstance;
-    use crate::types::{
-        BufferDescriptor, BufferUsage, TextureDescriptor, TextureFormat, TextureUsage,
-    };
-
-    fn create_test_device() -> Arc<crate::device::GraphicsDevice> {
-        let instance = GraphicsInstance::new().unwrap();
-        instance.create_device().unwrap()
-    }
-
-    fn create_test_texture() -> Arc<Texture> {
-        let device = create_test_device();
-        device
-            .create_texture(&TextureDescriptor::new_2d(
-                1920,
-                1080,
-                TextureFormat::Rgba8Unorm,
-                TextureUsage::RENDER_ATTACHMENT,
-            ))
-            .unwrap()
-    }
-
-    fn create_test_buffer() -> Arc<Buffer> {
-        let device = create_test_device();
-        device
-            .create_buffer(&BufferDescriptor::new(1024, BufferUsage::VERTEX))
-            .unwrap()
-    }
-
-    #[test]
-    fn test_add_texture() {
-        let mut graph = RenderGraph::new();
-        let texture = create_test_texture();
-        graph.add_texture(texture.clone());
-        assert_eq!(graph.texture_count(), 1);
-        assert!(graph.contains_texture(&texture));
-    }
-
-    #[test]
-    fn test_add_buffer() {
-        let mut graph = RenderGraph::new();
-        let buffer = create_test_buffer();
-        graph.add_buffer(buffer.clone());
-        assert_eq!(graph.buffer_count(), 1);
-        assert!(graph.contains_buffer(&buffer));
-    }
 
     #[test]
     fn test_add_pass() {
@@ -246,14 +134,10 @@ mod tests {
     #[test]
     fn test_clear() {
         let mut graph = RenderGraph::new();
-        graph.add_texture(create_test_texture());
-        graph.add_buffer(create_test_buffer());
         graph.add_pass("test_pass", PassType::Graphics);
 
         graph.clear();
 
-        assert_eq!(graph.texture_count(), 0);
-        assert_eq!(graph.buffer_count(), 0);
         assert_eq!(graph.pass_count(), 0);
     }
 }
