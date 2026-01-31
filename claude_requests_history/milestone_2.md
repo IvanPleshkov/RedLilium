@@ -112,3 +112,8 @@ Discuss please options how to fix it. Is it possible to reuse dead `Arc`s from p
 ## Request 18:
 Each `Pass` in render graph from graphics crate has a vector of dependencies. It looks not efficient because it produces allocations for each pass.
 Please refactror is and let render graph keep dependencies instead of pass.
+
+## Request 19:
+Please change `RenderGraph` functions: `add_graphics_pass`, `add_transfer_pass`, `add_compute_pass`.
+Provide as arguments `GraphicsPass`, `TransferPass`, `ComputePass` instead of just a name with getters.
+You can also remove getters because I expect, that getters are not required.

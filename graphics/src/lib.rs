@@ -14,14 +14,14 @@
 //! ## Example
 //!
 //! ```ignore
-//! use redlilium_graphics::{GraphicsInstance, RenderGraph};
+//! use redlilium_graphics::{GraphicsInstance, GraphicsPass, RenderGraph};
 //!
 //! let instance = GraphicsInstance::new()?;
 //! let device = instance.create_device()?;
 //!
 //! let mut graph = RenderGraph::new();
-//! let geometry = graph.add_graphics_pass("geometry");
-//! let lighting = graph.add_graphics_pass("lighting");
+//! let geometry = graph.add_graphics_pass(GraphicsPass::new("geometry".into()));
+//! let lighting = graph.add_graphics_pass(GraphicsPass::new("lighting".into()));
 //! graph.add_dependency(lighting, geometry);
 //! ```
 
