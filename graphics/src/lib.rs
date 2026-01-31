@@ -38,8 +38,10 @@ pub mod types;
 pub use device::{DeviceCapabilities, GraphicsDevice};
 pub use error::GraphicsError;
 pub use graph::{
-    ColorAttachment, DepthStencilAttachment, LoadOp, PassType, RenderGraph, RenderPass,
-    RenderTarget, RenderTargetConfig, StoreOp,
+    BufferCopyRegion, BufferTextureCopyRegion, BufferTextureLayout, ColorAttachment,
+    DepthStencilAttachment, LoadOp, PassType, RenderGraph, RenderPass, RenderTarget,
+    RenderTargetConfig, StoreOp, TextureCopyLocation, TextureCopyRegion, TextureOrigin,
+    TransferConfig, TransferOperation,
 };
 pub use instance::{AdapterInfo, AdapterType, GraphicsInstance};
 pub use materials::{

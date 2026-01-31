@@ -26,12 +26,17 @@
 
 mod pass;
 mod target;
+mod transfer;
 
 use std::sync::Arc;
 
 pub use pass::{PassType, RenderPass};
 pub use target::{
     ColorAttachment, DepthStencilAttachment, LoadOp, RenderTarget, RenderTargetConfig, StoreOp,
+};
+pub use transfer::{
+    BufferCopyRegion, BufferTextureCopyRegion, BufferTextureLayout, TextureCopyLocation,
+    TextureCopyRegion, TextureOrigin, TransferConfig, TransferOperation,
 };
 
 /// The render graph describes a frame's rendering operations.
@@ -139,7 +144,9 @@ impl std::error::Error for GraphError {}
 mod tests {
     use super::*;
     use crate::instance::GraphicsInstance;
-    use crate::types::{TextureDescriptor, TextureFormat, TextureUsage};
+    use crate::types::{
+        BufferDescriptor, BufferUsage, TextureDescriptor, TextureFormat, TextureUsage,
+    };
 
     #[test]
     fn test_add_pass() {
@@ -204,5 +211,61 @@ mod tests {
 
         let compiled = graph.compile().unwrap();
         assert_eq!(compiled.pass_order().len(), 2);
+    }
+
+    #[test]
+    fn test_transfer_pass() {
+        let instance = GraphicsInstance::new().unwrap();
+        let device = instance.create_device().unwrap();
+
+        let src_buffer = device
+            .create_buffer(&BufferDescriptor::new(1024, BufferUsage::COPY_SRC))
+            .unwrap();
+        let dst_buffer = device
+            .create_buffer(&BufferDescriptor::new(1024, BufferUsage::COPY_DST))
+            .unwrap();
+
+        let mut graph = RenderGraph::new();
+        let transfer = graph.add_pass("upload", PassType::Transfer);
+
+        let config = TransferConfig::new()
+            .with_operation(TransferOperation::copy_buffer_whole(src_buffer, dst_buffer));
+
+        transfer.set_transfer_config(config);
+
+        assert!(transfer.has_transfers());
+        assert_eq!(transfer.pass_type(), PassType::Transfer);
+    }
+
+    #[test]
+    fn test_transfer_before_render() {
+        let instance = GraphicsInstance::new().unwrap();
+        let device = instance.create_device().unwrap();
+
+        let staging = device
+            .create_buffer(&BufferDescriptor::new(1024, BufferUsage::COPY_SRC))
+            .unwrap();
+        let vertex = device
+            .create_buffer(&BufferDescriptor::new(
+                1024,
+                BufferUsage::COPY_DST | BufferUsage::VERTEX,
+            ))
+            .unwrap();
+
+        let mut graph = RenderGraph::new();
+
+        // Transfer pass uploads data
+        let upload = graph.add_pass("upload", PassType::Transfer);
+        upload.set_transfer_config(
+            TransferConfig::new()
+                .with_operation(TransferOperation::copy_buffer_whole(staging, vertex)),
+        );
+
+        // Render pass depends on transfer completing
+        let render = graph.add_pass("render", PassType::Graphics);
+        render.add_dependency(&upload);
+
+        assert_eq!(graph.pass_count(), 2);
+        assert_eq!(render.dependencies().len(), 1);
     }
 }

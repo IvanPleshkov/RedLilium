@@ -3,6 +3,7 @@
 use std::sync::{Arc, RwLock, Weak};
 
 use super::target::RenderTargetConfig;
+use super::transfer::TransferConfig;
 
 /// Type of render pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -23,6 +24,8 @@ struct RenderPassInner {
     dependencies: Vec<Weak<RenderPass>>,
     /// Render targets for graphics passes.
     render_targets: Option<RenderTargetConfig>,
+    /// Transfer operations for transfer passes.
+    transfer_config: Option<TransferConfig>,
 }
 
 /// A render pass in the graph.
@@ -112,6 +115,30 @@ impl RenderPass {
             .render_targets
             .as_ref()
             .map(|c| c.has_attachments())
+            .unwrap_or(false)
+    }
+
+    /// Get the transfer configuration.
+    pub fn transfer_config(&self) -> Option<TransferConfig> {
+        let inner = self.inner.read().unwrap();
+        inner.transfer_config.clone()
+    }
+
+    /// Set the transfer configuration.
+    ///
+    /// This is only meaningful for transfer passes.
+    pub fn set_transfer_config(&self, config: TransferConfig) {
+        let mut inner = self.inner.write().unwrap();
+        inner.transfer_config = Some(config);
+    }
+
+    /// Check if this pass has transfer operations configured.
+    pub fn has_transfers(&self) -> bool {
+        let inner = self.inner.read().unwrap();
+        inner
+            .transfer_config
+            .as_ref()
+            .map(|c| c.has_operations())
             .unwrap_or(false)
     }
 }

@@ -93,3 +93,5 @@ How it relies on the Hander with index.
 Let's change is to using `Arc` like all other resources in graphics crate.
 
 ## Request 14:
+Let's extend the render graph features in graphics crate.
+Add please support of data transferring. Think first, is data transferring a pass or it should be a separate struct, explain your decision.
