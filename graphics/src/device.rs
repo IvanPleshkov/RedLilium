@@ -61,7 +61,7 @@ impl Default for DeviceCapabilities {
 /// ))?;
 /// ```
 pub struct GraphicsDevice {
-    instance: Weak<GraphicsInstance>,
+    instance: Arc<GraphicsInstance>,
     name: String,
     capabilities: DeviceCapabilities,
     // Track allocated resources (weak references for cleanup/debugging)
@@ -72,7 +72,7 @@ pub struct GraphicsDevice {
 
 impl GraphicsDevice {
     /// Create a new graphics device (called by GraphicsInstance).
-    pub(crate) fn new(instance: Weak<GraphicsInstance>, name: String) -> Self {
+    pub(crate) fn new(instance: Arc<GraphicsInstance>, name: String) -> Self {
         Self {
             instance,
             name,
@@ -83,9 +83,9 @@ impl GraphicsDevice {
         }
     }
 
-    /// Get the parent instance, if it still exists.
-    pub fn instance(&self) -> Option<Arc<GraphicsInstance>> {
-        self.instance.upgrade()
+    /// Get the parent instance.
+    pub fn instance(&self) -> &Arc<GraphicsInstance> {
+        &self.instance
     }
 
     /// Get the device name.
@@ -122,7 +122,7 @@ impl GraphicsDevice {
         }
 
         // Create the buffer
-        let buffer = Arc::new(Buffer::new(Arc::downgrade(self), descriptor.clone()));
+        let buffer = Arc::new(Buffer::new(Arc::clone(self), descriptor.clone()));
 
         // Track it
         if let Ok(mut buffers) = self.buffers.write() {
@@ -165,7 +165,7 @@ impl GraphicsDevice {
         }
 
         // Create the texture
-        let texture = Arc::new(Texture::new(Arc::downgrade(self), descriptor.clone()));
+        let texture = Arc::new(Texture::new(Arc::clone(self), descriptor.clone()));
 
         // Track it
         if let Ok(mut textures) = self.textures.write() {
@@ -192,7 +192,7 @@ impl GraphicsDevice {
         descriptor: &SamplerDescriptor,
     ) -> Result<Arc<Sampler>, GraphicsError> {
         // Create the sampler
-        let sampler = Arc::new(Sampler::new(Arc::downgrade(self), descriptor.clone()));
+        let sampler = Arc::new(Sampler::new(Arc::clone(self), descriptor.clone()));
 
         // Track it
         if let Ok(mut samplers) = self.samplers.write() {
@@ -260,13 +260,14 @@ mod tests {
     use crate::types::{BufferUsage, TextureFormat, TextureUsage};
 
     fn create_test_device() -> Arc<GraphicsDevice> {
-        Arc::new(GraphicsDevice::new(Weak::new(), "Test Device".to_string()))
+        let instance = GraphicsInstance::new().unwrap();
+        instance.create_device().unwrap()
     }
 
     #[test]
     fn test_device_name() {
         let device = create_test_device();
-        assert_eq!(device.name(), "Test Device");
+        assert_eq!(device.name(), "Dummy Adapter");
     }
 
     #[test]
@@ -317,9 +318,7 @@ mod tests {
     #[test]
     fn test_create_sampler() {
         let device = create_test_device();
-        let sampler = device
-            .create_sampler(&SamplerDescriptor::linear())
-            .unwrap();
+        let sampler = device.create_sampler(&SamplerDescriptor::linear()).unwrap();
         assert!(sampler.label().is_none());
         assert_eq!(device.sampler_count(), 1);
     }

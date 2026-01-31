@@ -384,8 +384,8 @@ impl CameraSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scene::extracted::{ExtractedMaterial, ExtractedMesh, ExtractedTransform};
     use crate::scene::RenderWorld;
+    use crate::scene::extracted::{ExtractedMaterial, ExtractedMesh, ExtractedTransform};
     use glam::Vec4;
 
     fn make_camera(entity_id: u64, priority: i32, is_texture: bool) -> ExtractedCamera {

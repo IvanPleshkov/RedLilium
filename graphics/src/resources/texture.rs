@@ -1,6 +1,6 @@
 //! GPU texture resource.
 
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use crate::device::GraphicsDevice;
 use crate::types::{Extent3d, TextureDescriptor, TextureFormat};
@@ -8,7 +8,7 @@ use crate::types::{Extent3d, TextureDescriptor, TextureFormat};
 /// A GPU texture resource.
 ///
 /// Textures are created by [`GraphicsDevice::create_texture`] and are reference-counted.
-/// They hold a weak reference back to their parent device.
+/// They hold a strong reference to their parent device, keeping it alive.
 ///
 /// # Example
 ///
@@ -21,19 +21,19 @@ use crate::types::{Extent3d, TextureDescriptor, TextureFormat};
 /// println!("Texture size: {}x{}", texture.width(), texture.height());
 /// ```
 pub struct Texture {
-    device: Weak<GraphicsDevice>,
+    device: Arc<GraphicsDevice>,
     descriptor: TextureDescriptor,
 }
 
 impl Texture {
     /// Create a new texture (called by GraphicsDevice).
-    pub(crate) fn new(device: Weak<GraphicsDevice>, descriptor: TextureDescriptor) -> Self {
+    pub(crate) fn new(device: Arc<GraphicsDevice>, descriptor: TextureDescriptor) -> Self {
         Self { device, descriptor }
     }
 
-    /// Get the parent device, if it still exists.
-    pub fn device(&self) -> Option<Arc<GraphicsDevice>> {
-        self.device.upgrade()
+    /// Get the parent device.
+    pub fn device(&self) -> &Arc<GraphicsDevice> {
+        &self.device
     }
 
     /// Get the texture descriptor.
@@ -99,7 +99,13 @@ static_assertions::assert_impl_all!(Texture: Send, Sync);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::instance::GraphicsInstance;
     use crate::types::TextureUsage;
+
+    fn create_test_device() -> Arc<GraphicsDevice> {
+        let instance = GraphicsInstance::new().unwrap();
+        instance.create_device().unwrap()
+    }
 
     #[test]
     fn test_texture_debug() {
@@ -109,7 +115,7 @@ mod tests {
             TextureFormat::Rgba8Unorm,
             TextureUsage::RENDER_ATTACHMENT,
         );
-        let texture = Texture::new(Weak::new(), desc);
+        let texture = Texture::new(create_test_device(), desc);
         let debug = format!("{:?}", texture);
         assert!(debug.contains("Texture"));
         assert!(debug.contains("1920"));
@@ -123,7 +129,7 @@ mod tests {
             TextureFormat::Rgba8Unorm,
             TextureUsage::TEXTURE_BINDING,
         );
-        let texture = Texture::new(Weak::new(), desc);
+        let texture = Texture::new(create_test_device(), desc);
         assert_eq!(texture.width(), 800);
         assert_eq!(texture.height(), 600);
         assert_eq!(texture.depth(), 1);

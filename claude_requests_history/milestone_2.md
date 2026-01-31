@@ -49,3 +49,7 @@ Let's refactor resources usage in graphics crate.
 I dont like the approach, where render graph has a resource creation methods.
 Let's create a graphics instance and graphics device. Instance can handle multiple devices.
 Device can create resources. Resources are handled by `Arc`.
+
+## Request 6:
+Please change `Texture::device` to `Arc`. Do it also for `Buffer`, `Sampler`. Change also `GraphicsDevice::instance` to `Arc`.
+The motivation is keeping device and instance alive when depend resource is alive.

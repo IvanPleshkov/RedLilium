@@ -20,7 +20,8 @@
       "Bash(gh api:*)",
       "Bash(curl:*)",
       "Bash(cargo doc:*)",
-      "Bash(./scripts/test-all.sh:*)"
+      "Bash(./scripts/test-all.sh:*)",
+      "Bash(bash scripts/test-all.sh:*)"
     ],
     "deny": [
       "Read(claude_requests_history/**)",

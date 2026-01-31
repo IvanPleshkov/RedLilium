@@ -203,22 +203,33 @@ impl std::error::Error for GraphError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{BufferDescriptor, BufferUsage, TextureDescriptor, TextureFormat, TextureUsage};
-    use std::sync::Weak;
+    use crate::instance::GraphicsInstance;
+    use crate::types::{
+        BufferDescriptor, BufferUsage, TextureDescriptor, TextureFormat, TextureUsage,
+    };
+
+    fn create_test_device() -> Arc<crate::device::GraphicsDevice> {
+        let instance = GraphicsInstance::new().unwrap();
+        instance.create_device().unwrap()
+    }
 
     fn create_test_texture() -> Arc<Texture> {
-        let desc = TextureDescriptor::new_2d(
-            1920,
-            1080,
-            TextureFormat::Rgba8Unorm,
-            TextureUsage::RENDER_ATTACHMENT,
-        );
-        Arc::new(Texture::new(Weak::new(), desc))
+        let device = create_test_device();
+        device
+            .create_texture(&TextureDescriptor::new_2d(
+                1920,
+                1080,
+                TextureFormat::Rgba8Unorm,
+                TextureUsage::RENDER_ATTACHMENT,
+            ))
+            .unwrap()
     }
 
     fn create_test_buffer() -> Arc<Buffer> {
-        let desc = BufferDescriptor::new(1024, BufferUsage::VERTEX);
-        Arc::new(Buffer::new(Weak::new(), desc))
+        let device = create_test_device();
+        device
+            .create_buffer(&BufferDescriptor::new(1024, BufferUsage::VERTEX))
+            .unwrap()
     }
 
     #[test]

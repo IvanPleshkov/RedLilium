@@ -76,12 +76,9 @@ impl GraphicsInstance {
         Ok(instance)
     }
 
-    /// Get the weak self-reference.
-    fn weak_self(&self) -> Weak<GraphicsInstance> {
-        self.self_ref
-            .read()
-            .map(|r| r.clone())
-            .unwrap_or_else(|_| Weak::new())
+    /// Get the strong self-reference.
+    fn arc_self(&self) -> Option<Arc<GraphicsInstance>> {
+        self.self_ref.read().ok().and_then(|r| r.upgrade())
     }
 
     /// Enumerate available graphics adapters.
@@ -132,7 +129,10 @@ impl GraphicsInstance {
         let adapter = &adapters[adapter_index];
         log::info!("Creating device on adapter: {}", adapter.name);
 
-        let device = Arc::new(GraphicsDevice::new(self.weak_self(), adapter.name.clone()));
+        let instance = self.arc_self().ok_or_else(|| {
+            GraphicsError::ResourceCreationFailed("instance has been dropped".to_string())
+        })?;
+        let device = Arc::new(GraphicsDevice::new(instance, adapter.name.clone()));
 
         // Track the device
         if let Ok(mut devices) = self.devices.write() {
@@ -152,10 +152,7 @@ impl GraphicsInstance {
 
     /// Get the number of devices created by this instance.
     pub fn device_count(&self) -> usize {
-        self.devices
-            .read()
-            .map(|d| d.len())
-            .unwrap_or(0)
+        self.devices.read().map(|d| d.len()).unwrap_or(0)
     }
 }
 
@@ -214,6 +211,7 @@ mod tests {
     fn test_device_has_instance_reference() {
         let instance = GraphicsInstance::new().unwrap();
         let device = instance.create_device().unwrap();
-        assert!(device.instance().is_some());
+        // Device holds a strong reference to instance
+        assert!(Arc::ptr_eq(device.instance(), &instance));
     }
 }
