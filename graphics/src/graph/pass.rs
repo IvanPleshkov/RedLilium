@@ -1,7 +1,6 @@
 //! Render pass types.
 
-use std::sync::{Arc, RwLock, Weak};
-
+use super::PassHandle;
 use super::target::RenderTargetConfig;
 use super::transfer::TransferConfig;
 
@@ -29,10 +28,8 @@ impl Pass {
         }
     }
 
-    /// Get the pass dependencies.
-    ///
-    /// Returns only valid (still-alive) dependencies.
-    pub fn dependencies(&self) -> Vec<Arc<Pass>> {
+    /// Get the pass dependencies as handles.
+    pub fn dependencies(&self) -> &[PassHandle] {
         match self {
             Pass::Graphics(p) => p.dependencies(),
             Pass::Transfer(p) => p.dependencies(),
@@ -40,19 +37,26 @@ impl Pass {
         }
     }
 
-    /// Add a dependency on another pass.
-    ///
-    /// The dependency is stored as a weak reference to prevent cycles.
-    pub fn add_dependency(&self, pass: &Arc<Pass>) {
+    /// Add a dependency on another pass (internal use).
+    pub(crate) fn add_dependency(&mut self, handle: PassHandle) {
         match self {
-            Pass::Graphics(p) => p.add_dependency(pass),
-            Pass::Transfer(p) => p.add_dependency(pass),
-            Pass::Compute(p) => p.add_dependency(pass),
+            Pass::Graphics(p) => p.add_dependency(handle),
+            Pass::Transfer(p) => p.add_dependency(handle),
+            Pass::Compute(p) => p.add_dependency(handle),
         }
     }
 
     /// Get this pass as a graphics pass, if it is one.
     pub fn as_graphics(&self) -> Option<&GraphicsPass> {
+        if let Pass::Graphics(p) = self {
+            Some(p)
+        } else {
+            None
+        }
+    }
+
+    /// Get this pass as a mutable graphics pass, if it is one.
+    pub fn as_graphics_mut(&mut self) -> Option<&mut GraphicsPass> {
         if let Pass::Graphics(p) = self {
             Some(p)
         } else {
@@ -69,8 +73,26 @@ impl Pass {
         }
     }
 
+    /// Get this pass as a mutable transfer pass, if it is one.
+    pub fn as_transfer_mut(&mut self) -> Option<&mut TransferPass> {
+        if let Pass::Transfer(p) = self {
+            Some(p)
+        } else {
+            None
+        }
+    }
+
     /// Get this pass as a compute pass, if it is one.
     pub fn as_compute(&self) -> Option<&ComputePass> {
+        if let Pass::Compute(p) = self {
+            Some(p)
+        } else {
+            None
+        }
+    }
+
+    /// Get this pass as a mutable compute pass, if it is one.
+    pub fn as_compute_mut(&mut self) -> Option<&mut ComputePass> {
         if let Pass::Compute(p) = self {
             Some(p)
         } else {
@@ -98,13 +120,6 @@ impl Pass {
 // Graphics Pass
 // ============================================================================
 
-/// Inner mutable state of a graphics pass.
-#[derive(Debug, Default)]
-struct GraphicsPassInner {
-    dependencies: Vec<Weak<Pass>>,
-    render_targets: Option<RenderTargetConfig>,
-}
-
 /// A graphics pass for rasterization work.
 ///
 /// Graphics passes execute vertex and fragment shaders to render geometry.
@@ -112,7 +127,8 @@ struct GraphicsPassInner {
 #[derive(Debug)]
 pub struct GraphicsPass {
     name: String,
-    inner: RwLock<GraphicsPassInner>,
+    dependencies: Vec<PassHandle>,
+    render_targets: Option<RenderTargetConfig>,
 }
 
 impl GraphicsPass {
@@ -120,7 +136,8 @@ impl GraphicsPass {
     pub fn new(name: String) -> Self {
         Self {
             name,
-            inner: RwLock::new(GraphicsPassInner::default()),
+            dependencies: Vec::new(),
+            render_targets: None,
         }
     }
 
@@ -130,45 +147,30 @@ impl GraphicsPass {
     }
 
     /// Get the pass dependencies.
-    pub fn dependencies(&self) -> Vec<Arc<Pass>> {
-        let inner = self.inner.read().unwrap();
-        inner
-            .dependencies
-            .iter()
-            .filter_map(|weak| weak.upgrade())
-            .collect()
+    pub fn dependencies(&self) -> &[PassHandle] {
+        &self.dependencies
     }
 
     /// Add a dependency on another pass.
-    pub fn add_dependency(&self, pass: &Arc<Pass>) {
-        let mut inner = self.inner.write().unwrap();
-        let already_exists = inner.dependencies.iter().any(|weak| {
-            weak.upgrade()
-                .map(|existing| Arc::ptr_eq(&existing, pass))
-                .unwrap_or(false)
-        });
-        if !already_exists {
-            inner.dependencies.push(Arc::downgrade(pass));
+    pub(crate) fn add_dependency(&mut self, handle: PassHandle) {
+        if !self.dependencies.contains(&handle) {
+            self.dependencies.push(handle);
         }
     }
 
     /// Get the render target configuration.
-    pub fn render_targets(&self) -> Option<RenderTargetConfig> {
-        let inner = self.inner.read().unwrap();
-        inner.render_targets.clone()
+    pub fn render_targets(&self) -> Option<&RenderTargetConfig> {
+        self.render_targets.as_ref()
     }
 
     /// Set the render target configuration.
-    pub fn set_render_targets(&self, config: RenderTargetConfig) {
-        let mut inner = self.inner.write().unwrap();
-        inner.render_targets = Some(config);
+    pub fn set_render_targets(&mut self, config: RenderTargetConfig) {
+        self.render_targets = Some(config);
     }
 
     /// Check if this pass has render targets configured.
     pub fn has_render_targets(&self) -> bool {
-        let inner = self.inner.read().unwrap();
-        inner
-            .render_targets
+        self.render_targets
             .as_ref()
             .map(|c| c.has_attachments())
             .unwrap_or(false)
@@ -179,20 +181,14 @@ impl GraphicsPass {
 // Transfer Pass
 // ============================================================================
 
-/// Inner mutable state of a transfer pass.
-#[derive(Debug, Default)]
-struct TransferPassInner {
-    dependencies: Vec<Weak<Pass>>,
-    transfer_config: Option<TransferConfig>,
-}
-
 /// A transfer pass for data copy operations.
 ///
 /// Transfer passes execute buffer and texture copy commands.
 #[derive(Debug)]
 pub struct TransferPass {
     name: String,
-    inner: RwLock<TransferPassInner>,
+    dependencies: Vec<PassHandle>,
+    transfer_config: Option<TransferConfig>,
 }
 
 impl TransferPass {
@@ -200,7 +196,8 @@ impl TransferPass {
     pub fn new(name: String) -> Self {
         Self {
             name,
-            inner: RwLock::new(TransferPassInner::default()),
+            dependencies: Vec::new(),
+            transfer_config: None,
         }
     }
 
@@ -210,45 +207,30 @@ impl TransferPass {
     }
 
     /// Get the pass dependencies.
-    pub fn dependencies(&self) -> Vec<Arc<Pass>> {
-        let inner = self.inner.read().unwrap();
-        inner
-            .dependencies
-            .iter()
-            .filter_map(|weak| weak.upgrade())
-            .collect()
+    pub fn dependencies(&self) -> &[PassHandle] {
+        &self.dependencies
     }
 
     /// Add a dependency on another pass.
-    pub fn add_dependency(&self, pass: &Arc<Pass>) {
-        let mut inner = self.inner.write().unwrap();
-        let already_exists = inner.dependencies.iter().any(|weak| {
-            weak.upgrade()
-                .map(|existing| Arc::ptr_eq(&existing, pass))
-                .unwrap_or(false)
-        });
-        if !already_exists {
-            inner.dependencies.push(Arc::downgrade(pass));
+    pub(crate) fn add_dependency(&mut self, handle: PassHandle) {
+        if !self.dependencies.contains(&handle) {
+            self.dependencies.push(handle);
         }
     }
 
     /// Get the transfer configuration.
-    pub fn transfer_config(&self) -> Option<TransferConfig> {
-        let inner = self.inner.read().unwrap();
-        inner.transfer_config.clone()
+    pub fn transfer_config(&self) -> Option<&TransferConfig> {
+        self.transfer_config.as_ref()
     }
 
     /// Set the transfer configuration.
-    pub fn set_transfer_config(&self, config: TransferConfig) {
-        let mut inner = self.inner.write().unwrap();
-        inner.transfer_config = Some(config);
+    pub fn set_transfer_config(&mut self, config: TransferConfig) {
+        self.transfer_config = Some(config);
     }
 
     /// Check if this pass has transfer operations configured.
     pub fn has_transfers(&self) -> bool {
-        let inner = self.inner.read().unwrap();
-        inner
-            .transfer_config
+        self.transfer_config
             .as_ref()
             .map(|c| c.has_operations())
             .unwrap_or(false)
@@ -259,20 +241,14 @@ impl TransferPass {
 // Compute Pass
 // ============================================================================
 
-/// Inner mutable state of a compute pass.
-#[derive(Debug, Default)]
-struct ComputePassInner {
-    dependencies: Vec<Weak<Pass>>,
-    // Future: compute-specific configuration (dispatch size, etc.)
-}
-
 /// A compute pass for compute shader work.
 ///
 /// Compute passes execute compute shaders for general-purpose GPU computation.
 #[derive(Debug)]
 pub struct ComputePass {
     name: String,
-    inner: RwLock<ComputePassInner>,
+    dependencies: Vec<PassHandle>,
+    // Future: compute-specific configuration (dispatch size, etc.)
 }
 
 impl ComputePass {
@@ -280,7 +256,7 @@ impl ComputePass {
     pub fn new(name: String) -> Self {
         Self {
             name,
-            inner: RwLock::new(ComputePassInner::default()),
+            dependencies: Vec::new(),
         }
     }
 
@@ -290,25 +266,14 @@ impl ComputePass {
     }
 
     /// Get the pass dependencies.
-    pub fn dependencies(&self) -> Vec<Arc<Pass>> {
-        let inner = self.inner.read().unwrap();
-        inner
-            .dependencies
-            .iter()
-            .filter_map(|weak| weak.upgrade())
-            .collect()
+    pub fn dependencies(&self) -> &[PassHandle] {
+        &self.dependencies
     }
 
     /// Add a dependency on another pass.
-    pub fn add_dependency(&self, pass: &Arc<Pass>) {
-        let mut inner = self.inner.write().unwrap();
-        let already_exists = inner.dependencies.iter().any(|weak| {
-            weak.upgrade()
-                .map(|existing| Arc::ptr_eq(&existing, pass))
-                .unwrap_or(false)
-        });
-        if !already_exists {
-            inner.dependencies.push(Arc::downgrade(pass));
+    pub(crate) fn add_dependency(&mut self, handle: PassHandle) {
+        if !self.dependencies.contains(&handle) {
+            self.dependencies.push(handle);
         }
     }
 }

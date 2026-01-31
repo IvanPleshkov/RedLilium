@@ -104,3 +104,7 @@ Make please `Pass` as an enum with pass variants: graphics, transfer, compute.
 ## Request 16:
 I'm not sure if `target.rs` file is placed correctly.
 Please decide the proper place of this file or keep as is if you think that the current file place is a best option.
+
+## Request 17:
+Please take a loot to the render graph implementation. It seems usage of Arc is not optimimal because it produces a lot of allocations each frame.
+Discuss please options how to fix it. Is it possible to reuse dead `Arc`s from prev frame?

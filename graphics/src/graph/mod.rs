@@ -28,9 +28,24 @@ mod pass;
 mod target;
 mod transfer;
 
-use std::sync::Arc;
-
 pub use pass::{ComputePass, GraphicsPass, Pass, TransferPass};
+
+/// Handle to a pass in the render graph.
+///
+/// `PassHandle` is `Copy` and cheap to pass around. It is only valid within
+/// the `RenderGraph` that created it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PassHandle(u32);
+
+impl PassHandle {
+    fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+}
 pub use target::{
     ColorAttachment, DepthStencilAttachment, LoadOp, RenderTarget, RenderTargetConfig, StoreOp,
 };
@@ -49,7 +64,7 @@ pub use transfer::{
 /// let mut graph = RenderGraph::new();
 /// let geometry = graph.add_graphics_pass("geometry");
 /// let lighting = graph.add_graphics_pass("lighting");
-/// lighting.add_dependency(&geometry);
+/// graph.add_dependency(lighting, geometry);
 /// ```
 ///
 /// # Execution
@@ -61,8 +76,8 @@ pub use transfer::{
 /// ```
 #[derive(Debug, Default)]
 pub struct RenderGraph {
-    /// All passes in the graph.
-    passes: Vec<Arc<Pass>>,
+    /// All passes in the graph (direct storage, no Arc).
+    passes: Vec<Pass>,
 }
 
 impl RenderGraph {
@@ -73,33 +88,63 @@ impl RenderGraph {
 
     /// Add a graphics pass to the graph.
     ///
-    /// Returns an `Arc<Pass>` for direct manipulation and dependency tracking.
-    pub fn add_graphics_pass(&mut self, name: impl Into<String>) -> Arc<Pass> {
-        let pass = Arc::new(Pass::Graphics(GraphicsPass::new(name.into())));
-        self.passes.push(Arc::clone(&pass));
-        pass
+    /// Returns a `PassHandle` for referencing this pass.
+    pub fn add_graphics_pass(&mut self, name: impl Into<String>) -> PassHandle {
+        let index = self.passes.len() as u32;
+        self.passes
+            .push(Pass::Graphics(GraphicsPass::new(name.into())));
+        PassHandle::new(index)
     }
 
     /// Add a transfer pass to the graph.
     ///
-    /// Returns an `Arc<Pass>` for direct manipulation and dependency tracking.
-    pub fn add_transfer_pass(&mut self, name: impl Into<String>) -> Arc<Pass> {
-        let pass = Arc::new(Pass::Transfer(TransferPass::new(name.into())));
-        self.passes.push(Arc::clone(&pass));
-        pass
+    /// Returns a `PassHandle` for referencing this pass.
+    pub fn add_transfer_pass(&mut self, name: impl Into<String>) -> PassHandle {
+        let index = self.passes.len() as u32;
+        self.passes
+            .push(Pass::Transfer(TransferPass::new(name.into())));
+        PassHandle::new(index)
     }
 
     /// Add a compute pass to the graph.
     ///
-    /// Returns an `Arc<Pass>` for direct manipulation and dependency tracking.
-    pub fn add_compute_pass(&mut self, name: impl Into<String>) -> Arc<Pass> {
-        let pass = Arc::new(Pass::Compute(ComputePass::new(name.into())));
-        self.passes.push(Arc::clone(&pass));
-        pass
+    /// Returns a `PassHandle` for referencing this pass.
+    pub fn add_compute_pass(&mut self, name: impl Into<String>) -> PassHandle {
+        let index = self.passes.len() as u32;
+        self.passes
+            .push(Pass::Compute(ComputePass::new(name.into())));
+        PassHandle::new(index)
+    }
+
+    /// Add a dependency between passes.
+    ///
+    /// The `dependent` pass will execute after the `dependency` pass.
+    pub fn add_dependency(&mut self, dependent: PassHandle, dependency: PassHandle) {
+        assert!(
+            dependent.index() < self.passes.len(),
+            "Invalid dependent handle"
+        );
+        assert!(
+            dependency.index() < self.passes.len(),
+            "Invalid dependency handle"
+        );
+        assert!(dependent != dependency, "Pass cannot depend on itself");
+
+        self.passes[dependent.index()].add_dependency(dependency);
+    }
+
+    /// Get a pass by handle.
+    pub fn get(&self, handle: PassHandle) -> Option<&Pass> {
+        self.passes.get(handle.index())
+    }
+
+    /// Get a mutable pass by handle.
+    pub fn get_mut(&mut self, handle: PassHandle) -> Option<&mut Pass> {
+        self.passes.get_mut(handle.index())
     }
 
     /// Get all passes in the graph.
-    pub fn passes(&self) -> &[Arc<Pass>] {
+    pub fn passes(&self) -> &[Pass] {
         &self.passes
     }
 
@@ -116,9 +161,8 @@ impl RenderGraph {
     /// - Barrier placement optimization
     pub fn compile(&self) -> Result<CompiledGraph, GraphError> {
         // TODO: Implement proper topological sort
-        Ok(CompiledGraph {
-            pass_order: self.passes.clone(),
-        })
+        let pass_order = (0..self.passes.len() as u32).map(PassHandle::new).collect();
+        Ok(CompiledGraph { pass_order })
     }
 
     /// Clear all passes from the graph.
@@ -130,13 +174,13 @@ impl RenderGraph {
 /// A compiled render graph ready for execution.
 #[derive(Debug)]
 pub struct CompiledGraph {
-    /// Optimized pass execution order.
-    pass_order: Vec<Arc<Pass>>,
+    /// Optimized pass execution order as handles.
+    pass_order: Vec<PassHandle>,
 }
 
 impl CompiledGraph {
-    /// Get the optimized pass execution order.
-    pub fn pass_order(&self) -> &[Arc<Pass>] {
+    /// Get the optimized pass execution order as handles.
+    pub fn pass_order(&self) -> &[PassHandle] {
         &self.pass_order
     }
 }
@@ -169,28 +213,28 @@ mod tests {
     #[test]
     fn test_add_graphics_pass() {
         let mut graph = RenderGraph::new();
-        let pass = graph.add_graphics_pass("test_pass");
+        let handle = graph.add_graphics_pass("test_pass");
         assert_eq!(graph.pass_count(), 1);
-        assert_eq!(pass.name(), "test_pass");
-        assert!(pass.is_graphics());
+        assert_eq!(graph.get(handle).unwrap().name(), "test_pass");
+        assert!(graph.get(handle).unwrap().is_graphics());
     }
 
     #[test]
     fn test_add_transfer_pass() {
         let mut graph = RenderGraph::new();
-        let pass = graph.add_transfer_pass("upload");
+        let handle = graph.add_transfer_pass("upload");
         assert_eq!(graph.pass_count(), 1);
-        assert_eq!(pass.name(), "upload");
-        assert!(pass.is_transfer());
+        assert_eq!(graph.get(handle).unwrap().name(), "upload");
+        assert!(graph.get(handle).unwrap().is_transfer());
     }
 
     #[test]
     fn test_add_compute_pass() {
         let mut graph = RenderGraph::new();
-        let pass = graph.add_compute_pass("simulation");
+        let handle = graph.add_compute_pass("simulation");
         assert_eq!(graph.pass_count(), 1);
-        assert_eq!(pass.name(), "simulation");
-        assert!(pass.is_compute());
+        assert_eq!(graph.get(handle).unwrap().name(), "simulation");
+        assert!(graph.get(handle).unwrap().is_compute());
     }
 
     #[test]
@@ -217,15 +261,27 @@ mod tests {
             .unwrap();
 
         let mut graph = RenderGraph::new();
-        let pass = graph.add_graphics_pass("main");
+        let handle = graph.add_graphics_pass("main");
 
         let config = RenderTargetConfig::new().with_color(
             ColorAttachment::from_texture(texture).with_clear_color(0.0, 0.0, 0.0, 1.0),
         );
 
-        pass.as_graphics().unwrap().set_render_targets(config);
+        graph
+            .get_mut(handle)
+            .unwrap()
+            .as_graphics_mut()
+            .unwrap()
+            .set_render_targets(config);
 
-        assert!(pass.as_graphics().unwrap().has_render_targets());
+        assert!(
+            graph
+                .get(handle)
+                .unwrap()
+                .as_graphics()
+                .unwrap()
+                .has_render_targets()
+        );
     }
 
     #[test]
@@ -234,9 +290,9 @@ mod tests {
         let pass1 = graph.add_graphics_pass("geometry");
         let pass2 = graph.add_graphics_pass("lighting");
 
-        pass2.add_dependency(&pass1);
+        graph.add_dependency(pass2, pass1);
 
-        assert_eq!(pass2.dependencies().len(), 1);
+        assert_eq!(graph.get(pass2).unwrap().dependencies().len(), 1);
     }
 
     #[test]
@@ -244,7 +300,7 @@ mod tests {
         let mut graph = RenderGraph::new();
         let pass1 = graph.add_graphics_pass("geometry");
         let pass2 = graph.add_graphics_pass("lighting");
-        pass2.add_dependency(&pass1);
+        graph.add_dependency(pass2, pass1);
 
         let compiled = graph.compile().unwrap();
         assert_eq!(compiled.pass_order().len(), 2);
@@ -268,10 +324,22 @@ mod tests {
         let config = TransferConfig::new()
             .with_operation(TransferOperation::copy_buffer_whole(src_buffer, dst_buffer));
 
-        transfer.as_transfer().unwrap().set_transfer_config(config);
+        graph
+            .get_mut(transfer)
+            .unwrap()
+            .as_transfer_mut()
+            .unwrap()
+            .set_transfer_config(config);
 
-        assert!(transfer.as_transfer().unwrap().has_transfers());
-        assert!(transfer.is_transfer());
+        assert!(
+            graph
+                .get(transfer)
+                .unwrap()
+                .as_transfer()
+                .unwrap()
+                .has_transfers()
+        );
+        assert!(graph.get(transfer).unwrap().is_transfer());
     }
 
     #[test]
@@ -293,17 +361,22 @@ mod tests {
 
         // Transfer pass uploads data
         let upload = graph.add_transfer_pass("upload");
-        upload.as_transfer().unwrap().set_transfer_config(
-            TransferConfig::new()
-                .with_operation(TransferOperation::copy_buffer_whole(staging, vertex)),
-        );
+        graph
+            .get_mut(upload)
+            .unwrap()
+            .as_transfer_mut()
+            .unwrap()
+            .set_transfer_config(
+                TransferConfig::new()
+                    .with_operation(TransferOperation::copy_buffer_whole(staging, vertex)),
+            );
 
         // Render pass depends on transfer completing
         let render = graph.add_graphics_pass("render");
-        render.add_dependency(&upload);
+        graph.add_dependency(render, upload);
 
         assert_eq!(graph.pass_count(), 2);
-        assert_eq!(render.dependencies().len(), 1);
+        assert_eq!(graph.get(render).unwrap().dependencies().len(), 1);
     }
 
     #[test]
@@ -314,12 +387,12 @@ mod tests {
         let compute = graph.add_compute_pass("simulation");
         let render = graph.add_graphics_pass("render");
 
-        compute.add_dependency(&upload);
-        render.add_dependency(&compute);
+        graph.add_dependency(compute, upload);
+        graph.add_dependency(render, compute);
 
         assert_eq!(graph.pass_count(), 3);
-        assert!(upload.is_transfer());
-        assert!(compute.is_compute());
-        assert!(render.is_graphics());
+        assert!(graph.get(upload).unwrap().is_transfer());
+        assert!(graph.get(compute).unwrap().is_compute());
+        assert!(graph.get(render).unwrap().is_graphics());
     }
 }

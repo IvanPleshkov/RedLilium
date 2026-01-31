@@ -22,7 +22,7 @@
 //! let mut graph = RenderGraph::new();
 //! let geometry = graph.add_graphics_pass("geometry");
 //! let lighting = graph.add_graphics_pass("lighting");
-//! lighting.add_dependency(&geometry);
+//! graph.add_dependency(lighting, geometry);
 //! ```
 
 pub mod device;
@@ -40,7 +40,7 @@ pub use device::{DeviceCapabilities, GraphicsDevice};
 pub use error::GraphicsError;
 pub use graph::{
     BufferCopyRegion, BufferTextureCopyRegion, BufferTextureLayout, ColorAttachment, ComputePass,
-    DepthStencilAttachment, GraphicsPass, LoadOp, Pass, RenderGraph, RenderTarget,
+    DepthStencilAttachment, GraphicsPass, LoadOp, Pass, PassHandle, RenderGraph, RenderTarget,
     RenderTargetConfig, StoreOp, TextureCopyLocation, TextureCopyRegion, TextureOrigin,
     TransferConfig, TransferOperation, TransferPass,
 };
