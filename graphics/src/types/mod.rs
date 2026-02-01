@@ -8,7 +8,7 @@ mod common;
 mod sampler;
 mod texture;
 
-pub use buffer::{BufferDescriptor, BufferUsage};
+pub use buffer::{BufferDescriptor, BufferUsage, DrawIndexedIndirectArgs, DrawIndirectArgs};
 pub use common::{ClearValue, Extent3d};
 pub use sampler::SamplerDescriptor;
 pub use texture::{TextureDescriptor, TextureFormat, TextureUsage};

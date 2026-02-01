@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::materials::MaterialInstance;
 use crate::mesh::Mesh;
+use crate::resources::Buffer;
 
 use super::target::RenderTargetConfig;
 use super::transfer::TransferConfig;
@@ -210,6 +211,189 @@ impl std::fmt::Debug for DrawCommand {
 }
 
 // ============================================================================
+// Indirect Draw Command
+// ============================================================================
+
+/// An indirect draw command where draw parameters are read from a GPU buffer.
+///
+/// Indirect draw commands enable GPU-driven rendering where a compute shader
+/// or transfer operation prepares the draw arguments. This is essential for:
+///
+/// - **GPU culling**: Compute shader determines which objects are visible
+/// - **LOD selection**: GPU decides detail level based on distance
+/// - **Particle systems**: GPU controls particle counts dynamically
+/// - **Procedural geometry**: Draw counts determined at runtime on GPU
+///
+/// # Buffer Layout
+///
+/// The indirect buffer must contain draw arguments in the appropriate format:
+/// - For non-indexed draws: [`DrawIndirectArgs`](crate::types::DrawIndirectArgs)
+/// - For indexed draws: [`DrawIndexedIndirectArgs`](crate::types::DrawIndexedIndirectArgs)
+///
+/// # Multi-Draw Support
+///
+/// When `draw_count > 1`, multiple draw calls are issued from consecutive
+/// entries in the indirect buffer, each offset by `stride` bytes.
+///
+/// # Example
+///
+/// ```ignore
+/// use redlilium_graphics::{IndirectDrawCommand, BufferUsage};
+///
+/// // Single indirect draw
+/// let cmd = IndirectDrawCommand::new(mesh, material, indirect_buffer);
+///
+/// // Multi-draw indirect (draw 100 objects from buffer)
+/// let cmd = IndirectDrawCommand::new(mesh, material, indirect_buffer)
+///     .with_draw_count(100)
+///     .with_stride(20);  // stride for DrawIndexedIndirectArgs
+/// ```
+pub struct IndirectDrawCommand {
+    /// The mesh to render.
+    pub mesh: Arc<Mesh>,
+    /// The material instance with bound resources.
+    pub material: Arc<MaterialInstance>,
+    /// Buffer containing indirect draw arguments.
+    ///
+    /// Must have [`BufferUsage::INDIRECT`](crate::types::BufferUsage::INDIRECT) flag.
+    pub indirect_buffer: Arc<Buffer>,
+    /// Byte offset into the indirect buffer where arguments begin.
+    pub indirect_offset: u64,
+    /// Number of draw calls to issue (for multi-draw indirect).
+    ///
+    /// When greater than 1, draw arguments are read from consecutive
+    /// entries in the buffer, each separated by `stride` bytes.
+    pub draw_count: u32,
+    /// Stride between consecutive draw argument entries in bytes.
+    ///
+    /// Only relevant when `draw_count > 1`. For single draws, this is ignored.
+    /// Must be at least the size of the draw argument struct.
+    pub stride: u32,
+    /// Whether this is an indexed draw (uses index buffer from mesh).
+    pub indexed: bool,
+}
+
+impl IndirectDrawCommand {
+    /// Create a new indirect draw command.
+    ///
+    /// Creates a single non-indexed indirect draw.
+    /// Use builder methods to configure multi-draw or indexed mode.
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if the mesh vertex layout is not compatible with the material's
+    /// expected vertex layout.
+    pub fn new(
+        mesh: Arc<Mesh>,
+        material: Arc<MaterialInstance>,
+        indirect_buffer: Arc<Buffer>,
+    ) -> Self {
+        #[cfg(debug_assertions)]
+        DrawCommand::check_compatibility(&mesh, &material);
+
+        #[cfg(debug_assertions)]
+        Self::check_indirect_buffer(&indirect_buffer);
+
+        Self {
+            mesh,
+            material,
+            indirect_buffer,
+            indirect_offset: 0,
+            draw_count: 1,
+            stride: 0,
+            indexed: false,
+        }
+    }
+
+    /// Create a new indexed indirect draw command.
+    ///
+    /// The mesh must have an index buffer, and arguments are read as
+    /// [`DrawIndexedIndirectArgs`](crate::types::DrawIndexedIndirectArgs).
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if the mesh has no index buffer, or if mesh/material are incompatible.
+    pub fn new_indexed(
+        mesh: Arc<Mesh>,
+        material: Arc<MaterialInstance>,
+        indirect_buffer: Arc<Buffer>,
+    ) -> Self {
+        #[cfg(debug_assertions)]
+        DrawCommand::check_compatibility(&mesh, &material);
+
+        #[cfg(debug_assertions)]
+        Self::check_indirect_buffer(&indirect_buffer);
+
+        #[cfg(debug_assertions)]
+        if !mesh.is_indexed() {
+            panic!(
+                "IndirectDrawCommand::new_indexed requires a mesh with an index buffer, \
+                 but mesh '{}' has no indices",
+                mesh.label().unwrap_or("unnamed")
+            );
+        }
+
+        Self {
+            mesh,
+            material,
+            indirect_buffer,
+            indirect_offset: 0,
+            draw_count: 1,
+            stride: 0,
+            indexed: true,
+        }
+    }
+
+    /// Set the byte offset into the indirect buffer.
+    pub fn with_offset(mut self, offset: u64) -> Self {
+        self.indirect_offset = offset;
+        self
+    }
+
+    /// Set the number of draw calls for multi-draw indirect.
+    ///
+    /// When greater than 1, also set `stride` to specify the distance
+    /// between consecutive draw argument entries.
+    pub fn with_draw_count(mut self, count: u32) -> Self {
+        self.draw_count = count;
+        self
+    }
+
+    /// Set the stride between consecutive draw argument entries.
+    ///
+    /// Only relevant when `draw_count > 1`.
+    pub fn with_stride(mut self, stride: u32) -> Self {
+        self.stride = stride;
+        self
+    }
+
+    /// Check that the buffer has INDIRECT usage flag.
+    #[cfg(debug_assertions)]
+    fn check_indirect_buffer(buffer: &Buffer) {
+        use crate::types::BufferUsage;
+        if !buffer.descriptor().usage.contains(BufferUsage::INDIRECT) {
+            panic!(
+                "Indirect draw buffer '{}' must have BufferUsage::INDIRECT flag",
+                buffer.label().unwrap_or("unnamed")
+            );
+        }
+    }
+}
+
+impl std::fmt::Debug for IndirectDrawCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IndirectDrawCommand")
+            .field("mesh", &self.mesh.label())
+            .field("material", &self.material.label())
+            .field("indirect_buffer", &self.indirect_buffer.label())
+            .field("indirect_offset", &self.indirect_offset)
+            .field("draw_count", &self.draw_count)
+            .field("indexed", &self.indexed)
+            .finish()
+    }
+}
+
+// ============================================================================
 // Graphics Pass
 // ============================================================================
 
@@ -217,11 +401,22 @@ impl std::fmt::Debug for DrawCommand {
 ///
 /// Graphics passes execute vertex and fragment shaders to render geometry.
 /// They can have render targets configured to specify where they render to.
+///
+/// # Draw Commands
+///
+/// The pass supports two types of draw commands:
+///
+/// - **Direct draws** ([`DrawCommand`]): CPU specifies exact draw parameters
+/// - **Indirect draws** ([`IndirectDrawCommand`]): GPU buffer contains draw parameters
+///
+/// Indirect draws enable GPU-driven rendering where a compute shader determines
+/// what to draw, enabling efficient culling, LOD selection, and dynamic batching.
 #[derive(Debug)]
 pub struct GraphicsPass {
     name: String,
     render_targets: Option<RenderTargetConfig>,
     draw_commands: Vec<DrawCommand>,
+    indirect_draw_commands: Vec<IndirectDrawCommand>,
 }
 
 impl GraphicsPass {
@@ -231,6 +426,7 @@ impl GraphicsPass {
             name,
             render_targets: None,
             draw_commands: Vec::new(),
+            indirect_draw_commands: Vec::new(),
         }
     }
 
@@ -299,11 +495,160 @@ impl GraphicsPass {
     /// Clear all draw commands.
     pub fn clear_draws(&mut self) {
         self.draw_commands.clear();
+        self.indirect_draw_commands.clear();
     }
 
-    /// Check if this pass has any draw commands.
+    /// Check if this pass has any draw commands (direct or indirect).
     pub fn has_draws(&self) -> bool {
-        !self.draw_commands.is_empty()
+        !self.draw_commands.is_empty() || !self.indirect_draw_commands.is_empty()
+    }
+
+    // ========================================================================
+    // Indirect Draw Commands
+    // ========================================================================
+
+    /// Add an indirect draw command.
+    ///
+    /// The draw parameters (vertex count, instance count, etc.) are read from
+    /// the indirect buffer at runtime, enabling GPU-driven rendering.
+    ///
+    /// # Arguments
+    ///
+    /// * `mesh` - The mesh to render
+    /// * `material` - The material instance with bound resources
+    /// * `indirect_buffer` - Buffer containing [`DrawIndirectArgs`](crate::types::DrawIndirectArgs)
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if:
+    /// - The mesh and material are incompatible
+    /// - The buffer doesn't have `BufferUsage::INDIRECT` flag
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // GPU culling: compute shader writes visible object count to buffer
+    /// pass.add_draw_indirect(mesh, material, culled_indirect_buffer);
+    /// ```
+    pub fn add_draw_indirect(
+        &mut self,
+        mesh: Arc<Mesh>,
+        material: Arc<MaterialInstance>,
+        indirect_buffer: Arc<Buffer>,
+    ) {
+        self.indirect_draw_commands
+            .push(IndirectDrawCommand::new(mesh, material, indirect_buffer));
+    }
+
+    /// Add an indexed indirect draw command.
+    ///
+    /// Similar to `add_draw_indirect`, but uses the mesh's index buffer.
+    /// The draw parameters are read as [`DrawIndexedIndirectArgs`](crate::types::DrawIndexedIndirectArgs).
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if:
+    /// - The mesh has no index buffer
+    /// - The mesh and material are incompatible
+    /// - The buffer doesn't have `BufferUsage::INDIRECT` flag
+    pub fn add_draw_indexed_indirect(
+        &mut self,
+        mesh: Arc<Mesh>,
+        material: Arc<MaterialInstance>,
+        indirect_buffer: Arc<Buffer>,
+    ) {
+        self.indirect_draw_commands
+            .push(IndirectDrawCommand::new_indexed(
+                mesh,
+                material,
+                indirect_buffer,
+            ));
+    }
+
+    /// Add a multi-draw indirect command.
+    ///
+    /// Issues multiple draw calls from consecutive entries in the indirect buffer.
+    /// Each entry is separated by `stride` bytes.
+    ///
+    /// # Arguments
+    ///
+    /// * `mesh` - The mesh to render
+    /// * `material` - The material instance with bound resources
+    /// * `indirect_buffer` - Buffer containing multiple [`DrawIndirectArgs`](crate::types::DrawIndirectArgs)
+    /// * `draw_count` - Number of draw calls to issue
+    /// * `stride` - Bytes between consecutive draw argument entries
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Draw 1000 objects with GPU-prepared parameters
+    /// pass.add_multi_draw_indirect(
+    ///     mesh,
+    ///     material,
+    ///     indirect_buffer,
+    ///     1000,
+    ///     DrawIndirectArgs::SIZE as u32,
+    /// );
+    /// ```
+    pub fn add_multi_draw_indirect(
+        &mut self,
+        mesh: Arc<Mesh>,
+        material: Arc<MaterialInstance>,
+        indirect_buffer: Arc<Buffer>,
+        draw_count: u32,
+        stride: u32,
+    ) {
+        self.indirect_draw_commands.push(
+            IndirectDrawCommand::new(mesh, material, indirect_buffer)
+                .with_draw_count(draw_count)
+                .with_stride(stride),
+        );
+    }
+
+    /// Add a multi-draw indexed indirect command.
+    ///
+    /// Issues multiple indexed draw calls from consecutive entries in the indirect buffer.
+    ///
+    /// # Arguments
+    ///
+    /// * `mesh` - The mesh to render (must have index buffer)
+    /// * `material` - The material instance with bound resources
+    /// * `indirect_buffer` - Buffer containing multiple [`DrawIndexedIndirectArgs`](crate::types::DrawIndexedIndirectArgs)
+    /// * `draw_count` - Number of draw calls to issue
+    /// * `stride` - Bytes between consecutive draw argument entries
+    pub fn add_multi_draw_indexed_indirect(
+        &mut self,
+        mesh: Arc<Mesh>,
+        material: Arc<MaterialInstance>,
+        indirect_buffer: Arc<Buffer>,
+        draw_count: u32,
+        stride: u32,
+    ) {
+        self.indirect_draw_commands.push(
+            IndirectDrawCommand::new_indexed(mesh, material, indirect_buffer)
+                .with_draw_count(draw_count)
+                .with_stride(stride),
+        );
+    }
+
+    /// Add a pre-built indirect draw command.
+    pub fn add_indirect_draw_command(&mut self, command: IndirectDrawCommand) {
+        self.indirect_draw_commands.push(command);
+    }
+
+    /// Get all indirect draw commands.
+    pub fn indirect_draw_commands(&self) -> &[IndirectDrawCommand] {
+        &self.indirect_draw_commands
+    }
+
+    /// Get mutable access to indirect draw commands.
+    pub fn indirect_draw_commands_mut(&mut self) -> &mut Vec<IndirectDrawCommand> {
+        &mut self.indirect_draw_commands
+    }
+
+    /// Check if this pass has any indirect draw commands.
+    pub fn has_indirect_draws(&self) -> bool {
+        !self.indirect_draw_commands.is_empty()
     }
 }
 

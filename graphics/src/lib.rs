@@ -80,9 +80,10 @@ pub use device::{DeviceCapabilities, GraphicsDevice};
 pub use error::GraphicsError;
 pub use graph::{
     BufferCopyRegion, BufferTextureCopyRegion, BufferTextureLayout, ColorAttachment, CompiledGraph,
-    ComputePass, DepthStencilAttachment, DrawCommand, GraphError, GraphicsPass, LoadOp, Pass,
-    PassHandle, RenderGraph, RenderTarget, RenderTargetConfig, StoreOp, TextureCopyLocation,
-    TextureCopyRegion, TextureOrigin, TransferConfig, TransferOperation, TransferPass,
+    ComputePass, DepthStencilAttachment, DrawCommand, GraphError, GraphicsPass,
+    IndirectDrawCommand, LoadOp, Pass, PassHandle, RenderGraph, RenderTarget, RenderTargetConfig,
+    StoreOp, TextureCopyLocation, TextureCopyRegion, TextureOrigin, TransferConfig,
+    TransferOperation, TransferPass,
 };
 pub use instance::{AdapterInfo, AdapterType, GraphicsInstance};
 pub use materials::{
@@ -103,8 +104,8 @@ pub use scene::{
 pub use scheduler::{Fence, FenceStatus, FrameSchedule, GraphHandle, Semaphore};
 pub use swapchain::{PresentMode, Surface, SurfaceConfiguration, SurfaceTexture};
 pub use types::{
-    BufferDescriptor, BufferUsage, ClearValue, Extent3d, SamplerDescriptor, TextureDescriptor,
-    TextureFormat, TextureUsage,
+    BufferDescriptor, BufferUsage, ClearValue, DrawIndexedIndirectArgs, DrawIndirectArgs, Extent3d,
+    SamplerDescriptor, TextureDescriptor, TextureFormat, TextureUsage,
 };
 
 /// Graphics library version

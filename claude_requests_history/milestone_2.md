@@ -214,7 +214,7 @@ Read also the material system in graphics crate.
 Please check if such architecture supports instances drawing and indirect drawing.
 
 ## Request 31:
-Audit please render graph in graphics crate.
+Read please render graph in graphics crate.
 Read also the material system in graphics crate.
 Add Indirect Drawing Support.
   Current state:
