@@ -187,3 +187,21 @@ and it's not required to make an graphics engine overcomplicated and pay CPU pri
 
 ## Request 26:
 It's time to implement graph render compilation.
+
+## Request 27:
+Check out the graphics crate.
+I think we need a Mesh structure in graphics.
+With topology and layout.
+The `Pass` structure in render graph requires such kind of mesh and the `Arc` of material instance.
+Also add a debug check in `Pass` that mesh and material are compatible.
+It can be easily done if layout is an `Arc` in mesh and material.
+There are not a lot of combinations of mesh layout typically and we can `Arc` it and reduce allocations count per each mesh.
+
+## Request __:
+There is a basic render graph compilation alg in `graphics\src\compiler\mod.rs`.
+Read please how material system works.
+Material system uses `Arc` for bindings because it's designed to be shared between `Pass` in graph.
+After Kahn's algorithm for topological sort, please find the intervals in the result, where passes are save to be permuted.
+Then, for each found interval do a special kind of sorting, where you sort fist by the Pass type,
+then sort by the equal material bindings (just compate that Arc refers to the same memory).
+The goal is to reduce binding switching while rendering.

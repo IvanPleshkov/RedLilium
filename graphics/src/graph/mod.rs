@@ -42,7 +42,7 @@ mod pass;
 mod target;
 mod transfer;
 
-pub use pass::{ComputePass, GraphicsPass, Pass, TransferPass};
+pub use pass::{ComputePass, DrawCommand, GraphicsPass, Pass, TransferPass};
 
 // Re-export compiler types for convenience
 pub use crate::compiler::{CompiledGraph, GraphError, compile};

@@ -9,6 +9,7 @@
 use std::sync::Arc;
 
 use crate::device::GraphicsDevice;
+use crate::mesh::VertexLayout;
 
 use super::bindings::BindingLayout;
 
@@ -71,6 +72,11 @@ pub struct MaterialDescriptor {
     /// Layouts are wrapped in `Arc` to enable sharing and efficient batching.
     pub binding_layouts: Vec<Arc<BindingLayout>>,
 
+    /// Expected vertex layout for this material.
+    /// Used to verify mesh compatibility at draw time (debug builds).
+    /// Wrapped in `Arc` to enable sharing and efficient pointer comparison.
+    pub vertex_layout: Option<Arc<VertexLayout>>,
+
     /// Optional label for debugging.
     pub label: Option<String>,
 }
@@ -90,6 +96,12 @@ impl MaterialDescriptor {
     /// Add a binding layout.
     pub fn with_binding_layout(mut self, layout: Arc<BindingLayout>) -> Self {
         self.binding_layouts.push(layout);
+        self
+    }
+
+    /// Set the expected vertex layout for mesh compatibility checking.
+    pub fn with_vertex_layout(mut self, layout: Arc<VertexLayout>) -> Self {
+        self.vertex_layout = Some(layout);
         self
     }
 
@@ -147,6 +159,11 @@ impl Material {
     /// Get the binding layouts.
     pub fn binding_layouts(&self) -> &[Arc<BindingLayout>] {
         &self.descriptor.binding_layouts
+    }
+
+    /// Get the expected vertex layout.
+    pub fn vertex_layout(&self) -> Option<&Arc<VertexLayout>> {
+        self.descriptor.vertex_layout.as_ref()
     }
 
     /// Get the shaders.

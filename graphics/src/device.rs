@@ -8,9 +8,10 @@ use std::sync::{Arc, RwLock, Weak};
 use crate::error::GraphicsError;
 use crate::instance::GraphicsInstance;
 use crate::materials::{Material, MaterialDescriptor};
+use crate::mesh::{Mesh, MeshDescriptor};
 use crate::pipeline::FramePipeline;
 use crate::resources::{Buffer, Sampler, Texture};
-use crate::types::{BufferDescriptor, SamplerDescriptor, TextureDescriptor};
+use crate::types::{BufferDescriptor, BufferUsage, SamplerDescriptor, TextureDescriptor};
 
 /// Capabilities of a graphics device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -71,6 +72,7 @@ pub struct GraphicsDevice {
     textures: RwLock<Vec<Weak<Texture>>>,
     samplers: RwLock<Vec<Weak<Sampler>>>,
     materials: RwLock<Vec<Weak<Material>>>,
+    meshes: RwLock<Vec<Weak<Mesh>>>,
 }
 
 impl GraphicsDevice {
@@ -84,6 +86,7 @@ impl GraphicsDevice {
             textures: RwLock::new(Vec::new()),
             samplers: RwLock::new(Vec::new()),
             materials: RwLock::new(Vec::new()),
+            meshes: RwLock::new(Vec::new()),
         }
     }
 
@@ -230,6 +233,86 @@ impl GraphicsDevice {
         Ok(material)
     }
 
+    /// Create a mesh with vertex and optional index buffers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if buffer creation fails.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let layout = VertexLayout::position_normal_uv();
+    /// let mesh = device.create_mesh(&MeshDescriptor::new(layout)
+    ///     .with_vertex_count(24)
+    ///     .with_indices(IndexFormat::Uint16, 36)
+    ///     .with_label("cube"))?;
+    /// ```
+    pub fn create_mesh(
+        self: &Arc<Self>,
+        descriptor: &MeshDescriptor,
+    ) -> Result<Arc<Mesh>, GraphicsError> {
+        // Create vertex buffer
+        let vertex_size = descriptor.vertex_buffer_size();
+        if vertex_size == 0 {
+            return Err(GraphicsError::InvalidParameter(
+                "mesh must have at least one vertex".to_string(),
+            ));
+        }
+
+        let vertex_buffer = self.create_buffer(
+            &BufferDescriptor::new(vertex_size, BufferUsage::VERTEX).with_label(format!(
+                "{}_vertices",
+                descriptor.label.as_deref().unwrap_or("mesh")
+            )),
+        )?;
+
+        // Create index buffer if needed
+        let (index_buffer, index_format, index_count) = if descriptor.is_indexed() {
+            let index_size = descriptor.index_buffer_size();
+            let buffer = self.create_buffer(
+                &BufferDescriptor::new(index_size, BufferUsage::INDEX).with_label(format!(
+                    "{}_indices",
+                    descriptor.label.as_deref().unwrap_or("mesh")
+                )),
+            )?;
+            (
+                Some(buffer),
+                descriptor.index_format,
+                descriptor.index_count,
+            )
+        } else {
+            (None, None, 0)
+        };
+
+        // Create the mesh
+        let mesh = Arc::new(Mesh::new(
+            Arc::clone(self),
+            descriptor.layout.clone(),
+            descriptor.topology,
+            vertex_buffer,
+            descriptor.vertex_count,
+            index_buffer,
+            index_format,
+            index_count,
+            descriptor.label.clone(),
+        ));
+
+        // Track it
+        if let Ok(mut meshes) = self.meshes.write() {
+            meshes.push(Arc::downgrade(&mesh));
+        }
+
+        log::trace!(
+            "GraphicsDevice: created mesh {:?}, vertices={}, indices={}",
+            descriptor.label,
+            descriptor.vertex_count,
+            descriptor.index_count
+        );
+
+        Ok(mesh)
+    }
+
     /// Create a frame pipeline for managing multiple frames in flight.
     ///
     /// The pipeline coordinates CPU-GPU synchronization and enables frame overlap
@@ -298,6 +381,14 @@ impl GraphicsDevice {
             .unwrap_or(0)
     }
 
+    /// Get the number of live meshes created by this device.
+    pub fn mesh_count(&self) -> usize {
+        self.meshes
+            .read()
+            .map(|m| m.iter().filter(|w| w.strong_count() > 0).count())
+            .unwrap_or(0)
+    }
+
     /// Clean up dead weak references to released resources.
     pub fn cleanup_dead_resources(&self) {
         if let Ok(mut buffers) = self.buffers.write() {
@@ -311,6 +402,9 @@ impl GraphicsDevice {
         }
         if let Ok(mut materials) = self.materials.write() {
             materials.retain(|w| w.strong_count() > 0);
+        }
+        if let Ok(mut meshes) = self.meshes.write() {
+            meshes.retain(|w| w.strong_count() > 0);
         }
     }
 }

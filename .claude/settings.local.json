@@ -23,7 +23,8 @@
       "Bash(./scripts/test-all.sh:*)",
       "Bash(bash scripts/test-all.sh:*)",
       "Bash(wc:*)",
-      "Bash(cd:*)"
+      "Bash(cd:*)",
+      "Bash(.scriptstest-all.ps1 -SkipWeb)"
     ],
     "deny": [
       "Read(claude_requests_history/**)",

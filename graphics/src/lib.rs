@@ -66,6 +66,7 @@ pub mod error;
 pub mod graph;
 pub mod instance;
 pub mod materials;
+pub mod mesh;
 pub mod pipeline;
 pub mod resize;
 pub mod resources;
@@ -79,14 +80,18 @@ pub use device::{DeviceCapabilities, GraphicsDevice};
 pub use error::GraphicsError;
 pub use graph::{
     BufferCopyRegion, BufferTextureCopyRegion, BufferTextureLayout, ColorAttachment, CompiledGraph,
-    ComputePass, DepthStencilAttachment, GraphError, GraphicsPass, LoadOp, Pass, PassHandle,
-    RenderGraph, RenderTarget, RenderTargetConfig, StoreOp, TextureCopyLocation, TextureCopyRegion,
-    TextureOrigin, TransferConfig, TransferOperation, TransferPass,
+    ComputePass, DepthStencilAttachment, DrawCommand, GraphError, GraphicsPass, LoadOp, Pass,
+    PassHandle, RenderGraph, RenderTarget, RenderTargetConfig, StoreOp, TextureCopyLocation,
+    TextureCopyRegion, TextureOrigin, TransferConfig, TransferOperation, TransferPass,
 };
 pub use instance::{AdapterInfo, AdapterType, GraphicsInstance};
 pub use materials::{
     BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BoundResource, Material,
     MaterialDescriptor, MaterialInstance, ShaderSource, ShaderStage, ShaderStageFlags,
+};
+pub use mesh::{
+    IndexFormat, Mesh, MeshDescriptor, PrimitiveTopology, VertexAttribute, VertexAttributeFormat,
+    VertexAttributeSemantic, VertexLayout,
 };
 pub use pipeline::FramePipeline;
 pub use resize::{ResizeEvent, ResizeManager, ResizeStrategy};
