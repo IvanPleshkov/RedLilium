@@ -24,7 +24,9 @@
       "Bash(bash scripts/test-all.sh:*)",
       "Bash(wc:*)",
       "Bash(cd:*)",
-      "Bash(.scriptstest-all.ps1 -SkipWeb)"
+      "Bash(.scriptstest-all.ps1 -SkipWeb)",
+      "WebSearch",
+      "WebFetch(domain:docs.vulkan.org)"
     ],
     "deny": [
       "Read(claude_requests_history/**)",

@@ -665,6 +665,30 @@ impl VulkanBackend {
                 .cmd_begin_rendering(cmd, &rendering_info);
         }
 
+        // Set viewport with [0, 1] depth range (D3D/wgpu convention)
+        // This is the key coordinate system configuration that matches wgpu behavior.
+        // Vulkan natively uses [0, 1] depth range, so we just need to set it explicitly.
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: render_area.extent.width as f32,
+            height: render_area.extent.height as f32,
+            min_depth: 0.0, // Near plane maps to depth 0
+            max_depth: 1.0, // Far plane maps to depth 1
+        };
+        unsafe {
+            self.device.cmd_set_viewport(cmd, 0, &[viewport]);
+        }
+
+        // Set scissor to match render area
+        let scissor = vk::Rect2D {
+            offset: render_area.offset,
+            extent: render_area.extent,
+        };
+        unsafe {
+            self.device.cmd_set_scissor(cmd, 0, &[scissor]);
+        }
+
         // TODO: Encode draw commands
 
         // End dynamic rendering

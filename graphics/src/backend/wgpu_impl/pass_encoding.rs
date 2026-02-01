@@ -101,6 +101,22 @@ impl WgpuBackend {
             multiview_mask: None,
         });
 
+        // Set viewport with [0, 1] depth range (wgpu/D3D convention)
+        // This is the standard coordinate system used by wgpu and matches the Vulkan backend.
+        if let Some((width, height)) = render_targets.dimensions() {
+            render_pass.set_viewport(
+                0.0,           // x
+                0.0,           // y
+                width as f32,  // width
+                height as f32, // height
+                0.0,           // min_depth (near plane)
+                1.0,           // max_depth (far plane)
+            );
+
+            // Set scissor to match render area
+            render_pass.set_scissor_rect(0, 0, width, height);
+        }
+
         // Encode draw commands
         for draw_cmd in pass.draw_commands() {
             self.encode_draw_command(&mut render_pass, draw_cmd, render_targets)?;

@@ -293,6 +293,64 @@ let render_size = resize_manager.render_size();
 - `wait_current_slot()` waits for ONE slot (~16ms)
 - Result: 2-3x faster resize response
 
+## Coordinate System
+
+RedLilium uses the **D3D/wgpu coordinate system convention** for consistency across backends:
+
+### Conventions
+
+| Aspect | Convention |
+|--------|------------|
+| **Depth Range (NDC)** | `[0, 1]` (near = 0, far = 1) |
+| **Y-Axis (NDC)** | +Y points down |
+| **Screen Origin** | Top-left corner |
+| **Winding Order** | Counter-clockwise (CCW) front faces |
+
+### Depth Range
+
+The engine uses `[0, 1]` depth range, matching:
+- Vulkan's native convention
+- wgpu's cross-platform convention
+- D3D and Metal conventions
+
+This differs from OpenGL's `[-1, 1]` NDC depth range.
+
+### Projection Matrices
+
+When building projection matrices, use functions that output `[0, 1]` depth:
+
+```rust
+// glam - uses [0, 1] depth by default
+let proj = glam::Mat4::perspective_rh(fov_y, aspect, near, far);
+
+// nalgebra - use the explicit zero-to-one variant
+let proj = nalgebra::Perspective3::new_zo(aspect, fov_y, near, far);
+```
+
+### Why [0, 1] Depth?
+
+1. **Native Vulkan**: No shader transformation needed
+2. **wgpu Compatibility**: Same convention across backends
+3. **Industry Standard**: D3D, Metal, and modern APIs use this
+4. **Better Precision**: Full depth buffer range from near to far
+
+See `DECISIONS.md` ADR-015 for detailed rationale.
+
+### Reverse-Z Support
+
+For improved depth precision (especially with large view distances), you can use reverse-Z by swapping the depth range:
+
+```rust
+// Standard: near=0, far=1
+let viewport = Viewport::new(0.0, 0.0, width, height);
+
+// Reverse-Z: near=1, far=0 (better precision)
+let viewport = Viewport::new(0.0, 0.0, width, height)
+    .with_depth_range(1.0, 0.0);
+```
+
+Note: Reverse-Z also requires adjusting the depth comparison function to `GreaterEqual`.
+
 ## Multi-World Architecture
 
 The engine supports multiple ECS worlds with shared rendering backend:

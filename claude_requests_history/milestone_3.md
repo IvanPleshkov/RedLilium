@@ -53,3 +53,12 @@ It calls `execute_graph` from device and later uses scheduler.
 It looks incorrect. `schedule` should do an graph execution.
 Please remove `execute_graph` from device and from all backends.
 Make scheduler works, it's should be possibe to execute gpu tasks using scheduler only.
+
+## Request 9:
+Please audit vulkan api integration in graphics crate.
+`wgpu` crate (another backend) uses the coordinate systems of D3D and Metal. Depth ranges from [0, 1].
+It differs from vulkan api coordinate system.
+I preffer to use `wgpu` approach.
+If you can, find how coordinate system is resolved in `wgpu` sources with vulkan.
+Make the same for this project. If you cannot find, look at possibilities. Maybe there is some vulkan extension which allows to use D3D coordinate system.
+Update also `docs\ARCHITECTURE.md` and `docs\DECISIONS.md`, the desicion about coordinate system is important and should be mentioned.

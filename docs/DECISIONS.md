@@ -447,3 +447,68 @@ if let Some(event) = manager.update() {
 - ⚠️ 50-100ms delay before resize takes effect
 - ⚠️ `DynamicResolution` requires upscaling support
 - ⚠️ Application must integrate with event loop
+
+---
+
+## ADR-015: D3D/wgpu-Style Coordinate System with [0, 1] Depth Range
+
+**Date**: 2025-02-01
+**Status**: Accepted
+
+### Context
+
+Different graphics APIs use different coordinate system conventions:
+
+| API | NDC Depth Range | Y-Axis Direction |
+|-----|-----------------|------------------|
+| OpenGL | [-1, 1] | +Y up |
+| Vulkan | [0, 1] | +Y down |
+| D3D/Metal | [0, 1] | +Y down |
+| wgpu | [0, 1] | +Y down |
+
+We need to choose a consistent coordinate system convention that:
+- Works efficiently with our Vulkan backend
+- Matches our wgpu backend for compatibility
+- Allows straightforward porting of shaders and content
+
+### Decision
+
+Adopt the **D3D/wgpu coordinate system convention**:
+
+1. **Depth Range**: `[0, 1]` (near = 0, far = 1)
+2. **Y-Axis**: +Y points down in normalized device coordinates (NDC)
+3. **Origin**: Top-left corner in screen space
+
+**Implementation Details:**
+
+1. **Vulkan Backend**: Set viewport `minDepth = 0.0`, `maxDepth = 1.0`
+   - This is Vulkan's native convention, so no transformation needed
+   - Clear depth values use 1.0 for far plane
+
+2. **wgpu Backend**: Uses `[0, 1]` depth range natively
+   - wgpu handles this automatically across all backend APIs
+
+3. **Projection Matrices**: Must be built for `[0, 1]` depth
+   - Use `glam::Mat4::perspective_rh()` (right-handed, zero-to-one depth)
+   - Or use libraries' `_zo` (zero-to-one) projection variants
+
+**Why not use VK_EXT_depth_clip_control?**
+
+The `VK_EXT_depth_clip_control` extension allows using OpenGL's `[-1, 1]` convention on Vulkan. We don't need it because:
+- Vulkan natively uses `[0, 1]` which matches our target
+- The extension is designed for OpenGL-over-Vulkan layering
+- Not using the extension means broader hardware compatibility
+
+**Shader Implications:**
+
+Shaders receive depth in `[0, 1]` range after projection. No shader-side transformation like `gl_Position.z = (gl_Position.z + gl_Position.w) / 2.0` is needed.
+
+### Consequences
+
+- ✅ Consistent behavior across Vulkan and wgpu backends
+- ✅ Native Vulkan convention (no extension required)
+- ✅ Better depth precision than OpenGL's `[-1, 1]` mapped to `[0, 1]`
+- ✅ Compatible with reverse-Z for improved precision (minDepth=1, maxDepth=0)
+- ✅ Matches industry-standard D3D/Metal/wgpu convention
+- ⚠️ OpenGL shaders/content may need projection matrix adjustment
+- ⚠️ Users of glm/nalgebra must use depth-zero-to-one projection functions
