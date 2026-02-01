@@ -25,3 +25,10 @@ I dont like `Instance::backend` function because I dont want to show inner graph
 Please remove `Instance::backend`.
 This change will break tests. Fix it using Frame scheduler design described in docs.
 You can add some features in graphics crate if you think it's required to fix tests.
+
+## Request 4:
+Let's change integration tests in graphics crate.
+I dont like that tests rely on `GraphicsDevice::execute_graph` because there is already a frame scheduler, who actually must perform graph executions.
+Read `docs\ARCHITECTURE.md`, `docs\DECISIONS.md` to understand frame scheduler.
+Please remove `GraphicsDevice::execute_graph` and change integration graphics tests so that tests use `FrameSchedule`.
+Feel free to upgrade graphics api if something is missing to refactor tests.

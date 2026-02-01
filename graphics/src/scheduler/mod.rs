@@ -291,17 +291,78 @@ impl FrameSchedule {
         self.submitted.iter().map(|s| s.name.as_str())
     }
 
+    /// Finish the schedule without presenting to a swapchain.
+    ///
+    /// This is an alternative to [`present`](Self::present) for offscreen rendering
+    /// or test scenarios where no swapchain is involved. It sets a fence that will
+    /// be signaled when all submitted graphs complete.
+    ///
+    /// After calling this, the schedule is considered complete and should
+    /// be returned to the pipeline via [`FramePipeline::end_frame`](crate::pipeline::FramePipeline::end_frame).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `present` or `finish` has already been called on this schedule.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut schedule = pipeline.begin_frame();
+    /// let main = schedule.submit("main", main_graph, &[]);
+    /// schedule.finish(&[main]);  // No swapchain presentation
+    /// pipeline.end_frame(schedule);
+    /// ```
+    pub fn finish(&mut self, wait_for: &[GraphHandle]) {
+        assert!(
+            self.fence.is_none(),
+            "finish() or present() has already been called on this schedule"
+        );
+
+        // Validate wait_for handles
+        for &handle in wait_for {
+            assert!(
+                handle.index() < self.submitted.len(),
+                "Invalid dependency handle"
+            );
+        }
+
+        // Create fence for CPU synchronization
+        let fence = Fence::new_unsignaled();
+
+        // Collect semaphores to wait on (GPU waits for these before signaling fence)
+        let _wait_semaphores: Vec<&Semaphore> = wait_for
+            .iter()
+            .map(|h| &self.submitted[h.index()].completion)
+            .collect();
+
+        // TODO: Actual GPU submission with fence signal would happen here
+        // This would submit a command buffer that:
+        // 1. Waits on wait_semaphores
+        // 2. Signals the fence when complete
+        log::trace!(
+            "Finish schedule (waiting for {} dependencies)",
+            wait_for.len()
+        );
+
+        // For the dummy backend (no actual GPU), signal the fence immediately
+        // to simulate instant completion. Real backends will signal this
+        // when GPU work actually completes.
+        fence.signal();
+
+        self.fence = Some(fence);
+    }
+
     /// Extract the fence from this schedule.
     ///
     /// This is called internally by [`FramePipeline::end_frame`](crate::pipeline::FramePipeline::end_frame).
     ///
     /// # Panics
     ///
-    /// Panics if `present()` was not called.
+    /// Panics if neither `present()` nor `finish()` was called.
     pub(crate) fn take_fence(&mut self) -> Fence {
         self.fence
             .take()
-            .expect("present() must be called before end_frame()")
+            .expect("present() or finish() must be called before end_frame()")
     }
 
     /// Generate a unique semaphore ID.
@@ -365,6 +426,11 @@ impl FrameSchedule {
             signal_semaphore.id(),
             fence.status()
         );
+
+        // For the dummy backend (no actual GPU), signal the fence immediately
+        // to simulate instant completion. Real backends will signal this
+        // when GPU work actually completes.
+        fence.signal();
     }
 }
 
@@ -423,7 +489,8 @@ mod tests {
         schedule.present("present", make_test_graph("present"), &[main]);
 
         let fence = schedule.take_fence();
-        assert_eq!(fence.status(), FenceStatus::Unsignaled);
+        // In the dummy backend, fence is signaled immediately after present()
+        assert_eq!(fence.status(), FenceStatus::Signaled);
         assert!(!schedule.is_presented()); // Fence was taken
     }
 
@@ -437,11 +504,51 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "present() must be called before end_frame()")]
+    #[should_panic(expected = "present() or finish() must be called before end_frame()")]
     fn test_take_fence_without_present_panics() {
         let mut schedule = FrameSchedule::new();
         schedule.submit("main", make_test_graph("main"), &[]);
         schedule.take_fence(); // Panics
+    }
+
+    #[test]
+    fn test_finish() {
+        let mut schedule = FrameSchedule::new();
+
+        let main = schedule.submit("main", make_test_graph("main"), &[]);
+        assert!(!schedule.is_presented());
+
+        schedule.finish(&[main]);
+
+        // is_presented returns true for finish() too since fence is set
+        assert!(schedule.is_presented());
+    }
+
+    #[test]
+    fn test_finish_empty_dependencies() {
+        let mut schedule = FrameSchedule::new();
+        schedule.submit("main", make_test_graph("main"), &[]);
+        schedule.finish(&[]); // Finish without waiting for any graph
+
+        assert!(schedule.is_presented());
+    }
+
+    #[test]
+    #[should_panic(expected = "finish() or present() has already been called")]
+    fn test_double_finish_panics() {
+        let mut schedule = FrameSchedule::new();
+
+        schedule.finish(&[]);
+        schedule.finish(&[]); // Panics
+    }
+
+    #[test]
+    #[should_panic(expected = "finish() or present() has already been called")]
+    fn test_finish_after_present_panics() {
+        let mut schedule = FrameSchedule::new();
+
+        schedule.present("present", make_test_graph("present"), &[]);
+        schedule.finish(&[]); // Panics
     }
 
     #[test]

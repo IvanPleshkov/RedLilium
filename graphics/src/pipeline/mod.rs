@@ -566,11 +566,27 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "present() must be called before end_frame()")]
+    #[should_panic(expected = "present() or finish() must be called before end_frame()")]
     fn test_end_frame_without_present_panics() {
         let mut pipeline = FramePipeline::new(2);
         let schedule = pipeline.begin_frame();
-        pipeline.end_frame(schedule); // Panics - no present() called
+        pipeline.end_frame(schedule); // Panics - no present() or finish() called
+    }
+
+    #[test]
+    fn test_full_frame_with_finish() {
+        let mut pipeline = FramePipeline::new(2);
+
+        let mut schedule = pipeline.begin_frame();
+
+        // Build a simple offscreen render
+        let main = schedule.submit("main", make_test_graph("main"), &[]);
+        schedule.finish(&[main]); // Use finish instead of present
+
+        assert!(schedule.is_presented()); // is_presented returns true for finish too
+
+        pipeline.end_frame(schedule);
+        assert_eq!(pipeline.current_slot(), 1);
     }
 
     #[test]

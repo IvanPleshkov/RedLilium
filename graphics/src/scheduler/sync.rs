@@ -128,11 +128,11 @@ impl Fence {
         self.signaled.store(false, Ordering::Release);
     }
 
-    /// Signal the fence (for testing/simulation).
+    /// Signal the fence.
     ///
-    /// In real usage, the GPU signals the fence. This is exposed
-    /// for testing purposes.
-    #[cfg(test)]
+    /// In real GPU backends, the GPU signals the fence when work completes.
+    /// For the dummy backend (no actual GPU), call this immediately after
+    /// "submitting" work to simulate completion.
     pub(crate) fn signal(&self) {
         self.signaled.store(true, Ordering::Release);
     }

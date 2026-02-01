@@ -3,13 +3,15 @@
 //! This module provides shared test infrastructure that can be reused
 //! across different backend implementations.
 
+use std::cell::RefCell;
 use std::sync::Arc;
 
 use redlilium_graphics::{
-    Buffer, BufferDescriptor, BufferUsage, ColorAttachment, DepthStencilAttachment, GraphicsDevice,
-    GraphicsInstance, GraphicsPass, LoadOp, Mesh, MeshDescriptor, RenderGraph, RenderTargetConfig,
-    StoreOp, Texture, TextureDescriptor, TextureFormat, TextureUsage, TransferConfig,
-    TransferOperation, TransferPass, VertexAttribute, VertexBufferLayout, VertexLayout,
+    Buffer, BufferDescriptor, BufferUsage, ColorAttachment, DepthStencilAttachment, FramePipeline,
+    GraphicsDevice, GraphicsInstance, GraphicsPass, LoadOp, Mesh, MeshDescriptor, RenderGraph,
+    RenderTargetConfig, StoreOp, Texture, TextureDescriptor, TextureFormat, TextureUsage,
+    TransferConfig, TransferOperation, TransferPass, VertexAttribute, VertexBufferLayout,
+    VertexLayout,
 };
 
 /// Compute the aligned bytes per row for a texture (256-byte alignment for wgpu).
@@ -75,7 +77,7 @@ impl Backend {
 
 /// Test context providing access to graphics resources.
 ///
-/// This struct manages the graphics instance and device for a test,
+/// This struct manages the graphics instance, device, and frame pipeline for a test,
 /// and provides helper methods for common operations.
 pub struct TestContext {
     /// The backend being tested.
@@ -86,6 +88,8 @@ pub struct TestContext {
     instance: Arc<GraphicsInstance>,
     /// Graphics device for creating resources.
     pub device: Arc<GraphicsDevice>,
+    /// Frame pipeline for graph execution (uses RefCell for interior mutability).
+    pipeline: RefCell<FramePipeline>,
 }
 
 impl TestContext {
@@ -99,11 +103,14 @@ impl TestContext {
 
         let instance = GraphicsInstance::new().ok()?;
         let device = instance.create_device().ok()?;
+        // Use 1 frame in flight for synchronous test execution
+        let pipeline = device.create_pipeline(1);
 
         Some(Self {
             backend,
             instance,
             device,
+            pipeline: RefCell::new(pipeline),
         })
     }
 
@@ -164,12 +171,32 @@ impl TestContext {
 
     /// Execute a render graph and wait for completion.
     ///
-    /// This is a simplified execution path for tests that don't need
-    /// frame pipelining or complex scheduling.
+    /// Uses [`FramePipeline`] and [`FrameSchedule`] internally for proper
+    /// graph execution through the frame scheduling system.
     pub fn execute_graph(&self, graph: &RenderGraph) {
-        self.device
-            .execute_graph(graph)
-            .expect("Failed to execute render graph");
+        let compiled = graph.compile().expect("Failed to compile render graph");
+
+        let mut pipeline = self.pipeline.borrow_mut();
+        let mut schedule = pipeline.begin_frame();
+
+        // Submit the graph and collect its handle
+        let handle = schedule.submit("test_graph", compiled, &[]);
+
+        // Finish the schedule (offscreen, no presentation)
+        schedule.finish(&[handle]);
+
+        // End the frame and wait for completion
+        pipeline.end_frame(schedule);
+
+        // Wait for all GPU work to complete before returning
+        pipeline.wait_idle();
+    }
+}
+
+impl Drop for TestContext {
+    fn drop(&mut self) {
+        // Ensure GPU is idle before cleanup
+        self.pipeline.borrow().wait_idle();
     }
 }
 

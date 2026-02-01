@@ -414,32 +414,6 @@ impl GraphicsDevice {
         FramePipeline::new(frames_in_flight)
     }
 
-    /// Execute a render graph and wait for completion.
-    ///
-    /// This is a simplified execution path for single-shot graph execution,
-    /// useful for testing or one-time GPU operations. For frame-based rendering,
-    /// use [`create_pipeline`](Self::create_pipeline) and [`FrameSchedule`](crate::FrameSchedule).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the graph fails to compile or execute.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let mut graph = RenderGraph::new();
-    /// graph.add_graphics_pass(GraphicsPass::new("render".into()));
-    /// device.execute_graph(&graph)?;
-    /// ```
-    pub fn execute_graph(&self, graph: &crate::graph::RenderGraph) -> Result<(), GraphicsError> {
-        let compiled = graph.compile()?;
-        let backend = self.instance.backend();
-        let fence = backend.create_fence(false);
-        backend.execute_graph(graph, &compiled, Some(&fence))?;
-        backend.wait_fence(&fence);
-        Ok(())
-    }
-
     /// Get the number of live buffers created by this device.
     pub fn buffer_count(&self) -> usize {
         self.buffers
