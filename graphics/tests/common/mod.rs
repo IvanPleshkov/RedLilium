@@ -45,7 +45,10 @@ impl Backend {
         match self {
             // Dummy backend is always available
             Backend::Dummy => true,
-            // Vulkan backend via ash is not implemented yet
+            // Vulkan backend via ash is available when the feature is enabled
+            #[cfg(feature = "vulkan-backend")]
+            Backend::Vulkan => true,
+            #[cfg(not(feature = "vulkan-backend"))]
             Backend::Vulkan => false,
             // WebGpu backend (wgpu) is available when the feature is enabled
             #[cfg(feature = "wgpu-backend")]

@@ -38,6 +38,6 @@ rstest = "0.26.1"
 # GPU backends
 wgpu = "28.0.0"
 ash = "0.38.0"
-gpu-allocator = "0.27"
+gpu-allocator = "0.28"
 parking_lot = "0.12"
 pollster = "0.4"

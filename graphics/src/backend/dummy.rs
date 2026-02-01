@@ -74,7 +74,9 @@ impl GpuBackend for DummyBackend {
                 }
             }
             #[cfg(feature = "wgpu-backend")]
-            _ => {}
+            GpuFence::Wgpu { .. } => {}
+            #[cfg(feature = "vulkan-backend")]
+            GpuFence::Vulkan { .. } => {}
         }
     }
 
@@ -82,7 +84,9 @@ impl GpuBackend for DummyBackend {
         match fence {
             GpuFence::Dummy { signaled } => signaled.load(Ordering::Acquire),
             #[cfg(feature = "wgpu-backend")]
-            _ => false,
+            GpuFence::Wgpu { .. } => false,
+            #[cfg(feature = "vulkan-backend")]
+            GpuFence::Vulkan { .. } => false,
         }
     }
 
@@ -92,7 +96,9 @@ impl GpuBackend for DummyBackend {
                 signaled.store(true, Ordering::Release);
             }
             #[cfg(feature = "wgpu-backend")]
-            _ => {}
+            GpuFence::Wgpu { .. } => {}
+            #[cfg(feature = "vulkan-backend")]
+            GpuFence::Vulkan { .. } => {}
         }
     }
 
