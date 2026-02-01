@@ -9,6 +9,9 @@ use crate::resources::Texture;
 use crate::swapchain::SurfaceTexture;
 use crate::types::{ClearValue, TextureFormat};
 
+#[cfg(feature = "wgpu-backend")]
+use crate::backend::wgpu_impl::SurfaceTextureView;
+
 /// Operation to perform when loading an attachment at the start of a render pass.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum LoadOp {
@@ -65,6 +68,9 @@ pub enum RenderTarget {
         width: u32,
         /// Height of the surface.
         height: u32,
+        /// The actual wgpu texture view for rendering (only set when wgpu backend is used).
+        #[cfg(feature = "wgpu-backend")]
+        view: Option<SurfaceTextureView>,
     },
 }
 
@@ -93,6 +99,8 @@ impl RenderTarget {
             format: surface_texture.format(),
             width: surface_texture.width(),
             height: surface_texture.height(),
+            #[cfg(feature = "wgpu-backend")]
+            view: surface_texture.wgpu_view(),
         }
     }
 

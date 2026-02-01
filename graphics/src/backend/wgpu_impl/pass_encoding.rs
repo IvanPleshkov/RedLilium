@@ -73,15 +73,28 @@ impl WgpuBackend {
                             depth_slice: None,
                         })
                     }
-                    RenderTarget::Surface { .. } => {
-                        // Surface attachments require the actual wgpu swapchain texture view,
-                        // which isn't passed through the render graph yet. Skip for now.
-                        // TODO: Pass the acquired swapchain texture view through graph execution.
-                        log::warn!(
-                            "Pass '{}' has surface attachment - swapchain rendering not fully implemented",
-                            pass.name()
-                        );
-                        None
+                    RenderTarget::Surface { view, .. } => {
+                        // Use the surface texture view if available
+                        if let Some(surface_view) = view {
+                            let load_op = convert_load_op(&attachment.load_op());
+                            let store_op = convert_store_op(&attachment.store_op());
+
+                            Some(wgpu::RenderPassColorAttachment {
+                                view: surface_view.view(),
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: load_op,
+                                    store: store_op,
+                                },
+                                depth_slice: None,
+                            })
+                        } else {
+                            log::warn!(
+                                "Pass '{}' has surface attachment but no texture view available",
+                                pass.name()
+                            );
+                            None
+                        }
                     }
                 }
             })

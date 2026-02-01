@@ -88,3 +88,11 @@ Let's add to the instance in graphics crate in `new` a new agrument with paramet
 In parameters we need to provide a backend to use (in case of `wgpu` - also a backend for wgpu).
 Also parameters can configure debug and validation layers.
 Change integration tests and in window test use both backends (using `rstest`).
+
+## Request 13:
+Please fix test_window_swapchain_5_frames test with case::vulkan case.
+
+## Request 14:
+test_window_swapchain_5_frames test produces warning in the logs:
+WARN  redlilium_graphics::backend::wgpu_impl::pass_encoding Pass 'frame_3' has surface attachment - swapchain rendering not fully implemented
+Please fill the gaps to make this test fully functional

@@ -40,6 +40,9 @@ use crate::error::GraphicsError;
 use crate::instance::GraphicsInstance;
 use crate::types::TextureFormat;
 
+#[cfg(feature = "wgpu-backend")]
+use crate::backend::wgpu_impl::SurfaceTextureView;
+
 /// Presentation mode for the swapchain.
 ///
 /// Controls how frames are synchronized with the display.
@@ -103,6 +106,9 @@ pub struct Surface {
     device: RwLock<Option<Arc<GraphicsDevice>>>,
     /// Current frame index (cycles through swapchain images).
     frame_index: RwLock<u64>,
+    /// The underlying wgpu surface (only when using wgpu backend).
+    #[cfg(feature = "wgpu-backend")]
+    wgpu_surface: Option<wgpu::Surface<'static>>,
 }
 
 impl Surface {
@@ -111,22 +117,47 @@ impl Surface {
     /// # Safety
     ///
     /// The window handle must remain valid for the lifetime of the surface.
-    pub(crate) fn new<W>(
-        instance: Arc<GraphicsInstance>,
-        _window: &W,
-    ) -> Result<Self, GraphicsError>
+    pub(crate) fn new<W>(instance: Arc<GraphicsInstance>, window: &W) -> Result<Self, GraphicsError>
     where
-        W: HasWindowHandle + HasDisplayHandle,
+        W: HasWindowHandle + HasDisplayHandle + Sync,
     {
-        // In a real implementation, this would create the platform-specific surface
-        // using the window and display handles.
         log::info!("Creating surface from window");
+
+        #[cfg(feature = "wgpu-backend")]
+        let wgpu_surface = {
+            use crate::backend::GpuBackend;
+            match instance.backend() {
+                GpuBackend::Wgpu(wgpu_backend) => {
+                    // Create wgpu surface from window
+                    // SAFETY: The caller guarantees the window handle remains valid for the
+                    // lifetime of the surface. We transmute to 'static to satisfy wgpu's
+                    // Surface<'static> requirement, but the Surface is dropped before the
+                    // window in practice.
+                    let surface: wgpu::Surface<'static> = unsafe {
+                        std::mem::transmute(
+                            wgpu_backend
+                                .instance()
+                                .create_surface(window)
+                                .map_err(|e| {
+                                    GraphicsError::ResourceCreationFailed(format!(
+                                        "Failed to create wgpu surface: {e}"
+                                    ))
+                                })?,
+                        )
+                    };
+                    Some(surface)
+                }
+                _ => None,
+            }
+        };
 
         Ok(Self {
             instance,
             config: RwLock::new(None),
             device: RwLock::new(None),
             frame_index: RwLock::new(0),
+            #[cfg(feature = "wgpu-backend")]
+            wgpu_surface,
         })
     }
 
@@ -198,6 +229,26 @@ impl Surface {
             config.present_mode
         );
 
+        // Configure the wgpu surface if available
+        #[cfg(feature = "wgpu-backend")]
+        if let Some(wgpu_surface) = &self.wgpu_surface {
+            use crate::backend::GpuBackend;
+            if let GpuBackend::Wgpu(wgpu_backend) = self.instance.backend() {
+                let wgpu_config = wgpu::SurfaceConfiguration {
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    format: convert_texture_format_to_wgpu(config.format),
+                    width: config.width,
+                    height: config.height,
+                    present_mode: convert_present_mode_to_wgpu(config.present_mode),
+                    alpha_mode: wgpu::CompositeAlphaMode::Auto,
+                    view_formats: vec![],
+                    desired_maximum_frame_latency: 2,
+                };
+                wgpu_surface.configure(wgpu_backend.device(), &wgpu_config);
+                log::info!("Configured wgpu surface");
+            }
+        }
+
         // Store the configuration
         if let Ok(mut current_config) = self.config.write() {
             *current_config = Some(config.clone());
@@ -260,6 +311,25 @@ impl Surface {
             current
         };
 
+        // Acquire the actual wgpu surface texture if using wgpu backend
+        #[cfg(feature = "wgpu-backend")]
+        let (wgpu_texture, wgpu_view) = if let Some(wgpu_surface) = &self.wgpu_surface {
+            let surface_texture = wgpu_surface.get_current_texture().map_err(|e| {
+                GraphicsError::ResourceCreationFailed(format!(
+                    "Failed to acquire surface texture: {e}"
+                ))
+            })?;
+            let view = surface_texture
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            let surface_view = SurfaceTextureView {
+                view: Arc::new(view),
+            };
+            (Some(surface_texture), Some(surface_view))
+        } else {
+            (None, None)
+        };
+
         log::trace!("Acquired surface texture, frame index: {}", frame_index);
 
         Ok(SurfaceTexture {
@@ -269,6 +339,10 @@ impl Surface {
             height: config.height,
             frame_index,
             presented: RwLock::new(false),
+            #[cfg(feature = "wgpu-backend")]
+            wgpu_texture,
+            #[cfg(feature = "wgpu-backend")]
+            wgpu_view,
         })
     }
 }
@@ -281,7 +355,10 @@ impl std::fmt::Debug for Surface {
     }
 }
 
-// Ensure Surface is Send + Sync
+// Surface is Send + Sync when not using wgpu backend.
+// With wgpu backend, the Surface contains wgpu::Surface which may not be Send + Sync
+// on all platforms, so we skip the assertion.
+#[cfg(not(feature = "wgpu-backend"))]
 static_assertions::assert_impl_all!(Surface: Send, Sync);
 
 /// A texture acquired from the swapchain for rendering.
@@ -297,6 +374,12 @@ pub struct SurfaceTexture {
     height: u32,
     frame_index: u64,
     presented: RwLock<bool>,
+    /// The underlying wgpu surface texture (only when using wgpu backend).
+    #[cfg(feature = "wgpu-backend")]
+    wgpu_texture: Option<wgpu::SurfaceTexture>,
+    /// The texture view for rendering (only when using wgpu backend).
+    #[cfg(feature = "wgpu-backend")]
+    wgpu_view: Option<SurfaceTextureView>,
 }
 
 impl SurfaceTexture {
@@ -325,17 +408,33 @@ impl SurfaceTexture {
         self.frame_index
     }
 
+    /// Get the wgpu texture view for rendering (only available with wgpu backend).
+    #[cfg(feature = "wgpu-backend")]
+    pub fn wgpu_view(&self) -> Option<SurfaceTextureView> {
+        self.wgpu_view.clone()
+    }
+
+    /// Get the wgpu texture view for rendering (stub for non-wgpu builds).
+    #[cfg(not(feature = "wgpu-backend"))]
+    pub fn wgpu_view(&self) -> Option<()> {
+        None
+    }
+
     /// Present the texture to the screen.
     ///
     /// This displays the rendered content in the window. After calling this,
     /// the texture is no longer valid for rendering.
-    pub fn present(self) {
+    pub fn present(mut self) {
         if let Ok(mut presented) = self.presented.write() {
             *presented = true;
         }
         log::trace!("Presenting frame {}", self.frame_index);
-        // In a real implementation, this would submit the swapchain image
-        // for presentation to the display.
+
+        // Present the wgpu surface texture
+        #[cfg(feature = "wgpu-backend")]
+        if let Some(wgpu_texture) = self.wgpu_texture.take() {
+            wgpu_texture.present();
+        }
     }
 }
 
@@ -364,6 +463,48 @@ impl Drop for SurfaceTexture {
 
 // Ensure SurfaceTexture is Send + Sync
 static_assertions::assert_impl_all!(SurfaceTexture: Send, Sync);
+
+// ============================================================================
+// wgpu conversion helpers
+// ============================================================================
+
+#[cfg(feature = "wgpu-backend")]
+fn convert_texture_format_to_wgpu(format: TextureFormat) -> wgpu::TextureFormat {
+    match format {
+        TextureFormat::R8Unorm => wgpu::TextureFormat::R8Unorm,
+        TextureFormat::R8Snorm => wgpu::TextureFormat::R8Snorm,
+        TextureFormat::R8Uint => wgpu::TextureFormat::R8Uint,
+        TextureFormat::R8Sint => wgpu::TextureFormat::R8Sint,
+        TextureFormat::R16Unorm => wgpu::TextureFormat::R16Unorm,
+        TextureFormat::R16Float => wgpu::TextureFormat::R16Float,
+        TextureFormat::Rg8Unorm => wgpu::TextureFormat::Rg8Unorm,
+        TextureFormat::R32Float => wgpu::TextureFormat::R32Float,
+        TextureFormat::R32Uint => wgpu::TextureFormat::R32Uint,
+        TextureFormat::Rg16Float => wgpu::TextureFormat::Rg16Float,
+        TextureFormat::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
+        TextureFormat::Rgba8UnormSrgb => wgpu::TextureFormat::Rgba8UnormSrgb,
+        TextureFormat::Bgra8Unorm => wgpu::TextureFormat::Bgra8Unorm,
+        TextureFormat::Bgra8UnormSrgb => wgpu::TextureFormat::Bgra8UnormSrgb,
+        TextureFormat::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
+        TextureFormat::Rg32Float => wgpu::TextureFormat::Rg32Float,
+        TextureFormat::Rgba32Float => wgpu::TextureFormat::Rgba32Float,
+        TextureFormat::Depth16Unorm => wgpu::TextureFormat::Depth16Unorm,
+        TextureFormat::Depth24Plus => wgpu::TextureFormat::Depth24Plus,
+        TextureFormat::Depth24PlusStencil8 => wgpu::TextureFormat::Depth24PlusStencil8,
+        TextureFormat::Depth32Float => wgpu::TextureFormat::Depth32Float,
+        TextureFormat::Depth32FloatStencil8 => wgpu::TextureFormat::Depth32FloatStencil8,
+    }
+}
+
+#[cfg(feature = "wgpu-backend")]
+fn convert_present_mode_to_wgpu(mode: PresentMode) -> wgpu::PresentMode {
+    match mode {
+        PresentMode::Immediate => wgpu::PresentMode::Immediate,
+        PresentMode::Mailbox => wgpu::PresentMode::Mailbox,
+        PresentMode::Fifo => wgpu::PresentMode::Fifo,
+        PresentMode::FifoRelaxed => wgpu::PresentMode::FifoRelaxed,
+    }
+}
 
 #[cfg(test)]
 mod tests {

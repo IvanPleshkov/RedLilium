@@ -9,6 +9,27 @@ mod resources;
 
 use std::sync::Arc;
 
+/// A texture view for a surface texture (swapchain image).
+///
+/// This wraps the wgpu::TextureView from the surface texture for use in render passes.
+#[derive(Clone)]
+pub struct SurfaceTextureView {
+    pub(crate) view: Arc<wgpu::TextureView>,
+}
+
+impl std::fmt::Debug for SurfaceTextureView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SurfaceTextureView").finish()
+    }
+}
+
+impl SurfaceTextureView {
+    /// Get the underlying wgpu texture view.
+    pub fn view(&self) -> &wgpu::TextureView {
+        &self.view
+    }
+}
+
 use crate::error::GraphicsError;
 use crate::graph::{CompiledGraph, RenderGraph};
 
@@ -94,6 +115,16 @@ impl WgpuBackend {
             device: Arc::new(device),
             queue: Arc::new(queue),
         })
+    }
+
+    /// Get the wgpu instance.
+    pub fn instance(&self) -> &wgpu::Instance {
+        &self.instance
+    }
+
+    /// Get the wgpu adapter.
+    pub fn adapter(&self) -> &wgpu::Adapter {
+        &self.adapter
     }
 
     /// Get the wgpu device.

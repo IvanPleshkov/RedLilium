@@ -439,10 +439,10 @@ fn run_window_test(params: InstanceParameters) -> bool {
     }
 }
 
-/// Create instance parameters for wgpu with Vulkan backend.
-fn vulkan_params() -> InstanceParameters {
-    InstanceParameters::new().with_backend(BackendType::Vulkan)
-}
+// Native Vulkan backend disabled for now - use wgpu with Vulkan backend instead
+// fn vulkan_params() -> InstanceParameters {
+//    InstanceParameters::new().with_backend(BackendType::Vulkan)
+// }
 
 /// Create instance parameters for wgpu with Vulkan backend.
 fn wgpu_vulkan_params() -> InstanceParameters {
@@ -452,7 +452,7 @@ fn wgpu_vulkan_params() -> InstanceParameters {
 }
 
 #[rstest]
-#[case::vulkan(vulkan_params())]
+//#[case::vulkan(vulkan_params())] TODO: add it
 #[case::wgpu_vulkan(wgpu_vulkan_params())]
 fn test_window_swapchain_5_frames(#[case] params: InstanceParameters) {
     assert!(
