@@ -690,6 +690,10 @@ impl VulkanBackend {
         }
 
         // TODO: Encode draw commands
+        // When implementing pipeline creation, ensure these rasterization settings:
+        // - front_face: vk::FrontFace::COUNTER_CLOCKWISE (CCW front faces)
+        // - cull_mode: configurable, default vk::CullModeFlags::NONE
+        // This matches the wgpu backend and documented coordinate convention.
 
         // End dynamic rendering
         unsafe {

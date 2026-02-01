@@ -62,3 +62,11 @@ I preffer to use `wgpu` approach.
 If you can, find how coordinate system is resolved in `wgpu` sources with vulkan.
 Make the same for this project. If you cannot find, look at possibilities. Maybe there is some vulkan extension which allows to use D3D coordinate system.
 Update also `docs\ARCHITECTURE.md` and `docs\DECISIONS.md`, the desicion about coordinate system is important and should be mentioned.
+
+## Request 10:
+Regarding `docs\ARCHITECTURE.md`,
+RedLilium uses the **D3D/wgpu coordinate system convention** for consistency across backends:
+| **Y-Axis (NDC)** | +Y points down |
+| **Screen Origin** | Top-left corner |
+| **Winding Order** | Counter-clockwise (CCW) front faces |
+Please check if both vulkan api and wgpu backends in graphics crate follow this decision.
