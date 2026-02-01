@@ -59,8 +59,11 @@
 //!
 //! More frames = higher throughput but more input latency and memory usage.
 
-use crate::scheduler::{Fence, FrameSchedule};
+use std::sync::Arc;
 use std::time::Duration;
+
+use crate::device::GraphicsDevice;
+use crate::scheduler::{Fence, FrameSchedule};
 
 /// Manages multiple frames in flight for CPU-GPU parallelism.
 ///
@@ -93,8 +96,10 @@ use std::time::Duration;
 ///
 /// `FramePipeline` is **not thread-safe**. It should be owned by a single
 /// thread (typically the main/render thread).
-#[derive(Debug)]
 pub struct FramePipeline {
+    /// Device for executing graphs.
+    device: Option<Arc<GraphicsDevice>>,
+
     /// Fences for each frame slot. `None` if slot hasn't been used yet.
     frame_fences: Vec<Option<Fence>>,
 
@@ -108,8 +113,20 @@ pub struct FramePipeline {
     frame_count: u64,
 }
 
+impl std::fmt::Debug for FramePipeline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FramePipeline")
+            .field("device", &self.device.as_ref().map(|d| d.name()))
+            .field("frame_fences", &self.frame_fences)
+            .field("current_slot", &self.current_slot)
+            .field("frames_in_flight", &self.frames_in_flight)
+            .field("frame_count", &self.frame_count)
+            .finish()
+    }
+}
+
 impl FramePipeline {
-    /// Create a new frame pipeline.
+    /// Create a new frame pipeline without a device (for testing).
     ///
     /// This is called internally by [`GraphicsDevice::create_pipeline`](crate::device::GraphicsDevice::create_pipeline).
     ///
@@ -121,10 +138,36 @@ impl FramePipeline {
     /// # Panics
     ///
     /// Panics if `frames_in_flight` is 0.
+    #[allow(dead_code)]
     pub(crate) fn new(frames_in_flight: usize) -> Self {
         assert!(frames_in_flight > 0, "frames_in_flight must be at least 1");
 
         Self {
+            device: None,
+            frame_fences: (0..frames_in_flight).map(|_| None).collect(),
+            current_slot: 0,
+            frames_in_flight,
+            frame_count: 0,
+        }
+    }
+
+    /// Create a new frame pipeline with a device for GPU execution.
+    ///
+    /// This is called internally by [`GraphicsDevice::create_pipeline`](crate::device::GraphicsDevice::create_pipeline).
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - The graphics device for executing graphs.
+    /// * `frames_in_flight` - Number of frames that can be in flight simultaneously.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `frames_in_flight` is 0.
+    pub(crate) fn new_with_device(device: Arc<GraphicsDevice>, frames_in_flight: usize) -> Self {
+        assert!(frames_in_flight > 0, "frames_in_flight must be at least 1");
+
+        Self {
+            device: Some(device),
             frame_fences: (0..frames_in_flight).map(|_| None).collect(),
             current_slot: 0,
             frames_in_flight,
@@ -146,8 +189,8 @@ impl FramePipeline {
     /// loop {
     ///     let mut schedule = pipeline.begin_frame();  // Wait + get schedule
     ///
-    ///     let main = schedule.submit("main", main_graph, &[]);
-    ///     schedule.present("present", post_graph, &[main]);
+    ///     let main = schedule.submit("main", &main_graph, &[]);
+    ///     schedule.present("present", &post_graph, &[main]);
     ///
     ///     pipeline.end_frame(schedule);
     /// }
@@ -166,7 +209,11 @@ impl FramePipeline {
             self.current_slot
         );
 
-        FrameSchedule::new()
+        // Create schedule with device if available
+        match &self.device {
+            Some(device) => FrameSchedule::new_with_device(device.clone()),
+            None => FrameSchedule::new(),
+        }
     }
 
     /// Begin a new frame with a timeout.
@@ -190,7 +237,7 @@ impl FramePipeline {
     /// match pipeline.begin_frame_timeout(Duration::from_millis(100)) {
     ///     Some(schedule) => {
     ///         // Normal frame processing
-    ///         schedule.present("present", graph, &[]);
+    ///         schedule.present("present", &graph, &[]);
     ///         pipeline.end_frame(schedule);
     ///     }
     ///     None => {
@@ -214,7 +261,13 @@ impl FramePipeline {
             self.current_slot
         );
 
-        Some(FrameSchedule::new())
+        // Create schedule with device if available
+        let schedule = match &self.device {
+            Some(device) => FrameSchedule::new_with_device(device.clone()),
+            None => FrameSchedule::new(),
+        };
+
+        Some(schedule)
     }
 
     /// End the current frame.
@@ -433,10 +486,10 @@ mod tests {
     use super::*;
     use crate::graph::{GraphicsPass, RenderGraph};
 
-    fn make_test_graph(name: &str) -> crate::graph::CompiledGraph {
+    fn make_test_graph(name: &str) -> RenderGraph {
         let mut graph = RenderGraph::new();
         graph.add_graphics_pass(GraphicsPass::new(name.into()));
-        graph.compile().unwrap()
+        graph
     }
 
     #[test]
@@ -468,8 +521,9 @@ mod tests {
         let mut pipeline = FramePipeline::new(3);
         assert_eq!(pipeline.current_slot(), 0);
 
+        let present_graph = make_test_graph("present");
         let mut schedule = pipeline.begin_frame();
-        schedule.present("present", make_test_graph("present"), &[]);
+        schedule.present("present", &present_graph, &[]);
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 1);
 
@@ -477,14 +531,14 @@ mod tests {
         pipeline.signal_all_fences();
 
         let mut schedule = pipeline.begin_frame();
-        schedule.present("present", make_test_graph("present"), &[]);
+        schedule.present("present", &present_graph, &[]);
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 2);
 
         pipeline.signal_all_fences();
 
         let mut schedule = pipeline.begin_frame();
-        schedule.present("present", make_test_graph("present"), &[]);
+        schedule.present("present", &present_graph, &[]);
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 0); // Wraps around
     }
@@ -512,11 +566,12 @@ mod tests {
     #[test]
     fn test_frame_lifecycle() {
         let mut pipeline = FramePipeline::new(2);
+        let present_graph = make_test_graph("present");
 
         // Frame 0
         let mut schedule = pipeline.begin_frame();
         assert_eq!(pipeline.frame_count(), 1);
-        schedule.present("present", make_test_graph("present"), &[]);
+        schedule.present("present", &present_graph, &[]);
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 1);
 
@@ -526,7 +581,7 @@ mod tests {
         // Frame 1
         let mut schedule = pipeline.begin_frame();
         assert_eq!(pipeline.frame_count(), 2);
-        schedule.present("present", make_test_graph("present"), &[]);
+        schedule.present("present", &present_graph, &[]);
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 0);
 
@@ -580,7 +635,8 @@ mod tests {
         let mut schedule = pipeline.begin_frame();
 
         // Build a simple offscreen render
-        let main = schedule.submit("main", make_test_graph("main"), &[]);
+        let main_graph = make_test_graph("main");
+        let main = schedule.submit("main", &main_graph, &[]);
         schedule.finish(&[main]); // Use finish instead of present
 
         assert!(schedule.is_presented()); // is_presented returns true for finish too
@@ -596,9 +652,13 @@ mod tests {
         let mut schedule = pipeline.begin_frame();
 
         // Build a simple dependency chain
-        let shadows = schedule.submit("shadows", make_test_graph("shadow"), &[]);
-        let main = schedule.submit("main", make_test_graph("main"), &[shadows]);
-        schedule.present("present", make_test_graph("present"), &[main]);
+        let shadow_graph = make_test_graph("shadow");
+        let main_graph = make_test_graph("main");
+        let present_graph = make_test_graph("present");
+
+        let shadows = schedule.submit("shadows", &shadow_graph, &[]);
+        let main = schedule.submit("main", &main_graph, &[shadows]);
+        schedule.present("present", &present_graph, &[main]);
 
         assert_eq!(schedule.submitted_count(), 3);
         assert!(schedule.is_presented());

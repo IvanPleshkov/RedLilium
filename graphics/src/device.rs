@@ -401,18 +401,18 @@ impl GraphicsDevice {
     /// while running {
     ///     let mut schedule = pipeline.begin_frame();
     ///     // ... submit graphs ...
-    ///     schedule.present("present", graph, &[deps]);
+    ///     schedule.present("present", &graph, &[deps]);
     ///     pipeline.end_frame(schedule);
     /// }
     ///
     /// pipeline.wait_idle();
     /// ```
-    pub fn create_pipeline(&self, frames_in_flight: usize) -> FramePipeline {
+    pub fn create_pipeline(self: &Arc<Self>, frames_in_flight: usize) -> FramePipeline {
         log::trace!(
             "GraphicsDevice: created pipeline with {} frames in flight",
             frames_in_flight
         );
-        FramePipeline::new(frames_in_flight)
+        FramePipeline::new_with_device(Arc::clone(self), frames_in_flight)
     }
 
     /// Get the number of live buffers created by this device.
@@ -492,26 +492,6 @@ impl GraphicsDevice {
         self.instance
             .backend()
             .read_buffer(buffer.gpu_handle(), offset, size)
-    }
-
-    /// Execute a compiled render graph.
-    ///
-    /// This records commands from the graph into a command buffer and submits it.
-    ///
-    /// # Arguments
-    ///
-    /// * `graph` - The source render graph
-    /// * `compiled` - The compiled graph (pass order, etc.)
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if graph execution fails.
-    pub fn execute_graph(
-        &self,
-        graph: &crate::graph::RenderGraph,
-        compiled: &crate::compiler::CompiledGraph,
-    ) -> Result<(), GraphicsError> {
-        self.instance.backend().execute_graph(graph, compiled, None)
     }
 
     /// Clean up dead weak references to released resources.

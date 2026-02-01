@@ -46,3 +46,10 @@ Feel free to implement missing code in graphics backend.
 
 ## Request 7:
 Please refactor `graphics/src/backend/wgpu_backend.rs` and split it into multiple files like in `graphics/src/backend/vulkan`.
+
+## Request 8:
+Please look at `execute_graph` function in the graphic integration tests.
+It calls `execute_graph` from device and later uses scheduler.
+It looks incorrect. `schedule` should do an graph execution.
+Please remove `execute_graph` from device and from all backends.
+Make scheduler works, it's should be possibe to execute gpu tasks using scheduler only.

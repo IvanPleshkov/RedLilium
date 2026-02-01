@@ -50,7 +50,10 @@ mod sync;
 
 pub use sync::{Fence, FenceStatus, Semaphore};
 
-use crate::graph::CompiledGraph;
+use std::sync::Arc;
+
+use crate::device::GraphicsDevice;
+use crate::graph::{CompiledGraph, RenderGraph};
 
 /// Handle to a submitted graph in the frame schedule.
 ///
@@ -70,7 +73,6 @@ impl GraphHandle {
 }
 
 /// Information about a submitted graph.
-#[derive(Debug)]
 struct SubmittedGraph {
     /// Debug name for this graph.
     name: String,
@@ -79,6 +81,16 @@ struct SubmittedGraph {
     /// Handles of graphs this one waited for (for debugging/visualization).
     #[allow(dead_code)]
     waited_for: Vec<GraphHandle>,
+}
+
+impl std::fmt::Debug for SubmittedGraph {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubmittedGraph")
+            .field("name", &self.name)
+            .field("completion", &self.completion)
+            .field("waited_for", &self.waited_for)
+            .finish()
+    }
 }
 
 /// Frame schedule for streaming graph submission.
@@ -108,8 +120,9 @@ struct SubmittedGraph {
 /// // Return schedule to pipeline
 /// pipeline.end_frame(schedule);
 /// ```
-#[derive(Debug)]
 pub struct FrameSchedule {
+    /// Device for executing graphs.
+    device: Option<Arc<GraphicsDevice>>,
     /// Submitted graphs with their completion semaphores.
     submitted: Vec<SubmittedGraph>,
     /// Counter for generating semaphore IDs.
@@ -118,12 +131,37 @@ pub struct FrameSchedule {
     fence: Option<Fence>,
 }
 
+impl std::fmt::Debug for FrameSchedule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FrameSchedule")
+            .field("device", &self.device.as_ref().map(|d| d.name()))
+            .field("submitted", &self.submitted)
+            .field("semaphore_counter", &self.semaphore_counter)
+            .field("fence", &self.fence)
+            .finish()
+    }
+}
+
 impl FrameSchedule {
-    /// Create a new frame schedule.
+    /// Create a new frame schedule without a device (for testing).
     ///
     /// This is called internally by [`FramePipeline::begin_frame`](crate::pipeline::FramePipeline::begin_frame).
+    #[allow(dead_code)]
     pub(crate) fn new() -> Self {
         Self {
+            device: None,
+            submitted: Vec::new(),
+            semaphore_counter: 0,
+            fence: None,
+        }
+    }
+
+    /// Create a new frame schedule with a device for GPU execution.
+    ///
+    /// This is called internally by [`FramePipeline::begin_frame`](crate::pipeline::FramePipeline::begin_frame).
+    pub(crate) fn new_with_device(device: Arc<GraphicsDevice>) -> Self {
+        Self {
+            device: Some(device),
             submitted: Vec::new(),
             semaphore_counter: 0,
             fence: None,
@@ -140,7 +178,7 @@ impl FrameSchedule {
     /// # Arguments
     ///
     /// * `name` - Debug name for this graph submission
-    /// * `graph` - The compiled render graph to execute
+    /// * `graph` - The render graph to execute
     /// * `wait_for` - Graphs that must complete before this one starts
     ///
     /// # Example
@@ -155,7 +193,7 @@ impl FrameSchedule {
     pub fn submit(
         &mut self,
         name: impl Into<String>,
-        graph: CompiledGraph,
+        graph: &RenderGraph,
         wait_for: &[GraphHandle],
     ) -> GraphHandle {
         let name = name.into();
@@ -177,11 +215,79 @@ impl FrameSchedule {
             .map(|h| &self.submitted[h.index()].completion)
             .collect();
 
-        // Submit to GPU (this would be the actual GPU submission)
-        self.submit_to_gpu(&name, &graph, &wait_semaphores, &completion);
+        // Actually execute the graph on the GPU if we have a device
+        if let Some(device) = &self.device {
+            if let Ok(compiled) = graph.compile() {
+                let backend = device.instance().backend();
+                if let Err(e) = backend.execute_graph(graph, &compiled, None) {
+                    log::error!("Failed to execute graph '{}': {}", name, e);
+                }
+            } else {
+                log::error!("Failed to compile graph '{}'", name);
+            }
+        }
 
         log::trace!(
-            "Submitted graph '{}' (waiting for {} dependencies)",
+            "Submitted graph '{}' (waiting for {} dependencies, semaphores: [{}])",
+            name,
+            wait_for.len(),
+            wait_semaphores
+                .iter()
+                .map(|s| s.id().to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+
+        let handle = GraphHandle::new(self.submitted.len() as u32);
+        self.submitted.push(SubmittedGraph {
+            name,
+            completion,
+            waited_for: wait_for.to_vec(),
+        });
+        handle
+    }
+
+    /// Submit a pre-compiled graph for immediate execution.
+    ///
+    /// This is useful when you've already compiled the graph and want to avoid
+    /// recompilation.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Debug name for this graph submission
+    /// * `graph` - The render graph (needed for pass data)
+    /// * `compiled` - The pre-compiled graph
+    /// * `wait_for` - Graphs that must complete before this one starts
+    pub fn submit_compiled(
+        &mut self,
+        name: impl Into<String>,
+        graph: &RenderGraph,
+        compiled: &CompiledGraph,
+        wait_for: &[GraphHandle],
+    ) -> GraphHandle {
+        let name = name.into();
+
+        // Validate wait_for handles
+        for &handle in wait_for {
+            assert!(
+                handle.index() < self.submitted.len(),
+                "Invalid dependency handle"
+            );
+        }
+
+        // Create completion semaphore for this graph
+        let completion = Semaphore::new(self.next_semaphore_id());
+
+        // Actually execute the graph on the GPU if we have a device
+        if let Some(device) = &self.device {
+            let backend = device.instance().backend();
+            if let Err(e) = backend.execute_graph(graph, compiled, None) {
+                log::error!("Failed to execute graph '{}': {}", name, e);
+            }
+        }
+
+        log::trace!(
+            "Submitted compiled graph '{}' (waiting for {} dependencies)",
             name,
             wait_for.len()
         );
@@ -207,7 +313,7 @@ impl FrameSchedule {
     /// # Arguments
     ///
     /// * `name` - Debug name for this graph submission
-    /// * `graph` - The compiled render graph to execute
+    /// * `graph` - The render graph to execute
     /// * `wait_for` - Graphs that must complete before this one starts
     ///
     /// # Panics
@@ -225,7 +331,7 @@ impl FrameSchedule {
     pub fn present(
         &mut self,
         name: impl Into<String>,
-        graph: CompiledGraph,
+        graph: &RenderGraph,
         wait_for: &[GraphHandle],
     ) {
         assert!(
@@ -247,20 +353,26 @@ impl FrameSchedule {
         let completion = Semaphore::new(self.next_semaphore_id());
         let fence = Fence::new_unsignaled();
 
-        // Collect semaphores to wait on
-        let wait_semaphores: Vec<&Semaphore> = wait_for
-            .iter()
-            .map(|h| &self.submitted[h.index()].completion)
-            .collect();
-
-        // Submit to GPU with fence for CPU synchronization
-        self.submit_to_gpu_with_present(&name, &graph, &wait_semaphores, &completion, &fence);
+        // Actually execute the graph on the GPU if we have a device
+        if let Some(device) = &self.device {
+            if let Ok(compiled) = graph.compile() {
+                let backend = device.instance().backend();
+                if let Err(e) = backend.execute_graph(graph, &compiled, None) {
+                    log::error!("Failed to execute present graph '{}': {}", name, e);
+                }
+            } else {
+                log::error!("Failed to compile present graph '{}'", name);
+            }
+        }
 
         log::trace!(
             "Submitted present graph '{}' (waiting for {} dependencies)",
             name,
             wait_for.len()
         );
+
+        // Signal fence since GPU work is complete (synchronous execution)
+        fence.signal();
 
         self.submitted.push(SubmittedGraph {
             name,
@@ -371,67 +483,6 @@ impl FrameSchedule {
         self.semaphore_counter += 1;
         id
     }
-
-    /// Submit graph to GPU (placeholder for actual implementation).
-    fn submit_to_gpu(
-        &self,
-        name: &str,
-        graph: &CompiledGraph,
-        wait_semaphores: &[&Semaphore],
-        signal_semaphore: &Semaphore,
-    ) {
-        // TODO: Actual GPU submission would happen here
-        // This would:
-        // 1. Record commands from the compiled graph into a command buffer
-        // 2. Submit the command buffer with:
-        //    - wait_semaphores: semaphores to wait on before execution
-        //    - signal_semaphore: semaphore to signal after completion
-        log::trace!(
-            "GPU submit '{}': {} passes, wait={}, signal={}",
-            name,
-            graph.pass_order().len(),
-            wait_semaphores
-                .iter()
-                .map(|s| s.id().to_string())
-                .collect::<Vec<_>>()
-                .join(","),
-            signal_semaphore.id()
-        );
-    }
-
-    /// Submit graph to GPU with present (placeholder for actual implementation).
-    fn submit_to_gpu_with_present(
-        &self,
-        name: &str,
-        graph: &CompiledGraph,
-        wait_semaphores: &[&Semaphore],
-        signal_semaphore: &Semaphore,
-        fence: &Fence,
-    ) {
-        // TODO: Actual GPU submission with present would happen here
-        // This would:
-        // 1. Acquire swapchain image (with semaphore)
-        // 2. Record commands including final blit to swapchain
-        // 3. Submit with fence for CPU synchronization
-        // 4. Queue present operation
-        log::trace!(
-            "GPU submit+present '{}': {} passes, wait={}, signal={}, fence={:?}",
-            name,
-            graph.pass_order().len(),
-            wait_semaphores
-                .iter()
-                .map(|s| s.id().to_string())
-                .collect::<Vec<_>>()
-                .join(","),
-            signal_semaphore.id(),
-            fence.status()
-        );
-
-        // For the dummy backend (no actual GPU), signal the fence immediately
-        // to simulate instant completion. Real backends will signal this
-        // when GPU work actually completes.
-        fence.signal();
-    }
 }
 
 #[cfg(test)]
@@ -439,10 +490,10 @@ mod tests {
     use super::*;
     use crate::graph::{GraphicsPass, RenderGraph};
 
-    fn make_test_graph(name: &str) -> CompiledGraph {
+    fn make_test_graph(name: &str) -> RenderGraph {
         let mut graph = RenderGraph::new();
         graph.add_graphics_pass(GraphicsPass::new(name.into()));
-        graph.compile().unwrap()
+        graph
     }
 
     #[test]
@@ -450,7 +501,7 @@ mod tests {
         let mut schedule = FrameSchedule::new();
 
         let graph = make_test_graph("test");
-        let handle = schedule.submit("test", graph, &[]);
+        let handle = schedule.submit("test", &graph, &[]);
 
         assert_eq!(schedule.submitted_count(), 1);
         assert_eq!(handle.index(), 0);
@@ -460,9 +511,13 @@ mod tests {
     fn test_submit_with_dependencies() {
         let mut schedule = FrameSchedule::new();
 
-        let shadow = schedule.submit("shadows", make_test_graph("shadow"), &[]);
-        let depth = schedule.submit("depth", make_test_graph("depth"), &[]);
-        let main = schedule.submit("main", make_test_graph("main"), &[shadow, depth]);
+        let shadow_graph = make_test_graph("shadow");
+        let depth_graph = make_test_graph("depth");
+        let main_graph = make_test_graph("main");
+
+        let shadow = schedule.submit("shadows", &shadow_graph, &[]);
+        let depth = schedule.submit("depth", &depth_graph, &[]);
+        let main = schedule.submit("main", &main_graph, &[shadow, depth]);
 
         assert_eq!(schedule.submitted_count(), 3);
         assert_eq!(main.index(), 2);
@@ -472,10 +527,13 @@ mod tests {
     fn test_present() {
         let mut schedule = FrameSchedule::new();
 
-        let main = schedule.submit("main", make_test_graph("main"), &[]);
+        let main_graph = make_test_graph("main");
+        let present_graph = make_test_graph("present");
+
+        let main = schedule.submit("main", &main_graph, &[]);
         assert!(!schedule.is_presented());
 
-        schedule.present("present", make_test_graph("present"), &[main]);
+        schedule.present("present", &present_graph, &[main]);
 
         assert_eq!(schedule.submitted_count(), 2);
         assert!(schedule.is_presented());
@@ -485,8 +543,11 @@ mod tests {
     fn test_take_fence() {
         let mut schedule = FrameSchedule::new();
 
-        let main = schedule.submit("main", make_test_graph("main"), &[]);
-        schedule.present("present", make_test_graph("present"), &[main]);
+        let main_graph = make_test_graph("main");
+        let present_graph = make_test_graph("present");
+
+        let main = schedule.submit("main", &main_graph, &[]);
+        schedule.present("present", &present_graph, &[main]);
 
         let fence = schedule.take_fence();
         // In the dummy backend, fence is signaled immediately after present()
@@ -499,15 +560,19 @@ mod tests {
     fn test_double_present_panics() {
         let mut schedule = FrameSchedule::new();
 
-        schedule.present("present1", make_test_graph("present1"), &[]);
-        schedule.present("present2", make_test_graph("present2"), &[]); // Panics
+        let present1 = make_test_graph("present1");
+        let present2 = make_test_graph("present2");
+
+        schedule.present("present1", &present1, &[]);
+        schedule.present("present2", &present2, &[]); // Panics
     }
 
     #[test]
     #[should_panic(expected = "present() or finish() must be called before end_frame()")]
     fn test_take_fence_without_present_panics() {
         let mut schedule = FrameSchedule::new();
-        schedule.submit("main", make_test_graph("main"), &[]);
+        let main_graph = make_test_graph("main");
+        schedule.submit("main", &main_graph, &[]);
         schedule.take_fence(); // Panics
     }
 
@@ -515,7 +580,8 @@ mod tests {
     fn test_finish() {
         let mut schedule = FrameSchedule::new();
 
-        let main = schedule.submit("main", make_test_graph("main"), &[]);
+        let main_graph = make_test_graph("main");
+        let main = schedule.submit("main", &main_graph, &[]);
         assert!(!schedule.is_presented());
 
         schedule.finish(&[main]);
@@ -527,7 +593,8 @@ mod tests {
     #[test]
     fn test_finish_empty_dependencies() {
         let mut schedule = FrameSchedule::new();
-        schedule.submit("main", make_test_graph("main"), &[]);
+        let main_graph = make_test_graph("main");
+        schedule.submit("main", &main_graph, &[]);
         schedule.finish(&[]); // Finish without waiting for any graph
 
         assert!(schedule.is_presented());
@@ -547,7 +614,8 @@ mod tests {
     fn test_finish_after_present_panics() {
         let mut schedule = FrameSchedule::new();
 
-        schedule.present("present", make_test_graph("present"), &[]);
+        let present_graph = make_test_graph("present");
+        schedule.present("present", &present_graph, &[]);
         schedule.finish(&[]); // Panics
     }
 
@@ -555,9 +623,13 @@ mod tests {
     fn test_submitted_names() {
         let mut schedule = FrameSchedule::new();
 
-        schedule.submit("shadows", make_test_graph("shadow"), &[]);
-        schedule.submit("main", make_test_graph("main"), &[]);
-        schedule.present("post", make_test_graph("post"), &[]);
+        let shadow_graph = make_test_graph("shadow");
+        let main_graph = make_test_graph("main");
+        let post_graph = make_test_graph("post");
+
+        schedule.submit("shadows", &shadow_graph, &[]);
+        schedule.submit("main", &main_graph, &[]);
+        schedule.present("post", &post_graph, &[]);
 
         let names: Vec<_> = schedule.submitted_names().collect();
         assert_eq!(names, vec!["shadows", "main", "post"]);
@@ -570,7 +642,8 @@ mod tests {
 
         // Try to depend on non-existent graph
         let invalid_handle = GraphHandle::new(999);
-        schedule.submit("test", make_test_graph("test"), &[invalid_handle]);
+        let test_graph = make_test_graph("test");
+        schedule.submit("test", &test_graph, &[invalid_handle]);
     }
 
     #[test]
@@ -586,11 +659,17 @@ mod tests {
         //          |
         //        post
 
-        let shadows = schedule.submit("shadows", make_test_graph("shadow"), &[]);
-        let depth = schedule.submit("depth", make_test_graph("depth"), &[shadows]);
-        let gbuffer = schedule.submit("gbuffer", make_test_graph("gbuffer"), &[shadows]);
-        let main = schedule.submit("main", make_test_graph("main"), &[depth, gbuffer]);
-        schedule.present("post", make_test_graph("post"), &[main]);
+        let shadow_graph = make_test_graph("shadow");
+        let depth_graph = make_test_graph("depth");
+        let gbuffer_graph = make_test_graph("gbuffer");
+        let main_graph = make_test_graph("main");
+        let post_graph = make_test_graph("post");
+
+        let shadows = schedule.submit("shadows", &shadow_graph, &[]);
+        let depth = schedule.submit("depth", &depth_graph, &[shadows]);
+        let gbuffer = schedule.submit("gbuffer", &gbuffer_graph, &[shadows]);
+        let main = schedule.submit("main", &main_graph, &[depth, gbuffer]);
+        schedule.present("post", &post_graph, &[main]);
 
         assert_eq!(schedule.submitted_count(), 5);
         assert!(schedule.is_presented());

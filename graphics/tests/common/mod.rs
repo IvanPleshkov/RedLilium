@@ -174,18 +174,11 @@ impl TestContext {
     /// Uses [`FramePipeline`] and [`FrameSchedule`] internally for proper
     /// graph execution through the frame scheduling system.
     pub fn execute_graph(&self, graph: &RenderGraph) {
-        let compiled = graph.compile().expect("Failed to compile render graph");
-
-        // Actually execute the graph on the GPU backend
-        self.device
-            .execute_graph(graph, &compiled)
-            .expect("Failed to execute graph");
-
         let mut pipeline = self.pipeline.borrow_mut();
         let mut schedule = pipeline.begin_frame();
 
-        // Submit the graph and collect its handle
-        let handle = schedule.submit("test_graph", compiled, &[]);
+        // Submit the graph - this actually executes on the GPU
+        let handle = schedule.submit("test_graph", graph, &[]);
 
         // Finish the schedule (offscreen, no presentation)
         schedule.finish(&[handle]);
