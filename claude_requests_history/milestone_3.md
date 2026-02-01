@@ -70,3 +70,12 @@ RedLilium uses the **D3D/wgpu coordinate system convention** for consistency acr
 | **Screen Origin** | Top-left corner |
 | **Winding Order** | Counter-clockwise (CCW) front faces |
 Please check if both vulkan api and wgpu backends in graphics crate follow this decision.
+
+## Request 11:
+Let's create a new integration test in graphics crate.
+This test tries to create a window using `winit` crate.
+It creates graphics, uses swapchain, draw 5 frames and closes.
+Please use frame schedule and pipeline described in `docs\ARCHITECTURE.md`.
+If possible to read back swapchain, feel free to read it and check using tools in graphics integration tests.
+If window cannot be created or there is no any device compatible to the surface - finish test as passed.
+Tesh should pass in this case because of CI running.
