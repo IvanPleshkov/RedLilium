@@ -43,3 +43,6 @@ Graphics crate has integration tests.
 Please add test with a basic WGSL shader. The test using this shader renders a quad in the half of the small render target texture.
 Then, texture is read back to ram and you can use tools in integration tests to check pixel values.
 Feel free to implement missing code in graphics backend.
+
+## Request 7:
+Please refactor `graphics/src/backend/wgpu_backend.rs` and split it into multiple files like in `graphics/src/backend/vulkan`.

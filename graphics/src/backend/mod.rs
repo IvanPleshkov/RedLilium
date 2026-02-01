@@ -19,7 +19,7 @@
 //! - Synchronization primitives
 
 #[cfg(feature = "wgpu-backend")]
-pub mod wgpu_backend;
+pub mod wgpu_impl;
 
 #[cfg(feature = "vulkan-backend")]
 pub mod vulkan;
@@ -367,7 +367,7 @@ pub enum GpuBackend {
     Dummy(dummy::DummyBackend),
     /// wgpu backend for cross-platform GPU access.
     #[cfg(feature = "wgpu-backend")]
-    Wgpu(wgpu_backend::WgpuBackend),
+    Wgpu(wgpu_impl::WgpuBackend),
     /// Native Vulkan backend using ash.
     #[cfg(feature = "vulkan-backend")]
     Vulkan(vulkan::VulkanBackend),
@@ -532,7 +532,7 @@ pub fn create_backend() -> Result<GpuBackend, GraphicsError> {
     // Try wgpu backend first if available (supports WGSL shaders and full draw commands)
     #[cfg(feature = "wgpu-backend")]
     {
-        match wgpu_backend::WgpuBackend::new() {
+        match wgpu_impl::WgpuBackend::new() {
             Ok(backend) => {
                 log::info!("Using wgpu backend");
                 return Ok(GpuBackend::Wgpu(backend));
