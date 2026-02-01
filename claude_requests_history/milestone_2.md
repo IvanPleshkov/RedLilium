@@ -208,6 +208,28 @@ If you agree with this thinkings, refactor please `Mesh` and `Layout`.
 ## Request 29:
 Please remove `Custom` variant of `VertexAttributeSemantic` enum. If needed, we will add it back or add another specific kinds of semantics later.
 
+## Request 30:
+Audit please render graph in graphics crate.
+Read also the material system in graphics crate.
+Please check if such architecture supports instances drawing and indirect drawing.
+
+## Request 31:
+Audit please render graph in graphics crate.
+Read also the material system in graphics crate.
+Add Indirect Drawing Support.
+  Current state:
+  - No draw_indirect() methods in GraphicsPass
+  - No DrawIndirectBuffer type
+  - No indirect dispatch in ComputePass
+However, infrastructure is ready:
+  - BufferUsage::INDIRECT flag exists in the buffer system
+  - Transfer passes can prepare indirect buffers
+  - Arc-based resource sharing supports indirect buffer binding
+To add indirect drawing would require:
+  1. New DrawCommand variants or methods for indirect draws
+  2. Indirect buffer type/binding support in materials
+  3. Methods like GraphicsPass::add_draw_indirect()
+
 ## Request __:
 There is a basic render graph compilation alg in `graphics\src\compiler\mod.rs`.
 Read please how material system works.
