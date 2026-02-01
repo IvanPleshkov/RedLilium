@@ -87,8 +87,8 @@ impl GraphicsInstance {
         Ok(instance)
     }
 
-    /// Get the GPU backend.
-    pub fn backend(&self) -> &Arc<dyn GpuBackend> {
+    /// Get the GPU backend (internal use only).
+    pub(crate) fn backend(&self) -> &Arc<dyn GpuBackend> {
         &self.backend
     }
 

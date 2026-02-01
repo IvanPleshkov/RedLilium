@@ -167,18 +167,9 @@ impl TestContext {
     /// This is a simplified execution path for tests that don't need
     /// frame pipelining or complex scheduling.
     pub fn execute_graph(&self, graph: &RenderGraph) {
-        let compiled = graph.compile().expect("Failed to compile render graph");
-
-        // Get the backend from the instance and execute directly
-        let backend = self.instance.backend();
-        let fence = backend.create_fence(false);
-
-        backend
-            .execute_graph(graph, &compiled, Some(&fence))
+        self.device
+            .execute_graph(graph)
             .expect("Failed to execute render graph");
-
-        // Wait for GPU to complete
-        backend.wait_fence(&fence);
     }
 }
 

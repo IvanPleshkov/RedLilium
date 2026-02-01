@@ -17,3 +17,11 @@ Graphics crate has already a backend using `wgpu` crate. Now it's time to implem
 About ash here: https://github.com/ash-rs/ash.
 While working, use tests in `graphics\tests\gpu_tests.rs` to check, that everything works.
 Don't forget to provide a flag to enable debug layers and use debug layer in tests, no errors should be from validation layers.
+
+## Request 3:
+Read `docs\ARCHITECTURE.md`, `docs\DECISIONS.md` and the whole graphics crate in the workspace.
+See the graphics crate and Instance structure.
+I dont like `Instance::backend` function because I dont want to show inner graphics as a public API.
+Please remove `Instance::backend`.
+This change will break tests. Fix it using Frame scheduler design described in docs.
+You can add some features in graphics crate if you think it's required to fix tests.

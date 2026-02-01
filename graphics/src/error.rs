@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use crate::graph::GraphError;
+
 /// Errors that can occur in the graphics system.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GraphicsError {
@@ -42,6 +44,12 @@ impl fmt::Display for GraphicsError {
 }
 
 impl std::error::Error for GraphicsError {}
+
+impl From<GraphError> for GraphicsError {
+    fn from(err: GraphError) -> Self {
+        Self::Internal(err.to_string())
+    }
+}
 
 #[cfg(test)]
 mod tests {
