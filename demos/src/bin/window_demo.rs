@@ -11,10 +11,6 @@
 use redlilium_ecs::bevy_ecs::prelude::*;
 #[allow(unused_imports)]
 use redlilium_ecs::prelude::*;
-use redlilium_graphics::{
-    CameraSystem, ExtractedCamera, ExtractedMaterial, ExtractedMesh, ExtractedTransform,
-    RenderWorld,
-};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
@@ -25,10 +21,6 @@ struct App {
     window: Option<Window>,
     /// ECS world containing all entities and components.
     world: World,
-    /// Camera system managing per-camera render graphs.
-    camera_system: CameraSystem,
-    /// Shared render world for all cameras.
-    render_world: RenderWorld,
     /// Current window size.
     window_size: (u32, u32),
 }
@@ -41,98 +33,7 @@ impl App {
         Self {
             window: None,
             world,
-            camera_system: CameraSystem::new(),
-            render_world: RenderWorld::with_capacity(1024, 64, 64),
             window_size: (1280, 720),
-        }
-    }
-
-    /// Extracts camera data from ECS world into the camera system.
-    fn extract_cameras(&mut self) {
-        let mut query = self.world.query::<(Entity, &Camera, &GlobalTransform)>();
-
-        for (entity, camera, global_transform) in query.iter(&self.world) {
-            if !camera.is_active {
-                continue;
-            }
-
-            let position = global_transform.translation();
-            let view_matrix = camera.compute_view_matrix(global_transform);
-
-            // Determine target size and ID
-            let (target_size, target_id, is_texture_target) = match &camera.target {
-                RenderTarget::Surface { window_id } => (self.window_size, *window_id as u64, false),
-                RenderTarget::Texture { texture_id, size } => {
-                    ((size.x as u32, size.y as u32), *texture_id, true)
-                }
-            };
-
-            let projection_matrix = camera.compute_projection_matrix(target_size.0, target_size.1);
-
-            let viewport = camera.viewport.to_pixels(target_size.0, target_size.1);
-
-            let extracted = ExtractedCamera {
-                entity_id: entity.to_bits(),
-                view_matrix,
-                projection_matrix,
-                view_projection: projection_matrix * view_matrix,
-                position,
-                priority: camera.priority,
-                is_texture_target,
-                target_id,
-                target_size,
-                clear_color: camera.clear_color.map(|c| [c.x, c.y, c.z, c.w]),
-                render_layers: camera.render_layers,
-                viewport,
-            };
-
-            self.camera_system.add_camera(extracted);
-        }
-    }
-
-    /// Extracts render data from ECS world into the render world.
-    fn extract_render_data(&mut self) {
-        // Query all entities with Transform, GlobalTransform, RenderMesh, and Material
-        let mut query = self
-            .world
-            .query::<(Entity, &GlobalTransform, &RenderMesh, &Material)>();
-
-        for (entity, global_transform, render_mesh, material) in query.iter(&self.world) {
-            let transform = ExtractedTransform::from_matrix(global_transform.to_matrix());
-
-            let mesh = ExtractedMesh {
-                mesh_id: render_mesh.mesh.id(),
-                cast_shadows: render_mesh.cast_shadows,
-                receive_shadows: render_mesh.receive_shadows,
-                render_layers: render_mesh.render_layers.bits(),
-            };
-
-            let extracted_material = ExtractedMaterial {
-                base_color: material.base_color,
-                metallic: material.metallic,
-                roughness: material.roughness,
-                emissive: material.emissive,
-                alpha_mode: match material.alpha_mode {
-                    AlphaMode::Opaque => 0,
-                    AlphaMode::Mask { .. } => 1,
-                    AlphaMode::Blend => 2,
-                },
-                alpha_cutoff: material
-                    .alpha_mode
-                    .cutoff()
-                    .map(|c| (c * 255.0) as u8)
-                    .unwrap_or(127),
-                double_sided: material.double_sided,
-                base_color_texture: material.base_color_texture.map(|h| h.id()).unwrap_or(0),
-                normal_texture: material.normal_texture.map(|h| h.id()).unwrap_or(0),
-                metallic_roughness_texture: material
-                    .metallic_roughness_texture
-                    .map(|h| h.id())
-                    .unwrap_or(0),
-            };
-
-            self.render_world
-                .add(entity.to_bits(), transform, mesh, extracted_material);
         }
     }
 
@@ -143,38 +44,9 @@ impl App {
 
     /// Renders a single frame.
     fn render_frame(&mut self) {
-        // Begin frame - clear render world and camera system
-        self.render_world.clear();
-        self.camera_system.begin_frame();
+        Self::update_transforms(self);
 
-        // Update transforms first
-        self.update_transforms();
-
-        // Extract phase
-        self.extract_cameras();
-        self.extract_render_data();
-
-        // Prepare phase - sort cameras, filter items, setup graphs
-        self.camera_system.prepare(&self.render_world);
-
-        // Render phase - execute all camera graphs
-        if let Err(e) = self.camera_system.render() {
-            log::error!("Render error: {}", e);
-        }
-
-        // End frame
-        self.camera_system.end_frame();
-
-        // Log frame info periodically
-        let frame = self.camera_system.frame_count();
-        if frame.is_multiple_of(60) {
-            log::debug!(
-                "Frame {}: {} cameras, {} render items",
-                frame,
-                self.camera_system.camera_count(),
-                self.render_world.total_items()
-            );
-        }
+        // TODO
     }
 }
 
