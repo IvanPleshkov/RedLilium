@@ -25,6 +25,8 @@ pub enum GraphicsError {
     SurfaceOutdated,
     /// The surface was lost and needs to be recreated.
     SurfaceLost,
+    /// Shader compilation failed.
+    ShaderCompilationFailed(String),
 }
 
 impl fmt::Display for GraphicsError {
@@ -39,6 +41,7 @@ impl fmt::Display for GraphicsError {
             Self::Internal(msg) => write!(f, "internal error: {msg}"),
             Self::SurfaceOutdated => write!(f, "surface outdated, needs reconfiguration"),
             Self::SurfaceLost => write!(f, "surface lost, needs recreation"),
+            Self::ShaderCompilationFailed(msg) => write!(f, "shader compilation failed: {msg}"),
         }
     }
 }

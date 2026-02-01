@@ -756,12 +756,34 @@ impl VulkanBackend {
                     },
                 );
 
+                let block_size = src.format().block_size();
+
                 let copy_regions: Vec<vk::BufferImageCopy> = regions
                     .iter()
                     .map(|r| {
+                        // Compute bytes_per_row with 256-byte alignment for consistency with wgpu
+                        // If bytes_per_row is not specified and we have multiple rows, align to 256 bytes
+                        let bytes_per_row = r.buffer_layout.bytes_per_row.unwrap_or_else(|| {
+                            if r.extent.height > 1 {
+                                let unpadded = r.extent.width * block_size;
+                                // Align to 256 bytes for wgpu compatibility
+                                (unpadded + 255) & !255
+                            } else {
+                                0 // Single row - tight packing
+                            }
+                        });
+
+                        // Vulkan's buffer_row_length is in texels (pixels), not bytes
+                        // Convert from bytes to texels by dividing by block_size
+                        let row_length_texels = if bytes_per_row > 0 {
+                            bytes_per_row / block_size
+                        } else {
+                            0 // 0 means tightly packed
+                        };
+
                         vk::BufferImageCopy::default()
                             .buffer_offset(r.buffer_layout.offset)
-                            .buffer_row_length(r.buffer_layout.bytes_per_row.unwrap_or(0))
+                            .buffer_row_length(row_length_texels)
                             .buffer_image_height(r.buffer_layout.rows_per_image.unwrap_or(0))
                             .image_subresource(vk::ImageSubresourceLayers {
                                 aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -815,12 +837,31 @@ impl VulkanBackend {
                     vk::ImageAspectFlags::COLOR,
                 );
 
+                let block_size = dst.format().block_size();
+
                 let copy_regions: Vec<vk::BufferImageCopy> = regions
                     .iter()
                     .map(|r| {
+                        // Compute bytes_per_row with 256-byte alignment for consistency with wgpu
+                        let bytes_per_row = r.buffer_layout.bytes_per_row.unwrap_or_else(|| {
+                            if r.extent.height > 1 {
+                                let unpadded = r.extent.width * block_size;
+                                (unpadded + 255) & !255
+                            } else {
+                                0
+                            }
+                        });
+
+                        // Convert from bytes to texels for Vulkan
+                        let row_length_texels = if bytes_per_row > 0 {
+                            bytes_per_row / block_size
+                        } else {
+                            0
+                        };
+
                         vk::BufferImageCopy::default()
                             .buffer_offset(r.buffer_layout.offset)
-                            .buffer_row_length(r.buffer_layout.bytes_per_row.unwrap_or(0))
+                            .buffer_row_length(row_length_texels)
                             .buffer_image_height(r.buffer_layout.rows_per_image.unwrap_or(0))
                             .image_subresource(vk::ImageSubresourceLayers {
                                 aspect_mask: vk::ImageAspectFlags::COLOR,

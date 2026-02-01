@@ -37,3 +37,9 @@ Feel free to upgrade graphics api if something is missing to refactor tests.
 There is `GpuBackend` trait in graphics crate.
 Because we have a fixed list of supported backends, we don't need actually a trait and dyn for it.
 Let's refactor it. Change `GpuBackend` to the enum. All trait functions change to the enum functions.
+
+## Request 6:
+Graphics crate has integration tests.
+Please add test with a basic WGSL shader. The test using this shader renders a quad in the half of the small render target texture.
+Then, texture is read back to ram and you can use tools in integration tests to check pixel values.
+Feel free to implement missing code in graphics backend.

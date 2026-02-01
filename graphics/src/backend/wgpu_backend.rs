@@ -6,7 +6,9 @@
 use std::sync::{Arc, Mutex};
 
 use crate::error::GraphicsError;
-use crate::graph::{CompiledGraph, Pass, RenderGraph};
+use crate::graph::{CompiledGraph, DrawCommand, Pass, RenderGraph};
+use crate::materials::ShaderStage;
+use crate::mesh::{IndexFormat, PrimitiveTopology, VertexAttributeFormat, VertexStepMode};
 use crate::types::{
     AddressMode, BufferDescriptor, BufferUsage, CompareFunction, FilterMode, SamplerDescriptor,
     TextureDescriptor, TextureFormat, TextureUsage,
@@ -175,16 +177,14 @@ impl WgpuBackend {
             device,
             submission_index,
         } = fence
+            && let Ok(guard) = submission_index.lock()
+            && let Some(idx) = guard.clone()
         {
-            if let Ok(guard) = submission_index.lock() {
-                if let Some(idx) = guard.clone() {
-                    // Wait for the specific submission
-                    let _ = device.poll(wgpu::PollType::Wait {
-                        submission_index: Some(idx),
-                        timeout: Some(std::time::Duration::from_secs(10)),
-                    });
-                }
-            }
+            // Wait for the specific submission
+            let _ = device.poll(wgpu::PollType::Wait {
+                submission_index: Some(idx),
+                timeout: Some(std::time::Duration::from_secs(10)),
+            });
         }
     }
 
@@ -194,18 +194,14 @@ impl WgpuBackend {
             device,
             submission_index,
         } = fence
+            && let Ok(guard) = submission_index.lock()
+            && guard.is_some()
+            && let Ok(status) = device.poll(wgpu::PollType::Poll)
         {
-            if let Ok(guard) = submission_index.lock() {
-                if guard.is_some() {
-                    // Poll without waiting to check status
-                    if let Ok(status) = device.poll(wgpu::PollType::Poll) {
-                        return status.is_queue_empty();
-                    }
-                }
-            }
-            return true; // No submission yet means "done"
+            return status.is_queue_empty();
         }
-        false
+        // No submission yet or not wgpu fence means "done" or default
+        matches!(fence, GpuFence::Wgpu { .. })
     }
 
     /// Signal a fence (for testing/dummy backend).
@@ -244,11 +240,16 @@ impl WgpuBackend {
             submission_index: fence_idx,
             ..
         }) = signal_fence
+            && let Ok(mut guard) = fence_idx.lock()
         {
-            if let Ok(mut guard) = fence_idx.lock() {
-                *guard = Some(submission_index);
-            }
+            *guard = Some(submission_index.clone());
         }
+
+        // Wait for GPU to complete before returning
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submission_index),
+            timeout: Some(std::time::Duration::from_secs(10)),
+        });
 
         Ok(())
     }
@@ -263,7 +264,25 @@ impl WgpuBackend {
     /// Read data from a buffer.
     pub fn read_buffer(&self, buffer: &GpuBuffer, offset: u64, size: u64) -> Vec<u8> {
         if let GpuBuffer::Wgpu(wgpu_buffer) = buffer {
-            // Create a staging buffer for reading
+            // Try to map the buffer directly first (works if buffer has MAP_READ)
+            let slice = wgpu_buffer.slice(offset..offset + size);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |result| {
+                let _ = tx.send(result);
+            });
+
+            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+
+            if let Ok(Ok(())) = rx.recv() {
+                // Direct mapping succeeded
+                let data = slice.get_mapped_range().to_vec();
+                let _ = slice;
+                wgpu_buffer.unmap();
+                return data;
+            }
+
+            // Direct mapping failed - use staging buffer approach
+            // This requires the source buffer to have COPY_SRC
             let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Read Staging Buffer"),
                 size,
@@ -386,7 +405,7 @@ impl WgpuBackend {
                 });
 
         // Create render pass
-        let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some(pass.name()),
             color_attachments: &color_attachments,
             depth_stencil_attachment,
@@ -395,8 +414,194 @@ impl WgpuBackend {
             multiview_mask: None,
         });
 
-        // TODO: Encode draw commands
-        // For now, just the clear operations happen via load ops
+        // Encode draw commands
+        for draw_cmd in pass.draw_commands() {
+            self.encode_draw_command(&mut render_pass, draw_cmd, render_targets)?;
+        }
+
+        Ok(())
+    }
+
+    fn encode_draw_command<'a>(
+        &'a self,
+        render_pass: &mut wgpu::RenderPass<'a>,
+        draw_cmd: &'a DrawCommand,
+        render_targets: &crate::graph::RenderTargetConfig,
+    ) -> Result<(), GraphicsError> {
+        let material = draw_cmd.material.material();
+        let mesh = &draw_cmd.mesh;
+
+        // Get color target formats
+        let color_formats: Vec<Option<wgpu::TextureFormat>> = render_targets
+            .color_attachments
+            .iter()
+            .map(|a| Some(convert_texture_format(a.texture().format())))
+            .collect();
+
+        // Get depth format if present
+        let depth_format = render_targets
+            .depth_stencil_attachment
+            .as_ref()
+            .map(|a| convert_texture_format(a.texture().format()));
+
+        // Create shader modules from material
+        let shaders = material.shaders();
+        let mut vertex_module = None;
+        let mut fragment_module = None;
+        let mut vertex_entry = "vs_main";
+        let mut fragment_entry = "fs_main";
+
+        for shader in shaders {
+            let source = std::str::from_utf8(&shader.source).map_err(|e| {
+                GraphicsError::ShaderCompilationFailed(format!("Invalid UTF-8 in shader: {e}"))
+            })?;
+
+            let module = self
+                .device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: material.label(),
+                    source: wgpu::ShaderSource::Wgsl(source.into()),
+                });
+
+            match shader.stage {
+                ShaderStage::Vertex => {
+                    vertex_module = Some(module);
+                    vertex_entry = Box::leak(shader.entry_point.clone().into_boxed_str());
+                }
+                ShaderStage::Fragment => {
+                    fragment_module = Some(module);
+                    fragment_entry = Box::leak(shader.entry_point.clone().into_boxed_str());
+                }
+                ShaderStage::Compute => {}
+            }
+        }
+
+        let vertex_module = vertex_module.ok_or_else(|| {
+            GraphicsError::ShaderCompilationFailed("No vertex shader provided".into())
+        })?;
+
+        // Build vertex buffer layouts
+        let layout = mesh.layout();
+        let vertex_buffer_layouts: Vec<wgpu::VertexBufferLayout> = layout
+            .buffers
+            .iter()
+            .enumerate()
+            .map(|(buffer_idx, buffer)| {
+                let attributes: Vec<wgpu::VertexAttribute> = layout
+                    .attributes
+                    .iter()
+                    .filter(|attr| attr.buffer_index == buffer_idx as u32)
+                    .map(|attr| wgpu::VertexAttribute {
+                        format: convert_vertex_format(attr.format),
+                        offset: attr.offset as u64,
+                        shader_location: attr.semantic.index(),
+                    })
+                    .collect();
+
+                wgpu::VertexBufferLayout {
+                    array_stride: buffer.stride as u64,
+                    step_mode: match buffer.step_mode {
+                        VertexStepMode::Vertex => wgpu::VertexStepMode::Vertex,
+                        VertexStepMode::Instance => wgpu::VertexStepMode::Instance,
+                    },
+                    attributes: Box::leak(attributes.into_boxed_slice()),
+                }
+            })
+            .collect();
+
+        // Create pipeline layout (empty for now - no bind groups)
+        let pipeline_layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Draw Pipeline Layout"),
+                bind_group_layouts: &[],
+                immediate_size: 0,
+            });
+
+        // Build color targets
+        let color_targets: Vec<Option<wgpu::ColorTargetState>> = color_formats
+            .iter()
+            .map(|format| {
+                format.map(|f| wgpu::ColorTargetState {
+                    format: f,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })
+            })
+            .collect();
+
+        // Create render pipeline
+        let pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: material.label(),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &vertex_module,
+                    entry_point: Some(vertex_entry),
+                    buffers: &vertex_buffer_layouts,
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: fragment_module.as_ref().map(|module| wgpu::FragmentState {
+                    module,
+                    entry_point: Some(fragment_entry),
+                    targets: &color_targets,
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: convert_topology(mesh.topology()),
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: depth_format.map(|format| wgpu::DepthStencilState {
+                    format,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+
+        // Set the pipeline
+        render_pass.set_pipeline(&pipeline);
+
+        // Bind vertex buffers
+        for (slot, buffer) in mesh.vertex_buffers().iter().enumerate() {
+            if let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() {
+                render_pass.set_vertex_buffer(slot as u32, wgpu_buffer.slice(..));
+            }
+        }
+
+        // Issue draw call
+        if mesh.is_indexed() {
+            // Bind index buffer
+            if let Some(index_buffer) = mesh.index_buffer()
+                && let GpuBuffer::Wgpu(wgpu_buffer) = index_buffer.gpu_handle()
+            {
+                let index_format = match mesh.index_format().unwrap_or(IndexFormat::Uint16) {
+                    IndexFormat::Uint16 => wgpu::IndexFormat::Uint16,
+                    IndexFormat::Uint32 => wgpu::IndexFormat::Uint32,
+                };
+                render_pass.set_index_buffer(wgpu_buffer.slice(..), index_format);
+            }
+            render_pass.draw_indexed(
+                0..mesh.index_count(),
+                0,
+                draw_cmd.first_instance..(draw_cmd.first_instance + draw_cmd.instance_count),
+            );
+        } else {
+            render_pass.draw(
+                0..mesh.vertex_count(),
+                draw_cmd.first_instance..(draw_cmd.first_instance + draw_cmd.instance_count),
+            );
+        }
 
         Ok(())
     }
@@ -459,23 +664,27 @@ impl WgpuBackend {
 
                 for region in regions {
                     // Compute bytes_per_row if not specified (and align to 256 bytes as required by wgpu)
-                    let bytes_per_row = region.buffer_layout.bytes_per_row.or_else(|| {
-                        if region.extent.height > 1 {
-                            let unpadded = region.extent.width * block_size;
-                            // wgpu requires 256-byte alignment for bytes_per_row
-                            Some((unpadded + 255) & !255)
-                        } else {
-                            None
-                        }
-                    });
+                    let bytes_per_row =
+                        region
+                            .buffer_layout
+                            .bytes_per_row
+                            .or(if region.extent.height > 1 {
+                                let unpadded = region.extent.width * block_size;
+                                // wgpu requires 256-byte alignment for bytes_per_row
+                                Some((unpadded + 255) & !255)
+                            } else {
+                                None
+                            });
 
-                    let rows_per_image = region.buffer_layout.rows_per_image.or_else(|| {
-                        if region.extent.depth > 1 {
-                            Some(region.extent.height)
-                        } else {
-                            None
-                        }
-                    });
+                    let rows_per_image =
+                        region
+                            .buffer_layout
+                            .rows_per_image
+                            .or(if region.extent.depth > 1 {
+                                Some(region.extent.height)
+                            } else {
+                                None
+                            });
 
                     encoder.copy_texture_to_buffer(
                         wgpu::TexelCopyTextureInfo {
@@ -521,23 +730,27 @@ impl WgpuBackend {
 
                 for region in regions {
                     // Compute bytes_per_row if not specified (and align to 256 bytes as required by wgpu)
-                    let bytes_per_row = region.buffer_layout.bytes_per_row.or_else(|| {
-                        if region.extent.height > 1 {
-                            let unpadded = region.extent.width * block_size;
-                            // wgpu requires 256-byte alignment for bytes_per_row
-                            Some((unpadded + 255) & !255)
-                        } else {
-                            None
-                        }
-                    });
+                    let bytes_per_row =
+                        region
+                            .buffer_layout
+                            .bytes_per_row
+                            .or(if region.extent.height > 1 {
+                                let unpadded = region.extent.width * block_size;
+                                // wgpu requires 256-byte alignment for bytes_per_row
+                                Some((unpadded + 255) & !255)
+                            } else {
+                                None
+                            });
 
-                    let rows_per_image = region.buffer_layout.rows_per_image.or_else(|| {
-                        if region.extent.depth > 1 {
-                            Some(region.extent.height)
-                        } else {
-                            None
-                        }
-                    });
+                    let rows_per_image =
+                        region
+                            .buffer_layout
+                            .rows_per_image
+                            .or(if region.extent.depth > 1 {
+                                Some(region.extent.height)
+                            } else {
+                                None
+                            });
 
                     encoder.copy_buffer_to_texture(
                         wgpu::TexelCopyBufferInfo {
@@ -804,5 +1017,34 @@ fn convert_store_op(op: &crate::graph::StoreOp) -> wgpu::StoreOp {
     match op {
         crate::graph::StoreOp::Store => wgpu::StoreOp::Store,
         crate::graph::StoreOp::DontCare => wgpu::StoreOp::Discard,
+    }
+}
+
+fn convert_vertex_format(format: VertexAttributeFormat) -> wgpu::VertexFormat {
+    match format {
+        VertexAttributeFormat::Float => wgpu::VertexFormat::Float32,
+        VertexAttributeFormat::Float2 => wgpu::VertexFormat::Float32x2,
+        VertexAttributeFormat::Float3 => wgpu::VertexFormat::Float32x3,
+        VertexAttributeFormat::Float4 => wgpu::VertexFormat::Float32x4,
+        VertexAttributeFormat::Int => wgpu::VertexFormat::Sint32,
+        VertexAttributeFormat::Int2 => wgpu::VertexFormat::Sint32x2,
+        VertexAttributeFormat::Int3 => wgpu::VertexFormat::Sint32x3,
+        VertexAttributeFormat::Int4 => wgpu::VertexFormat::Sint32x4,
+        VertexAttributeFormat::Uint => wgpu::VertexFormat::Uint32,
+        VertexAttributeFormat::Uint2 => wgpu::VertexFormat::Uint32x2,
+        VertexAttributeFormat::Uint3 => wgpu::VertexFormat::Uint32x3,
+        VertexAttributeFormat::Uint4 => wgpu::VertexFormat::Uint32x4,
+        VertexAttributeFormat::Unorm8x4 => wgpu::VertexFormat::Unorm8x4,
+        VertexAttributeFormat::Snorm8x4 => wgpu::VertexFormat::Snorm8x4,
+    }
+}
+
+fn convert_topology(topology: PrimitiveTopology) -> wgpu::PrimitiveTopology {
+    match topology {
+        PrimitiveTopology::PointList => wgpu::PrimitiveTopology::PointList,
+        PrimitiveTopology::LineList => wgpu::PrimitiveTopology::LineList,
+        PrimitiveTopology::LineStrip => wgpu::PrimitiveTopology::LineStrip,
+        PrimitiveTopology::TriangleList => wgpu::PrimitiveTopology::TriangleList,
+        PrimitiveTopology::TriangleStrip => wgpu::PrimitiveTopology::TriangleStrip,
     }
 }

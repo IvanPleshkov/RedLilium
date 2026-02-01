@@ -8,10 +8,10 @@ use std::sync::Arc;
 
 use redlilium_graphics::{
     Buffer, BufferDescriptor, BufferUsage, ColorAttachment, DepthStencilAttachment, FramePipeline,
-    GraphicsDevice, GraphicsInstance, GraphicsPass, LoadOp, Mesh, MeshDescriptor, RenderGraph,
-    RenderTargetConfig, StoreOp, Texture, TextureDescriptor, TextureFormat, TextureUsage,
-    TransferConfig, TransferOperation, TransferPass, VertexAttribute, VertexBufferLayout,
-    VertexLayout,
+    GraphicsDevice, GraphicsInstance, GraphicsPass, LoadOp, Material, MaterialDescriptor,
+    MaterialInstance, Mesh, MeshDescriptor, RenderGraph, RenderTargetConfig, ShaderSource, StoreOp,
+    Texture, TextureDescriptor, TextureFormat, TextureUsage, TransferConfig, TransferOperation,
+    TransferPass, VertexAttribute, VertexBufferLayout, VertexLayout,
 };
 
 /// Compute the aligned bytes per row for a texture (256-byte alignment for wgpu).
@@ -175,6 +175,11 @@ impl TestContext {
     /// graph execution through the frame scheduling system.
     pub fn execute_graph(&self, graph: &RenderGraph) {
         let compiled = graph.compile().expect("Failed to compile render graph");
+
+        // Actually execute the graph on the GPU backend
+        self.device
+            .execute_graph(graph, &compiled)
+            .expect("Failed to execute graph");
 
         let mut pipeline = self.pipeline.borrow_mut();
         let mut schedule = pipeline.begin_frame();
@@ -494,6 +499,7 @@ impl ExpectedPixel {
 }
 
 /// Verify that a pixel in the readback data matches the expected value.
+/// Uses 256-byte row alignment as required by wgpu texture readback.
 #[allow(dead_code)]
 pub fn verify_pixel(
     data: &[u8],
@@ -503,7 +509,11 @@ pub fn verify_pixel(
     expected: ExpectedPixel,
     tolerance: u8,
 ) -> bool {
-    let offset = ((y * width + x) * 4) as usize;
+    // Account for row alignment (256 bytes)
+    let bytes_per_pixel = 4u32;
+    let aligned_row_bytes = aligned_bytes_per_row(width, bytes_per_pixel);
+    let offset = (y * aligned_row_bytes + x * bytes_per_pixel) as usize;
+
     if offset + 4 > data.len() {
         return false;
     }
@@ -516,6 +526,21 @@ pub fn verify_pixel(
     };
 
     actual.matches(&expected, tolerance)
+}
+
+/// Get the actual pixel value for debugging.
+#[allow(dead_code)]
+pub fn get_pixel(data: &[u8], width: u32, x: u32, y: u32) -> ExpectedPixel {
+    let bytes_per_pixel = 4u32;
+    let aligned_row_bytes = aligned_bytes_per_row(width, bytes_per_pixel);
+    let offset = (y * aligned_row_bytes + x * bytes_per_pixel) as usize;
+
+    ExpectedPixel {
+        r: data.get(offset).copied().unwrap_or(0),
+        g: data.get(offset + 1).copied().unwrap_or(0),
+        b: data.get(offset + 2).copied().unwrap_or(0),
+        a: data.get(offset + 3).copied().unwrap_or(0),
+    }
 }
 
 /// Verify that a region of pixels all match the expected value.
@@ -562,4 +587,119 @@ pub fn generate_solid_color(width: u32, height: u32, color: ExpectedPixel) -> Ve
         data.push(color.a);
     }
     data
+}
+
+// ============================================================================
+// Shader Helpers
+// ============================================================================
+
+/// Simple WGSL shader that outputs a solid red color.
+/// The vertex shader reads position from vertex buffer (location 0).
+pub const SOLID_RED_SHADER: &str = r#"
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(3) uv: vec2<f32>,
+}
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+}
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.position = vec4<f32>(in.position, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+}
+"#;
+
+/// Create a material with the given WGSL shader source.
+#[allow(dead_code)]
+pub fn create_solid_color_material(ctx: &TestContext) -> Arc<Material> {
+    ctx.device
+        .create_material(
+            &MaterialDescriptor::new()
+                .with_shader(ShaderSource::vertex(
+                    SOLID_RED_SHADER.as_bytes().to_vec(),
+                    "vs_main",
+                ))
+                .with_shader(ShaderSource::fragment(
+                    SOLID_RED_SHADER.as_bytes().to_vec(),
+                    "fs_main",
+                ))
+                .with_vertex_layout(quad_vertex_layout())
+                .with_label("solid_red_material"),
+        )
+        .expect("Failed to create material")
+}
+
+/// Create a material instance from a material.
+#[allow(dead_code)]
+pub fn create_material_instance(material: Arc<Material>) -> Arc<MaterialInstance> {
+    Arc::new(MaterialInstance::new(material).with_label("test_instance"))
+}
+
+/// Quad vertex data for a left-half quad (covers x from -1 to 0).
+#[allow(dead_code)]
+pub const LEFT_HALF_QUAD_VERTICES: [QuadVertex; 6] = [
+    // First triangle (bottom-left, bottom-center, top-center)
+    QuadVertex {
+        position: [-1.0, -1.0, 0.0],
+        uv: [0.0, 1.0],
+    },
+    QuadVertex {
+        position: [0.0, -1.0, 0.0],
+        uv: [0.5, 1.0],
+    },
+    QuadVertex {
+        position: [0.0, 1.0, 0.0],
+        uv: [0.5, 0.0],
+    },
+    // Second triangle (bottom-left, top-center, top-left)
+    QuadVertex {
+        position: [-1.0, -1.0, 0.0],
+        uv: [0.0, 1.0],
+    },
+    QuadVertex {
+        position: [0.0, 1.0, 0.0],
+        uv: [0.5, 0.0],
+    },
+    QuadVertex {
+        position: [-1.0, 1.0, 0.0],
+        uv: [0.0, 0.0],
+    },
+];
+
+/// Create a left-half quad mesh.
+#[allow(dead_code)]
+pub fn create_left_half_quad(ctx: &TestContext) -> Arc<Mesh> {
+    let layout = quad_vertex_layout();
+    ctx.device
+        .create_mesh(
+            &MeshDescriptor::new(layout)
+                .with_vertex_count(6)
+                .with_label("left_half_quad"),
+        )
+        .expect("Failed to create quad mesh")
+}
+
+/// Write quad vertex data to a mesh's vertex buffer.
+#[allow(dead_code)]
+pub fn write_quad_vertices(ctx: &TestContext, mesh: &Mesh, vertices: &[QuadVertex]) {
+    let vb = mesh
+        .vertex_buffer(0)
+        .expect("Mesh should have vertex buffer");
+    // Convert vertices to bytes
+    let bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(
+            vertices.as_ptr() as *const u8,
+            vertices.len() * QuadVertex::SIZE,
+        )
+    };
+    ctx.device.write_buffer(vb, 0, bytes);
 }

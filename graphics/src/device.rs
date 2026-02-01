@@ -328,7 +328,8 @@ impl GraphicsDevice {
             };
 
             let buffer = self.create_buffer(
-                &BufferDescriptor::new(buffer_size, BufferUsage::VERTEX).with_label(label),
+                &BufferDescriptor::new(buffer_size, BufferUsage::VERTEX | BufferUsage::COPY_DST)
+                    .with_label(label),
             )?;
             vertex_buffers.push(buffer);
         }
@@ -337,7 +338,7 @@ impl GraphicsDevice {
         let (index_buffer, index_format, index_count) = if descriptor.is_indexed() {
             let index_size = descriptor.index_buffer_size();
             let buffer = self.create_buffer(
-                &BufferDescriptor::new(index_size, BufferUsage::INDEX)
+                &BufferDescriptor::new(index_size, BufferUsage::INDEX | BufferUsage::COPY_DST)
                     .with_label(format!("{mesh_label}_indices")),
             )?;
             (
@@ -452,6 +453,65 @@ impl GraphicsDevice {
             .read()
             .map(|m| m.iter().filter(|w| w.strong_count() > 0).count())
             .unwrap_or(0)
+    }
+
+    /// Write data to a buffer.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` - The buffer to write to
+    /// * `offset` - Byte offset into the buffer
+    /// * `data` - The data to write
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let vertices: &[f32] = &[0.0, 0.0, 1.0, 0.0, 0.5, 1.0];
+    /// device.write_buffer(&buffer, 0, bytemuck::cast_slice(vertices));
+    /// ```
+    pub fn write_buffer(&self, buffer: &Buffer, offset: u64, data: &[u8]) {
+        self.instance
+            .backend()
+            .write_buffer(buffer.gpu_handle(), offset, data);
+    }
+
+    /// Read data from a buffer.
+    ///
+    /// This is a blocking operation that waits for the GPU to finish.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` - The buffer to read from
+    /// * `offset` - Byte offset into the buffer
+    /// * `size` - Number of bytes to read
+    ///
+    /// # Returns
+    ///
+    /// A vector containing the read data.
+    pub fn read_buffer(&self, buffer: &Buffer, offset: u64, size: u64) -> Vec<u8> {
+        self.instance
+            .backend()
+            .read_buffer(buffer.gpu_handle(), offset, size)
+    }
+
+    /// Execute a compiled render graph.
+    ///
+    /// This records commands from the graph into a command buffer and submits it.
+    ///
+    /// # Arguments
+    ///
+    /// * `graph` - The source render graph
+    /// * `compiled` - The compiled graph (pass order, etc.)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if graph execution fails.
+    pub fn execute_graph(
+        &self,
+        graph: &crate::graph::RenderGraph,
+        compiled: &crate::compiler::CompiledGraph,
+    ) -> Result<(), GraphicsError> {
+        self.instance.backend().execute_graph(graph, compiled, None)
     }
 
     /// Clean up dead weak references to released resources.

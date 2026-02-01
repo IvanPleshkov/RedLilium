@@ -187,6 +187,7 @@ impl GraphicsInstance {
     /// let surface = instance.create_surface(&window)?;
     /// surface.configure(&device, &SurfaceConfiguration::new(800, 600));
     /// ```
+    #[allow(clippy::arc_with_non_send_sync)] // Surface is intentionally !Send+!Sync for window safety
     pub fn create_surface<W>(&self, window: &W) -> Result<Arc<Surface>, GraphicsError>
     where
         W: HasWindowHandle + HasDisplayHandle,

@@ -361,6 +361,7 @@ impl Drop for GpuSemaphore {
 ///
 /// Unlike a trait-based approach, this enum allows for static dispatch
 /// and avoids the overhead of dynamic dispatch.
+#[allow(clippy::large_enum_variant)]
 pub enum GpuBackend {
     /// Dummy backend for testing and development.
     Dummy(dummy::DummyBackend),
@@ -528,21 +529,7 @@ impl GpuBackend {
 
 /// Selects and creates the appropriate backend based on available features.
 pub fn create_backend() -> Result<GpuBackend, GraphicsError> {
-    // Try Vulkan backend first if available (native Vulkan via ash)
-    #[cfg(feature = "vulkan-backend")]
-    {
-        match vulkan::VulkanBackend::new() {
-            Ok(backend) => {
-                log::info!("Using Vulkan backend (ash)");
-                return Ok(GpuBackend::Vulkan(backend));
-            }
-            Err(e) => {
-                log::warn!("Failed to create Vulkan backend: {}", e);
-            }
-        }
-    }
-
-    // Try wgpu backend if available
+    // Try wgpu backend first if available (supports WGSL shaders and full draw commands)
     #[cfg(feature = "wgpu-backend")]
     {
         match wgpu_backend::WgpuBackend::new() {
@@ -552,6 +539,21 @@ pub fn create_backend() -> Result<GpuBackend, GraphicsError> {
             }
             Err(e) => {
                 log::warn!("Failed to create wgpu backend: {}", e);
+            }
+        }
+    }
+
+    // Try Vulkan backend if wgpu unavailable (native Vulkan via ash)
+    // Note: Vulkan backend currently doesn't support draw commands - only transfer operations
+    #[cfg(feature = "vulkan-backend")]
+    {
+        match vulkan::VulkanBackend::new() {
+            Ok(backend) => {
+                log::info!("Using Vulkan backend (ash)");
+                return Ok(GpuBackend::Vulkan(backend));
+            }
+            Err(e) => {
+                log::warn!("Failed to create Vulkan backend: {}", e);
             }
         }
     }

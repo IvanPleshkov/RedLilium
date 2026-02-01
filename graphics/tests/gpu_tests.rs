@@ -28,8 +28,10 @@ mod common;
 use rstest::rstest;
 
 use common::{
-    Backend, TestContext, create_mrt_pass, create_render_pass_with_depth,
-    create_simple_render_pass, generate_test_pattern, readback_buffer_size,
+    Backend, ExpectedPixel, LEFT_HALF_QUAD_VERTICES, TestContext, create_left_half_quad,
+    create_material_instance, create_mrt_pass, create_render_pass_with_depth,
+    create_simple_render_pass, create_solid_color_material, generate_test_pattern, get_pixel,
+    readback_buffer_size, verify_pixel, write_quad_vertices,
 };
 use redlilium_graphics::{
     BufferUsage, RenderGraph, TextureFormat, TextureUsage, TransferConfig, TransferOperation,
@@ -228,6 +230,11 @@ fn test_render_clear_color(#[case] backend: Backend) {
         return;
     };
 
+    // Skip dummy backend since it doesn't actually render
+    if backend == Backend::Dummy {
+        return;
+    }
+
     const WIDTH: u32 = 32;
     const HEIGHT: u32 = 32;
     const CLEAR_COLOR: [f32; 4] = [0.25, 0.5, 0.75, 1.0];
@@ -253,10 +260,17 @@ fn test_render_clear_color(#[case] backend: Backend) {
 
     ctx.execute_graph(&graph);
 
-    // In a real test:
-    // let data = map_buffer_read(&readback);
-    // let expected = ExpectedPixel::from_float(0.25, 0.5, 0.75, 1.0);
-    // assert!(verify_region(&data, WIDTH, 0, 0, WIDTH, HEIGHT, expected, 2));
+    // Read back and verify clear color
+    let data = ctx.device.read_buffer(&readback, 0, readback_size);
+
+    let expected = ExpectedPixel::from_float(0.25, 0.5, 0.75, 1.0);
+    let center_pixel = get_pixel(&data, WIDTH, WIDTH / 2, HEIGHT / 2);
+    assert!(
+        verify_pixel(&data, WIDTH, WIDTH / 2, HEIGHT / 2, expected, 2),
+        "Clear color pixel should be {:?}, but got {:?}",
+        expected,
+        center_pixel
+    );
 }
 
 // ============================================================================
@@ -610,4 +624,103 @@ fn test_diamond_dependency_graph(#[case] backend: Backend) {
     assert!(shadow_idx < lighting_idx);
     assert!(gbuffer_idx < composite_idx);
     assert!(lighting_idx < composite_idx);
+}
+
+// ============================================================================
+// Shader Rendering Tests
+// ============================================================================
+
+/// Test rendering a quad with a WGSL shader.
+///
+/// This test verifies:
+/// 1. WGSL shader compilation works
+/// 2. A material can be created and used for rendering
+/// 3. A quad covering the left half of the screen is rendered correctly
+/// 4. Texture readback returns expected pixel values
+#[rstest]
+#[case::dummy(Backend::Dummy)]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_shader_render_half_quad(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new(backend) else {
+        eprintln!("Backend {:?} not available, skipping", backend);
+        return;
+    };
+
+    // Skip dummy backend since it doesn't actually render
+    if backend == Backend::Dummy {
+        eprintln!("Dummy backend doesn't render, skipping pixel verification");
+        return;
+    }
+
+    const WIDTH: u32 = 16;
+    const HEIGHT: u32 = 16;
+    const CLEAR_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 1.0]; // Black background
+
+    // Create render target
+    let render_target = ctx.create_render_target(WIDTH, HEIGHT);
+
+    // Create readback buffer for texture data (with alignment)
+    let readback_size = readback_buffer_size(WIDTH, HEIGHT, 4);
+    let readback = ctx.create_readback_buffer(readback_size);
+
+    // Create the quad mesh covering the left half of the screen
+    let quad_mesh = create_left_half_quad(&ctx);
+    write_quad_vertices(&ctx, &quad_mesh, &LEFT_HALF_QUAD_VERTICES);
+
+    // Create material and material instance with WGSL shader
+    let material = create_solid_color_material(&ctx);
+    let material_instance = create_material_instance(material);
+
+    // Create render graph
+    let mut graph = RenderGraph::new();
+
+    // Render pass - clear to black, render red quad in left half
+    let mut render_pass =
+        create_simple_render_pass("render_half_quad", render_target.clone(), CLEAR_COLOR);
+    render_pass.add_draw(quad_mesh, material_instance);
+    let render_handle = graph.add_graphics_pass(render_pass);
+
+    // Copy pass - copy render target to readback buffer
+    let mut copy_pass = TransferPass::new("copy_to_readback".into());
+    copy_pass.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::readback_texture_whole(render_target, readback.clone()),
+    ));
+    let copy_handle = graph.add_transfer_pass(copy_pass);
+
+    // Copy depends on render
+    graph.add_dependency(copy_handle, render_handle);
+
+    // Execute
+    ctx.execute_graph(&graph);
+
+    // Read back the pixel data
+    let data = ctx.device.read_buffer(&readback, 0, readback_size);
+
+    // Verify pixel values
+    // Left half (x < WIDTH/2) should be red
+    // Right half (x >= WIDTH/2) should be black (clear color)
+
+    // Check a pixel in the left half (should be red)
+    let left_x = WIDTH / 4;
+    let center_y = HEIGHT / 2;
+    let left_pixel = get_pixel(&data, WIDTH, left_x, center_y);
+    assert!(
+        verify_pixel(&data, WIDTH, left_x, center_y, ExpectedPixel::RED, 2),
+        "Left half pixel ({}, {}) should be red, but got: {:?}",
+        left_x,
+        center_y,
+        left_pixel
+    );
+
+    // Check a pixel in the right half (should be black)
+    let right_x = WIDTH * 3 / 4;
+    let right_pixel = get_pixel(&data, WIDTH, right_x, center_y);
+    assert!(
+        verify_pixel(&data, WIDTH, right_x, center_y, ExpectedPixel::BLACK, 2),
+        "Right half pixel ({}, {}) should be black, but got: {:?}",
+        right_x,
+        center_y,
+        right_pixel
+    );
 }
