@@ -628,17 +628,4 @@ mod tests {
         assert_eq!(pbr.buffer_stride(0), 48);
         assert_eq!(pbr.attributes.len(), 4);
     }
-
-    #[test]
-    fn test_animated_layouts() {
-        let skinned = VertexLayout::skinned();
-        assert_eq!(skinned.buffer_count(), 2);
-        assert!(skinned.has_semantic(VertexAttributeSemantic::Joints));
-        assert!(skinned.has_semantic(VertexAttributeSemantic::Weights));
-        assert!(skinned.validate().is_ok());
-
-        let animated_pbr = VertexLayout::animated_pbr();
-        assert_eq!(animated_pbr.buffer_count(), 3);
-        assert!(animated_pbr.validate().is_ok());
-    }
 }

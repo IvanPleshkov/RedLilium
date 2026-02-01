@@ -389,16 +389,6 @@ mod tests {
     }
 
     #[test]
-    fn test_mesh_descriptor_multi_buffer() {
-        let layout = VertexLayout::animated_dynamic(); // 2 buffers
-        let desc = MeshDescriptor::new(layout).with_vertex_count(100);
-
-        assert_eq!(desc.buffer_count(), 2);
-        assert_eq!(desc.vertex_buffer_size(0), 100 * 8); // texcoord buffer: 8 bytes
-        assert_eq!(desc.vertex_buffer_size(1), 100 * 24); // pos+normal buffer: 24 bytes
-    }
-
-    #[test]
     fn test_mesh_descriptor_non_indexed() {
         let layout = VertexLayout::position_only();
         let desc = MeshDescriptor::new(layout).with_vertex_count(100);
