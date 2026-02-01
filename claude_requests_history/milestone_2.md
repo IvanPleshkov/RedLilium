@@ -197,6 +197,14 @@ Also add a debug check in `Pass` that mesh and material are compatible.
 It can be easily done if layout is an `Arc` in mesh and material.
 There are not a lot of combinations of mesh layout typically and we can `Arc` it and reduce allocations count per each mesh.
 
+## Request 28:
+Please review `Mesh` struct in the graphics crate.
+it requires only one buffer as a vertex data.
+Analyse please if it's acceptable for animation.
+I guess in the common graphics crate, the mesh should be optimized also for the animated meshes,
+where some of vertex attributes are dynamic, and some is static.
+If you agree with this thinkings, refactor please `Mesh` and `Layout`.
+
 ## Request __:
 There is a basic render graph compilation alg in `graphics\src\compiler\mod.rs`.
 Read please how material system works.

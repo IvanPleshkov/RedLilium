@@ -91,7 +91,7 @@ pub use materials::{
 };
 pub use mesh::{
     IndexFormat, Mesh, MeshDescriptor, PrimitiveTopology, VertexAttribute, VertexAttributeFormat,
-    VertexAttributeSemantic, VertexLayout,
+    VertexAttributeSemantic, VertexBufferLayout, VertexLayout, VertexStepMode,
 };
 pub use pipeline::FramePipeline;
 pub use resize::{ResizeEvent, ResizeManager, ResizeStrategy};

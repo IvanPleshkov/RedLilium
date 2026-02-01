@@ -235,11 +235,14 @@ impl GraphicsDevice {
 
     /// Create a mesh with vertex and optional index buffers.
     ///
+    /// Creates one vertex buffer per buffer slot defined in the layout.
+    /// For animated meshes, this allows separating static and dynamic data.
+    ///
     /// # Errors
     ///
-    /// Returns an error if buffer creation fails.
+    /// Returns an error if buffer creation fails or the layout has no buffers.
     ///
-    /// # Example
+    /// # Example - Single Buffer
     ///
     /// ```ignore
     /// let layout = VertexLayout::position_normal_uv();
@@ -248,33 +251,73 @@ impl GraphicsDevice {
     ///     .with_indices(IndexFormat::Uint16, 36)
     ///     .with_label("cube"))?;
     /// ```
+    ///
+    /// # Example - Multiple Buffers (Animated)
+    ///
+    /// ```ignore
+    /// let layout = VertexLayout::animated_dynamic(); // 2 buffers
+    /// let mesh = device.create_mesh(&MeshDescriptor::new(layout)
+    ///     .with_vertex_count(1000)
+    ///     .with_label("character"))?;
+    ///
+    /// // Buffer 0: static data (texcoords)
+    /// // Buffer 1: dynamic data (positions/normals) - update each frame
+    /// ```
     pub fn create_mesh(
         self: &Arc<Self>,
         descriptor: &MeshDescriptor,
     ) -> Result<Arc<Mesh>, GraphicsError> {
-        // Create vertex buffer
-        let vertex_size = descriptor.vertex_buffer_size();
-        if vertex_size == 0 {
+        // Validate
+        if descriptor.vertex_count == 0 {
             return Err(GraphicsError::InvalidParameter(
                 "mesh must have at least one vertex".to_string(),
             ));
         }
 
-        let vertex_buffer = self.create_buffer(
-            &BufferDescriptor::new(vertex_size, BufferUsage::VERTEX).with_label(format!(
-                "{}_vertices",
-                descriptor.label.as_deref().unwrap_or("mesh")
-            )),
-        )?;
+        let buffer_count = descriptor.buffer_count();
+        if buffer_count == 0 {
+            return Err(GraphicsError::InvalidParameter(
+                "mesh layout must have at least one buffer".to_string(),
+            ));
+        }
+
+        // Validate the layout
+        if let Err(e) = descriptor.layout.validate() {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "invalid vertex layout: {e}"
+            )));
+        }
+
+        let mesh_label = descriptor.label.as_deref().unwrap_or("mesh");
+
+        // Create vertex buffers (one per layout buffer slot)
+        let mut vertex_buffers = Vec::with_capacity(buffer_count);
+        for i in 0..buffer_count {
+            let buffer_size = descriptor.vertex_buffer_size(i);
+            if buffer_size == 0 {
+                return Err(GraphicsError::InvalidParameter(format!(
+                    "vertex buffer {i} has zero size (stride may be zero)"
+                )));
+            }
+
+            let label = if buffer_count == 1 {
+                format!("{mesh_label}_vertices")
+            } else {
+                format!("{mesh_label}_vb{i}")
+            };
+
+            let buffer = self.create_buffer(
+                &BufferDescriptor::new(buffer_size, BufferUsage::VERTEX).with_label(label),
+            )?;
+            vertex_buffers.push(buffer);
+        }
 
         // Create index buffer if needed
         let (index_buffer, index_format, index_count) = if descriptor.is_indexed() {
             let index_size = descriptor.index_buffer_size();
             let buffer = self.create_buffer(
-                &BufferDescriptor::new(index_size, BufferUsage::INDEX).with_label(format!(
-                    "{}_indices",
-                    descriptor.label.as_deref().unwrap_or("mesh")
-                )),
+                &BufferDescriptor::new(index_size, BufferUsage::INDEX)
+                    .with_label(format!("{mesh_label}_indices")),
             )?;
             (
                 Some(buffer),
@@ -290,7 +333,7 @@ impl GraphicsDevice {
             Arc::clone(self),
             descriptor.layout.clone(),
             descriptor.topology,
-            vertex_buffer,
+            vertex_buffers,
             descriptor.vertex_count,
             index_buffer,
             index_format,
@@ -304,9 +347,10 @@ impl GraphicsDevice {
         }
 
         log::trace!(
-            "GraphicsDevice: created mesh {:?}, vertices={}, indices={}",
+            "GraphicsDevice: created mesh {:?}, vertices={}, buffers={}, indices={}",
             descriptor.label,
             descriptor.vertex_count,
+            buffer_count,
             descriptor.index_count
         );
 

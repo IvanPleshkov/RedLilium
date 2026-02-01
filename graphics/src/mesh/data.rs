@@ -1,7 +1,16 @@
 //! Mesh definition with vertex/index buffers.
 //!
 //! A [`Mesh`] contains the GPU resources needed for rendering geometry:
-//! vertex buffer, optional index buffer, topology, and vertex layout.
+//! one or more vertex buffers, optional index buffer, topology, and vertex layout.
+//!
+//! # Multiple Vertex Buffers
+//!
+//! Meshes can have multiple vertex buffers to support:
+//! - **Animation**: Static data (texcoords) separate from dynamic data (positions)
+//! - **Skinning**: Bone indices/weights in their own buffer
+//! - **Instancing**: Per-instance data in a separate buffer
+//!
+//! Each buffer corresponds to a slot defined in the [`VertexLayout`].
 
 use std::sync::Arc;
 
@@ -59,6 +68,26 @@ impl IndexFormat {
 }
 
 /// Descriptor for creating a mesh.
+///
+/// # Example - Single Buffer
+///
+/// ```ignore
+/// let layout = VertexLayout::position_normal_uv();
+/// let desc = MeshDescriptor::new(layout)
+///     .with_vertex_count(24)
+///     .with_indices(IndexFormat::Uint16, 36)
+///     .with_label("cube");
+/// ```
+///
+/// # Example - Multiple Buffers (Animation)
+///
+/// ```ignore
+/// let layout = VertexLayout::animated_dynamic(); // 2 buffers
+/// let desc = MeshDescriptor::new(layout)
+///     .with_vertex_count(1000)
+///     .with_indices(IndexFormat::Uint16, 3000)
+///     .with_label("character");
+/// ```
 #[derive(Debug)]
 pub struct MeshDescriptor {
     /// Vertex layout (shared via Arc).
@@ -118,9 +147,10 @@ impl MeshDescriptor {
         self.index_format.is_some() && self.index_count > 0
     }
 
-    /// Compute the required vertex buffer size in bytes.
-    pub fn vertex_buffer_size(&self) -> u64 {
-        self.vertex_count as u64 * self.layout.stride() as u64
+    /// Compute the required size for a specific vertex buffer.
+    pub fn vertex_buffer_size(&self, buffer_index: usize) -> u64 {
+        let stride = self.layout.buffer_stride(buffer_index);
+        self.vertex_count as u64 * stride as u64
     }
 
     /// Compute the required index buffer size in bytes.
@@ -131,32 +161,54 @@ impl MeshDescriptor {
             0
         }
     }
+
+    /// Get the number of vertex buffers needed.
+    pub fn buffer_count(&self) -> usize {
+        self.layout.buffer_count()
+    }
 }
 
 /// A GPU mesh with vertex and optional index buffers.
+///
+/// Meshes can have multiple vertex buffers to support animation, skinning,
+/// and instancing. The buffer layout is defined by the [`VertexLayout`].
 ///
 /// The vertex layout is shared via `Arc` since there are typically only a few
 /// layout combinations across many meshes. This reduces allocations and enables
 /// fast pointer comparison for batching.
 ///
-/// # Example
+/// # Example - Static Mesh
 ///
 /// ```ignore
 /// let layout = VertexLayout::position_normal_uv();
-///
-/// let descriptor = MeshDescriptor::new(layout)
-///     .with_topology(PrimitiveTopology::TriangleList)
+/// let mesh = device.create_mesh(&MeshDescriptor::new(layout)
 ///     .with_vertex_count(24)
 ///     .with_indices(IndexFormat::Uint16, 36)
-///     .with_label("cube_mesh");
+///     .with_label("cube"))?;
 ///
-/// let mesh = device.create_mesh(&descriptor)?;
+/// // Access the single vertex buffer
+/// let vb = mesh.vertex_buffer(0).unwrap();
+/// ```
+///
+/// # Example - Animated Mesh
+///
+/// ```ignore
+/// let layout = VertexLayout::animated_dynamic();
+/// let mesh = device.create_mesh(&MeshDescriptor::new(layout)
+///     .with_vertex_count(1000)
+///     .with_label("character"))?;
+///
+/// // Buffer 0: static texcoords (upload once)
+/// let static_buffer = mesh.vertex_buffer(0).unwrap();
+///
+/// // Buffer 1: dynamic positions/normals (update each frame)
+/// let dynamic_buffer = mesh.vertex_buffer(1).unwrap();
 /// ```
 pub struct Mesh {
     device: Arc<GraphicsDevice>,
     layout: Arc<VertexLayout>,
     topology: PrimitiveTopology,
-    vertex_buffer: Arc<Buffer>,
+    vertex_buffers: Vec<Arc<Buffer>>,
     vertex_count: u32,
     index_buffer: Option<Arc<Buffer>>,
     index_format: Option<IndexFormat>,
@@ -171,18 +223,24 @@ impl Mesh {
         device: Arc<GraphicsDevice>,
         layout: Arc<VertexLayout>,
         topology: PrimitiveTopology,
-        vertex_buffer: Arc<Buffer>,
+        vertex_buffers: Vec<Arc<Buffer>>,
         vertex_count: u32,
         index_buffer: Option<Arc<Buffer>>,
         index_format: Option<IndexFormat>,
         index_count: u32,
         label: Option<String>,
     ) -> Self {
+        debug_assert_eq!(
+            vertex_buffers.len(),
+            layout.buffer_count(),
+            "Mesh buffer count must match layout buffer count"
+        );
+
         Self {
             device,
             layout,
             topology,
-            vertex_buffer,
+            vertex_buffers,
             vertex_count,
             index_buffer,
             index_format,
@@ -206,9 +264,19 @@ impl Mesh {
         self.topology
     }
 
-    /// Get the vertex buffer.
-    pub fn vertex_buffer(&self) -> &Arc<Buffer> {
-        &self.vertex_buffer
+    /// Get a vertex buffer by index.
+    pub fn vertex_buffer(&self, index: usize) -> Option<&Arc<Buffer>> {
+        self.vertex_buffers.get(index)
+    }
+
+    /// Get all vertex buffers.
+    pub fn vertex_buffers(&self) -> &[Arc<Buffer>] {
+        &self.vertex_buffers
+    }
+
+    /// Get the number of vertex buffers.
+    pub fn vertex_buffer_count(&self) -> usize {
+        self.vertex_buffers.len()
     }
 
     /// Get the number of vertices.
@@ -265,6 +333,7 @@ impl std::fmt::Debug for Mesh {
             .field("label", &self.label)
             .field("topology", &self.topology)
             .field("vertex_count", &self.vertex_count)
+            .field("vertex_buffer_count", &self.vertex_buffers.len())
             .field("index_count", &self.index_count)
             .field("layout", &self.layout.label)
             .finish()
@@ -305,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mesh_descriptor() {
+    fn test_mesh_descriptor_single_buffer() {
         let layout = VertexLayout::position_normal_uv();
         let desc = MeshDescriptor::new(layout)
             .with_topology(PrimitiveTopology::TriangleList)
@@ -314,8 +383,19 @@ mod tests {
             .with_label("test_mesh");
 
         assert!(desc.is_indexed());
-        assert_eq!(desc.vertex_buffer_size(), 24 * 32); // 32 bytes per vertex
+        assert_eq!(desc.buffer_count(), 1);
+        assert_eq!(desc.vertex_buffer_size(0), 24 * 32); // 32 bytes per vertex
         assert_eq!(desc.index_buffer_size(), 36 * 2); // 2 bytes per index
+    }
+
+    #[test]
+    fn test_mesh_descriptor_multi_buffer() {
+        let layout = VertexLayout::animated_dynamic(); // 2 buffers
+        let desc = MeshDescriptor::new(layout).with_vertex_count(100);
+
+        assert_eq!(desc.buffer_count(), 2);
+        assert_eq!(desc.vertex_buffer_size(0), 100 * 8); // texcoord buffer: 8 bytes
+        assert_eq!(desc.vertex_buffer_size(1), 100 * 24); // pos+normal buffer: 24 bytes
     }
 
     #[test]

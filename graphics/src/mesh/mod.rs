@@ -2,8 +2,16 @@
 //!
 //! This module provides mesh data structures for rendering:
 //!
-//! - [`VertexLayout`] - Describes vertex attributes (shared via `Arc`)
-//! - [`Mesh`] - GPU mesh with vertex/index buffers and topology
+//! - [`VertexLayout`] - Describes vertex attributes across multiple buffers
+//! - [`VertexBufferLayout`] - Describes a single vertex buffer binding
+//! - [`Mesh`] - GPU mesh with one or more vertex buffers and topology
+//!
+//! # Multiple Vertex Buffers
+//!
+//! Meshes support multiple vertex buffers to enable:
+//! - **Animation**: Separate static data (texcoords) from dynamic data (positions)
+//! - **Skinning**: Bone indices/weights in their own buffer
+//! - **Instancing**: Per-instance data with instance step mode
 //!
 //! # Efficient Sharing via Arc
 //!
@@ -15,4 +23,7 @@ mod data;
 mod layout;
 
 pub use data::{IndexFormat, Mesh, MeshDescriptor, PrimitiveTopology};
-pub use layout::{VertexAttribute, VertexAttributeFormat, VertexAttributeSemantic, VertexLayout};
+pub use layout::{
+    VertexAttribute, VertexAttributeFormat, VertexAttributeSemantic, VertexBufferLayout,
+    VertexLayout, VertexStepMode,
+};
