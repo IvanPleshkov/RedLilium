@@ -230,11 +230,14 @@ To add indirect drawing would require:
   2. Indirect buffer type/binding support in materials
   3. Methods like GraphicsPass::add_draw_indirect()
 
-## Request __:
-There is a basic render graph compilation alg in `graphics\src\compiler\mod.rs`.
-Read please how material system works.
-Material system uses `Arc` for bindings because it's designed to be shared between `Pass` in graph.
-After Kahn's algorithm for topological sort, please find the intervals in the result, where passes are save to be permuted.
-Then, for each found interval do a special kind of sorting, where you sort fist by the Pass type,
-then sort by the equal material bindings (just compate that Arc refers to the same memory).
-The goal is to reduce binding switching while rendering.
+## Request 32:
+Please add intergration tests to the graphics crate.
+To allow to reuse test for multiple backends, use also `rstest`.
+Create the following test cases:
+- Resource copying. Create a render device without window. Copy some data into the buffer and back using render graph.
+- Test to render a single squad into the texture, read it back to RAM and check that it's rendered. You can yse squad if you think that check will be easier.
+- Also a test with rendering but with two calls and depth buffer usage.
+- Test multirender target.
+Because the tests are compilcated, feel free to unite the common code in integration tests folder.
+Because there are no any backends yet, please add `skip` attribute to the tests.
+While implementing the backends, we will enable tests one by one.

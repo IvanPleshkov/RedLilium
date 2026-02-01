@@ -31,3 +31,6 @@ wasm-bindgen-futures = "0.4"
 web-sys = "0.3"
 console_log = "1.0"
 console_error_panic_hook = "0.1"
+
+# Testing
+rstest = "0.26.1"
