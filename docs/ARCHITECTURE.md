@@ -81,11 +81,6 @@ graphics/
 │   ├── mod.rs         # RenderGraph, CompiledGraph
 │   ├── pass.rs        # RenderPass, PassHandle
 │   └── resource.rs    # ResourceHandle, TextureHandle, BufferHandle
-├── scene/             # ECS-Rendering bridge
-│   ├── mod.rs         # Scene module exports
-│   ├── extracted.rs   # ExtractedTransform, ExtractedMesh, ExtractedMaterial
-│   ├── render_world.rs # RenderWorld - extracted render data
-│   └── scene_renderer.rs # SceneRenderer - ECS to render graph
 └── types/             # GPU resource types
     ├── texture.rs     # TextureDescriptor, TextureFormat
     ├── buffer.rs      # BufferDescriptor, BufferUsage
@@ -298,32 +293,6 @@ let render_size = resize_manager.render_size();
 - `wait_current_slot()` waits for ONE slot (~16ms)
 - Result: 2-3x faster resize response
 
-## ECS-Rendering Integration
-
-The engine uses a three-phase rendering approach:
-
-```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   EXTRACT   │ ──▶ │   PREPARE   │ ──▶ │   RENDER    │
-│   Phase     │     │   Phase     │     │   Phase     │
-└─────────────┘     └─────────────┘     └─────────────┘
-     │                    │                    │
-Copy render data    Sort & batch         Execute render
-from ECS World      for GPU upload       graph with backend
-```
-
-### Extract Phase
-Queries ECS for entities with render components (GlobalTransform, RenderMesh, Material)
-and copies relevant data into the RenderWorld.
-
-### Prepare Phase
-Sorts render items (front-to-back for opaque, back-to-front for transparent),
-batches by material/mesh, and prepares instance data for GPU upload.
-
-### Render Phase
-Executes the compiled render graph through the backend, issuing draw calls
-for all items in the RenderWorld.
-
 ## Multi-World Architecture
 
 The engine supports multiple ECS worlds with shared rendering backend:
@@ -350,8 +319,6 @@ The engine supports multiple ECS worlds with shared rendering backend:
 │              └───────────────────────┘                 │
 └─────────────────────────────────────────────────────────┘
 ```
-
-See ADR-009 in DECISIONS.md for rationale.
 
 ## Reading Guide for AI Assistants
 

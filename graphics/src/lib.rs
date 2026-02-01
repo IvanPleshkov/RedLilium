@@ -70,7 +70,6 @@ pub mod mesh;
 pub mod pipeline;
 pub mod resize;
 pub mod resources;
-pub mod scene;
 pub mod scheduler;
 pub mod swapchain;
 pub mod types;
@@ -97,10 +96,6 @@ pub use mesh::{
 pub use pipeline::FramePipeline;
 pub use resize::{ResizeEvent, ResizeManager, ResizeStrategy};
 pub use resources::{Buffer, Sampler, Texture};
-pub use scene::{
-    CameraRenderContext, CameraSystem, ExtractedCamera, ExtractedMaterial, ExtractedMesh,
-    ExtractedTransform, RenderWorld,
-};
 pub use scheduler::{Fence, FenceStatus, FrameSchedule, GraphHandle, Semaphore};
 pub use swapchain::{PresentMode, Surface, SurfaceConfiguration, SurfaceTexture};
 pub use types::{
