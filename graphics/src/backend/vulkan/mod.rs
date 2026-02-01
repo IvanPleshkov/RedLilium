@@ -19,7 +19,7 @@ use crate::error::GraphicsError;
 use crate::graph::{CompiledGraph, Pass, RenderGraph};
 use crate::types::{BufferDescriptor, SamplerDescriptor, TextureDescriptor};
 
-use super::{GpuBackend, GpuBuffer, GpuFence, GpuSampler, GpuTexture};
+use super::{GpuBuffer, GpuFence, GpuSampler, GpuTexture};
 
 use self::conversion::{
     convert_address_mode, convert_buffer_usage, convert_compare_function, convert_filter_mode,
@@ -167,12 +167,14 @@ impl Drop for VulkanBackend {
     }
 }
 
-impl GpuBackend for VulkanBackend {
-    fn name(&self) -> &'static str {
+impl VulkanBackend {
+    /// Get the backend name.
+    pub fn name(&self) -> &'static str {
         "Vulkan Backend (ash)"
     }
 
-    fn create_buffer(&self, descriptor: &BufferDescriptor) -> Result<GpuBuffer, GraphicsError> {
+    /// Create a buffer resource.
+    pub fn create_buffer(&self, descriptor: &BufferDescriptor) -> Result<GpuBuffer, GraphicsError> {
         let usage = convert_buffer_usage(descriptor.usage);
 
         // Determine memory location based on usage flags
@@ -239,7 +241,11 @@ impl GpuBackend for VulkanBackend {
         })
     }
 
-    fn create_texture(&self, descriptor: &TextureDescriptor) -> Result<GpuTexture, GraphicsError> {
+    /// Create a texture resource.
+    pub fn create_texture(
+        &self,
+        descriptor: &TextureDescriptor,
+    ) -> Result<GpuTexture, GraphicsError> {
         let format = convert_texture_format(descriptor.format);
         let usage = convert_texture_usage(descriptor.usage);
 
@@ -343,7 +349,11 @@ impl GpuBackend for VulkanBackend {
         })
     }
 
-    fn create_sampler(&self, descriptor: &SamplerDescriptor) -> Result<GpuSampler, GraphicsError> {
+    /// Create a sampler resource.
+    pub fn create_sampler(
+        &self,
+        descriptor: &SamplerDescriptor,
+    ) -> Result<GpuSampler, GraphicsError> {
         let sampler_info = vk::SamplerCreateInfo::default()
             .mag_filter(convert_filter_mode(descriptor.mag_filter))
             .min_filter(convert_filter_mode(descriptor.min_filter))
@@ -376,7 +386,8 @@ impl GpuBackend for VulkanBackend {
         })
     }
 
-    fn create_fence(&self, signaled: bool) -> GpuFence {
+    /// Create a fence for CPU-GPU synchronization.
+    pub fn create_fence(&self, signaled: bool) -> GpuFence {
         let flags = if signaled {
             vk::FenceCreateFlags::SIGNALED
         } else {
@@ -394,7 +405,8 @@ impl GpuBackend for VulkanBackend {
         }
     }
 
-    fn wait_fence(&self, fence: &GpuFence) {
+    /// Wait for a fence to be signaled.
+    pub fn wait_fence(&self, fence: &GpuFence) {
         if let GpuFence::Vulkan { device, fence } = fence {
             unsafe {
                 let _ = device.wait_for_fences(&[*fence], true, u64::MAX);
@@ -402,7 +414,8 @@ impl GpuBackend for VulkanBackend {
         }
     }
 
-    fn is_fence_signaled(&self, fence: &GpuFence) -> bool {
+    /// Check if a fence is signaled (non-blocking).
+    pub fn is_fence_signaled(&self, fence: &GpuFence) -> bool {
         if let GpuFence::Vulkan { device, fence } = fence {
             unsafe { device.get_fence_status(*fence).is_ok() }
         } else {
@@ -410,12 +423,14 @@ impl GpuBackend for VulkanBackend {
         }
     }
 
-    fn signal_fence(&self, _fence: &GpuFence) {
+    /// Signal a fence (for testing/dummy backend).
+    pub fn signal_fence(&self, _fence: &GpuFence) {
         // Vulkan fences are signaled by the GPU, not the CPU
         // This is a no-op for the Vulkan backend
     }
 
-    fn execute_graph(
+    /// Execute a compiled render graph.
+    pub fn execute_graph(
         &self,
         graph: &RenderGraph,
         compiled: &CompiledGraph,
@@ -499,7 +514,8 @@ impl GpuBackend for VulkanBackend {
         Ok(())
     }
 
-    fn write_buffer(&self, buffer: &GpuBuffer, offset: u64, data: &[u8]) {
+    /// Write data to a buffer.
+    pub fn write_buffer(&self, buffer: &GpuBuffer, offset: u64, data: &[u8]) {
         if let GpuBuffer::Vulkan { allocation, .. } = buffer
             && let Some(allocation) = allocation.lock().as_ref()
             && let Some(mapped_ptr) = allocation.mapped_ptr()
@@ -511,7 +527,8 @@ impl GpuBackend for VulkanBackend {
         }
     }
 
-    fn read_buffer(&self, buffer: &GpuBuffer, offset: u64, size: u64) -> Vec<u8> {
+    /// Read data from a buffer.
+    pub fn read_buffer(&self, buffer: &GpuBuffer, offset: u64, size: u64) -> Vec<u8> {
         if let GpuBuffer::Vulkan { allocation, .. } = buffer
             && let Some(allocation) = allocation.lock().as_ref()
             && let Some(mapped_ptr) = allocation.mapped_ptr()
@@ -525,9 +542,7 @@ impl GpuBackend for VulkanBackend {
         }
         vec![0u8; size as usize]
     }
-}
 
-impl VulkanBackend {
     fn encode_pass(&self, cmd: vk::CommandBuffer, pass: &Pass) -> Result<(), GraphicsError> {
         match pass {
             Pass::Graphics(graphics_pass) => self.encode_graphics_pass(cmd, graphics_pass),

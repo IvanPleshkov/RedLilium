@@ -32,3 +32,8 @@ I dont like that tests rely on `GraphicsDevice::execute_graph` because there is 
 Read `docs\ARCHITECTURE.md`, `docs\DECISIONS.md` to understand frame scheduler.
 Please remove `GraphicsDevice::execute_graph` and change integration graphics tests so that tests use `FrameSchedule`.
 Feel free to upgrade graphics api if something is missing to refactor tests.
+
+## Request 5:
+There is `GpuBackend` trait in graphics crate.
+Because we have a fixed list of supported backends, we don't need actually a trait and dyn for it.
+Let's refactor it. Change `GpuBackend` to the enum. All trait functions change to the enum functions.

@@ -1,17 +1,18 @@
 //! GPU backend abstraction layer.
 //!
-//! This module provides a trait-based abstraction for GPU backends,
-//! allowing the graphics crate to work with different GPU APIs.
+//! This module provides an enum-based abstraction for GPU backends,
+//! allowing the graphics crate to work with different GPU APIs without
+//! dynamic dispatch.
 //!
 //! # Available Backends
 //!
-//! - `dummy` (default): No-op backend for testing and development
-//! - `wgpu-backend`: Cross-platform backend using wgpu
-//! - `vulkan-backend`: Native Vulkan backend using ash
+//! - `Dummy` (default): No-op backend for testing and development
+//! - `Wgpu`: Cross-platform backend using wgpu (requires `wgpu-backend` feature)
+//! - `Vulkan`: Native Vulkan backend using ash (requires `vulkan-backend` feature)
 //!
 //! # Architecture
 //!
-//! Each backend implements the [`GpuBackend`] trait, which provides:
+//! The [`GpuBackend`] enum provides:
 //! - Instance and device creation
 //! - Resource creation (buffers, textures, samplers)
 //! - Command buffer recording and submission
@@ -25,6 +26,7 @@ pub mod vulkan;
 
 pub mod dummy;
 
+#[cfg(feature = "wgpu-backend")]
 use std::sync::Arc;
 
 #[cfg(feature = "vulkan-backend")]
@@ -351,60 +353,188 @@ impl Drop for GpuSemaphore {
     }
 }
 
-/// GPU backend trait for abstracting different GPU APIs.
-pub trait GpuBackend: Send + Sync + 'static {
+// ============================================================================
+// GPU Backend Enum
+// ============================================================================
+
+/// GPU backend enum for abstracting different GPU APIs.
+///
+/// Unlike a trait-based approach, this enum allows for static dispatch
+/// and avoids the overhead of dynamic dispatch.
+pub enum GpuBackend {
+    /// Dummy backend for testing and development.
+    Dummy(dummy::DummyBackend),
+    /// wgpu backend for cross-platform GPU access.
+    #[cfg(feature = "wgpu-backend")]
+    Wgpu(wgpu_backend::WgpuBackend),
+    /// Native Vulkan backend using ash.
+    #[cfg(feature = "vulkan-backend")]
+    Vulkan(vulkan::VulkanBackend),
+}
+
+impl std::fmt::Debug for GpuBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dummy(backend) => f.debug_tuple("GpuBackend::Dummy").field(backend).finish(),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(backend) => f.debug_tuple("GpuBackend::Wgpu").field(backend).finish(),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => f.debug_tuple("GpuBackend::Vulkan").field(backend).finish(),
+        }
+    }
+}
+
+// GpuBackend is Send + Sync because all variant backends are Send + Sync
+unsafe impl Send for GpuBackend {}
+unsafe impl Sync for GpuBackend {}
+
+impl GpuBackend {
     /// Get the backend name.
-    fn name(&self) -> &'static str;
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Dummy(backend) => backend.name(),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(backend) => backend.name(),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => backend.name(),
+        }
+    }
 
     /// Create a buffer resource.
-    fn create_buffer(&self, descriptor: &BufferDescriptor) -> Result<GpuBuffer, GraphicsError>;
+    pub fn create_buffer(&self, descriptor: &BufferDescriptor) -> Result<GpuBuffer, GraphicsError> {
+        match self {
+            Self::Dummy(backend) => backend.create_buffer(descriptor),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(backend) => backend.create_buffer(descriptor),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => backend.create_buffer(descriptor),
+        }
+    }
 
     /// Create a texture resource.
-    fn create_texture(&self, descriptor: &TextureDescriptor) -> Result<GpuTexture, GraphicsError>;
+    pub fn create_texture(
+        &self,
+        descriptor: &TextureDescriptor,
+    ) -> Result<GpuTexture, GraphicsError> {
+        match self {
+            Self::Dummy(backend) => backend.create_texture(descriptor),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(backend) => backend.create_texture(descriptor),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => backend.create_texture(descriptor),
+        }
+    }
 
     /// Create a sampler resource.
-    fn create_sampler(&self, descriptor: &SamplerDescriptor) -> Result<GpuSampler, GraphicsError>;
+    pub fn create_sampler(
+        &self,
+        descriptor: &SamplerDescriptor,
+    ) -> Result<GpuSampler, GraphicsError> {
+        match self {
+            Self::Dummy(backend) => backend.create_sampler(descriptor),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(backend) => backend.create_sampler(descriptor),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => backend.create_sampler(descriptor),
+        }
+    }
 
     /// Create a fence for CPU-GPU synchronization.
-    fn create_fence(&self, signaled: bool) -> GpuFence;
+    pub fn create_fence(&self, signaled: bool) -> GpuFence {
+        match self {
+            Self::Dummy(backend) => backend.create_fence(signaled),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(backend) => backend.create_fence(signaled),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => backend.create_fence(signaled),
+        }
+    }
 
     /// Wait for a fence to be signaled.
-    fn wait_fence(&self, fence: &GpuFence);
+    pub fn wait_fence(&self, fence: &GpuFence) {
+        match self {
+            Self::Dummy(backend) => backend.wait_fence(fence),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(backend) => backend.wait_fence(fence),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => backend.wait_fence(fence),
+        }
+    }
 
     /// Check if a fence is signaled (non-blocking).
-    fn is_fence_signaled(&self, fence: &GpuFence) -> bool;
+    pub fn is_fence_signaled(&self, fence: &GpuFence) -> bool {
+        match self {
+            Self::Dummy(backend) => backend.is_fence_signaled(fence),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(backend) => backend.is_fence_signaled(fence),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => backend.is_fence_signaled(fence),
+        }
+    }
 
     /// Signal a fence (for testing/dummy backend).
-    fn signal_fence(&self, fence: &GpuFence);
+    pub fn signal_fence(&self, fence: &GpuFence) {
+        match self {
+            Self::Dummy(backend) => backend.signal_fence(fence),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(backend) => backend.signal_fence(fence),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => backend.signal_fence(fence),
+        }
+    }
 
     /// Execute a compiled render graph.
     ///
     /// This records commands from the graph into a command buffer and submits it.
-    fn execute_graph(
+    pub fn execute_graph(
         &self,
         graph: &RenderGraph,
         compiled: &CompiledGraph,
         signal_fence: Option<&GpuFence>,
-    ) -> Result<(), GraphicsError>;
+    ) -> Result<(), GraphicsError> {
+        match self {
+            Self::Dummy(backend) => backend.execute_graph(graph, compiled, signal_fence),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(backend) => backend.execute_graph(graph, compiled, signal_fence),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => backend.execute_graph(graph, compiled, signal_fence),
+        }
+    }
 
     /// Write data to a buffer.
-    fn write_buffer(&self, buffer: &GpuBuffer, offset: u64, data: &[u8]);
+    pub fn write_buffer(&self, buffer: &GpuBuffer, offset: u64, data: &[u8]) {
+        match self {
+            Self::Dummy(backend) => backend.write_buffer(buffer, offset, data),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(backend) => backend.write_buffer(buffer, offset, data),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => backend.write_buffer(buffer, offset, data),
+        }
+    }
 
     /// Read data from a buffer.
     ///
     /// This is a blocking operation that waits for the GPU to finish.
-    fn read_buffer(&self, buffer: &GpuBuffer, offset: u64, size: u64) -> Vec<u8>;
+    pub fn read_buffer(&self, buffer: &GpuBuffer, offset: u64, size: u64) -> Vec<u8> {
+        match self {
+            Self::Dummy(backend) => backend.read_buffer(buffer, offset, size),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(backend) => backend.read_buffer(buffer, offset, size),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => backend.read_buffer(buffer, offset, size),
+        }
+    }
 }
 
 /// Selects and creates the appropriate backend based on available features.
-pub fn create_backend() -> Result<Arc<dyn GpuBackend>, GraphicsError> {
+pub fn create_backend() -> Result<GpuBackend, GraphicsError> {
     // Try Vulkan backend first if available (native Vulkan via ash)
     #[cfg(feature = "vulkan-backend")]
     {
         match vulkan::VulkanBackend::new() {
             Ok(backend) => {
                 log::info!("Using Vulkan backend (ash)");
-                return Ok(Arc::new(backend));
+                return Ok(GpuBackend::Vulkan(backend));
             }
             Err(e) => {
                 log::warn!("Failed to create Vulkan backend: {}", e);
@@ -418,7 +548,7 @@ pub fn create_backend() -> Result<Arc<dyn GpuBackend>, GraphicsError> {
         match wgpu_backend::WgpuBackend::new() {
             Ok(backend) => {
                 log::info!("Using wgpu backend");
-                return Ok(Arc::new(backend));
+                return Ok(GpuBackend::Wgpu(backend));
             }
             Err(e) => {
                 log::warn!("Failed to create wgpu backend: {}", e);
@@ -428,7 +558,7 @@ pub fn create_backend() -> Result<Arc<dyn GpuBackend>, GraphicsError> {
 
     // Fall back to dummy backend
     log::info!("Using dummy backend");
-    Ok(Arc::new(dummy::DummyBackend::new()))
+    Ok(GpuBackend::Dummy(dummy::DummyBackend::new()))
 }
 
 /// Check if a real GPU backend is available.

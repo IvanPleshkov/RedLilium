@@ -12,7 +12,7 @@ use crate::types::{
     TextureDescriptor, TextureFormat, TextureUsage,
 };
 
-use super::{GpuBackend, GpuBuffer, GpuFence, GpuSampler, GpuTexture};
+use super::{GpuBuffer, GpuFence, GpuSampler, GpuTexture};
 
 /// wgpu-based GPU backend.
 pub struct WgpuBackend {
@@ -87,12 +87,14 @@ impl WgpuBackend {
     }
 }
 
-impl GpuBackend for WgpuBackend {
-    fn name(&self) -> &'static str {
+impl WgpuBackend {
+    /// Get the backend name.
+    pub fn name(&self) -> &'static str {
         "wgpu Backend"
     }
 
-    fn create_buffer(&self, descriptor: &BufferDescriptor) -> Result<GpuBuffer, GraphicsError> {
+    /// Create a buffer resource.
+    pub fn create_buffer(&self, descriptor: &BufferDescriptor) -> Result<GpuBuffer, GraphicsError> {
         let usage = convert_buffer_usage(descriptor.usage);
 
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -105,7 +107,11 @@ impl GpuBackend for WgpuBackend {
         Ok(GpuBuffer::Wgpu(Arc::new(buffer)))
     }
 
-    fn create_texture(&self, descriptor: &TextureDescriptor) -> Result<GpuTexture, GraphicsError> {
+    /// Create a texture resource.
+    pub fn create_texture(
+        &self,
+        descriptor: &TextureDescriptor,
+    ) -> Result<GpuTexture, GraphicsError> {
         let format = convert_texture_format(descriptor.format);
         let usage = convert_texture_usage(descriptor.usage);
 
@@ -132,7 +138,11 @@ impl GpuBackend for WgpuBackend {
         })
     }
 
-    fn create_sampler(&self, descriptor: &SamplerDescriptor) -> Result<GpuSampler, GraphicsError> {
+    /// Create a sampler resource.
+    pub fn create_sampler(
+        &self,
+        descriptor: &SamplerDescriptor,
+    ) -> Result<GpuSampler, GraphicsError> {
         let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
             label: descriptor.label.as_deref(),
             address_mode_u: convert_address_mode(descriptor.address_mode_u),
@@ -151,14 +161,16 @@ impl GpuBackend for WgpuBackend {
         Ok(GpuSampler::Wgpu(Arc::new(sampler)))
     }
 
-    fn create_fence(&self, _signaled: bool) -> GpuFence {
+    /// Create a fence for CPU-GPU synchronization.
+    pub fn create_fence(&self, _signaled: bool) -> GpuFence {
         GpuFence::Wgpu {
             device: self.device.clone(),
             submission_index: Mutex::new(None),
         }
     }
 
-    fn wait_fence(&self, fence: &GpuFence) {
+    /// Wait for a fence to be signaled.
+    pub fn wait_fence(&self, fence: &GpuFence) {
         if let GpuFence::Wgpu {
             device,
             submission_index,
@@ -176,7 +188,8 @@ impl GpuBackend for WgpuBackend {
         }
     }
 
-    fn is_fence_signaled(&self, fence: &GpuFence) -> bool {
+    /// Check if a fence is signaled (non-blocking).
+    pub fn is_fence_signaled(&self, fence: &GpuFence) -> bool {
         if let GpuFence::Wgpu {
             device,
             submission_index,
@@ -195,11 +208,13 @@ impl GpuBackend for WgpuBackend {
         false
     }
 
-    fn signal_fence(&self, _fence: &GpuFence) {
+    /// Signal a fence (for testing/dummy backend).
+    pub fn signal_fence(&self, _fence: &GpuFence) {
         // wgpu fences are signaled automatically when GPU work completes
     }
 
-    fn execute_graph(
+    /// Execute a compiled render graph.
+    pub fn execute_graph(
         &self,
         graph: &RenderGraph,
         compiled: &CompiledGraph,
@@ -238,13 +253,15 @@ impl GpuBackend for WgpuBackend {
         Ok(())
     }
 
-    fn write_buffer(&self, buffer: &GpuBuffer, offset: u64, data: &[u8]) {
+    /// Write data to a buffer.
+    pub fn write_buffer(&self, buffer: &GpuBuffer, offset: u64, data: &[u8]) {
         if let GpuBuffer::Wgpu(wgpu_buffer) = buffer {
             self.queue.write_buffer(wgpu_buffer, offset, data);
         }
     }
 
-    fn read_buffer(&self, buffer: &GpuBuffer, offset: u64, size: u64) -> Vec<u8> {
+    /// Read data from a buffer.
+    pub fn read_buffer(&self, buffer: &GpuBuffer, offset: u64, size: u64) -> Vec<u8> {
         if let GpuBuffer::Wgpu(wgpu_buffer) = buffer {
             // Create a staging buffer for reading
             let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -289,9 +306,7 @@ impl GpuBackend for WgpuBackend {
             vec![0u8; size as usize]
         }
     }
-}
 
-impl WgpuBackend {
     fn encode_pass(
         &self,
         encoder: &mut wgpu::CommandEncoder,

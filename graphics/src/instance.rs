@@ -7,7 +7,7 @@ use std::sync::{Arc, RwLock, Weak};
 
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
-use crate::backend::{self, GpuBackend};
+use crate::backend;
 use crate::device::GraphicsDevice;
 use crate::error::GraphicsError;
 use crate::swapchain::Surface;
@@ -57,7 +57,7 @@ pub struct GraphicsInstance {
     /// Devices created by this instance.
     devices: RwLock<Vec<Arc<GraphicsDevice>>>,
     /// GPU backend for this instance.
-    backend: Arc<dyn GpuBackend>,
+    backend: backend::GpuBackend,
 }
 
 impl GraphicsInstance {
@@ -88,7 +88,7 @@ impl GraphicsInstance {
     }
 
     /// Get the GPU backend (internal use only).
-    pub(crate) fn backend(&self) -> &Arc<dyn GpuBackend> {
+    pub(crate) fn backend(&self) -> &backend::GpuBackend {
         &self.backend
     }
 

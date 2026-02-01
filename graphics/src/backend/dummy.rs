@@ -1,8 +1,8 @@
 //! Dummy GPU backend for testing and development.
 //!
 //! This backend doesn't perform actual GPU operations but provides
-//! a valid implementation of the [`GpuBackend`] trait for testing
-//! the graphics API without requiring GPU hardware.
+//! a valid implementation for testing the graphics API without
+//! requiring GPU hardware.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -10,7 +10,7 @@ use crate::error::GraphicsError;
 use crate::graph::{CompiledGraph, RenderGraph};
 use crate::types::{BufferDescriptor, SamplerDescriptor, TextureDescriptor};
 
-use super::{GpuBackend, GpuBuffer, GpuFence, GpuSampler, GpuTexture};
+use super::{GpuBuffer, GpuFence, GpuSampler, GpuTexture};
 
 /// Dummy GPU backend.
 #[derive(Debug)]
@@ -21,20 +21,14 @@ impl DummyBackend {
     pub fn new() -> Self {
         Self
     }
-}
 
-impl Default for DummyBackend {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl GpuBackend for DummyBackend {
-    fn name(&self) -> &'static str {
+    /// Get the backend name.
+    pub fn name(&self) -> &'static str {
         "Dummy Backend"
     }
 
-    fn create_buffer(&self, descriptor: &BufferDescriptor) -> Result<GpuBuffer, GraphicsError> {
+    /// Create a buffer resource.
+    pub fn create_buffer(&self, descriptor: &BufferDescriptor) -> Result<GpuBuffer, GraphicsError> {
         log::trace!(
             "DummyBackend: creating buffer {:?} (size: {})",
             descriptor.label,
@@ -43,7 +37,11 @@ impl GpuBackend for DummyBackend {
         Ok(GpuBuffer::Dummy)
     }
 
-    fn create_texture(&self, descriptor: &TextureDescriptor) -> Result<GpuTexture, GraphicsError> {
+    /// Create a texture resource.
+    pub fn create_texture(
+        &self,
+        descriptor: &TextureDescriptor,
+    ) -> Result<GpuTexture, GraphicsError> {
         log::trace!(
             "DummyBackend: creating texture {:?} ({}x{}x{})",
             descriptor.label,
@@ -54,18 +52,24 @@ impl GpuBackend for DummyBackend {
         Ok(GpuTexture::Dummy)
     }
 
-    fn create_sampler(&self, descriptor: &SamplerDescriptor) -> Result<GpuSampler, GraphicsError> {
+    /// Create a sampler resource.
+    pub fn create_sampler(
+        &self,
+        descriptor: &SamplerDescriptor,
+    ) -> Result<GpuSampler, GraphicsError> {
         log::trace!("DummyBackend: creating sampler {:?}", descriptor.label);
         Ok(GpuSampler::Dummy)
     }
 
-    fn create_fence(&self, signaled: bool) -> GpuFence {
+    /// Create a fence for CPU-GPU synchronization.
+    pub fn create_fence(&self, signaled: bool) -> GpuFence {
         GpuFence::Dummy {
             signaled: AtomicBool::new(signaled),
         }
     }
 
-    fn wait_fence(&self, fence: &GpuFence) {
+    /// Wait for a fence to be signaled.
+    pub fn wait_fence(&self, fence: &GpuFence) {
         match fence {
             GpuFence::Dummy { signaled } => {
                 // In dummy mode, just spin until signaled (or assume signaled)
@@ -80,7 +84,8 @@ impl GpuBackend for DummyBackend {
         }
     }
 
-    fn is_fence_signaled(&self, fence: &GpuFence) -> bool {
+    /// Check if a fence is signaled (non-blocking).
+    pub fn is_fence_signaled(&self, fence: &GpuFence) -> bool {
         match fence {
             GpuFence::Dummy { signaled } => signaled.load(Ordering::Acquire),
             #[cfg(feature = "wgpu-backend")]
@@ -90,7 +95,8 @@ impl GpuBackend for DummyBackend {
         }
     }
 
-    fn signal_fence(&self, fence: &GpuFence) {
+    /// Signal a fence (for testing/simulation).
+    pub fn signal_fence(&self, fence: &GpuFence) {
         match fence {
             GpuFence::Dummy { signaled } => {
                 signaled.store(true, Ordering::Release);
@@ -102,7 +108,8 @@ impl GpuBackend for DummyBackend {
         }
     }
 
-    fn execute_graph(
+    /// Execute a compiled render graph.
+    pub fn execute_graph(
         &self,
         _graph: &RenderGraph,
         compiled: &CompiledGraph,
@@ -126,7 +133,8 @@ impl GpuBackend for DummyBackend {
         Ok(())
     }
 
-    fn write_buffer(&self, _buffer: &GpuBuffer, offset: u64, data: &[u8]) {
+    /// Write data to a buffer.
+    pub fn write_buffer(&self, _buffer: &GpuBuffer, offset: u64, data: &[u8]) {
         log::trace!(
             "DummyBackend: write_buffer offset={} len={}",
             offset,
@@ -134,9 +142,16 @@ impl GpuBackend for DummyBackend {
         );
     }
 
-    fn read_buffer(&self, _buffer: &GpuBuffer, offset: u64, size: u64) -> Vec<u8> {
+    /// Read data from a buffer.
+    pub fn read_buffer(&self, _buffer: &GpuBuffer, offset: u64, size: u64) -> Vec<u8> {
         log::trace!("DummyBackend: read_buffer offset={} size={}", offset, size);
         // Return zeroed data
         vec![0u8; size as usize]
+    }
+}
+
+impl Default for DummyBackend {
+    fn default() -> Self {
+        Self::new()
     }
 }
