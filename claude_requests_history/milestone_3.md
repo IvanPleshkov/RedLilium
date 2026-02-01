@@ -79,3 +79,6 @@ Please use frame schedule and pipeline described in `docs\ARCHITECTURE.md`.
 If possible to read back swapchain, feel free to read it and check using tools in graphics integration tests.
 If window cannot be created or there is no any device compatible to the surface - finish test as passed.
 Tesh should pass in this case because of CI running.
+
+## Request 11:
+Please explain this line comment and use actual swapchain even if it brakes readback in test

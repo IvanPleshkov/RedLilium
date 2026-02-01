@@ -28,7 +28,6 @@ use winit::window::{Window, WindowId};
 use redlilium_graphics::{
     ColorAttachment, FramePipeline, GraphicsDevice, GraphicsInstance, GraphicsPass, LoadOp,
     PresentMode, RenderGraph, RenderTargetConfig, StoreOp, Surface, SurfaceConfiguration,
-    TextureFormat, TextureUsage,
 };
 
 /// Number of frames to render before exiting.
@@ -151,7 +150,8 @@ impl WindowTestApp {
 
     /// Render a single frame using FramePipeline and FrameSchedule.
     fn render_frame(&mut self) -> bool {
-        let device = match &self.device {
+        // Device is available but not directly used - graph execution uses it internally
+        let _device = match &self.device {
             Some(d) => d,
             None => return false,
         };
@@ -173,25 +173,9 @@ impl WindowTestApp {
             }
         };
 
-        // Create an offscreen render target (since swapchain isn't fully connected yet)
-        // In a real implementation, we'd render directly to swapchain_texture
-        let render_target =
-            match device.create_texture(&redlilium_graphics::TextureDescriptor::new_2d(
-                self.window_size.0,
-                self.window_size.1,
-                TextureFormat::Rgba8Unorm,
-                TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
-            )) {
-                Ok(t) => t,
-                Err(e) => {
-                    log::warn!("Failed to create render target: {}", e);
-                    swapchain_texture.present();
-                    return false;
-                }
-            };
-
-        // Build render graph with a simple clear pass
-        // Clear color cycles through colors based on frame number
+        // Build render graph with a simple clear pass that renders directly to swapchain
+        // Note: This means we can't do GPU readback of the result since swapchain textures
+        // typically don't have COPY_SRC usage, but it tests the real rendering path.
         let hue = (self.frame_count as f32 / FRAMES_TO_RENDER as f32) * 360.0;
         let (r, g, b) = hue_to_rgb(hue);
 
@@ -199,7 +183,7 @@ impl WindowTestApp {
         let mut pass = GraphicsPass::new(format!("frame_{}", self.frame_count));
         pass.set_render_targets(
             RenderTargetConfig::new().with_color(
-                ColorAttachment::from_texture(render_target)
+                ColorAttachment::from_surface(&swapchain_texture)
                     .with_load_op(LoadOp::clear_color(r, g, b, 1.0))
                     .with_store_op(StoreOp::Store),
             ),

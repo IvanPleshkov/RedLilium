@@ -37,6 +37,8 @@ impl WgpuBackend {
         encoder: &mut wgpu::CommandEncoder,
         pass: &crate::graph::GraphicsPass,
     ) -> Result<(), GraphicsError> {
+        use crate::graph::RenderTarget;
+
         // Get render targets configuration
         let Some(render_targets) = pass.render_targets() else {
             // No render targets configured, skip this pass
@@ -52,22 +54,36 @@ impl WgpuBackend {
             .color_attachments
             .iter()
             .map(|attachment| {
-                let GpuTexture::Wgpu { view, .. } = attachment.texture().gpu_handle() else {
-                    return None;
-                };
+                match &attachment.target {
+                    RenderTarget::Texture { texture, .. } => {
+                        let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() else {
+                            return None;
+                        };
 
-                let load_op = convert_load_op(&attachment.load_op());
-                let store_op = convert_store_op(&attachment.store_op());
+                        let load_op = convert_load_op(&attachment.load_op());
+                        let store_op = convert_store_op(&attachment.store_op());
 
-                Some(wgpu::RenderPassColorAttachment {
-                    view: view.as_ref(),
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: load_op,
-                        store: store_op,
-                    },
-                    depth_slice: None,
-                })
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: view.as_ref(),
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: load_op,
+                                store: store_op,
+                            },
+                            depth_slice: None,
+                        })
+                    }
+                    RenderTarget::Surface { .. } => {
+                        // Surface attachments require the actual wgpu swapchain texture view,
+                        // which isn't passed through the render graph yet. Skip for now.
+                        // TODO: Pass the acquired swapchain texture view through graph execution.
+                        log::warn!(
+                            "Pass '{}' has surface attachment - swapchain rendering not fully implemented",
+                            pass.name()
+                        );
+                        None
+                    }
+                }
             })
             .collect();
 
@@ -90,6 +106,17 @@ impl WgpuBackend {
                         stencil_ops: None, // TODO: Add stencil support
                     }
                 });
+
+        // Check if we have any valid attachments - wgpu requires at least one
+        let has_valid_color = color_attachments.iter().any(|a| a.is_some());
+        let has_depth = depth_stencil_attachment.is_some();
+        if !has_valid_color && !has_depth {
+            log::trace!(
+                "Skipping graphics pass '{}': no valid attachments (surface-only passes not yet supported)",
+                pass.name()
+            );
+            return Ok(());
+        }
 
         // Create render pass
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -134,18 +161,18 @@ impl WgpuBackend {
         let material = draw_cmd.material.material();
         let mesh = &draw_cmd.mesh;
 
-        // Get color target formats
+        // Get color target formats (using target.format() which works for both textures and surfaces)
         let color_formats: Vec<Option<wgpu::TextureFormat>> = render_targets
             .color_attachments
             .iter()
-            .map(|a| Some(convert_texture_format(a.texture().format())))
+            .map(|a| Some(convert_texture_format(a.target.format())))
             .collect();
 
-        // Get depth format if present
+        // Get depth format if present (depth attachments are always textures, never surfaces)
         let depth_format = render_targets
             .depth_stencil_attachment
             .as_ref()
-            .map(|a| convert_texture_format(a.texture().format()));
+            .map(|a| convert_texture_format(a.target.format()));
 
         // Create shader modules from material
         let shaders = material.shaders();

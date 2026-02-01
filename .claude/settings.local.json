@@ -26,7 +26,8 @@
       "Bash(cd:*)",
       "Bash(.scriptstest-all.ps1 -SkipWeb)",
       "WebSearch",
-      "WebFetch(domain:docs.vulkan.org)"
+      "WebFetch(domain:docs.vulkan.org)",
+      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"& ''./scripts/test-all.ps1'' -SkipWeb\")"
     ],
     "deny": [
       "Read(claude_requests_history/**)",
