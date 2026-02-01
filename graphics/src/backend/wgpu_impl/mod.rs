@@ -33,12 +33,32 @@ impl std::fmt::Debug for WgpuBackend {
 }
 
 impl WgpuBackend {
-    /// Create a new wgpu backend.
+    /// Create a new wgpu backend with default parameters.
     pub fn new() -> Result<Self, GraphicsError> {
-        // Create instance with all backends
+        Self::with_params(&crate::instance::InstanceParameters::default())
+    }
+
+    /// Create a new wgpu backend with custom parameters.
+    pub fn with_params(
+        params: &crate::instance::InstanceParameters,
+    ) -> Result<Self, GraphicsError> {
+        // Determine which wgpu backends to enable
+        let backends = params.wgpu_backend.to_wgpu_backends();
+
+        // Configure instance flags based on validation/debug settings
+        let mut flags = wgpu::InstanceFlags::default();
+        if params.validation {
+            flags |= wgpu::InstanceFlags::VALIDATION;
+            flags |= wgpu::InstanceFlags::GPU_BASED_VALIDATION;
+        }
+        if params.debug {
+            flags |= wgpu::InstanceFlags::DEBUG;
+        }
+
+        // Create instance with configured backends
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            flags: wgpu::InstanceFlags::default(),
+            backends,
+            flags,
             backend_options: wgpu::BackendOptions::default(),
             memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
         });

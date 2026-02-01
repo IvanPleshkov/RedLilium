@@ -7,11 +7,12 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use redlilium_graphics::{
-    Buffer, BufferDescriptor, BufferUsage, ColorAttachment, DepthStencilAttachment, FramePipeline,
-    GraphicsDevice, GraphicsInstance, GraphicsPass, LoadOp, Material, MaterialDescriptor,
-    MaterialInstance, Mesh, MeshDescriptor, RenderGraph, RenderTargetConfig, ShaderSource, StoreOp,
-    Texture, TextureDescriptor, TextureFormat, TextureUsage, TransferConfig, TransferOperation,
-    TransferPass, VertexAttribute, VertexBufferLayout, VertexLayout,
+    BackendType, Buffer, BufferDescriptor, BufferUsage, ColorAttachment, DepthStencilAttachment,
+    FramePipeline, GraphicsDevice, GraphicsInstance, GraphicsPass, InstanceParameters, LoadOp,
+    Material, MaterialDescriptor, MaterialInstance, Mesh, MeshDescriptor, RenderGraph,
+    RenderTargetConfig, ShaderSource, StoreOp, Texture, TextureDescriptor, TextureFormat,
+    TextureUsage, TransferConfig, TransferOperation, TransferPass, VertexAttribute,
+    VertexBufferLayout, VertexLayout, WgpuBackendType,
 };
 
 /// Compute the aligned bytes per row for a texture (256-byte alignment for wgpu).
@@ -35,9 +36,9 @@ pub fn readback_buffer_size(width: u32, height: u32, bytes_per_pixel: u32) -> u6
 pub enum Backend {
     /// Dummy backend (no actual GPU operations).
     Dummy,
-    /// Vulkan backend.
+    /// Vulkan backend (native via ash).
     Vulkan,
-    /// WebGPU backend.
+    /// WebGPU backend (via wgpu with Vulkan).
     WebGpu,
 }
 
@@ -67,6 +68,19 @@ impl Backend {
             Backend::Dummy => "dummy",
             Backend::Vulkan => "vulkan",
             Backend::WebGpu => "webgpu",
+        }
+    }
+
+    /// Convert to InstanceParameters for creating a GraphicsInstance.
+    pub fn to_instance_parameters(self) -> InstanceParameters {
+        match self {
+            Backend::Dummy => InstanceParameters::new().with_backend(BackendType::Dummy),
+            Backend::Vulkan => InstanceParameters::new()
+                .with_backend(BackendType::Wgpu)
+                .with_wgpu_backend(WgpuBackendType::Vulkan),
+            Backend::WebGpu => InstanceParameters::new()
+                .with_backend(BackendType::Wgpu)
+                .with_wgpu_backend(WgpuBackendType::Vulkan), // Use Vulkan via wgpu for testing
         }
     }
 }
@@ -101,7 +115,8 @@ impl TestContext {
             return None;
         }
 
-        let instance = GraphicsInstance::new().ok()?;
+        let params = backend.to_instance_parameters();
+        let instance = GraphicsInstance::with_parameters(params).ok()?;
         let device = instance.create_device().ok()?;
         // Use 1 frame in flight for synchronous test execution
         let pipeline = device.create_pipeline(1);

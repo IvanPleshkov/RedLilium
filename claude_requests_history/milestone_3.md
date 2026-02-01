@@ -82,3 +82,9 @@ Tesh should pass in this case because of CI running.
 
 ## Request 11:
 Please explain this line comment and use actual swapchain even if it brakes readback in test
+
+## Request 12:
+Let's add to the instance in graphics crate in `new` a new agrument with parameters. parameters have a builder.
+In parameters we need to provide a backend to use (in case of `wgpu` - also a backend for wgpu).
+Also parameters can configure debug and validation layers.
+Change integration tests and in window test use both backends (using `rstest`).

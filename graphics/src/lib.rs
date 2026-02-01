@@ -85,7 +85,9 @@ pub use graph::{
     StoreOp, TextureCopyLocation, TextureCopyRegion, TextureOrigin, TransferConfig,
     TransferOperation, TransferPass,
 };
-pub use instance::{AdapterInfo, AdapterType, GraphicsInstance};
+pub use instance::{
+    AdapterInfo, AdapterType, BackendType, GraphicsInstance, InstanceParameters, WgpuBackendType,
+};
 pub use materials::{
     BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BoundResource, Material,
     MaterialDescriptor, MaterialInstance, ShaderSource, ShaderStage, ShaderStageFlags,

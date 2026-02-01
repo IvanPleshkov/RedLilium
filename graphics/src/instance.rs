@@ -12,6 +12,120 @@ use crate::device::GraphicsDevice;
 use crate::error::GraphicsError;
 use crate::swapchain::Surface;
 
+// ============================================================================
+// Instance Parameters
+// ============================================================================
+
+/// Backend selection for the graphics instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum BackendType {
+    /// Automatically select the best available backend.
+    #[default]
+    Auto,
+    /// Use the dummy backend (no actual GPU operations).
+    Dummy,
+    /// Use the wgpu backend (cross-platform via wgpu).
+    Wgpu,
+    /// Use the native Vulkan backend (via ash).
+    Vulkan,
+}
+
+/// wgpu-specific backend selection.
+///
+/// When using the wgpu backend, this controls which underlying graphics API is used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum WgpuBackendType {
+    /// Automatically select the best available backend.
+    #[default]
+    Auto,
+    /// Use Vulkan backend.
+    Vulkan,
+    /// Use DirectX 12 backend (Windows only).
+    Dx12,
+    /// Use Metal backend (macOS/iOS only).
+    Metal,
+    /// Use OpenGL backend.
+    Gl,
+    /// Use WebGPU backend (browser only).
+    WebGpu,
+}
+
+impl WgpuBackendType {
+    /// Convert to wgpu::Backends flags.
+    #[cfg(feature = "wgpu-backend")]
+    pub(crate) fn to_wgpu_backends(self) -> wgpu::Backends {
+        match self {
+            Self::Auto => wgpu::Backends::all(),
+            Self::Vulkan => wgpu::Backends::VULKAN,
+            Self::Dx12 => wgpu::Backends::DX12,
+            Self::Metal => wgpu::Backends::METAL,
+            Self::Gl => wgpu::Backends::GL,
+            Self::WebGpu => wgpu::Backends::BROWSER_WEBGPU,
+        }
+    }
+}
+
+/// Configuration parameters for creating a graphics instance.
+///
+/// Use the builder pattern to configure the instance:
+///
+/// ```ignore
+/// let params = InstanceParameters::new()
+///     .with_backend(BackendType::Wgpu)
+///     .with_wgpu_backend(WgpuBackendType::Vulkan)
+///     .with_validation(true)
+///     .with_debug(true);
+///
+/// let instance = GraphicsInstance::new(params)?;
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct InstanceParameters {
+    /// Which backend to use.
+    pub backend: BackendType,
+    /// Which wgpu backend to use (only relevant when backend is Wgpu or Auto).
+    pub wgpu_backend: WgpuBackendType,
+    /// Enable GPU validation layers for debugging.
+    pub validation: bool,
+    /// Enable debug mode (additional logging, debug names).
+    pub debug: bool,
+}
+
+impl InstanceParameters {
+    /// Create new default instance parameters.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the backend type to use.
+    pub fn with_backend(mut self, backend: BackendType) -> Self {
+        self.backend = backend;
+        self
+    }
+
+    /// Set the wgpu backend type (only used when backend is Wgpu or Auto).
+    pub fn with_wgpu_backend(mut self, wgpu_backend: WgpuBackendType) -> Self {
+        self.wgpu_backend = wgpu_backend;
+        self
+    }
+
+    /// Enable or disable GPU validation layers.
+    ///
+    /// Validation layers help catch API misuse but have a performance cost.
+    /// Recommended for development, disabled for release builds.
+    pub fn with_validation(mut self, validation: bool) -> Self {
+        self.validation = validation;
+        self
+    }
+
+    /// Enable or disable debug mode.
+    ///
+    /// Debug mode enables additional logging and debug names for resources.
+    pub fn with_debug(mut self, debug: bool) -> Self {
+        self.debug = debug;
+        self
+    }
+}
+
 /// Information about a graphics adapter.
 #[derive(Debug, Clone)]
 pub struct AdapterInfo {
@@ -61,16 +175,43 @@ pub struct GraphicsInstance {
 }
 
 impl GraphicsInstance {
-    /// Create a new graphics instance.
+    /// Create a new graphics instance with default parameters.
+    ///
+    /// This is equivalent to `GraphicsInstance::with_parameters(InstanceParameters::default())`.
     ///
     /// # Errors
     ///
     /// Returns an error if the graphics system cannot be initialized.
     pub fn new() -> Result<Arc<Self>, GraphicsError> {
-        log::info!("Creating GraphicsInstance");
+        Self::with_parameters(InstanceParameters::default())
+    }
 
-        // Create the GPU backend
-        let backend = backend::create_backend()?;
+    /// Create a new graphics instance with custom parameters.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - Configuration parameters for the instance
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the graphics system cannot be initialized.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use redlilium_graphics::{GraphicsInstance, InstanceParameters, BackendType};
+    ///
+    /// let params = InstanceParameters::new()
+    ///     .with_backend(BackendType::Wgpu)
+    ///     .with_validation(true);
+    ///
+    /// let instance = GraphicsInstance::with_parameters(params)?;
+    /// ```
+    pub fn with_parameters(params: InstanceParameters) -> Result<Arc<Self>, GraphicsError> {
+        log::info!("Creating GraphicsInstance with params: {:?}", params);
+
+        // Create the GPU backend based on parameters
+        let backend = backend::create_backend_with_params(&params)?;
         log::info!("Using GPU backend: {}", backend.name());
 
         let instance = Arc::new(Self {

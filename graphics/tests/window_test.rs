@@ -17,6 +17,7 @@
 
 use std::sync::Arc;
 
+use rstest::rstest;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
@@ -26,8 +27,9 @@ use winit::platform::windows::EventLoopBuilderExtWindows;
 use winit::window::{Window, WindowId};
 
 use redlilium_graphics::{
-    ColorAttachment, FramePipeline, GraphicsDevice, GraphicsInstance, GraphicsPass, LoadOp,
-    PresentMode, RenderGraph, RenderTargetConfig, StoreOp, Surface, SurfaceConfiguration,
+    BackendType, ColorAttachment, FramePipeline, GraphicsDevice, GraphicsInstance, GraphicsPass,
+    InstanceParameters, LoadOp, PresentMode, RenderGraph, RenderTargetConfig, StoreOp, Surface,
+    SurfaceConfiguration, WgpuBackendType,
 };
 
 /// Number of frames to render before exiting.
@@ -50,6 +52,8 @@ enum TestResult {
 struct WindowTestApp {
     /// Test result.
     result: TestResult,
+    /// Instance parameters for backend selection.
+    params: InstanceParameters,
     /// Window handle (created on resume).
     window: Option<Window>,
     /// Graphics instance.
@@ -69,9 +73,10 @@ struct WindowTestApp {
 }
 
 impl WindowTestApp {
-    fn new() -> Self {
+    fn new(params: InstanceParameters) -> Self {
         Self {
             result: TestResult::Running,
+            params,
             window: None,
             instance: None,
             device: None,
@@ -93,8 +98,8 @@ impl WindowTestApp {
             }
         };
 
-        // Create graphics instance
-        let instance = match GraphicsInstance::new() {
+        // Create graphics instance with configured parameters
+        let instance = match GraphicsInstance::with_parameters(self.params.clone()) {
             Ok(i) => i,
             Err(e) => {
                 log::warn!("Failed to create graphics instance: {}", e);
@@ -340,14 +345,18 @@ fn hue_to_rgb(hue: f32) -> (f32, f32, f32) {
 /// Run the window test with event pumping (test-friendly approach).
 ///
 /// Returns true if the test passed or was skipped (CI compatibility).
-fn run_window_test() -> bool {
+fn run_window_test(params: InstanceParameters) -> bool {
     // Initialize logging for test output
     let _ = env_logger::builder()
         .filter_level(log::LevelFilter::Info)
         .is_test(true)
         .try_init();
 
-    log::info!("Starting window integration test");
+    log::info!(
+        "Starting window integration test with backend: {:?}, wgpu_backend: {:?}",
+        params.backend,
+        params.wgpu_backend
+    );
 
     // Try to create event loop - may fail on headless systems
     // On Windows, we need to use any_thread() because tests run on a non-main thread
@@ -369,7 +378,7 @@ fn run_window_test() -> bool {
         }
     };
 
-    let mut app = WindowTestApp::new();
+    let mut app = WindowTestApp::new(params);
 
     // Use pump_events for controlled iteration (test-friendly)
     // This allows us to have a timeout and not block forever
@@ -430,10 +439,24 @@ fn run_window_test() -> bool {
     }
 }
 
-#[test]
-fn test_window_swapchain_5_frames() {
+/// Create instance parameters for wgpu with Vulkan backend.
+fn vulkan_params() -> InstanceParameters {
+    InstanceParameters::new().with_backend(BackendType::Vulkan)
+}
+
+/// Create instance parameters for wgpu with Vulkan backend.
+fn wgpu_vulkan_params() -> InstanceParameters {
+    InstanceParameters::new()
+        .with_backend(BackendType::Wgpu)
+        .with_wgpu_backend(WgpuBackendType::Vulkan)
+}
+
+#[rstest]
+#[case::vulkan(vulkan_params())]
+#[case::wgpu_vulkan(wgpu_vulkan_params())]
+fn test_window_swapchain_5_frames(#[case] params: InstanceParameters) {
     assert!(
-        run_window_test(),
+        run_window_test(params),
         "Window swapchain test failed - see log for details"
     );
 }

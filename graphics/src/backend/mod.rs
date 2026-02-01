@@ -528,11 +528,64 @@ impl GpuBackend {
 }
 
 /// Selects and creates the appropriate backend based on available features.
+///
+/// This uses default parameters (auto-select best backend).
 pub fn create_backend() -> Result<GpuBackend, GraphicsError> {
+    create_backend_with_params(&crate::instance::InstanceParameters::default())
+}
+
+/// Selects and creates the appropriate backend based on parameters.
+pub fn create_backend_with_params(
+    params: &crate::instance::InstanceParameters,
+) -> Result<GpuBackend, GraphicsError> {
+    use crate::instance::BackendType;
+
+    match params.backend {
+        BackendType::Auto => create_backend_auto(params),
+        BackendType::Dummy => {
+            log::info!("Using dummy backend (requested)");
+            Ok(GpuBackend::Dummy(dummy::DummyBackend::new()))
+        }
+        BackendType::Wgpu => {
+            #[cfg(feature = "wgpu-backend")]
+            {
+                let backend = wgpu_impl::WgpuBackend::with_params(params)?;
+                log::info!("Using wgpu backend (requested)");
+                Ok(GpuBackend::Wgpu(backend))
+            }
+            #[cfg(not(feature = "wgpu-backend"))]
+            {
+                Err(GraphicsError::ResourceCreationFailed(
+                    "wgpu backend requested but wgpu-backend feature is not enabled".to_string(),
+                ))
+            }
+        }
+        BackendType::Vulkan => {
+            #[cfg(feature = "vulkan-backend")]
+            {
+                let backend = vulkan::VulkanBackend::new()?;
+                log::info!("Using Vulkan backend (requested)");
+                Ok(GpuBackend::Vulkan(backend))
+            }
+            #[cfg(not(feature = "vulkan-backend"))]
+            {
+                Err(GraphicsError::ResourceCreationFailed(
+                    "Vulkan backend requested but vulkan-backend feature is not enabled"
+                        .to_string(),
+                ))
+            }
+        }
+    }
+}
+
+/// Auto-select the best available backend.
+fn create_backend_auto(
+    params: &crate::instance::InstanceParameters,
+) -> Result<GpuBackend, GraphicsError> {
     // Try wgpu backend first if available (supports WGSL shaders and full draw commands)
     #[cfg(feature = "wgpu-backend")]
     {
-        match wgpu_impl::WgpuBackend::new() {
+        match wgpu_impl::WgpuBackend::with_params(params) {
             Ok(backend) => {
                 log::info!("Using wgpu backend");
                 return Ok(GpuBackend::Wgpu(backend));
