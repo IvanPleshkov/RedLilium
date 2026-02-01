@@ -11,15 +11,70 @@ mod device;
 mod instance;
 mod sync;
 
+use std::sync::Arc;
+
 use ash::vk;
 use gpu_allocator::vulkan::Allocator;
 use parking_lot::Mutex;
 
 use crate::error::GraphicsError;
-use crate::graph::{CompiledGraph, Pass, RenderGraph};
+use crate::graph::{CompiledGraph, Pass, RenderGraph, RenderTarget};
 use crate::types::{BufferDescriptor, SamplerDescriptor, TextureDescriptor};
 
 use super::{GpuBuffer, GpuFence, GpuSampler, GpuTexture};
+
+/// A texture view for a Vulkan surface texture (swapchain image).
+///
+/// This wraps the Vulkan image view from the swapchain for use in render passes.
+#[derive(Clone)]
+pub struct VulkanSurfaceTextureView {
+    pub(crate) image: vk::Image,
+    pub(crate) view: Arc<VulkanImageView>,
+}
+
+/// Wrapper for a Vulkan image view that handles cleanup.
+pub struct VulkanImageView {
+    #[allow(dead_code)] // Reserved for cleanup when needed
+    device: ash::Device,
+    view: vk::ImageView,
+}
+
+impl VulkanImageView {
+    /// Create a new VulkanImageView wrapper.
+    pub(crate) fn new(device: ash::Device, view: vk::ImageView) -> Self {
+        Self { device, view }
+    }
+
+    /// Get the raw Vulkan image view handle.
+    pub fn view(&self) -> vk::ImageView {
+        self.view
+    }
+}
+
+impl Drop for VulkanImageView {
+    fn drop(&mut self) {
+        // Note: We don't destroy the view here because swapchain image views
+        // are managed by the swapchain. Only destroy views we created ourselves.
+    }
+}
+
+impl std::fmt::Debug for VulkanSurfaceTextureView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VulkanSurfaceTextureView").finish()
+    }
+}
+
+impl VulkanSurfaceTextureView {
+    /// Get the underlying Vulkan image.
+    pub fn image(&self) -> vk::Image {
+        self.image
+    }
+
+    /// Get the underlying Vulkan image view.
+    pub fn view(&self) -> vk::ImageView {
+        self.view.view()
+    }
+}
 
 use self::conversion::{
     convert_address_mode, convert_buffer_usage, convert_compare_function, convert_filter_mode,
@@ -34,7 +89,6 @@ use self::conversion::{
 /// - Dynamic rendering (VK_KHR_dynamic_rendering)
 pub struct VulkanBackend {
     /// Vulkan entry points (function loader).
-    #[allow(dead_code)]
     entry: ash::Entry,
     /// Vulkan instance.
     instance: ash::Instance,
@@ -43,14 +97,12 @@ pub struct VulkanBackend {
     /// Debug utils extension instance.
     debug_utils: Option<ash::ext::debug_utils::Instance>,
     /// Selected physical device.
-    #[allow(dead_code)]
     physical_device: vk::PhysicalDevice,
     /// Logical device.
     device: ash::Device,
     /// Graphics queue.
     graphics_queue: vk::Queue,
     /// Graphics queue family index.
-    #[allow(dead_code)]
     graphics_queue_family: u32,
     /// Memory allocator.
     allocator: Mutex<Allocator>,
@@ -61,6 +113,10 @@ pub struct VulkanBackend {
     validation_enabled: bool,
     /// Dynamic rendering extension.
     dynamic_rendering: ash::khr::dynamic_rendering::Device,
+    /// Surface extension.
+    surface_loader: ash::khr::surface::Instance,
+    /// Swapchain extension.
+    swapchain_loader: ash::khr::swapchain::Device,
 }
 
 impl std::fmt::Debug for VulkanBackend {
@@ -112,6 +168,12 @@ impl VulkanBackend {
         // Load dynamic rendering extension
         let dynamic_rendering = ash::khr::dynamic_rendering::Device::new(&instance, &device);
 
+        // Load surface extension
+        let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
+
+        // Load swapchain extension
+        let swapchain_loader = ash::khr::swapchain::Device::new(&instance, &device);
+
         log::info!(
             "Vulkan backend initialized (validation: {})",
             validation_enabled
@@ -130,12 +192,121 @@ impl VulkanBackend {
             command_pool,
             validation_enabled,
             dynamic_rendering,
+            surface_loader,
+            swapchain_loader,
         })
     }
 
     /// Get the Vulkan device.
     pub fn device(&self) -> &ash::Device {
         &self.device
+    }
+
+    /// Get the Vulkan entry.
+    pub fn entry(&self) -> &ash::Entry {
+        &self.entry
+    }
+
+    /// Get the Vulkan instance.
+    pub fn instance(&self) -> &ash::Instance {
+        &self.instance
+    }
+
+    /// Get the physical device.
+    pub fn physical_device(&self) -> vk::PhysicalDevice {
+        self.physical_device
+    }
+
+    /// Get the graphics queue family index.
+    pub fn graphics_queue_family(&self) -> u32 {
+        self.graphics_queue_family
+    }
+
+    /// Get the graphics queue.
+    pub fn graphics_queue(&self) -> vk::Queue {
+        self.graphics_queue
+    }
+
+    /// Get the surface loader.
+    pub fn surface_loader(&self) -> &ash::khr::surface::Instance {
+        &self.surface_loader
+    }
+
+    /// Get the swapchain loader.
+    pub fn swapchain_loader(&self) -> &ash::khr::swapchain::Device {
+        &self.swapchain_loader
+    }
+
+    /// Query surface capabilities for a given surface.
+    pub fn get_surface_capabilities(
+        &self,
+        surface: vk::SurfaceKHR,
+    ) -> Result<vk::SurfaceCapabilitiesKHR, GraphicsError> {
+        unsafe {
+            self.surface_loader
+                .get_physical_device_surface_capabilities(self.physical_device, surface)
+        }
+        .map_err(|e| {
+            GraphicsError::ResourceCreationFailed(format!(
+                "Failed to get surface capabilities: {:?}",
+                e
+            ))
+        })
+    }
+
+    /// Query surface formats for a given surface.
+    pub fn get_surface_formats(
+        &self,
+        surface: vk::SurfaceKHR,
+    ) -> Result<Vec<vk::SurfaceFormatKHR>, GraphicsError> {
+        unsafe {
+            self.surface_loader
+                .get_physical_device_surface_formats(self.physical_device, surface)
+        }
+        .map_err(|e| {
+            GraphicsError::ResourceCreationFailed(format!("Failed to get surface formats: {:?}", e))
+        })
+    }
+
+    /// Query present modes for a given surface.
+    pub fn get_surface_present_modes(
+        &self,
+        surface: vk::SurfaceKHR,
+    ) -> Result<Vec<vk::PresentModeKHR>, GraphicsError> {
+        unsafe {
+            self.surface_loader
+                .get_physical_device_surface_present_modes(self.physical_device, surface)
+        }
+        .map_err(|e| {
+            GraphicsError::ResourceCreationFailed(format!("Failed to get present modes: {:?}", e))
+        })
+    }
+
+    /// Create an image view for a swapchain image.
+    pub fn create_swapchain_image_view(
+        &self,
+        image: vk::Image,
+        format: vk::Format,
+    ) -> Result<vk::ImageView, GraphicsError> {
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(format)
+            .components(vk::ComponentMapping::default())
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+
+        unsafe { self.device.create_image_view(&view_info, None) }.map_err(|e| {
+            GraphicsError::ResourceCreationFailed(format!(
+                "Failed to create swapchain image view: {:?}",
+                e
+            ))
+        })
     }
 }
 
@@ -569,22 +740,45 @@ impl VulkanBackend {
             .color_attachments
             .iter()
             .filter_map(|attachment| {
-                let GpuTexture::Vulkan { view, .. } = attachment.texture().gpu_handle() else {
-                    return None;
-                };
-
                 let (load_op, clear_value) =
                     conversion::convert_load_op_color(&attachment.load_op());
                 let store_op = conversion::convert_store_op(&attachment.store_op());
 
-                Some(
-                    vk::RenderingAttachmentInfo::default()
-                        .image_view(*view)
-                        .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                        .load_op(load_op)
-                        .store_op(store_op)
-                        .clear_value(clear_value),
-                )
+                match &attachment.target {
+                    RenderTarget::Texture { texture, .. } => {
+                        let GpuTexture::Vulkan { view, .. } = texture.gpu_handle() else {
+                            return None;
+                        };
+
+                        Some(
+                            vk::RenderingAttachmentInfo::default()
+                                .image_view(*view)
+                                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                                .load_op(load_op)
+                                .store_op(store_op)
+                                .clear_value(clear_value),
+                        )
+                    }
+                    RenderTarget::Surface { vulkan_view, .. } => {
+                        // Use the Vulkan swapchain image view if available
+                        if let Some(surface_view) = vulkan_view {
+                            Some(
+                                vk::RenderingAttachmentInfo::default()
+                                    .image_view(surface_view.view())
+                                    .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                                    .load_op(load_op)
+                                    .store_op(store_op)
+                                    .clear_value(clear_value),
+                            )
+                        } else {
+                            log::warn!(
+                                "Pass '{}' has surface attachment but no Vulkan view available",
+                                pass.name()
+                            );
+                            None
+                        }
+                    }
+                }
             })
             .collect();
 
@@ -594,22 +788,37 @@ impl VulkanBackend {
                 .depth_stencil_attachment
                 .as_ref()
                 .and_then(|attachment| {
-                    let GpuTexture::Vulkan { view, .. } = attachment.texture().gpu_handle() else {
-                        return None;
-                    };
-
                     let (load_op, clear_value) =
                         conversion::convert_load_op_depth(&attachment.depth_load_op());
                     let store_op = conversion::convert_store_op(&attachment.depth_store_op());
 
-                    Some(
-                        vk::RenderingAttachmentInfo::default()
-                            .image_view(*view)
-                            .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                            .load_op(load_op)
-                            .store_op(store_op)
-                            .clear_value(clear_value),
-                    )
+                    match &attachment.target {
+                        RenderTarget::Texture { texture, .. } => {
+                            let GpuTexture::Vulkan { view, .. } = texture.gpu_handle() else {
+                                return None;
+                            };
+
+                            Some(
+                                vk::RenderingAttachmentInfo::default()
+                                    .image_view(*view)
+                                    .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                                    .load_op(load_op)
+                                    .store_op(store_op)
+                                    .clear_value(clear_value),
+                            )
+                        }
+                        RenderTarget::Surface { vulkan_view, .. } => {
+                            // Depth attachments are typically not surfaces, but handle for completeness
+                            vulkan_view.as_ref().map(|surface_view| {
+                                vk::RenderingAttachmentInfo::default()
+                                    .image_view(surface_view.view())
+                                    .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                                    .load_op(load_op)
+                                    .store_op(store_op)
+                                    .clear_value(clear_value)
+                            })
+                        }
+                    }
                 });
 
         // Determine render area from first attachment
@@ -626,27 +835,58 @@ impl VulkanBackend {
 
         // Transition images to the appropriate layouts
         for attachment in &render_targets.color_attachments {
-            if let GpuTexture::Vulkan { image, .. } = attachment.texture().gpu_handle() {
-                self.transition_image_layout(
-                    cmd,
-                    *image,
-                    vk::ImageLayout::UNDEFINED,
-                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                    vk::ImageAspectFlags::COLOR,
-                );
+            match &attachment.target {
+                RenderTarget::Texture { texture, .. } => {
+                    if let GpuTexture::Vulkan { image, .. } = texture.gpu_handle() {
+                        self.transition_image_layout(
+                            cmd,
+                            *image,
+                            vk::ImageLayout::UNDEFINED,
+                            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                            vk::ImageAspectFlags::COLOR,
+                        );
+                    }
+                }
+                RenderTarget::Surface { vulkan_view, .. } => {
+                    if let Some(surface_view) = vulkan_view {
+                        self.transition_image_layout(
+                            cmd,
+                            surface_view.image(),
+                            vk::ImageLayout::UNDEFINED,
+                            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                            vk::ImageAspectFlags::COLOR,
+                        );
+                    }
+                }
             }
         }
 
-        if let Some(attachment) = &render_targets.depth_stencil_attachment
-            && let GpuTexture::Vulkan { image, .. } = attachment.texture().gpu_handle()
-        {
-            self.transition_image_layout(
-                cmd,
-                *image,
-                vk::ImageLayout::UNDEFINED,
-                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                vk::ImageAspectFlags::DEPTH,
-            );
+        if let Some(attachment) = &render_targets.depth_stencil_attachment {
+            match &attachment.target {
+                RenderTarget::Texture { texture, .. } => {
+                    if let GpuTexture::Vulkan { image, .. } = texture.gpu_handle() {
+                        self.transition_image_layout(
+                            cmd,
+                            *image,
+                            vk::ImageLayout::UNDEFINED,
+                            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                            vk::ImageAspectFlags::DEPTH,
+                        );
+                    }
+                }
+                RenderTarget::Surface { vulkan_view, .. } => {
+                    // Depth attachments are typically not surfaces, but handle for completeness
+                    if let Some(surface_view) = vulkan_view {
+                        self.transition_image_layout(
+                            cmd,
+                            surface_view.image(),
+                            vk::ImageLayout::UNDEFINED,
+                            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                            vk::ImageAspectFlags::DEPTH,
+                        );
+                    }
+                }
+            }
         }
 
         // Create rendering info

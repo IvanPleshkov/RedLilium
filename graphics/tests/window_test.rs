@@ -29,7 +29,7 @@ use winit::window::{Window, WindowId};
 use redlilium_graphics::{
     BackendType, ColorAttachment, FramePipeline, GraphicsDevice, GraphicsInstance, GraphicsPass,
     InstanceParameters, LoadOp, PresentMode, RenderGraph, RenderTargetConfig, StoreOp, Surface,
-    SurfaceConfiguration, WgpuBackendType,
+    SurfaceConfiguration,
 };
 
 /// Number of frames to render before exiting.
@@ -439,21 +439,20 @@ fn run_window_test(params: InstanceParameters) -> bool {
     }
 }
 
-// Native Vulkan backend disabled for now - use wgpu with Vulkan backend instead
-// fn vulkan_params() -> InstanceParameters {
-//    InstanceParameters::new().with_backend(BackendType::Vulkan)
-// }
-
-/// Create instance parameters for wgpu with Vulkan backend.
-fn wgpu_vulkan_params() -> InstanceParameters {
-    InstanceParameters::new()
-        .with_backend(BackendType::Wgpu)
-        .with_wgpu_backend(WgpuBackendType::Vulkan)
+fn vulkan_params() -> InstanceParameters {
+    InstanceParameters::new().with_backend(BackendType::Vulkan)
 }
 
+/// Create instance parameters for wgpu with Vulkan backend.
+// fn wgpu_vulkan_params() -> InstanceParameters {
+//    InstanceParameters::new()
+//        .with_backend(BackendType::Wgpu)
+//        .with_wgpu_backend(WgpuBackendType::Vulkan)
+//}
+
 #[rstest]
-//#[case::vulkan(vulkan_params())] TODO: add it
-#[case::wgpu_vulkan(wgpu_vulkan_params())]
+#[case::vulkan(vulkan_params())]
+//#[case::wgpu_vulkan(wgpu_vulkan_params())]
 fn test_window_swapchain_5_frames(#[case] params: InstanceParameters) {
     assert!(
         run_window_test(params),

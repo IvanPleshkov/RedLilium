@@ -43,6 +43,12 @@ use crate::types::TextureFormat;
 #[cfg(feature = "wgpu-backend")]
 use crate::backend::wgpu_impl::SurfaceTextureView;
 
+#[cfg(feature = "vulkan-backend")]
+use crate::backend::vulkan::VulkanSurfaceTextureView;
+
+#[cfg(feature = "vulkan-backend")]
+use ash::vk;
+
 /// Presentation mode for the swapchain.
 ///
 /// Controls how frames are synchronized with the display.
@@ -109,6 +115,25 @@ pub struct Surface {
     /// The underlying wgpu surface (only when using wgpu backend).
     #[cfg(feature = "wgpu-backend")]
     wgpu_surface: Option<wgpu::Surface<'static>>,
+    /// The underlying Vulkan surface (only when using vulkan backend).
+    #[cfg(feature = "vulkan-backend")]
+    vulkan_surface: Option<ash::vk::SurfaceKHR>,
+    /// The Vulkan swapchain (only when using vulkan backend).
+    #[cfg(feature = "vulkan-backend")]
+    vulkan_swapchain: RwLock<Option<VulkanSwapchain>>,
+}
+
+/// Vulkan swapchain resources.
+#[cfg(feature = "vulkan-backend")]
+struct VulkanSwapchain {
+    swapchain: ash::vk::SwapchainKHR,
+    images: Vec<ash::vk::Image>,
+    image_views: Vec<ash::vk::ImageView>,
+    #[allow(dead_code)] // Reserved for future use
+    format: ash::vk::Format,
+    #[allow(dead_code)] // Reserved for future use
+    extent: ash::vk::Extent2D,
+    current_image_index: u32,
 }
 
 impl Surface {
@@ -151,6 +176,43 @@ impl Surface {
             }
         };
 
+        #[cfg(feature = "vulkan-backend")]
+        let vulkan_surface = {
+            use crate::backend::GpuBackend;
+            match instance.backend() {
+                GpuBackend::Vulkan(vulkan_backend) => {
+                    // Create Vulkan surface from window
+                    let display_handle = window.display_handle().map_err(|e| {
+                        GraphicsError::ResourceCreationFailed(format!(
+                            "Failed to get display handle: {e}"
+                        ))
+                    })?;
+                    let window_handle = window.window_handle().map_err(|e| {
+                        GraphicsError::ResourceCreationFailed(format!(
+                            "Failed to get window handle: {e}"
+                        ))
+                    })?;
+
+                    let surface = unsafe {
+                        ash_window::create_surface(
+                            vulkan_backend.entry(),
+                            vulkan_backend.instance(),
+                            display_handle.as_raw(),
+                            window_handle.as_raw(),
+                            None,
+                        )
+                    }
+                    .map_err(|e| {
+                        GraphicsError::ResourceCreationFailed(format!(
+                            "Failed to create Vulkan surface: {e}"
+                        ))
+                    })?;
+                    Some(surface)
+                }
+                _ => None,
+            }
+        };
+
         Ok(Self {
             instance,
             config: RwLock::new(None),
@@ -158,6 +220,10 @@ impl Surface {
             frame_index: RwLock::new(0),
             #[cfg(feature = "wgpu-backend")]
             wgpu_surface,
+            #[cfg(feature = "vulkan-backend")]
+            vulkan_surface,
+            #[cfg(feature = "vulkan-backend")]
+            vulkan_swapchain: RwLock::new(None),
         })
     }
 
@@ -249,6 +315,38 @@ impl Surface {
             }
         }
 
+        // Configure the Vulkan swapchain if available
+        #[cfg(feature = "vulkan-backend")]
+        if let Some(vulkan_surface) = self.vulkan_surface {
+            use crate::backend::GpuBackend;
+            if let GpuBackend::Vulkan(vulkan_backend) = self.instance.backend() {
+                // Destroy old swapchain if it exists
+                if let Ok(mut swapchain_guard) = self.vulkan_swapchain.write()
+                    && let Some(old_swapchain) = swapchain_guard.take()
+                {
+                    // Wait for device to be idle before destroying
+                    unsafe {
+                        let _ = vulkan_backend.device().device_wait_idle();
+                        for view in old_swapchain.image_views {
+                            vulkan_backend.device().destroy_image_view(view, None);
+                        }
+                        vulkan_backend
+                            .swapchain_loader()
+                            .destroy_swapchain(old_swapchain.swapchain, None);
+                    }
+                }
+
+                // Create new swapchain
+                let new_swapchain =
+                    create_vulkan_swapchain(vulkan_backend, vulkan_surface, config)?;
+
+                if let Ok(mut swapchain_guard) = self.vulkan_swapchain.write() {
+                    *swapchain_guard = Some(new_swapchain);
+                }
+                log::info!("Configured Vulkan swapchain");
+            }
+        }
+
         // Store the configuration
         if let Ok(mut current_config) = self.config.write() {
             *current_config = Some(config.clone());
@@ -330,6 +428,54 @@ impl Surface {
             (None, None)
         };
 
+        // Acquire the Vulkan swapchain image if using Vulkan backend
+        #[cfg(feature = "vulkan-backend")]
+        let (vulkan_view, vulkan_image_index) = {
+            use crate::backend::GpuBackend;
+            use crate::backend::vulkan::{VulkanImageView, VulkanSurfaceTextureView};
+
+            if let GpuBackend::Vulkan(vulkan_backend) = self.instance.backend() {
+                if let Ok(mut swapchain_guard) = self.vulkan_swapchain.write() {
+                    if let Some(ref mut swapchain) = *swapchain_guard {
+                        // Acquire next image
+                        let (image_index, _suboptimal) = unsafe {
+                            vulkan_backend.swapchain_loader().acquire_next_image(
+                                swapchain.swapchain,
+                                u64::MAX,
+                                vk::Semaphore::null(),
+                                vk::Fence::null(),
+                            )
+                        }
+                        .map_err(|e| {
+                            GraphicsError::ResourceCreationFailed(format!(
+                                "Failed to acquire swapchain image: {:?}",
+                                e
+                            ))
+                        })?;
+
+                        swapchain.current_image_index = image_index;
+                        let image = swapchain.images[image_index as usize];
+                        let view = swapchain.image_views[image_index as usize];
+
+                        let vulkan_view = VulkanSurfaceTextureView {
+                            image,
+                            view: Arc::new(VulkanImageView::new(
+                                vulkan_backend.device().clone(),
+                                view,
+                            )),
+                        };
+                        (Some(vulkan_view), image_index)
+                    } else {
+                        (None, 0)
+                    }
+                } else {
+                    (None, 0)
+                }
+            } else {
+                (None, 0)
+            }
+        };
+
         log::trace!("Acquired surface texture, frame index: {}", frame_index);
 
         Ok(SurfaceTexture {
@@ -343,6 +489,10 @@ impl Surface {
             wgpu_texture,
             #[cfg(feature = "wgpu-backend")]
             wgpu_view,
+            #[cfg(feature = "vulkan-backend")]
+            vulkan_view,
+            #[cfg(feature = "vulkan-backend")]
+            vulkan_image_index,
         })
     }
 }
@@ -380,6 +530,12 @@ pub struct SurfaceTexture {
     /// The texture view for rendering (only when using wgpu backend).
     #[cfg(feature = "wgpu-backend")]
     wgpu_view: Option<SurfaceTextureView>,
+    /// The Vulkan texture view for rendering (only when using vulkan backend).
+    #[cfg(feature = "vulkan-backend")]
+    vulkan_view: Option<VulkanSurfaceTextureView>,
+    /// The swapchain image index (only when using vulkan backend).
+    #[cfg(feature = "vulkan-backend")]
+    vulkan_image_index: u32,
 }
 
 impl SurfaceTexture {
@@ -420,6 +576,18 @@ impl SurfaceTexture {
         None
     }
 
+    /// Get the Vulkan texture view for rendering (only available with vulkan backend).
+    #[cfg(feature = "vulkan-backend")]
+    pub fn vulkan_view(&self) -> Option<VulkanSurfaceTextureView> {
+        self.vulkan_view.clone()
+    }
+
+    /// Get the Vulkan texture view for rendering (stub for non-vulkan builds).
+    #[cfg(not(feature = "vulkan-backend"))]
+    pub fn vulkan_view(&self) -> Option<()> {
+        None
+    }
+
     /// Present the texture to the screen.
     ///
     /// This displays the rendered content in the window. After calling this,
@@ -434,6 +602,19 @@ impl SurfaceTexture {
         #[cfg(feature = "wgpu-backend")]
         if let Some(wgpu_texture) = self.wgpu_texture.take() {
             wgpu_texture.present();
+        }
+
+        // Present the Vulkan swapchain image
+        // Note: Vulkan presentation is typically done via queue_present after rendering
+        // For now, we just log that we're ready to present
+        #[cfg(feature = "vulkan-backend")]
+        if self.vulkan_view.is_some() {
+            log::trace!(
+                "Vulkan surface texture ready for presentation, image index: {}",
+                self.vulkan_image_index
+            );
+            // Actual presentation happens through the graphics queue
+            // This would need the swapchain reference to call vkQueuePresentKHR
         }
     }
 }
@@ -503,6 +684,155 @@ fn convert_present_mode_to_wgpu(mode: PresentMode) -> wgpu::PresentMode {
         PresentMode::Mailbox => wgpu::PresentMode::Mailbox,
         PresentMode::Fifo => wgpu::PresentMode::Fifo,
         PresentMode::FifoRelaxed => wgpu::PresentMode::FifoRelaxed,
+    }
+}
+
+// ============================================================================
+// Vulkan swapchain helpers
+// ============================================================================
+
+#[cfg(feature = "vulkan-backend")]
+fn create_vulkan_swapchain(
+    vulkan_backend: &crate::backend::vulkan::VulkanBackend,
+    surface: vk::SurfaceKHR,
+    config: &SurfaceConfiguration,
+) -> Result<VulkanSwapchain, GraphicsError> {
+    // Get surface capabilities
+    let capabilities = vulkan_backend.get_surface_capabilities(surface)?;
+
+    // Choose format
+    let formats = vulkan_backend.get_surface_formats(surface)?;
+    let surface_format = formats
+        .iter()
+        .find(|f| f.format == convert_texture_format_to_vk(config.format))
+        .cloned()
+        .unwrap_or(formats[0]);
+
+    // Choose present mode
+    let present_modes = vulkan_backend.get_surface_present_modes(surface)?;
+    let present_mode = convert_present_mode_to_vk(config.present_mode);
+    let present_mode = if present_modes.contains(&present_mode) {
+        present_mode
+    } else {
+        vk::PresentModeKHR::FIFO // Always available
+    };
+
+    // Choose extent
+    let extent = if capabilities.current_extent.width != u32::MAX {
+        capabilities.current_extent
+    } else {
+        vk::Extent2D {
+            width: config.width.clamp(
+                capabilities.min_image_extent.width,
+                capabilities.max_image_extent.width,
+            ),
+            height: config.height.clamp(
+                capabilities.min_image_extent.height,
+                capabilities.max_image_extent.height,
+            ),
+        }
+    };
+
+    // Choose image count (prefer triple buffering)
+    let image_count = (capabilities.min_image_count + 1).min(if capabilities.max_image_count > 0 {
+        capabilities.max_image_count
+    } else {
+        u32::MAX
+    });
+
+    // Create swapchain
+    let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
+        .surface(surface)
+        .min_image_count(image_count)
+        .image_format(surface_format.format)
+        .image_color_space(surface_format.color_space)
+        .image_extent(extent)
+        .image_array_layers(1)
+        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+        .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .pre_transform(capabilities.current_transform)
+        .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+        .present_mode(present_mode)
+        .clipped(true)
+        .old_swapchain(vk::SwapchainKHR::null());
+
+    let swapchain = unsafe {
+        vulkan_backend
+            .swapchain_loader()
+            .create_swapchain(&swapchain_create_info, None)
+    }
+    .map_err(|e| {
+        GraphicsError::ResourceCreationFailed(format!("Failed to create swapchain: {:?}", e))
+    })?;
+
+    // Get swapchain images
+    let images = unsafe {
+        vulkan_backend
+            .swapchain_loader()
+            .get_swapchain_images(swapchain)
+    }
+    .map_err(|e| {
+        GraphicsError::ResourceCreationFailed(format!("Failed to get swapchain images: {:?}", e))
+    })?;
+
+    // Create image views
+    let image_views: Vec<vk::ImageView> = images
+        .iter()
+        .map(|&image| vulkan_backend.create_swapchain_image_view(image, surface_format.format))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    log::info!(
+        "Created Vulkan swapchain: {}x{} with {} images",
+        extent.width,
+        extent.height,
+        images.len()
+    );
+
+    Ok(VulkanSwapchain {
+        swapchain,
+        images,
+        image_views,
+        format: surface_format.format,
+        extent,
+        current_image_index: 0,
+    })
+}
+
+#[cfg(feature = "vulkan-backend")]
+fn convert_texture_format_to_vk(format: TextureFormat) -> vk::Format {
+    match format {
+        TextureFormat::R8Unorm => vk::Format::R8_UNORM,
+        TextureFormat::R8Snorm => vk::Format::R8_SNORM,
+        TextureFormat::R8Uint => vk::Format::R8_UINT,
+        TextureFormat::R8Sint => vk::Format::R8_SINT,
+        TextureFormat::R16Unorm => vk::Format::R16_UNORM,
+        TextureFormat::R16Float => vk::Format::R16_SFLOAT,
+        TextureFormat::Rg8Unorm => vk::Format::R8G8_UNORM,
+        TextureFormat::R32Float => vk::Format::R32_SFLOAT,
+        TextureFormat::R32Uint => vk::Format::R32_UINT,
+        TextureFormat::Rg16Float => vk::Format::R16G16_SFLOAT,
+        TextureFormat::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,
+        TextureFormat::Rgba8UnormSrgb => vk::Format::R8G8B8A8_SRGB,
+        TextureFormat::Bgra8Unorm => vk::Format::B8G8R8A8_UNORM,
+        TextureFormat::Bgra8UnormSrgb => vk::Format::B8G8R8A8_SRGB,
+        TextureFormat::Rgba16Float => vk::Format::R16G16B16A16_SFLOAT,
+        TextureFormat::Rg32Float => vk::Format::R32G32_SFLOAT,
+        TextureFormat::Rgba32Float => vk::Format::R32G32B32A32_SFLOAT,
+        TextureFormat::Depth16Unorm => vk::Format::D16_UNORM,
+        TextureFormat::Depth24Plus => vk::Format::D24_UNORM_S8_UINT,
+        TextureFormat::Depth24PlusStencil8 => vk::Format::D24_UNORM_S8_UINT,
+        TextureFormat::Depth32Float => vk::Format::D32_SFLOAT,
+        TextureFormat::Depth32FloatStencil8 => vk::Format::D32_SFLOAT_S8_UINT,
+    }
+}
+
+#[cfg(feature = "vulkan-backend")]
+fn convert_present_mode_to_vk(mode: PresentMode) -> vk::PresentModeKHR {
+    match mode {
+        PresentMode::Immediate => vk::PresentModeKHR::IMMEDIATE,
+        PresentMode::Mailbox => vk::PresentModeKHR::MAILBOX,
+        PresentMode::Fifo => vk::PresentModeKHR::FIFO,
+        PresentMode::FifoRelaxed => vk::PresentModeKHR::FIFO_RELAXED,
     }
 }
 

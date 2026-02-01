@@ -9,7 +9,7 @@ description = "RedLilium engine graphics"
 default = ["dummy", "wgpu-backend", "vulkan-backend"]
 dummy = []
 wgpu-backend = ["dep:wgpu", "dep:pollster"]
-vulkan-backend = ["dep:ash", "dep:gpu-allocator", "dep:parking_lot"]
+vulkan-backend = ["dep:ash", "dep:ash-window", "dep:gpu-allocator", "dep:parking_lot"]
 
 [dependencies]
 log.workspace = true
@@ -22,6 +22,7 @@ raw-window-handle = "0.6"
 # Optional GPU backend dependencies
 wgpu = { workspace = true, optional = true }
 ash = { workspace = true, optional = true }
+ash-window = { version = "0.13", optional = true }
 gpu-allocator = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
 pollster = { workspace = true, optional = true }

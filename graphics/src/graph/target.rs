@@ -12,6 +12,9 @@ use crate::types::{ClearValue, TextureFormat};
 #[cfg(feature = "wgpu-backend")]
 use crate::backend::wgpu_impl::SurfaceTextureView;
 
+#[cfg(feature = "vulkan-backend")]
+use crate::backend::vulkan::VulkanSurfaceTextureView;
+
 /// Operation to perform when loading an attachment at the start of a render pass.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum LoadOp {
@@ -71,6 +74,9 @@ pub enum RenderTarget {
         /// The actual wgpu texture view for rendering (only set when wgpu backend is used).
         #[cfg(feature = "wgpu-backend")]
         view: Option<SurfaceTextureView>,
+        /// The actual Vulkan image view for rendering (only set when vulkan backend is used).
+        #[cfg(feature = "vulkan-backend")]
+        vulkan_view: Option<VulkanSurfaceTextureView>,
     },
 }
 
@@ -101,6 +107,8 @@ impl RenderTarget {
             height: surface_texture.height(),
             #[cfg(feature = "wgpu-backend")]
             view: surface_texture.wgpu_view(),
+            #[cfg(feature = "vulkan-backend")]
+            vulkan_view: surface_texture.vulkan_view(),
         }
     }
 

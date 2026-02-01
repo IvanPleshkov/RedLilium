@@ -96,3 +96,8 @@ Please fix test_window_swapchain_5_frames test with case::vulkan case.
 test_window_swapchain_5_frames test produces warning in the logs:
 WARN  redlilium_graphics::backend::wgpu_impl::pass_encoding Pass 'frame_3' has surface attachment - swapchain rendering not fully implemented
 Please fill the gaps to make this test fully functional
+
+## Request 15:
+I changes test_window_swapchain_5_frames test to vulkan api and it fails with panic:
+Cannot get texture from surface attachment
+Please fill the gaps in vulkan backend to run this test.
