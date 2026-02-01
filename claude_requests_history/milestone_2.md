@@ -205,6 +205,9 @@ I guess in the common graphics crate, the mesh should be optimized also for the 
 where some of vertex attributes are dynamic, and some is static.
 If you agree with this thinkings, refactor please `Mesh` and `Layout`.
 
+## Request 29:
+Please remove `Custom` variant of `VertexAttributeSemantic` enum. If needed, we will add it back or add another specific kinds of semantics later.
+
 ## Request __:
 There is a basic render graph compilation alg in `graphics\src\compiler\mod.rs`.
 Read please how material system works.

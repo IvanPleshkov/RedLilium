@@ -72,8 +72,6 @@ pub enum VertexAttributeSemantic {
     Joints,
     /// Bone weights for skinning (typically float4).
     Weights,
-    /// Custom attribute with a user-defined index.
-    Custom(u32),
 }
 
 impl VertexAttributeSemantic {
@@ -88,7 +86,6 @@ impl VertexAttributeSemantic {
             Self::Color => 5,
             Self::Joints => 6,
             Self::Weights => 7,
-            Self::Custom(i) => 100 + i,
         }
     }
 }
