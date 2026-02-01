@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::backend::GpuSampler;
 use crate::device::GraphicsDevice;
 use crate::types::SamplerDescriptor;
 
@@ -18,12 +19,26 @@ use crate::types::SamplerDescriptor;
 pub struct Sampler {
     device: Arc<GraphicsDevice>,
     descriptor: SamplerDescriptor,
+    gpu_handle: GpuSampler,
 }
 
 impl Sampler {
     /// Create a new sampler (called by GraphicsDevice).
-    pub(crate) fn new(device: Arc<GraphicsDevice>, descriptor: SamplerDescriptor) -> Self {
-        Self { device, descriptor }
+    pub(crate) fn new(
+        device: Arc<GraphicsDevice>,
+        descriptor: SamplerDescriptor,
+        gpu_handle: GpuSampler,
+    ) -> Self {
+        Self {
+            device,
+            descriptor,
+            gpu_handle,
+        }
+    }
+
+    /// Get the GPU handle for this sampler.
+    pub fn gpu_handle(&self) -> &GpuSampler {
+        &self.gpu_handle
     }
 
     /// Get the parent device.
@@ -67,8 +82,8 @@ mod tests {
 
     #[test]
     fn test_sampler_debug() {
-        let desc = SamplerDescriptor::linear();
-        let sampler = Sampler::new(create_test_device(), desc);
+        let device = create_test_device();
+        let sampler = device.create_sampler(&SamplerDescriptor::linear()).unwrap();
         let debug = format!("{:?}", sampler);
         assert!(debug.contains("Sampler"));
         assert!(debug.contains("Linear"));
@@ -76,8 +91,10 @@ mod tests {
 
     #[test]
     fn test_sampler_label() {
-        let desc = SamplerDescriptor::linear().with_label("test_sampler");
-        let sampler = Sampler::new(create_test_device(), desc);
+        let device = create_test_device();
+        let sampler = device
+            .create_sampler(&SamplerDescriptor::linear().with_label("test_sampler"))
+            .unwrap();
         assert_eq!(sampler.label(), Some("test_sampler"));
     }
 }

@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::backend::GpuTexture;
 use crate::device::GraphicsDevice;
 use crate::types::{Extent3d, TextureDescriptor, TextureFormat};
 
@@ -23,12 +24,26 @@ use crate::types::{Extent3d, TextureDescriptor, TextureFormat};
 pub struct Texture {
     device: Arc<GraphicsDevice>,
     descriptor: TextureDescriptor,
+    gpu_handle: GpuTexture,
 }
 
 impl Texture {
     /// Create a new texture (called by GraphicsDevice).
-    pub(crate) fn new(device: Arc<GraphicsDevice>, descriptor: TextureDescriptor) -> Self {
-        Self { device, descriptor }
+    pub(crate) fn new(
+        device: Arc<GraphicsDevice>,
+        descriptor: TextureDescriptor,
+        gpu_handle: GpuTexture,
+    ) -> Self {
+        Self {
+            device,
+            descriptor,
+            gpu_handle,
+        }
+    }
+
+    /// Get the GPU handle for this texture.
+    pub fn gpu_handle(&self) -> &GpuTexture {
+        &self.gpu_handle
     }
 
     /// Get the parent device.
@@ -109,13 +124,15 @@ mod tests {
 
     #[test]
     fn test_texture_debug() {
-        let desc = TextureDescriptor::new_2d(
-            1920,
-            1080,
-            TextureFormat::Rgba8Unorm,
-            TextureUsage::RENDER_ATTACHMENT,
-        );
-        let texture = Texture::new(create_test_device(), desc);
+        let device = create_test_device();
+        let texture = device
+            .create_texture(&TextureDescriptor::new_2d(
+                1920,
+                1080,
+                TextureFormat::Rgba8Unorm,
+                TextureUsage::RENDER_ATTACHMENT,
+            ))
+            .unwrap();
         let debug = format!("{:?}", texture);
         assert!(debug.contains("Texture"));
         assert!(debug.contains("1920"));
@@ -123,13 +140,15 @@ mod tests {
 
     #[test]
     fn test_texture_dimensions() {
-        let desc = TextureDescriptor::new_2d(
-            800,
-            600,
-            TextureFormat::Rgba8Unorm,
-            TextureUsage::TEXTURE_BINDING,
-        );
-        let texture = Texture::new(create_test_device(), desc);
+        let device = create_test_device();
+        let texture = device
+            .create_texture(&TextureDescriptor::new_2d(
+                800,
+                600,
+                TextureFormat::Rgba8Unorm,
+                TextureUsage::TEXTURE_BINDING,
+            ))
+            .unwrap();
         assert_eq!(texture.width(), 800);
         assert_eq!(texture.height(), 600);
         assert_eq!(texture.depth(), 1);

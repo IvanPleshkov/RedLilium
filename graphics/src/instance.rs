@@ -7,6 +7,7 @@ use std::sync::{Arc, RwLock, Weak};
 
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
+use crate::backend::{self, GpuBackend};
 use crate::device::GraphicsDevice;
 use crate::error::GraphicsError;
 use crate::swapchain::Surface;
@@ -55,6 +56,8 @@ pub struct GraphicsInstance {
     self_ref: RwLock<Weak<GraphicsInstance>>,
     /// Devices created by this instance.
     devices: RwLock<Vec<Arc<GraphicsDevice>>>,
+    /// GPU backend for this instance.
+    backend: Arc<dyn GpuBackend>,
 }
 
 impl GraphicsInstance {
@@ -66,9 +69,14 @@ impl GraphicsInstance {
     pub fn new() -> Result<Arc<Self>, GraphicsError> {
         log::info!("Creating GraphicsInstance");
 
+        // Create the GPU backend
+        let backend = backend::create_backend()?;
+        log::info!("Using GPU backend: {}", backend.name());
+
         let instance = Arc::new(Self {
             self_ref: RwLock::new(Weak::new()),
             devices: RwLock::new(Vec::new()),
+            backend,
         });
 
         // Store self-reference
@@ -77,6 +85,11 @@ impl GraphicsInstance {
         }
 
         Ok(instance)
+    }
+
+    /// Get the GPU backend.
+    pub fn backend(&self) -> &Arc<dyn GpuBackend> {
+        &self.backend
     }
 
     /// Get the strong self-reference.

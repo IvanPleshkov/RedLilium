@@ -12,6 +12,18 @@ use redlilium_graphics::{
     TransferOperation, TransferPass, VertexAttribute, VertexBufferLayout, VertexLayout,
 };
 
+/// Compute the aligned bytes per row for a texture (256-byte alignment for wgpu).
+pub fn aligned_bytes_per_row(width: u32, bytes_per_pixel: u32) -> u32 {
+    let unpadded = width * bytes_per_pixel;
+    (unpadded + 255) & !255
+}
+
+/// Compute the required buffer size for reading back a texture with row alignment.
+pub fn readback_buffer_size(width: u32, height: u32, bytes_per_pixel: u32) -> u64 {
+    let aligned_row = aligned_bytes_per_row(width, bytes_per_pixel);
+    (aligned_row * height) as u64
+}
+
 // ============================================================================
 // Backend Enumeration
 // ============================================================================
@@ -33,8 +45,13 @@ impl Backend {
         match self {
             // Dummy backend is always available
             Backend::Dummy => true,
-            // Other backends are not implemented yet
-            Backend::Vulkan | Backend::WebGpu => false,
+            // Vulkan backend via ash is not implemented yet
+            Backend::Vulkan => false,
+            // WebGpu backend (wgpu) is available when the feature is enabled
+            #[cfg(feature = "wgpu-backend")]
+            Backend::WebGpu => true,
+            #[cfg(not(feature = "wgpu-backend"))]
+            Backend::WebGpu => false,
         }
     }
 
@@ -148,11 +165,17 @@ impl TestContext {
     /// frame pipelining or complex scheduling.
     pub fn execute_graph(&self, graph: &RenderGraph) {
         let compiled = graph.compile().expect("Failed to compile render graph");
-        let mut pipeline = self.device.create_pipeline(1);
-        let mut schedule = pipeline.begin_frame();
-        schedule.present("test", compiled, &[]);
-        pipeline.end_frame(schedule);
-        pipeline.wait_idle();
+
+        // Get the backend from the instance and execute directly
+        let backend = self.instance.backend();
+        let fence = backend.create_fence(false);
+
+        backend
+            .execute_graph(graph, &compiled, Some(&fence))
+            .expect("Failed to execute render graph");
+
+        // Wait for GPU to complete
+        backend.wait_fence(&fence);
     }
 }
 

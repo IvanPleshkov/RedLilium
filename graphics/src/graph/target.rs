@@ -178,6 +178,26 @@ impl ColorAttachment {
         self.resolve_target = Some(target);
         self
     }
+
+    /// Get the texture for this attachment.
+    ///
+    /// Panics if this is a surface attachment (not a texture).
+    pub fn texture(&self) -> &Arc<Texture> {
+        match &self.target {
+            RenderTarget::Texture { texture, .. } => texture,
+            RenderTarget::Surface { .. } => panic!("Cannot get texture from surface attachment"),
+        }
+    }
+
+    /// Get the load operation.
+    pub fn load_op(&self) -> LoadOp {
+        self.load_op
+    }
+
+    /// Get the store operation.
+    pub fn store_op(&self) -> StoreOp {
+        self.store_op
+    }
 }
 
 /// A depth/stencil attachment for a render pass.
@@ -258,6 +278,36 @@ impl DepthStencilAttachment {
     pub fn with_stencil_read_only(mut self, read_only: bool) -> Self {
         self.stencil_read_only = read_only;
         self
+    }
+
+    /// Get the texture for this attachment.
+    ///
+    /// Panics if this is a surface attachment (not a texture).
+    pub fn texture(&self) -> &Arc<Texture> {
+        match &self.target {
+            RenderTarget::Texture { texture, .. } => texture,
+            RenderTarget::Surface { .. } => panic!("Cannot get texture from surface attachment"),
+        }
+    }
+
+    /// Get the depth load operation.
+    pub fn depth_load_op(&self) -> LoadOp {
+        self.depth_load_op
+    }
+
+    /// Get the depth store operation.
+    pub fn depth_store_op(&self) -> StoreOp {
+        self.depth_store_op
+    }
+
+    /// Get the stencil load operation.
+    pub fn stencil_load_op(&self) -> LoadOp {
+        self.stencil_load_op
+    }
+
+    /// Get the stencil store operation.
+    pub fn stencil_store_op(&self) -> StoreOp {
+        self.stencil_store_op
     }
 }
 

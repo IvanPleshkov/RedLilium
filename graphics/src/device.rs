@@ -128,8 +128,15 @@ impl GraphicsDevice {
             ));
         }
 
+        // Create the GPU buffer via backend
+        let gpu_handle = self.instance.backend().create_buffer(descriptor)?;
+
         // Create the buffer
-        let buffer = Arc::new(Buffer::new(Arc::clone(self), descriptor.clone()));
+        let buffer = Arc::new(Buffer::new(
+            Arc::clone(self),
+            descriptor.clone(),
+            gpu_handle,
+        ));
 
         // Track it
         if let Ok(mut buffers) = self.buffers.write() {
@@ -171,8 +178,15 @@ impl GraphicsDevice {
             ));
         }
 
+        // Create the GPU texture via backend
+        let gpu_handle = self.instance.backend().create_texture(descriptor)?;
+
         // Create the texture
-        let texture = Arc::new(Texture::new(Arc::clone(self), descriptor.clone()));
+        let texture = Arc::new(Texture::new(
+            Arc::clone(self),
+            descriptor.clone(),
+            gpu_handle,
+        ));
 
         // Track it
         if let Ok(mut textures) = self.textures.write() {
@@ -198,8 +212,15 @@ impl GraphicsDevice {
         self: &Arc<Self>,
         descriptor: &SamplerDescriptor,
     ) -> Result<Arc<Sampler>, GraphicsError> {
+        // Create the GPU sampler via backend
+        let gpu_handle = self.instance.backend().create_sampler(descriptor)?;
+
         // Create the sampler
-        let sampler = Arc::new(Sampler::new(Arc::clone(self), descriptor.clone()));
+        let sampler = Arc::new(Sampler::new(
+            Arc::clone(self),
+            descriptor.clone(),
+            gpu_handle,
+        ));
 
         // Track it
         if let Ok(mut samplers) = self.samplers.write() {

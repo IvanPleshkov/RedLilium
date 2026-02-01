@@ -29,7 +29,7 @@ use rstest::rstest;
 
 use common::{
     Backend, TestContext, create_mrt_pass, create_render_pass_with_depth,
-    create_simple_render_pass, generate_test_pattern,
+    create_simple_render_pass, generate_test_pattern, readback_buffer_size,
 };
 use redlilium_graphics::{
     BufferUsage, RenderGraph, TextureFormat, TextureUsage, TransferConfig, TransferOperation,
@@ -51,7 +51,6 @@ use redlilium_graphics::{
 #[case::dummy(Backend::Dummy)]
 #[case::vulkan(Backend::Vulkan)]
 #[case::webgpu(Backend::WebGpu)]
-#[ignore = "No GPU backends implemented yet"]
 fn test_buffer_copy_roundtrip(#[case] backend: Backend) {
     let Some(ctx) = TestContext::new(backend) else {
         eprintln!("Backend {:?} not available, skipping", backend);
@@ -113,7 +112,6 @@ fn test_buffer_copy_roundtrip(#[case] backend: Backend) {
 #[case::dummy(Backend::Dummy)]
 #[case::vulkan(Backend::Vulkan)]
 #[case::webgpu(Backend::WebGpu)]
-#[ignore = "No GPU backends implemented yet"]
 fn test_buffer_copy_partial(#[case] backend: Backend) {
     let Some(ctx) = TestContext::new(backend) else {
         eprintln!("Backend {:?} not available, skipping", backend);
@@ -166,7 +164,6 @@ fn test_buffer_copy_partial(#[case] backend: Backend) {
 #[case::dummy(Backend::Dummy)]
 #[case::vulkan(Backend::Vulkan)]
 #[case::webgpu(Backend::WebGpu)]
-#[ignore = "No GPU backends implemented yet"]
 fn test_render_single_quad(#[case] backend: Backend) {
     let Some(ctx) = TestContext::new(backend) else {
         eprintln!("Backend {:?} not available, skipping", backend);
@@ -225,7 +222,6 @@ fn test_render_single_quad(#[case] backend: Backend) {
 #[case::dummy(Backend::Dummy)]
 #[case::vulkan(Backend::Vulkan)]
 #[case::webgpu(Backend::WebGpu)]
-#[ignore = "No GPU backends implemented yet"]
 fn test_render_clear_color(#[case] backend: Backend) {
     let Some(ctx) = TestContext::new(backend) else {
         eprintln!("Backend {:?} not available, skipping", backend);
@@ -236,9 +232,9 @@ fn test_render_clear_color(#[case] backend: Backend) {
     const HEIGHT: u32 = 32;
     const CLEAR_COLOR: [f32; 4] = [0.25, 0.5, 0.75, 1.0];
 
-    // Create render target and readback
+    // Create render target and readback (with alignment for row pitch)
     let render_target = ctx.create_render_target(WIDTH, HEIGHT);
-    let readback_size = (WIDTH * HEIGHT * 4) as u64;
+    let readback_size = readback_buffer_size(WIDTH, HEIGHT, 4);
     let readback = ctx.create_readback_buffer(readback_size);
 
     // Create graph with just a clear operation
@@ -277,7 +273,6 @@ fn test_render_clear_color(#[case] backend: Backend) {
 #[case::dummy(Backend::Dummy)]
 #[case::vulkan(Backend::Vulkan)]
 #[case::webgpu(Backend::WebGpu)]
-#[ignore = "No GPU backends implemented yet"]
 fn test_render_depth_buffer_two_quads(#[case] backend: Backend) {
     let Some(ctx) = TestContext::new(backend) else {
         eprintln!("Backend {:?} not available, skipping", backend);
@@ -346,7 +341,6 @@ fn test_render_depth_buffer_two_quads(#[case] backend: Backend) {
 #[case::dummy(Backend::Dummy)]
 #[case::vulkan(Backend::Vulkan)]
 #[case::webgpu(Backend::WebGpu)]
-#[ignore = "No GPU backends implemented yet"]
 fn test_render_depth_buffer_reverse_order(#[case] backend: Backend) {
     let Some(ctx) = TestContext::new(backend) else {
         eprintln!("Backend {:?} not available, skipping", backend);
@@ -404,7 +398,6 @@ fn test_render_depth_buffer_reverse_order(#[case] backend: Backend) {
 #[case::dummy(Backend::Dummy)]
 #[case::vulkan(Backend::Vulkan)]
 #[case::webgpu(Backend::WebGpu)]
-#[ignore = "No GPU backends implemented yet"]
 fn test_render_multiple_targets(#[case] backend: Backend) {
     let Some(ctx) = TestContext::new(backend) else {
         eprintln!("Backend {:?} not available, skipping", backend);
@@ -419,8 +412,8 @@ fn test_render_multiple_targets(#[case] backend: Backend) {
     let target1 = ctx.create_render_target(WIDTH, HEIGHT); // Will clear to green
     let target2 = ctx.create_render_target(WIDTH, HEIGHT); // Will clear to blue
 
-    // Create readback buffers
-    let readback_size = (WIDTH * HEIGHT * 4) as u64;
+    // Create readback buffers (with alignment for row pitch)
+    let readback_size = readback_buffer_size(WIDTH, HEIGHT, 4);
     let readback0 = ctx.create_readback_buffer(readback_size);
     let readback1 = ctx.create_readback_buffer(readback_size);
     let readback2 = ctx.create_readback_buffer(readback_size);
@@ -483,7 +476,6 @@ fn test_render_multiple_targets(#[case] backend: Backend) {
 #[case::dummy(Backend::Dummy)]
 #[case::vulkan(Backend::Vulkan)]
 #[case::webgpu(Backend::WebGpu)]
-#[ignore = "No GPU backends implemented yet"]
 fn test_render_mrt_different_formats(#[case] backend: Backend) {
     let Some(ctx) = TestContext::new(backend) else {
         eprintln!("Backend {:?} not available, skipping", backend);
@@ -542,7 +534,6 @@ fn test_render_mrt_different_formats(#[case] backend: Backend) {
 #[case::dummy(Backend::Dummy)]
 #[case::vulkan(Backend::Vulkan)]
 #[case::webgpu(Backend::WebGpu)]
-#[ignore = "No GPU backends implemented yet"]
 fn test_empty_graph(#[case] _backend: Backend) {
     let graph = RenderGraph::new();
 
@@ -556,7 +547,6 @@ fn test_empty_graph(#[case] _backend: Backend) {
 #[case::dummy(Backend::Dummy)]
 #[case::vulkan(Backend::Vulkan)]
 #[case::webgpu(Backend::WebGpu)]
-#[ignore = "No GPU backends implemented yet"]
 fn test_diamond_dependency_graph(#[case] backend: Backend) {
     let Some(ctx) = TestContext::new(backend) else {
         eprintln!("Backend {:?} not available, skipping", backend);

@@ -60,6 +60,7 @@
 //! pipeline.wait_idle();  // Graceful shutdown
 //! ```
 
+pub mod backend;
 pub mod compiler;
 pub mod device;
 pub mod error;

@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::backend::GpuBuffer;
 use crate::device::GraphicsDevice;
 use crate::types::BufferDescriptor;
 
@@ -19,12 +20,26 @@ use crate::types::BufferDescriptor;
 pub struct Buffer {
     device: Arc<GraphicsDevice>,
     descriptor: BufferDescriptor,
+    gpu_handle: GpuBuffer,
 }
 
 impl Buffer {
     /// Create a new buffer (called by GraphicsDevice).
-    pub(crate) fn new(device: Arc<GraphicsDevice>, descriptor: BufferDescriptor) -> Self {
-        Self { device, descriptor }
+    pub(crate) fn new(
+        device: Arc<GraphicsDevice>,
+        descriptor: BufferDescriptor,
+        gpu_handle: GpuBuffer,
+    ) -> Self {
+        Self {
+            device,
+            descriptor,
+            gpu_handle,
+        }
+    }
+
+    /// Get the GPU handle for this buffer.
+    pub fn gpu_handle(&self) -> &GpuBuffer {
+        &self.gpu_handle
     }
 
     /// Get the parent device.
@@ -74,8 +89,10 @@ mod tests {
 
     #[test]
     fn test_buffer_debug() {
-        let desc = BufferDescriptor::new(1024, BufferUsage::VERTEX);
-        let buffer = Buffer::new(create_test_device(), desc);
+        let device = create_test_device();
+        let buffer = device
+            .create_buffer(&BufferDescriptor::new(1024, BufferUsage::VERTEX))
+            .unwrap();
         let debug = format!("{:?}", buffer);
         assert!(debug.contains("Buffer"));
         assert!(debug.contains("1024"));
@@ -83,8 +100,10 @@ mod tests {
 
     #[test]
     fn test_buffer_size() {
-        let desc = BufferDescriptor::new(2048, BufferUsage::UNIFORM);
-        let buffer = Buffer::new(create_test_device(), desc);
+        let device = create_test_device();
+        let buffer = device
+            .create_buffer(&BufferDescriptor::new(2048, BufferUsage::UNIFORM))
+            .unwrap();
         assert_eq!(buffer.size(), 2048);
     }
 }
