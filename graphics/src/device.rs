@@ -512,6 +512,33 @@ impl GraphicsDevice {
             meshes.retain(|w| w.strong_count() > 0);
         }
     }
+
+    /// Advance the deferred destruction system.
+    ///
+    /// This should be called after a frame fence has been waited on, indicating
+    /// that the GPU has finished with resources from older frames. For the Vulkan
+    /// backend, this processes the deferred destruction queue and destroys resources
+    /// that are no longer in use.
+    ///
+    /// # Safety Note
+    ///
+    /// This method is safe to call - it internally handles the unsafe aspects
+    /// of GPU resource destruction. However, it should only be called after
+    /// waiting on a frame fence to ensure proper synchronization.
+    pub(crate) fn advance_deferred_destruction(&self) {
+        use crate::backend::GpuBackend;
+
+        // Only Vulkan backend needs deferred destruction
+        #[cfg(feature = "vulkan-backend")]
+        if let GpuBackend::Vulkan(vulkan_backend) = &*self.instance.backend() {
+            // SAFETY: This is called after waiting on a frame fence, which guarantees
+            // the GPU has finished with resources from MAX_FRAMES_IN_FLIGHT frames ago.
+            unsafe { vulkan_backend.advance_frame() };
+        }
+
+        // Also clean up dead weak references while we're at it
+        self.cleanup_dead_resources();
+    }
 }
 
 impl std::fmt::Debug for GraphicsDevice {

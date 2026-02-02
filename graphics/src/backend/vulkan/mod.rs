@@ -7,6 +7,7 @@ mod allocator;
 mod command;
 pub(crate) mod conversion;
 mod debug;
+pub mod deferred;
 mod device;
 mod instance;
 pub mod swapchain;
@@ -23,6 +24,8 @@ use crate::graph::{CompiledGraph, Pass, RenderGraph, RenderTarget};
 use crate::types::{BufferDescriptor, SamplerDescriptor, TextureDescriptor};
 
 use super::{GpuBuffer, GpuFence, GpuSampler, GpuTexture};
+
+pub use deferred::{DeferredDestructor, DeferredResource, MAX_FRAMES_IN_FLIGHT};
 
 /// A texture view for a Vulkan surface texture (swapchain image).
 ///
@@ -88,6 +91,7 @@ use self::conversion::{
 /// - Validation layers enabled in debug builds
 /// - gpu-allocator for memory management
 /// - Dynamic rendering (VK_KHR_dynamic_rendering)
+/// - Deferred resource destruction for safe GPU resource management
 pub struct VulkanBackend {
     /// Vulkan entry points (function loader).
     entry: ash::Entry,
@@ -105,8 +109,8 @@ pub struct VulkanBackend {
     graphics_queue: vk::Queue,
     /// Graphics queue family index.
     graphics_queue_family: u32,
-    /// Memory allocator.
-    allocator: Mutex<Allocator>,
+    /// Memory allocator (wrapped in Arc for sharing with deferred destructor).
+    allocator: Arc<Mutex<Allocator>>,
     /// Command pool for graphics operations.
     command_pool: vk::CommandPool,
     /// Whether validation layers are enabled.
@@ -118,6 +122,8 @@ pub struct VulkanBackend {
     surface_loader: ash::khr::surface::Instance,
     /// Swapchain extension.
     swapchain_loader: ash::khr::swapchain::Device,
+    /// Deferred destructor for safe resource cleanup.
+    deferred_destructor: Arc<DeferredDestructor>,
 }
 
 impl std::fmt::Debug for VulkanBackend {
@@ -160,8 +166,16 @@ impl VulkanBackend {
 
         let graphics_queue = unsafe { device.get_device_queue(graphics_queue_family, 0) };
 
-        // Create memory allocator
-        let allocator = allocator::create_allocator(&instance, physical_device, device.clone())?;
+        // Create memory allocator (wrapped in Arc for sharing with deferred destructor)
+        let allocator = Arc::new(Mutex::new(allocator::create_allocator(
+            &instance,
+            physical_device,
+            device.clone(),
+        )?));
+
+        // Create deferred destructor
+        let deferred_destructor = Arc::new(DeferredDestructor::new());
+        deferred_destructor.set_allocator(Arc::downgrade(&allocator));
 
         // Create command pool
         let command_pool = command::create_command_pool(&device, graphics_queue_family)?;
@@ -189,12 +203,13 @@ impl VulkanBackend {
             device,
             graphics_queue,
             graphics_queue_family,
-            allocator: Mutex::new(allocator),
+            allocator,
             command_pool,
             validation_enabled,
             dynamic_rendering,
             surface_loader,
             swapchain_loader,
+            deferred_destructor,
         })
     }
 
@@ -241,6 +256,25 @@ impl VulkanBackend {
     /// Get the command pool.
     pub fn command_pool(&self) -> vk::CommandPool {
         self.command_pool
+    }
+
+    /// Get the deferred destructor for safe resource cleanup.
+    pub fn deferred_destructor(&self) -> &Arc<DeferredDestructor> {
+        &self.deferred_destructor
+    }
+
+    /// Advance the deferred destructor to the next frame.
+    ///
+    /// This should be called after waiting on a frame fence to ensure
+    /// the GPU has finished with resources from older frames.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the GPU has finished executing all commands
+    /// from `MAX_FRAMES_IN_FLIGHT` frames ago.
+    pub unsafe fn advance_frame(&self) {
+        // SAFETY: Caller guarantees GPU has finished with old resources
+        unsafe { self.deferred_destructor.advance_frame() };
     }
 
     /// Check if the current physical device supports presentation to a surface.
@@ -335,6 +369,9 @@ impl Drop for VulkanBackend {
             // Wait for device to be idle before cleanup
             let _ = self.device.device_wait_idle();
 
+            // Flush all pending deferred resources now that the device is idle
+            self.deferred_destructor.flush_all();
+
             // Destroy command pool
             self.device.destroy_command_pool(self.command_pool, None);
 
@@ -428,6 +465,7 @@ impl VulkanBackend {
             buffer,
             allocation: Mutex::new(Some(allocation)),
             size: descriptor.size,
+            deferred: Arc::clone(&self.deferred_destructor),
         })
     }
 
@@ -536,6 +574,7 @@ impl VulkanBackend {
                 height: descriptor.size.height,
                 depth: descriptor.size.depth.max(1),
             },
+            deferred: Arc::clone(&self.deferred_destructor),
         })
     }
 
@@ -573,6 +612,7 @@ impl VulkanBackend {
         Ok(GpuSampler::Vulkan {
             device: self.device.clone(),
             sampler,
+            deferred: Arc::clone(&self.deferred_destructor),
         })
     }
 
@@ -592,12 +632,13 @@ impl VulkanBackend {
         GpuFence::Vulkan {
             device: self.device.clone(),
             fence,
+            deferred: Arc::clone(&self.deferred_destructor),
         }
     }
 
     /// Wait for a fence to be signaled.
     pub fn wait_fence(&self, fence: &GpuFence) {
-        if let GpuFence::Vulkan { device, fence } = fence {
+        if let GpuFence::Vulkan { device, fence, .. } = fence {
             unsafe {
                 let _ = device.wait_for_fences(&[*fence], true, u64::MAX);
             }
@@ -606,7 +647,7 @@ impl VulkanBackend {
 
     /// Check if a fence is signaled (non-blocking).
     pub fn is_fence_signaled(&self, fence: &GpuFence) -> bool {
-        if let GpuFence::Vulkan { device, fence } = fence {
+        if let GpuFence::Vulkan { device, fence, .. } = fence {
             unsafe { device.get_fence_status(*fence).is_ok() }
         } else {
             false

@@ -191,6 +191,58 @@ Benefits:
 - Better CPU-GPU parallelism
 - Lower frame latency
 
+### GPU Resource Lifetime Management
+
+GPU resources (buffers, textures, samplers, fences, semaphores) have a critical lifetime constraint: they cannot be destroyed while the GPU is still using them. This is because GPU commands execute asynchronously - when you submit work, the CPU continues while the GPU processes commands 1-3 frames behind.
+
+```
+CPU Frame 0: Record commands using Buffer A → Submit → Continue to Frame 1
+CPU Frame 1: Record commands using Buffer B → Submit → Continue to Frame 2
+CPU Frame 2: User drops Buffer A (Arc refcount = 0)
+                 ↓
+GPU Frame 0: Still reading from Buffer A! ← PROBLEM
+```
+
+#### Deferred Destruction (Vulkan Backend)
+
+The Vulkan backend implements a deferred destruction system to solve this problem. When a resource's `Arc` is dropped, instead of immediately destroying the Vulkan handle, it's queued for later destruction:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     DeferredDestructor                          │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │                   Frame-indexed queues                     │  │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐                 │  │
+│  │  │ Frame 0  │  │ Frame 1  │  │ Frame 2  │  ...            │  │
+│  │  │ pending  │  │ pending  │  │ pending  │                 │  │
+│  │  └──────────┘  └──────────┘  └──────────┘                 │  │
+│  └───────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Flow:**
+
+1. **On Resource Drop**: Resource handle queued in current frame's pending list
+2. **On Frame Boundary**: After fence wait in `begin_frame()`, oldest queue is processed
+3. **Safe Destruction**: Resources destroyed only after `MAX_FRAMES_IN_FLIGHT` (3) frames
+
+```
+CPU Frame 0: Create Buffer A, submit commands → GPU starts
+CPU Frame 2: Drop Buffer A → Queued for frame 2
+CPU Frame 5: begin_frame() waits for frame 2 fence
+             → fence signaled (GPU done with frame 2)
+             → Buffer A safely destroyed
+```
+
+This is automatic - users don't need to manually manage resource lifetimes. The wgpu backend handles this internally.
+
+#### Best Practices
+
+1. **Avoid excessive resource churn**: Reuse buffers/textures across frames when possible
+2. **Use object pools**: For frequently created/destroyed resources (particles, UI elements)
+3. **Don't hold unnecessary references**: Drop `Arc` handles when no longer needed
+4. **Trust the system**: Resources are automatically cleaned up safely
+
 ### Graceful Shutdown
 
 When the application exits, call `FramePipeline::wait_idle()` before destroying resources:
@@ -213,6 +265,8 @@ When the application exits, call `FramePipeline::wait_idle()` before destroying 
 │  Drop resources   │  Safe to destroy GPU objects
 └───────────────────┘
 ```
+
+During shutdown, `wait_idle()` ensures all pending GPU work completes. The Vulkan backend then flushes all deferred destruction queues, safely destroying any pending resources before the device is destroyed.
 
 ### Typical Frame Flow
 

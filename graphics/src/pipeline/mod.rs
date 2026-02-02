@@ -201,6 +201,12 @@ impl FramePipeline {
             fence.wait();
         }
 
+        // Now that the GPU has finished with the old frame, advance the deferred
+        // destruction system to clean up resources that were dropped
+        if let Some(device) = &self.device {
+            device.advance_deferred_destruction();
+        }
+
         self.frame_count += 1;
 
         log::trace!(
@@ -251,6 +257,12 @@ impl FramePipeline {
             && !fence.wait_timeout(timeout)
         {
             return None;
+        }
+
+        // Now that the GPU has finished with the old frame, advance the deferred
+        // destruction system to clean up resources that were dropped
+        if let Some(device) = &self.device {
+            device.advance_deferred_destruction();
         }
 
         self.frame_count += 1;

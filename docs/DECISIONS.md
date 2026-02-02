@@ -512,3 +512,128 @@ Shaders receive depth in `[0, 1]` range after projection. No shader-side transfo
 - ✅ Matches industry-standard D3D/Metal/wgpu convention
 - ⚠️ OpenGL shaders/content may need projection matrix adjustment
 - ⚠️ Users of glm/nalgebra must use depth-zero-to-one projection functions
+
+---
+
+## ADR-016: Deferred GPU Resource Destruction for Vulkan
+
+**Date**: 2025-02-02
+**Status**: Accepted
+
+### Context
+
+GPU commands execute asynchronously - when work is submitted, the CPU continues while the GPU processes commands 1-3 frames behind. This creates a critical problem: if a resource (buffer, texture, etc.) is destroyed while the GPU is still using it, the result is:
+
+- Vulkan validation errors
+- Undefined behavior (corrupted rendering, crashes, GPU hangs)
+- Hard-to-debug intermittent failures
+
+The **wgpu backend doesn't have this problem** because wgpu handles deferred destruction internally. When you drop a `wgpu::Buffer`, wgpu tracks resource usage and automatically defers destruction until the GPU is done. This safety is built into wgpu's design.
+
+Our **Vulkan backend uses raw `ash`** (direct Vulkan bindings), which provides maximum performance but no automatic safety. When `vkDestroyBuffer()` is called, destruction is immediate. We needed to implement equivalent protection.
+
+**The Problem Illustrated:**
+
+```
+CPU Frame 0: Submit commands using Buffer A → GPU starts
+CPU Frame 1: Submit commands using Buffer B → Continue
+CPU Frame 2: User drops Arc<Buffer> for A (refcount = 0)
+             → Immediate vkDestroyBuffer() ← WRONG!
+GPU Frame 0: Still reading from Buffer A! ← CRASH/CORRUPTION
+```
+
+### Decision
+
+Implement a deferred destruction system for the Vulkan backend:
+
+**1. Resource Queuing**
+
+When a Vulkan resource's `Arc` is dropped, instead of immediately calling `vkDestroy*`, the resource handle is queued:
+
+```rust
+impl Drop for GpuBuffer {
+    fn drop(&mut self) {
+        if let GpuBuffer::Vulkan { device, buffer, allocation, deferred, .. } = self {
+            deferred.queue(DeferredResource::Buffer {
+                device: device.clone(),
+                buffer: *buffer,
+                allocation: allocation.lock().take(),
+            });
+        }
+    }
+}
+```
+
+**2. Frame-Indexed Queues**
+
+The `DeferredDestructor` maintains `MAX_FRAMES_IN_FLIGHT` (3) queues, one per frame slot:
+
+```
+Frame Queues:
+┌──────────┐  ┌──────────┐  ┌──────────┐
+│ Frame 0  │  │ Frame 1  │  │ Frame 2  │
+│ [buf, tex]│  │ [sampler]│  │ []       │
+└──────────┘  └──────────┘  └──────────┘
+```
+
+**3. Frame Boundary Processing**
+
+When `FramePipeline::begin_frame()` waits on a fence, it means the GPU has finished with an old frame. After the fence signals, we advance the destructor:
+
+```rust
+// In FramePipeline::begin_frame()
+if let Some(fence) = &self.frame_fences[self.current_slot] {
+    fence.wait();  // GPU done with old frame
+}
+device.advance_deferred_destruction();  // Safe to destroy old resources
+```
+
+**4. Resource Types Covered**
+
+All Vulkan resource types use deferred destruction:
+- `GpuBuffer` - vertex/index/uniform buffers
+- `GpuTexture` - images and image views
+- `GpuSampler` - texture samplers
+- `GpuFence` - CPU-GPU synchronization
+- `GpuSemaphore` - GPU-GPU synchronization
+
+**5. Allocator Integration**
+
+Memory allocations (via `gpu-allocator`) are freed along with their resources through a weak reference to the allocator. If the allocator is already dropped (during shutdown), resources are destroyed without freeing allocations (the allocator cleanup handles this).
+
+### Alternatives Considered
+
+**1. Manual Lifetime Management**
+
+Require users to track resource lifetimes and call explicit destruction methods.
+
+- ❌ Error-prone and tedious
+- ❌ Doesn't match Rust's RAII patterns
+- ❌ Poor developer experience
+
+**2. Reference Counting with Frame Tracking**
+
+Track which frames use which resources via reference counting.
+
+- ❌ Complex bookkeeping
+- ❌ Every resource access needs tracking
+- ❌ Performance overhead per draw call
+
+**3. Global Device Wait on Every Drop**
+
+Call `vkDeviceWaitIdle()` in every resource destructor.
+
+- ❌ Massive performance impact
+- ❌ Defeats the purpose of async GPU execution
+- ❌ Completely impractical
+
+### Consequences
+
+- ✅ **Safe**: Resources destroyed only after GPU is done with them
+- ✅ **Transparent**: Users use `Arc<Buffer>` normally; destruction is automatic
+- ✅ **Zero-cost for wgpu**: wgpu handles this internally; no double-deferral
+- ✅ **Integrates with FramePipeline**: Cleanup happens at natural frame boundaries
+- ✅ **Graceful shutdown**: `flush_all()` destroys all pending resources when device waits idle
+- ⚠️ **Memory overhead**: Resources held slightly longer than strictly necessary
+- ⚠️ **Vulkan-specific**: Only the Vulkan backend needs this complexity
+- ⚠️ **Frame timing dependent**: Resources destroyed at frame boundaries, not immediately

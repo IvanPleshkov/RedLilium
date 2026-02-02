@@ -252,3 +252,73 @@ First, make all backends compiled on related target_os.
 Second, let's change `Auto` mode.
 Please make it metal on macos, vulkan on linux, webgl on web target and DX12 on windows.
 Change also demos and tests in `graphics/tests/window_test.rs` to use Auto wgpu mode.
+
+## Request 27:
+The Problem: Premature Resource Destruction
+How GPU Rendering Works
+When you submit commands to the GPU, they don't execute immediately. The CPU records commands into a command buffer, submits it to a queue, and continues. The GPU processes these commands asynchronously, often 1-3 frames behind the CPU.
+
+
+CPU Frame 0: Record commands using Buffer A → Submit → Continue to Frame 1
+CPU Frame 1: Record commands using Buffer B → Submit → Continue to Frame 2
+CPU Frame 2: User drops Buffer A (Arc refcount = 0)
+                 ↓
+GPU Frame 0: Still reading from Buffer A! ← PROBLEM
+What Happens Currently
+In my graphics crate, when an Arc<Buffer> refcount reaches zero:
+
+Rust calls Drop on Buffer
+Drop calls Drop on inner GpuBuffer
+For Vulkan: immediately calls vkDestroyBuffer() (backend/mod.rs:585)
+If the GPU is still using that buffer in an in-flight command buffer, this causes:
+
+Validation errors (if validation layers enabled)
+Undefined behavior (corrupted rendering, crashes, GPU hangs)
+Why wgpu Doesn't Have This Problem
+wgpu internally tracks resource usage and defers destruction until safe. Your Vulkan backend doesn't have this protection.
+
+Recommended Solution: Deferred Destruction Queue
+Core Idea
+Don't destroy resources immediately. Instead:
+
+When Drop is called, move the resource to a "pending deletion" queue
+Tag it with the current frame number
+Only actually destroy it after N frames have completed (N = max frames in flight)
+Why This Works
+If you have 2 frames in flight:
+
+Frame 0 submits, uses Buffer A
+Frame 1 submits, user drops Buffer A → queued for deletion at frame 0
+Frame 2 begins → Frame 0's fence signals (GPU done with Frame 0) → safe to destroy Buffer A
+Architecture
+
+┌─────────────────────────────────────────────────────────┐
+│                    GraphicsDevice                        │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │            DeferredDestructor                    │    │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐      │    │
+│  │  │ Frame 0  │  │ Frame 1  │  │ Frame 2  │ ...  │    │
+│  │  │ pending  │  │ pending  │  │ pending  │      │    │
+│  │  └──────────┘  └──────────┘  └──────────┘      │    │
+│  └─────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────┘
+
+On Drop(Buffer):
+  1. Don't call vkDestroyBuffer
+  2. Send buffer handle to DeferredDestructor
+  3. DeferredDestructor stores it in current frame's pending list
+
+On frame boundary (after fence wait):
+  1. Destroy all resources in oldest frame's pending list
+  2. Rotate frame index
+What Needs to Change
+Component	Change
+GraphicsDevice	Add DeferredDestructor field
+GpuBuffer, GpuTexture, etc.	Drop queues instead of destroying (Vulkan only)
+FramePipeline::next_frame()	Call destructor.advance_frame() after fence wait
+New type	DeferredResource enum to hold any destroyable resource
+Benefits
+Safe: Resources only destroyed after GPU is done with them
+Minimal API change: Users still use Arc<Buffer> normally
+Backend-specific: Only affects Vulkan; wgpu continues as-is
+Integrates with existing code: Hooks into FramePipeline frame boundaries
