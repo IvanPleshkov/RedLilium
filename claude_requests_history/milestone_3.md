@@ -188,3 +188,7 @@ stack backtrace:
 note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
 test test_window_swapchain_5_frames_wgpu ... FAILED
 ```
+
+## Request 23:
+In `graphics/tests/window_test.rs` while device creation we dont select device which is compatible to the surface. Please fix it.
+You can change graphics crate and extend device selection method.

@@ -107,20 +107,23 @@ impl WindowTestApp {
             }
         };
 
-        // Create device
-        let device = match instance.create_device() {
-            Ok(d) => d,
-            Err(e) => {
-                log::warn!("Failed to create graphics device: {}", e);
-                return false;
-            }
-        };
-
-        // Create surface
+        // Create surface first (needed to select compatible adapter)
         let surface = match instance.create_surface(window) {
             Ok(s) => s,
             Err(e) => {
                 log::warn!("Failed to create surface: {}", e);
+                return false;
+            }
+        };
+
+        // Create device that is compatible with the surface
+        let device = match instance.create_device_for_surface(&surface) {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!(
+                    "Failed to create graphics device compatible with surface: {}",
+                    e
+                );
                 return false;
             }
         };

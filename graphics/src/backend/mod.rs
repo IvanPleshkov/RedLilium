@@ -885,6 +885,67 @@ impl GpuBackend {
             }
         }
     }
+
+    /// Ensure the backend is compatible with the given surface.
+    ///
+    /// For wgpu backend, this may re-request an adapter if the current one is not
+    /// compatible with the surface. For Vulkan backend, this verifies the physical
+    /// device supports the surface.
+    ///
+    /// Returns `Ok(true)` if compatible, `Err` if no compatible adapter could be found.
+    pub fn ensure_compatible_with_surface(
+        &mut self,
+        surface: &GpuSurface,
+    ) -> Result<bool, GraphicsError> {
+        match (self, surface) {
+            (Self::Dummy(_), _) => {
+                // Dummy backend is always "compatible"
+                Ok(true)
+            }
+
+            #[cfg(feature = "wgpu-backend")]
+            (Self::Wgpu(wgpu_backend), GpuSurface::Wgpu { surface }) => {
+                wgpu_backend.ensure_compatible_with_surface(surface)
+            }
+
+            #[cfg(feature = "vulkan-backend")]
+            (Self::Vulkan(vulkan_backend), GpuSurface::Vulkan { surface, .. }) => {
+                if vulkan_backend.is_surface_supported(*surface) {
+                    Ok(true)
+                } else {
+                    Err(GraphicsError::ResourceCreationFailed(
+                        "Vulkan physical device does not support presentation to this surface"
+                            .to_string(),
+                    ))
+                }
+            }
+
+            #[allow(unreachable_patterns)]
+            _ => Err(GraphicsError::Internal(
+                "Surface and backend type mismatch".to_string(),
+            )),
+        }
+    }
+
+    /// Check if the backend is compatible with the given surface without modifying it.
+    pub fn is_compatible_with_surface(&self, surface: &GpuSurface) -> bool {
+        match (self, surface) {
+            (Self::Dummy(_), _) => true,
+
+            #[cfg(feature = "wgpu-backend")]
+            (Self::Wgpu(wgpu_backend), GpuSurface::Wgpu { surface }) => {
+                wgpu_backend.is_adapter_compatible_with_surface(surface)
+            }
+
+            #[cfg(feature = "vulkan-backend")]
+            (Self::Vulkan(vulkan_backend), GpuSurface::Vulkan { surface, .. }) => {
+                vulkan_backend.is_surface_supported(*surface)
+            }
+
+            #[allow(unreachable_patterns)]
+            _ => false,
+        }
+    }
 }
 
 /// Selects and creates the appropriate backend based on available features.

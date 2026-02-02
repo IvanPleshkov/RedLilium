@@ -136,6 +136,11 @@ impl Surface {
         &self.instance
     }
 
+    /// Get the underlying GPU surface (internal use only).
+    pub(crate) fn gpu_surface(&self) -> &GpuSurface {
+        &self.gpu_surface
+    }
+
     /// Get the preferred texture format for this surface.
     ///
     /// This format is guaranteed to be supported and is typically the most efficient.
@@ -201,7 +206,7 @@ impl Surface {
 
         // Configure the backend-specific surface
         self.gpu_surface
-            .configure(self.instance.backend(), config)?;
+            .configure(&self.instance.backend(), config)?;
 
         // Store the configuration
         if let Ok(mut current_config) = self.config.write() {
@@ -284,7 +289,7 @@ impl Surface {
 
     /// Acquire the backend-specific surface texture.
     fn acquire_gpu_texture(&self) -> Result<GpuSurfaceTexture, GraphicsError> {
-        self.gpu_surface.acquire_texture(self.instance.backend())
+        self.gpu_surface.acquire_texture(&self.instance.backend())
     }
 }
 
@@ -362,7 +367,7 @@ impl SurfaceTexture {
         log::trace!("Presenting frame {}", self.frame_index);
 
         if let Some(gpu_texture) = self.gpu_texture.take() {
-            gpu_texture.present(self.instance.backend(), self.frame_index);
+            gpu_texture.present(&self.instance.backend(), self.frame_index);
         }
     }
 }

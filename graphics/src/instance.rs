@@ -170,8 +170,8 @@ pub struct GraphicsInstance {
     self_ref: RwLock<Weak<GraphicsInstance>>,
     /// Devices created by this instance.
     devices: RwLock<Vec<Arc<GraphicsDevice>>>,
-    /// GPU backend for this instance.
-    backend: backend::GpuBackend,
+    /// GPU backend for this instance (wrapped in RwLock for interior mutability).
+    backend: RwLock<backend::GpuBackend>,
 }
 
 impl GraphicsInstance {
@@ -217,7 +217,7 @@ impl GraphicsInstance {
         let instance = Arc::new(Self {
             self_ref: RwLock::new(Weak::new()),
             devices: RwLock::new(Vec::new()),
-            backend,
+            backend: RwLock::new(backend),
         });
 
         // Store self-reference
@@ -228,9 +228,14 @@ impl GraphicsInstance {
         Ok(instance)
     }
 
-    /// Get the GPU backend (internal use only).
-    pub(crate) fn backend(&self) -> &backend::GpuBackend {
-        &self.backend
+    /// Get the GPU backend for reading (internal use only).
+    pub(crate) fn backend(&self) -> std::sync::RwLockReadGuard<'_, backend::GpuBackend> {
+        self.backend.read().expect("backend lock poisoned")
+    }
+
+    /// Get the GPU backend for writing (internal use only).
+    pub(crate) fn backend_mut(&self) -> std::sync::RwLockWriteGuard<'_, backend::GpuBackend> {
+        self.backend.write().expect("backend lock poisoned")
     }
 
     /// Get the strong self-reference.
@@ -339,6 +344,40 @@ impl GraphicsInstance {
 
         let surface = Surface::new(instance, window)?;
         Ok(Arc::new(surface))
+    }
+
+    /// Create a graphics device that is compatible with the given surface.
+    ///
+    /// This method ensures that the selected adapter/device can present to the
+    /// given surface. On some systems, not all adapters can present to all surfaces.
+    ///
+    /// # Arguments
+    ///
+    /// * `surface` - The surface that the device must be compatible with
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no compatible adapter is found or device creation fails.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let surface = instance.create_surface(&window)?;
+    /// let device = instance.create_device_for_surface(&surface)?;
+    /// surface.configure(&device, &SurfaceConfiguration::new(800, 600))?;
+    /// ```
+    pub fn create_device_for_surface(
+        &self,
+        surface: &Surface,
+    ) -> Result<Arc<GraphicsDevice>, GraphicsError> {
+        // Ensure the backend is compatible with the surface
+        {
+            let mut backend = self.backend_mut();
+            backend.ensure_compatible_with_surface(surface.gpu_surface())?;
+        }
+
+        // Now create the device using the (potentially updated) backend
+        self.create_device()
     }
 }
 

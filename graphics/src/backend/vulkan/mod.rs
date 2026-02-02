@@ -243,6 +243,19 @@ impl VulkanBackend {
         self.command_pool
     }
 
+    /// Check if the current physical device supports presentation to a surface.
+    pub fn is_surface_supported(&self, surface: vk::SurfaceKHR) -> bool {
+        unsafe {
+            self.surface_loader
+                .get_physical_device_surface_support(
+                    self.physical_device,
+                    self.graphics_queue_family,
+                    surface,
+                )
+                .unwrap_or(false)
+        }
+    }
+
     /// Query surface capabilities for a given surface.
     pub fn get_surface_capabilities(
         &self,

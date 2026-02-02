@@ -138,6 +138,69 @@ impl WgpuBackend {
         &self.queue
     }
 
+    /// Check if the current adapter is compatible with a surface.
+    pub fn is_adapter_compatible_with_surface(&self, surface: &wgpu::Surface<'_>) -> bool {
+        self.adapter.is_surface_supported(surface)
+    }
+
+    /// Re-request an adapter that is compatible with the given surface.
+    ///
+    /// This creates a new device and queue if the current adapter is not compatible.
+    /// Returns true if a compatible adapter was found and the backend was updated.
+    pub fn ensure_compatible_with_surface(
+        &mut self,
+        surface: &wgpu::Surface<'_>,
+    ) -> Result<bool, GraphicsError> {
+        // Check if current adapter is already compatible
+        if self.adapter.is_surface_supported(surface) {
+            return Ok(true);
+        }
+
+        log::info!(
+            "Current adapter '{}' not compatible with surface, requesting new adapter",
+            self.adapter.get_info().name
+        );
+
+        // Request a new adapter that is compatible with the surface
+        let new_adapter =
+            pollster::block_on(self.instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: Some(surface),
+                force_fallback_adapter: false,
+            }))
+            .map_err(|e| {
+                GraphicsError::ResourceCreationFailed(format!(
+                    "No GPU adapter compatible with surface: {e}"
+                ))
+            })?;
+
+        log::info!(
+            "Found compatible adapter: {:?}",
+            new_adapter.get_info().name
+        );
+
+        // Request device from the new adapter
+        let (new_device, new_queue) =
+            pollster::block_on(new_adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("RedLilium Device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                memory_hints: wgpu::MemoryHints::default(),
+                experimental_features: wgpu::ExperimentalFeatures::default(),
+                trace: wgpu::Trace::Off,
+            }))
+            .map_err(|e| {
+                GraphicsError::ResourceCreationFailed(format!("Device creation failed: {e}"))
+            })?;
+
+        // Update the backend with new adapter and device
+        self.adapter = new_adapter;
+        self.device = Arc::new(new_device);
+        self.queue = Arc::new(new_queue);
+
+        Ok(true)
+    }
+
     /// Get the backend name.
     pub fn name(&self) -> &'static str {
         "wgpu Backend"
