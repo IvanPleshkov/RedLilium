@@ -144,6 +144,8 @@ struct VulkanSwapchain {
     render_finished_semaphores: Vec<ash::vk::Semaphore>,
     /// Fences for CPU-GPU synchronization (one per frame in flight).
     in_flight_fences: Vec<ash::vk::Fence>,
+    /// Command buffers for presentation (one per frame in flight).
+    present_command_buffers: Vec<ash::vk::CommandBuffer>,
     /// Current frame index (cycles through frames in flight).
     current_frame: usize,
 }
@@ -340,6 +342,12 @@ impl Surface {
                     unsafe {
                         let _ = vulkan_backend.device().device_wait_idle();
 
+                        // Free command buffers
+                        vulkan_backend.device().free_command_buffers(
+                            vulkan_backend.command_pool(),
+                            &old_swapchain.present_command_buffers,
+                        );
+
                         // Destroy synchronization primitives
                         for semaphore in old_swapchain.image_available_semaphores {
                             vulkan_backend.device().destroy_semaphore(semaphore, None);
@@ -465,6 +473,7 @@ impl Surface {
             vulkan_image_available_semaphore,
             vulkan_render_finished_semaphore,
             vulkan_in_flight_fence,
+            vulkan_present_command_buffer,
         ) = {
             use crate::backend::GpuBackend;
             use crate::backend::vulkan::{VulkanImageView, VulkanSurfaceTextureView};
@@ -523,6 +532,7 @@ impl Surface {
                         let image = swapchain.images[image_index as usize];
                         let view = swapchain.image_views[image_index as usize];
                         let swapchain_handle = swapchain.swapchain;
+                        let present_cmd = swapchain.present_command_buffers[current_frame];
 
                         // Advance to next frame slot
                         swapchain.current_frame = (current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
@@ -542,6 +552,7 @@ impl Surface {
                             image_available_semaphore,
                             render_finished_semaphore,
                             in_flight_fence,
+                            present_cmd,
                         )
                     } else {
                         (
@@ -552,6 +563,7 @@ impl Surface {
                             vk::Semaphore::null(),
                             vk::Semaphore::null(),
                             vk::Fence::null(),
+                            vk::CommandBuffer::null(),
                         )
                     }
                 } else {
@@ -563,6 +575,7 @@ impl Surface {
                         vk::Semaphore::null(),
                         vk::Semaphore::null(),
                         vk::Fence::null(),
+                        vk::CommandBuffer::null(),
                     )
                 }
             } else {
@@ -574,6 +587,7 @@ impl Surface {
                     vk::Semaphore::null(),
                     vk::Semaphore::null(),
                     vk::Fence::null(),
+                    vk::CommandBuffer::null(),
                 )
             }
         };
@@ -606,6 +620,8 @@ impl Surface {
             vulkan_render_finished_semaphore,
             #[cfg(feature = "vulkan-backend")]
             vulkan_in_flight_fence,
+            #[cfg(feature = "vulkan-backend")]
+            vulkan_present_command_buffer,
         })
     }
 }
@@ -666,6 +682,9 @@ pub struct SurfaceTexture {
     /// The in-flight fence for this frame (to signal after presentation).
     #[cfg(feature = "vulkan-backend")]
     vulkan_in_flight_fence: vk::Fence,
+    /// The command buffer for this frame's presentation.
+    #[cfg(feature = "vulkan-backend")]
+    vulkan_present_command_buffer: vk::CommandBuffer,
 }
 
 impl SurfaceTexture {
@@ -740,26 +759,20 @@ impl SurfaceTexture {
             use crate::backend::GpuBackend;
 
             if let GpuBackend::Vulkan(vulkan_backend) = self.instance.backend() {
-                // Allocate a command buffer for the layout transition
-                let alloc_info = vk::CommandBufferAllocateInfo::default()
-                    .command_pool(vulkan_backend.command_pool())
-                    .level(vk::CommandBufferLevel::PRIMARY)
-                    .command_buffer_count(1);
+                // Use pre-allocated command buffer for this frame
+                let cmd = self.vulkan_present_command_buffer;
+                let command_buffers = [cmd];
 
-                let command_buffers = match unsafe {
+                // Reset and begin command buffer
+                if let Err(e) = unsafe {
                     vulkan_backend
                         .device()
-                        .allocate_command_buffers(&alloc_info)
+                        .reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
                 } {
-                    Ok(buffers) => buffers,
-                    Err(e) => {
-                        log::error!("Failed to allocate command buffer for present: {:?}", e);
-                        return;
-                    }
-                };
-                let cmd = command_buffers[0];
+                    log::error!("Failed to reset command buffer for present: {:?}", e);
+                    return;
+                }
 
-                // Begin command buffer
                 let begin_info = vk::CommandBufferBeginInfo::default()
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
@@ -829,11 +842,6 @@ impl SurfaceTexture {
 
                 if let Err(e) = result {
                     log::error!("Failed to submit presentation sync: {:?}", e);
-                    unsafe {
-                        vulkan_backend
-                            .device()
-                            .free_command_buffers(vulkan_backend.command_pool(), &command_buffers);
-                    }
                     return;
                 }
 
@@ -850,14 +858,6 @@ impl SurfaceTexture {
                         .swapchain_loader()
                         .queue_present(vulkan_backend.graphics_queue(), &present_info)
                 };
-
-                // Free command buffer (after queue submit, fence will track completion)
-                // Note: We free immediately because the fence ensures the GPU is done before reuse
-                unsafe {
-                    vulkan_backend
-                        .device()
-                        .free_command_buffers(vulkan_backend.command_pool(), &command_buffers);
-                }
 
                 match result {
                     Ok(_) => {
@@ -1089,6 +1089,24 @@ fn create_vulkan_swapchain(
         in_flight_fences.push(fence);
     }
 
+    // Allocate command buffers for presentation (one per frame in flight)
+    let alloc_info = vk::CommandBufferAllocateInfo::default()
+        .command_pool(vulkan_backend.command_pool())
+        .level(vk::CommandBufferLevel::PRIMARY)
+        .command_buffer_count(MAX_FRAMES_IN_FLIGHT as u32);
+
+    let present_command_buffers = unsafe {
+        vulkan_backend
+            .device()
+            .allocate_command_buffers(&alloc_info)
+    }
+    .map_err(|e| {
+        GraphicsError::ResourceCreationFailed(format!(
+            "Failed to allocate present command buffers: {:?}",
+            e
+        ))
+    })?;
+
     log::info!(
         "Created Vulkan swapchain: {}x{} with {} images, {} frames in flight",
         extent.width,
@@ -1107,6 +1125,7 @@ fn create_vulkan_swapchain(
         image_available_semaphores,
         render_finished_semaphores,
         in_flight_fences,
+        present_command_buffers,
         current_frame: 0,
     })
 }
