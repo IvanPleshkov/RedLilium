@@ -106,9 +106,9 @@ impl RenderTarget {
             width: surface_texture.width(),
             height: surface_texture.height(),
             #[cfg(feature = "wgpu-backend")]
-            view: surface_texture.wgpu_view(),
+            view: surface_texture.gpu_texture().and_then(|t| t.wgpu_view()),
             #[cfg(feature = "vulkan-backend")]
-            vulkan_view: surface_texture.vulkan_view(),
+            vulkan_view: surface_texture.gpu_texture().and_then(|t| t.vulkan_view()),
         }
     }
 

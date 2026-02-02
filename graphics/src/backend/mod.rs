@@ -35,6 +35,8 @@ use ash::vk;
 use gpu_allocator::vulkan::Allocation;
 #[cfg(feature = "vulkan-backend")]
 use parking_lot::Mutex;
+#[cfg(feature = "vulkan-backend")]
+use parking_lot::RwLock;
 
 use crate::error::GraphicsError;
 use crate::graph::{CompiledGraph, RenderGraph};
@@ -407,6 +409,161 @@ impl GpuSurfaceTexture {
     }
 }
 
+/// Represents a GPU surface for presentation.
+///
+/// This encapsulates all backend-specific state needed to create and manage
+/// a presentation surface (swapchain).
+#[allow(clippy::large_enum_variant)]
+pub enum GpuSurface {
+    /// Dummy backend (no GPU surface)
+    Dummy,
+    /// wgpu backend surface
+    #[cfg(feature = "wgpu-backend")]
+    Wgpu {
+        /// The wgpu surface.
+        surface: wgpu::Surface<'static>,
+    },
+    /// Vulkan backend surface
+    #[cfg(feature = "vulkan-backend")]
+    Vulkan {
+        /// The Vulkan surface handle.
+        surface: vk::SurfaceKHR,
+        /// The Vulkan swapchain (created on configure).
+        swapchain: RwLock<Option<vulkan::swapchain::VulkanSwapchain>>,
+    },
+}
+
+impl std::fmt::Debug for GpuSurface {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dummy => write!(f, "GpuSurface::Dummy"),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu { .. } => f.debug_struct("GpuSurface::Wgpu").finish(),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan { surface, .. } => f
+                .debug_struct("GpuSurface::Vulkan")
+                .field("surface", surface)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+// GpuSurface is Send + Sync because all variant backends are Send + Sync
+unsafe impl Send for GpuSurface {}
+unsafe impl Sync for GpuSurface {}
+
+impl GpuSurface {
+    /// Configure the surface for rendering.
+    ///
+    /// This must be called before acquiring textures. It should also be called
+    /// when the window is resized.
+    pub fn configure(
+        &self,
+        backend: &GpuBackend,
+        config: &crate::swapchain::SurfaceConfiguration,
+    ) -> Result<(), GraphicsError> {
+        match (self, backend) {
+            (Self::Dummy, _) => {
+                log::info!("Configured dummy surface");
+                Ok(())
+            }
+
+            #[cfg(feature = "wgpu-backend")]
+            (Self::Wgpu { surface }, GpuBackend::Wgpu(wgpu_backend)) => {
+                wgpu_impl::swapchain::configure_surface(surface, wgpu_backend, config);
+                Ok(())
+            }
+
+            #[cfg(feature = "vulkan-backend")]
+            (Self::Vulkan { surface, swapchain }, GpuBackend::Vulkan(vulkan_backend)) => {
+                use vulkan::swapchain::VulkanSwapchain;
+
+                // Destroy old swapchain if it exists
+                if let Some(ref mut old_swapchain) = *swapchain.write() {
+                    old_swapchain.destroy(vulkan_backend);
+                }
+
+                // Create new swapchain
+                let new_swapchain = VulkanSwapchain::new(vulkan_backend, *surface, config)?;
+                *swapchain.write() = Some(new_swapchain);
+                log::info!("Configured Vulkan swapchain");
+                Ok(())
+            }
+
+            #[allow(unreachable_patterns)]
+            _ => Err(GraphicsError::Internal(
+                "Surface and backend type mismatch".to_string(),
+            )),
+        }
+    }
+
+    /// Acquire the next texture from the swapchain.
+    ///
+    /// Returns a backend-specific surface texture for rendering.
+    pub fn acquire_texture(
+        &self,
+        backend: &GpuBackend,
+    ) -> Result<GpuSurfaceTexture, GraphicsError> {
+        match (self, backend) {
+            (Self::Dummy, _) => Ok(GpuSurfaceTexture::Dummy),
+
+            #[cfg(feature = "wgpu-backend")]
+            (Self::Wgpu { surface }, GpuBackend::Wgpu(_)) => {
+                let result = wgpu_impl::swapchain::acquire_surface_texture(surface)?;
+                Ok(GpuSurfaceTexture::Wgpu {
+                    texture: result.texture,
+                    view: result.view,
+                })
+            }
+
+            #[cfg(feature = "vulkan-backend")]
+            (Self::Vulkan { swapchain, .. }, GpuBackend::Vulkan(vulkan_backend)) => {
+                if let Some(ref mut swapchain) = *swapchain.write() {
+                    let result = swapchain.acquire_next_image(vulkan_backend)?;
+                    Ok(GpuSurfaceTexture::Vulkan {
+                        view: result.view,
+                        image_index: result.image_index,
+                        frame_index: result.frame_index,
+                        swapchain: result.swapchain,
+                        image_available_semaphore: result.image_available_semaphore,
+                        render_finished_semaphore: result.render_finished_semaphore,
+                        in_flight_fence: result.in_flight_fence,
+                        present_command_buffer: result.present_command_buffer,
+                    })
+                } else {
+                    Err(GraphicsError::Internal(
+                        "Vulkan swapchain not configured".to_string(),
+                    ))
+                }
+            }
+
+            #[allow(unreachable_patterns)]
+            _ => Err(GraphicsError::Internal(
+                "Surface and backend type mismatch".to_string(),
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "vulkan-backend")]
+impl Drop for GpuSurface {
+    fn drop(&mut self) {
+        if let GpuSurface::Vulkan { swapchain, .. } = self {
+            // Note: The swapchain needs to be destroyed before the surface,
+            // but we need a reference to the backend to do that properly.
+            // The swapchain will be dropped when the RwLock is dropped.
+            // The VulkanSwapchain's Drop impl handles cleanup.
+            if let Some(ref swapchain) = *swapchain.read() {
+                log::warn!(
+                    "GpuSurface::Vulkan dropped with active swapchain - \
+                    swapchain should be destroyed before surface"
+                );
+                let _ = swapchain; // Suppress unused warning
+            }
+        }
+    }
+}
+
 // ============================================================================
 // Vulkan Resource Cleanup (Drop implementations)
 // ============================================================================
@@ -654,6 +811,78 @@ impl GpuBackend {
             Self::Wgpu(backend) => backend.read_buffer(buffer, offset, size),
             #[cfg(feature = "vulkan-backend")]
             Self::Vulkan(backend) => backend.read_buffer(buffer, offset, size),
+        }
+    }
+
+    /// Create a surface from a window.
+    ///
+    /// # Safety
+    ///
+    /// The window handle must remain valid for the lifetime of the surface.
+    pub fn create_surface<W>(&self, window: &W) -> Result<GpuSurface, GraphicsError>
+    where
+        W: raw_window_handle::HasWindowHandle + raw_window_handle::HasDisplayHandle + Sync,
+    {
+        match self {
+            Self::Dummy(_) => {
+                log::info!("Created dummy surface");
+                Ok(GpuSurface::Dummy)
+            }
+
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(wgpu_backend) => {
+                // Create wgpu surface from window
+                // SAFETY: The caller guarantees the window handle remains valid for the
+                // lifetime of the surface. We transmute to 'static to satisfy wgpu's
+                // Surface<'static> requirement, but the Surface is dropped before the
+                // window in practice.
+                let surface: wgpu::Surface<'static> = unsafe {
+                    std::mem::transmute(wgpu_backend.instance().create_surface(window).map_err(
+                        |e| {
+                            GraphicsError::ResourceCreationFailed(format!(
+                                "Failed to create wgpu surface: {e}"
+                            ))
+                        },
+                    )?)
+                };
+                log::info!("Created wgpu surface");
+                Ok(GpuSurface::Wgpu { surface })
+            }
+
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(vulkan_backend) => {
+                // Create Vulkan surface from window
+                let display_handle = window.display_handle().map_err(|e| {
+                    GraphicsError::ResourceCreationFailed(format!(
+                        "Failed to get display handle: {e}"
+                    ))
+                })?;
+                let window_handle = window.window_handle().map_err(|e| {
+                    GraphicsError::ResourceCreationFailed(format!(
+                        "Failed to get window handle: {e}"
+                    ))
+                })?;
+
+                let surface = unsafe {
+                    ash_window::create_surface(
+                        vulkan_backend.entry(),
+                        vulkan_backend.instance(),
+                        display_handle.as_raw(),
+                        window_handle.as_raw(),
+                        None,
+                    )
+                }
+                .map_err(|e| {
+                    GraphicsError::ResourceCreationFailed(format!(
+                        "Failed to create Vulkan surface: {e}"
+                    ))
+                })?;
+                log::info!("Created Vulkan surface");
+                Ok(GpuSurface::Vulkan {
+                    surface,
+                    swapchain: RwLock::new(None),
+                })
+            }
         }
     }
 }

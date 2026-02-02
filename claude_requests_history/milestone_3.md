@@ -122,11 +122,31 @@ Please refactor this file, create an entity in backed as an entry point for `gra
 ## Request 20:
 Please review `graphics\src\swapchain.rs`.
 I dont like this imports:
+```rust
 #[cfg(feature = "wgpu-backend")]
 use crate::backend::wgpu_impl::SurfaceTextureView;
 #[cfg(feature = "vulkan-backend")]
 use crate::backend::vulkan::VulkanSurfaceTextureView;
 #[cfg(feature = "vulkan-backend")]
 use ash::vk;
+```
 Please remove this imports and move related logic to this imports to the corresponding backend.
 
+## Request 21:
+Please review `graphics\src\swapchain.rs` and `Surface` struct.
+I dont like this fields:
+```rust
+/// The underlying wgpu surface (only when using wgpu backend).
+#[cfg(feature = "wgpu-backend")]
+wgpu_surface: Option<wgpu::Surface<'static>>,
+/// The underlying Vulkan surface (only when using vulkan backend).
+#[cfg(feature = "vulkan-backend")]
+vulkan_surface: Option<ash::vk::SurfaceKHR>,
+/// The Vulkan swapchain (only when using vulkan backend).
+#[cfg(feature = "vulkan-backend")]
+vulkan_swapchain: RwLock<Option<crate::backend::vulkan::swapchain::VulkanSwapchain>>,
+```
+By design of graphics, surface can be related only to one backend.
+Here it's possible by the code to set `Some` for different backends.
+Please refactor it. As a result, I want to have a single field instead of `wgpu_surface`, `vulkan_surface`, `vulkan_swapchain`.
+You can move some code to backend folder. I dont want also to see `#[cfg(feature = "vulkan-backend")]` and `#[cfg(feature = "wgpu-backend")]` in `graphics\src\swapchain.rs`.
