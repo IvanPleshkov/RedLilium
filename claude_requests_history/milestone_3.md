@@ -114,3 +114,7 @@ Test test_window_swapchain_5_frames passes but in logs there are validation erro
 ## Request 18:
 Test test_window_swapchain_5_frames passes but in logs there are validation errors:
 [2026-02-02T10:10:16Z ERROR redlilium_graphics::backend::vulkan::debug] [Vulkan Validation] Validation Error: [ VUID-vkFreeCommandBuffers-pCommandBuffers-00047 ] Object 0: handle = 0x20ecf6ce0b0, type = VK_OBJECT_TYPE_COMMAND_BUFFER; Object 1: handle = 0xfab64d0000000002, type = VK_OBJECT_TYPE_COMMAND_POOL; | MessageID = 0x1ab902fc | vkFreeCommandBuffers(): pCommandBuffers[0] (VkCommandBuffer 0x20ecf6ce0b0[]) is in use. The Vulkan spec states: All elements of pCommandBuffers must not be in the pending state (https://vulkan.lunarg.com/doc/view/1.3.283.0/windows/1.3-extensions/vkspec.html#VUID-vkFreeCommandBuffers-pCommandBuffers-00047)
+
+## Request 19:
+Please review `graphics\src\swapchain.rs`. It seems this file does not follow the crate style, where all backed-related stuff is hided in the backend folder.
+Please refactor this file, create an entity in backed as an entry point for `graphics\src\swapchain.rs` and move all backend-related code to their backends.

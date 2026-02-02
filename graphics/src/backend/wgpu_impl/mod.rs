@@ -3,9 +3,10 @@
 //! This backend uses wgpu for cross-platform GPU access, supporting
 //! Vulkan, Metal, DX12, and WebGPU.
 
-mod conversion;
+pub(crate) mod conversion;
 mod pass_encoding;
 mod resources;
+pub mod swapchain;
 
 use std::sync::Arc;
 

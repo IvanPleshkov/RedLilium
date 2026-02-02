@@ -117,37 +117,10 @@ pub struct Surface {
     wgpu_surface: Option<wgpu::Surface<'static>>,
     /// The underlying Vulkan surface (only when using vulkan backend).
     #[cfg(feature = "vulkan-backend")]
-    vulkan_surface: Option<ash::vk::SurfaceKHR>,
+    vulkan_surface: Option<vk::SurfaceKHR>,
     /// The Vulkan swapchain (only when using vulkan backend).
     #[cfg(feature = "vulkan-backend")]
-    vulkan_swapchain: RwLock<Option<VulkanSwapchain>>,
-}
-
-/// Maximum number of frames that can be in flight simultaneously.
-#[cfg(feature = "vulkan-backend")]
-const MAX_FRAMES_IN_FLIGHT: usize = 2;
-
-/// Vulkan swapchain resources.
-#[cfg(feature = "vulkan-backend")]
-struct VulkanSwapchain {
-    swapchain: ash::vk::SwapchainKHR,
-    images: Vec<ash::vk::Image>,
-    image_views: Vec<ash::vk::ImageView>,
-    #[allow(dead_code)] // Reserved for future use
-    format: ash::vk::Format,
-    #[allow(dead_code)] // Reserved for future use
-    extent: ash::vk::Extent2D,
-    current_image_index: u32,
-    /// Semaphores signaled when swapchain image is available (one per frame in flight).
-    image_available_semaphores: Vec<ash::vk::Semaphore>,
-    /// Semaphores signaled when rendering is complete (one per frame in flight).
-    render_finished_semaphores: Vec<ash::vk::Semaphore>,
-    /// Fences for CPU-GPU synchronization (one per frame in flight).
-    in_flight_fences: Vec<ash::vk::Fence>,
-    /// Command buffers for presentation (one per frame in flight).
-    present_command_buffers: Vec<ash::vk::CommandBuffer>,
-    /// Current frame index (cycles through frames in flight).
-    current_frame: usize,
+    vulkan_swapchain: RwLock<Option<crate::backend::vulkan::swapchain::VulkanSwapchain>>,
 }
 
 impl Surface {
@@ -314,18 +287,11 @@ impl Surface {
         if let Some(wgpu_surface) = &self.wgpu_surface {
             use crate::backend::GpuBackend;
             if let GpuBackend::Wgpu(wgpu_backend) = self.instance.backend() {
-                let wgpu_config = wgpu::SurfaceConfiguration {
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                    format: convert_texture_format_to_wgpu(config.format),
-                    width: config.width,
-                    height: config.height,
-                    present_mode: convert_present_mode_to_wgpu(config.present_mode),
-                    alpha_mode: wgpu::CompositeAlphaMode::Auto,
-                    view_formats: vec![],
-                    desired_maximum_frame_latency: 2,
-                };
-                wgpu_surface.configure(wgpu_backend.device(), &wgpu_config);
-                log::info!("Configured wgpu surface");
+                crate::backend::wgpu_impl::swapchain::configure_surface(
+                    wgpu_surface,
+                    wgpu_backend,
+                    config,
+                );
             }
         }
 
@@ -333,47 +299,19 @@ impl Surface {
         #[cfg(feature = "vulkan-backend")]
         if let Some(vulkan_surface) = self.vulkan_surface {
             use crate::backend::GpuBackend;
+            use crate::backend::vulkan::swapchain::VulkanSwapchain;
+
             if let GpuBackend::Vulkan(vulkan_backend) = self.instance.backend() {
                 // Destroy old swapchain if it exists
                 if let Ok(mut swapchain_guard) = self.vulkan_swapchain.write()
-                    && let Some(old_swapchain) = swapchain_guard.take()
+                    && let Some(ref mut old_swapchain) = *swapchain_guard
                 {
-                    // Wait for device to be idle before destroying
-                    unsafe {
-                        let _ = vulkan_backend.device().device_wait_idle();
-
-                        // Free command buffers
-                        vulkan_backend.device().free_command_buffers(
-                            vulkan_backend.command_pool(),
-                            &old_swapchain.present_command_buffers,
-                        );
-
-                        // Destroy synchronization primitives
-                        for semaphore in old_swapchain.image_available_semaphores {
-                            vulkan_backend.device().destroy_semaphore(semaphore, None);
-                        }
-                        for semaphore in old_swapchain.render_finished_semaphores {
-                            vulkan_backend.device().destroy_semaphore(semaphore, None);
-                        }
-                        for fence in old_swapchain.in_flight_fences {
-                            vulkan_backend.device().destroy_fence(fence, None);
-                        }
-
-                        // Destroy image views
-                        for view in old_swapchain.image_views {
-                            vulkan_backend.device().destroy_image_view(view, None);
-                        }
-
-                        // Destroy swapchain
-                        vulkan_backend
-                            .swapchain_loader()
-                            .destroy_swapchain(old_swapchain.swapchain, None);
-                    }
+                    old_swapchain.destroy(vulkan_backend);
+                    *swapchain_guard = None;
                 }
 
                 // Create new swapchain
-                let new_swapchain =
-                    create_vulkan_swapchain(vulkan_backend, vulkan_surface, config)?;
+                let new_swapchain = VulkanSwapchain::new(vulkan_backend, vulkan_surface, config)?;
 
                 if let Ok(mut swapchain_guard) = self.vulkan_swapchain.write() {
                     *swapchain_guard = Some(new_swapchain);
@@ -447,18 +385,9 @@ impl Surface {
         // Acquire the actual wgpu surface texture if using wgpu backend
         #[cfg(feature = "wgpu-backend")]
         let (wgpu_texture, wgpu_view) = if let Some(wgpu_surface) = &self.wgpu_surface {
-            let surface_texture = wgpu_surface.get_current_texture().map_err(|e| {
-                GraphicsError::ResourceCreationFailed(format!(
-                    "Failed to acquire surface texture: {e}"
-                ))
-            })?;
-            let view = surface_texture
-                .texture
-                .create_view(&wgpu::TextureViewDescriptor::default());
-            let surface_view = SurfaceTextureView {
-                view: Arc::new(view),
-            };
-            (Some(surface_texture), Some(surface_view))
+            let result =
+                crate::backend::wgpu_impl::swapchain::acquire_surface_texture(wgpu_surface)?;
+            (Some(result.texture), Some(result.view))
         } else {
             (None, None)
         };
@@ -476,83 +405,20 @@ impl Surface {
             vulkan_present_command_buffer,
         ) = {
             use crate::backend::GpuBackend;
-            use crate::backend::vulkan::{VulkanImageView, VulkanSurfaceTextureView};
 
             if let GpuBackend::Vulkan(vulkan_backend) = self.instance.backend() {
                 if let Ok(mut swapchain_guard) = self.vulkan_swapchain.write() {
                     if let Some(ref mut swapchain) = *swapchain_guard {
-                        let current_frame = swapchain.current_frame;
-
-                        // Wait for the previous frame using this slot to complete
-                        let in_flight_fence = swapchain.in_flight_fences[current_frame];
-                        unsafe {
-                            vulkan_backend.device().wait_for_fences(
-                                &[in_flight_fence],
-                                true,
-                                u64::MAX,
-                            )
-                        }
-                        .map_err(|e| {
-                            GraphicsError::Internal(format!(
-                                "Failed to wait for in-flight fence: {:?}",
-                                e
-                            ))
-                        })?;
-
-                        // Reset the fence for this frame
-                        unsafe { vulkan_backend.device().reset_fences(&[in_flight_fence]) }
-                            .map_err(|e| {
-                                GraphicsError::Internal(format!(
-                                    "Failed to reset in-flight fence: {:?}",
-                                    e
-                                ))
-                            })?;
-
-                        // Acquire next image with semaphore synchronization
-                        let image_available_semaphore =
-                            swapchain.image_available_semaphores[current_frame];
-                        let render_finished_semaphore =
-                            swapchain.render_finished_semaphores[current_frame];
-                        let (image_index, _suboptimal) = unsafe {
-                            vulkan_backend.swapchain_loader().acquire_next_image(
-                                swapchain.swapchain,
-                                u64::MAX,
-                                image_available_semaphore,
-                                vk::Fence::null(),
-                            )
-                        }
-                        .map_err(|e| {
-                            GraphicsError::ResourceCreationFailed(format!(
-                                "Failed to acquire swapchain image: {:?}",
-                                e
-                            ))
-                        })?;
-
-                        swapchain.current_image_index = image_index;
-                        let image = swapchain.images[image_index as usize];
-                        let view = swapchain.image_views[image_index as usize];
-                        let swapchain_handle = swapchain.swapchain;
-                        let present_cmd = swapchain.present_command_buffers[current_frame];
-
-                        // Advance to next frame slot
-                        swapchain.current_frame = (current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
-
-                        let vulkan_view = VulkanSurfaceTextureView {
-                            image,
-                            view: Arc::new(VulkanImageView::new(
-                                vulkan_backend.device().clone(),
-                                view,
-                            )),
-                        };
+                        let result = swapchain.acquire_next_image(vulkan_backend)?;
                         (
-                            Some(vulkan_view),
-                            image_index,
-                            current_frame,
-                            Some(swapchain_handle),
-                            image_available_semaphore,
-                            render_finished_semaphore,
-                            in_flight_fence,
-                            present_cmd,
+                            Some(result.view),
+                            result.image_index,
+                            result.frame_index,
+                            Some(result.swapchain),
+                            result.image_available_semaphore,
+                            result.render_finished_semaphore,
+                            result.in_flight_fence,
+                            result.present_command_buffer,
                         )
                     } else {
                         (
@@ -750,134 +616,26 @@ impl SurfaceTexture {
         // Present the wgpu surface texture
         #[cfg(feature = "wgpu-backend")]
         if let Some(wgpu_texture) = self.wgpu_texture.take() {
-            wgpu_texture.present();
+            crate::backend::wgpu_impl::swapchain::present_surface_texture(wgpu_texture);
         }
 
         // Present the Vulkan swapchain image
         #[cfg(feature = "vulkan-backend")]
-        if let (Some(vulkan_view), Some(swapchain)) = (&self.vulkan_view, self.vulkan_swapchain) {
-            use crate::backend::GpuBackend;
-
-            if let GpuBackend::Vulkan(vulkan_backend) = self.instance.backend() {
-                // Use pre-allocated command buffer for this frame
-                let cmd = self.vulkan_present_command_buffer;
-                let command_buffers = [cmd];
-
-                // Reset and begin command buffer
-                if let Err(e) = unsafe {
-                    vulkan_backend
-                        .device()
-                        .reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
-                } {
-                    log::error!("Failed to reset command buffer for present: {:?}", e);
-                    return;
-                }
-
-                let begin_info = vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-
-                if let Err(e) = unsafe {
-                    vulkan_backend
-                        .device()
-                        .begin_command_buffer(cmd, &begin_info)
-                } {
-                    log::error!("Failed to begin command buffer for present: {:?}", e);
-                    return;
-                }
-
-                // Transition image from COLOR_ATTACHMENT_OPTIMAL to PRESENT_SRC_KHR
-                let barrier = vk::ImageMemoryBarrier::default()
-                    .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                    .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .image(vulkan_view.image())
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count: 1,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    })
-                    .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-                    .dst_access_mask(vk::AccessFlags::empty());
-
-                unsafe {
-                    vulkan_backend.device().cmd_pipeline_barrier(
-                        cmd,
-                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                        vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[],
-                        &[barrier],
-                    );
-                }
-
-                // End command buffer
-                if let Err(e) = unsafe { vulkan_backend.device().end_command_buffer(cmd) } {
-                    log::error!("Failed to end command buffer for present: {:?}", e);
-                    return;
-                }
-
-                // Submit command buffer with synchronization
-                let wait_semaphores = [self.vulkan_image_available_semaphore];
-                let signal_semaphores = [self.vulkan_render_finished_semaphore];
-                let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-
-                let submit_info = vk::SubmitInfo::default()
-                    .wait_semaphores(&wait_semaphores)
-                    .wait_dst_stage_mask(&wait_stages)
-                    .command_buffers(&command_buffers)
-                    .signal_semaphores(&signal_semaphores);
-
-                // Submit and signal the fence
-                let result = unsafe {
-                    vulkan_backend.device().queue_submit(
-                        vulkan_backend.graphics_queue(),
-                        &[submit_info],
-                        self.vulkan_in_flight_fence,
-                    )
-                };
-
-                if let Err(e) = result {
-                    log::error!("Failed to submit presentation sync: {:?}", e);
-                    return;
-                }
-
-                // Present the swapchain image
-                let swapchains = [swapchain];
-                let image_indices = [self.vulkan_image_index];
-                let present_info = vk::PresentInfoKHR::default()
-                    .wait_semaphores(&signal_semaphores)
-                    .swapchains(&swapchains)
-                    .image_indices(&image_indices);
-
-                let result = unsafe {
-                    vulkan_backend
-                        .swapchain_loader()
-                        .queue_present(vulkan_backend.graphics_queue(), &present_info)
-                };
-
-                match result {
-                    Ok(_) => {
-                        log::trace!(
-                            "Presented Vulkan frame {}, image index: {}",
-                            self.frame_index,
-                            self.vulkan_image_index
-                        );
-                    }
-                    Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                        log::warn!("Swapchain out of date, needs recreation");
-                    }
-                    Err(vk::Result::SUBOPTIMAL_KHR) => {
-                        log::trace!("Swapchain suboptimal");
-                    }
-                    Err(e) => {
-                        log::error!("Failed to present swapchain image: {:?}", e);
-                    }
-                }
-            }
+        if let (Some(vulkan_view), Some(swapchain)) = (&self.vulkan_view, self.vulkan_swapchain)
+            && let crate::backend::GpuBackend::Vulkan(vulkan_backend) = self.instance.backend()
+            && let Err(e) = crate::backend::vulkan::swapchain::present_vulkan_frame(
+                vulkan_backend,
+                vulkan_view,
+                swapchain,
+                self.vulkan_image_index,
+                self.vulkan_image_available_semaphore,
+                self.vulkan_render_finished_semaphore,
+                self.vulkan_in_flight_fence,
+                self.vulkan_present_command_buffer,
+                self.frame_index,
+            )
+        {
+            log::error!("Failed to present Vulkan frame: {}", e);
         }
     }
 }
@@ -907,266 +665,6 @@ impl Drop for SurfaceTexture {
 
 // Ensure SurfaceTexture is Send + Sync
 static_assertions::assert_impl_all!(SurfaceTexture: Send, Sync);
-
-// ============================================================================
-// wgpu conversion helpers
-// ============================================================================
-
-#[cfg(feature = "wgpu-backend")]
-fn convert_texture_format_to_wgpu(format: TextureFormat) -> wgpu::TextureFormat {
-    match format {
-        TextureFormat::R8Unorm => wgpu::TextureFormat::R8Unorm,
-        TextureFormat::R8Snorm => wgpu::TextureFormat::R8Snorm,
-        TextureFormat::R8Uint => wgpu::TextureFormat::R8Uint,
-        TextureFormat::R8Sint => wgpu::TextureFormat::R8Sint,
-        TextureFormat::R16Unorm => wgpu::TextureFormat::R16Unorm,
-        TextureFormat::R16Float => wgpu::TextureFormat::R16Float,
-        TextureFormat::Rg8Unorm => wgpu::TextureFormat::Rg8Unorm,
-        TextureFormat::R32Float => wgpu::TextureFormat::R32Float,
-        TextureFormat::R32Uint => wgpu::TextureFormat::R32Uint,
-        TextureFormat::Rg16Float => wgpu::TextureFormat::Rg16Float,
-        TextureFormat::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
-        TextureFormat::Rgba8UnormSrgb => wgpu::TextureFormat::Rgba8UnormSrgb,
-        TextureFormat::Bgra8Unorm => wgpu::TextureFormat::Bgra8Unorm,
-        TextureFormat::Bgra8UnormSrgb => wgpu::TextureFormat::Bgra8UnormSrgb,
-        TextureFormat::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
-        TextureFormat::Rg32Float => wgpu::TextureFormat::Rg32Float,
-        TextureFormat::Rgba32Float => wgpu::TextureFormat::Rgba32Float,
-        TextureFormat::Depth16Unorm => wgpu::TextureFormat::Depth16Unorm,
-        TextureFormat::Depth24Plus => wgpu::TextureFormat::Depth24Plus,
-        TextureFormat::Depth24PlusStencil8 => wgpu::TextureFormat::Depth24PlusStencil8,
-        TextureFormat::Depth32Float => wgpu::TextureFormat::Depth32Float,
-        TextureFormat::Depth32FloatStencil8 => wgpu::TextureFormat::Depth32FloatStencil8,
-    }
-}
-
-#[cfg(feature = "wgpu-backend")]
-fn convert_present_mode_to_wgpu(mode: PresentMode) -> wgpu::PresentMode {
-    match mode {
-        PresentMode::Immediate => wgpu::PresentMode::Immediate,
-        PresentMode::Mailbox => wgpu::PresentMode::Mailbox,
-        PresentMode::Fifo => wgpu::PresentMode::Fifo,
-        PresentMode::FifoRelaxed => wgpu::PresentMode::FifoRelaxed,
-    }
-}
-
-// ============================================================================
-// Vulkan swapchain helpers
-// ============================================================================
-
-#[cfg(feature = "vulkan-backend")]
-fn create_vulkan_swapchain(
-    vulkan_backend: &crate::backend::vulkan::VulkanBackend,
-    surface: vk::SurfaceKHR,
-    config: &SurfaceConfiguration,
-) -> Result<VulkanSwapchain, GraphicsError> {
-    // Get surface capabilities
-    let capabilities = vulkan_backend.get_surface_capabilities(surface)?;
-
-    // Choose format
-    let formats = vulkan_backend.get_surface_formats(surface)?;
-    let surface_format = formats
-        .iter()
-        .find(|f| f.format == convert_texture_format_to_vk(config.format))
-        .cloned()
-        .unwrap_or(formats[0]);
-
-    // Choose present mode
-    let present_modes = vulkan_backend.get_surface_present_modes(surface)?;
-    let present_mode = convert_present_mode_to_vk(config.present_mode);
-    let present_mode = if present_modes.contains(&present_mode) {
-        present_mode
-    } else {
-        vk::PresentModeKHR::FIFO // Always available
-    };
-
-    // Choose extent
-    let extent = if capabilities.current_extent.width != u32::MAX {
-        capabilities.current_extent
-    } else {
-        vk::Extent2D {
-            width: config.width.clamp(
-                capabilities.min_image_extent.width,
-                capabilities.max_image_extent.width,
-            ),
-            height: config.height.clamp(
-                capabilities.min_image_extent.height,
-                capabilities.max_image_extent.height,
-            ),
-        }
-    };
-
-    // Choose image count (prefer triple buffering)
-    let image_count = (capabilities.min_image_count + 1).min(if capabilities.max_image_count > 0 {
-        capabilities.max_image_count
-    } else {
-        u32::MAX
-    });
-
-    // Create swapchain
-    let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
-        .surface(surface)
-        .min_image_count(image_count)
-        .image_format(surface_format.format)
-        .image_color_space(surface_format.color_space)
-        .image_extent(extent)
-        .image_array_layers(1)
-        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
-        .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
-        .pre_transform(capabilities.current_transform)
-        .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-        .present_mode(present_mode)
-        .clipped(true)
-        .old_swapchain(vk::SwapchainKHR::null());
-
-    let swapchain = unsafe {
-        vulkan_backend
-            .swapchain_loader()
-            .create_swapchain(&swapchain_create_info, None)
-    }
-    .map_err(|e| {
-        GraphicsError::ResourceCreationFailed(format!("Failed to create swapchain: {:?}", e))
-    })?;
-
-    // Get swapchain images
-    let images = unsafe {
-        vulkan_backend
-            .swapchain_loader()
-            .get_swapchain_images(swapchain)
-    }
-    .map_err(|e| {
-        GraphicsError::ResourceCreationFailed(format!("Failed to get swapchain images: {:?}", e))
-    })?;
-
-    // Create image views
-    let image_views: Vec<vk::ImageView> = images
-        .iter()
-        .map(|&image| vulkan_backend.create_swapchain_image_view(image, surface_format.format))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // Create synchronization primitives for frames in flight
-    let semaphore_info = vk::SemaphoreCreateInfo::default();
-    let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
-
-    let mut image_available_semaphores = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-    let mut render_finished_semaphores = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-    let mut in_flight_fences = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-
-    for _ in 0..MAX_FRAMES_IN_FLIGHT {
-        let image_available = unsafe {
-            vulkan_backend
-                .device()
-                .create_semaphore(&semaphore_info, None)
-        }
-        .map_err(|e| {
-            GraphicsError::ResourceCreationFailed(format!(
-                "Failed to create image available semaphore: {:?}",
-                e
-            ))
-        })?;
-        image_available_semaphores.push(image_available);
-
-        let render_finished = unsafe {
-            vulkan_backend
-                .device()
-                .create_semaphore(&semaphore_info, None)
-        }
-        .map_err(|e| {
-            GraphicsError::ResourceCreationFailed(format!(
-                "Failed to create render finished semaphore: {:?}",
-                e
-            ))
-        })?;
-        render_finished_semaphores.push(render_finished);
-
-        let fence =
-            unsafe { vulkan_backend.device().create_fence(&fence_info, None) }.map_err(|e| {
-                GraphicsError::ResourceCreationFailed(format!(
-                    "Failed to create in-flight fence: {:?}",
-                    e
-                ))
-            })?;
-        in_flight_fences.push(fence);
-    }
-
-    // Allocate command buffers for presentation (one per frame in flight)
-    let alloc_info = vk::CommandBufferAllocateInfo::default()
-        .command_pool(vulkan_backend.command_pool())
-        .level(vk::CommandBufferLevel::PRIMARY)
-        .command_buffer_count(MAX_FRAMES_IN_FLIGHT as u32);
-
-    let present_command_buffers = unsafe {
-        vulkan_backend
-            .device()
-            .allocate_command_buffers(&alloc_info)
-    }
-    .map_err(|e| {
-        GraphicsError::ResourceCreationFailed(format!(
-            "Failed to allocate present command buffers: {:?}",
-            e
-        ))
-    })?;
-
-    log::info!(
-        "Created Vulkan swapchain: {}x{} with {} images, {} frames in flight",
-        extent.width,
-        extent.height,
-        images.len(),
-        MAX_FRAMES_IN_FLIGHT
-    );
-
-    Ok(VulkanSwapchain {
-        swapchain,
-        images,
-        image_views,
-        format: surface_format.format,
-        extent,
-        current_image_index: 0,
-        image_available_semaphores,
-        render_finished_semaphores,
-        in_flight_fences,
-        present_command_buffers,
-        current_frame: 0,
-    })
-}
-
-#[cfg(feature = "vulkan-backend")]
-fn convert_texture_format_to_vk(format: TextureFormat) -> vk::Format {
-    match format {
-        TextureFormat::R8Unorm => vk::Format::R8_UNORM,
-        TextureFormat::R8Snorm => vk::Format::R8_SNORM,
-        TextureFormat::R8Uint => vk::Format::R8_UINT,
-        TextureFormat::R8Sint => vk::Format::R8_SINT,
-        TextureFormat::R16Unorm => vk::Format::R16_UNORM,
-        TextureFormat::R16Float => vk::Format::R16_SFLOAT,
-        TextureFormat::Rg8Unorm => vk::Format::R8G8_UNORM,
-        TextureFormat::R32Float => vk::Format::R32_SFLOAT,
-        TextureFormat::R32Uint => vk::Format::R32_UINT,
-        TextureFormat::Rg16Float => vk::Format::R16G16_SFLOAT,
-        TextureFormat::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,
-        TextureFormat::Rgba8UnormSrgb => vk::Format::R8G8B8A8_SRGB,
-        TextureFormat::Bgra8Unorm => vk::Format::B8G8R8A8_UNORM,
-        TextureFormat::Bgra8UnormSrgb => vk::Format::B8G8R8A8_SRGB,
-        TextureFormat::Rgba16Float => vk::Format::R16G16B16A16_SFLOAT,
-        TextureFormat::Rg32Float => vk::Format::R32G32_SFLOAT,
-        TextureFormat::Rgba32Float => vk::Format::R32G32B32A32_SFLOAT,
-        TextureFormat::Depth16Unorm => vk::Format::D16_UNORM,
-        TextureFormat::Depth24Plus => vk::Format::D24_UNORM_S8_UINT,
-        TextureFormat::Depth24PlusStencil8 => vk::Format::D24_UNORM_S8_UINT,
-        TextureFormat::Depth32Float => vk::Format::D32_SFLOAT,
-        TextureFormat::Depth32FloatStencil8 => vk::Format::D32_SFLOAT_S8_UINT,
-    }
-}
-
-#[cfg(feature = "vulkan-backend")]
-fn convert_present_mode_to_vk(mode: PresentMode) -> vk::PresentModeKHR {
-    match mode {
-        PresentMode::Immediate => vk::PresentModeKHR::IMMEDIATE,
-        PresentMode::Mailbox => vk::PresentModeKHR::MAILBOX,
-        PresentMode::Fifo => vk::PresentModeKHR::FIFO,
-        PresentMode::FifoRelaxed => vk::PresentModeKHR::FIFO_RELAXED,
-    }
-}
 
 #[cfg(test)]
 mod tests {

@@ -201,3 +201,13 @@ pub fn convert_store_op(op: &crate::graph::StoreOp) -> vk::AttachmentStoreOp {
         crate::graph::StoreOp::DontCare => vk::AttachmentStoreOp::DONT_CARE,
     }
 }
+
+/// Convert PresentMode to Vulkan present mode.
+pub fn convert_present_mode(mode: crate::swapchain::PresentMode) -> vk::PresentModeKHR {
+    match mode {
+        crate::swapchain::PresentMode::Immediate => vk::PresentModeKHR::IMMEDIATE,
+        crate::swapchain::PresentMode::Mailbox => vk::PresentModeKHR::MAILBOX,
+        crate::swapchain::PresentMode::Fifo => vk::PresentModeKHR::FIFO,
+        crate::swapchain::PresentMode::FifoRelaxed => vk::PresentModeKHR::FIFO_RELAXED,
+    }
+}

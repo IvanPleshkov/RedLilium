@@ -225,3 +225,13 @@ pub fn convert_step_mode(mode: VertexStepMode) -> wgpu::VertexStepMode {
         VertexStepMode::Instance => wgpu::VertexStepMode::Instance,
     }
 }
+
+/// Convert PresentMode to wgpu present mode.
+pub fn convert_present_mode(mode: crate::swapchain::PresentMode) -> wgpu::PresentMode {
+    match mode {
+        crate::swapchain::PresentMode::Immediate => wgpu::PresentMode::Immediate,
+        crate::swapchain::PresentMode::Mailbox => wgpu::PresentMode::Mailbox,
+        crate::swapchain::PresentMode::Fifo => wgpu::PresentMode::Fifo,
+        crate::swapchain::PresentMode::FifoRelaxed => wgpu::PresentMode::FifoRelaxed,
+    }
+}

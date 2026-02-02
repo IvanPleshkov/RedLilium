@@ -5,10 +5,11 @@
 
 mod allocator;
 mod command;
-mod conversion;
+pub(crate) mod conversion;
 mod debug;
 mod device;
 mod instance;
+pub mod swapchain;
 mod sync;
 
 use std::sync::Arc;
