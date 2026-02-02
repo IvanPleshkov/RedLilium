@@ -145,6 +145,57 @@ Different synchronization primitives are used at different levels:
 | Graph → Graph | Semaphores | GPU-GPU sync within a frame |
 | Frame → Frame | Fences | CPU-GPU sync across frames |
 
+### Automatic Texture Layout Tracking (Vulkan Backend)
+
+The Vulkan backend automatically tracks texture layouts and generates memory barriers,
+eliminating the need for manual layout management. This system ensures correct
+synchronization while optimizing barrier placement.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    TextureLayoutTracker                          │
+│  Per-frame tracking of texture layouts (one state per frame     │
+│  in flight to handle async GPU execution)                        │
+├─────────────────────────────────────────────────────────────────┤
+│                     BarrierBatch                                 │
+│  Collects all barriers needed for a pass, submits them once     │
+│  with optimal pipeline stage masks                               │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**How it works:**
+
+1. **Pass Configuration**: Each pass declares its resource usage via render targets,
+   material bindings, and transfer operations.
+
+2. **Usage Inference**: At encode time, `infer_resource_usage()` extracts texture
+   usages from the pass configuration:
+   - Color attachments → `RenderTargetWrite`
+   - Depth attachments → `DepthStencilWrite` or `DepthStencilReadOnly`
+   - Material textures → `ShaderRead`
+   - Transfer sources → `TransferRead`
+   - Transfer destinations → `TransferWrite`
+
+3. **Barrier Generation**: Before encoding each pass, the system:
+   - Queries current layout from the tracker
+   - Determines required layout from usage
+   - Generates barrier if layout differs
+   - Updates tracked layout
+
+4. **Batched Submission**: All barriers for a pass are collected and submitted
+   in a single `vkCmdPipelineBarrier` call with combined stage masks.
+
+**Example transition sequence:**
+
+```
+Pass 1 (Render): texture Undefined → ColorAttachment
+Pass 2 (Sample): texture ColorAttachment → ShaderReadOnly
+Pass 3 (Copy):   texture ShaderReadOnly → TransferSrc
+```
+
+The wgpu backend handles layout tracking internally, so this system is
+Vulkan-specific.
+
 ### Frame Overlap (Pipelining)
 
 With 2 frames in flight, the CPU and GPU work in parallel:

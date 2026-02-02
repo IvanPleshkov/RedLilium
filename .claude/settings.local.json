@@ -28,7 +28,9 @@
       "WebSearch",
       "WebFetch(domain:docs.vulkan.org)",
       "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"& ''./scripts/test-all.ps1'' -SkipWeb\")",
-      "Bash(set RUST_LOG=warn)"
+      "Bash(set RUST_LOG=warn)",
+      "Bash(tree:*)",
+      "Bash(ls -la \"d:\\\\github\\\\vibeengine\\\\graphics\\\\src\"\" && echo \"===\" && ls -la \"d:githubvibeenginegraphicssrcbackend\"\")"
     ],
     "deny": [
       "Read(claude_requests_history/**)",

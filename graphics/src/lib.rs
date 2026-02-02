@@ -84,6 +84,7 @@ pub use graph::{
     IndirectDrawCommand, LoadOp, Pass, PassHandle, RenderGraph, RenderTarget, RenderTargetConfig,
     StoreOp, TextureCopyLocation, TextureCopyRegion, TextureOrigin, TransferConfig,
     TransferOperation, TransferPass,
+    resource_usage::{PassResourceUsage, TextureAccessMode, TextureUsageDecl},
 };
 pub use instance::{
     AdapterInfo, AdapterType, BackendType, GraphicsInstance, InstanceParameters, WgpuBackendType,

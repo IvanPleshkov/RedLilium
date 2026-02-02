@@ -39,6 +39,7 @@
 //! ```
 
 mod pass;
+pub mod resource_usage;
 mod target;
 mod transfer;
 

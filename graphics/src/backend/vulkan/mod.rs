@@ -4,12 +4,14 @@
 //! It includes support for validation layers in debug builds.
 
 mod allocator;
+pub mod barriers;
 mod command;
 pub(crate) mod conversion;
 mod debug;
 pub mod deferred;
 mod device;
 mod instance;
+pub mod layout;
 pub mod swapchain;
 mod sync;
 
@@ -26,6 +28,10 @@ use crate::types::{BufferDescriptor, SamplerDescriptor, TextureDescriptor};
 use super::{GpuBuffer, GpuFence, GpuSampler, GpuTexture};
 
 pub use deferred::{DeferredDestructor, DeferredResource, MAX_FRAMES_IN_FLIGHT};
+pub use layout::{TextureLayout, TextureLayoutTracker, TextureUsageGraph};
+
+use self::barriers::BarrierBatch;
+use self::layout::TextureId;
 
 /// A texture view for a Vulkan surface texture (swapchain image).
 ///
@@ -124,6 +130,9 @@ pub struct VulkanBackend {
     swapchain_loader: ash::khr::swapchain::Device,
     /// Deferred destructor for safe resource cleanup.
     deferred_destructor: Arc<DeferredDestructor>,
+    /// Layout tracker for automatic barrier placement.
+    /// Uses interior mutability since execute_graph takes &self.
+    layout_tracker: Mutex<TextureLayoutTracker>,
 }
 
 impl std::fmt::Debug for VulkanBackend {
@@ -189,6 +198,9 @@ impl VulkanBackend {
         // Load swapchain extension
         let swapchain_loader = ash::khr::swapchain::Device::new(&instance, &device);
 
+        // Create layout tracker for automatic barrier placement
+        let layout_tracker = Mutex::new(TextureLayoutTracker::new(MAX_FRAMES_IN_FLIGHT));
+
         log::info!(
             "Vulkan backend initialized (validation: {})",
             validation_enabled
@@ -210,6 +222,7 @@ impl VulkanBackend {
             surface_loader,
             swapchain_loader,
             deferred_destructor,
+            layout_tracker,
         })
     }
 
@@ -263,7 +276,10 @@ impl VulkanBackend {
         &self.deferred_destructor
     }
 
-    /// Advance the deferred destructor to the next frame.
+    /// Advance to the next frame.
+    ///
+    /// This advances both the deferred destructor (to clean up old resources)
+    /// and the layout tracker (to reset layout state for the new frame).
     ///
     /// This should be called after waiting on a frame fence to ensure
     /// the GPU has finished with resources from older frames.
@@ -275,6 +291,14 @@ impl VulkanBackend {
     pub unsafe fn advance_frame(&self) {
         // SAFETY: Caller guarantees GPU has finished with old resources
         unsafe { self.deferred_destructor.advance_frame() };
+
+        // Advance layout tracker to new frame (resets layout state)
+        self.layout_tracker.lock().advance_frame();
+    }
+
+    /// Get the layout tracker for direct access (for testing).
+    pub fn layout_tracker(&self) -> &Mutex<TextureLayoutTracker> {
+        &self.layout_tracker
     }
 
     /// Check if the current physical device supports presentation to a surface.
@@ -694,6 +718,13 @@ impl VulkanBackend {
         // Process each pass in compiled order
         for handle in compiled.pass_order() {
             let pass = &passes[handle.index()];
+
+            // Infer resource usage and generate barriers
+            let usage = pass.infer_resource_usage();
+            let barriers = self.generate_barriers_for_pass(&usage);
+            barriers.submit(&self.device, cmd);
+
+            // Encode the pass
             self.encode_pass(cmd, pass)?;
         }
 
@@ -743,6 +774,61 @@ impl VulkanBackend {
         }
 
         Ok(())
+    }
+
+    /// Generate barriers for a pass's resource usage.
+    ///
+    /// This examines the texture usages declared by the pass, determines
+    /// required layout transitions, and updates the layout tracker state.
+    fn generate_barriers_for_pass(
+        &self,
+        usage: &crate::graph::resource_usage::PassResourceUsage,
+    ) -> BarrierBatch {
+        use crate::graph::resource_usage::TextureAccessMode;
+
+        let mut tracker = self.layout_tracker.lock();
+        let mut batch = BarrierBatch::new();
+
+        for decl in &usage.texture_usages {
+            // Get Vulkan image info from the texture
+            let GpuTexture::Vulkan { image, .. } = decl.texture.gpu_handle() else {
+                continue;
+            };
+
+            let texture_id = TextureId::from(*image);
+            let current_layout = tracker.get_layout(texture_id);
+            let required_layout = decl.access.to_layout();
+
+            // Determine aspect mask based on access mode and format
+            let is_depth = matches!(
+                decl.access,
+                TextureAccessMode::DepthStencilWrite | TextureAccessMode::DepthStencilReadOnly
+            ) || decl.texture.format().is_depth_stencil();
+
+            let aspect_mask = if is_depth {
+                if decl.texture.format().has_stencil() {
+                    vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+                } else {
+                    vk::ImageAspectFlags::DEPTH
+                }
+            } else {
+                vk::ImageAspectFlags::COLOR
+            };
+
+            // Add barrier if layout change is needed
+            batch.add_image_barrier(
+                texture_id,
+                *image,
+                current_layout,
+                required_layout,
+                aspect_mask,
+            );
+
+            // Update tracked state
+            tracker.set_layout(texture_id, required_layout);
+        }
+
+        batch
     }
 
     /// Write data to a buffer.
@@ -893,59 +979,24 @@ impl VulkanBackend {
             })
             .unwrap_or_default();
 
-        // Transition images to the appropriate layouts
-        for attachment in &render_targets.color_attachments {
-            match &attachment.target {
-                RenderTarget::Texture { texture, .. } => {
-                    if let GpuTexture::Vulkan { image, .. } = texture.gpu_handle() {
-                        self.transition_image_layout(
-                            cmd,
-                            *image,
-                            vk::ImageLayout::UNDEFINED,
-                            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                            vk::ImageAspectFlags::COLOR,
-                        );
-                    }
-                }
-                RenderTarget::Surface { vulkan_view, .. } => {
-                    if let Some(surface_view) = vulkan_view {
-                        self.transition_image_layout(
-                            cmd,
-                            surface_view.image(),
-                            vk::ImageLayout::UNDEFINED,
-                            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                            vk::ImageAspectFlags::COLOR,
-                        );
-                    }
-                }
-            }
-        }
+        // NOTE: Layout transitions are now handled automatically by the barrier
+        // generation system in execute_graph() before each pass is encoded.
+        // Surface images (swapchain) are handled specially below.
 
-        if let Some(attachment) = &render_targets.depth_stencil_attachment {
-            match &attachment.target {
-                RenderTarget::Texture { texture, .. } => {
-                    if let GpuTexture::Vulkan { image, .. } = texture.gpu_handle() {
-                        self.transition_image_layout(
-                            cmd,
-                            *image,
-                            vk::ImageLayout::UNDEFINED,
-                            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                            vk::ImageAspectFlags::DEPTH,
-                        );
-                    }
-                }
-                RenderTarget::Surface { vulkan_view, .. } => {
-                    // Depth attachments are typically not surfaces, but handle for completeness
-                    if let Some(surface_view) = vulkan_view {
-                        self.transition_image_layout(
-                            cmd,
-                            surface_view.image(),
-                            vk::ImageLayout::UNDEFINED,
-                            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                            vk::ImageAspectFlags::DEPTH,
-                        );
-                    }
-                }
+        // Transition surface images (not tracked by the automatic system)
+        for attachment in &render_targets.color_attachments {
+            if let RenderTarget::Surface {
+                vulkan_view: Some(surface_view),
+                ..
+            } = &attachment.target
+            {
+                self.transition_image_layout(
+                    cmd,
+                    surface_view.image(),
+                    vk::ImageLayout::UNDEFINED,
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    vk::ImageAspectFlags::COLOR,
+                );
             }
         }
 
@@ -1057,9 +1108,7 @@ impl VulkanBackend {
             }
             TransferOperation::TextureToBuffer { src, dst, regions } => {
                 let GpuTexture::Vulkan {
-                    image: src_image,
-                    format,
-                    ..
+                    image: src_image, ..
                 } = src.gpu_handle()
                 else {
                     return Ok(());
@@ -1071,18 +1120,8 @@ impl VulkanBackend {
                     return Ok(());
                 };
 
-                // Transition image to transfer src
-                self.transition_image_layout(
-                    cmd,
-                    *src_image,
-                    vk::ImageLayout::UNDEFINED,
-                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                    if format.has_depth() {
-                        vk::ImageAspectFlags::DEPTH
-                    } else {
-                        vk::ImageAspectFlags::COLOR
-                    },
-                );
+                // NOTE: Layout transitions are now handled automatically by the barrier
+                // generation system in execute_graph() before each pass is encoded.
 
                 let block_size = src.format().block_size();
 
@@ -1156,14 +1195,8 @@ impl VulkanBackend {
                     return Ok(());
                 };
 
-                // Transition image to transfer dst
-                self.transition_image_layout(
-                    cmd,
-                    *dst_image,
-                    vk::ImageLayout::UNDEFINED,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    vk::ImageAspectFlags::COLOR,
-                );
+                // NOTE: Layout transitions are now handled automatically by the barrier
+                // generation system in execute_graph() before each pass is encoded.
 
                 let block_size = dst.format().block_size();
 
@@ -1234,21 +1267,8 @@ impl VulkanBackend {
                     return Ok(());
                 };
 
-                // Transition images
-                self.transition_image_layout(
-                    cmd,
-                    *src_image,
-                    vk::ImageLayout::UNDEFINED,
-                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                    vk::ImageAspectFlags::COLOR,
-                );
-                self.transition_image_layout(
-                    cmd,
-                    *dst_image,
-                    vk::ImageLayout::UNDEFINED,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    vk::ImageAspectFlags::COLOR,
-                );
+                // NOTE: Layout transitions are now handled automatically by the barrier
+                // generation system in execute_graph() before each pass is encoded.
 
                 let copy_regions: Vec<vk::ImageCopy> = regions
                     .iter()
@@ -1401,22 +1421,5 @@ impl VulkanBackend {
                 &[barrier],
             );
         }
-    }
-}
-
-// Helper trait for vk::Format to check depth
-trait FormatExt {
-    fn has_depth(&self) -> bool;
-}
-
-impl FormatExt for vk::Format {
-    fn has_depth(&self) -> bool {
-        matches!(
-            *self,
-            vk::Format::D16_UNORM
-                | vk::Format::D32_SFLOAT
-                | vk::Format::D24_UNORM_S8_UINT
-                | vk::Format::D32_SFLOAT_S8_UINT
-        )
     }
 }

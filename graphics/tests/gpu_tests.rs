@@ -28,10 +28,10 @@ mod common;
 use rstest::rstest;
 
 use common::{
-    Backend, ExpectedPixel, LEFT_HALF_QUAD_VERTICES, TestContext, create_left_half_quad,
-    create_material_instance, create_mrt_pass, create_render_pass_with_depth,
-    create_simple_render_pass, create_solid_color_material, generate_test_pattern, get_pixel,
-    readback_buffer_size, verify_pixel, write_quad_vertices,
+    Backend, ExpectedPixel, FULLSCREEN_QUAD_VERTICES, LEFT_HALF_QUAD_VERTICES, TestContext,
+    create_fullscreen_quad, create_left_half_quad, create_material_instance, create_mrt_pass,
+    create_render_pass_with_depth, create_simple_render_pass, create_solid_color_material,
+    generate_test_pattern, get_pixel, readback_buffer_size, verify_pixel, write_quad_vertices,
 };
 use redlilium_graphics::{
     BufferUsage, RenderGraph, TextureFormat, TextureUsage, TransferConfig, TransferOperation,
@@ -722,5 +722,146 @@ fn test_shader_render_half_quad(#[case] backend: Backend) {
         right_x,
         center_y,
         right_pixel
+    );
+}
+
+// ============================================================================
+// Layout Tracking Integration Test
+// ============================================================================
+
+/// Test automatic texture layout tracking and barrier placement.
+///
+/// This integration test verifies that the automatic barrier generation system
+/// correctly handles texture layout transitions across multiple passes:
+///
+/// 1. **Pass 1 (Render)**: Render a red quad to RT1
+///    - Transition: RT1 Undefined → ColorAttachment
+///
+/// 2. **Pass 2 (Render)**: Render a green quad to RT2
+///    - Transition: RT2 Undefined → ColorAttachment
+///    - RT1 remains in ColorAttachment (could be transitioned if we were sampling it)
+///
+/// 3. **Pass 3 (Copy)**: Copy RT1 to readback buffer
+///    - Transition: RT1 ColorAttachment → TransferSrc
+///
+/// 4. **Pass 4 (Copy)**: Copy RT2 to readback buffer 2
+///    - Transition: RT2 ColorAttachment → TransferSrc
+///
+/// The test verifies that:
+/// - No Vulkan validation errors occur (automatic barriers are correct)
+/// - Both render targets have the expected colors after readback
+///
+/// Note: This test doesn't use texture sampling due to current backend limitations.
+/// The texture sampling test will be enabled once the wgpu backend supports
+/// material binding layouts in pipeline creation.
+#[rstest]
+#[case::dummy(Backend::Dummy)]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_layout_tracking_multi_pass(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new(backend) else {
+        eprintln!("Backend {:?} not available, skipping", backend);
+        return;
+    };
+
+    // Skip dummy backend since it doesn't actually render
+    if backend == Backend::Dummy {
+        eprintln!("Dummy backend doesn't render, skipping pixel verification");
+        return;
+    }
+
+    const WIDTH: u32 = 16;
+    const HEIGHT: u32 = 16;
+    const CLEAR_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 1.0]; // Black background
+
+    // Create render targets that will go through multiple layout transitions
+    let rt1 = ctx.create_render_target(WIDTH, HEIGHT);
+    let rt2 = ctx.create_render_target(WIDTH, HEIGHT);
+
+    // Create readback buffers for final verification
+    let readback_size = readback_buffer_size(WIDTH, HEIGHT, 4);
+    let readback1 = ctx.create_readback_buffer(readback_size);
+    let readback2 = ctx.create_readback_buffer(readback_size);
+
+    // Create quad mesh for rendering
+    let quad = create_fullscreen_quad(&ctx);
+    write_quad_vertices(&ctx, &quad, &FULLSCREEN_QUAD_VERTICES);
+
+    // Create material for solid red rendering
+    let red_material = create_solid_color_material(&ctx);
+    let red_instance = create_material_instance(red_material);
+
+    // Build render graph
+    let mut graph = RenderGraph::new();
+
+    // Pass 1: Render red quad to RT1
+    // This tests: RT1: Undefined → ColorAttachment
+    let mut pass1 = create_simple_render_pass("render_to_rt1", rt1.clone(), CLEAR_COLOR);
+    pass1.add_draw(quad.clone(), red_instance.clone());
+    let pass1_handle = graph.add_graphics_pass(pass1);
+
+    // Pass 2: Clear RT2 to green (different color to verify both passes work)
+    // This tests: RT2: Undefined → ColorAttachment
+    // Using different clear color instead of shader to avoid binding layout issues
+    let pass2 = create_simple_render_pass(
+        "clear_rt2_green",
+        rt2.clone(),
+        [0.0, 1.0, 0.0, 1.0], // Green
+    );
+    let pass2_handle = graph.add_graphics_pass(pass2);
+    // Pass 2 doesn't depend on Pass 1 - they're independent
+    // But we add dependency to ensure consistent ordering for the test
+    graph.add_dependency(pass2_handle, pass1_handle);
+
+    // Pass 3: Readback RT1 to buffer
+    // This tests: RT1: ColorAttachment → TransferSrc
+    let mut pass3 = TransferPass::new("readback_rt1".into());
+    pass3.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::readback_texture_whole(rt1, readback1.clone()),
+    ));
+    let pass3_handle = graph.add_transfer_pass(pass3);
+    graph.add_dependency(pass3_handle, pass1_handle);
+
+    // Pass 4: Readback RT2 to buffer
+    // This tests: RT2: ColorAttachment → TransferSrc
+    let mut pass4 = TransferPass::new("readback_rt2".into());
+    pass4.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::readback_texture_whole(rt2, readback2.clone()),
+    ));
+    let pass4_handle = graph.add_transfer_pass(pass4);
+    graph.add_dependency(pass4_handle, pass2_handle);
+
+    // Execute the graph
+    // If automatic barriers are incorrect, this would either:
+    // - Cause Vulkan validation errors (layout mismatch)
+    // - Produce incorrect pixel values (data hazards)
+    ctx.execute_graph(&graph);
+
+    // Verify graph structure
+    let compiled = graph.compile().expect("Graph should compile");
+    assert_eq!(compiled.pass_order().len(), 4, "Should have 4 passes");
+
+    // Read back and verify RT1 (should be red from the rendered quad)
+    let data1 = ctx.device.read_buffer(&readback1, 0, readback_size);
+    let center_x = WIDTH / 2;
+    let center_y = HEIGHT / 2;
+    let rt1_pixel = get_pixel(&data1, WIDTH, center_x, center_y);
+    assert!(
+        verify_pixel(&data1, WIDTH, center_x, center_y, ExpectedPixel::RED, 2),
+        "RT1 center pixel ({}, {}) should be red, but got: {:?}",
+        center_x,
+        center_y,
+        rt1_pixel
+    );
+
+    // Read back and verify RT2 (should be green from clear color)
+    let data2 = ctx.device.read_buffer(&readback2, 0, readback_size);
+    let rt2_pixel = get_pixel(&data2, WIDTH, center_x, center_y);
+    assert!(
+        verify_pixel(&data2, WIDTH, center_x, center_y, ExpectedPixel::GREEN, 2),
+        "RT2 center pixel ({}, {}) should be green, but got: {:?}",
+        center_x,
+        center_y,
+        rt2_pixel
     );
 }

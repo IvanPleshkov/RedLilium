@@ -2,12 +2,14 @@
 
 use std::sync::Arc;
 
+use crate::materials::BoundResource;
 use crate::materials::MaterialInstance;
 use crate::mesh::Mesh;
 use crate::resources::Buffer;
 
-use super::target::RenderTargetConfig;
-use super::transfer::TransferConfig;
+use super::resource_usage::{PassResourceUsage, TextureAccessMode};
+use super::target::{RenderTarget, RenderTargetConfig};
+use super::transfer::{TransferConfig, TransferOperation};
 
 /// A pass in the render graph.
 ///
@@ -100,6 +102,18 @@ impl Pass {
     /// Check if this is a compute pass.
     pub fn is_compute(&self) -> bool {
         matches!(self, Pass::Compute(_))
+    }
+
+    /// Infer resource usage from the pass configuration.
+    ///
+    /// This examines the pass's render targets, material bindings, and transfer
+    /// operations to determine which textures are used and how.
+    pub fn infer_resource_usage(&self) -> PassResourceUsage {
+        match self {
+            Pass::Graphics(p) => p.infer_resource_usage(),
+            Pass::Transfer(p) => p.infer_resource_usage(),
+            Pass::Compute(p) => p.infer_resource_usage(),
+        }
     }
 }
 
@@ -650,6 +664,69 @@ impl GraphicsPass {
     pub fn has_indirect_draws(&self) -> bool {
         !self.indirect_draw_commands.is_empty()
     }
+
+    /// Infer resource usage from the pass configuration.
+    ///
+    /// This examines render targets and material bindings to determine
+    /// which textures are used and how (as render targets vs sampled).
+    pub fn infer_resource_usage(&self) -> PassResourceUsage {
+        let mut usage = PassResourceUsage::new();
+
+        // Infer from render targets
+        if let Some(targets) = &self.render_targets {
+            // Color attachments are written to
+            for color in &targets.color_attachments {
+                if let RenderTarget::Texture { texture, .. } = &color.target {
+                    usage.add_texture(Arc::clone(texture), TextureAccessMode::RenderTargetWrite);
+                }
+                // Resolve targets are also written to
+                if let Some(RenderTarget::Texture { texture, .. }) = &color.resolve_target {
+                    usage.add_texture(Arc::clone(texture), TextureAccessMode::RenderTargetWrite);
+                }
+            }
+
+            // Depth/stencil attachment
+            if let Some(depth) = &targets.depth_stencil_attachment
+                && let RenderTarget::Texture { texture, .. } = &depth.target
+            {
+                let access = if depth.depth_read_only && depth.stencil_read_only {
+                    TextureAccessMode::DepthStencilReadOnly
+                } else {
+                    TextureAccessMode::DepthStencilWrite
+                };
+                usage.add_texture(Arc::clone(texture), access);
+            }
+        }
+
+        // Infer from draw commands (textures in material bindings are sampled)
+        for cmd in &self.draw_commands {
+            Self::extract_material_textures(&cmd.material, &mut usage);
+        }
+
+        // Infer from indirect draw commands
+        for cmd in &self.indirect_draw_commands {
+            Self::extract_material_textures(&cmd.material, &mut usage);
+        }
+
+        usage
+    }
+
+    /// Extract textures from a material instance's bindings.
+    fn extract_material_textures(material: &MaterialInstance, usage: &mut PassResourceUsage) {
+        for group in material.binding_groups() {
+            for entry in &group.entries {
+                match &entry.resource {
+                    BoundResource::Texture(tex) => {
+                        usage.add_texture(Arc::clone(tex), TextureAccessMode::ShaderRead);
+                    }
+                    BoundResource::CombinedTextureSampler { texture, .. } => {
+                        usage.add_texture(Arc::clone(texture), TextureAccessMode::ShaderRead);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -696,6 +773,36 @@ impl TransferPass {
             .map(|c| c.has_operations())
             .unwrap_or(false)
     }
+
+    /// Infer resource usage from the transfer operations.
+    ///
+    /// This examines transfer operations to determine which textures
+    /// are used as sources or destinations.
+    pub fn infer_resource_usage(&self) -> PassResourceUsage {
+        let mut usage = PassResourceUsage::new();
+
+        if let Some(config) = &self.transfer_config {
+            for op in &config.operations {
+                match op {
+                    TransferOperation::TextureToBuffer { src, .. } => {
+                        usage.add_texture(Arc::clone(src), TextureAccessMode::TransferRead);
+                    }
+                    TransferOperation::BufferToTexture { dst, .. } => {
+                        usage.add_texture(Arc::clone(dst), TextureAccessMode::TransferWrite);
+                    }
+                    TransferOperation::TextureToTexture { src, dst, .. } => {
+                        usage.add_texture(Arc::clone(src), TextureAccessMode::TransferRead);
+                        usage.add_texture(Arc::clone(dst), TextureAccessMode::TransferWrite);
+                    }
+                    TransferOperation::BufferToBuffer { .. } => {
+                        // No texture usage
+                    }
+                }
+            }
+        }
+
+        usage
+    }
 }
 
 // ============================================================================
@@ -720,5 +827,14 @@ impl ComputePass {
     /// Get the pass name.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Infer resource usage from the compute pass.
+    ///
+    /// Currently returns empty usage as compute pass configuration
+    /// is not yet implemented.
+    pub fn infer_resource_usage(&self) -> PassResourceUsage {
+        // TODO: Extract usage from compute shader bindings when implemented
+        PassResourceUsage::new()
     }
 }

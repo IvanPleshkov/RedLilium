@@ -7,12 +7,12 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use redlilium_graphics::{
-    BackendType, Buffer, BufferDescriptor, BufferUsage, ColorAttachment, DepthStencilAttachment,
-    FramePipeline, GraphicsDevice, GraphicsInstance, GraphicsPass, InstanceParameters, LoadOp,
-    Material, MaterialDescriptor, MaterialInstance, Mesh, MeshDescriptor, RenderGraph,
-    RenderTargetConfig, ShaderSource, StoreOp, Texture, TextureDescriptor, TextureFormat,
-    TextureUsage, TransferConfig, TransferOperation, TransferPass, VertexAttribute,
-    VertexBufferLayout, VertexLayout, WgpuBackendType,
+    BackendType, BindingGroup, Buffer, BufferDescriptor, BufferUsage, ColorAttachment,
+    DepthStencilAttachment, FramePipeline, GraphicsDevice, GraphicsInstance, GraphicsPass,
+    InstanceParameters, LoadOp, Material, MaterialDescriptor, MaterialInstance, Mesh,
+    MeshDescriptor, RenderGraph, RenderTargetConfig, SamplerDescriptor, ShaderSource, StoreOp,
+    Texture, TextureDescriptor, TextureFormat, TextureUsage, TransferConfig, TransferOperation,
+    TransferPass, VertexAttribute, VertexBufferLayout, VertexLayout, WgpuBackendType,
 };
 
 /// Compute the aligned bytes per row for a texture (256-byte alignment for wgpu).
@@ -601,6 +601,36 @@ pub fn generate_solid_color(width: u32, height: u32, color: ExpectedPixel) -> Ve
 // Shader Helpers
 // ============================================================================
 
+/// Simple WGSL shader that samples a texture and outputs its color.
+/// Used for pass-to-pass texture read tests (e.g., layout tracking integration test).
+pub const TEXTURE_SAMPLE_SHADER: &str = r#"
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(3) uv: vec2<f32>,
+}
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@group(0) @binding(0) var input_texture: texture_2d<f32>;
+@group(0) @binding(1) var input_sampler: sampler;
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.position = vec4<f32>(in.position, 1.0);
+    out.uv = in.uv;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return textureSample(input_texture, input_sampler, in.uv);
+}
+"#;
+
 /// Simple WGSL shader that outputs a solid red color.
 /// The vertex shader reads position from vertex buffer (location 0).
 pub const SOLID_RED_SHADER: &str = r#"
@@ -710,4 +740,77 @@ pub fn write_quad_vertices(ctx: &TestContext, mesh: &Mesh, vertices: &[QuadVerte
         )
     };
     ctx.device.write_buffer(vb, 0, bytes);
+}
+
+/// Create a material that samples a texture and outputs its color.
+/// Used for pass-to-pass texture read tests.
+#[allow(dead_code)]
+pub fn create_texture_sample_material(ctx: &TestContext) -> Arc<Material> {
+    use redlilium_graphics::BindingLayout;
+
+    // Create binding layout for group 0: texture at binding 0, sampler at binding 1
+    let binding_layout = Arc::new(
+        BindingLayout::new()
+            .with_texture(0)
+            .with_sampler(1)
+            .with_label("texture_sample_bindings"),
+    );
+
+    ctx.device
+        .create_material(
+            &MaterialDescriptor::new()
+                .with_shader(ShaderSource::vertex(
+                    TEXTURE_SAMPLE_SHADER.as_bytes().to_vec(),
+                    "vs_main",
+                ))
+                .with_shader(ShaderSource::fragment(
+                    TEXTURE_SAMPLE_SHADER.as_bytes().to_vec(),
+                    "fs_main",
+                ))
+                .with_vertex_layout(quad_vertex_layout())
+                .with_binding_layout(binding_layout)
+                .with_label("texture_sample_material"),
+        )
+        .expect("Failed to create texture sample material")
+}
+
+/// Create a material instance that samples from a texture.
+/// Binds the texture to binding 0 and sampler to binding 1 in a binding group.
+#[allow(dead_code)]
+pub fn create_texture_sample_instance(
+    ctx: &TestContext,
+    material: Arc<Material>,
+    texture: Arc<Texture>,
+) -> Arc<MaterialInstance> {
+    // Create a sampler for the texture (nearest filtering with clamp to edge)
+    let sampler = ctx
+        .device
+        .create_sampler(&SamplerDescriptor::nearest().with_label("test_sampler"))
+        .expect("Failed to create sampler");
+
+    // Create binding group with texture at binding 0 and sampler at binding 1
+    let binding_group = Arc::new(
+        BindingGroup::new()
+            .with_texture(0, texture)
+            .with_sampler(1, sampler)
+            .with_label("texture_sample_bindings"),
+    );
+
+    Arc::new(
+        MaterialInstance::new(material)
+            .with_binding_group(binding_group)
+            .with_label("texture_sample_instance"),
+    )
+}
+
+/// Create a render target that can be both rendered to AND sampled from.
+/// This is needed for pass-to-pass texture use (layout tracking tests).
+#[allow(dead_code)]
+pub fn create_sampleable_render_target(ctx: &TestContext, width: u32, height: u32) -> Arc<Texture> {
+    ctx.create_texture_2d(
+        width,
+        height,
+        TextureFormat::Rgba8Unorm,
+        TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_SRC,
+    )
 }

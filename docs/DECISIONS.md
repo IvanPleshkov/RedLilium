@@ -637,3 +637,140 @@ Call `vkDeviceWaitIdle()` in every resource destructor.
 - ⚠️ **Memory overhead**: Resources held slightly longer than strictly necessary
 - ⚠️ **Vulkan-specific**: Only the Vulkan backend needs this complexity
 - ⚠️ **Frame timing dependent**: Resources destroyed at frame boundaries, not immediately
+
+---
+
+## ADR-017: Automatic Texture Layout Tracking and Barrier Placement
+
+**Date**: 2026-02-02
+**Status**: Accepted
+
+### Context
+
+Vulkan requires explicit image layout transitions via pipeline barriers. Each texture has a current "layout" (e.g., `COLOR_ATTACHMENT_OPTIMAL`, `SHADER_READ_ONLY_OPTIMAL`) that must match what the GPU expects. Transitioning between layouts requires:
+
+1. Knowing the current layout of each texture
+2. Knowing the required layout for the upcoming operation
+3. Issuing a `vkCmdPipelineBarrier` with appropriate stage and access masks
+
+Manual barrier management is error-prone:
+- Easy to forget transitions
+- Easy to use wrong old/new layouts
+- Leads to Vulkan validation errors or undefined behavior
+- Each pass must track what layouts textures were left in
+
+The original implementation always used `VK_IMAGE_LAYOUT_UNDEFINED` as the old layout, which:
+- Works but may discard texture contents
+- Prevents multi-pass workflows where a texture is rendered then sampled
+- No optimization for consecutive passes using the same layout
+
+### Decision
+
+Implement automatic texture layout tracking for the Vulkan backend:
+
+**1. Per-Frame Layout State**
+
+Track texture layouts per frame-in-flight since the GPU may be processing old frames while the CPU records new ones:
+
+```rust
+pub struct TextureLayoutTracker {
+    frame_states: Vec<FrameLayoutState>,  // One per frame in flight
+    current_frame: usize,
+}
+
+pub struct FrameLayoutState {
+    layouts: HashMap<TextureId, TextureLayout>,
+}
+```
+
+**2. Usage Inference from Pass Configuration**
+
+Instead of requiring explicit layout declarations, infer texture usage from pass configuration:
+
+```rust
+impl GraphicsPass {
+    pub fn infer_resource_usage(&self) -> PassResourceUsage {
+        let mut usage = PassResourceUsage::new();
+        // Color attachments → RenderTargetWrite
+        // Depth attachments → DepthStencilWrite or DepthStencilReadOnly
+        // Material textures → ShaderRead
+        usage
+    }
+}
+```
+
+**3. Barrier Generation at Encode Time**
+
+Before encoding each pass, generate barriers for all textures that need transitions:
+
+```rust
+fn execute_graph(&self, compiled: &CompiledGraph) {
+    for pass_handle in compiled.pass_order() {
+        let pass = &passes[pass_handle.index()];
+        let usage = pass.infer_resource_usage();
+
+        // Generate and submit barriers
+        let barriers = self.layout_tracker.generate_barriers(&usage);
+        barriers.submit(cmd);
+
+        // Encode the pass
+        self.encode_pass(cmd, pass)?;
+    }
+}
+```
+
+**4. Batched Barrier Submission**
+
+Collect all barriers for a pass and submit them in a single `vkCmdPipelineBarrier` call with combined stage masks for efficiency.
+
+**5. Access Mode to Layout Mapping**
+
+```rust
+pub enum TextureAccessMode {
+    RenderTargetWrite    → ColorAttachment
+    DepthStencilWrite    → DepthStencilAttachment
+    DepthStencilReadOnly → DepthStencilReadOnly
+    ShaderRead           → ShaderReadOnly
+    StorageReadWrite     → General
+    TransferRead         → TransferSrc
+    TransferWrite        → TransferDst
+}
+```
+
+### Alternatives Considered
+
+**1. Explicit Layout Annotations**
+
+Require users to declare layouts for each texture in each pass.
+
+- ❌ Verbose and error-prone
+- ❌ Duplicates information already present in pass configuration
+- ❌ Easy to get out of sync with actual usage
+
+**2. Layout Tracking at Texture Level**
+
+Store current layout in each `Texture` object.
+
+- ❌ Doesn't work with frames in flight (GPU may be using old layout)
+- ❌ Race conditions between CPU recording and GPU execution
+- ❌ Complex synchronization needed
+
+**3. Always Use UNDEFINED → Optimal**
+
+Keep the simple approach of always transitioning from UNDEFINED.
+
+- ❌ Discards texture contents (can't sample a texture after rendering to it)
+- ❌ Misses optimization opportunities
+- ❌ Only works for single-pass scenarios
+
+### Consequences
+
+- ✅ **Zero user burden**: No manual barrier management required
+- ✅ **Correct by construction**: Layouts always match actual usage
+- ✅ **Multi-pass workflows**: Textures can be rendered then sampled
+- ✅ **Optimized barriers**: Skip transitions when layout already correct
+- ✅ **Batched submission**: Single barrier call per pass
+- ✅ **wgpu compatible**: wgpu handles this internally; system is Vulkan-only
+- ⚠️ **Vulkan-specific complexity**: Adds code only used by Vulkan backend
+- ⚠️ **Per-frame memory**: Layout maps consume memory per frame in flight
+- ⚠️ **Inference limitations**: Some edge cases may need manual hints (future work)
