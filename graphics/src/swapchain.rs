@@ -35,19 +35,11 @@ use std::sync::{Arc, RwLock};
 
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
+use crate::backend::GpuSurfaceTexture;
 use crate::device::GraphicsDevice;
 use crate::error::GraphicsError;
 use crate::instance::GraphicsInstance;
 use crate::types::TextureFormat;
-
-#[cfg(feature = "wgpu-backend")]
-use crate::backend::wgpu_impl::SurfaceTextureView;
-
-#[cfg(feature = "vulkan-backend")]
-use crate::backend::vulkan::VulkanSurfaceTextureView;
-
-#[cfg(feature = "vulkan-backend")]
-use ash::vk;
 
 /// Presentation mode for the swapchain.
 ///
@@ -117,7 +109,7 @@ pub struct Surface {
     wgpu_surface: Option<wgpu::Surface<'static>>,
     /// The underlying Vulkan surface (only when using vulkan backend).
     #[cfg(feature = "vulkan-backend")]
-    vulkan_surface: Option<vk::SurfaceKHR>,
+    vulkan_surface: Option<ash::vk::SurfaceKHR>,
     /// The Vulkan swapchain (only when using vulkan backend).
     #[cfg(feature = "vulkan-backend")]
     vulkan_swapchain: RwLock<Option<crate::backend::vulkan::swapchain::VulkanSwapchain>>,
@@ -382,81 +374,8 @@ impl Surface {
             current
         };
 
-        // Acquire the actual wgpu surface texture if using wgpu backend
-        #[cfg(feature = "wgpu-backend")]
-        let (wgpu_texture, wgpu_view) = if let Some(wgpu_surface) = &self.wgpu_surface {
-            let result =
-                crate::backend::wgpu_impl::swapchain::acquire_surface_texture(wgpu_surface)?;
-            (Some(result.texture), Some(result.view))
-        } else {
-            (None, None)
-        };
-
-        // Acquire the Vulkan swapchain image if using Vulkan backend
-        #[cfg(feature = "vulkan-backend")]
-        let (
-            vulkan_view,
-            vulkan_image_index,
-            vulkan_frame_index,
-            vulkan_swapchain_handle,
-            vulkan_image_available_semaphore,
-            vulkan_render_finished_semaphore,
-            vulkan_in_flight_fence,
-            vulkan_present_command_buffer,
-        ) = {
-            use crate::backend::GpuBackend;
-
-            if let GpuBackend::Vulkan(vulkan_backend) = self.instance.backend() {
-                if let Ok(mut swapchain_guard) = self.vulkan_swapchain.write() {
-                    if let Some(ref mut swapchain) = *swapchain_guard {
-                        let result = swapchain.acquire_next_image(vulkan_backend)?;
-                        (
-                            Some(result.view),
-                            result.image_index,
-                            result.frame_index,
-                            Some(result.swapchain),
-                            result.image_available_semaphore,
-                            result.render_finished_semaphore,
-                            result.in_flight_fence,
-                            result.present_command_buffer,
-                        )
-                    } else {
-                        (
-                            None,
-                            0,
-                            0,
-                            None,
-                            vk::Semaphore::null(),
-                            vk::Semaphore::null(),
-                            vk::Fence::null(),
-                            vk::CommandBuffer::null(),
-                        )
-                    }
-                } else {
-                    (
-                        None,
-                        0,
-                        0,
-                        None,
-                        vk::Semaphore::null(),
-                        vk::Semaphore::null(),
-                        vk::Fence::null(),
-                        vk::CommandBuffer::null(),
-                    )
-                }
-            } else {
-                (
-                    None,
-                    0,
-                    0,
-                    None,
-                    vk::Semaphore::null(),
-                    vk::Semaphore::null(),
-                    vk::Fence::null(),
-                    vk::CommandBuffer::null(),
-                )
-            }
-        };
+        // Acquire the backend-specific surface texture
+        let gpu_texture = self.acquire_gpu_texture()?;
 
         log::trace!("Acquired surface texture, frame index: {}", frame_index);
 
@@ -468,27 +387,57 @@ impl Surface {
             height: config.height,
             frame_index,
             presented: RwLock::new(false),
-            #[cfg(feature = "wgpu-backend")]
-            wgpu_texture,
-            #[cfg(feature = "wgpu-backend")]
-            wgpu_view,
-            #[cfg(feature = "vulkan-backend")]
-            vulkan_view,
-            #[cfg(feature = "vulkan-backend")]
-            vulkan_image_index,
-            #[cfg(feature = "vulkan-backend")]
-            vulkan_frame_index,
-            #[cfg(feature = "vulkan-backend")]
-            vulkan_swapchain: vulkan_swapchain_handle,
-            #[cfg(feature = "vulkan-backend")]
-            vulkan_image_available_semaphore,
-            #[cfg(feature = "vulkan-backend")]
-            vulkan_render_finished_semaphore,
-            #[cfg(feature = "vulkan-backend")]
-            vulkan_in_flight_fence,
-            #[cfg(feature = "vulkan-backend")]
-            vulkan_present_command_buffer,
+            gpu_texture: Some(gpu_texture),
         })
+    }
+
+    /// Acquire the backend-specific surface texture.
+    fn acquire_gpu_texture(&self) -> Result<GpuSurfaceTexture, GraphicsError> {
+        use crate::backend::GpuBackend;
+
+        match self.instance.backend() {
+            GpuBackend::Dummy(_) => Ok(GpuSurfaceTexture::Dummy),
+
+            #[cfg(feature = "wgpu-backend")]
+            GpuBackend::Wgpu(_) => {
+                if let Some(wgpu_surface) = &self.wgpu_surface {
+                    let result = crate::backend::wgpu_impl::swapchain::acquire_surface_texture(
+                        wgpu_surface,
+                    )?;
+                    Ok(GpuSurfaceTexture::Wgpu {
+                        texture: result.texture,
+                        view: result.view,
+                    })
+                } else {
+                    Err(GraphicsError::Internal(
+                        "wgpu surface not available".to_string(),
+                    ))
+                }
+            }
+
+            #[cfg(feature = "vulkan-backend")]
+            GpuBackend::Vulkan(vulkan_backend) => {
+                if let Ok(mut swapchain_guard) = self.vulkan_swapchain.write()
+                    && let Some(ref mut swapchain) = *swapchain_guard
+                {
+                    let result = swapchain.acquire_next_image(vulkan_backend)?;
+                    Ok(GpuSurfaceTexture::Vulkan {
+                        view: result.view,
+                        image_index: result.image_index,
+                        frame_index: result.frame_index,
+                        swapchain: result.swapchain,
+                        image_available_semaphore: result.image_available_semaphore,
+                        render_finished_semaphore: result.render_finished_semaphore,
+                        in_flight_fence: result.in_flight_fence,
+                        present_command_buffer: result.present_command_buffer,
+                    })
+                } else {
+                    Err(GraphicsError::Internal(
+                        "Vulkan swapchain not available".to_string(),
+                    ))
+                }
+            }
+        }
     }
 }
 
@@ -520,37 +469,8 @@ pub struct SurfaceTexture {
     height: u32,
     frame_index: u64,
     presented: RwLock<bool>,
-    /// The underlying wgpu surface texture (only when using wgpu backend).
-    #[cfg(feature = "wgpu-backend")]
-    wgpu_texture: Option<wgpu::SurfaceTexture>,
-    /// The texture view for rendering (only when using wgpu backend).
-    #[cfg(feature = "wgpu-backend")]
-    wgpu_view: Option<SurfaceTextureView>,
-    /// The Vulkan texture view for rendering (only when using vulkan backend).
-    #[cfg(feature = "vulkan-backend")]
-    vulkan_view: Option<VulkanSurfaceTextureView>,
-    /// The swapchain image index (only when using vulkan backend).
-    #[cfg(feature = "vulkan-backend")]
-    vulkan_image_index: u32,
-    /// The Vulkan frame-in-flight index (for sync primitive lookup).
-    #[cfg(feature = "vulkan-backend")]
-    #[allow(dead_code)] // Reserved for future use in advanced synchronization
-    vulkan_frame_index: usize,
-    /// The Vulkan swapchain handle (for presentation).
-    #[cfg(feature = "vulkan-backend")]
-    vulkan_swapchain: Option<vk::SwapchainKHR>,
-    /// The image available semaphore for this frame (for presentation wait).
-    #[cfg(feature = "vulkan-backend")]
-    vulkan_image_available_semaphore: vk::Semaphore,
-    /// The render finished semaphore for this frame (for presentation signal).
-    #[cfg(feature = "vulkan-backend")]
-    vulkan_render_finished_semaphore: vk::Semaphore,
-    /// The in-flight fence for this frame (to signal after presentation).
-    #[cfg(feature = "vulkan-backend")]
-    vulkan_in_flight_fence: vk::Fence,
-    /// The command buffer for this frame's presentation.
-    #[cfg(feature = "vulkan-backend")]
-    vulkan_present_command_buffer: vk::CommandBuffer,
+    /// The backend-specific surface texture.
+    gpu_texture: Option<GpuSurfaceTexture>,
 }
 
 impl SurfaceTexture {
@@ -581,8 +501,8 @@ impl SurfaceTexture {
 
     /// Get the wgpu texture view for rendering (only available with wgpu backend).
     #[cfg(feature = "wgpu-backend")]
-    pub fn wgpu_view(&self) -> Option<SurfaceTextureView> {
-        self.wgpu_view.clone()
+    pub fn wgpu_view(&self) -> Option<crate::backend::wgpu_impl::SurfaceTextureView> {
+        self.gpu_texture.as_ref().and_then(|t| t.wgpu_view())
     }
 
     /// Get the wgpu texture view for rendering (stub for non-wgpu builds).
@@ -593,8 +513,8 @@ impl SurfaceTexture {
 
     /// Get the Vulkan texture view for rendering (only available with vulkan backend).
     #[cfg(feature = "vulkan-backend")]
-    pub fn vulkan_view(&self) -> Option<VulkanSurfaceTextureView> {
-        self.vulkan_view.clone()
+    pub fn vulkan_view(&self) -> Option<crate::backend::vulkan::VulkanSurfaceTextureView> {
+        self.gpu_texture.as_ref().and_then(|t| t.vulkan_view())
     }
 
     /// Get the Vulkan texture view for rendering (stub for non-vulkan builds).
@@ -613,29 +533,8 @@ impl SurfaceTexture {
         }
         log::trace!("Presenting frame {}", self.frame_index);
 
-        // Present the wgpu surface texture
-        #[cfg(feature = "wgpu-backend")]
-        if let Some(wgpu_texture) = self.wgpu_texture.take() {
-            crate::backend::wgpu_impl::swapchain::present_surface_texture(wgpu_texture);
-        }
-
-        // Present the Vulkan swapchain image
-        #[cfg(feature = "vulkan-backend")]
-        if let (Some(vulkan_view), Some(swapchain)) = (&self.vulkan_view, self.vulkan_swapchain)
-            && let crate::backend::GpuBackend::Vulkan(vulkan_backend) = self.instance.backend()
-            && let Err(e) = crate::backend::vulkan::swapchain::present_vulkan_frame(
-                vulkan_backend,
-                vulkan_view,
-                swapchain,
-                self.vulkan_image_index,
-                self.vulkan_image_available_semaphore,
-                self.vulkan_render_finished_semaphore,
-                self.vulkan_in_flight_fence,
-                self.vulkan_present_command_buffer,
-                self.frame_index,
-            )
-        {
-            log::error!("Failed to present Vulkan frame: {}", e);
+        if let Some(gpu_texture) = self.gpu_texture.take() {
+            gpu_texture.present(self.instance.backend(), self.frame_index);
         }
     }
 }

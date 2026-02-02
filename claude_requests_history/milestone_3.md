@@ -80,7 +80,7 @@ If possible to read back swapchain, feel free to read it and check using tools i
 If window cannot be created or there is no any device compatible to the surface - finish test as passed.
 Tesh should pass in this case because of CI running.
 
-## Request 11:
+## Request 11.1:
 Please explain this line comment and use actual swapchain even if it brakes readback in test
 
 ## Request 12:
@@ -118,3 +118,15 @@ Test test_window_swapchain_5_frames passes but in logs there are validation erro
 ## Request 19:
 Please review `graphics\src\swapchain.rs`. It seems this file does not follow the crate style, where all backed-related stuff is hided in the backend folder.
 Please refactor this file, create an entity in backed as an entry point for `graphics\src\swapchain.rs` and move all backend-related code to their backends.
+
+## Request 20:
+Please review `graphics\src\swapchain.rs`.
+I dont like this imports:
+#[cfg(feature = "wgpu-backend")]
+use crate::backend::wgpu_impl::SurfaceTextureView;
+#[cfg(feature = "vulkan-backend")]
+use crate::backend::vulkan::VulkanSurfaceTextureView;
+#[cfg(feature = "vulkan-backend")]
+use ash::vk;
+Please remove this imports and move related logic to this imports to the corresponding backend.
+

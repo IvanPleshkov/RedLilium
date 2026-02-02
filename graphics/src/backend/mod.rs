@@ -276,6 +276,137 @@ impl std::fmt::Debug for GpuSemaphore {
     }
 }
 
+/// Handle to an acquired surface texture for presentation.
+///
+/// This encapsulates all backend-specific state needed to render to a surface
+/// and present the result.
+#[allow(clippy::large_enum_variant)]
+pub enum GpuSurfaceTexture {
+    /// Dummy backend (no GPU texture)
+    Dummy,
+    /// wgpu backend surface texture
+    #[cfg(feature = "wgpu-backend")]
+    Wgpu {
+        /// The raw surface texture (needed for presentation).
+        texture: wgpu::SurfaceTexture,
+        /// The texture view for rendering.
+        view: wgpu_impl::SurfaceTextureView,
+    },
+    /// Vulkan backend surface texture
+    #[cfg(feature = "vulkan-backend")]
+    Vulkan {
+        /// The texture view for rendering.
+        view: vulkan::VulkanSurfaceTextureView,
+        /// The swapchain image index.
+        image_index: u32,
+        /// The frame-in-flight index.
+        #[allow(dead_code)] // Reserved for future use
+        frame_index: usize,
+        /// The swapchain handle.
+        swapchain: vk::SwapchainKHR,
+        /// The image available semaphore.
+        image_available_semaphore: vk::Semaphore,
+        /// The render finished semaphore.
+        render_finished_semaphore: vk::Semaphore,
+        /// The in-flight fence.
+        in_flight_fence: vk::Fence,
+        /// The command buffer for presentation.
+        present_command_buffer: vk::CommandBuffer,
+    },
+}
+
+impl std::fmt::Debug for GpuSurfaceTexture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dummy => write!(f, "GpuSurfaceTexture::Dummy"),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu { .. } => f.debug_struct("GpuSurfaceTexture::Wgpu").finish(),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan { image_index, .. } => f
+                .debug_struct("GpuSurfaceTexture::Vulkan")
+                .field("image_index", image_index)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+impl GpuSurfaceTexture {
+    /// Get the wgpu texture view for rendering (only available with wgpu backend).
+    #[cfg(feature = "wgpu-backend")]
+    pub fn wgpu_view(&self) -> Option<wgpu_impl::SurfaceTextureView> {
+        match self {
+            Self::Wgpu { view, .. } => Some(view.clone()),
+            _ => None,
+        }
+    }
+
+    /// Get the wgpu texture view for rendering (stub for non-wgpu builds).
+    #[cfg(not(feature = "wgpu-backend"))]
+    pub fn wgpu_view(&self) -> Option<()> {
+        None
+    }
+
+    /// Get the Vulkan texture view for rendering (only available with vulkan backend).
+    #[cfg(feature = "vulkan-backend")]
+    pub fn vulkan_view(&self) -> Option<vulkan::VulkanSurfaceTextureView> {
+        match self {
+            Self::Vulkan { view, .. } => Some(view.clone()),
+            _ => None,
+        }
+    }
+
+    /// Get the Vulkan texture view for rendering (stub for non-vulkan builds).
+    #[cfg(not(feature = "vulkan-backend"))]
+    pub fn vulkan_view(&self) -> Option<()> {
+        None
+    }
+
+    /// Present the surface texture.
+    ///
+    /// Takes the backend for Vulkan presentation.
+    pub fn present(self, backend: &GpuBackend, frame_index: u64) {
+        match self {
+            Self::Dummy => {
+                log::trace!("Presenting dummy frame {}", frame_index);
+            }
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu { texture, .. } => {
+                wgpu_impl::swapchain::present_surface_texture(texture);
+                log::trace!("Presented wgpu frame {}", frame_index);
+            }
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan {
+                view,
+                image_index,
+                swapchain,
+                image_available_semaphore,
+                render_finished_semaphore,
+                in_flight_fence,
+                present_command_buffer,
+                ..
+            } => {
+                if let GpuBackend::Vulkan(vulkan_backend) = backend {
+                    if let Err(e) = vulkan::swapchain::present_vulkan_frame(
+                        vulkan_backend,
+                        &view,
+                        swapchain,
+                        image_index,
+                        image_available_semaphore,
+                        render_finished_semaphore,
+                        in_flight_fence,
+                        present_command_buffer,
+                        frame_index,
+                    ) {
+                        log::error!("Failed to present Vulkan frame: {}", e);
+                    }
+                } else {
+                    log::error!("Vulkan surface texture requires Vulkan backend for presentation");
+                }
+            }
+        }
+    }
+}
+
 // ============================================================================
 // Vulkan Resource Cleanup (Drop implementations)
 // ============================================================================
