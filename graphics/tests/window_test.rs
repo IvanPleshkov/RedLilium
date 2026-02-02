@@ -373,7 +373,7 @@ fn run_window_test(params: InstanceParameters) -> bool {
     };
 
     // On macOS, EventLoop must be created on the main thread. Since Rust tests run on
-    // worker threads, we use catch_unwind to gracefully skip if this panics.
+    // worker threads, we use catch_unwind to detect panics and fail properly.
     #[cfg(target_os = "macos")]
     #[allow(clippy::redundant_closure)]
     let event_loop_result = std::panic::catch_unwind(|| EventLoop::new());
@@ -385,11 +385,20 @@ fn run_window_test(params: InstanceParameters) -> bool {
             log::info!("Event loop creation failed (expected on CI): {}", e);
             return true; // Skip test, consider passed
         }
-        Err(_) => {
-            log::info!(
-                "Event loop creation panicked (expected on macOS non-main thread), skipping test"
+        Err(panic_info) => {
+            // Extract panic message if possible
+            let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic".to_string()
+            };
+            log::error!(
+                "Event loop creation panicked on macOS (non-main thread): {}",
+                panic_msg
             );
-            return true; // Skip test, consider passed
+            return false; // Fail the test - this is a validation error that should not be silently skipped
         }
     };
 

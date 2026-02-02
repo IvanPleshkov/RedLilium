@@ -192,3 +192,51 @@ test test_window_swapchain_5_frames_wgpu ... FAILED
 ## Request 23:
 In `graphics/tests/window_test.rs` while device creation we dont select device which is compatible to the surface. Please fix it.
 You can change graphics crate and extend device selection method.
+
+## Request 24:
+In `graphics/tests/window_test.rs` test `test_window_swapchain_5_frames_wgpu` passes but in logs I see the error:
+```
+on macOS, `EventLoop` must be created on the main thread!
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+   1: core::panicking::panic_fmt
+             at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+   2: core::panicking::panic_display
+             at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:264:5
+   3: core::option::expect_failed
+             at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/option.rs:2183:5
+   4: core::option::Option<T>::expect
+             at /Users/pleshkov/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:970:21
+   5: winit::platform_impl::macos::event_loop::EventLoop<T>::new
+             at /Users/pleshkov/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.12/src/platform_impl/macos/event_loop.rs:221:14
+   6: winit::event_loop::EventLoopBuilder<T>::build
+             at /Users/pleshkov/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.12/src/event_loop.rs:125:25
+   7: winit::event_loop::EventLoop<()>::new
+             at /Users/pleshkov/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.12/src/event_loop.rs:198:25
+   8: window_test::run_window_test::{{closure}}
+             at ./tests/window_test.rs:379:57
+   9: std::panicking::catch_unwind::do_call
+             at /Users/pleshkov/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/panicking.rs:590:40
+  10: ___rust_try
+  11: std::panicking::catch_unwind
+             at /Users/pleshkov/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/panicking.rs:553:19
+  12: std::panic::catch_unwind
+             at /Users/pleshkov/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/panic.rs:359:14
+  13: window_test::run_window_test
+             at ./tests/window_test.rs:379:29
+  14: window_test::test_window_swapchain_5_frames_wgpu::test_window_swapchain_5_frames_wgpu
+             at ./tests/window_test.rs:481:9
+  15: window_test::test_window_swapchain_5_frames_wgpu
+             at ./tests/window_test.rs:475:1
+  16: window_test::test_window_swapchain_5_frames_wgpu::{{closure}}
+             at ./tests/window_test.rs:475:10
+  17: core::ops::function::FnOnce::call_once
+             at /Users/pleshkov/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+  18: core::ops::function::FnOnce::call_once
+             at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+```
+Please modify the test to fail when there are validation errors.
+Don't fix this error right now, just catch the error and dont skip it.
+
