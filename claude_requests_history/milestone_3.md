@@ -101,3 +101,8 @@ Please fill the gaps to make this test fully functional
 I changes test_window_swapchain_5_frames test to vulkan api and it fails with panic:
 Cannot get texture from surface attachment
 Please fill the gaps in vulkan backend to run this test.
+
+## Request 16:
+Test test_window_swapchain_5_frames passes but in logs there are validation errors:
+[2026-02-02T09:34:26Z ERROR redlilium_graphics::backend::vulkan::debug] [Vulkan Validation] Validation Error: [ VUID-vkAcquireNextImageKHR-semaphore-01780 ] Object 0: handle = 0x27d60e0000000019, type = VK_OBJECT_TYPE_SWAPCHAIN_KHR; | MessageID = 0x94557523 | vkAcquireNextImageKHR():  semaphore and fence are both VK_NULL_HANDLE. The Vulkan spec states: semaphore and fence must not both be equal to VK_NULL_HANDLE (https://vulkan.lunarg.com/doc/view/1.3.283.0/windows/1.3-extensions/vkspec.html#VUID-vkAcquireNextImageKHR-semaphore-01780)
+[2026-02-02T09:34:26Z ERROR redlilium_graphics::backend::vulkan::debug] [Vulkan Validation] Validation Error: [ VUID-vkAcquireNextImageKHR-surface-07783 ] Object 0: handle = 0x27d60e0000000019, type = VK_OBJECT_TYPE_SWAPCHAIN_KHR; | MessageID = 0xad0e15f6 | vkAcquireNextImageKHR():  Application has already previously acquired 4 images from swapchain. Only 2 are available to be acquired using a timeout of UINT64_MAX (given the swapchain has 3, and VkSurfaceCapabilitiesKHR::minImageCount is 2). The Vulkan spec states: If forward progress cannot be guaranteed for the surface used to create the swapchain member of pAcquireInfo, the timeout member of pAcquireInfo must not be UINT64_MAX (https://vulkan.lunarg.com/doc/view/1.3.283.0/windows/1.3-extensions/vkspec.html#VUID-vkAcquireNextImageKHR-surface-07783)

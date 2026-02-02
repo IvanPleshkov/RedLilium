@@ -123,6 +123,10 @@ pub struct Surface {
     vulkan_swapchain: RwLock<Option<VulkanSwapchain>>,
 }
 
+/// Maximum number of frames that can be in flight simultaneously.
+#[cfg(feature = "vulkan-backend")]
+const MAX_FRAMES_IN_FLIGHT: usize = 2;
+
 /// Vulkan swapchain resources.
 #[cfg(feature = "vulkan-backend")]
 struct VulkanSwapchain {
@@ -134,6 +138,14 @@ struct VulkanSwapchain {
     #[allow(dead_code)] // Reserved for future use
     extent: ash::vk::Extent2D,
     current_image_index: u32,
+    /// Semaphores signaled when swapchain image is available (one per frame in flight).
+    image_available_semaphores: Vec<ash::vk::Semaphore>,
+    /// Semaphores signaled when rendering is complete (one per frame in flight).
+    render_finished_semaphores: Vec<ash::vk::Semaphore>,
+    /// Fences for CPU-GPU synchronization (one per frame in flight).
+    in_flight_fences: Vec<ash::vk::Fence>,
+    /// Current frame index (cycles through frames in flight).
+    current_frame: usize,
 }
 
 impl Surface {
@@ -327,9 +339,24 @@ impl Surface {
                     // Wait for device to be idle before destroying
                     unsafe {
                         let _ = vulkan_backend.device().device_wait_idle();
+
+                        // Destroy synchronization primitives
+                        for semaphore in old_swapchain.image_available_semaphores {
+                            vulkan_backend.device().destroy_semaphore(semaphore, None);
+                        }
+                        for semaphore in old_swapchain.render_finished_semaphores {
+                            vulkan_backend.device().destroy_semaphore(semaphore, None);
+                        }
+                        for fence in old_swapchain.in_flight_fences {
+                            vulkan_backend.device().destroy_fence(fence, None);
+                        }
+
+                        // Destroy image views
                         for view in old_swapchain.image_views {
                             vulkan_backend.device().destroy_image_view(view, None);
                         }
+
+                        // Destroy swapchain
                         vulkan_backend
                             .swapchain_loader()
                             .destroy_swapchain(old_swapchain.swapchain, None);
@@ -430,19 +457,58 @@ impl Surface {
 
         // Acquire the Vulkan swapchain image if using Vulkan backend
         #[cfg(feature = "vulkan-backend")]
-        let (vulkan_view, vulkan_image_index) = {
+        let (
+            vulkan_view,
+            vulkan_image_index,
+            vulkan_frame_index,
+            vulkan_swapchain_handle,
+            vulkan_image_available_semaphore,
+            vulkan_render_finished_semaphore,
+            vulkan_in_flight_fence,
+        ) = {
             use crate::backend::GpuBackend;
             use crate::backend::vulkan::{VulkanImageView, VulkanSurfaceTextureView};
 
             if let GpuBackend::Vulkan(vulkan_backend) = self.instance.backend() {
                 if let Ok(mut swapchain_guard) = self.vulkan_swapchain.write() {
                     if let Some(ref mut swapchain) = *swapchain_guard {
-                        // Acquire next image
+                        let current_frame = swapchain.current_frame;
+
+                        // Wait for the previous frame using this slot to complete
+                        let in_flight_fence = swapchain.in_flight_fences[current_frame];
+                        unsafe {
+                            vulkan_backend.device().wait_for_fences(
+                                &[in_flight_fence],
+                                true,
+                                u64::MAX,
+                            )
+                        }
+                        .map_err(|e| {
+                            GraphicsError::Internal(format!(
+                                "Failed to wait for in-flight fence: {:?}",
+                                e
+                            ))
+                        })?;
+
+                        // Reset the fence for this frame
+                        unsafe { vulkan_backend.device().reset_fences(&[in_flight_fence]) }
+                            .map_err(|e| {
+                                GraphicsError::Internal(format!(
+                                    "Failed to reset in-flight fence: {:?}",
+                                    e
+                                ))
+                            })?;
+
+                        // Acquire next image with semaphore synchronization
+                        let image_available_semaphore =
+                            swapchain.image_available_semaphores[current_frame];
+                        let render_finished_semaphore =
+                            swapchain.render_finished_semaphores[current_frame];
                         let (image_index, _suboptimal) = unsafe {
                             vulkan_backend.swapchain_loader().acquire_next_image(
                                 swapchain.swapchain,
                                 u64::MAX,
-                                vk::Semaphore::null(),
+                                image_available_semaphore,
                                 vk::Fence::null(),
                             )
                         }
@@ -456,6 +522,10 @@ impl Surface {
                         swapchain.current_image_index = image_index;
                         let image = swapchain.images[image_index as usize];
                         let view = swapchain.image_views[image_index as usize];
+                        let swapchain_handle = swapchain.swapchain;
+
+                        // Advance to next frame slot
+                        swapchain.current_frame = (current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
 
                         let vulkan_view = VulkanSurfaceTextureView {
                             image,
@@ -464,15 +534,47 @@ impl Surface {
                                 view,
                             )),
                         };
-                        (Some(vulkan_view), image_index)
+                        (
+                            Some(vulkan_view),
+                            image_index,
+                            current_frame,
+                            Some(swapchain_handle),
+                            image_available_semaphore,
+                            render_finished_semaphore,
+                            in_flight_fence,
+                        )
                     } else {
-                        (None, 0)
+                        (
+                            None,
+                            0,
+                            0,
+                            None,
+                            vk::Semaphore::null(),
+                            vk::Semaphore::null(),
+                            vk::Fence::null(),
+                        )
                     }
                 } else {
-                    (None, 0)
+                    (
+                        None,
+                        0,
+                        0,
+                        None,
+                        vk::Semaphore::null(),
+                        vk::Semaphore::null(),
+                        vk::Fence::null(),
+                    )
                 }
             } else {
-                (None, 0)
+                (
+                    None,
+                    0,
+                    0,
+                    None,
+                    vk::Semaphore::null(),
+                    vk::Semaphore::null(),
+                    vk::Fence::null(),
+                )
             }
         };
 
@@ -480,6 +582,7 @@ impl Surface {
 
         Ok(SurfaceTexture {
             device,
+            instance: Arc::clone(&self.instance),
             format: config.format,
             width: config.width,
             height: config.height,
@@ -493,6 +596,16 @@ impl Surface {
             vulkan_view,
             #[cfg(feature = "vulkan-backend")]
             vulkan_image_index,
+            #[cfg(feature = "vulkan-backend")]
+            vulkan_frame_index,
+            #[cfg(feature = "vulkan-backend")]
+            vulkan_swapchain: vulkan_swapchain_handle,
+            #[cfg(feature = "vulkan-backend")]
+            vulkan_image_available_semaphore,
+            #[cfg(feature = "vulkan-backend")]
+            vulkan_render_finished_semaphore,
+            #[cfg(feature = "vulkan-backend")]
+            vulkan_in_flight_fence,
         })
     }
 }
@@ -519,6 +632,7 @@ static_assertions::assert_impl_all!(Surface: Send, Sync);
 /// If dropped without presenting, the frame is discarded.
 pub struct SurfaceTexture {
     device: Arc<GraphicsDevice>,
+    instance: Arc<GraphicsInstance>,
     format: TextureFormat,
     width: u32,
     height: u32,
@@ -536,6 +650,22 @@ pub struct SurfaceTexture {
     /// The swapchain image index (only when using vulkan backend).
     #[cfg(feature = "vulkan-backend")]
     vulkan_image_index: u32,
+    /// The Vulkan frame-in-flight index (for sync primitive lookup).
+    #[cfg(feature = "vulkan-backend")]
+    #[allow(dead_code)] // Reserved for future use in advanced synchronization
+    vulkan_frame_index: usize,
+    /// The Vulkan swapchain handle (for presentation).
+    #[cfg(feature = "vulkan-backend")]
+    vulkan_swapchain: Option<vk::SwapchainKHR>,
+    /// The image available semaphore for this frame (for presentation wait).
+    #[cfg(feature = "vulkan-backend")]
+    vulkan_image_available_semaphore: vk::Semaphore,
+    /// The render finished semaphore for this frame (for presentation signal).
+    #[cfg(feature = "vulkan-backend")]
+    vulkan_render_finished_semaphore: vk::Semaphore,
+    /// The in-flight fence for this frame (to signal after presentation).
+    #[cfg(feature = "vulkan-backend")]
+    vulkan_in_flight_fence: vk::Fence,
 }
 
 impl SurfaceTexture {
@@ -605,16 +735,69 @@ impl SurfaceTexture {
         }
 
         // Present the Vulkan swapchain image
-        // Note: Vulkan presentation is typically done via queue_present after rendering
-        // For now, we just log that we're ready to present
         #[cfg(feature = "vulkan-backend")]
-        if self.vulkan_view.is_some() {
-            log::trace!(
-                "Vulkan surface texture ready for presentation, image index: {}",
-                self.vulkan_image_index
-            );
-            // Actual presentation happens through the graphics queue
-            // This would need the swapchain reference to call vkQueuePresentKHR
+        if let (Some(_), Some(swapchain)) = (&self.vulkan_view, self.vulkan_swapchain) {
+            use crate::backend::GpuBackend;
+
+            if let GpuBackend::Vulkan(vulkan_backend) = self.instance.backend() {
+                // Submit an empty command buffer to synchronize and signal the fence
+                // This waits for image acquisition and signals when rendering can proceed
+                let wait_semaphores = [self.vulkan_image_available_semaphore];
+                let signal_semaphores = [self.vulkan_render_finished_semaphore];
+                let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+
+                let submit_info = vk::SubmitInfo::default()
+                    .wait_semaphores(&wait_semaphores)
+                    .wait_dst_stage_mask(&wait_stages)
+                    .signal_semaphores(&signal_semaphores);
+
+                // Submit and signal the fence
+                let result = unsafe {
+                    vulkan_backend.device().queue_submit(
+                        vulkan_backend.graphics_queue(),
+                        &[submit_info],
+                        self.vulkan_in_flight_fence,
+                    )
+                };
+
+                if let Err(e) = result {
+                    log::error!("Failed to submit presentation sync: {:?}", e);
+                    return;
+                }
+
+                // Present the swapchain image
+                let swapchains = [swapchain];
+                let image_indices = [self.vulkan_image_index];
+                let present_info = vk::PresentInfoKHR::default()
+                    .wait_semaphores(&signal_semaphores)
+                    .swapchains(&swapchains)
+                    .image_indices(&image_indices);
+
+                let result = unsafe {
+                    vulkan_backend
+                        .swapchain_loader()
+                        .queue_present(vulkan_backend.graphics_queue(), &present_info)
+                };
+
+                match result {
+                    Ok(_) => {
+                        log::trace!(
+                            "Presented Vulkan frame {}, image index: {}",
+                            self.frame_index,
+                            self.vulkan_image_index
+                        );
+                    }
+                    Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                        log::warn!("Swapchain out of date, needs recreation");
+                    }
+                    Err(vk::Result::SUBOPTIMAL_KHR) => {
+                        log::trace!("Swapchain suboptimal");
+                    }
+                    Err(e) => {
+                        log::error!("Failed to present swapchain image: {:?}", e);
+                    }
+                }
+            }
         }
     }
 }
@@ -781,11 +964,57 @@ fn create_vulkan_swapchain(
         .map(|&image| vulkan_backend.create_swapchain_image_view(image, surface_format.format))
         .collect::<Result<Vec<_>, _>>()?;
 
+    // Create synchronization primitives for frames in flight
+    let semaphore_info = vk::SemaphoreCreateInfo::default();
+    let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+
+    let mut image_available_semaphores = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+    let mut render_finished_semaphores = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+    let mut in_flight_fences = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+
+    for _ in 0..MAX_FRAMES_IN_FLIGHT {
+        let image_available = unsafe {
+            vulkan_backend
+                .device()
+                .create_semaphore(&semaphore_info, None)
+        }
+        .map_err(|e| {
+            GraphicsError::ResourceCreationFailed(format!(
+                "Failed to create image available semaphore: {:?}",
+                e
+            ))
+        })?;
+        image_available_semaphores.push(image_available);
+
+        let render_finished = unsafe {
+            vulkan_backend
+                .device()
+                .create_semaphore(&semaphore_info, None)
+        }
+        .map_err(|e| {
+            GraphicsError::ResourceCreationFailed(format!(
+                "Failed to create render finished semaphore: {:?}",
+                e
+            ))
+        })?;
+        render_finished_semaphores.push(render_finished);
+
+        let fence =
+            unsafe { vulkan_backend.device().create_fence(&fence_info, None) }.map_err(|e| {
+                GraphicsError::ResourceCreationFailed(format!(
+                    "Failed to create in-flight fence: {:?}",
+                    e
+                ))
+            })?;
+        in_flight_fences.push(fence);
+    }
+
     log::info!(
-        "Created Vulkan swapchain: {}x{} with {} images",
+        "Created Vulkan swapchain: {}x{} with {} images, {} frames in flight",
         extent.width,
         extent.height,
-        images.len()
+        images.len(),
+        MAX_FRAMES_IN_FLIGHT
     );
 
     Ok(VulkanSwapchain {
@@ -795,6 +1024,10 @@ fn create_vulkan_swapchain(
         format: surface_format.format,
         extent,
         current_image_index: 0,
+        image_available_semaphores,
+        render_finished_semaphores,
+        in_flight_fences,
+        current_frame: 0,
     })
 }
 
