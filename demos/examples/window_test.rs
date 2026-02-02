@@ -1,45 +1,31 @@
-//! Window and swapchain integration test.
+//! Window integration test example.
 //!
-//! This test verifies that the graphics system works correctly with a real window
-//! and swapchain. It creates a window, configures a surface, and renders 5 frames.
+//! This example runs the same window/swapchain test as `graphics/tests/window_test.rs`
+//! but can be run on the main thread, which is required for macOS.
 //!
-//! # Platform Notes
-//!
-//! ## macOS
-//!
-//! These tests are **ignored on macOS** because the Cocoa framework requires that
-//! `EventLoop` be created on the main thread. Rust's test framework runs tests on
-//! worker threads, making window tests impossible to run as `#[test]` functions.
-//!
-//! To run window tests on macOS, use the example binary instead:
+//! # Usage
 //!
 //! ```bash
+//! # Run with Vulkan backend
+//! cargo run -p redlilium-demos --example window_test -- vulkan
+//!
 //! # Run with wgpu backend
 //! cargo run -p redlilium-demos --example window_test -- wgpu
 //!
-//! # Run with Vulkan backend
-//! cargo run -p redlilium-demos --example window_test -- vulkan
-//! ```
-//!
-//! ## CI Compatibility
-//!
-//! If window creation fails (e.g., on headless CI systems) or no device is compatible
-//! with the surface, the test passes gracefully. This ensures the test suite doesn't
-//! fail on systems without display hardware.
-//!
-//! # Running This Test
-//!
-//! ```bash
-//! # On Windows/Linux:
-//! cargo test --test window_test
-//!
-//! # On macOS (via example binary):
+//! # Run with default (wgpu) backend
 //! cargo run -p redlilium-demos --example window_test
 //! ```
+//!
+//! # Why This Exists
+//!
+//! On macOS, the Cocoa framework requires that `EventLoop` be created on the main thread.
+//! Rust's test framework runs tests on worker threads, making it impossible to run
+//! window tests as regular `#[test]` functions on macOS.
+//!
+//! This example provides a way to run the window tests manually on all platforms.
 
 use std::sync::Arc;
 
-use rstest::rstest;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
@@ -60,37 +46,23 @@ const FRAMES_TO_RENDER: u32 = 5;
 /// Test result that can be shared across the event loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TestResult {
-    /// Test is still running.
     Running,
-    /// Test passed successfully.
     Passed,
-    /// Test was skipped (window/device not available).
     Skipped,
-    /// Test failed with an error.
     Failed,
 }
 
 /// Application state for the window test.
 struct WindowTestApp {
-    /// Test result.
     result: TestResult,
-    /// Instance parameters for backend selection.
     params: InstanceParameters,
-    /// Window handle (created on resume).
     window: Option<Window>,
-    /// Graphics instance.
     instance: Option<Arc<GraphicsInstance>>,
-    /// Graphics device.
     device: Option<Arc<GraphicsDevice>>,
-    /// Surface for the window.
     surface: Option<Arc<Surface>>,
-    /// Frame pipeline for synchronization.
     pipeline: Option<FramePipeline>,
-    /// Current frame count.
     frame_count: u32,
-    /// Window size.
     window_size: (u32, u32),
-    /// Whether we've been resumed (window created).
     resumed: bool,
 }
 
@@ -105,12 +77,11 @@ impl WindowTestApp {
             surface: None,
             pipeline: None,
             frame_count: 0,
-            window_size: (320, 240), // Small window for tests
+            window_size: (320, 240),
             resumed: false,
         }
     }
 
-    /// Initialize graphics after window is created.
     fn init_graphics(&mut self) -> bool {
         let window = match &self.window {
             Some(w) => w,
@@ -120,7 +91,6 @@ impl WindowTestApp {
             }
         };
 
-        // Create graphics instance with configured parameters
         let instance = match GraphicsInstance::with_parameters(self.params.clone()) {
             Ok(i) => i,
             Err(e) => {
@@ -150,7 +120,6 @@ impl WindowTestApp {
             }
         };
 
-        // Configure the surface
         let config = SurfaceConfiguration::new(self.window_size.0, self.window_size.1)
             .with_format(surface.preferred_format())
             .with_present_mode(PresentMode::Fifo);
@@ -160,7 +129,6 @@ impl WindowTestApp {
             return false;
         }
 
-        // Create frame pipeline with 2 frames in flight
         let pipeline = device.create_pipeline(2);
 
         log::info!(
@@ -178,9 +146,7 @@ impl WindowTestApp {
         true
     }
 
-    /// Render a single frame using FramePipeline and FrameSchedule.
     fn render_frame(&mut self) -> bool {
-        // Device is available but not directly used - graph execution uses it internally
         let _device = match &self.device {
             Some(d) => d,
             None => return false,
@@ -194,7 +160,6 @@ impl WindowTestApp {
             None => return false,
         };
 
-        // Acquire swapchain texture
         let swapchain_texture = match surface.acquire_texture() {
             Ok(t) => t,
             Err(e) => {
@@ -203,9 +168,6 @@ impl WindowTestApp {
             }
         };
 
-        // Build render graph with a simple clear pass that renders directly to swapchain
-        // Note: This means we can't do GPU readback of the result since swapchain textures
-        // typically don't have COPY_SRC usage, but it tests the real rendering path.
         let hue = (self.frame_count as f32 / FRAMES_TO_RENDER as f32) * 360.0;
         let (r, g, b) = hue_to_rgb(hue);
 
@@ -220,19 +182,11 @@ impl WindowTestApp {
         );
         let _pass_handle = graph.add_graphics_pass(pass);
 
-        // Execute using FramePipeline and FrameSchedule (as documented in ARCHITECTURE.md)
         let mut schedule = pipeline.begin_frame();
-
-        // Submit the render graph
         let graph_handle = schedule.submit(format!("frame_{}", self.frame_count), &graph, &[]);
-
-        // Finish the schedule (offscreen rendering, no actual present to swapchain yet)
         schedule.finish(&[graph_handle]);
-
-        // End the frame
         pipeline.end_frame(schedule);
 
-        // Present the swapchain texture
         swapchain_texture.present();
 
         log::info!(
@@ -247,7 +201,6 @@ impl WindowTestApp {
         true
     }
 
-    /// Check if test is complete.
     fn is_complete(&self) -> bool {
         !matches!(self.result, TestResult::Running)
     }
@@ -258,21 +211,19 @@ impl ApplicationHandler for WindowTestApp {
         if self.window.is_none() {
             self.resumed = true;
 
-            // Create a small test window
             let window_attributes = Window::default_attributes()
                 .with_title("RedLilium Window Test")
                 .with_inner_size(winit::dpi::LogicalSize::new(
                     self.window_size.0,
                     self.window_size.1,
                 ))
-                .with_visible(true); // Need visible window for events
+                .with_visible(true);
 
             match event_loop.create_window(window_attributes) {
                 Ok(window) => {
                     log::info!("Test window created successfully");
                     self.window = Some(window);
 
-                    // Initialize graphics
                     if !self.init_graphics() {
                         log::info!("Graphics initialization failed, skipping test");
                         self.result = TestResult::Skipped;
@@ -280,7 +231,7 @@ impl ApplicationHandler for WindowTestApp {
                     }
                 }
                 Err(e) => {
-                    log::info!("Window creation failed (expected on CI): {}", e);
+                    log::info!("Window creation failed: {}", e);
                     self.result = TestResult::Skipped;
                     event_loop.exit();
                 }
@@ -292,13 +243,12 @@ impl ApplicationHandler for WindowTestApp {
         match event {
             WindowEvent::CloseRequested => {
                 log::info!("Close requested");
-                self.result = TestResult::Failed; // Unexpected close
+                self.result = TestResult::Failed;
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
                 self.window_size = (size.width.max(1), size.height.max(1));
 
-                // Reconfigure surface on resize
                 if let (Some(device), Some(surface)) = (&self.device, &self.surface) {
                     let config = SurfaceConfiguration::new(self.window_size.0, self.window_size.1)
                         .with_format(surface.preferred_format())
@@ -307,9 +257,7 @@ impl ApplicationHandler for WindowTestApp {
                 }
             }
             WindowEvent::RedrawRequested => {
-                // Only render if we're initialized
                 if self.pipeline.is_some() {
-                    // Render frame
                     if !self.render_frame() {
                         log::warn!("Frame rendering failed");
                         self.result = TestResult::Failed;
@@ -317,7 +265,6 @@ impl ApplicationHandler for WindowTestApp {
                         return;
                     }
 
-                    // Check if we've rendered enough frames
                     if self.frame_count >= FRAMES_TO_RENDER {
                         log::info!(
                             "Successfully rendered {} frames, test passed!",
@@ -325,7 +272,6 @@ impl ApplicationHandler for WindowTestApp {
                         );
                         self.result = TestResult::Passed;
 
-                        // Wait for GPU to finish before exiting
                         if let Some(pipeline) = &self.pipeline {
                             pipeline.wait_idle();
                         }
@@ -335,7 +281,6 @@ impl ApplicationHandler for WindowTestApp {
                     }
                 }
 
-                // Request next frame
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -345,14 +290,12 @@ impl ApplicationHandler for WindowTestApp {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        // Request redraw on each iteration to drive rendering
         if let Some(window) = &self.window {
             window.request_redraw();
         }
     }
 }
 
-/// Convert hue (0-360) to RGB (0-1).
 fn hue_to_rgb(hue: f32) -> (f32, f32, f32) {
     let h = hue / 60.0;
     let x = 1.0 - (h % 2.0 - 1.0).abs();
@@ -367,81 +310,37 @@ fn hue_to_rgb(hue: f32) -> (f32, f32, f32) {
     }
 }
 
-/// Run the window test with event pumping (test-friendly approach).
-///
-/// Returns true if the test passed or was skipped (CI compatibility).
 fn run_window_test(params: InstanceParameters) -> bool {
-    // Initialize logging for test output
-    let _ = env_logger::builder()
-        .filter_level(log::LevelFilter::Info)
-        .is_test(true)
-        .try_init();
-
     log::info!(
         "Starting window integration test with backend: {:?}, wgpu_backend: {:?}",
         params.backend,
         params.wgpu_backend
     );
 
-    // Try to create event loop - may fail on headless systems
-    // On Windows, we need to use any_thread() because tests run on a non-main thread
     #[cfg(target_os = "windows")]
     let mut event_loop = match EventLoop::builder().with_any_thread(true).build() {
         Ok(el) => el,
         Err(e) => {
-            log::info!("Event loop creation failed (expected on CI): {}", e);
-            return true; // Skip test, consider passed
+            log::error!("Event loop creation failed: {}", e);
+            return false;
         }
     };
 
-    // On macOS, EventLoop must be created on the main thread. Since Rust tests run on
-    // worker threads, we use catch_unwind to detect panics and fail properly.
-    #[cfg(target_os = "macos")]
-    #[allow(clippy::redundant_closure)]
-    let event_loop_result = std::panic::catch_unwind(|| EventLoop::new());
-
-    #[cfg(target_os = "macos")]
-    let mut event_loop = match event_loop_result {
-        Ok(Ok(el)) => el,
-        Ok(Err(e)) => {
-            log::info!("Event loop creation failed (expected on CI): {}", e);
-            return true; // Skip test, consider passed
-        }
-        Err(panic_info) => {
-            // Extract panic message if possible
-            let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                s.to_string()
-            } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                s.clone()
-            } else {
-                "unknown panic".to_string()
-            };
-            log::error!(
-                "Event loop creation panicked on macOS (non-main thread): {}",
-                panic_msg
-            );
-            return false; // Fail the test - this is a validation error that should not be silently skipped
-        }
-    };
-
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(not(target_os = "windows"))]
     let mut event_loop = match EventLoop::new() {
         Ok(el) => el,
         Err(e) => {
-            log::info!("Event loop creation failed (expected on CI): {}", e);
-            return true; // Skip test, consider passed
+            log::error!("Event loop creation failed: {}", e);
+            return false;
         }
     };
 
     let mut app = WindowTestApp::new(params);
 
-    // Use pump_events for controlled iteration (test-friendly)
-    // This allows us to have a timeout and not block forever
-    let max_iterations = 1000; // Timeout after 1000 iterations
+    let max_iterations = 1000;
     let mut iterations = 0;
 
     loop {
-        // Pump events
         let status = event_loop.pump_app_events(None, &mut app);
 
         match status {
@@ -450,7 +349,6 @@ fn run_window_test(params: InstanceParameters) -> bool {
                 break;
             }
             PumpStatus::Continue => {
-                // Check if test is complete
                 if app.is_complete() {
                     break;
                 }
@@ -462,13 +360,11 @@ fn run_window_test(params: InstanceParameters) -> bool {
                     break;
                 }
 
-                // Small delay to avoid busy-waiting
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
     }
 
-    // Cleanup
     if let Some(pipeline) = &app.pipeline {
         pipeline.wait_idle();
     }
@@ -480,66 +376,54 @@ fn run_window_test(params: InstanceParameters) -> bool {
         }
         TestResult::Skipped => {
             log::info!("Window test SKIPPED (no display available)");
-            true // Skipped tests are considered passing for CI
+            true
         }
         TestResult::Failed => {
             log::error!("Window test FAILED");
             false
         }
         TestResult::Running => {
-            // If still running after timeout, consider it failed
             log::warn!("Window test ended in Running state (timeout)");
             false
         }
     }
 }
 
-/// Test window swapchain rendering with Vulkan backend.
-///
-/// # macOS Note
-///
-/// This test is ignored on macOS because the Cocoa framework requires EventLoop
-/// to be created on the main thread, but Rust tests run on worker threads.
-/// To run this test on macOS, use the `window_test` example:
-///
-/// ```bash
-/// cargo run -p redlilium-demos --example window_test -- vulkan
-/// ```
-#[rstest]
-#[cfg_attr(
-    target_os = "macos",
-    ignore = "macOS requires EventLoop on main thread - use examples/window_test.rs instead"
-)]
-fn test_window_swapchain_5_frames_vulkan() {
-    let params = InstanceParameters::new().with_backend(BackendType::Vulkan);
-    assert!(
-        run_window_test(params),
-        "Window swapchain test failed - see log for details"
-    );
-}
+fn main() {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-/// Test window swapchain rendering with wgpu backend.
-///
-/// # macOS Note
-///
-/// This test is ignored on macOS because the Cocoa framework requires EventLoop
-/// to be created on the main thread, but Rust tests run on worker threads.
-/// To run this test on macOS, use the `window_test` example:
-///
-/// ```bash
-/// cargo run -p redlilium-demos --example window_test -- wgpu
-/// ```
-#[rstest]
-#[cfg_attr(
-    target_os = "macos",
-    ignore = "macOS requires EventLoop on main thread - use examples/window_test.rs instead"
-)]
-fn test_window_swapchain_5_frames_wgpu() {
-    let params = InstanceParameters::new()
-        .with_backend(BackendType::Wgpu)
-        .with_wgpu_backend(WgpuBackendType::Vulkan);
-    assert!(
-        run_window_test(params),
-        "Window swapchain test failed - see log for details"
-    );
+    let args: Vec<String> = std::env::args().collect();
+    let backend = args.get(1).map(|s| s.as_str()).unwrap_or("wgpu");
+
+    let params = match backend {
+        "vulkan" => {
+            log::info!("Using Vulkan backend");
+            InstanceParameters::new().with_backend(BackendType::Vulkan)
+        }
+        "wgpu" => {
+            log::info!("Using wgpu backend with Vulkan");
+            InstanceParameters::new()
+                .with_backend(BackendType::Wgpu)
+                .with_wgpu_backend(WgpuBackendType::Vulkan)
+        }
+        other => {
+            log::info!(
+                "Unknown backend '{}', defaulting to wgpu with Vulkan",
+                other
+            );
+            InstanceParameters::new()
+                .with_backend(BackendType::Wgpu)
+                .with_wgpu_backend(WgpuBackendType::Vulkan)
+        }
+    };
+
+    let success = run_window_test(params);
+
+    if success {
+        log::info!("Test completed successfully!");
+        std::process::exit(0);
+    } else {
+        log::error!("Test failed!");
+        std::process::exit(1);
+    }
 }

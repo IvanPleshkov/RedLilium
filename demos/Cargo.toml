@@ -28,3 +28,7 @@ web-sys = { workspace = true, features = ["Window", "Document", "Element"] }
 [[bin]]
 name = "window_demo"
 path = "src/bin/window_demo.rs"
+
+[[example]]
+name = "window_test"
+path = "examples/window_test.rs"

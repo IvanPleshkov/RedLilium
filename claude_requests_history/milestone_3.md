@@ -240,3 +240,8 @@ note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose bac
 Please modify the test to fail when there are validation errors.
 Don't fix this error right now, just catch the error and dont skip it.
 
+## Request 25:
+Please fix `test_window_swapchain_5_frames_wgpu` test in `graphics/tests/window_test.rs`.
+This test should work on windows, macos and linux.
+It requires to create event loop in main thread on macos.
+Is it possible to make the event loop in main thread in rust tests? If not, explain it.
