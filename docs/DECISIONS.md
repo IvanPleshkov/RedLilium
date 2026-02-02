@@ -774,3 +774,127 @@ Keep the simple approach of always transitioning from UNDEFINED.
 - ⚠️ **Vulkan-specific complexity**: Adds code only used by Vulkan backend
 - ⚠️ **Per-frame memory**: Layout maps consume memory per frame in flight
 - ⚠️ **Inference limitations**: Some edge cases may need manual hints (future work)
+
+---
+
+## ADR-018: Automatic Buffer Barrier Placement
+
+**Date**: 2026-02-02
+**Status**: Accepted
+
+### Context
+
+While ADR-017 addressed automatic texture layout tracking, buffers also require memory barriers for correct synchronization in Vulkan. Unlike textures, buffers don't have "layouts" but still need barriers for:
+
+1. **Write-After-Read (WAR)**: Ensure reads complete before writes begin
+2. **Read-After-Write (RAW)**: Ensure writes are visible before reads begin
+3. **Write-After-Write (WAW)**: Ensure sequential writes don't overlap
+
+Common scenarios requiring buffer barriers:
+- Compute shader writes storage buffer → Graphics pass reads as vertex buffer
+- Transfer operation copies to buffer → Shader reads buffer data
+- Indirect draw arguments written by compute → Draw indirect reads arguments
+- Multi-pass scenarios where the same buffer is used differently
+
+Without proper barriers, the GPU may read stale data or writes may occur out of order.
+
+### Decision
+
+Extend the automatic barrier system to cover buffers:
+
+**1. Buffer Access Mode Enumeration**
+
+Define access modes that map to Vulkan access flags and pipeline stages:
+
+```rust
+pub enum BufferAccessMode {
+    VertexBuffer,       // Vertex input stage, vertex attribute read
+    IndexBuffer,        // Vertex input stage, index read
+    UniformRead,        // Vertex/fragment shader, uniform read
+    StorageRead,        // Shader stages, shader read
+    StorageWrite,       // Shader stages, shader write
+    StorageReadWrite,   // Shader stages, shader read | write
+    IndirectRead,       // Draw indirect stage, indirect command read
+    TransferRead,       // Transfer stage, transfer read
+    TransferWrite,      // Transfer stage, transfer write
+}
+```
+
+**2. Buffer Usage Declaration**
+
+Pass configurations declare buffer usage via `BufferUsageDecl`:
+
+```rust
+pub struct BufferUsageDecl {
+    pub buffer: Arc<Buffer>,
+    pub access: BufferAccessMode,
+    pub offset: u64,
+    pub size: u64,
+}
+```
+
+**3. Usage Inference from Pass Configuration**
+
+Buffer usages are automatically inferred from pass configuration:
+
+- **GraphicsPass**: Indirect draw buffers → `IndirectRead`
+- **TransferPass**:
+  - `BufferToBuffer` src → `TransferRead`, dst → `TransferWrite`
+  - `BufferToTexture` src → `TransferRead`
+  - `TextureToBuffer` dst → `TransferWrite`
+
+**4. Batched Barrier Submission**
+
+Buffer barriers are collected alongside image barriers and submitted in a single `vkCmdPipelineBarrier` call:
+
+```rust
+unsafe {
+    device.cmd_pipeline_barrier(
+        cmd,
+        src_stage_mask,
+        dst_stage_mask,
+        vk::DependencyFlags::empty(),
+        &[],                // memory barriers (global)
+        &buffer_barriers,   // buffer memory barriers
+        &image_barriers,    // image memory barriers
+    );
+}
+```
+
+### Alternatives Considered
+
+**1. Per-Buffer State Tracking (like textures)**
+
+Track previous access mode per buffer across passes.
+
+- ✅ Optimal barriers (only insert when state changes)
+- ❌ Significant memory overhead for many buffers
+- ❌ Complex state management
+- ❌ Buffers change usage more frequently than textures
+
+**2. Manual Buffer Barriers**
+
+Require users to explicitly declare buffer barriers.
+
+- ❌ Error-prone and tedious
+- ❌ Inconsistent with automatic texture barriers
+- ❌ Easy to forget and cause subtle bugs
+
+**3. No Buffer Barriers (rely on implicit guarantees)**
+
+Rely on command buffer ordering for synchronization.
+
+- ❌ Incorrect for cross-pass dependencies
+- ❌ Would cause undefined behavior in multi-pass scenarios
+- ❌ Different behavior between backends
+
+### Consequences
+
+- ✅ **Consistent with texture system**: Same inference pattern
+- ✅ **Zero user burden**: Barriers automatically inferred from pass config
+- ✅ **Correct synchronization**: Proper RAW/WAR/WAW handling
+- ✅ **Batched submission**: Efficient single barrier call per pass
+- ✅ **wgpu compatible**: wgpu handles this internally; Vulkan-only
+- ⚠️ **Conservative barriers**: May insert barriers where not strictly needed
+- ⚠️ **No per-buffer state tracking**: Future optimization opportunity
+- ⚠️ **Vulkan-specific**: Only affects Vulkan backend complexity

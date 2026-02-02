@@ -27,5 +27,9 @@ maybe you need to upgrade material system for it.
 
 Feel free to upgrade material system if material (or material instance) should have additional info to make barriers and texture layouts automatically.
 
+## Request 2:
+Please take a loot into `docs\ARCHITECTURE.md` and `docs\DECISIONS.md`.
+There is an automatically placed barriers for texture usage in graphics crate.
+Check if we need the same for buffers and do it if needed.
 
-## TODO: the same for buffers as for textures
+

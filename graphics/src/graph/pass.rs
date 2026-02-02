@@ -7,7 +7,7 @@ use crate::materials::MaterialInstance;
 use crate::mesh::Mesh;
 use crate::resources::Buffer;
 
-use super::resource_usage::{PassResourceUsage, TextureAccessMode};
+use super::resource_usage::{BufferAccessMode, PassResourceUsage, TextureAccessMode};
 use super::target::{RenderTarget, RenderTargetConfig};
 use super::transfer::{TransferConfig, TransferOperation};
 
@@ -667,8 +667,8 @@ impl GraphicsPass {
 
     /// Infer resource usage from the pass configuration.
     ///
-    /// This examines render targets and material bindings to determine
-    /// which textures are used and how (as render targets vs sampled).
+    /// This examines render targets, material bindings, and indirect buffers
+    /// to determine which textures and buffers are used and how.
     pub fn infer_resource_usage(&self) -> PassResourceUsage {
         let mut usage = PassResourceUsage::new();
 
@@ -706,6 +706,11 @@ impl GraphicsPass {
         // Infer from indirect draw commands
         for cmd in &self.indirect_draw_commands {
             Self::extract_material_textures(&cmd.material, &mut usage);
+            // Indirect buffers are read by the GPU for draw arguments
+            usage.add_buffer(
+                Arc::clone(&cmd.indirect_buffer),
+                BufferAccessMode::IndirectRead,
+            );
         }
 
         usage
@@ -776,7 +781,7 @@ impl TransferPass {
 
     /// Infer resource usage from the transfer operations.
     ///
-    /// This examines transfer operations to determine which textures
+    /// This examines transfer operations to determine which textures and buffers
     /// are used as sources or destinations.
     pub fn infer_resource_usage(&self) -> PassResourceUsage {
         let mut usage = PassResourceUsage::new();
@@ -784,18 +789,21 @@ impl TransferPass {
         if let Some(config) = &self.transfer_config {
             for op in &config.operations {
                 match op {
-                    TransferOperation::TextureToBuffer { src, .. } => {
+                    TransferOperation::TextureToBuffer { src, dst, .. } => {
                         usage.add_texture(Arc::clone(src), TextureAccessMode::TransferRead);
+                        usage.add_buffer(Arc::clone(dst), BufferAccessMode::TransferWrite);
                     }
-                    TransferOperation::BufferToTexture { dst, .. } => {
+                    TransferOperation::BufferToTexture { src, dst, .. } => {
+                        usage.add_buffer(Arc::clone(src), BufferAccessMode::TransferRead);
                         usage.add_texture(Arc::clone(dst), TextureAccessMode::TransferWrite);
                     }
                     TransferOperation::TextureToTexture { src, dst, .. } => {
                         usage.add_texture(Arc::clone(src), TextureAccessMode::TransferRead);
                         usage.add_texture(Arc::clone(dst), TextureAccessMode::TransferWrite);
                     }
-                    TransferOperation::BufferToBuffer { .. } => {
-                        // No texture usage
+                    TransferOperation::BufferToBuffer { src, dst, .. } => {
+                        usage.add_buffer(Arc::clone(src), BufferAccessMode::TransferRead);
+                        usage.add_buffer(Arc::clone(dst), BufferAccessMode::TransferWrite);
                     }
                 }
             }

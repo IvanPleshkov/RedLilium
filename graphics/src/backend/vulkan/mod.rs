@@ -30,7 +30,7 @@ use super::{GpuBuffer, GpuFence, GpuSampler, GpuTexture};
 pub use deferred::{DeferredDestructor, DeferredResource, MAX_FRAMES_IN_FLIGHT};
 pub use layout::{TextureLayout, TextureLayoutTracker, TextureUsageGraph};
 
-use self::barriers::BarrierBatch;
+use self::barriers::{BarrierBatch, BufferId};
 use self::layout::TextureId;
 
 /// A texture view for a Vulkan surface texture (swapchain image).
@@ -778,8 +778,8 @@ impl VulkanBackend {
 
     /// Generate barriers for a pass's resource usage.
     ///
-    /// This examines the texture usages declared by the pass, determines
-    /// required layout transitions, and updates the layout tracker state.
+    /// This examines the texture and buffer usages declared by the pass, determines
+    /// required layout transitions and memory barriers, and updates tracker state.
     fn generate_barriers_for_pass(
         &self,
         usage: &crate::graph::resource_usage::PassResourceUsage,
@@ -789,6 +789,7 @@ impl VulkanBackend {
         let mut tracker = self.layout_tracker.lock();
         let mut batch = BarrierBatch::new();
 
+        // Generate texture (image) barriers
         for decl in &usage.texture_usages {
             // Get Vulkan image info from the texture
             let GpuTexture::Vulkan { image, .. } = decl.texture.gpu_handle() else {
@@ -826,6 +827,47 @@ impl VulkanBackend {
 
             // Update tracked state
             tracker.set_layout(texture_id, required_layout);
+        }
+
+        // Generate buffer barriers
+        // Note: Buffer barriers are needed for synchronization between passes that
+        // write and read the same buffer. We track the previous access mode per buffer.
+        for decl in &usage.buffer_usages {
+            // Get Vulkan buffer info
+            let GpuBuffer::Vulkan { buffer, .. } = decl.buffer.gpu_handle() else {
+                continue;
+            };
+
+            let buffer_id = BufferId::from(*buffer);
+
+            // For buffer barriers, we need to track previous access mode.
+            // Since we don't have per-buffer tracking yet, we generate barriers
+            // for all write operations and write-to-read transitions.
+            // This is conservative but safe - a future optimization could add
+            // buffer state tracking similar to texture layout tracking.
+            if decl.access.is_write() {
+                // Always barrier before writes to ensure previous reads complete
+                batch.add_buffer_barrier(
+                    buffer_id,
+                    *buffer,
+                    decl.access, // Use same access as src (will be optimized away if same read)
+                    decl.access,
+                    decl.offset,
+                    decl.size,
+                );
+            } else {
+                // For reads after potential writes, we need barriers.
+                // Since we don't track previous state, use TransferWrite as conservative src.
+                // This ensures any previous transfer/storage writes are visible.
+                batch.add_buffer_barrier(
+                    buffer_id,
+                    *buffer,
+                    crate::graph::resource_usage::BufferAccessMode::TransferWrite,
+                    decl.access,
+                    decl.offset,
+                    decl.size,
+                );
+            }
         }
 
         batch

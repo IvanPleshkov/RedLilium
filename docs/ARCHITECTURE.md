@@ -158,8 +158,8 @@ synchronization while optimizing barrier placement.
 │  in flight to handle async GPU execution)                        │
 ├─────────────────────────────────────────────────────────────────┤
 │                     BarrierBatch                                 │
-│  Collects all barriers needed for a pass, submits them once     │
-│  with optimal pipeline stage masks                               │
+│  Collects all barriers (image + buffer) for a pass, submits     │
+│  them once with optimal pipeline stage masks                     │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -169,18 +169,21 @@ synchronization while optimizing barrier placement.
    material bindings, and transfer operations.
 
 2. **Usage Inference**: At encode time, `infer_resource_usage()` extracts texture
-   usages from the pass configuration:
+   and buffer usages from the pass configuration:
    - Color attachments → `RenderTargetWrite`
    - Depth attachments → `DepthStencilWrite` or `DepthStencilReadOnly`
    - Material textures → `ShaderRead`
    - Transfer sources → `TransferRead`
    - Transfer destinations → `TransferWrite`
+   - Indirect draw buffers → `IndirectRead`
+   - Buffer copy sources → `TransferRead`
+   - Buffer copy destinations → `TransferWrite`
 
 3. **Barrier Generation**: Before encoding each pass, the system:
-   - Queries current layout from the tracker
-   - Determines required layout from usage
-   - Generates barrier if layout differs
-   - Updates tracked layout
+   - Queries current layout from the tracker (for textures)
+   - Determines required layout/access from usage
+   - Generates barriers if transitions are needed
+   - Updates tracked layout (for textures)
 
 4. **Batched Submission**: All barriers for a pass are collected and submitted
    in a single `vkCmdPipelineBarrier` call with combined stage masks.
@@ -191,10 +194,39 @@ synchronization while optimizing barrier placement.
 Pass 1 (Render): texture Undefined → ColorAttachment
 Pass 2 (Sample): texture ColorAttachment → ShaderReadOnly
 Pass 3 (Copy):   texture ShaderReadOnly → TransferSrc
+                 buffer TransferWrite → VertexBuffer
 ```
 
 The wgpu backend handles layout tracking internally, so this system is
 Vulkan-specific.
+
+### Automatic Buffer Barrier Placement (Vulkan Backend)
+
+In addition to texture layout tracking, the Vulkan backend automatically generates
+buffer memory barriers. Unlike textures, buffers don't have "layouts" but still
+need barriers for memory coherence between passes.
+
+**Buffer Access Modes:**
+
+| Access Mode | Vulkan Stage | Access Flags |
+|-------------|--------------|--------------|
+| `VertexBuffer` | Vertex Input | Vertex Attribute Read |
+| `IndexBuffer` | Vertex Input | Index Read |
+| `UniformRead` | VS/FS | Uniform Read |
+| `StorageRead` | VS/FS/CS | Shader Read |
+| `StorageWrite` | VS/FS/CS | Shader Write |
+| `IndirectRead` | Draw Indirect | Indirect Command Read |
+| `TransferRead` | Transfer | Transfer Read |
+| `TransferWrite` | Transfer | Transfer Write |
+
+**Usage Inference:**
+
+- **GraphicsPass**: Indirect draw buffers automatically detected
+- **TransferPass**: Source and destination buffers for copy operations
+
+The system is conservative - it may insert barriers where not strictly needed,
+but guarantees correctness. Future optimization could add per-buffer state
+tracking similar to the texture layout tracker.
 
 ### Frame Overlap (Pipelining)
 
