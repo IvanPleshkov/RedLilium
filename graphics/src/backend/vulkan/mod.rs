@@ -237,6 +237,11 @@ impl VulkanBackend {
         &self.swapchain_loader
     }
 
+    /// Get the command pool.
+    pub fn command_pool(&self) -> vk::CommandPool {
+        self.command_pool
+    }
+
     /// Query surface capabilities for a given surface.
     pub fn get_surface_capabilities(
         &self,

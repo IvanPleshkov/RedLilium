@@ -736,12 +736,78 @@ impl SurfaceTexture {
 
         // Present the Vulkan swapchain image
         #[cfg(feature = "vulkan-backend")]
-        if let (Some(_), Some(swapchain)) = (&self.vulkan_view, self.vulkan_swapchain) {
+        if let (Some(vulkan_view), Some(swapchain)) = (&self.vulkan_view, self.vulkan_swapchain) {
             use crate::backend::GpuBackend;
 
             if let GpuBackend::Vulkan(vulkan_backend) = self.instance.backend() {
-                // Submit an empty command buffer to synchronize and signal the fence
-                // This waits for image acquisition and signals when rendering can proceed
+                // Allocate a command buffer for the layout transition
+                let alloc_info = vk::CommandBufferAllocateInfo::default()
+                    .command_pool(vulkan_backend.command_pool())
+                    .level(vk::CommandBufferLevel::PRIMARY)
+                    .command_buffer_count(1);
+
+                let command_buffers = match unsafe {
+                    vulkan_backend
+                        .device()
+                        .allocate_command_buffers(&alloc_info)
+                } {
+                    Ok(buffers) => buffers,
+                    Err(e) => {
+                        log::error!("Failed to allocate command buffer for present: {:?}", e);
+                        return;
+                    }
+                };
+                let cmd = command_buffers[0];
+
+                // Begin command buffer
+                let begin_info = vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+                if let Err(e) = unsafe {
+                    vulkan_backend
+                        .device()
+                        .begin_command_buffer(cmd, &begin_info)
+                } {
+                    log::error!("Failed to begin command buffer for present: {:?}", e);
+                    return;
+                }
+
+                // Transition image from COLOR_ATTACHMENT_OPTIMAL to PRESENT_SRC_KHR
+                let barrier = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(vulkan_view.image())
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    })
+                    .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                    .dst_access_mask(vk::AccessFlags::empty());
+
+                unsafe {
+                    vulkan_backend.device().cmd_pipeline_barrier(
+                        cmd,
+                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                        vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[barrier],
+                    );
+                }
+
+                // End command buffer
+                if let Err(e) = unsafe { vulkan_backend.device().end_command_buffer(cmd) } {
+                    log::error!("Failed to end command buffer for present: {:?}", e);
+                    return;
+                }
+
+                // Submit command buffer with synchronization
                 let wait_semaphores = [self.vulkan_image_available_semaphore];
                 let signal_semaphores = [self.vulkan_render_finished_semaphore];
                 let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
@@ -749,6 +815,7 @@ impl SurfaceTexture {
                 let submit_info = vk::SubmitInfo::default()
                     .wait_semaphores(&wait_semaphores)
                     .wait_dst_stage_mask(&wait_stages)
+                    .command_buffers(&command_buffers)
                     .signal_semaphores(&signal_semaphores);
 
                 // Submit and signal the fence
@@ -762,6 +829,11 @@ impl SurfaceTexture {
 
                 if let Err(e) = result {
                     log::error!("Failed to submit presentation sync: {:?}", e);
+                    unsafe {
+                        vulkan_backend
+                            .device()
+                            .free_command_buffers(vulkan_backend.command_pool(), &command_buffers);
+                    }
                     return;
                 }
 
@@ -778,6 +850,14 @@ impl SurfaceTexture {
                         .swapchain_loader()
                         .queue_present(vulkan_backend.graphics_queue(), &present_info)
                 };
+
+                // Free command buffer (after queue submit, fence will track completion)
+                // Note: We free immediately because the fence ensures the GPU is done before reuse
+                unsafe {
+                    vulkan_backend
+                        .device()
+                        .free_command_buffers(vulkan_backend.command_pool(), &command_buffers);
+                }
 
                 match result {
                     Ok(_) => {
