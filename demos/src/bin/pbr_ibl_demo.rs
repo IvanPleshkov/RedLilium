@@ -27,6 +27,8 @@ use redlilium_graphics::{
     TransferOperation, TransferPass, VertexAttribute, VertexAttributeFormat,
     VertexAttributeSemantic, VertexBufferLayout, VertexLayout,
 };
+use winit::event::KeyEvent;
+use winit::keyboard::{KeyCode, PhysicalKey};
 
 // === WGSL Shaders ===
 
@@ -202,6 +204,57 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Skybox shader - renders environment cubemap as background
+const SKYBOX_SHADER_WGSL: &str = r#"
+struct SkyboxUniforms {
+    inv_view_proj: mat4x4<f32>,
+    camera_pos: vec4<f32>,
+    mip_level: f32,
+    _pad: vec3<f32>,
+};
+
+@group(0) @binding(0) var<uniform> uniforms: SkyboxUniforms;
+@group(0) @binding(1) var env_map: texture_cube<f32>;
+@group(0) @binding(2) var env_sampler: sampler;
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) view_dir: vec3<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
+    // Fullscreen triangle
+    let x = f32((vertex_index & 1u) << 2u) - 1.0;
+    let y = f32((vertex_index & 2u) << 1u) - 1.0;
+
+    var out: VertexOutput;
+    out.position = vec4<f32>(x, y, 0.9999, 1.0);
+
+    // Compute view direction from clip space
+    let clip_pos = vec4<f32>(x, y, 1.0, 1.0);
+    let world_pos = uniforms.inv_view_proj * clip_pos;
+    out.view_dir = normalize(world_pos.xyz / world_pos.w - uniforms.camera_pos.xyz);
+
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let color = textureSampleLevel(env_map, env_sampler, in.view_dir, uniforms.mip_level).rgb;
+
+    // Tonemap and gamma correct
+    let mapped = color / (color + vec3<f32>(1.0));
+    let corrected = pow(mapped, vec3<f32>(1.0 / 2.2));
+
+    return vec4<f32>(corrected, 1.0);
+}
+"#;
+
+// Note: G-buffer debug visualization would require multi-render-target output
+// from the PBR shader, which is not implemented yet. The debug mode keys are
+// reserved for future implementation.
+
 // === Orbit Camera ===
 
 struct OrbitCamera {
@@ -277,6 +330,16 @@ struct SphereInstance {
     model: [[f32; 4]; 4],
     base_color: [f32; 4],
     metallic_roughness: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct SkyboxUniforms {
+    inv_view_proj: [[f32; 4]; 4], // 64 bytes, offset 0
+    camera_pos: [f32; 4],         // 16 bytes, offset 64
+    mip_level: f32,               // 4 bytes, offset 80
+    _pad0: [f32; 3],              // 12 bytes padding before vec3 (which has 16-byte alignment)
+    _pad1: [f32; 4],              // Additional padding to match WGSL vec3<f32> + struct alignment
 }
 
 // === Mesh Generation ===
@@ -418,6 +481,16 @@ struct PbrIblDemo {
     instance_buffer: Option<Arc<redlilium_graphics::Buffer>>,
     depth_texture: Option<Arc<redlilium_graphics::Texture>>,
 
+    // Skybox resources
+    skybox_material: Option<Arc<Material>>,
+    skybox_material_instance: Option<Arc<MaterialInstance>>,
+    skybox_uniform_buffer: Option<Arc<redlilium_graphics::Buffer>>,
+    skybox_mesh: Option<Arc<Mesh>>,
+    skybox_mip_level: f32,
+
+    // Track shift key for MIP level switching
+    shift_pressed: bool,
+
     // IBL resources
     ibl_ready: bool,
     irradiance_cubemap: Option<Arc<redlilium_graphics::Texture>>,
@@ -448,6 +521,12 @@ impl PbrIblDemo {
             camera_buffer: None,
             instance_buffer: None,
             depth_texture: None,
+            skybox_material: None,
+            skybox_material_instance: None,
+            skybox_uniform_buffer: None,
+            skybox_mesh: None,
+            skybox_mip_level: 0.0,
+            shift_pressed: false,
             ibl_ready: false,
             irradiance_cubemap: None,
             prefilter_cubemap: None,
@@ -775,8 +854,107 @@ impl PbrIblDemo {
         }
         self.mesh = Some(mesh);
 
+        // Create skybox material and resources
+        self.create_skybox_resources(ctx);
+
         // Create depth texture
         self.create_depth_texture(ctx);
+    }
+
+    fn create_skybox_resources(&mut self, ctx: &AppContext) {
+        let device = ctx.device();
+
+        // Create skybox binding layout
+        let skybox_binding_layout = Arc::new(
+            BindingLayout::new()
+                .with_entry(
+                    BindingLayoutEntry::new(0, BindingType::UniformBuffer)
+                        .with_visibility(ShaderStageFlags::VERTEX | ShaderStageFlags::FRAGMENT),
+                )
+                .with_entry(
+                    BindingLayoutEntry::new(1, BindingType::TextureCube)
+                        .with_visibility(ShaderStageFlags::FRAGMENT),
+                )
+                .with_entry(
+                    BindingLayoutEntry::new(2, BindingType::Sampler)
+                        .with_visibility(ShaderStageFlags::FRAGMENT),
+                )
+                .with_label("skybox_bindings"),
+        );
+
+        // Create skybox material (no vertex layout needed for fullscreen triangle)
+        let skybox_material = device
+            .create_material(
+                &MaterialDescriptor::new()
+                    .with_shader(ShaderSource::new(
+                        ShaderStage::Vertex,
+                        SKYBOX_SHADER_WGSL.as_bytes().to_vec(),
+                        "vs_main",
+                    ))
+                    .with_shader(ShaderSource::new(
+                        ShaderStage::Fragment,
+                        SKYBOX_SHADER_WGSL.as_bytes().to_vec(),
+                        "fs_main",
+                    ))
+                    .with_binding_layout(skybox_binding_layout)
+                    .with_label("skybox_material"),
+            )
+            .expect("Failed to create skybox material");
+        self.skybox_material = Some(skybox_material.clone());
+
+        // Create skybox uniform buffer
+        let skybox_uniform_buffer = device
+            .create_buffer(&BufferDescriptor::new(
+                std::mem::size_of::<SkyboxUniforms>() as u64,
+                BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+            ))
+            .expect("Failed to create skybox uniform buffer");
+        self.skybox_uniform_buffer = Some(skybox_uniform_buffer.clone());
+
+        // Create skybox material instance
+        #[allow(clippy::arc_with_non_send_sync)]
+        let skybox_binding_group = Arc::new(
+            BindingGroup::new()
+                .with_buffer(0, skybox_uniform_buffer)
+                .with_texture(1, self.prefilter_cubemap.clone().unwrap())
+                .with_sampler(2, self.ibl_sampler.clone().unwrap()),
+        );
+
+        let skybox_material_instance = Arc::new(
+            MaterialInstance::new(skybox_material).with_binding_group(skybox_binding_group),
+        );
+        self.skybox_material_instance = Some(skybox_material_instance);
+
+        // Create a minimal mesh for fullscreen triangle (shader uses vertex_index)
+        // Just need 3 vertices with a dummy layout
+        let skybox_vertex_layout = Arc::new(
+            VertexLayout::new()
+                .with_buffer(VertexBufferLayout::new(4)) // 1 dummy float per vertex
+                .with_attribute(VertexAttribute {
+                    semantic: VertexAttributeSemantic::Position,
+                    format: VertexAttributeFormat::Float,
+                    offset: 0,
+                    buffer_index: 0,
+                })
+                .with_label("skybox_vertex_layout"),
+        );
+
+        let skybox_mesh = device
+            .create_mesh(
+                &MeshDescriptor::new(skybox_vertex_layout)
+                    .with_vertex_count(3)
+                    .with_label("skybox_triangle"),
+            )
+            .expect("Failed to create skybox mesh");
+
+        // Write dummy vertex data (shader doesn't use it, just needs valid buffer)
+        if let Some(vb) = skybox_mesh.vertex_buffer(0) {
+            let dummy_data: [f32; 3] = [0.0, 0.0, 0.0];
+            device.write_buffer(vb, 0, bytemuck::cast_slice(&dummy_data));
+        }
+        self.skybox_mesh = Some(skybox_mesh);
+
+        log::info!("Skybox resources created");
     }
 
     fn create_depth_texture(&mut self, ctx: &AppContext) {
@@ -829,6 +1007,26 @@ impl PbrIblDemo {
         };
 
         if let Some(buffer) = &self.camera_buffer {
+            ctx.device()
+                .write_buffer(buffer, 0, bytemuck::bytes_of(&uniforms));
+        }
+    }
+
+    fn update_skybox_buffer(&self, ctx: &AppContext) {
+        let view = self.camera.view_matrix();
+        let proj = self.camera.projection_matrix(ctx.aspect_ratio());
+        let view_proj = proj * view;
+        let inv_view_proj = view_proj.inverse();
+
+        let uniforms = SkyboxUniforms {
+            inv_view_proj: inv_view_proj.to_cols_array_2d(),
+            camera_pos: self.camera.position().extend(1.0).to_array(),
+            mip_level: self.skybox_mip_level,
+            _pad0: [0.0; 3],
+            _pad1: [0.0; 4],
+        };
+
+        if let Some(buffer) = &self.skybox_uniform_buffer {
             ctx.device()
                 .write_buffer(buffer, 0, bytemuck::bytes_of(&uniforms));
         }
@@ -1122,6 +1320,7 @@ impl AppHandler for PbrIblDemo {
         log::info!("Controls:");
         log::info!("  - Left mouse drag: Rotate camera");
         log::info!("  - Scroll: Zoom");
+        log::info!("  - Shift+0-7: Change skybox MIP level (0=sharp, higher=blurry)");
 
         self.create_gpu_resources(ctx);
     }
@@ -1135,6 +1334,7 @@ impl AppHandler for PbrIblDemo {
             self.camera.rotate(ctx.delta_time() * 0.15, 0.0);
         }
         self.update_camera_buffer(ctx);
+        self.update_skybox_buffer(ctx);
         true
     }
 
@@ -1166,6 +1366,14 @@ impl AppHandler for PbrIblDemo {
             );
         }
 
+        // Draw skybox first (fullscreen triangle at far plane)
+        if let (Some(skybox_mesh), Some(skybox_instance)) =
+            (&self.skybox_mesh, &self.skybox_material_instance)
+        {
+            render_pass.add_draw(skybox_mesh.clone(), skybox_instance.clone());
+        }
+
+        // Draw PBR spheres
         if let (Some(mesh), Some(material_instance)) = (&self.mesh, &self.material_instance) {
             render_pass.add_draw_instanced(
                 mesh.clone(),
@@ -1203,6 +1411,60 @@ impl AppHandler for PbrIblDemo {
 
     fn on_mouse_scroll(&mut self, _ctx: &mut AppContext, _dx: f32, dy: f32) {
         self.camera.zoom(dy * 0.5);
+    }
+
+    fn on_key(&mut self, _ctx: &mut AppContext, event: &KeyEvent) {
+        // Track shift key state
+        if let PhysicalKey::Code(KeyCode::ShiftLeft | KeyCode::ShiftRight) = event.physical_key {
+            self.shift_pressed = event.state.is_pressed();
+            return;
+        }
+
+        // Only handle key press events
+        if !event.state.is_pressed() {
+            return;
+        }
+
+        let mip_levels = (PREFILTER_SIZE as f32).log2().floor() as u32 + 1;
+
+        match event.physical_key {
+            // Shift + number: change skybox MIP level
+            PhysicalKey::Code(KeyCode::Digit0) if self.shift_pressed => {
+                self.skybox_mip_level = 0.0;
+                log::info!("Skybox MIP level: 0");
+            }
+            PhysicalKey::Code(KeyCode::Digit1) if self.shift_pressed => {
+                self.skybox_mip_level = 1.0_f32.min(mip_levels as f32 - 1.0);
+                log::info!("Skybox MIP level: {}", self.skybox_mip_level);
+            }
+            PhysicalKey::Code(KeyCode::Digit2) if self.shift_pressed => {
+                self.skybox_mip_level = 2.0_f32.min(mip_levels as f32 - 1.0);
+                log::info!("Skybox MIP level: {}", self.skybox_mip_level);
+            }
+            PhysicalKey::Code(KeyCode::Digit3) if self.shift_pressed => {
+                self.skybox_mip_level = 3.0_f32.min(mip_levels as f32 - 1.0);
+                log::info!("Skybox MIP level: {}", self.skybox_mip_level);
+            }
+            PhysicalKey::Code(KeyCode::Digit4) if self.shift_pressed => {
+                self.skybox_mip_level = 4.0_f32.min(mip_levels as f32 - 1.0);
+                log::info!("Skybox MIP level: {}", self.skybox_mip_level);
+            }
+            PhysicalKey::Code(KeyCode::Digit5) if self.shift_pressed => {
+                self.skybox_mip_level = 5.0_f32.min(mip_levels as f32 - 1.0);
+                log::info!("Skybox MIP level: {}", self.skybox_mip_level);
+            }
+            PhysicalKey::Code(KeyCode::Digit6) if self.shift_pressed => {
+                self.skybox_mip_level = 6.0_f32.min(mip_levels as f32 - 1.0);
+                log::info!("Skybox MIP level: {}", self.skybox_mip_level);
+            }
+            PhysicalKey::Code(KeyCode::Digit7) if self.shift_pressed => {
+                self.skybox_mip_level = 7.0_f32.min(mip_levels as f32 - 1.0);
+                log::info!("Skybox MIP level: {}", self.skybox_mip_level);
+            }
+
+            // Note: Number keys without shift reserved for future G-buffer debug visualization
+            _ => {}
+        }
     }
 
     fn on_shutdown(&mut self, _ctx: &mut AppContext) {

@@ -66,4 +66,4 @@ https://learnopengl.com/img/pbr/ibl_brdf_lut.png
 App struct has a feature to run just N frames and exit. Run the demo with 10 frames and check that there is crash. If there is a crash, fix it
 
 ## Request 6:
-Cool pbr demo! Can you also draw in background the cude texture (switch cubemap MIP mamually using shift+number). by pressing number switch deferred channels to show that deferred works
+Cool pbr demo! Can you also draw in background the cude texture (switch cubemap MIP manually using shift+number). by pressing number switch deferred channels to show that deferred works
