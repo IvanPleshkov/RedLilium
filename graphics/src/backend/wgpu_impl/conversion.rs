@@ -235,3 +235,57 @@ pub fn convert_present_mode(mode: crate::swapchain::PresentMode) -> wgpu::Presen
         crate::swapchain::PresentMode::FifoRelaxed => wgpu::PresentMode::FifoRelaxed,
     }
 }
+
+/// Convert ShaderStageFlags to wgpu shader stages.
+pub fn convert_shader_stages(flags: crate::materials::ShaderStageFlags) -> wgpu::ShaderStages {
+    let mut result = wgpu::ShaderStages::empty();
+
+    if flags.contains(crate::materials::ShaderStageFlags::VERTEX) {
+        result |= wgpu::ShaderStages::VERTEX;
+    }
+    if flags.contains(crate::materials::ShaderStageFlags::FRAGMENT) {
+        result |= wgpu::ShaderStages::FRAGMENT;
+    }
+    if flags.contains(crate::materials::ShaderStageFlags::COMPUTE) {
+        result |= wgpu::ShaderStages::COMPUTE;
+    }
+
+    result
+}
+
+/// Convert BindingType to wgpu binding type.
+pub fn convert_binding_type(binding_type: crate::materials::BindingType) -> wgpu::BindingType {
+    match binding_type {
+        crate::materials::BindingType::UniformBuffer => wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        crate::materials::BindingType::StorageBuffer => wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        crate::materials::BindingType::Texture => wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        crate::materials::BindingType::TextureCube => wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::Cube,
+            multisampled: false,
+        },
+        crate::materials::BindingType::Sampler => {
+            wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)
+        }
+        crate::materials::BindingType::CombinedTextureSampler => {
+            // wgpu doesn't have combined texture/sampler, use texture binding
+            wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            }
+        }
+    }
+}

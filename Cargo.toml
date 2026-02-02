@@ -4,6 +4,7 @@ members = [
     "core",
     "ecs",
     "graphics",
+    "app",
     "demos",
 ]
 
@@ -41,3 +42,7 @@ ash = "0.38.0"
 gpu-allocator = "0.28"
 parking_lot = "0.12"
 pollster = "0.4"
+
+# Math and data
+glam = "0.30"
+bytemuck = { version = "1.21", features = ["derive"] }

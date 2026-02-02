@@ -30,7 +30,10 @@
       "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"& ''./scripts/test-all.ps1'' -SkipWeb\")",
       "Bash(set RUST_LOG=warn)",
       "Bash(tree:*)",
-      "Bash(ls -la \"d:\\\\github\\\\vibeengine\\\\graphics\\\\src\"\" && echo \"===\" && ls -la \"d:githubvibeenginegraphicssrcbackend\"\")"
+      "Bash(ls -la \"d:\\\\github\\\\vibeengine\\\\graphics\\\\src\"\" && echo \"===\" && ls -la \"d:githubvibeenginegraphicssrcbackend\"\")",
+      "Bash(cargo run:*)",
+      "WebFetch(domain:learnopengl.com)",
+      "Bash(bash:*)"
     ],
     "deny": [
       "Read(claude_requests_history/**)",

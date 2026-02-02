@@ -8,8 +8,9 @@ use crate::mesh::IndexFormat;
 use super::super::{GpuBuffer, GpuTexture};
 use super::WgpuBackend;
 use super::conversion::{
-    convert_depth_load_op, convert_load_op, convert_step_mode, convert_store_op,
-    convert_texture_format, convert_topology, convert_vertex_format,
+    convert_binding_type, convert_depth_load_op, convert_load_op, convert_shader_stages,
+    convert_step_mode, convert_store_op, convert_texture_format, convert_topology,
+    convert_vertex_format,
 };
 
 impl WgpuBackend {
@@ -249,14 +250,107 @@ impl WgpuBackend {
             })
             .collect();
 
-        // Create pipeline layout (empty for now - no bind groups)
+        // Create bind group layouts from material binding layouts
+        let binding_layouts = material.binding_layouts();
+        let bind_group_layouts: Vec<wgpu::BindGroupLayout> = binding_layouts
+            .iter()
+            .map(|layout| {
+                let entries: Vec<wgpu::BindGroupLayoutEntry> = layout
+                    .entries
+                    .iter()
+                    .map(|entry| wgpu::BindGroupLayoutEntry {
+                        binding: entry.binding,
+                        visibility: convert_shader_stages(entry.visibility),
+                        ty: convert_binding_type(entry.binding_type),
+                        count: None,
+                    })
+                    .collect();
+
+                self.device
+                    .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                        label: layout.label.as_deref(),
+                        entries: &entries,
+                    })
+            })
+            .collect();
+
+        let bind_group_layout_refs: Vec<&wgpu::BindGroupLayout> =
+            bind_group_layouts.iter().collect();
+
+        // Create pipeline layout with bind group layouts
         let pipeline_layout = self
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Draw Pipeline Layout"),
-                bind_group_layouts: &[],
+                bind_group_layouts: &bind_group_layout_refs,
                 immediate_size: 0,
             });
+
+        // Create bind groups from material instance binding groups
+        let material_instance = &draw_cmd.material;
+        let bind_groups: Vec<wgpu::BindGroup> = material_instance
+            .binding_groups()
+            .iter()
+            .zip(bind_group_layouts.iter())
+            .map(|(binding_group, layout)| {
+                let entries: Vec<wgpu::BindGroupEntry> = binding_group
+                    .entries
+                    .iter()
+                    .filter_map(|entry| {
+                        let resource = match &entry.resource {
+                            crate::materials::BoundResource::Buffer(buffer) => {
+                                if let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() {
+                                    Some(wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                        buffer: wgpu_buffer,
+                                        offset: 0,
+                                        size: None,
+                                    }))
+                                } else {
+                                    None
+                                }
+                            }
+                            crate::materials::BoundResource::Texture(texture) => {
+                                if let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() {
+                                    Some(wgpu::BindingResource::TextureView(view.as_ref()))
+                                } else {
+                                    None
+                                }
+                            }
+                            crate::materials::BoundResource::Sampler(sampler) => {
+                                if let crate::backend::GpuSampler::Wgpu(wgpu_sampler) =
+                                    sampler.gpu_handle()
+                                {
+                                    Some(wgpu::BindingResource::Sampler(wgpu_sampler))
+                                } else {
+                                    None
+                                }
+                            }
+                            crate::materials::BoundResource::CombinedTextureSampler {
+                                texture,
+                                ..
+                            } => {
+                                // For combined, just use the texture view
+                                if let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() {
+                                    Some(wgpu::BindingResource::TextureView(view.as_ref()))
+                                } else {
+                                    None
+                                }
+                            }
+                        };
+                        resource.map(|r| wgpu::BindGroupEntry {
+                            binding: entry.binding,
+                            resource: r,
+                        })
+                    })
+                    .collect();
+
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: binding_group.label.as_deref(),
+                    layout,
+                    entries: &entries,
+                })
+            })
+            .collect();
 
         // Build color targets
         let color_targets: Vec<Option<wgpu::ColorTargetState>> = color_formats
@@ -311,6 +405,11 @@ impl WgpuBackend {
 
         // Set the pipeline
         render_pass.set_pipeline(&pipeline);
+
+        // Bind bind groups
+        for (index, bind_group) in bind_groups.iter().enumerate() {
+            render_pass.set_bind_group(index as u32, bind_group, &[]);
+        }
 
         // Bind vertex buffers
         for (slot, buffer) in mesh.vertex_buffers().iter().enumerate() {

@@ -133,6 +133,9 @@ impl Default for BindingGroup {
     }
 }
 
+// Ensure BindingGroup is Send + Sync for use in Arc
+static_assertions::assert_impl_all!(BindingGroup: Send, Sync);
+
 /// A material instance with bound resources for rendering.
 ///
 /// The instance references a [`Material`] and contains the actual GPU resources

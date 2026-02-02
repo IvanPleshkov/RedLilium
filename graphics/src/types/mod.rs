@@ -11,4 +11,4 @@ mod texture;
 pub use buffer::{BufferDescriptor, BufferUsage, DrawIndexedIndirectArgs, DrawIndirectArgs};
 pub use common::{ClearValue, Extent3d, ScissorRect, Viewport};
 pub use sampler::{AddressMode, CompareFunction, FilterMode, SamplerDescriptor};
-pub use texture::{TextureDescriptor, TextureFormat, TextureUsage};
+pub use texture::{TextureDescriptor, TextureDimension, TextureFormat, TextureUsage};

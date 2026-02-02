@@ -32,25 +32,54 @@ impl WgpuBackend {
         &self,
         descriptor: &TextureDescriptor,
     ) -> Result<GpuTexture, GraphicsError> {
+        use crate::types::TextureDimension;
+
         let format = convert_texture_format(descriptor.format);
         let usage = convert_texture_usage(descriptor.usage);
+
+        // Convert our texture dimension to wgpu's
+        let (wgpu_dimension, depth_or_array_layers) = match descriptor.dimension {
+            TextureDimension::D1 => (wgpu::TextureDimension::D1, descriptor.size.depth),
+            TextureDimension::D2 => (wgpu::TextureDimension::D2, descriptor.size.depth),
+            TextureDimension::D3 => (wgpu::TextureDimension::D3, descriptor.size.depth),
+            TextureDimension::Cube => (wgpu::TextureDimension::D2, 6),
+            TextureDimension::CubeArray => (wgpu::TextureDimension::D2, descriptor.size.depth * 6),
+        };
 
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: descriptor.label.as_deref(),
             size: wgpu::Extent3d {
                 width: descriptor.size.width,
                 height: descriptor.size.height,
-                depth_or_array_layers: descriptor.size.depth,
+                depth_or_array_layers,
             },
             mip_level_count: descriptor.mip_level_count,
             sample_count: descriptor.sample_count,
-            dimension: wgpu::TextureDimension::D2,
+            dimension: wgpu_dimension,
             format,
             usage,
             view_formats: &[],
         });
 
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // Create the appropriate view based on dimension
+        let view_dimension = match descriptor.dimension {
+            TextureDimension::D1 => wgpu::TextureViewDimension::D1,
+            TextureDimension::D2 => {
+                if descriptor.size.depth > 1 {
+                    wgpu::TextureViewDimension::D2Array
+                } else {
+                    wgpu::TextureViewDimension::D2
+                }
+            }
+            TextureDimension::D3 => wgpu::TextureViewDimension::D3,
+            TextureDimension::Cube => wgpu::TextureViewDimension::Cube,
+            TextureDimension::CubeArray => wgpu::TextureViewDimension::CubeArray,
+        };
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(view_dimension),
+            ..Default::default()
+        });
 
         Ok(GpuTexture::Wgpu {
             texture: Arc::new(texture),

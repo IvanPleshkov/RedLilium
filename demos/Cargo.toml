@@ -12,11 +12,18 @@ crate-type = ["cdylib", "rlib"]
 redlilium-core = { path = "../core" }
 redlilium-ecs = { path = "../ecs" }
 redlilium-graphics = { path = "../graphics" }
+redlilium-app = { path = "../app" }
 winit.workspace = true
 log.workspace = true
+bytemuck = { workspace = true }
+glam = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 env_logger.workspace = true
+# For PBR IBL demo - HDR texture loading
+image = { version = "0.25", default-features = false, features = ["hdr", "png"] }
+ureq = "2.10"
+half = { version = "2.4", features = ["bytemuck"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen.workspace = true
@@ -28,6 +35,10 @@ web-sys = { workspace = true, features = ["Window", "Document", "Element"] }
 [[bin]]
 name = "window_demo"
 path = "src/bin/window_demo.rs"
+
+[[bin]]
+name = "pbr_ibl_demo"
+path = "src/bin/pbr_ibl_demo.rs"
 
 [[example]]
 name = "window_test"

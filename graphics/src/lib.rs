@@ -103,8 +103,9 @@ pub use resources::{Buffer, Sampler, Texture};
 pub use scheduler::{Fence, FenceStatus, FrameSchedule, GraphHandle, Semaphore};
 pub use swapchain::{PresentMode, Surface, SurfaceConfiguration, SurfaceTexture};
 pub use types::{
-    BufferDescriptor, BufferUsage, ClearValue, DrawIndexedIndirectArgs, DrawIndirectArgs, Extent3d,
-    SamplerDescriptor, ScissorRect, TextureDescriptor, TextureFormat, TextureUsage, Viewport,
+    AddressMode, BufferDescriptor, BufferUsage, ClearValue, CompareFunction,
+    DrawIndexedIndirectArgs, DrawIndirectArgs, Extent3d, FilterMode, SamplerDescriptor,
+    ScissorRect, TextureDescriptor, TextureDimension, TextureFormat, TextureUsage, Viewport,
 };
 
 /// Graphics library version

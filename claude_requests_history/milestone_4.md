@@ -32,4 +32,38 @@ Please take a loot into `docs\ARCHITECTURE.md` and `docs\DECISIONS.md`.
 There is an automatically placed barriers for texture usage in graphics crate.
 Check if we need the same for buffers and do it if needed.
 
+## Request 3:
+Add to workspace a new crate app.
+App is a library to create an application window with graphics from graphics crate.
+App it a technical library without actual game code, no ecs here.
+There is an `App` struct inside.
+This struct is generic over the trait to handle window events and draw requests.
+And over the trait to parse command line arguments.
+Command line arguments trait also has a functions to use in app like graphics backend, windows mode and size etc.
+Command line arguments trait has an additional function with `Option<u64>` how many should be processed before automatically exit.
+It's helphul for AI agents and allow agents to check if validation errors exist.
+Command line arguments for theese app params has default implementation.
 
+Please read carefully `docs\ARCHITECTURE.md` and `docs\DECISIONS.md` to integrate graphics properly.
+Use frame pipeline, frame schedule and resizing mechanism from graphics crate.
+
+Next, we need a new demo with a perfect showcase of graphics crate.
+As a result, I want a demo with a deferred pipeline, HDR, PBR with IBL, orbit camera (no ecs, it's a graphics showcase).
+For image based lighting as a texture use this HDR texture, you can download dynamically in demo.
+https://github.com/JoeyDeVries/LearnOpenGL/blob/master/resources/textures/hdr/newport_loft.hdr
+Demo shows a grid of pbr lighted red spheres.
+
+Add support of cubemap textures if graphics crate does not have it.
+
+## Request 4:
+Lets refactor pbr demo. I dont want to use harmonics yet. instead, I want to use environment map conversion into irradiance cubemap, like in learnopengl tutorials:
+https://learnopengl.com/PBR/IBL/Diffuse-irradiance
+https://learnopengl.com/PBR/IBL/Specular-IBL
+
+## Request 5:
+Lets refactor pbr demo. I dont want to calculate BRDF LUT, remove calculation and take it from
+https://learnopengl.com/img/pbr/ibl_brdf_lut.png
+App struct has a feature to run just N frames and exit. Run the demo with 10 frames and check that there is crash. If there is a crash, fix it
+
+## Request 6:
+Cool pbr demo! Can you also draw in background the cude texture (switch cubemap MIP mamually using shift+number). by pressing number switch deferred channels to show that deferred works

@@ -3,6 +3,46 @@
 use super::Extent3d;
 use bitflags::bitflags;
 
+/// Texture dimension enumeration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TextureDimension {
+    /// 1D texture.
+    D1,
+    /// 2D texture (default).
+    #[default]
+    D2,
+    /// 3D texture (volume).
+    D3,
+    /// Cubemap texture (6 faces).
+    Cube,
+    /// Cubemap array texture (N × 6 faces).
+    CubeArray,
+}
+
+impl TextureDimension {
+    /// Returns the number of array layers for this dimension.
+    ///
+    /// For cubemaps, this is 6. For cube arrays, multiply by 6.
+    /// For other dimensions, it's the depth/array_layers from the extent.
+    pub fn layer_count(&self, depth_or_array_layers: u32) -> u32 {
+        match self {
+            Self::D1 | Self::D2 | Self::D3 => depth_or_array_layers,
+            Self::Cube => 6,
+            Self::CubeArray => depth_or_array_layers * 6,
+        }
+    }
+
+    /// Returns true if this is a cubemap or cubemap array dimension.
+    pub fn is_cubemap(&self) -> bool {
+        matches!(self, Self::Cube | Self::CubeArray)
+    }
+
+    /// Returns true if this is an array texture (2D array or cube array).
+    pub fn is_array(&self) -> bool {
+        matches!(self, Self::CubeArray)
+    }
+}
+
 /// Texture format enumeration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
@@ -138,6 +178,8 @@ pub struct TextureDescriptor {
     pub mip_level_count: u32,
     /// Sample count for multisampling.
     pub sample_count: u32,
+    /// Texture dimension (1D, 2D, 3D, Cube, CubeArray).
+    pub dimension: TextureDimension,
     /// Texture format.
     pub format: TextureFormat,
     /// Usage flags.
@@ -152,6 +194,42 @@ impl TextureDescriptor {
             size: Extent3d::new_2d(width, height),
             mip_level_count: 1,
             sample_count: 1,
+            dimension: TextureDimension::D2,
+            format,
+            usage,
+        }
+    }
+
+    /// Create a new cubemap texture descriptor.
+    ///
+    /// Cubemaps have 6 faces (layers): +X, -X, +Y, -Y, +Z, -Z.
+    /// The size is the width/height of each face (must be square).
+    pub fn new_cube(size: u32, format: TextureFormat, usage: TextureUsage) -> Self {
+        Self {
+            label: None,
+            size: Extent3d::new_3d(size, size, 6),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::Cube,
+            format,
+            usage,
+        }
+    }
+
+    /// Create a new 3D (volume) texture descriptor.
+    pub fn new_3d(
+        width: u32,
+        height: u32,
+        depth: u32,
+        format: TextureFormat,
+        usage: TextureUsage,
+    ) -> Self {
+        Self {
+            label: None,
+            size: Extent3d::new_3d(width, height, depth),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D3,
             format,
             usage,
         }
@@ -174,6 +252,12 @@ impl TextureDescriptor {
         self.sample_count = count;
         self
     }
+
+    /// Set the texture dimension.
+    pub fn with_dimension(mut self, dimension: TextureDimension) -> Self {
+        self.dimension = dimension;
+        self
+    }
 }
 
 impl Default for TextureDescriptor {
@@ -183,6 +267,7 @@ impl Default for TextureDescriptor {
             size: Extent3d::default(),
             mip_level_count: 1,
             sample_count: 1,
+            dimension: TextureDimension::default(),
             format: TextureFormat::default(),
             usage: TextureUsage::empty(),
         }

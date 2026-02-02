@@ -498,20 +498,73 @@ impl VulkanBackend {
         &self,
         descriptor: &TextureDescriptor,
     ) -> Result<GpuTexture, GraphicsError> {
+        use crate::types::TextureDimension;
+
         let format = convert_texture_format(descriptor.format);
         let usage = convert_texture_usage(descriptor.usage);
 
+        // Determine image type, array layers, and flags based on dimension
+        let (image_type, array_layers, extent, flags) = match descriptor.dimension {
+            TextureDimension::D1 => (
+                vk::ImageType::TYPE_1D,
+                1,
+                vk::Extent3D {
+                    width: descriptor.size.width,
+                    height: 1,
+                    depth: 1,
+                },
+                vk::ImageCreateFlags::empty(),
+            ),
+            TextureDimension::D2 => (
+                vk::ImageType::TYPE_2D,
+                descriptor.size.depth.max(1),
+                vk::Extent3D {
+                    width: descriptor.size.width,
+                    height: descriptor.size.height,
+                    depth: 1,
+                },
+                vk::ImageCreateFlags::empty(),
+            ),
+            TextureDimension::D3 => (
+                vk::ImageType::TYPE_3D,
+                1,
+                vk::Extent3D {
+                    width: descriptor.size.width,
+                    height: descriptor.size.height,
+                    depth: descriptor.size.depth.max(1),
+                },
+                vk::ImageCreateFlags::empty(),
+            ),
+            TextureDimension::Cube => (
+                vk::ImageType::TYPE_2D,
+                6,
+                vk::Extent3D {
+                    width: descriptor.size.width,
+                    height: descriptor.size.height,
+                    depth: 1,
+                },
+                vk::ImageCreateFlags::CUBE_COMPATIBLE,
+            ),
+            TextureDimension::CubeArray => (
+                vk::ImageType::TYPE_2D,
+                descriptor.size.depth * 6,
+                vk::Extent3D {
+                    width: descriptor.size.width,
+                    height: descriptor.size.height,
+                    depth: 1,
+                },
+                vk::ImageCreateFlags::CUBE_COMPATIBLE,
+            ),
+        };
+
         // Create image
         let image_info = vk::ImageCreateInfo::default()
-            .image_type(vk::ImageType::TYPE_2D)
+            .flags(flags)
+            .image_type(image_type)
             .format(format)
-            .extent(vk::Extent3D {
-                width: descriptor.size.width,
-                height: descriptor.size.height,
-                depth: descriptor.size.depth.max(1),
-            })
+            .extent(extent)
             .mip_levels(descriptor.mip_level_count)
-            .array_layers(1)
+            .array_layers(array_layers)
             .samples(match descriptor.sample_count {
                 1 => vk::SampleCountFlags::TYPE_1,
                 2 => vk::SampleCountFlags::TYPE_2,
@@ -570,9 +623,30 @@ impl VulkanBackend {
             vk::ImageAspectFlags::COLOR
         };
 
+        // Determine view type based on dimension
+        let (view_type, layer_count) = match descriptor.dimension {
+            TextureDimension::D1 => {
+                if descriptor.size.depth > 1 {
+                    (vk::ImageViewType::TYPE_1D_ARRAY, array_layers)
+                } else {
+                    (vk::ImageViewType::TYPE_1D, 1)
+                }
+            }
+            TextureDimension::D2 => {
+                if array_layers > 1 {
+                    (vk::ImageViewType::TYPE_2D_ARRAY, array_layers)
+                } else {
+                    (vk::ImageViewType::TYPE_2D, 1)
+                }
+            }
+            TextureDimension::D3 => (vk::ImageViewType::TYPE_3D, 1),
+            TextureDimension::Cube => (vk::ImageViewType::CUBE, 6),
+            TextureDimension::CubeArray => (vk::ImageViewType::CUBE_ARRAY, array_layers),
+        };
+
         let view_info = vk::ImageViewCreateInfo::default()
             .image(image)
-            .view_type(vk::ImageViewType::TYPE_2D)
+            .view_type(view_type)
             .format(format)
             .components(vk::ComponentMapping::default())
             .subresource_range(vk::ImageSubresourceRange {
@@ -580,7 +654,7 @@ impl VulkanBackend {
                 base_mip_level: 0,
                 level_count: descriptor.mip_level_count,
                 base_array_layer: 0,
-                layer_count: 1,
+                layer_count,
             });
 
         let view = unsafe { self.device.create_image_view(&view_info, None) }.map_err(|e| {
@@ -593,11 +667,7 @@ impl VulkanBackend {
             view,
             allocation: Mutex::new(Some(allocation)),
             format,
-            extent: vk::Extent3D {
-                width: descriptor.size.width,
-                height: descriptor.size.height,
-                depth: descriptor.size.depth.max(1),
-            },
+            extent,
             deferred: Arc::clone(&self.deferred_destructor),
         })
     }
