@@ -150,3 +150,41 @@ By design of graphics, surface can be related only to one backend.
 Here it's possible by the code to set `Some` for different backends.
 Please refactor it. As a result, I want to have a single field instead of `wgpu_surface`, `vulkan_surface`, `vulkan_swapchain`.
 You can move some code to backend folder. I dont want also to see `#[cfg(feature = "vulkan-backend")]` and `#[cfg(feature = "wgpu-backend")]` in `graphics\src\swapchain.rs`.
+
+## Request 22:
+Please fix this test (it works on Windows but fails on macos):
+```
+thread 'test_window_swapchain_5_frames_wgpu' (19130748) panicked at /Users/pleshkov/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.12/src/platform_impl/macos/event_loop.rs:221:14:
+on macOS, `EventLoop` must be created on the main thread!
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/std/src/panicking.rs:698:5
+   1: core::panicking::panic_fmt
+             at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:80:14
+   2: core::panicking::panic_display
+             at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/panicking.rs:264:5
+   3: core::option::expect_failed
+             at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/option.rs:2183:5
+   4: core::option::Option<T>::expect
+             at /Users/pleshkov/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:970:21
+   5: winit::platform_impl::macos::event_loop::EventLoop<T>::new
+             at /Users/pleshkov/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.12/src/platform_impl/macos/event_loop.rs:221:14
+   6: winit::event_loop::EventLoopBuilder<T>::build
+             at /Users/pleshkov/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.12/src/event_loop.rs:125:25
+   7: winit::event_loop::EventLoop<()>::new
+             at /Users/pleshkov/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.12/src/event_loop.rs:198:25
+   8: window_test::run_window_test
+             at ./tests/window_test.rs:373:32
+   9: window_test::test_window_swapchain_5_frames_wgpu::test_window_swapchain_5_frames_wgpu
+             at ./tests/window_test.rs:457:9
+  10: window_test::test_window_swapchain_5_frames_wgpu
+             at ./tests/window_test.rs:451:1
+  11: window_test::test_window_swapchain_5_frames_wgpu::{{closure}}
+             at ./tests/window_test.rs:451:10
+  12: core::ops::function::FnOnce::call_once
+             at /Users/pleshkov/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+  13: core::ops::function::FnOnce::call_once
+             at /rustc/ded5c06cf21d2b93bffd5d884aa6e96934ee4234/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+test test_window_swapchain_5_frames_wgpu ... FAILED
+```
