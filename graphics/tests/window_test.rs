@@ -537,7 +537,7 @@ fn test_window_swapchain_5_frames_vulkan() {
 fn test_window_swapchain_5_frames_wgpu() {
     let params = InstanceParameters::new()
         .with_backend(BackendType::Wgpu)
-        .with_wgpu_backend(WgpuBackendType::Vulkan);
+        .with_wgpu_backend(WgpuBackendType::Auto);
     assert!(
         run_window_test(params),
         "Window swapchain test failed - see log for details"

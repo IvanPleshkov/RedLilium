@@ -245,3 +245,10 @@ Please fix `test_window_swapchain_5_frames_wgpu` test in `graphics/tests/window_
 This test should work on windows, macos and linux.
 It requires to create event loop in main thread on macos.
 Is it possible to make the event loop in main thread in rust tests? If not, explain it.
+
+## Request 26:
+Let's refactor `WgpuBackendType` in `graphics/src/instance.rs`.
+First, make all backends compiled on related target_os.
+Second, let's change `Auto` mode.
+Please make it metal on macos, vulkan on linux, webgl on web target and DX12 on windows.
+Change also demos and tests in `graphics/tests/window_test.rs` to use Auto wgpu mode.

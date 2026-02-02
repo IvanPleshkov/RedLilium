@@ -33,34 +33,83 @@ pub enum BackendType {
 /// wgpu-specific backend selection.
 ///
 /// When using the wgpu backend, this controls which underlying graphics API is used.
+/// Backend variants are conditionally compiled based on target platform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum WgpuBackendType {
-    /// Automatically select the best available backend.
+    /// Automatically select the best available backend for the current platform:
+    /// - macOS: Metal
+    /// - Linux: Vulkan
+    /// - Windows: DX12
+    /// - Web: WebGL
     #[default]
     Auto,
-    /// Use Vulkan backend.
+    /// Use Vulkan backend (Linux, Windows, Android).
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "windows",
+        target_os = "android",
+        target_os = "freebsd"
+    ))]
     Vulkan,
     /// Use DirectX 12 backend (Windows only).
+    #[cfg(target_os = "windows")]
     Dx12,
     /// Use Metal backend (macOS/iOS only).
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     Metal,
-    /// Use OpenGL backend.
+    /// Use OpenGL/WebGL backend.
     Gl,
     /// Use WebGPU backend (browser only).
+    #[cfg(target_arch = "wasm32")]
     WebGpu,
 }
 
 impl WgpuBackendType {
     /// Convert to wgpu::Backends flags.
+    ///
+    /// For `Auto` mode, selects the platform-appropriate backend:
+    /// - macOS: Metal
+    /// - Linux: Vulkan
+    /// - Windows: DX12
+    /// - Web: WebGL (GL backend)
     #[cfg(feature = "wgpu-backend")]
     pub(crate) fn to_wgpu_backends(self) -> wgpu::Backends {
         match self {
+            #[cfg(target_os = "macos")]
+            Self::Auto => wgpu::Backends::METAL,
+            #[cfg(target_os = "linux")]
+            Self::Auto => wgpu::Backends::VULKAN,
+            #[cfg(target_os = "windows")]
+            Self::Auto => wgpu::Backends::DX12,
+            #[cfg(target_arch = "wasm32")]
+            Self::Auto => wgpu::Backends::GL,
+            // Fallback for other platforms
+            #[cfg(not(any(
+                target_os = "macos",
+                target_os = "linux",
+                target_os = "windows",
+                target_arch = "wasm32"
+            )))]
             Self::Auto => wgpu::Backends::all(),
+
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "windows",
+                target_os = "android",
+                target_os = "freebsd"
+            ))]
             Self::Vulkan => wgpu::Backends::VULKAN,
+
+            #[cfg(target_os = "windows")]
             Self::Dx12 => wgpu::Backends::DX12,
+
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
             Self::Metal => wgpu::Backends::METAL,
+
             Self::Gl => wgpu::Backends::GL,
-            Self::WebGpu => wgpu::Backends::BROWSER_WEBGPU,
+
+            #[cfg(target_arch = "wasm32")]
+            Self::WebGpu => wgpu::Backends::GL,
         }
     }
 }
@@ -72,7 +121,7 @@ impl WgpuBackendType {
 /// ```ignore
 /// let params = InstanceParameters::new()
 ///     .with_backend(BackendType::Wgpu)
-///     .with_wgpu_backend(WgpuBackendType::Vulkan)
+///     .with_wgpu_backend(WgpuBackendType::Auto)
 ///     .with_validation(true)
 ///     .with_debug(true);
 ///

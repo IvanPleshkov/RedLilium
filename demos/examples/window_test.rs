@@ -401,19 +401,16 @@ fn main() {
             InstanceParameters::new().with_backend(BackendType::Vulkan)
         }
         "wgpu" => {
-            log::info!("Using wgpu backend with Vulkan");
+            log::info!("Using wgpu backend with Auto mode");
             InstanceParameters::new()
                 .with_backend(BackendType::Wgpu)
-                .with_wgpu_backend(WgpuBackendType::Vulkan)
+                .with_wgpu_backend(WgpuBackendType::Auto)
         }
         other => {
-            log::info!(
-                "Unknown backend '{}', defaulting to wgpu with Vulkan",
-                other
-            );
+            log::info!("Unknown backend '{}', defaulting to wgpu with Auto", other);
             InstanceParameters::new()
                 .with_backend(BackendType::Wgpu)
-                .with_wgpu_backend(WgpuBackendType::Vulkan)
+                .with_wgpu_backend(WgpuBackendType::Auto)
         }
     };
 

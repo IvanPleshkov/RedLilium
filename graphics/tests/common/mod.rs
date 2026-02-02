@@ -77,10 +77,10 @@ impl Backend {
             Backend::Dummy => InstanceParameters::new().with_backend(BackendType::Dummy),
             Backend::Vulkan => InstanceParameters::new()
                 .with_backend(BackendType::Wgpu)
-                .with_wgpu_backend(WgpuBackendType::Vulkan),
+                .with_wgpu_backend(WgpuBackendType::Auto),
             Backend::WebGpu => InstanceParameters::new()
                 .with_backend(BackendType::Wgpu)
-                .with_wgpu_backend(WgpuBackendType::Vulkan), // Use Vulkan via wgpu for testing
+                .with_wgpu_backend(WgpuBackendType::Auto),
         }
     }
 }
