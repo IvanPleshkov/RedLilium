@@ -84,3 +84,8 @@ Please run textured quad demo with 10 frames before exit and with vulkan API bac
 Use validation layers and look into logs of application.
 Fix vulkan api errors.
 Probaply there is an issue with macos and moltenvk config, feel free to configure on local machine.
+
+## Request 9:
+Please run textured quad demo with 10 frames before exit and with vulkan API backend (not wgpu).
+Use validation layers and look into logs of application.
+On demo I see that there is no textured quad. I guess vulkan backend is missing something.

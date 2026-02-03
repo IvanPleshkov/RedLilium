@@ -12,6 +12,7 @@ pub mod deferred;
 mod device;
 mod instance;
 pub mod layout;
+mod pipeline;
 pub mod swapchain;
 mod sync;
 
@@ -133,6 +134,8 @@ pub struct VulkanBackend {
     /// Layout tracker for automatic barrier placement.
     /// Uses interior mutability since execute_graph takes &self.
     layout_tracker: Mutex<TextureLayoutTracker>,
+    /// Pipeline manager for shader compilation and pipeline creation.
+    pipeline_manager: pipeline::PipelineManager,
 }
 
 impl std::fmt::Debug for VulkanBackend {
@@ -201,6 +204,9 @@ impl VulkanBackend {
         // Create layout tracker for automatic barrier placement
         let layout_tracker = Mutex::new(TextureLayoutTracker::new(MAX_FRAMES_IN_FLIGHT));
 
+        // Create pipeline manager for shader compilation and graphics pipelines
+        let pipeline_manager = pipeline::PipelineManager::new(device.clone())?;
+
         log::info!(
             "Vulkan backend initialized (validation: {})",
             validation_enabled
@@ -223,6 +229,7 @@ impl VulkanBackend {
             swapchain_loader,
             deferred_destructor,
             layout_tracker,
+            pipeline_manager,
         })
     }
 
@@ -428,7 +435,10 @@ impl VulkanBackend {
     pub fn create_buffer(&self, descriptor: &BufferDescriptor) -> Result<GpuBuffer, GraphicsError> {
         let usage = convert_buffer_usage(descriptor.usage);
 
-        // Determine memory location based on usage flags
+        // Determine memory location based on usage flags.
+        // Buffers that need CPU access (MAP_READ, MAP_WRITE, or COPY_DST for CPU writes)
+        // should use host-visible memory. UNIFORM and VERTEX buffers with COPY_DST are
+        // commonly updated from CPU, so use CpuToGpu for those too.
         let location = if descriptor
             .usage
             .contains(crate::types::BufferUsage::MAP_READ)
@@ -437,7 +447,12 @@ impl VulkanBackend {
         } else if descriptor
             .usage
             .contains(crate::types::BufferUsage::MAP_WRITE)
+            || descriptor
+                .usage
+                .contains(crate::types::BufferUsage::COPY_DST)
         {
+            // COPY_DST buffers are typically updated from CPU via write_buffer,
+            // so they need host-visible memory for direct mapping
             gpu_allocator::MemoryLocation::CpuToGpu
         } else {
             gpu_allocator::MemoryLocation::GpuOnly
@@ -859,6 +874,12 @@ impl VulkanBackend {
         let mut tracker = self.layout_tracker.lock();
         let mut batch = BarrierBatch::new();
 
+        log::debug!(
+            "Generating barriers: {} texture usages, {} buffer usages",
+            usage.texture_usages.len(),
+            usage.buffer_usages.len()
+        );
+
         // Generate texture (image) barriers
         for decl in &usage.texture_usages {
             // Get Vulkan image info from the texture
@@ -887,6 +908,12 @@ impl VulkanBackend {
             };
 
             // Add barrier if layout change is needed
+            log::debug!(
+                "Texture barrier: {:?} -> {:?} (label: {:?})",
+                current_layout,
+                required_layout,
+                decl.texture.label()
+            );
             batch.add_image_barrier(
                 texture_id,
                 *image,
@@ -1091,24 +1118,55 @@ impl VulkanBackend {
             })
             .unwrap_or_default();
 
+        log::debug!(
+            "Graphics pass '{}': render_area={}x{}, color_attachments={}, depth={}",
+            pass.name(),
+            render_area.extent.width,
+            render_area.extent.height,
+            color_attachments.len(),
+            depth_attachment.is_some()
+        );
+
         // NOTE: Layout transitions are now handled automatically by the barrier
         // generation system in execute_graph() before each pass is encoded.
         // Surface images (swapchain) are handled specially below.
 
-        // Transition surface images (not tracked by the automatic system)
+        // Transition surface images from UNDEFINED/PRESENT_SRC to COLOR_ATTACHMENT_OPTIMAL.
+        // Using UNDEFINED as old_layout is valid from any actual layout (contents are discarded
+        // but that's OK since we're clearing the render target).
         for attachment in &render_targets.color_attachments {
             if let RenderTarget::Surface {
                 vulkan_view: Some(surface_view),
                 ..
             } = &attachment.target
             {
-                self.transition_image_layout(
-                    cmd,
-                    surface_view.image(),
-                    vk::ImageLayout::UNDEFINED,
-                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                    vk::ImageAspectFlags::COLOR,
-                );
+                let barrier = vk::ImageMemoryBarrier::default()
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(surface_view.image())
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    })
+                    .src_access_mask(vk::AccessFlags::empty())
+                    .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
+
+                unsafe {
+                    self.device.cmd_pipeline_barrier(
+                        cmd,
+                        vk::PipelineStageFlags::TOP_OF_PIPE,
+                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[barrier],
+                    );
+                }
             }
         }
 
@@ -1128,16 +1186,17 @@ impl VulkanBackend {
                 .cmd_begin_rendering(cmd, &rendering_info);
         }
 
-        // Set viewport with [0, 1] depth range (D3D/wgpu convention)
-        // This is the key coordinate system configuration that matches wgpu behavior.
-        // Vulkan natively uses [0, 1] depth range, so we just need to set it explicitly.
+        // Set viewport with Y-flip and [0, 1] depth range to match wgpu/D3D conventions.
+        // Vulkan's Y-axis points down (0=top, height=bottom), but wgpu/OpenGL use Y-up.
+        // Using a negative height viewport flips the Y-axis, making the coordinate system
+        // consistent with wgpu behavior. This requires VK_KHR_maintenance1 (Vulkan 1.1+).
         let viewport = vk::Viewport {
             x: 0.0,
-            y: 0.0,
+            y: render_area.extent.height as f32, // Start at bottom
             width: render_area.extent.width as f32,
-            height: render_area.extent.height as f32,
-            min_depth: 0.0, // Near plane maps to depth 0
-            max_depth: 1.0, // Far plane maps to depth 1
+            height: -(render_area.extent.height as f32), // Negative height flips Y
+            min_depth: 0.0,                              // Near plane maps to depth 0
+            max_depth: 1.0,                              // Far plane maps to depth 1
         };
         unsafe {
             self.device.cmd_set_viewport(cmd, 0, &[viewport]);
@@ -1152,15 +1211,333 @@ impl VulkanBackend {
             self.device.cmd_set_scissor(cmd, 0, &[scissor]);
         }
 
-        // TODO: Encode draw commands
-        // When implementing pipeline creation, ensure these rasterization settings:
-        // - front_face: vk::FrontFace::COUNTER_CLOCKWISE (CCW front faces)
-        // - cull_mode: configurable, default vk::CullModeFlags::NONE
-        // This matches the wgpu backend and documented coordinate convention.
+        // Encode draw commands
+        for draw_cmd in pass.draw_commands() {
+            self.encode_draw_command(cmd, draw_cmd, render_targets)?;
+        }
 
         // End dynamic rendering
         unsafe {
             self.dynamic_rendering.cmd_end_rendering(cmd);
+        }
+
+        // Note: Surface images are transitioned to PRESENT_SRC_KHR in present_vulkan_frame,
+        // so we leave them in COLOR_ATTACHMENT_OPTIMAL here.
+
+        Ok(())
+    }
+
+    fn encode_draw_command(
+        &self,
+        cmd: vk::CommandBuffer,
+        draw_cmd: &crate::graph::DrawCommand,
+        render_targets: &crate::graph::RenderTargetConfig,
+    ) -> Result<(), GraphicsError> {
+        use crate::materials::BoundResource;
+
+        let material = draw_cmd.material.material();
+        let mesh = &draw_cmd.mesh;
+
+        // Get color target formats
+        let color_formats: Vec<crate::types::TextureFormat> = render_targets
+            .color_attachments
+            .iter()
+            .map(|a| a.target.format())
+            .collect();
+
+        // Get depth format if present
+        let depth_format = render_targets
+            .depth_stencil_attachment
+            .as_ref()
+            .map(|a| a.target.format());
+
+        // Compile shaders
+        let shaders = material.shaders();
+        let mut vertex_module = None;
+        let mut fragment_module = None;
+        let mut vertex_entry = "vs_main".to_string();
+        let mut fragment_entry = "fs_main".to_string();
+
+        for shader in shaders {
+            let module = self.pipeline_manager.compile_shader(
+                &shader.source,
+                shader.stage,
+                &shader.entry_point,
+            )?;
+
+            match shader.stage {
+                crate::materials::ShaderStage::Vertex => {
+                    vertex_module = Some(module);
+                    vertex_entry = shader.entry_point.clone();
+                }
+                crate::materials::ShaderStage::Fragment => {
+                    fragment_module = Some(module);
+                    fragment_entry = shader.entry_point.clone();
+                }
+                crate::materials::ShaderStage::Compute => {}
+            }
+        }
+
+        let vertex_module = vertex_module.ok_or_else(|| {
+            GraphicsError::ShaderCompilationFailed("No vertex shader provided".into())
+        })?;
+
+        // Create descriptor set layouts from material binding layouts
+        let binding_layouts = material.binding_layouts();
+        let mut descriptor_set_layouts = Vec::new();
+
+        for layout in binding_layouts {
+            let ds_layout = self.pipeline_manager.create_descriptor_set_layout(layout)?;
+            descriptor_set_layouts.push(ds_layout);
+        }
+
+        // Create pipeline layout
+        let pipeline_layout = self
+            .pipeline_manager
+            .create_pipeline_layout(&descriptor_set_layouts)?;
+
+        // Create graphics pipeline
+        let pipeline = self.pipeline_manager.create_graphics_pipeline(
+            vertex_module,
+            fragment_module,
+            &vertex_entry,
+            &fragment_entry,
+            mesh,
+            pipeline_layout,
+            &color_formats,
+            depth_format,
+            &self.dynamic_rendering,
+        )?;
+
+        // Create and bind descriptor sets
+        let material_instance = &draw_cmd.material;
+        let binding_groups = material_instance.binding_groups();
+
+        let mut descriptor_sets = Vec::new();
+        for (group, ds_layout) in binding_groups.iter().zip(descriptor_set_layouts.iter()) {
+            let descriptor_set = self.pipeline_manager.allocate_descriptor_set(*ds_layout)?;
+
+            // Write descriptor set entries
+            let mut writes: Vec<vk::WriteDescriptorSet> = Vec::new();
+            let mut buffer_infos: Vec<vk::DescriptorBufferInfo> = Vec::new();
+            let mut image_infos: Vec<vk::DescriptorImageInfo> = Vec::new();
+
+            for entry in &group.entries {
+                match &entry.resource {
+                    BoundResource::Buffer(buffer) => {
+                        if let GpuBuffer::Vulkan {
+                            buffer: vk_buffer,
+                            size,
+                            ..
+                        } = buffer.gpu_handle()
+                        {
+                            buffer_infos.push(vk::DescriptorBufferInfo {
+                                buffer: *vk_buffer,
+                                offset: 0,
+                                range: *size,
+                            });
+                        }
+                    }
+                    BoundResource::Texture(texture) => {
+                        if let GpuTexture::Vulkan { view, .. } = texture.gpu_handle() {
+                            image_infos.push(vk::DescriptorImageInfo {
+                                sampler: vk::Sampler::null(),
+                                image_view: *view,
+                                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                            });
+                        }
+                    }
+                    BoundResource::Sampler(sampler) => {
+                        if let GpuSampler::Vulkan {
+                            sampler: vk_sampler,
+                            ..
+                        } = sampler.gpu_handle()
+                        {
+                            image_infos.push(vk::DescriptorImageInfo {
+                                sampler: *vk_sampler,
+                                image_view: vk::ImageView::null(),
+                                image_layout: vk::ImageLayout::UNDEFINED,
+                            });
+                        }
+                    }
+                    BoundResource::CombinedTextureSampler { texture, sampler } => {
+                        if let (
+                            GpuTexture::Vulkan { view, .. },
+                            GpuSampler::Vulkan {
+                                sampler: vk_sampler,
+                                ..
+                            },
+                        ) = (texture.gpu_handle(), sampler.gpu_handle())
+                        {
+                            image_infos.push(vk::DescriptorImageInfo {
+                                sampler: *vk_sampler,
+                                image_view: *view,
+                                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                            });
+                        }
+                    }
+                }
+            }
+
+            // Build write descriptors
+            let mut buffer_idx = 0;
+            let mut image_idx = 0;
+            for entry in &group.entries {
+                let write = match &entry.resource {
+                    BoundResource::Buffer(_) => {
+                        let info = &buffer_infos[buffer_idx..buffer_idx + 1];
+                        buffer_idx += 1;
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(descriptor_set)
+                            .dst_binding(entry.binding)
+                            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                            .buffer_info(info)
+                    }
+                    BoundResource::Texture(_) => {
+                        let info = &image_infos[image_idx..image_idx + 1];
+                        image_idx += 1;
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(descriptor_set)
+                            .dst_binding(entry.binding)
+                            .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                            .image_info(info)
+                    }
+                    BoundResource::Sampler(_) => {
+                        let info = &image_infos[image_idx..image_idx + 1];
+                        image_idx += 1;
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(descriptor_set)
+                            .dst_binding(entry.binding)
+                            .descriptor_type(vk::DescriptorType::SAMPLER)
+                            .image_info(info)
+                    }
+                    BoundResource::CombinedTextureSampler { .. } => {
+                        let info = &image_infos[image_idx..image_idx + 1];
+                        image_idx += 1;
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(descriptor_set)
+                            .dst_binding(entry.binding)
+                            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                            .image_info(info)
+                    }
+                };
+                writes.push(write);
+            }
+
+            if !writes.is_empty() {
+                log::debug!(
+                    "Writing {} descriptors to set: {:?}",
+                    writes.len(),
+                    writes
+                        .iter()
+                        .map(|w| (w.dst_binding, w.descriptor_type))
+                        .collect::<Vec<_>>()
+                );
+                unsafe {
+                    self.device.update_descriptor_sets(&writes, &[]);
+                }
+            }
+
+            descriptor_sets.push(descriptor_set);
+        }
+
+        // Bind pipeline
+        unsafe {
+            self.device
+                .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
+        }
+
+        // Bind descriptor sets
+        if !descriptor_sets.is_empty() {
+            unsafe {
+                self.device.cmd_bind_descriptor_sets(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    pipeline_layout,
+                    0,
+                    &descriptor_sets,
+                    &[],
+                );
+            }
+        }
+
+        // Bind vertex buffers
+        for (slot, buffer) in mesh.vertex_buffers().iter().enumerate() {
+            if let GpuBuffer::Vulkan {
+                buffer: vk_buffer, ..
+            } = buffer.gpu_handle()
+            {
+                unsafe {
+                    self.device
+                        .cmd_bind_vertex_buffers(cmd, slot as u32, &[*vk_buffer], &[0]);
+                }
+            }
+        }
+
+        // Issue draw call
+        log::debug!(
+            "Issuing draw call: indexed={}, vertex_count={}, index_count={}, instance_count={}",
+            mesh.is_indexed(),
+            mesh.vertex_count(),
+            mesh.index_count(),
+            draw_cmd.instance_count
+        );
+
+        if mesh.is_indexed() {
+            // Bind index buffer
+            if let Some(index_buffer) = mesh.index_buffer()
+                && let GpuBuffer::Vulkan {
+                    buffer: vk_buffer, ..
+                } = index_buffer.gpu_handle()
+            {
+                let index_type = match mesh
+                    .index_format()
+                    .unwrap_or(crate::mesh::IndexFormat::Uint16)
+                {
+                    crate::mesh::IndexFormat::Uint16 => vk::IndexType::UINT16,
+                    crate::mesh::IndexFormat::Uint32 => vk::IndexType::UINT32,
+                };
+                unsafe {
+                    self.device
+                        .cmd_bind_index_buffer(cmd, *vk_buffer, 0, index_type);
+                }
+            }
+
+            unsafe {
+                self.device.cmd_draw_indexed(
+                    cmd,
+                    mesh.index_count(),
+                    draw_cmd.instance_count,
+                    0,
+                    0,
+                    draw_cmd.first_instance,
+                );
+            }
+        } else {
+            unsafe {
+                self.device.cmd_draw(
+                    cmd,
+                    mesh.vertex_count(),
+                    draw_cmd.instance_count,
+                    0,
+                    draw_cmd.first_instance,
+                );
+            }
+        }
+
+        // Note: In a real implementation, we would cache pipelines and descriptor sets
+        // and destroy them properly. For now, we'll leak them until a proper caching
+        // mechanism is implemented.
+        // TODO: Implement proper pipeline and descriptor set caching/cleanup
+
+        // Clean up shader modules (not cached yet)
+        unsafe {
+            self.device.destroy_shader_module(vertex_module, None);
+            if let Some(frag) = fragment_module {
+                self.device.destroy_shader_module(frag, None);
+            }
+            // Note: We're leaking the pipeline and descriptor set layouts here
+            // They should be cached and properly destroyed
         }
 
         Ok(())
@@ -1440,6 +1817,7 @@ impl VulkanBackend {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn transition_image_layout(
         &self,
         cmd: vk::CommandBuffer,
@@ -1473,6 +1851,10 @@ impl VulkanBackend {
                 vk::AccessFlags::SHADER_READ,
                 vk::PipelineStageFlags::FRAGMENT_SHADER,
             ),
+            vk::ImageLayout::PRESENT_SRC_KHR => (
+                vk::AccessFlags::empty(),
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+            ),
             _ => (
                 vk::AccessFlags::empty(),
                 vk::PipelineStageFlags::TOP_OF_PIPE,
@@ -1499,6 +1881,10 @@ impl VulkanBackend {
             vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => (
                 vk::AccessFlags::SHADER_READ,
                 vk::PipelineStageFlags::FRAGMENT_SHADER,
+            ),
+            vk::ImageLayout::PRESENT_SRC_KHR => (
+                vk::AccessFlags::empty(),
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
             ),
             _ => (
                 vk::AccessFlags::empty(),

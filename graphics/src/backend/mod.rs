@@ -491,7 +491,7 @@ impl GpuSurface {
 
                 // Destroy old swapchain if it exists
                 if let Some(ref mut old_swapchain) = *swapchain.write() {
-                    old_swapchain.destroy(vulkan_backend);
+                    old_swapchain.destroy();
                 }
 
                 // Create new swapchain
@@ -560,16 +560,10 @@ impl GpuSurface {
 impl Drop for GpuSurface {
     fn drop(&mut self) {
         if let GpuSurface::Vulkan { swapchain, .. } = self {
-            // Note: The swapchain needs to be destroyed before the surface,
-            // but we need a reference to the backend to do that properly.
-            // The swapchain will be dropped when the RwLock is dropped.
-            // The VulkanSwapchain's Drop impl handles cleanup.
-            if let Some(ref swapchain) = *swapchain.read() {
-                log::warn!(
-                    "GpuSurface::Vulkan dropped with active swapchain - \
-                    swapchain should be destroyed before surface"
-                );
-                let _ = swapchain; // Suppress unused warning
+            // Destroy the swapchain before the surface is dropped.
+            // The VulkanSwapchain stores its own device handles for cleanup.
+            if let Some(ref mut sc) = *swapchain.write() {
+                sc.destroy();
             }
         }
     }

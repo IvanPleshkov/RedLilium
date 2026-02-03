@@ -34,6 +34,12 @@ pub struct VulkanSwapchain {
     pub(crate) present_command_buffers: Vec<vk::CommandBuffer>,
     /// Current frame index (cycles through frames in flight).
     pub(crate) current_frame: usize,
+    /// Device handle for cleanup.
+    device: ash::Device,
+    /// Swapchain loader for cleanup.
+    swapchain_loader: ash::khr::swapchain::Device,
+    /// Command pool for freeing command buffers.
+    command_pool: vk::CommandPool,
 }
 
 impl VulkanSwapchain {
@@ -214,39 +220,52 @@ impl VulkanSwapchain {
             in_flight_fences,
             present_command_buffers,
             current_frame: 0,
+            device: vulkan_backend.device().clone(),
+            swapchain_loader: vulkan_backend.swapchain_loader().clone(),
+            command_pool: vulkan_backend.command_pool(),
         })
     }
 
     /// Destroy the swapchain and associated resources.
-    pub fn destroy(&mut self, vulkan_backend: &VulkanBackend) {
+    ///
+    /// Note: This is called automatically by Drop, but can be called explicitly
+    /// if you need to control when destruction happens.
+    pub fn destroy(&mut self) {
+        // Check if already destroyed (swapchain handle is null)
+        if self.swapchain == vk::SwapchainKHR::null() {
+            return;
+        }
+
         unsafe {
-            let _ = vulkan_backend.device().device_wait_idle();
+            let _ = self.device.device_wait_idle();
 
             // Free command buffers
-            vulkan_backend
-                .device()
-                .free_command_buffers(vulkan_backend.command_pool(), &self.present_command_buffers);
+            if !self.present_command_buffers.is_empty() {
+                self.device
+                    .free_command_buffers(self.command_pool, &self.present_command_buffers);
+                self.present_command_buffers.clear();
+            }
 
             // Destroy synchronization primitives
-            for semaphore in &self.image_available_semaphores {
-                vulkan_backend.device().destroy_semaphore(*semaphore, None);
+            for semaphore in self.image_available_semaphores.drain(..) {
+                self.device.destroy_semaphore(semaphore, None);
             }
-            for semaphore in &self.render_finished_semaphores {
-                vulkan_backend.device().destroy_semaphore(*semaphore, None);
+            for semaphore in self.render_finished_semaphores.drain(..) {
+                self.device.destroy_semaphore(semaphore, None);
             }
-            for fence in &self.in_flight_fences {
-                vulkan_backend.device().destroy_fence(*fence, None);
+            for fence in self.in_flight_fences.drain(..) {
+                self.device.destroy_fence(fence, None);
             }
 
             // Destroy image views
-            for view in &self.image_views {
-                vulkan_backend.device().destroy_image_view(*view, None);
+            for view in self.image_views.drain(..) {
+                self.device.destroy_image_view(view, None);
             }
 
             // Destroy swapchain
-            vulkan_backend
-                .swapchain_loader()
+            self.swapchain_loader
                 .destroy_swapchain(self.swapchain, None);
+            self.swapchain = vk::SwapchainKHR::null();
         }
     }
 
@@ -474,5 +493,11 @@ pub fn present_vulkan_frame(
             "Failed to present swapchain image: {:?}",
             e
         ))),
+    }
+}
+
+impl Drop for VulkanSwapchain {
+    fn drop(&mut self) {
+        self.destroy();
     }
 }
