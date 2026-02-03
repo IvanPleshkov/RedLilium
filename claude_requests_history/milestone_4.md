@@ -67,3 +67,14 @@ App struct has a feature to run just N frames and exit. Run the demo with 10 fra
 
 ## Request 6:
 Cool pbr demo! Can you also draw in background the cude texture (switch cubemap MIP manually using shift+number). by pressing number switch deferred channels to show that deferred works
+
+## Request 7:
+Please create a new demo in demos crate.
+This demo should render a simple quad mesh, dont fill the whole screen, use just center place, background is cleared.
+Demo downloads the texture from https://upload.wikimedia.org/wikipedia/en/7/7d/Lenna_%28test_image%29.png
+Please read `docs\ARCHITECTURE.md` and follow the architecture while implementing:
+- all resources should be uploaded using render graphs
+- use frame scheduler and frame pipeline
+- use resizing tools from graphics crate
+- use `App` from app crate
+Please check that there is no errors in log, use please the tool in app that closes window after fixed frames (use 10).

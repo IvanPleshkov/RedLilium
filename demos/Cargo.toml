@@ -40,6 +40,10 @@ path = "src/bin/window_demo.rs"
 name = "pbr_ibl_demo"
 path = "src/bin/pbr_ibl_demo.rs"
 
+[[bin]]
+name = "textured_quad_demo"
+path = "src/bin/textured_quad_demo.rs"
+
 [[example]]
 name = "window_test"
 path = "examples/window_test.rs"
