@@ -402,6 +402,21 @@ impl PipelineManager {
     pub fn descriptor_pool(&self) -> vk::DescriptorPool {
         self.descriptor_pool
     }
+
+    /// Reset the descriptor pool, freeing all allocated descriptor sets.
+    ///
+    /// This should only be called when no descriptor sets from this pool
+    /// are in use by the GPU (i.e., after waiting for the GPU to idle).
+    pub fn reset_descriptor_pool(&self) -> Result<(), GraphicsError> {
+        unsafe {
+            self.device
+                .reset_descriptor_pool(self.descriptor_pool, vk::DescriptorPoolResetFlags::empty())
+        }
+        .map_err(|e| {
+            GraphicsError::Internal(format!("Failed to reset descriptor pool: {:?}", e))
+        })?;
+        Ok(())
+    }
 }
 
 impl Drop for PipelineManager {

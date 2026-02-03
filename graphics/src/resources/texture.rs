@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::backend::GpuTexture;
 use crate::device::GraphicsDevice;
-use crate::types::{Extent3d, TextureDescriptor, TextureFormat};
+use crate::types::{Extent3d, TextureDescriptor, TextureDimension, TextureFormat};
 
 /// A GPU texture resource.
 ///
@@ -89,6 +89,11 @@ impl Texture {
     /// Get the sample count.
     pub fn sample_count(&self) -> u32 {
         self.descriptor.sample_count
+    }
+
+    /// Get the texture dimension.
+    pub fn dimension(&self) -> TextureDimension {
+        self.descriptor.dimension
     }
 
     /// Get the texture label, if set.

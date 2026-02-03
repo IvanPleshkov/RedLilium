@@ -103,6 +103,7 @@ pub fn create_logical_device(
     let queue_create_infos = [queue_create_info];
 
     // Required device extensions
+    #[allow(unused_mut)]
     let mut device_extensions = vec![
         ash::khr::swapchain::NAME.as_ptr(),
         ash::khr::dynamic_rendering::NAME.as_ptr(),

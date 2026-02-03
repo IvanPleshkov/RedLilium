@@ -89,3 +89,9 @@ Probaply there is an issue with macos and moltenvk config, feel free to configur
 Please run textured quad demo with 10 frames before exit and with vulkan API backend (not wgpu).
 Use validation layers and look into logs of application.
 On demo I see that there is no textured quad. I guess vulkan backend is missing something.
+
+## Request 10:
+Please run PBR demo with 10 frames before exit and with vulkan API backend (not wgpu).
+Use validation layers and look into logs of application.
+There are errors.
+please analyse how material system in graphics crate works and fix image layout errors.

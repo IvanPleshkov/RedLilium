@@ -776,6 +776,11 @@ impl VulkanBackend {
         compiled: &CompiledGraph,
         signal_fence: Option<&GpuFence>,
     ) -> Result<(), GraphicsError> {
+        // Reset descriptor pool at the start of each graph execution.
+        // This is safe because execute_graph waits for the queue to idle at the end,
+        // so any descriptor sets from previous executions are no longer in use.
+        self.pipeline_manager.reset_descriptor_pool()?;
+
         // Allocate command buffer
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(self.command_pool)
@@ -1314,8 +1319,15 @@ impl VulkanBackend {
         let binding_groups = material_instance.binding_groups();
 
         let mut descriptor_sets = Vec::new();
-        for (group, ds_layout) in binding_groups.iter().zip(descriptor_set_layouts.iter()) {
+        for (group_idx, (group, ds_layout)) in binding_groups
+            .iter()
+            .zip(descriptor_set_layouts.iter())
+            .enumerate()
+        {
             let descriptor_set = self.pipeline_manager.allocate_descriptor_set(*ds_layout)?;
+
+            // Get the corresponding binding layout to look up binding types
+            let binding_layout = binding_layouts.get(group_idx);
 
             // Write descriptor set entries
             let mut writes: Vec<vk::WriteDescriptorSet> = Vec::new();
@@ -1383,14 +1395,30 @@ impl VulkanBackend {
             let mut buffer_idx = 0;
             let mut image_idx = 0;
             for entry in &group.entries {
+                // Look up the binding type from the layout
+                let binding_type = binding_layout.and_then(|layout| {
+                    layout
+                        .entries
+                        .iter()
+                        .find(|e| e.binding == entry.binding)
+                        .map(|e| e.binding_type)
+                });
+
                 let write = match &entry.resource {
                     BoundResource::Buffer(_) => {
                         let info = &buffer_infos[buffer_idx..buffer_idx + 1];
                         buffer_idx += 1;
+                        // Use the binding type from layout, defaulting to UNIFORM_BUFFER
+                        let descriptor_type =
+                            if binding_type == Some(crate::materials::BindingType::StorageBuffer) {
+                                vk::DescriptorType::STORAGE_BUFFER
+                            } else {
+                                vk::DescriptorType::UNIFORM_BUFFER
+                            };
                         vk::WriteDescriptorSet::default()
                             .dst_set(descriptor_set)
                             .dst_binding(entry.binding)
-                            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                            .descriptor_type(descriptor_type)
                             .buffer_info(info)
                     }
                     BoundResource::Texture(_) => {
@@ -1596,6 +1624,8 @@ impl VulkanBackend {
                 }
             }
             TransferOperation::TextureToBuffer { src, dst, regions } => {
+                use crate::types::TextureDimension;
+
                 let GpuTexture::Vulkan {
                     image: src_image, ..
                 } = src.gpu_handle()
@@ -1613,6 +1643,14 @@ impl VulkanBackend {
                 // generation system in execute_graph() before each pass is encoded.
 
                 let block_size = src.format().block_size();
+                let dimension = src.dimension();
+
+                // For cubemaps and 2D arrays, origin.z specifies the array layer, not the z offset.
+                // Vulkan requires z offset to be 0 for 2D images, with layer specified in subresource.
+                let uses_array_layers = matches!(
+                    dimension,
+                    TextureDimension::Cube | TextureDimension::CubeArray
+                ) || (dimension == TextureDimension::D2 && src.depth() > 1);
 
                 let copy_regions: Vec<vk::BufferImageCopy> = regions
                     .iter()
@@ -1637,6 +1675,13 @@ impl VulkanBackend {
                             0 // 0 means tightly packed
                         };
 
+                        // Determine array layer and z offset based on texture type
+                        let (base_array_layer, z_offset) = if uses_array_layers {
+                            (r.texture_location.origin.z, 0)
+                        } else {
+                            (0, r.texture_location.origin.z as i32)
+                        };
+
                         vk::BufferImageCopy::default()
                             .buffer_offset(r.buffer_layout.offset)
                             .buffer_row_length(row_length_texels)
@@ -1644,13 +1689,13 @@ impl VulkanBackend {
                             .image_subresource(vk::ImageSubresourceLayers {
                                 aspect_mask: vk::ImageAspectFlags::COLOR,
                                 mip_level: r.texture_location.mip_level,
-                                base_array_layer: 0,
+                                base_array_layer,
                                 layer_count: 1,
                             })
                             .image_offset(vk::Offset3D {
                                 x: r.texture_location.origin.x as i32,
                                 y: r.texture_location.origin.y as i32,
-                                z: r.texture_location.origin.z as i32,
+                                z: z_offset,
                             })
                             .image_extent(vk::Extent3D {
                                 width: r.extent.width,
@@ -1671,6 +1716,8 @@ impl VulkanBackend {
                 }
             }
             TransferOperation::BufferToTexture { src, dst, regions } => {
+                use crate::types::TextureDimension;
+
                 let GpuBuffer::Vulkan {
                     buffer: src_buffer, ..
                 } = src.gpu_handle()
@@ -1688,6 +1735,14 @@ impl VulkanBackend {
                 // generation system in execute_graph() before each pass is encoded.
 
                 let block_size = dst.format().block_size();
+                let dimension = dst.dimension();
+
+                // For cubemaps and 2D arrays, origin.z specifies the array layer, not the z offset.
+                // Vulkan requires z offset to be 0 for 2D images, with layer specified in subresource.
+                let uses_array_layers = matches!(
+                    dimension,
+                    TextureDimension::Cube | TextureDimension::CubeArray
+                ) || (dimension == TextureDimension::D2 && dst.depth() > 1);
 
                 let copy_regions: Vec<vk::BufferImageCopy> = regions
                     .iter()
@@ -1709,6 +1764,13 @@ impl VulkanBackend {
                             0
                         };
 
+                        // Determine array layer and z offset based on texture type
+                        let (base_array_layer, z_offset) = if uses_array_layers {
+                            (r.texture_location.origin.z, 0)
+                        } else {
+                            (0, r.texture_location.origin.z as i32)
+                        };
+
                         vk::BufferImageCopy::default()
                             .buffer_offset(r.buffer_layout.offset)
                             .buffer_row_length(row_length_texels)
@@ -1716,13 +1778,13 @@ impl VulkanBackend {
                             .image_subresource(vk::ImageSubresourceLayers {
                                 aspect_mask: vk::ImageAspectFlags::COLOR,
                                 mip_level: r.texture_location.mip_level,
-                                base_array_layer: 0,
+                                base_array_layer,
                                 layer_count: 1,
                             })
                             .image_offset(vk::Offset3D {
                                 x: r.texture_location.origin.x as i32,
                                 y: r.texture_location.origin.y as i32,
-                                z: r.texture_location.origin.z as i32,
+                                z: z_offset,
                             })
                             .image_extent(vk::Extent3D {
                                 width: r.extent.width,
