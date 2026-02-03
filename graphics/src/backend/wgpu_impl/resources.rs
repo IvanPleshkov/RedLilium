@@ -1,6 +1,6 @@
 //! Resource creation for the wgpu backend.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use crate::error::GraphicsError;
 use crate::types::{BufferDescriptor, SamplerDescriptor, TextureDescriptor};
@@ -24,7 +24,7 @@ impl WgpuBackend {
             mapped_at_creation: false,
         });
 
-        Ok(GpuBuffer::Wgpu(Arc::new(buffer)))
+        Ok(GpuBuffer::Wgpu(buffer))
     }
 
     /// Create a texture resource.
@@ -81,10 +81,7 @@ impl WgpuBackend {
             ..Default::default()
         });
 
-        Ok(GpuTexture::Wgpu {
-            texture: Arc::new(texture),
-            view: Arc::new(view),
-        })
+        Ok(GpuTexture::Wgpu { texture, view })
     }
 
     /// Create a sampler resource.
@@ -107,7 +104,7 @@ impl WgpuBackend {
             border_color: None,
         });
 
-        Ok(GpuSampler::Wgpu(Arc::new(sampler)))
+        Ok(GpuSampler::Wgpu(sampler))
     }
 
     /// Create a fence for CPU-GPU synchronization.

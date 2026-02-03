@@ -50,7 +50,7 @@ pub enum GpuBuffer {
     Dummy,
     /// wgpu backend buffer
     #[cfg(feature = "wgpu-backend")]
-    Wgpu(Arc<wgpu::Buffer>),
+    Wgpu(wgpu::Buffer),
     /// Vulkan backend buffer
     #[cfg(feature = "vulkan-backend")]
     Vulkan {
@@ -79,20 +79,6 @@ impl std::fmt::Debug for GpuBuffer {
     }
 }
 
-impl Clone for GpuBuffer {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Dummy => Self::Dummy,
-            #[cfg(feature = "wgpu-backend")]
-            Self::Wgpu(buffer) => Self::Wgpu(buffer.clone()),
-            #[cfg(feature = "vulkan-backend")]
-            Self::Vulkan { .. } => {
-                panic!("Vulkan buffers cannot be cloned - use Arc<Buffer> instead")
-            }
-        }
-    }
-}
-
 /// Handle to a GPU texture resource.
 #[allow(clippy::large_enum_variant)]
 pub enum GpuTexture {
@@ -101,8 +87,8 @@ pub enum GpuTexture {
     /// wgpu backend texture
     #[cfg(feature = "wgpu-backend")]
     Wgpu {
-        texture: Arc<wgpu::Texture>,
-        view: Arc<wgpu::TextureView>,
+        texture: wgpu::Texture,
+        view: wgpu::TextureView,
     },
     /// Vulkan backend texture
     #[cfg(feature = "vulkan-backend")]
@@ -146,23 +132,6 @@ impl std::fmt::Debug for GpuTexture {
     }
 }
 
-impl Clone for GpuTexture {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Dummy => Self::Dummy,
-            #[cfg(feature = "wgpu-backend")]
-            Self::Wgpu { texture, view } => Self::Wgpu {
-                texture: texture.clone(),
-                view: view.clone(),
-            },
-            #[cfg(feature = "vulkan-backend")]
-            Self::Vulkan { .. } => {
-                panic!("Vulkan textures cannot be cloned - use Arc<Texture> instead")
-            }
-        }
-    }
-}
-
 /// Handle to a GPU sampler resource.
 #[allow(clippy::large_enum_variant)]
 pub enum GpuSampler {
@@ -170,7 +139,7 @@ pub enum GpuSampler {
     Dummy,
     /// wgpu backend sampler
     #[cfg(feature = "wgpu-backend")]
-    Wgpu(Arc<wgpu::Sampler>),
+    Wgpu(wgpu::Sampler),
     /// Vulkan backend sampler
     #[cfg(feature = "vulkan-backend")]
     Vulkan {
@@ -192,20 +161,6 @@ impl std::fmt::Debug for GpuSampler {
                 .debug_struct("GpuSampler::Vulkan")
                 .field("sampler", sampler)
                 .finish_non_exhaustive(),
-        }
-    }
-}
-
-impl Clone for GpuSampler {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Dummy => Self::Dummy,
-            #[cfg(feature = "wgpu-backend")]
-            Self::Wgpu(sampler) => Self::Wgpu(sampler.clone()),
-            #[cfg(feature = "vulkan-backend")]
-            Self::Vulkan { .. } => {
-                panic!("Vulkan samplers cannot be cloned - use Arc<Sampler> instead")
-            }
         }
     }
 }

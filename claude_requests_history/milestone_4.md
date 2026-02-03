@@ -99,3 +99,9 @@ please analyse how material system in graphics crate works and fix image layout 
 ## Request 11:
 You checked wrong demo, use this (dont forget to limit frames as a feature of the application for tests)
 cargo run -p redlilium-demos --bin pbr_ibl_demo -- --backend=vulkan
+
+## Request 12:
+`GpuBuffer` in graphics backend has an `Wgpu(Arc<wgpu::Buffer>)`.
+Is `Arc` here necessary? I think just plain `Wgpu(wgpu::Buffer)` is better because on the higher level the gpu buffer is already covered by `Arc`.
+Check also for texture, sampler, etc.
+

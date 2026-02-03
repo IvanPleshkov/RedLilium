@@ -65,7 +65,7 @@ impl WgpuBackend {
                         let store_op = convert_store_op(&attachment.store_op());
 
                         Some(wgpu::RenderPassColorAttachment {
-                            view: view.as_ref(),
+                            view,
                             resolve_target: None,
                             ops: wgpu::Operations {
                                 load: load_op,
@@ -112,7 +112,7 @@ impl WgpuBackend {
                     };
 
                     wgpu::RenderPassDepthStencilAttachment {
-                        view: view.as_ref(),
+                        view,
                         depth_ops: Some(wgpu::Operations {
                             load: convert_depth_load_op(&attachment.depth_load_op()),
                             store: convert_store_op(&attachment.depth_store_op()),
@@ -311,7 +311,7 @@ impl WgpuBackend {
                             }
                             crate::materials::BoundResource::Texture(texture) => {
                                 if let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() {
-                                    Some(wgpu::BindingResource::TextureView(view.as_ref()))
+                                    Some(wgpu::BindingResource::TextureView(view))
                                 } else {
                                     None
                                 }
@@ -331,7 +331,7 @@ impl WgpuBackend {
                             } => {
                                 // For combined, just use the texture view
                                 if let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() {
-                                    Some(wgpu::BindingResource::TextureView(view.as_ref()))
+                                    Some(wgpu::BindingResource::TextureView(view))
                                 } else {
                                     None
                                 }

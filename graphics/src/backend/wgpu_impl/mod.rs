@@ -13,6 +13,8 @@ use std::sync::Arc;
 /// A texture view for a surface texture (swapchain image).
 ///
 /// This wraps the wgpu::TextureView from the surface texture for use in render passes.
+/// Note: Uses Arc because this type needs to be Clone for use in RenderTarget,
+/// and wgpu::TextureView doesn't implement Clone.
 #[derive(Clone)]
 pub struct SurfaceTextureView {
     pub(crate) view: Arc<wgpu::TextureView>,
