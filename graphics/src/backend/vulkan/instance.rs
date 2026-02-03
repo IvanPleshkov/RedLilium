@@ -8,7 +8,13 @@ use crate::error::GraphicsError;
 
 use super::debug;
 
-/// Required Vulkan API version (1.3 for dynamic rendering).
+/// Required Vulkan API version.
+/// On macOS with MoltenVK, only Vulkan 1.2 is supported.
+/// On other platforms, we can use 1.3 for native dynamic rendering support.
+#[cfg(target_os = "macos")]
+const REQUIRED_API_VERSION: u32 = vk::make_api_version(0, 1, 2, 0);
+
+#[cfg(not(target_os = "macos"))]
 const REQUIRED_API_VERSION: u32 = vk::make_api_version(0, 1, 3, 0);
 
 /// Validation layer name.

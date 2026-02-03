@@ -501,7 +501,7 @@ impl VulkanBackend {
         use crate::types::TextureDimension;
 
         let format = convert_texture_format(descriptor.format);
-        let usage = convert_texture_usage(descriptor.usage);
+        let usage = convert_texture_usage(descriptor.usage, descriptor.format);
 
         // Determine image type, array layers, and flags based on dimension
         let (image_type, array_layers, extent, flags) = match descriptor.dimension {

@@ -78,7 +78,10 @@ pub fn convert_texture_format(format: TextureFormat) -> vk::Format {
 }
 
 /// Convert TextureUsage flags to Vulkan image usage flags.
-pub fn convert_texture_usage(usage: TextureUsage) -> vk::ImageUsageFlags {
+///
+/// The format is needed to determine whether RENDER_ATTACHMENT should map to
+/// COLOR_ATTACHMENT or DEPTH_STENCIL_ATTACHMENT.
+pub fn convert_texture_usage(usage: TextureUsage, format: TextureFormat) -> vk::ImageUsageFlags {
     let mut result = vk::ImageUsageFlags::empty();
 
     if usage.contains(TextureUsage::COPY_SRC) {
@@ -94,9 +97,12 @@ pub fn convert_texture_usage(usage: TextureUsage) -> vk::ImageUsageFlags {
         result |= vk::ImageUsageFlags::STORAGE;
     }
     if usage.contains(TextureUsage::RENDER_ATTACHMENT) {
-        result |= vk::ImageUsageFlags::COLOR_ATTACHMENT;
-        // Also add depth stencil if format supports it
-        result |= vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT;
+        // Use the appropriate attachment type based on format
+        if format.is_depth_stencil() {
+            result |= vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT;
+        } else {
+            result |= vk::ImageUsageFlags::COLOR_ATTACHMENT;
+        }
     }
 
     result

@@ -188,6 +188,12 @@ impl DefaultAppArgs {
         self.max_frames = Some(max_frames);
         self
     }
+
+    /// Set the window title.
+    pub fn with_title_str(mut self, title: impl Into<String>) -> Self {
+        self.title = title.into();
+        self
+    }
 }
 
 impl AppArgs for DefaultAppArgs {

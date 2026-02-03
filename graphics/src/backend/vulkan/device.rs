@@ -103,26 +103,33 @@ pub fn create_logical_device(
     let queue_create_infos = [queue_create_info];
 
     // Required device extensions
-    let device_extensions = [
+    let mut device_extensions = vec![
         ash::khr::swapchain::NAME.as_ptr(),
         ash::khr::dynamic_rendering::NAME.as_ptr(),
     ];
 
+    // On macOS with MoltenVK, we need VK_KHR_portability_subset
+    #[cfg(target_os = "macos")]
+    {
+        // Check if portability subset is supported and required
+        if device_supports_extension(instance, physical_device, "VK_KHR_portability_subset") {
+            device_extensions.push(c"VK_KHR_portability_subset".as_ptr());
+        }
+    }
+
     // Enable required features
     let features = vk::PhysicalDeviceFeatures::default().sampler_anisotropy(true);
 
-    // Enable Vulkan 1.3 features for dynamic rendering
-    let mut vulkan_13_features =
-        vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true);
-
-    // Enable synchronization2 for better barrier API (optional but recommended)
-    vulkan_13_features = vulkan_13_features.synchronization2(true);
+    // Enable dynamic rendering via extension features (works on Vulkan 1.2 with extension)
+    // This is compatible with MoltenVK which only supports Vulkan 1.2
+    let mut dynamic_rendering_features =
+        vk::PhysicalDeviceDynamicRenderingFeatures::default().dynamic_rendering(true);
 
     let create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_create_infos)
         .enabled_extension_names(&device_extensions)
         .enabled_features(&features)
-        .push_next(&mut vulkan_13_features);
+        .push_next(&mut dynamic_rendering_features);
 
     let device =
         unsafe { instance.create_device(physical_device, &create_info, None) }.map_err(|e| {
@@ -130,4 +137,29 @@ pub fn create_logical_device(
         })?;
 
     Ok(device)
+}
+
+/// Check if a physical device supports a specific extension.
+#[cfg(target_os = "macos")]
+fn device_supports_extension(
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+    extension_name: &str,
+) -> bool {
+    let extensions =
+        match unsafe { instance.enumerate_device_extension_properties(physical_device) } {
+            Ok(ext) => ext,
+            Err(_) => return false,
+        };
+
+    for ext in extensions {
+        let name = unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) };
+        if let Ok(name_str) = name.to_str()
+            && name_str == extension_name
+        {
+            return true;
+        }
+    }
+
+    false
 }

@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
-use redlilium_app::{App, AppContext, AppHandler, DefaultAppArgs, DrawContext};
+use redlilium_app::{App, AppArgs, AppContext, AppHandler, DefaultAppArgs, DrawContext};
 use redlilium_graphics::{
     AddressMode, BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferDescriptor,
     BufferUsage, ColorAttachment, DepthStencilAttachment, Extent3d, FilterMode, FrameSchedule,
@@ -505,7 +505,8 @@ impl AppHandler for TexturedQuadDemo {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
-    let args = DefaultAppArgs::with_title("Textured Quad Demo");
+    // Parse command line arguments and set the window title
+    let args = DefaultAppArgs::parse().with_title_str("Textured Quad Demo");
     App::run(TexturedQuadDemo::new(), args);
 }
 

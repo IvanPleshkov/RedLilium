@@ -78,3 +78,9 @@ Please read `docs\ARCHITECTURE.md` and follow the architecture while implementin
 - use resizing tools from graphics crate
 - use `App` from app crate
 Please check that there is no errors in log, use please the tool in app that closes window after fixed frames (use 10).
+
+## Request 8:
+Please run textured quad demo with 10 frames before exit and with vulkan API backend (not wgpu).
+Use validation layers and look into logs of application.
+Fix vulkan api errors.
+Probaply there is an issue with macos and moltenvk config, feel free to configure on local machine.
