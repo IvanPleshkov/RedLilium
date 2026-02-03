@@ -95,3 +95,7 @@ Please run PBR demo with 10 frames before exit and with vulkan API backend (not 
 Use validation layers and look into logs of application.
 There are errors.
 please analyse how material system in graphics crate works and fix image layout errors.
+
+## Request 11:
+You checked wrong demo, use this (dont forget to limit frames as a feature of the application for tests)
+cargo run -p redlilium-demos --bin pbr_ibl_demo -- --backend=vulkan

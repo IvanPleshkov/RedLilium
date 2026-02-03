@@ -925,17 +925,11 @@ impl PbrIblDemo {
         );
         self.skybox_material_instance = Some(skybox_material_instance);
 
-        // Create a minimal mesh for fullscreen triangle (shader uses vertex_index)
-        // Just need 3 vertices with a dummy layout
+        // Create a minimal mesh for fullscreen triangle (shader uses vertex_index only)
+        // Need a buffer but no attributes since the shader doesn't consume any vertex inputs
         let skybox_vertex_layout = Arc::new(
             VertexLayout::new()
-                .with_buffer(VertexBufferLayout::new(4)) // 1 dummy float per vertex
-                .with_attribute(VertexAttribute {
-                    semantic: VertexAttributeSemantic::Position,
-                    format: VertexAttributeFormat::Float,
-                    offset: 0,
-                    buffer_index: 0,
-                })
+                .with_buffer(VertexBufferLayout::new(4)) // Minimal stride, no attributes
                 .with_label("skybox_vertex_layout"),
         );
 
@@ -947,7 +941,7 @@ impl PbrIblDemo {
             )
             .expect("Failed to create skybox mesh");
 
-        // Write dummy vertex data (shader doesn't use it, just needs valid buffer)
+        // Write minimal vertex data (shader doesn't use it, just needs valid buffer)
         if let Some(vb) = skybox_mesh.vertex_buffer(0) {
             let dummy_data: [f32; 3] = [0.0, 0.0, 0.0];
             device.write_buffer(vb, 0, bytemuck::cast_slice(&dummy_data));

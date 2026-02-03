@@ -33,7 +33,8 @@
       "Bash(ls -la \"d:\\\\github\\\\vibeengine\\\\graphics\\\\src\"\" && echo \"===\" && ls -la \"d:githubvibeenginegraphicssrcbackend\"\")",
       "Bash(cargo run:*)",
       "WebFetch(domain:learnopengl.com)",
-      "Bash(bash:*)"
+      "Bash(bash:*)",
+      "Bash(RUSTFLAGS=\"-W warnings\" cargo build:*)"
     ],
     "deny": [
       "Read(claude_requests_history/**)",
