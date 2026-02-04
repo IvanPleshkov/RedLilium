@@ -132,3 +132,18 @@ Proposal of design:
 There is EguiController structure with `Arc<dyn EguiApp>`, where EguiApp is a trait to handle egui events.
 EguiController has inside all resources and has a function to create a render graph to send it into frame scheduler.
 Add also to PRB demo a ui with example of usage with different controls.
+
+## Request 17:
+Please run pbr demo with 10 frames before exit and with wgpu backend.
+There is an error related to UI:
+[2026-02-04T13:57:00Z ERROR wgpu::backend::wgpu_core] Handling wgpu errors as fatal by default
+
+thread 'main' (23379683) panicked at /Users/pleshkov/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-28.0.0/src/backend/wgpu_core.rs:1386:26:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_render_pipeline, label = 'egui_material'
+    Error matching ShaderStages(VERTEX) shader requirements against the pipeline
+      Location[1] Float32x2 interpolated as Some(Perspective) with sampling Some(Center) is not provided by the previous stage outputs
+        Input is not provided by the earlier stage in the pipeline
+

@@ -11,10 +11,12 @@ struct EguiUniforms {
 }
 
 /// Vertex input from egui mesh data.
+/// Locations match VertexAttributeSemantic indices:
+/// - Position = 0, TexCoord0 = 3, Color = 5
 struct EguiVertexInput {
     @location(0) position: vec2<f32>,
-    @location(1) tex_coords: vec2<f32>,
-    @location(2) color: vec4<f32>,
+    @location(3) tex_coords: vec2<f32>,
+    @location(5) color: vec4<f32>,
 }
 
 /// Vertex output to fragment shader.
