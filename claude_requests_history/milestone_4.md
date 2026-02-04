@@ -105,3 +105,7 @@ cargo run -p redlilium-demos --bin pbr_ibl_demo -- --backend=vulkan
 Is `Arc` here necessary? I think just plain `Wgpu(wgpu::Buffer)` is better because on the higher level the gpu buffer is already covered by `Arc`.
 Check also for texture, sampler, etc.
 
+## Request 13:
+Please audit `app` and `demos` crates.
+It seems the backend choosing between vulkan and wgpu with vulkan is not obvious.
+Please refactor command line argument parsing and propose better way to select wgpu internal params.

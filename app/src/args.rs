@@ -1,4 +1,9 @@
 //! Command line arguments trait and default implementation.
+//!
+//! Uses clap for proper CLI parsing on native targets with:
+//! - Help text (`--help`)
+//! - Validation and clear error messages
+//! - Platform-specific backend availability warnings
 
 use redlilium_graphics::{BackendType, WgpuBackendType};
 
@@ -120,18 +125,122 @@ pub trait AppArgs: Sized {
     }
 }
 
+// ============================================================================
+// CLI Backend Selection (clap enums with clearer naming)
+// ============================================================================
+
+/// Graphics backend selection for CLI.
+///
+/// This enum provides clearer naming for CLI users than the internal `BackendType`.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum CliBackend {
+    /// Automatically select the best available backend (wgpu preferred).
+    #[default]
+    Auto,
+    /// Cross-platform backend via wgpu (recommended for most use cases).
+    /// Supports full rendering features including draw commands.
+    Wgpu,
+    /// Native Vulkan backend via ash (advanced/experimental).
+    /// Note: Currently limited to transfer operations, no draw commands.
+    #[value(name = "vulkan-native")]
+    VulkanNative,
+    /// No-op backend for testing and CI environments.
+    Dummy,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl From<CliBackend> for BackendType {
+    fn from(cli: CliBackend) -> Self {
+        match cli {
+            CliBackend::Auto => BackendType::Auto,
+            CliBackend::Wgpu => BackendType::Wgpu,
+            CliBackend::VulkanNative => BackendType::Vulkan,
+            CliBackend::Dummy => BackendType::Dummy,
+        }
+    }
+}
+
+/// GPU API selection for wgpu backend.
+///
+/// Controls which underlying graphics API wgpu uses.
+/// Only relevant when using the wgpu backend.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum CliGpuApi {
+    /// Platform-appropriate default:
+    /// - macOS/iOS: Metal
+    /// - Linux: Vulkan
+    /// - Windows: DirectX 12
+    /// - Web: WebGL
+    #[default]
+    Auto,
+    /// Vulkan (available on Linux, Windows, Android).
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "windows",
+        target_os = "android",
+        target_os = "freebsd"
+    ))]
+    Vulkan,
+    /// Metal (available on macOS and iOS only).
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    Metal,
+    /// DirectX 12 (available on Windows only).
+    #[cfg(target_os = "windows")]
+    Dx12,
+    /// OpenGL/WebGL (cross-platform fallback).
+    Gl,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl From<CliGpuApi> for WgpuBackendType {
+    fn from(cli: CliGpuApi) -> Self {
+        match cli {
+            CliGpuApi::Auto => WgpuBackendType::Auto,
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "windows",
+                target_os = "android",
+                target_os = "freebsd"
+            ))]
+            CliGpuApi::Vulkan => WgpuBackendType::Vulkan,
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            CliGpuApi::Metal => WgpuBackendType::Metal,
+            #[cfg(target_os = "windows")]
+            CliGpuApi::Dx12 => WgpuBackendType::Dx12,
+            CliGpuApi::Gl => WgpuBackendType::Gl,
+        }
+    }
+}
+
+// ============================================================================
+// Default App Args (with clap on native)
+// ============================================================================
+
 /// Default command line arguments implementation.
 ///
-/// Parses standard command line arguments:
-/// - `--backend=<vulkan|wgpu|dummy>` - Graphics backend
-/// - `--wgpu-backend=<vulkan|metal|dx12|gl|auto>` - wgpu backend type
-/// - `--fullscreen` - Run in borderless fullscreen
-/// - `--width=<N>` - Window width
-/// - `--height=<N>` - Window height
-/// - `--no-vsync` - Disable VSync
-/// - `--max-frames=<N>` - Exit after N frames
-/// - `--validation` - Enable validation layers
-/// - `--no-validation` - Disable validation layers
+/// On native platforms, uses clap for proper CLI parsing with help text.
+/// On WASM, uses simple environment-based defaults.
+///
+/// # Examples
+///
+/// ```bash
+/// # Show help
+/// ./my_app --help
+///
+/// # Use wgpu with Vulkan API
+/// ./my_app --backend wgpu --gpu-api vulkan
+///
+/// # Use native Vulkan (limited features)
+/// ./my_app --backend vulkan-native
+///
+/// # Run in fullscreen with validation disabled
+/// ./my_app --fullscreen --no-validation
+///
+/// # Run for 100 frames then exit (useful for testing)
+/// ./my_app --max-frames 100
+/// ```
 #[derive(Debug, Clone)]
 pub struct DefaultAppArgs {
     backend: BackendType,
@@ -196,47 +305,142 @@ impl DefaultAppArgs {
     }
 }
 
-impl AppArgs for DefaultAppArgs {
-    fn parse() -> Self {
-        let mut args = Self::default();
-        let env_args: Vec<String> = std::env::args().collect();
+// ============================================================================
+// Native implementation using clap
+// ============================================================================
 
-        for arg in &env_args[1..] {
-            if let Some(value) = arg.strip_prefix("--backend=") {
-                args.backend = match value.to_lowercase().as_str() {
-                    "vulkan" => BackendType::Vulkan,
-                    "wgpu" => BackendType::Wgpu,
-                    "dummy" => BackendType::Dummy,
-                    _ => BackendType::Auto,
-                };
-            } else if let Some(value) = arg.strip_prefix("--wgpu-backend=") {
-                // Note: WgpuBackendType variants are platform-conditional
-                // Just parse what we can and fallback to Auto
-                args.wgpu_backend = parse_wgpu_backend(value);
-            } else if arg == "--fullscreen" {
-                args.window_mode = WindowMode::Borderless;
-            } else if let Some(value) = arg.strip_prefix("--width=") {
-                if let Ok(w) = value.parse() {
-                    args.width = w;
-                }
-            } else if let Some(value) = arg.strip_prefix("--height=") {
-                if let Ok(h) = value.parse() {
-                    args.height = h;
-                }
-            } else if arg == "--no-vsync" {
-                args.vsync = false;
-            } else if let Some(value) = arg.strip_prefix("--max-frames=") {
-                if let Ok(n) = value.parse() {
-                    args.max_frames = Some(n);
-                }
-            } else if arg == "--validation" {
-                args.validation = true;
-            } else if arg == "--no-validation" {
-                args.validation = false;
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
+    use super::*;
+    use clap::Parser;
+
+    /// RedLilium Engine application arguments.
+    #[derive(Parser, Debug)]
+    #[command(
+        name = "RedLilium App",
+        about = "RedLilium Engine application",
+        long_about = "A graphics application powered by the RedLilium Engine.\n\n\
+            BACKEND SELECTION:\n\
+            The engine supports multiple graphics backends:\n\
+            \n\
+            • wgpu (recommended): Cross-platform abstraction supporting Metal, Vulkan, DX12, OpenGL.\n\
+              Use --gpu-api to select the underlying API.\n\
+            \n\
+            • vulkan-native: Direct Vulkan via ash. Currently limited to transfer operations.\n\
+              Only use this for advanced debugging or development purposes.\n\
+            \n\
+            • dummy: No-op backend for testing without GPU.\n\
+            \n\
+            EXAMPLES:\n\
+              # Use wgpu with platform default (recommended)\n\
+              ./app --backend wgpu\n\
+            \n\
+              # Use wgpu with explicit Vulkan API\n\
+              ./app --backend wgpu --gpu-api vulkan\n\
+            \n\
+              # Run headless test\n\
+              ./app --backend dummy --max-frames 10",
+        version
+    )]
+    pub(super) struct ClapArgs {
+        /// Graphics backend to use.
+        #[arg(long, default_value = "auto", value_enum)]
+        pub backend: CliBackend,
+
+        /// GPU API for wgpu backend.
+        /// Only applies when --backend is 'wgpu' or 'auto'.
+        #[arg(long, default_value = "auto", value_enum)]
+        pub gpu_api: CliGpuApi,
+
+        /// Run in borderless fullscreen mode.
+        #[arg(long)]
+        pub fullscreen: bool,
+
+        /// Initial window width in pixels.
+        #[arg(long, default_value = "1280")]
+        pub width: u32,
+
+        /// Initial window height in pixels.
+        #[arg(long, default_value = "720")]
+        pub height: u32,
+
+        /// Disable vertical sync (may cause tearing).
+        #[arg(long)]
+        pub no_vsync: bool,
+
+        /// Exit after rendering N frames (useful for testing).
+        #[arg(long)]
+        pub max_frames: Option<u64>,
+
+        /// Enable GPU validation layers (slower but helps catch bugs).
+        #[arg(long, conflicts_with = "no_validation")]
+        pub validation: bool,
+
+        /// Disable GPU validation layers (faster but less safe).
+        #[arg(long, conflicts_with = "validation")]
+        pub no_validation: bool,
+    }
+
+    impl From<ClapArgs> for DefaultAppArgs {
+        fn from(args: ClapArgs) -> Self {
+            // Warn if gpu-api is set but backend is not wgpu
+            if args.gpu_api != CliGpuApi::Auto
+                && args.backend != CliBackend::Wgpu
+                && args.backend != CliBackend::Auto
+            {
+                log::warn!(
+                    "--gpu-api has no effect when --backend is '{:?}'. \
+                    The --gpu-api option only applies to the wgpu backend.",
+                    args.backend
+                );
+            }
+
+            // Warn about vulkan-native limitations
+            if args.backend == CliBackend::VulkanNative {
+                log::warn!(
+                    "Using vulkan-native backend. Note: This backend currently only \
+                    supports transfer operations (no draw commands). \
+                    Consider using '--backend wgpu --gpu-api vulkan' for full Vulkan support."
+                );
+            }
+
+            // Determine validation setting: explicit flags override default
+            // --validation forces on, --no-validation forces off, otherwise use debug default
+            let validation = args.validation || (!args.no_validation && cfg!(debug_assertions));
+
+            Self {
+                backend: args.backend.into(),
+                wgpu_backend: args.gpu_api.into(),
+                window_mode: if args.fullscreen {
+                    WindowMode::Borderless
+                } else {
+                    WindowMode::Windowed
+                },
+                width: args.width,
+                height: args.height,
+                title: "RedLilium App".to_string(),
+                vsync: !args.no_vsync,
+                max_frames: args.max_frames,
+                validation,
             }
         }
+    }
+}
 
-        args
+impl AppArgs for DefaultAppArgs {
+    fn parse() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use clap::Parser;
+            let clap_args = native::ClapArgs::parse();
+            clap_args.into()
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            // On WASM, just use defaults (no CLI)
+            Self::default()
+        }
     }
 
     fn backend(&self) -> BackendType {
@@ -276,8 +480,17 @@ impl AppArgs for DefaultAppArgs {
     }
 }
 
-/// Parse wgpu backend type from string, handling platform-specific variants.
-fn parse_wgpu_backend(value: &str) -> WgpuBackendType {
+// ============================================================================
+// Backward compatibility: keep the old parsing function available
+// ============================================================================
+
+/// Parse wgpu backend type from string (for backward compatibility).
+///
+/// This function is kept for custom AppArgs implementations that may want
+/// to parse backend strings manually.
+#[deprecated(since = "0.2.0", note = "Use CliGpuApi with clap instead")]
+#[allow(dead_code)]
+pub fn parse_wgpu_backend(value: &str) -> WgpuBackendType {
     match value.to_lowercase().as_str() {
         #[cfg(any(
             target_os = "linux",
@@ -293,9 +506,62 @@ fn parse_wgpu_backend(value: &str) -> WgpuBackendType {
         #[cfg(target_os = "windows")]
         "dx12" => WgpuBackendType::Dx12,
 
-        #[cfg(not(target_arch = "wasm32"))]
         "gl" | "opengl" => WgpuBackendType::Gl,
 
-        _ => WgpuBackendType::Auto,
+        _ => {
+            if value != "auto" {
+                log::warn!(
+                    "Unknown GPU API '{}', falling back to auto. \
+                    Valid options on this platform: auto, gl{}",
+                    value,
+                    platform_gpu_apis()
+                );
+            }
+            WgpuBackendType::Auto
+        }
+    }
+}
+
+/// Parse backend type from string (for backward compatibility).
+///
+/// This function is kept for custom AppArgs implementations that may want
+/// to parse backend strings manually.
+#[deprecated(since = "0.2.0", note = "Use CliBackend with clap instead")]
+#[allow(dead_code)]
+pub fn parse_backend(value: &str) -> BackendType {
+    match value.to_lowercase().as_str() {
+        "wgpu" => BackendType::Wgpu,
+        "vulkan" | "vulkan-native" => BackendType::Vulkan,
+        "dummy" => BackendType::Dummy,
+        "auto" => BackendType::Auto,
+        _ => {
+            log::warn!(
+                "Unknown backend '{}', falling back to auto. \
+                Valid options: auto, wgpu, vulkan-native, dummy",
+                value
+            );
+            BackendType::Auto
+        }
+    }
+}
+
+/// Get a string listing available GPU APIs for the current platform.
+#[allow(dead_code)]
+fn platform_gpu_apis() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        ", metal"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        ", vulkan, dx12"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        ", vulkan"
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        ""
     }
 }
