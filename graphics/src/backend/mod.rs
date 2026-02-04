@@ -166,19 +166,46 @@ impl std::fmt::Debug for GpuSampler {
 }
 
 /// Handle to a GPU fence for CPU-GPU synchronization.
+///
+/// # Backend Differences
+///
+/// Fences are implemented differently across backends due to API constraints:
+///
+/// ## Vulkan (`vk::Fence`)
+/// True GPU fence with binary signaled/unsignaled state. The GPU signals the fence
+/// when command buffer execution completes. CPU can wait or poll the fence status.
+/// This provides precise synchronization and supports multiple frames in flight.
+///
+/// ## wgpu (`SubmissionIndex`)
+/// wgpu abstracts over multiple backends (Vulkan, Metal, DX12, WebGPU) and doesn't
+/// expose native fence handles to maintain portability. Instead, it uses submission
+/// indices that can be polled via `device.poll()`. Key differences:
+/// - No true "unsignaled" state - fence tracks submissions, not binary state
+/// - Polling checks if work is complete, not a specific fence state
+/// - `execute_graph` already blocks on completion, making fences somewhat redundant
+///   for simple use cases
+///
+/// **Why not expose GPU fences in wgpu?** Each backend (Metal, DX12, WebGPU) has
+/// different synchronization primitives. wgpu's submission index abstraction works
+/// across all backends at the cost of less precise control.
+///
+/// ## Dummy (`AtomicBool`)
+/// Simple CPU-side flag for testing without GPU hardware.
 #[allow(clippy::large_enum_variant)]
 pub enum GpuFence {
-    /// Dummy backend (no GPU fence)
+    /// Dummy backend - CPU-side atomic boolean for testing.
     Dummy {
         signaled: std::sync::atomic::AtomicBool,
     },
-    /// wgpu backend fence (submission index for polling)
+    /// wgpu backend - tracks submission index for polling.
+    /// Note: wgpu fences track submissions rather than binary state.
+    /// A fence with `submission_index: None` is considered "signaled" (no pending work).
     #[cfg(feature = "wgpu-backend")]
     Wgpu {
         device: Arc<wgpu::Device>,
         submission_index: std::sync::Mutex<Option<wgpu::SubmissionIndex>>,
     },
-    /// Vulkan backend fence
+    /// Vulkan backend - true GPU fence via `vkFence`.
     #[cfg(feature = "vulkan-backend")]
     Vulkan {
         device: ash::Device,
@@ -1017,7 +1044,6 @@ fn create_backend_auto(
     }
 
     // Try Vulkan backend if wgpu unavailable (native Vulkan via ash)
-    // Note: Vulkan backend currently doesn't support draw commands - only transfer operations
     #[cfg(feature = "vulkan-backend")]
     {
         match vulkan::VulkanBackend::new() {

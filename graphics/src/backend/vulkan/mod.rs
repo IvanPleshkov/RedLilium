@@ -745,10 +745,26 @@ impl VulkanBackend {
     }
 
     /// Wait for a fence to be signaled.
+    ///
+    /// Uses a 10-second timeout to prevent indefinite hangs on corrupted fences
+    /// or GPU lockups. If timeout occurs, logs a warning but continues.
     pub fn wait_fence(&self, fence: &GpuFence) {
         if let GpuFence::Vulkan { device, fence, .. } = fence {
+            // 10 second timeout in nanoseconds
+            const FENCE_TIMEOUT_NS: u64 = 10_000_000_000;
             unsafe {
-                let _ = device.wait_for_fences(&[*fence], true, u64::MAX);
+                match device.wait_for_fences(&[*fence], true, FENCE_TIMEOUT_NS) {
+                    Ok(()) => {}
+                    Err(vk::Result::TIMEOUT) => {
+                        log::warn!(
+                            "Fence wait timed out after 10 seconds. \
+                             GPU may be hung or fence was never signaled."
+                        );
+                    }
+                    Err(e) => {
+                        log::error!("Fence wait failed: {:?}", e);
+                    }
+                }
             }
         }
     }

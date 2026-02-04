@@ -108,7 +108,23 @@ impl WgpuBackend {
     }
 
     /// Create a fence for CPU-GPU synchronization.
-    pub fn create_fence(&self, _signaled: bool) -> GpuFence {
+    ///
+    /// Note: wgpu fences work differently from Vulkan fences. Instead of a binary
+    /// signaled/unsignaled state, wgpu tracks submission indices. A fence with no
+    /// submission (None) is considered "signaled" (no work to wait for).
+    ///
+    /// The `signaled` parameter is acknowledged but has limited effect:
+    /// - `signaled=true`: Fence starts with no submission (effectively signaled)
+    /// - `signaled=false`: Same as above - wgpu cannot represent an unsignaled fence
+    ///   without pending work. The fence becomes meaningful only after `execute_graph`
+    ///   stores a submission index.
+    pub fn create_fence(&self, signaled: bool) -> GpuFence {
+        if !signaled {
+            log::debug!(
+                "wgpu fence created with signaled=false, but wgpu fences track submissions, \
+                 not binary state. Fence will appear signaled until work is submitted."
+            );
+        }
         GpuFence::Wgpu {
             device: self.device.clone(),
             submission_index: Mutex::new(None),
@@ -133,19 +149,40 @@ impl WgpuBackend {
     }
 
     /// Check if a fence is signaled (non-blocking).
+    ///
+    /// Returns `true` if:
+    /// - No work has been submitted yet (fence is in initial state)
+    /// - All submitted work has completed
+    ///
+    /// Returns `false` if:
+    /// - Work is still pending on the GPU
+    /// - Lock acquisition failed (conservative assumption)
+    /// - Not a wgpu fence
     pub fn is_fence_signaled(&self, fence: &GpuFence) -> bool {
-        if let GpuFence::Wgpu {
+        let GpuFence::Wgpu {
             device,
             submission_index,
         } = fence
-            && let Ok(guard) = submission_index.lock()
-            && guard.is_some()
-            && let Ok(status) = device.poll(wgpu::PollType::Poll)
-        {
-            return status.is_queue_empty();
+        else {
+            return false; // Not a wgpu fence
+        };
+
+        let Ok(guard) = submission_index.lock() else {
+            return false; // Lock failed, assume not signaled (conservative)
+        };
+
+        // No submission yet means fence is in initial "signaled" state
+        if guard.is_none() {
+            return true;
         }
-        // No submission yet or not wgpu fence means "done" or default
-        matches!(fence, GpuFence::Wgpu { .. })
+
+        // Poll without blocking to check completion status.
+        // Note: wgpu's non-blocking poll checks if ALL queue work is done,
+        // not a specific submission. This is conservative but correct.
+        match device.poll(wgpu::PollType::Poll) {
+            Ok(status) => status.is_queue_empty(),
+            Err(_) => false, // Poll failed, assume not signaled
+        }
     }
 
     /// Signal a fence (for testing/dummy backend).
