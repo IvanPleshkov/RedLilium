@@ -35,6 +35,24 @@
 //! }));
 //! let controller = EguiController::new(device.clone(), ui);
 //! ```
+//!
+//! ## User Textures
+//!
+//! You can display custom textures (render targets, offscreen buffers, etc.) in egui:
+//!
+//! ```ignore
+//! // Register your texture with egui
+//! let texture_id = controller.register_user_texture(my_render_target);
+//!
+//! // In your EguiApp::update, display the texture:
+//! ui.image(egui::load::SizedTexture::new(texture_id, [256.0, 256.0]));
+//!
+//! // When the texture is recreated (e.g., on resize):
+//! controller.update_user_texture(texture_id, new_render_target);
+//!
+//! // When done with the texture:
+//! controller.unregister_user_texture(texture_id);
+//! ```
 
 mod controller;
 mod input;
@@ -42,6 +60,7 @@ mod renderer;
 
 pub use controller::EguiController;
 pub use egui;
+pub use egui::TextureId;
 
 use std::sync::Arc;
 

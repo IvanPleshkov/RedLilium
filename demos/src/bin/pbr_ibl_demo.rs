@@ -199,6 +199,10 @@ pub struct PbrUiState {
     pub sphere_spacing: f32,
     /// Whether to show the info panel
     pub show_info: bool,
+    /// Whether to show the albedo G-buffer preview
+    pub show_albedo: bool,
+    /// Texture ID for the albedo G-buffer (set by the demo)
+    pub albedo_texture_id: Option<egui::TextureId>,
 }
 
 impl Default for PbrUiState {
@@ -211,6 +215,8 @@ impl Default for PbrUiState {
             ui_visible: true,
             sphere_spacing: SPHERE_SPACING,
             show_info: true,
+            show_albedo: true,
+            albedo_texture_id: None,
         }
     }
 }
@@ -251,6 +257,10 @@ impl PbrUi {
 
     pub fn toggle_visibility(&mut self) {
         self.state.ui_visible = !self.state.ui_visible;
+    }
+
+    pub fn set_albedo_texture_id(&mut self, texture_id: Option<egui::TextureId>) {
+        self.state.albedo_texture_id = texture_id;
     }
 }
 
@@ -346,9 +356,14 @@ impl EguiApp for PbrUi {
                 });
 
                 ui.add_space(10.0);
+                ui.heading("Debug");
+                ui.separator();
 
                 // Show info checkbox
                 ui.checkbox(&mut self.state.show_info, "Show Info Panel");
+
+                // Show albedo G-buffer checkbox
+                ui.checkbox(&mut self.state.show_albedo, "Show Albedo G-Buffer");
             });
 
         // Info panel
@@ -367,6 +382,23 @@ impl EguiApp for PbrUi {
                     ui.label("  H: Toggle UI");
                     ui.label("  LMB Drag: Rotate camera");
                     ui.label("  Scroll: Zoom");
+                });
+        }
+
+        // Albedo G-buffer preview window
+        if self.state.show_albedo
+            && let Some(texture_id) = self.state.albedo_texture_id
+        {
+            egui::Window::new("Albedo G-Buffer")
+                .default_pos([ctx.available_rect().right() - 280.0, 10.0])
+                .resizable(true)
+                .show(ctx, |ui| {
+                    let available_size = ui.available_size();
+                    let image_size = egui::vec2(
+                        available_size.x.min(256.0),
+                        available_size.x.min(256.0) * 0.75, // 4:3 aspect ratio
+                    );
+                    ui.image(egui::load::SizedTexture::new(texture_id, image_size));
                 });
         }
     }
@@ -495,6 +527,10 @@ struct PbrIblDemo {
     egui_controller: Option<EguiController>,
     egui_ui: Arc<RwLock<PbrUi>>,
     needs_instance_update: bool,
+
+    // G-buffer for albedo visualization
+    albedo_texture: Option<Arc<redlilium_graphics::Texture>>,
+    albedo_texture_id: Option<egui::TextureId>,
 }
 
 impl PbrIblDemo {
@@ -531,6 +567,8 @@ impl PbrIblDemo {
             egui_controller: None,
             egui_ui: Arc::new(RwLock::new(PbrUi::new())),
             needs_instance_update: false,
+            albedo_texture: None,
+            albedo_texture_id: None,
         }
     }
 
@@ -973,6 +1011,21 @@ impl PbrIblDemo {
             ))
             .expect("Failed to create depth texture");
         self.depth_texture = Some(depth_texture);
+
+        // Create albedo G-buffer texture for visualization in UI
+        let albedo_texture = ctx
+            .device()
+            .create_texture(
+                &TextureDescriptor::new_2d(
+                    ctx.width(),
+                    ctx.height(),
+                    TextureFormat::Rgba8UnormSrgb,
+                    TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
+                )
+                .with_label("gbuffer_albedo"),
+            )
+            .expect("Failed to create albedo texture");
+        self.albedo_texture = Some(albedo_texture);
     }
 
     fn create_sphere_instances(&self) -> Vec<SphereInstance> {
@@ -1353,17 +1406,40 @@ impl AppHandler for PbrIblDemo {
         self.create_gpu_resources(ctx);
 
         // Initialize egui controller
-        self.egui_controller = Some(EguiController::new(
+        let mut egui_controller = EguiController::new(
             ctx.device().clone(),
             self.egui_ui.clone(),
             ctx.width(),
             ctx.height(),
             ctx.scale_factor(),
-        ));
+        );
+
+        // Register the albedo texture with egui for UI visualization
+        if let Some(albedo) = &self.albedo_texture {
+            let texture_id = egui_controller.register_user_texture(albedo.clone());
+            self.albedo_texture_id = Some(texture_id);
+
+            // Pass the texture ID to the UI
+            if let Ok(mut ui) = self.egui_ui.write() {
+                ui.set_albedo_texture_id(Some(texture_id));
+            }
+        }
+
+        self.egui_controller = Some(egui_controller);
     }
 
     fn on_resize(&mut self, ctx: &mut AppContext) {
         self.create_depth_texture(ctx);
+
+        // Update the registered albedo texture after resize
+        if let (Some(egui), Some(texture_id), Some(albedo)) = (
+            &mut self.egui_controller,
+            self.albedo_texture_id,
+            &self.albedo_texture,
+        ) {
+            egui.update_user_texture(texture_id, albedo.clone());
+        }
+
         if let Some(egui) = &mut self.egui_controller {
             egui.on_resize(ctx.width(), ctx.height());
         }
@@ -1420,12 +1496,17 @@ impl AppHandler for PbrIblDemo {
 
         let mut render_pass = GraphicsPass::new("main".into());
 
-        if let Some(depth) = &self.depth_texture {
+        if let (Some(depth), Some(albedo)) = (&self.depth_texture, &self.albedo_texture) {
             render_pass.set_render_targets(
                 RenderTargetConfig::new()
                     .with_color(
                         ColorAttachment::from_surface(ctx.swapchain_texture())
                             .with_clear_color(0.02, 0.02, 0.03, 1.0),
+                    )
+                    // G-buffer albedo output (MRT @location(1))
+                    .with_color(
+                        ColorAttachment::from_texture(albedo.clone())
+                            .with_clear_color(0.0, 0.0, 0.0, 1.0),
                     )
                     .with_depth_stencil(
                         DepthStencilAttachment::from_texture(depth.clone()).with_clear_depth(1.0),

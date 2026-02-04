@@ -71,8 +71,15 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 // IBL constants
 const MAX_REFLECTION_LOD: f32 = 4.0;
 
+// Fragment output structure for MRT (Multiple Render Targets)
+// Supports G-buffer output for deferred rendering visualization
+struct FragmentOutput {
+    @location(0) color: vec4<f32>,
+    @location(1) albedo: vec4<f32>,
+};
+
 @fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+fn fs_main(in: VertexOutput) -> FragmentOutput {
     let albedo = in.base_color.rgb;
     let metallic = in.metallic;
     let roughness = max(in.roughness, 0.04);
@@ -127,5 +134,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Gamma correction using library function
     color = gamma_correct(color);
 
-    return vec4<f32>(color, 1.0);
+    var out: FragmentOutput;
+    out.color = vec4<f32>(color, 1.0);
+    out.albedo = vec4<f32>(albedo, 1.0);
+    return out;
 }

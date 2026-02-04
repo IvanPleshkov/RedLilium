@@ -79,6 +79,8 @@ pub struct EguiRenderer {
     uniform_binding_layout: Arc<BindingLayout>,
     #[allow(dead_code)]
     texture_binding_layout: Arc<BindingLayout>,
+    /// Counter for generating unique user texture IDs.
+    next_user_texture_id: u64,
 }
 
 impl EguiRenderer {
@@ -195,6 +197,7 @@ impl EguiRenderer {
             texture_data: HashMap::new(),
             uniform_binding_layout,
             texture_binding_layout,
+            next_user_texture_id: 0,
         }
     }
 
@@ -305,6 +308,64 @@ impl EguiRenderer {
         );
 
         self.textures.insert(id, texture);
+    }
+
+    /// Register a user-managed texture with egui.
+    ///
+    /// This allows external textures (such as render targets, offscreen buffers,
+    /// or any GPU texture) to be displayed in egui UI elements like `ui.image()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `texture` - The GPU texture to register
+    ///
+    /// # Returns
+    ///
+    /// A `TextureId` that can be used with egui's image widgets.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let texture_id = renderer.register_user_texture(my_render_target);
+    /// // In egui update:
+    /// ui.image(egui::load::SizedTexture::new(texture_id, [256.0, 256.0]));
+    /// ```
+    pub fn register_user_texture(&mut self, texture: Arc<Texture>) -> TextureId {
+        let id = TextureId::User(self.next_user_texture_id);
+        self.next_user_texture_id += 1;
+        self.textures.insert(id, texture);
+        id
+    }
+
+    /// Update a previously registered user texture.
+    ///
+    /// This is useful when the underlying texture has been recreated (e.g., on resize).
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The texture ID returned from `register_user_texture`
+    /// * `texture` - The new GPU texture
+    pub fn update_user_texture(&mut self, id: TextureId, texture: Arc<Texture>) {
+        if matches!(id, TextureId::User(_)) {
+            self.textures.insert(id, texture);
+        } else {
+            log::warn!("Attempted to update non-user texture {:?}", id);
+        }
+    }
+
+    /// Unregister a user-managed texture.
+    ///
+    /// The texture will no longer be available for rendering in egui.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The texture ID returned from `register_user_texture`
+    pub fn unregister_user_texture(&mut self, id: TextureId) {
+        if matches!(id, TextureId::User(_)) {
+            self.textures.remove(&id);
+        } else {
+            log::warn!("Attempted to unregister non-user texture {:?}", id);
+        }
     }
 
     /// Create a graphics pass for rendering egui primitives.

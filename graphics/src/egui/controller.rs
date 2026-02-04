@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use egui::Context;
+use egui::{Context, TextureId};
 use winit::event::{KeyEvent, MouseButton, MouseScrollDelta};
 use winit::keyboard::ModifiersState;
 
@@ -12,6 +12,7 @@ use super::ArcEguiApp;
 use super::input::EguiInputState;
 use super::renderer::EguiRenderer;
 use crate::graph::{GraphicsPass, RenderGraph};
+use crate::resources::Texture;
 use crate::{GraphicsDevice, SurfaceTexture};
 
 /// Controller for egui UI integration.
@@ -240,5 +241,54 @@ impl EguiController {
         }
 
         graph
+    }
+
+    /// Register a user-managed texture with egui.
+    ///
+    /// This allows external textures (such as render targets, offscreen buffers,
+    /// or any GPU texture) to be displayed in egui UI elements like `ui.image()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `texture` - The GPU texture to register
+    ///
+    /// # Returns
+    ///
+    /// A `TextureId` that can be used with egui's image widgets.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Register a render target texture
+    /// let texture_id = controller.register_user_texture(my_render_target);
+    ///
+    /// // In your EguiApp::update():
+    /// ui.image(egui::load::SizedTexture::new(texture_id, [256.0, 256.0]));
+    /// ```
+    pub fn register_user_texture(&mut self, texture: Arc<Texture>) -> TextureId {
+        self.renderer.register_user_texture(texture)
+    }
+
+    /// Update a previously registered user texture.
+    ///
+    /// This is useful when the underlying texture has been recreated (e.g., on resize).
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The texture ID returned from `register_user_texture`
+    /// * `texture` - The new GPU texture
+    pub fn update_user_texture(&mut self, id: TextureId, texture: Arc<Texture>) {
+        self.renderer.update_user_texture(id, texture);
+    }
+
+    /// Unregister a user-managed texture.
+    ///
+    /// The texture will no longer be available for rendering in egui.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The texture ID returned from `register_user_texture`
+    pub fn unregister_user_texture(&mut self, id: TextureId) {
+        self.renderer.unregister_user_texture(id);
     }
 }
