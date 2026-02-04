@@ -14,7 +14,6 @@ mod instance;
 pub mod layout;
 mod pipeline;
 pub mod swapchain;
-mod sync;
 
 use std::sync::Arc;
 
