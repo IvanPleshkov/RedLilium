@@ -785,6 +785,15 @@ impl VulkanBackend {
     }
 
     /// Execute a compiled render graph.
+    ///
+    /// # Async Behavior
+    ///
+    /// - If `signal_fence` is provided: Returns immediately after submission (async).
+    ///   The caller can wait on the fence using `wait_fence()` or poll with `is_fence_signaled()`.
+    ///   Command buffers are queued for deferred destruction after the GPU finishes.
+    /// - If `signal_fence` is `None`: Blocks until GPU completes (sync, for backwards compatibility).
+    ///
+    /// For true async rendering with multiple frames in flight, always provide a fence.
     pub fn execute_graph(
         &self,
         graph: &RenderGraph,
@@ -792,8 +801,8 @@ impl VulkanBackend {
         signal_fence: Option<&GpuFence>,
     ) -> Result<(), GraphicsError> {
         // Reset descriptor pool at the start of each graph execution.
-        // This is safe because execute_graph waits for the queue to idle at the end,
-        // so any descriptor sets from previous executions are no longer in use.
+        // When async (fence provided), this relies on the frame pipeline ensuring
+        // proper synchronization before reusing descriptor sets.
         self.pipeline_manager.reset_descriptor_pool()?;
 
         // Allocate command buffer
@@ -865,17 +874,25 @@ impl VulkanBackend {
             GraphicsError::Internal(format!("Failed to submit command buffer: {:?}", e))
         })?;
 
-        // If no fence provided, wait for queue to idle
-        if signal_fence.is_none() {
+        // Handle sync vs async paths
+        if signal_fence.is_some() {
+            // Async path: queue command buffer for deferred destruction
+            // It will be freed after the GPU finishes (tracked by frame pipeline)
+            self.deferred_destructor.queue(DeferredResource::CommandBuffers {
+                device: self.device.clone(),
+                command_pool: self.command_pool,
+                buffers: command_buffers,
+            });
+        } else {
+            // Sync path: wait for queue to idle, then free immediately
             unsafe { self.device.queue_wait_idle(self.graphics_queue) }.map_err(|e| {
                 GraphicsError::Internal(format!("Failed to wait for queue idle: {:?}", e))
             })?;
-        }
 
-        // Free command buffer
-        unsafe {
-            self.device
-                .free_command_buffers(self.command_pool, &command_buffers);
+            unsafe {
+                self.device
+                    .free_command_buffers(self.command_pool, &command_buffers);
+            }
         }
 
         Ok(())

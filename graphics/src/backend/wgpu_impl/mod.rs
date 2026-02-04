@@ -209,6 +209,14 @@ impl WgpuBackend {
     }
 
     /// Execute a compiled render graph.
+    ///
+    /// # Async Behavior
+    ///
+    /// - If `signal_fence` is provided: Returns immediately after submission (async).
+    ///   The caller can wait on the fence using `wait_fence()` or poll with `is_fence_signaled()`.
+    /// - If `signal_fence` is `None`: Blocks until GPU completes (sync, for backwards compatibility).
+    ///
+    /// For true async rendering with multiple frames in flight, always provide a fence.
     pub fn execute_graph(
         &self,
         graph: &RenderGraph,
@@ -234,17 +242,19 @@ impl WgpuBackend {
         let command_buffer = encoder.finish();
         let submission_index = self.queue.submit(std::iter::once(command_buffer));
 
-        // Store submission index in fence for polling
+        // Store submission index in fence for async polling
         if let Some(GpuFence::Wgpu {
             submission_index: fence_idx,
             ..
         }) = signal_fence
             && let Ok(mut guard) = fence_idx.lock()
         {
-            *guard = Some(submission_index.clone());
+            *guard = Some(submission_index);
+            // Async path: return immediately, caller will wait on fence
+            return Ok(());
         }
 
-        // Wait for GPU to complete before returning
+        // Sync path: no fence provided, wait for GPU to complete before returning
         let _ = self.device.poll(wgpu::PollType::Wait {
             submission_index: Some(submission_index),
             timeout: Some(std::time::Duration::from_secs(10)),

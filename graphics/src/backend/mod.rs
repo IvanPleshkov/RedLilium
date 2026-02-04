@@ -182,8 +182,8 @@ impl std::fmt::Debug for GpuSampler {
 /// indices that can be polled via `device.poll()`. Key differences:
 /// - No true "unsignaled" state - fence tracks submissions, not binary state
 /// - Polling checks if work is complete, not a specific fence state
-/// - `execute_graph` already blocks on completion, making fences somewhat redundant
-///   for simple use cases
+/// - `execute_graph` with fence provided returns immediately (async)
+/// - `execute_graph` without fence blocks until completion (sync, backwards compatible)
 ///
 /// **Why not expose GPU fences in wgpu?** Each backend (Metal, DX12, WebGPU) has
 /// different synchronization primitives. wgpu's submission index abstraction works

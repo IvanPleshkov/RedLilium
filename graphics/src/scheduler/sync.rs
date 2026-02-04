@@ -3,8 +3,11 @@
 //! This module provides synchronization types for coordinating work
 //! between the CPU and GPU, and between different GPU operations.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use crate::backend::GpuFence;
+use crate::instance::GraphicsInstance;
 
 /// GPU semaphore for synchronizing operations within a frame.
 ///
@@ -42,48 +45,109 @@ pub enum FenceStatus {
     Signaled,
 }
 
+/// Internal fence implementation.
+enum FenceInner {
+    /// CPU-only fence for testing without GPU.
+    Dummy {
+        signaled: Arc<AtomicBool>,
+    },
+    /// GPU-backed fence for real async rendering.
+    /// The fence is boxed to reduce enum size (GpuFence is large due to backend variants).
+    Gpu {
+        fence: Box<GpuFence>,
+        instance: Arc<GraphicsInstance>,
+    },
+}
+
+impl std::fmt::Debug for FenceInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dummy { signaled } => f
+                .debug_struct("Dummy")
+                .field("signaled", &signaled.load(Ordering::Relaxed))
+                .finish(),
+            Self::Gpu { fence, .. } => f.debug_struct("Gpu").field("fence", fence).finish(),
+        }
+    }
+}
+
 /// CPU-GPU synchronization primitive.
 ///
 /// Fences allow the CPU to wait for GPU work to complete.
 /// Used to synchronize frame boundaries and ensure resources
 /// are safe to reuse.
 ///
+/// # Async Behavior
+///
+/// When backed by a real GPU fence, `wait()` blocks until the GPU
+/// signals completion. This enables true async rendering where the
+/// CPU can continue building subsequent frames while the GPU works.
+///
 /// # Example
 ///
 /// ```ignore
-/// let fence = schedule.submit_and_present(graph, &[deps], swapchain);
+/// let fence = schedule.take_fence();
 ///
-/// // Later, before reusing frame resources:
+/// // Do other CPU work while GPU executes...
+///
+/// // Before reusing frame resources, wait for GPU:
 /// fence.wait();
 /// assert_eq!(fence.status(), FenceStatus::Signaled);
 /// ```
-#[derive(Debug)]
 pub struct Fence {
-    /// Whether the fence has been signaled.
-    signaled: Arc<AtomicBool>,
-    // TODO: Actual GPU fence handle would go here
-    // e.g., vk::Fence for Vulkan, ID3D12Fence for D3D12
+    inner: FenceInner,
+}
+
+impl std::fmt::Debug for Fence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Fence").field("inner", &self.inner).finish()
+    }
 }
 
 impl Fence {
-    /// Create a new fence in the unsignaled state.
+    /// Create a new CPU-only fence in the unsignaled state (for testing).
     pub(crate) fn new_unsignaled() -> Self {
         Self {
-            signaled: Arc::new(AtomicBool::new(false)),
+            inner: FenceInner::Dummy {
+                signaled: Arc::new(AtomicBool::new(false)),
+            },
         }
     }
 
-    /// Create a new fence in the signaled state.
+    /// Create a new CPU-only fence in the signaled state (for testing).
     #[allow(dead_code)]
     pub(crate) fn new_signaled() -> Self {
         Self {
-            signaled: Arc::new(AtomicBool::new(true)),
+            inner: FenceInner::Dummy {
+                signaled: Arc::new(AtomicBool::new(true)),
+            },
+        }
+    }
+
+    /// Create a new GPU-backed fence.
+    ///
+    /// The fence is created in the signaled state initially (ready for first use).
+    /// When passed to `execute_graph`, the GPU will signal it upon completion.
+    pub(crate) fn new_gpu(instance: Arc<GraphicsInstance>) -> Self {
+        let fence = Box::new(instance.backend().create_fence(true)); // Start signaled
+        Self {
+            inner: FenceInner::Gpu { fence, instance },
+        }
+    }
+
+    /// Get the underlying GpuFence (if GPU-backed).
+    ///
+    /// Returns `None` for CPU-only fences.
+    pub(crate) fn gpu_fence(&self) -> Option<&GpuFence> {
+        match &self.inner {
+            FenceInner::Dummy { .. } => None,
+            FenceInner::Gpu { fence, .. } => Some(fence),
         }
     }
 
     /// Check the current status of the fence.
     pub fn status(&self) -> FenceStatus {
-        if self.signaled.load(Ordering::Acquire) {
+        if self.is_signaled() {
             FenceStatus::Signaled
         } else {
             FenceStatus::Unsignaled
@@ -92,7 +156,10 @@ impl Fence {
 
     /// Check if the fence is signaled (non-blocking).
     pub fn is_signaled(&self) -> bool {
-        self.status() == FenceStatus::Signaled
+        match &self.inner {
+            FenceInner::Dummy { signaled } => signaled.load(Ordering::Acquire),
+            FenceInner::Gpu { fence, instance } => instance.backend().is_fence_signaled(fence),
+        }
     }
 
     /// Wait for the fence to be signaled (blocking).
@@ -100,10 +167,15 @@ impl Fence {
     /// This blocks the calling thread until the GPU signals the fence.
     /// Returns immediately if already signaled.
     pub fn wait(&self) {
-        // TODO: Actual GPU fence wait would happen here
-        // For now, just spin (in real impl this would call vkWaitForFences etc.)
-        while !self.signaled.load(Ordering::Acquire) {
-            std::hint::spin_loop();
+        match &self.inner {
+            FenceInner::Dummy { signaled } => {
+                while !signaled.load(Ordering::Acquire) {
+                    std::hint::spin_loop();
+                }
+            }
+            FenceInner::Gpu { fence, instance } => {
+                instance.backend().wait_fence(fence);
+            }
         }
     }
 
@@ -111,37 +183,76 @@ impl Fence {
     ///
     /// Returns `true` if the fence was signaled, `false` if timeout elapsed.
     pub fn wait_timeout(&self, timeout: std::time::Duration) -> bool {
-        let start = std::time::Instant::now();
-        while !self.signaled.load(Ordering::Acquire) {
-            if start.elapsed() >= timeout {
-                return false;
+        match &self.inner {
+            FenceInner::Dummy { signaled } => {
+                let start = std::time::Instant::now();
+                while !signaled.load(Ordering::Acquire) {
+                    if start.elapsed() >= timeout {
+                        return false;
+                    }
+                    std::hint::spin_loop();
+                }
+                true
             }
-            std::hint::spin_loop();
+            FenceInner::Gpu { fence, instance } => {
+                // For GPU fences, we poll with short sleeps until timeout
+                let start = std::time::Instant::now();
+                while !instance.backend().is_fence_signaled(fence) {
+                    if start.elapsed() >= timeout {
+                        return false;
+                    }
+                    std::thread::sleep(std::time::Duration::from_micros(100));
+                }
+                true
+            }
         }
-        true
     }
 
     /// Reset the fence to unsignaled state.
     ///
     /// Must only be called when no GPU work is pending on this fence.
     pub fn reset(&self) {
-        self.signaled.store(false, Ordering::Release);
+        match &self.inner {
+            FenceInner::Dummy { signaled } => {
+                signaled.store(false, Ordering::Release);
+            }
+            FenceInner::Gpu { .. } => {
+                // GPU fences are reset automatically when passed to execute_graph
+                // No manual reset needed - the backend handles this
+            }
+        }
     }
 
-    /// Signal the fence.
+    /// Signal the fence (for CPU-only/testing mode).
     ///
-    /// In real GPU backends, the GPU signals the fence when work completes.
-    /// For the dummy backend (no actual GPU), call this immediately after
-    /// "submitting" work to simulate completion.
+    /// For GPU-backed fences, the GPU signals automatically when work completes.
     pub(crate) fn signal(&self) {
-        self.signaled.store(true, Ordering::Release);
+        match &self.inner {
+            FenceInner::Dummy { signaled } => {
+                signaled.store(true, Ordering::Release);
+            }
+            FenceInner::Gpu { .. } => {
+                // GPU signals the fence automatically - this is a no-op
+                log::trace!("signal() called on GPU fence - GPU will signal automatically");
+            }
+        }
     }
 }
 
 impl Clone for Fence {
     fn clone(&self) -> Self {
-        Self {
-            signaled: Arc::clone(&self.signaled),
+        match &self.inner {
+            FenceInner::Dummy { signaled } => Self {
+                inner: FenceInner::Dummy {
+                    signaled: Arc::clone(signaled),
+                },
+            },
+            FenceInner::Gpu { .. } => {
+                // GPU fences cannot be cloned - create a new dummy one
+                // This maintains API compatibility but logs a warning
+                log::warn!("Cloning GPU fence creates a dummy fence - use with caution");
+                Self::new_signaled()
+            }
         }
     }
 }

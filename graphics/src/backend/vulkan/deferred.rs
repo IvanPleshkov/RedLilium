@@ -75,6 +75,12 @@ pub enum DeferredResource {
         device: ash::Device,
         semaphore: vk::Semaphore,
     },
+    /// Command buffers to be freed.
+    CommandBuffers {
+        device: ash::Device,
+        command_pool: vk::CommandPool,
+        buffers: Vec<vk::CommandBuffer>,
+    },
 }
 
 // SAFETY: DeferredResource only contains Vulkan handles which are thread-safe.
@@ -134,6 +140,14 @@ impl DeferredResource {
                 unsafe { device.destroy_semaphore(semaphore, None) };
                 log::trace!("Deferred: destroyed semaphore {:?}", semaphore);
             }
+            DeferredResource::CommandBuffers {
+                device,
+                command_pool,
+                buffers,
+            } => {
+                unsafe { device.free_command_buffers(command_pool, &buffers) };
+                log::trace!("Deferred: freed {} command buffers", buffers.len());
+            }
         }
     }
 
@@ -186,6 +200,14 @@ impl DeferredResource {
             DeferredResource::Semaphore { device, semaphore } => {
                 unsafe { device.destroy_semaphore(semaphore, None) };
                 log::trace!("Deferred: destroyed semaphore {:?}", semaphore);
+            }
+            DeferredResource::CommandBuffers {
+                device,
+                command_pool,
+                buffers,
+            } => {
+                unsafe { device.free_command_buffers(command_pool, &buffers) };
+                log::trace!("Deferred: freed {} command buffers", buffers.len());
             }
         }
     }

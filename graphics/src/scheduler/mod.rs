@@ -99,6 +99,13 @@ impl std::fmt::Debug for SubmittedGraph {
 /// rather than batching all submissions at frame end. This maximizes
 /// CPU-GPU parallelism.
 ///
+/// # Async Behavior
+///
+/// With GPU-backed fences, `present()` and `finish()` return immediately
+/// after submitting work to the GPU. The fence tracks when the GPU actually
+/// completes, enabling true async rendering where the CPU can build the
+/// next frame while the GPU renders the current one.
+///
 /// # Creation
 ///
 /// `FrameSchedule` is created by [`FramePipeline::begin_frame`](crate::pipeline::FramePipeline::begin_frame).
@@ -114,10 +121,10 @@ impl std::fmt::Debug for SubmittedGraph {
 /// let a = schedule.submit("graph_a", graph_a, &[]);
 /// let b = schedule.submit("graph_b", graph_b, &[a]);
 ///
-/// // Present to screen (marks schedule as complete)
+/// // Present to screen (returns immediately - GPU works async)
 /// schedule.present("present", final_graph, &[b]);
 ///
-/// // Return schedule to pipeline
+/// // Return schedule to pipeline (stores fence for later waiting)
 /// pipeline.end_frame(schedule);
 /// ```
 pub struct FrameSchedule {
@@ -349,30 +356,39 @@ impl FrameSchedule {
             );
         }
 
-        // Create completion semaphore and fence
+        // Create completion semaphore
         let completion = Semaphore::new(self.next_semaphore_id());
-        let fence = Fence::new_unsignaled();
 
-        // Actually execute the graph on the GPU if we have a device
-        if let Some(device) = &self.device {
+        // Execute graph and create appropriate fence
+        let fence = if let Some(device) = &self.device {
+            // Create GPU-backed fence for async execution
+            let instance = Arc::clone(device.instance());
+            let fence = Fence::new_gpu(instance);
+
             if let Ok(compiled) = graph.compile() {
                 let backend = device.instance().backend();
-                if let Err(e) = backend.execute_graph(graph, &compiled, None) {
+                // Pass the GPU fence - execute_graph returns immediately (async)
+                if let Err(e) = backend.execute_graph(graph, &compiled, fence.gpu_fence()) {
                     log::error!("Failed to execute present graph '{}': {}", name, e);
                 }
             } else {
                 log::error!("Failed to compile present graph '{}'", name);
             }
-        }
+
+            fence
+        } else {
+            // No device (testing) - use CPU fence and signal immediately
+            let fence = Fence::new_unsignaled();
+            fence.signal();
+            fence
+        };
 
         log::trace!(
-            "Submitted present graph '{}' (waiting for {} dependencies)",
+            "Submitted present graph '{}' (waiting for {} dependencies, async={})",
             name,
-            wait_for.len()
+            wait_for.len(),
+            self.device.is_some()
         );
-
-        // Signal fence since GPU work is complete (synchronous execution)
-        fence.signal();
 
         self.submitted.push(SubmittedGraph {
             name,
@@ -439,27 +455,26 @@ impl FrameSchedule {
         }
 
         // Create fence for CPU synchronization
-        let fence = Fence::new_unsignaled();
+        // Note: Since intermediate submit() calls currently execute synchronously,
+        // all GPU work is already complete by the time finish() is called.
+        // We create a signaled fence to indicate completion.
+        let fence = if let Some(device) = &self.device {
+            // Create GPU-backed fence (already signaled since work is done)
+            let instance = Arc::clone(device.instance());
+            Fence::new_gpu(instance)
+            // Fence starts signaled, and since all submit() calls blocked,
+            // the GPU work is already complete
+        } else {
+            // No device (testing) - use CPU fence
+            let fence = Fence::new_unsignaled();
+            fence.signal();
+            fence
+        };
 
-        // Collect semaphores to wait on (GPU waits for these before signaling fence)
-        let _wait_semaphores: Vec<&Semaphore> = wait_for
-            .iter()
-            .map(|h| &self.submitted[h.index()].completion)
-            .collect();
-
-        // TODO: Actual GPU submission with fence signal would happen here
-        // This would submit a command buffer that:
-        // 1. Waits on wait_semaphores
-        // 2. Signals the fence when complete
         log::trace!(
             "Finish schedule (waiting for {} dependencies)",
             wait_for.len()
         );
-
-        // For the dummy backend (no actual GPU), signal the fence immediately
-        // to simulate instant completion. Real backends will signal this
-        // when GPU work actually completes.
-        fence.signal();
 
         self.fence = Some(fence);
     }
