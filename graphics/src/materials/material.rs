@@ -311,6 +311,11 @@ impl Material {
     pub fn shaders(&self) -> &[ShaderSource] {
         &self.descriptor.shaders
     }
+
+    /// Get the blend state.
+    pub fn blend_state(&self) -> Option<&BlendState> {
+        self.descriptor.blend_state.as_ref()
+    }
 }
 
 impl std::fmt::Debug for Material {

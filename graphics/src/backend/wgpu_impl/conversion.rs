@@ -253,6 +253,55 @@ pub fn convert_shader_stages(flags: crate::materials::ShaderStageFlags) -> wgpu:
     result
 }
 
+/// Convert BlendFactor to wgpu blend factor.
+pub fn convert_blend_factor(factor: crate::materials::BlendFactor) -> wgpu::BlendFactor {
+    match factor {
+        crate::materials::BlendFactor::Zero => wgpu::BlendFactor::Zero,
+        crate::materials::BlendFactor::One => wgpu::BlendFactor::One,
+        crate::materials::BlendFactor::Src => wgpu::BlendFactor::Src,
+        crate::materials::BlendFactor::OneMinusSrc => wgpu::BlendFactor::OneMinusSrc,
+        crate::materials::BlendFactor::SrcAlpha => wgpu::BlendFactor::SrcAlpha,
+        crate::materials::BlendFactor::OneMinusSrcAlpha => wgpu::BlendFactor::OneMinusSrcAlpha,
+        crate::materials::BlendFactor::Dst => wgpu::BlendFactor::Dst,
+        crate::materials::BlendFactor::OneMinusDst => wgpu::BlendFactor::OneMinusDst,
+        crate::materials::BlendFactor::DstAlpha => wgpu::BlendFactor::DstAlpha,
+        crate::materials::BlendFactor::OneMinusDstAlpha => wgpu::BlendFactor::OneMinusDstAlpha,
+        crate::materials::BlendFactor::SrcAlphaSaturated => wgpu::BlendFactor::SrcAlphaSaturated,
+        crate::materials::BlendFactor::Constant => wgpu::BlendFactor::Constant,
+        crate::materials::BlendFactor::OneMinusConstant => wgpu::BlendFactor::OneMinusConstant,
+    }
+}
+
+/// Convert BlendOperation to wgpu blend operation.
+pub fn convert_blend_operation(op: crate::materials::BlendOperation) -> wgpu::BlendOperation {
+    match op {
+        crate::materials::BlendOperation::Add => wgpu::BlendOperation::Add,
+        crate::materials::BlendOperation::Subtract => wgpu::BlendOperation::Subtract,
+        crate::materials::BlendOperation::ReverseSubtract => wgpu::BlendOperation::ReverseSubtract,
+        crate::materials::BlendOperation::Min => wgpu::BlendOperation::Min,
+        crate::materials::BlendOperation::Max => wgpu::BlendOperation::Max,
+    }
+}
+
+/// Convert BlendComponent to wgpu blend component.
+pub fn convert_blend_component(
+    component: &crate::materials::BlendComponent,
+) -> wgpu::BlendComponent {
+    wgpu::BlendComponent {
+        src_factor: convert_blend_factor(component.src_factor),
+        dst_factor: convert_blend_factor(component.dst_factor),
+        operation: convert_blend_operation(component.operation),
+    }
+}
+
+/// Convert BlendState to wgpu blend state.
+pub fn convert_blend_state(state: &crate::materials::BlendState) -> wgpu::BlendState {
+    wgpu::BlendState {
+        color: convert_blend_component(&state.color),
+        alpha: convert_blend_component(&state.alpha),
+    }
+}
+
 /// Convert BindingType to wgpu binding type.
 pub fn convert_binding_type(binding_type: crate::materials::BindingType) -> wgpu::BindingType {
     match binding_type {

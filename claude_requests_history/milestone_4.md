@@ -147,3 +147,6 @@ Caused by:
       Location[1] Float32x2 interpolated as Some(Perspective) with sampling Some(Center) is not provided by the previous stage outputs
         Input is not provided by the earlier stage in the pipeline
 
+## Request 18:
+In PRB demo I see that UI uses wrong DPI (or ignores it).
+Please provide DPI in App and use correct DPI in the demo.

@@ -161,14 +161,18 @@ where
             }
         };
 
-        // Configure surface
+        // Get scale factor and physical size from window
+        let scale_factor = window.scale_factor();
+        let physical_size = window.inner_size();
+
+        // Configure surface with physical dimensions
         let present_mode = if self.args.vsync() {
             PresentMode::Fifo
         } else {
             PresentMode::Immediate
         };
 
-        let config = SurfaceConfiguration::new(self.args.window_width(), self.args.window_height())
+        let config = SurfaceConfiguration::new(physical_size.width, physical_size.height)
             .with_format(surface.preferred_format())
             .with_present_mode(present_mode);
 
@@ -181,10 +185,11 @@ where
         let pipeline = device.create_pipeline(2);
 
         log::info!(
-            "Graphics initialized: {} ({}x{})",
+            "Graphics initialized: {} ({}x{} physical, scale_factor={})",
             device.name(),
-            self.args.window_width(),
-            self.args.window_height()
+            physical_size.width,
+            physical_size.height,
+            scale_factor
         );
 
         self.context = Some(AppContext {
@@ -192,8 +197,9 @@ where
             device,
             surface,
             pipeline,
-            width: self.args.window_width(),
-            height: self.args.window_height(),
+            width: physical_size.width,
+            height: physical_size.height,
+            scale_factor,
             frame_number: 0,
             delta_time: 0.0,
             elapsed_time: 0.0,
@@ -378,6 +384,13 @@ where
 
             WindowEvent::Resized(size) => {
                 self.handle_resize(size.width, size.height);
+            }
+
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                if let Some(ctx) = &mut self.context {
+                    ctx.scale_factor = scale_factor;
+                    log::info!("Scale factor changed to {}", scale_factor);
+                }
             }
 
             WindowEvent::RedrawRequested => {

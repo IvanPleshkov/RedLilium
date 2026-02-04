@@ -26,8 +26,10 @@ use crate::types::{
 use crate::{GraphicsDevice, SurfaceTexture};
 
 /// WGSL shader source for egui rendering.
+/// Based on egui-wgpu's shader approach for proper alpha blending.
+/// Uses gamma framebuffer output since our surface format is Bgra8Unorm (non-sRGB).
 const EGUI_SHADER: &str = r#"
-#import redlilium::egui::{EguiUniforms, EguiVertexInput, EguiVertexOutput, srgb_to_linear}
+#import redlilium::egui::{EguiUniforms, EguiVertexInput, EguiVertexOutput, srgb_to_linear, linear_to_srgb}
 
 @group(0) @binding(0) var<uniform> uniforms: EguiUniforms;
 @group(1) @binding(0) var egui_texture: texture_2d<f32>;
@@ -52,18 +54,27 @@ fn vs_main(in: EguiVertexInput) -> EguiVertexOutput {
 
 @fragment
 fn fs_main(in: EguiVertexOutput) -> @location(0) vec4<f32> {
-    let tex_color = textureSample(egui_texture, egui_sampler, in.tex_coords);
+    // Sample texture (hardware converts sRGB texture to linear)
+    let texture_color_linear = textureSample(egui_texture, egui_sampler, in.tex_coords);
 
-    // Convert vertex color from sRGB to linear
-    let vertex_linear = vec4<f32>(srgb_to_linear(in.color.rgb), in.color.a);
+    // Premultiply texture color by its alpha in linear space
+    let texture_color_linear_premultiplied = vec4<f32>(
+        texture_color_linear.rgb * texture_color_linear.a,
+        texture_color_linear.a
+    );
 
-    // Multiply with texture (already in linear space if font atlas)
-    var color = vertex_linear * tex_color;
+    // Convert premultiplied texture to gamma/sRGB space
+    let texture_color_gamma_premultiplied = vec4<f32>(
+        linear_to_srgb(texture_color_linear_premultiplied.rgb),
+        texture_color_linear_premultiplied.a
+    );
 
-    // Pre-multiply alpha for proper blending
-    color = vec4<f32>(color.rgb * color.a, color.a);
+    // Multiply with vertex color in GAMMA space (vertex colors are already in sRGB)
+    let color_gamma = texture_color_gamma_premultiplied * in.color;
 
-    return color;
+    // Output in gamma space directly (framebuffer is Bgra8Unorm, not sRGB)
+    // This matches egui-wgpu's fs_main_gamma_framebuffer
+    return color_gamma;
 }
 "#;
 
@@ -99,6 +110,14 @@ pub struct EguiUniforms {
     pub _padding: [f32; 2],
 }
 
+/// CPU-side texture data for handling partial updates.
+#[allow(dead_code)]
+struct TextureData {
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+}
+
 /// Manages GPU resources for egui rendering.
 pub struct EguiRenderer {
     device: Arc<GraphicsDevice>,
@@ -107,6 +126,8 @@ pub struct EguiRenderer {
     uniform_buffer: Arc<Buffer>,
     sampler: Arc<Sampler>,
     textures: HashMap<TextureId, Arc<Texture>>,
+    /// CPU-side texture data for partial update support.
+    texture_data: HashMap<TextureId, TextureData>,
     #[allow(dead_code)]
     uniform_binding_layout: Arc<BindingLayout>,
     #[allow(dead_code)]
@@ -224,15 +245,24 @@ impl EguiRenderer {
             uniform_buffer,
             sampler,
             textures: HashMap::new(),
+            texture_data: HashMap::new(),
             uniform_binding_layout,
             texture_binding_layout,
         }
     }
 
-    /// Update screen size uniforms.
+    /// Update screen size uniforms (integer version for resize events).
     pub fn update_screen_size(&self, width: u32, height: u32) {
+        self.update_screen_size_f32(width as f32, height as f32);
+    }
+
+    /// Update screen size uniforms with float values.
+    ///
+    /// This is used when the screen size needs to be in logical points rather than
+    /// physical pixels (e.g., for egui rendering where vertices are in points).
+    pub fn update_screen_size_f32(&self, width: f32, height: f32) {
         let uniforms = EguiUniforms {
-            screen_size: [width as f32, height as f32],
+            screen_size: [width, height],
             _padding: [0.0, 0.0],
         };
         self.device
@@ -244,6 +274,7 @@ impl EguiRenderer {
         // Free textures that are no longer needed
         for id in &textures_delta.free {
             self.textures.remove(id);
+            self.texture_data.remove(id);
         }
 
         // Set or update textures
@@ -254,33 +285,58 @@ impl EguiRenderer {
 
     /// Set or update a texture.
     fn set_texture(&mut self, id: TextureId, delta: &ImageDelta) {
-        let (width, height) = (delta.image.width() as u32, delta.image.height() as u32);
+        let region_width = delta.image.width() as u32;
+        let region_height = delta.image.height() as u32;
 
         // Convert image data to RGBA8
-        let pixels: Vec<u8> = match &delta.image {
+        let new_pixels: Vec<u8> = match &delta.image {
             egui::ImageData::Color(image) => {
                 image.pixels.iter().flat_map(|c| c.to_array()).collect()
             }
         };
 
         if let Some(pos) = delta.pos {
-            // Partial update - need to update a region of existing texture
-            if let Some(texture) = self.textures.get(&id) {
-                // For partial updates, we'd need a staging buffer and transfer pass
-                // For simplicity, we recreate the texture (not ideal for performance)
-                log::debug!("Partial texture update at {:?} - recreating texture", pos);
-                // In a production implementation, you'd use a transfer pass here
-                let _ = texture;
+            // Partial update - update the CPU-side data and re-upload
+            if let Some(data) = self.texture_data.get_mut(&id) {
+                let start_x = pos[0] as u32;
+                let start_y = pos[1] as u32;
+
+                // Copy the new pixels into the correct region of the stored data
+                for y in 0..region_height {
+                    for x in 0..region_width {
+                        let src_idx = ((y * region_width + x) * 4) as usize;
+                        let dst_x = start_x + x;
+                        let dst_y = start_y + y;
+                        let dst_idx = ((dst_y * data.width + dst_x) * 4) as usize;
+
+                        if dst_idx + 4 <= data.pixels.len() && src_idx + 4 <= new_pixels.len() {
+                            data.pixels[dst_idx..dst_idx + 4]
+                                .copy_from_slice(&new_pixels[src_idx..src_idx + 4]);
+                        }
+                    }
+                }
+
+                // Re-upload the full texture
+                if let Some(texture) = self.textures.get(&id) {
+                    self.device.write_texture(texture, &data.pixels);
+                }
+                return;
             }
+            // If we don't have the texture data, fall through to create a new texture
+            // This shouldn't happen in normal operation
+            log::warn!(
+                "Partial texture update for unknown texture {:?}, creating new",
+                id
+            );
         }
 
-        // Create or recreate texture
+        // Full update - create or recreate texture
         let texture = self
             .device
             .create_texture(
                 &TextureDescriptor::new_2d(
-                    width,
-                    height,
+                    region_width,
+                    region_height,
                     TextureFormat::Rgba8UnormSrgb,
                     TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST,
                 )
@@ -289,18 +345,37 @@ impl EguiRenderer {
             .expect("Failed to create egui texture");
 
         // Upload pixel data
-        self.device.write_texture(&texture, &pixels);
+        self.device.write_texture(&texture, &new_pixels);
+
+        // Store CPU-side data for future partial updates
+        self.texture_data.insert(
+            id,
+            TextureData {
+                width: region_width,
+                height: region_height,
+                pixels: new_pixels,
+            },
+        );
 
         self.textures.insert(id, texture);
     }
 
     /// Create a graphics pass for rendering egui primitives.
+    ///
+    /// # Arguments
+    ///
+    /// * `primitives` - The tessellated egui primitives to render
+    /// * `surface_texture` - The surface texture to render to
+    /// * `screen_width` - Screen width in physical pixels
+    /// * `screen_height` - Screen height in physical pixels
+    /// * `pixels_per_point` - DPI scale factor for converting points to pixels
     pub fn create_graphics_pass(
         &self,
         primitives: &[ClippedPrimitive],
         surface_texture: &SurfaceTexture,
         screen_width: u32,
         screen_height: u32,
+        pixels_per_point: f32,
     ) -> GraphicsPass {
         let mut pass = GraphicsPass::new("egui".into());
 
@@ -379,11 +454,11 @@ impl EguiRenderer {
                             .with_binding_group(texture_binding),
                     );
 
-                    // Calculate scissor rect
-                    let clip_min_x = clip_rect.min.x.round() as i32;
-                    let clip_min_y = clip_rect.min.y.round() as i32;
-                    let clip_max_x = clip_rect.max.x.round() as i32;
-                    let clip_max_y = clip_rect.max.y.round() as i32;
+                    // Calculate scissor rect - clip_rect is in points, but scissor needs physical pixels
+                    let clip_min_x = (clip_rect.min.x * pixels_per_point).round() as i32;
+                    let clip_min_y = (clip_rect.min.y * pixels_per_point).round() as i32;
+                    let clip_max_x = (clip_rect.max.x * pixels_per_point).round() as i32;
+                    let clip_max_y = (clip_rect.max.y * pixels_per_point).round() as i32;
 
                     let scissor_x = clip_min_x.max(0);
                     let scissor_y = clip_min_y.max(0);

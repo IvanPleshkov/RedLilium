@@ -59,11 +59,18 @@ impl EguiController {
     ///
     /// * `device` - The graphics device for creating GPU resources
     /// * `app` - The egui application implementing the UI logic
-    /// * `width` - Initial screen width
-    /// * `height` - Initial screen height
-    pub fn new(device: Arc<GraphicsDevice>, app: ArcEguiApp, width: u32, height: u32) -> Self {
+    /// * `width` - Initial screen width in physical pixels
+    /// * `height` - Initial screen height in physical pixels
+    /// * `scale_factor` - The DPI scale factor (pixels per point)
+    pub fn new(
+        device: Arc<GraphicsDevice>,
+        app: ArcEguiApp,
+        width: u32,
+        height: u32,
+        scale_factor: f64,
+    ) -> Self {
         let ctx = Context::default();
-        let input_state = EguiInputState::new(width, height, 1.0);
+        let input_state = EguiInputState::new(width, height, scale_factor as f32);
         let renderer = EguiRenderer::new(device);
 
         Self {
@@ -86,6 +93,11 @@ impl EguiController {
     pub fn on_resize(&mut self, width: u32, height: u32) {
         self.input_state.set_screen_size(width, height);
         self.renderer.update_screen_size(width, height);
+    }
+
+    /// Handle scale factor (DPI) change.
+    pub fn on_scale_factor_changed(&mut self, scale_factor: f64) {
+        self.input_state.set_pixels_per_point(scale_factor as f32);
     }
 
     /// Handle mouse move event.
@@ -191,9 +203,12 @@ impl EguiController {
             return None;
         }
 
-        // Update screen size uniforms
+        // Update screen size uniforms - egui outputs vertices in POINTS, not pixels
+        // So we need to pass screen size in points to the shader
+        let screen_width_points = screen_width as f32 / output.pixels_per_point;
+        let screen_height_points = screen_height as f32 / output.pixels_per_point;
         self.renderer
-            .update_screen_size(screen_width, screen_height);
+            .update_screen_size_f32(screen_width_points, screen_height_points);
 
         // Create graphics pass
         Some(self.renderer.create_graphics_pass(
@@ -201,6 +216,7 @@ impl EguiController {
             surface_texture,
             screen_width,
             screen_height,
+            output.pixels_per_point,
         ))
     }
 

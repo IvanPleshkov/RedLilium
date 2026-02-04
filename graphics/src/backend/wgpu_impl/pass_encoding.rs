@@ -8,9 +8,9 @@ use crate::mesh::IndexFormat;
 use super::super::{GpuBuffer, GpuTexture};
 use super::WgpuBackend;
 use super::conversion::{
-    convert_binding_type, convert_depth_load_op, convert_load_op, convert_shader_stages,
-    convert_step_mode, convert_store_op, convert_texture_format, convert_topology,
-    convert_vertex_format,
+    convert_binding_type, convert_blend_state, convert_depth_load_op, convert_load_op,
+    convert_shader_stages, convert_step_mode, convert_store_op, convert_texture_format,
+    convert_topology, convert_vertex_format,
 };
 
 impl WgpuBackend {
@@ -352,13 +352,18 @@ impl WgpuBackend {
             })
             .collect();
 
-        // Build color targets
+        // Build color targets with material's blend state
+        let wgpu_blend_state = material
+            .blend_state()
+            .map(convert_blend_state)
+            .unwrap_or(wgpu::BlendState::REPLACE);
+
         let color_targets: Vec<Option<wgpu::ColorTargetState>> = color_formats
             .iter()
             .map(|format| {
                 format.map(|f| wgpu::ColorTargetState {
                     format: f,
-                    blend: Some(wgpu::BlendState::REPLACE),
+                    blend: Some(wgpu_blend_state),
                     write_mask: wgpu::ColorWrites::ALL,
                 })
             })

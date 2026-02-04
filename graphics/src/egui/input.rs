@@ -55,7 +55,9 @@ impl EguiInputState {
     }
 
     /// Update pixels per point (DPI scaling).
-    #[allow(dead_code)]
+    ///
+    /// Note: Call `set_screen_size` after this to update the screen rect
+    /// with the new scale factor.
     pub fn set_pixels_per_point(&mut self, pixels_per_point: f32) {
         self.pixels_per_point = pixels_per_point;
     }
@@ -159,7 +161,19 @@ impl EguiInputState {
         let events = std::mem::take(&mut self.events);
         self.scroll_delta = Vec2::ZERO;
 
+        // Create viewport info with native pixels per point
+        let mut viewports = egui::viewport::ViewportIdMap::default();
+        viewports.insert(
+            egui::ViewportId::ROOT,
+            egui::ViewportInfo {
+                native_pixels_per_point: Some(self.pixels_per_point),
+                ..Default::default()
+            },
+        );
+
         RawInput {
+            viewport_id: egui::ViewportId::ROOT,
+            viewports,
             screen_rect: Some(self.screen_rect),
             max_texture_side: Some(8192),
             time: Some(time),

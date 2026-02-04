@@ -20,10 +20,12 @@ pub struct AppContext {
     pub(crate) surface: Arc<Surface>,
     /// The frame pipeline for managing frames in flight.
     pub(crate) pipeline: FramePipeline,
-    /// Current window width.
+    /// Current window width in physical pixels.
     pub(crate) width: u32,
-    /// Current window height.
+    /// Current window height in physical pixels.
     pub(crate) height: u32,
+    /// Current scale factor (DPI scaling).
+    pub(crate) scale_factor: f64,
     /// Current frame number.
     pub(crate) frame_number: u64,
     /// Delta time since last frame in seconds.
@@ -71,6 +73,14 @@ impl AppContext {
     /// Get the window aspect ratio.
     pub fn aspect_ratio(&self) -> f32 {
         self.width as f32 / self.height.max(1) as f32
+    }
+
+    /// Get the current scale factor (DPI scaling).
+    ///
+    /// This is the ratio between physical pixels and logical pixels.
+    /// A scale factor of 2.0 means the display is a HiDPI/Retina display.
+    pub fn scale_factor(&self) -> f64 {
+        self.scale_factor
     }
 
     /// Get the current frame number.
@@ -127,6 +137,11 @@ impl<'a> DrawContext<'a> {
     /// Get the window aspect ratio.
     pub fn aspect_ratio(&self) -> f32 {
         self.app.aspect_ratio()
+    }
+
+    /// Get the current scale factor (DPI scaling).
+    pub fn scale_factor(&self) -> f64 {
+        self.app.scale_factor
     }
 
     /// Get the current frame number.

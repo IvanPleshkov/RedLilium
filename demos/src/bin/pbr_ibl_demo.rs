@@ -1358,6 +1358,7 @@ impl AppHandler for PbrIblDemo {
             self.egui_ui.clone(),
             ctx.width(),
             ctx.height(),
+            ctx.scale_factor(),
         ));
     }
 
