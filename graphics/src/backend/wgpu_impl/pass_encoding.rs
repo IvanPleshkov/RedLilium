@@ -1,5 +1,7 @@
 //! Pass encoding for the wgpu backend.
 
+use redlilium_core::profile_scope;
+
 use crate::error::GraphicsError;
 use crate::graph::{DrawCommand, Pass, RenderTargetConfig};
 use crate::materials::ShaderStage;
@@ -19,6 +21,7 @@ impl WgpuBackend {
         encoder: &mut wgpu::CommandEncoder,
         pass: &Pass,
     ) -> Result<(), GraphicsError> {
+        profile_scope!("encode_pass");
         match pass {
             Pass::Graphics(graphics_pass) => {
                 self.encode_graphics_pass(encoder, graphics_pass)?;

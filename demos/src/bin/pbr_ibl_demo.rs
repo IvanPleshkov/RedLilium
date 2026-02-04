@@ -18,6 +18,14 @@ use std::sync::{Arc, RwLock};
 
 use glam::{Mat4, Vec3};
 use redlilium_app::{App, AppArgs, AppContext, AppHandler, DefaultAppArgs, DrawContext};
+use redlilium_core::profiling::{
+    create_profiled_allocator, profile_function, profile_memory_stats, profile_message,
+    profile_scope,
+};
+
+// Enable memory allocation tracking with Tracy.
+// Set callstack depth to 32 for detailed allocation tracking (0 for minimal overhead).
+create_profiled_allocator!(GLOBAL_ALLOCATOR, 32);
 use redlilium_graphics::{
     AddressMode, BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferDescriptor,
     BufferUsage, ColorAttachment, DepthStencilAttachment, Extent3d, FilterMode, FrameSchedule,
@@ -645,6 +653,9 @@ impl PbrIblDemo {
     }
 
     fn create_gpu_resources(&mut self, ctx: &mut AppContext) {
+        profile_function!();
+        profile_message!("Creating GPU resources");
+
         let device = ctx.device();
 
         // Create vertex layout
@@ -954,6 +965,8 @@ impl PbrIblDemo {
     }
 
     fn create_skybox_resources(&mut self, ctx: &AppContext) {
+        profile_scope!("create_skybox_resources");
+
         let device = ctx.device();
 
         // Create skybox binding layout
@@ -1055,6 +1068,8 @@ impl PbrIblDemo {
     }
 
     fn create_depth_texture(&mut self, ctx: &AppContext) {
+        profile_scope!("create_depth_texture");
+
         let device = ctx.device();
         let width = ctx.width();
         let height = ctx.height();
@@ -1116,6 +1131,8 @@ impl PbrIblDemo {
     }
 
     fn create_resolve_resources(&mut self, ctx: &AppContext) {
+        profile_scope!("create_resolve_resources");
+
         let device = ctx.device();
 
         // Create G-buffer sampler
@@ -1353,6 +1370,7 @@ impl PbrIblDemo {
     }
 
     fn update_sphere_instances(&mut self, ctx: &AppContext) {
+        profile_scope!("update_sphere_instances");
         let instances = self.create_sphere_instances();
         let instance_data = bytemuck::cast_slice(&instances);
         if let Some(buffer) = &self.instance_buffer {
@@ -1363,6 +1381,7 @@ impl PbrIblDemo {
     }
 
     fn update_camera_buffer(&self, ctx: &AppContext) {
+        profile_scope!("update_camera_buffer");
         let view = self.camera.view_matrix();
         let proj = self.camera.projection_matrix(ctx.aspect_ratio());
         let view_proj = proj * view;
@@ -1382,6 +1401,7 @@ impl PbrIblDemo {
     }
 
     fn update_skybox_buffer(&self, ctx: &AppContext) {
+        profile_scope!("update_skybox_buffer");
         let view = self.camera.view_matrix();
         let proj = self.camera.projection_matrix(ctx.aspect_ratio());
         let view_proj = proj * view;
@@ -1680,6 +1700,9 @@ fn importance_sample_ggx(xi: glam::Vec2, n: Vec3, roughness: f32) -> Vec3 {
 
 impl AppHandler for PbrIblDemo {
     fn on_init(&mut self, ctx: &mut AppContext) {
+        profile_function!();
+        profile_message!("PBR Demo: Initializing");
+
         log::info!("Initializing Deferred PBR IBL Demo");
         log::info!(
             "Grid: {}x{} spheres with varying metallic/roughness",
@@ -1764,6 +1787,8 @@ impl AppHandler for PbrIblDemo {
     }
 
     fn on_update(&mut self, ctx: &mut AppContext) -> bool {
+        profile_scope!("on_update");
+
         // Process UI state changes
         if let Ok(mut ui) = self.egui_ui.write() {
             if ui.take_state_changed() {
@@ -1801,6 +1826,8 @@ impl AppHandler for PbrIblDemo {
     }
 
     fn on_draw(&mut self, mut ctx: DrawContext) -> FrameSchedule {
+        profile_scope!("on_draw");
+
         let mut graph = RenderGraph::new();
 
         // Upload IBL textures on first frame
@@ -1905,6 +1932,10 @@ impl AppHandler for PbrIblDemo {
         }
 
         let _handle = ctx.submit("main", &graph, &[]);
+
+        // Report memory stats to Tracy
+        profile_memory_stats!();
+
         ctx.finish(&[])
     }
 

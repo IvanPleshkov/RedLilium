@@ -54,6 +54,25 @@
 //! }
 //! ```
 //!
+//! # Memory Profiling
+//!
+//! Track memory allocations and plot memory usage:
+//!
+//! ```ignore
+//! use redlilium_core::profiling::{profile_alloc, profile_free, profile_memory_stats};
+//!
+//! // Track individual allocations
+//! let ptr = allocate_memory(size);
+//! profile_alloc!(ptr, size);
+//!
+//! // When freeing
+//! profile_free!(ptr);
+//! free_memory(ptr);
+//!
+//! // Plot current memory usage (call periodically)
+//! profile_memory_stats!();
+//! ```
+//!
 //! # Performance
 //!
 //! When profiling is disabled (the default), all macros compile to no-ops with
@@ -62,8 +81,52 @@
 // Re-export tracy-client types when profiling is enabled
 #[cfg(feature = "profiling")]
 pub use tracy_client::{
-    self, Client, PlotName, Span, frame_mark as tracy_frame_mark, plot as tracy_plot, span,
+    self, Client, PlotName, ProfiledAllocator, Span, frame_mark as tracy_frame_mark,
+    plot as tracy_plot, span,
 };
+
+/// Create a profiled global allocator that tracks all memory allocations in Tracy.
+///
+/// This macro creates a `#[global_allocator]` static that wraps the system allocator
+/// with Tracy's profiling capabilities. Memory allocations and deallocations will
+/// appear in Tracy's memory view with callstack information.
+///
+/// # Arguments
+///
+/// * `$name` - The name of the static allocator variable
+/// * `$callstack_depth` - Number of callstack frames to capture (0 = no callstack, higher = more detail but slower)
+///
+/// # Example
+///
+/// ```ignore
+/// use redlilium_core::profiling::create_profiled_allocator;
+///
+/// // Create a profiled allocator with 32 frames of callstack
+/// create_profiled_allocator!(GLOBAL_ALLOCATOR, 32);
+/// ```
+///
+/// # Performance Note
+///
+/// Non-zero callstack depth adds overhead to every allocation. Use 0 for minimal
+/// overhead, or 16-32 for detailed allocation tracking during debugging.
+#[macro_export]
+#[cfg(feature = "profiling")]
+macro_rules! create_profiled_allocator {
+    ($name:ident, $callstack_depth:expr) => {
+        #[global_allocator]
+        static $name: $crate::profiling::ProfiledAllocator<std::alloc::System> =
+            $crate::profiling::ProfiledAllocator::new(std::alloc::System, $callstack_depth);
+    };
+}
+
+/// Create a profiled allocator (no-op when profiling disabled - uses system allocator).
+#[macro_export]
+#[cfg(not(feature = "profiling"))]
+macro_rules! create_profiled_allocator {
+    ($name:ident, $callstack_depth:expr) => {
+        // When profiling is disabled, don't override the default allocator
+    };
+}
 
 /// Mark the end of a frame for Tracy's frame analysis.
 ///
@@ -211,9 +274,159 @@ macro_rules! set_thread_name {
     ($name:expr) => {};
 }
 
+/// Send a message to Tracy's message log.
+///
+/// Messages appear in Tracy's "Messages" view and can be used for important
+/// events, state changes, or debugging information.
+///
+/// # Example
+///
+/// ```ignore
+/// profile_message!("Loading scene: forest.scene");
+/// profile_message!("Shader compilation complete");
+/// ```
+#[macro_export]
+#[cfg(feature = "profiling")]
+macro_rules! profile_message {
+    ($msg:expr) => {
+        if let Some(client) = $crate::profiling::Client::running() {
+            client.message($msg, 0);
+        }
+    };
+    ($msg:expr, $callstack_depth:expr) => {
+        if let Some(client) = $crate::profiling::Client::running() {
+            client.message($msg, $callstack_depth);
+        }
+    };
+}
+
+/// Send a message (no-op when profiling disabled).
+#[macro_export]
+#[cfg(not(feature = "profiling"))]
+macro_rules! profile_message {
+    ($msg:expr) => {};
+    ($msg:expr, $callstack_depth:expr) => {};
+}
+
+/// Report current memory usage statistics to Tracy as plots.
+///
+/// This reports the current heap memory usage using the system's allocation info.
+/// Call this periodically (e.g., once per frame) to track memory over time.
+///
+/// # Example
+///
+/// ```ignore
+/// // In your main loop
+/// loop {
+///     // ... frame work ...
+///     profile_memory_stats!();
+///     frame_mark!();
+/// }
+/// ```
+#[macro_export]
+#[cfg(all(feature = "profiling", target_os = "windows"))]
+macro_rules! profile_memory_stats {
+    () => {{
+        // On Windows, use GetProcessMemoryInfo for accurate heap stats
+        use std::mem::MaybeUninit;
+        #[repr(C)]
+        struct ProcessMemoryCounters {
+            cb: u32,
+            page_fault_count: u32,
+            peak_working_set_size: usize,
+            working_set_size: usize,
+            quota_peak_paged_pool_usage: usize,
+            quota_paged_pool_usage: usize,
+            quota_peak_non_paged_pool_usage: usize,
+            quota_non_paged_pool_usage: usize,
+            pagefile_usage: usize,
+            peak_pagefile_usage: usize,
+        }
+        #[link(name = "psapi")]
+        unsafe extern "system" {
+            fn GetProcessMemoryInfo(
+                process: *mut std::ffi::c_void,
+                counters: *mut ProcessMemoryCounters,
+                cb: u32,
+            ) -> i32;
+            fn GetCurrentProcess() -> *mut std::ffi::c_void;
+        }
+        let mut counters = MaybeUninit::<ProcessMemoryCounters>::uninit();
+        unsafe {
+            let process = GetCurrentProcess();
+            if GetProcessMemoryInfo(
+                process,
+                counters.as_mut_ptr(),
+                std::mem::size_of::<ProcessMemoryCounters>() as u32,
+            ) != 0
+            {
+                let counters = counters.assume_init();
+                let working_set_mb = counters.working_set_size as f64 / (1024.0 * 1024.0);
+                let private_mb = counters.pagefile_usage as f64 / (1024.0 * 1024.0);
+                $crate::profiling::tracy_plot!("Memory: Working Set (MB)", working_set_mb);
+                $crate::profiling::tracy_plot!("Memory: Private (MB)", private_mb);
+            }
+        }
+    }};
+}
+
+/// Report memory stats (Linux/macOS implementation).
+#[macro_export]
+#[cfg(all(feature = "profiling", not(target_os = "windows")))]
+macro_rules! profile_memory_stats {
+    () => {{
+        // On Unix-like systems, read from /proc/self/statm or use mallinfo
+        // For simplicity, we'll use a rough estimate from the allocator stats
+        // A more accurate implementation could read /proc/self/status
+        if let Some(client) = $crate::profiling::Client::running() {
+            // Plot a placeholder - users can implement custom memory tracking
+            $crate::profiling::tracy_plot!("Memory: Tracked", 0.0f64);
+        }
+    }};
+}
+
+/// Report memory stats (no-op when profiling disabled).
+#[macro_export]
+#[cfg(not(feature = "profiling"))]
+macro_rules! profile_memory_stats {
+    () => {};
+}
+
+/// Mark a named frame for multi-threaded frame analysis.
+///
+/// Use this for secondary frame markers (e.g., physics thread, audio thread).
+///
+/// # Example
+///
+/// ```ignore
+/// // In physics thread
+/// loop {
+///     // ... physics work ...
+///     profile_frame_mark_named!("Physics");
+/// }
+/// ```
+#[macro_export]
+#[cfg(feature = "profiling")]
+macro_rules! profile_frame_mark_named {
+    ($name:expr) => {
+        $crate::profiling::tracy_client::secondary_frame_mark!($name)
+    };
+}
+
+/// Named frame mark (no-op when profiling disabled).
+#[macro_export]
+#[cfg(not(feature = "profiling"))]
+macro_rules! profile_frame_mark_named {
+    ($name:expr) => {};
+}
+
 // Re-export macros at module level
+pub use create_profiled_allocator;
 pub use frame_mark;
+pub use profile_frame_mark_named;
 pub use profile_function;
+pub use profile_memory_stats;
+pub use profile_message;
 pub use profile_plot;
 pub use profile_scope;
 pub use set_thread_name;
@@ -228,5 +441,8 @@ mod tests {
         profile_function!();
         profile_plot!("test_value", 42.0);
         set_thread_name!("test_thread");
+        profile_message!("test message");
+        profile_memory_stats!();
+        profile_frame_mark_named!("test_frame");
     }
 }

@@ -10,6 +10,7 @@ use crate::instance::GraphicsInstance;
 use crate::materials::{Material, MaterialDescriptor};
 use crate::mesh::{Mesh, MeshDescriptor};
 use crate::pipeline::FramePipeline;
+use crate::profiling::profile_scope;
 use crate::resources::{Buffer, Sampler, Texture};
 use crate::types::{BufferDescriptor, BufferUsage, SamplerDescriptor, TextureDescriptor};
 
@@ -114,6 +115,8 @@ impl GraphicsDevice {
         self: &Arc<Self>,
         descriptor: &BufferDescriptor,
     ) -> Result<Arc<Buffer>, GraphicsError> {
+        profile_scope!("create_buffer");
+
         // Validate
         if descriptor.size > self.capabilities.max_buffer_size {
             return Err(GraphicsError::InvalidParameter(format!(
@@ -161,6 +164,8 @@ impl GraphicsDevice {
         self: &Arc<Self>,
         descriptor: &TextureDescriptor,
     ) -> Result<Arc<Texture>, GraphicsError> {
+        profile_scope!("create_texture");
+
         // Validate
         let max_dim = self.capabilities.max_texture_dimension;
         if descriptor.size.width > max_dim
@@ -212,6 +217,8 @@ impl GraphicsDevice {
         self: &Arc<Self>,
         descriptor: &SamplerDescriptor,
     ) -> Result<Arc<Sampler>, GraphicsError> {
+        profile_scope!("create_sampler");
+
         // Create the GPU sampler via backend
         let gpu_handle = self.instance.backend().create_sampler(descriptor)?;
 
@@ -241,6 +248,8 @@ impl GraphicsDevice {
         self: &Arc<Self>,
         descriptor: &MaterialDescriptor,
     ) -> Result<Arc<Material>, GraphicsError> {
+        profile_scope!("create_material");
+
         // Create the material
         let material = Arc::new(Material::new(Arc::clone(self), descriptor.clone()));
 
@@ -288,6 +297,8 @@ impl GraphicsDevice {
         self: &Arc<Self>,
         descriptor: &MeshDescriptor,
     ) -> Result<Arc<Mesh>, GraphicsError> {
+        profile_scope!("create_mesh");
+
         // Validate
         if descriptor.vertex_count == 0 {
             return Err(GraphicsError::InvalidParameter(

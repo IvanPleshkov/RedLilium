@@ -1394,6 +1394,7 @@ impl VulkanBackend {
     }
 
     fn encode_pass(&self, cmd: vk::CommandBuffer, pass: &Pass) -> Result<(), GraphicsError> {
+        profile_scope!("encode_pass");
         match pass {
             Pass::Graphics(graphics_pass) => self.encode_graphics_pass(cmd, graphics_pass),
             Pass::Transfer(transfer_pass) => self.encode_transfer_pass(cmd, transfer_pass),

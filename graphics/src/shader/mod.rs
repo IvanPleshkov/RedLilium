@@ -42,6 +42,7 @@ use naga_oil::compose::{
 };
 
 use crate::error::GraphicsError;
+use crate::profiling::profile_scope;
 
 pub use library::{EGUI_SHADER_SOURCE, ShaderLibrary};
 
@@ -155,6 +156,8 @@ impl ShaderComposer {
         source: &str,
         shader_defs: &[(&str, ShaderDef)],
     ) -> Result<String, GraphicsError> {
+        profile_scope!("shader_compose");
+
         let defs: HashMap<String, ShaderDefValue> = shader_defs
             .iter()
             .map(|(k, v)| (k.to_string(), v.clone().into()))
@@ -201,6 +204,8 @@ impl ShaderComposer {
         source: &str,
         shader_defs: &[(&str, ShaderDef)],
     ) -> Result<naga::Module, GraphicsError> {
+        profile_scope!("shader_compose_to_naga");
+
         let defs: HashMap<String, ShaderDefValue> = shader_defs
             .iter()
             .map(|(k, v)| (k.to_string(), v.clone().into()))
