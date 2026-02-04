@@ -21,7 +21,7 @@ use redlilium_app::{App, AppArgs, AppContext, AppHandler, DefaultAppArgs, DrawCo
 use redlilium_graphics::{
     AddressMode, BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferDescriptor,
     BufferUsage, ColorAttachment, DepthStencilAttachment, Extent3d, FilterMode, FrameSchedule,
-    GraphicsPass, IndexFormat, Material, MaterialDescriptor, MaterialInstance, Mesh,
+    GraphicsPass, IndexFormat, LoadOp, Material, MaterialDescriptor, MaterialInstance, Mesh,
     MeshDescriptor, RenderGraph, RenderTargetConfig, SamplerDescriptor, ShaderComposer,
     ShaderSource, ShaderStage, ShaderStageFlags, TextureDescriptor, TextureFormat, TextureUsage,
     TransferConfig, TransferOperation, TransferPass, VertexAttribute, VertexAttributeFormat,
@@ -37,15 +37,14 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 // They use the RedLilium shader library via `#import` directives,
 // which are resolved by ShaderComposer at runtime.
 
-/// Main PBR shader with IBL - uses shader library imports
-const PBR_SHADER_WGSL: &str = include_str!("../../shaders/pbr_ibl.wgsl");
+/// G-buffer pass shader - outputs to multiple render targets
+const GBUFFER_SHADER_WGSL: &str = include_str!("../../shaders/deferred_gbuffer.wgsl");
+
+/// Resolve/lighting pass shader - reads G-buffer and applies IBL
+const RESOLVE_SHADER_WGSL: &str = include_str!("../../shaders/deferred_resolve.wgsl");
 
 /// Skybox shader - renders environment cubemap as background
 const SKYBOX_SHADER_WGSL: &str = include_str!("../../shaders/skybox.wgsl");
-
-// Note: G-buffer debug visualization would require multi-render-target output
-// from the PBR shader, which is not implemented yet. The debug mode keys are
-// reserved for future implementation.
 
 // === Orbit Camera ===
 
@@ -134,6 +133,13 @@ struct SkyboxUniforms {
     _pad1: [f32; 4],              // Additional padding to match WGSL vec3<f32> + struct alignment
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct ResolveUniforms {
+    camera_pos: [f32; 4],  // 16 bytes
+    screen_size: [f32; 4], // xy = dimensions, zw = 1/dimensions
+}
+
 // === Mesh Generation ===
 
 fn generate_sphere(radius: f32, segments: u32, rings: u32) -> (Vec<PbrVertex>, Vec<u32>) {
@@ -199,10 +205,12 @@ pub struct PbrUiState {
     pub sphere_spacing: f32,
     /// Whether to show the info panel
     pub show_info: bool,
-    /// Whether to show the albedo G-buffer preview
-    pub show_albedo: bool,
-    /// Texture ID for the albedo G-buffer (set by the demo)
-    pub albedo_texture_id: Option<egui::TextureId>,
+    /// Whether to show the G-buffer preview panel
+    pub show_gbuffer: bool,
+    /// Texture IDs for G-buffer visualization
+    pub gbuffer_albedo_id: Option<egui::TextureId>,
+    pub gbuffer_normal_id: Option<egui::TextureId>,
+    pub gbuffer_position_id: Option<egui::TextureId>,
 }
 
 impl Default for PbrUiState {
@@ -215,8 +223,10 @@ impl Default for PbrUiState {
             ui_visible: true,
             sphere_spacing: SPHERE_SPACING,
             show_info: true,
-            show_albedo: true,
-            albedo_texture_id: None,
+            show_gbuffer: true,
+            gbuffer_albedo_id: None,
+            gbuffer_normal_id: None,
+            gbuffer_position_id: None,
         }
     }
 }
@@ -259,8 +269,15 @@ impl PbrUi {
         self.state.ui_visible = !self.state.ui_visible;
     }
 
-    pub fn set_albedo_texture_id(&mut self, texture_id: Option<egui::TextureId>) {
-        self.state.albedo_texture_id = texture_id;
+    pub fn set_gbuffer_texture_ids(
+        &mut self,
+        albedo: Option<egui::TextureId>,
+        normal: Option<egui::TextureId>,
+        position: Option<egui::TextureId>,
+    ) {
+        self.state.gbuffer_albedo_id = albedo;
+        self.state.gbuffer_normal_id = normal;
+        self.state.gbuffer_position_id = position;
     }
 }
 
@@ -362,8 +379,8 @@ impl EguiApp for PbrUi {
                 // Show info checkbox
                 ui.checkbox(&mut self.state.show_info, "Show Info Panel");
 
-                // Show albedo G-buffer checkbox
-                ui.checkbox(&mut self.state.show_albedo, "Show Albedo G-Buffer");
+                // Show G-buffer checkbox
+                ui.checkbox(&mut self.state.show_gbuffer, "Show G-Buffer");
             });
 
         // Info panel
@@ -372,11 +389,16 @@ impl EguiApp for PbrUi {
                 .default_pos([10.0, 400.0])
                 .resizable(false)
                 .show(ctx, |ui| {
-                    ui.label("PBR IBL Demo");
+                    ui.label("Deferred PBR IBL Demo");
                     ui.separator();
                     ui.label(format!("Grid: {}x{} spheres", GRID_SIZE, GRID_SIZE));
                     ui.label("Rows: Roughness (top=smooth)");
                     ui.label("Cols: Metallic (left=dielectric)");
+                    ui.separator();
+                    ui.label("Deferred Rendering Pipeline:");
+                    ui.label("  1. G-Buffer Pass (MRT)");
+                    ui.label("  2. Skybox Pass");
+                    ui.label("  3. Resolve/Lighting Pass");
                     ui.separator();
                     ui.label("Controls:");
                     ui.label("  H: Toggle UI");
@@ -385,20 +407,46 @@ impl EguiApp for PbrUi {
                 });
         }
 
-        // Albedo G-buffer preview window
-        if self.state.show_albedo
-            && let Some(texture_id) = self.state.albedo_texture_id
-        {
-            egui::Window::new("Albedo G-Buffer")
-                .default_pos([ctx.available_rect().right() - 280.0, 10.0])
+        // G-buffer preview window showing all render targets
+        if self.state.show_gbuffer {
+            egui::Window::new("G-Buffer")
+                .default_pos([ctx.available_rect().right() - 420.0, 10.0])
+                .default_width(400.0)
                 .resizable(true)
                 .show(ctx, |ui| {
-                    let available_size = ui.available_size();
-                    let image_size = egui::vec2(
-                        available_size.x.min(256.0),
-                        available_size.x.min(256.0) * 0.75, // 4:3 aspect ratio
-                    );
-                    ui.image(egui::load::SizedTexture::new(texture_id, image_size));
+                    let preview_size = egui::vec2(120.0, 90.0);
+
+                    ui.horizontal(|ui| {
+                        // Albedo
+                        ui.vertical(|ui| {
+                            ui.label("Albedo");
+                            if let Some(id) = self.state.gbuffer_albedo_id {
+                                ui.image(egui::load::SizedTexture::new(id, preview_size));
+                            } else {
+                                ui.label("(not available)");
+                            }
+                        });
+
+                        // Normal + Metallic
+                        ui.vertical(|ui| {
+                            ui.label("Normal+Metal");
+                            if let Some(id) = self.state.gbuffer_normal_id {
+                                ui.image(egui::load::SizedTexture::new(id, preview_size));
+                            } else {
+                                ui.label("(not available)");
+                            }
+                        });
+
+                        // Position + Roughness
+                        ui.vertical(|ui| {
+                            ui.label("Pos+Rough");
+                            if let Some(id) = self.state.gbuffer_position_id {
+                                ui.image(egui::load::SizedTexture::new(id, preview_size));
+                            } else {
+                                ui.label("(not available)");
+                            }
+                        });
+                    });
                 });
         }
     }
@@ -528,9 +576,20 @@ struct PbrIblDemo {
     egui_ui: Arc<RwLock<PbrUi>>,
     needs_instance_update: bool,
 
-    // G-buffer for albedo visualization
-    albedo_texture: Option<Arc<redlilium_graphics::Texture>>,
-    albedo_texture_id: Option<egui::TextureId>,
+    // G-buffer textures for deferred rendering
+    gbuffer_albedo: Option<Arc<redlilium_graphics::Texture>>,
+    gbuffer_normal_metallic: Option<Arc<redlilium_graphics::Texture>>,
+    gbuffer_position_roughness: Option<Arc<redlilium_graphics::Texture>>,
+    gbuffer_albedo_id: Option<egui::TextureId>,
+    gbuffer_normal_id: Option<egui::TextureId>,
+    gbuffer_position_id: Option<egui::TextureId>,
+
+    // Resolve pass resources
+    resolve_material: Option<Arc<Material>>,
+    resolve_material_instance: Option<Arc<MaterialInstance>>,
+    resolve_uniform_buffer: Option<Arc<redlilium_graphics::Buffer>>,
+    resolve_mesh: Option<Arc<Mesh>>,
+    gbuffer_sampler: Option<Arc<redlilium_graphics::Sampler>>,
 }
 
 impl PbrIblDemo {
@@ -567,8 +626,17 @@ impl PbrIblDemo {
             egui_controller: None,
             egui_ui: Arc::new(RwLock::new(PbrUi::new())),
             needs_instance_update: false,
-            albedo_texture: None,
-            albedo_texture_id: None,
+            gbuffer_albedo: None,
+            gbuffer_normal_metallic: None,
+            gbuffer_position_roughness: None,
+            gbuffer_albedo_id: None,
+            gbuffer_normal_id: None,
+            gbuffer_position_id: None,
+            resolve_material: None,
+            resolve_material_instance: None,
+            resolve_uniform_buffer: None,
+            resolve_mesh: None,
+            gbuffer_sampler: None,
         }
     }
 
@@ -777,57 +845,34 @@ impl PbrIblDemo {
                 .with_label("camera_bindings"),
         );
 
-        let ibl_binding_layout = Arc::new(
-            BindingLayout::new()
-                .with_entry(
-                    BindingLayoutEntry::new(0, BindingType::TextureCube)
-                        .with_visibility(ShaderStageFlags::FRAGMENT),
-                )
-                .with_entry(
-                    BindingLayoutEntry::new(1, BindingType::TextureCube)
-                        .with_visibility(ShaderStageFlags::FRAGMENT),
-                )
-                .with_entry(
-                    BindingLayoutEntry::new(2, BindingType::Texture)
-                        .with_visibility(ShaderStageFlags::FRAGMENT),
-                )
-                .with_entry(
-                    BindingLayoutEntry::new(3, BindingType::Sampler)
-                        .with_visibility(ShaderStageFlags::FRAGMENT),
-                )
-                .with_label("ibl_bindings"),
-        );
-
-        // Compose PBR shader using shader library
-        // This resolves #import directives and inlines library functions
+        // Compose G-buffer shader using shader library
         let mut shader_composer =
             ShaderComposer::with_standard_library().expect("Failed to create shader composer");
-        let composed_pbr_shader = shader_composer
-            .compose(PBR_SHADER_WGSL, &[])
-            .expect("Failed to compose PBR shader");
+        let composed_gbuffer_shader = shader_composer
+            .compose(GBUFFER_SHADER_WGSL, &[])
+            .expect("Failed to compose G-buffer shader");
 
-        log::info!("PBR shader composed with library imports");
+        log::info!("G-buffer shader composed with library imports");
 
-        // Create PBR material with composed shader
+        // Create G-buffer material (only needs camera/instance bindings, no IBL)
         let material = device
             .create_material(
                 &MaterialDescriptor::new()
                     .with_shader(ShaderSource::new(
                         ShaderStage::Vertex,
-                        composed_pbr_shader.as_bytes().to_vec(),
+                        composed_gbuffer_shader.as_bytes().to_vec(),
                         "vs_main",
                     ))
                     .with_shader(ShaderSource::new(
                         ShaderStage::Fragment,
-                        composed_pbr_shader.as_bytes().to_vec(),
+                        composed_gbuffer_shader.as_bytes().to_vec(),
                         "fs_main",
                     ))
-                    .with_binding_layout(camera_binding_layout)
-                    .with_binding_layout(ibl_binding_layout)
+                    .with_binding_layout(camera_binding_layout.clone())
                     .with_vertex_layout(vertex_layout.clone())
-                    .with_label("pbr_material"),
+                    .with_label("gbuffer_material"),
             )
-            .expect("Failed to create material");
+            .expect("Failed to create G-buffer material");
         self.material = Some(material.clone());
 
         // Create camera uniform buffer
@@ -851,29 +896,20 @@ impl PbrIblDemo {
         device.write_buffer(&instance_buffer, 0, instance_data);
         self.instance_buffer = Some(instance_buffer.clone());
 
-        // Create material instance with bindings
+        // Create G-buffer material instance (only camera bindings, no IBL for G-buffer pass)
         #[allow(clippy::arc_with_non_send_sync)]
         let camera_binding_group = Arc::new(
             BindingGroup::new()
-                .with_buffer(0, camera_buffer)
+                .with_buffer(0, camera_buffer.clone())
                 .with_buffer(1, instance_buffer),
         );
 
-        #[allow(clippy::arc_with_non_send_sync)]
-        let ibl_binding_group = Arc::new(
-            BindingGroup::new()
-                .with_texture(0, self.irradiance_cubemap.clone().unwrap())
-                .with_texture(1, self.prefilter_cubemap.clone().unwrap())
-                .with_texture(2, self.brdf_lut.clone().unwrap())
-                .with_sampler(3, self.ibl_sampler.clone().unwrap()),
-        );
-
-        let material_instance = Arc::new(
-            MaterialInstance::new(material)
-                .with_binding_group(camera_binding_group)
-                .with_binding_group(ibl_binding_group),
-        );
+        let material_instance =
+            Arc::new(MaterialInstance::new(material).with_binding_group(camera_binding_group));
         self.material_instance = Some(material_instance);
+
+        // Store IBL binding group for resolve pass (created later after G-buffer textures exist)
+        // We'll create the resolve material and its bindings in create_resolve_resources()
 
         // Create sphere mesh
         let (vertices, indices) = generate_sphere(0.5, 32, 16);
@@ -1001,31 +1037,250 @@ impl PbrIblDemo {
     }
 
     fn create_depth_texture(&mut self, ctx: &AppContext) {
-        let depth_texture = ctx
-            .device()
+        let device = ctx.device();
+        let width = ctx.width();
+        let height = ctx.height();
+
+        // Create depth texture
+        let depth_texture = device
             .create_texture(&TextureDescriptor::new_2d(
-                ctx.width(),
-                ctx.height(),
+                width,
+                height,
                 TextureFormat::Depth32Float,
                 TextureUsage::RENDER_ATTACHMENT,
             ))
             .expect("Failed to create depth texture");
         self.depth_texture = Some(depth_texture);
 
-        // Create albedo G-buffer texture for visualization in UI
-        let albedo_texture = ctx
-            .device()
+        // Create G-buffer textures for deferred rendering
+
+        // RT0: Albedo (sRGB for correct color)
+        let gbuffer_albedo = device
             .create_texture(
                 &TextureDescriptor::new_2d(
-                    ctx.width(),
-                    ctx.height(),
+                    width,
+                    height,
                     TextureFormat::Rgba8UnormSrgb,
                     TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
                 )
                 .with_label("gbuffer_albedo"),
             )
-            .expect("Failed to create albedo texture");
-        self.albedo_texture = Some(albedo_texture);
+            .expect("Failed to create G-buffer albedo");
+        self.gbuffer_albedo = Some(gbuffer_albedo);
+
+        // RT1: Normal (RGB) + Metallic (A) - high precision for normals
+        let gbuffer_normal_metallic = device
+            .create_texture(
+                &TextureDescriptor::new_2d(
+                    width,
+                    height,
+                    TextureFormat::Rgba16Float,
+                    TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
+                )
+                .with_label("gbuffer_normal_metallic"),
+            )
+            .expect("Failed to create G-buffer normal/metallic");
+        self.gbuffer_normal_metallic = Some(gbuffer_normal_metallic);
+
+        // RT2: Position (RGB) + Roughness (A) - high precision for world positions
+        let gbuffer_position_roughness = device
+            .create_texture(
+                &TextureDescriptor::new_2d(
+                    width,
+                    height,
+                    TextureFormat::Rgba16Float,
+                    TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
+                )
+                .with_label("gbuffer_position_roughness"),
+            )
+            .expect("Failed to create G-buffer position/roughness");
+        self.gbuffer_position_roughness = Some(gbuffer_position_roughness);
+    }
+
+    fn create_resolve_resources(&mut self, ctx: &AppContext) {
+        let device = ctx.device();
+
+        // Create G-buffer sampler
+        let gbuffer_sampler = device
+            .create_sampler(&SamplerDescriptor {
+                label: Some("gbuffer_sampler".into()),
+                mag_filter: FilterMode::Nearest,
+                min_filter: FilterMode::Nearest,
+                mipmap_filter: FilterMode::Nearest,
+                address_mode_u: AddressMode::ClampToEdge,
+                address_mode_v: AddressMode::ClampToEdge,
+                address_mode_w: AddressMode::ClampToEdge,
+                ..Default::default()
+            })
+            .expect("Failed to create G-buffer sampler");
+        self.gbuffer_sampler = Some(gbuffer_sampler.clone());
+
+        // Create resolve uniform buffer
+        let resolve_uniform_buffer = device
+            .create_buffer(&BufferDescriptor::new(
+                std::mem::size_of::<ResolveUniforms>() as u64,
+                BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+            ))
+            .expect("Failed to create resolve uniform buffer");
+        self.resolve_uniform_buffer = Some(resolve_uniform_buffer.clone());
+
+        // Create binding layouts for resolve pass
+        // Group 0: Resolve uniforms
+        let resolve_uniform_layout = Arc::new(
+            BindingLayout::new()
+                .with_entry(
+                    BindingLayoutEntry::new(0, BindingType::UniformBuffer)
+                        .with_visibility(ShaderStageFlags::VERTEX | ShaderStageFlags::FRAGMENT),
+                )
+                .with_label("resolve_uniform_bindings"),
+        );
+
+        // Group 1: G-buffer textures
+        let gbuffer_layout = Arc::new(
+            BindingLayout::new()
+                .with_entry(
+                    BindingLayoutEntry::new(0, BindingType::Texture)
+                        .with_visibility(ShaderStageFlags::FRAGMENT),
+                )
+                .with_entry(
+                    BindingLayoutEntry::new(1, BindingType::Texture)
+                        .with_visibility(ShaderStageFlags::FRAGMENT),
+                )
+                .with_entry(
+                    BindingLayoutEntry::new(2, BindingType::Texture)
+                        .with_visibility(ShaderStageFlags::FRAGMENT),
+                )
+                .with_entry(
+                    BindingLayoutEntry::new(3, BindingType::Sampler)
+                        .with_visibility(ShaderStageFlags::FRAGMENT),
+                )
+                .with_label("gbuffer_bindings"),
+        );
+
+        // Group 2: IBL textures
+        let ibl_layout = Arc::new(
+            BindingLayout::new()
+                .with_entry(
+                    BindingLayoutEntry::new(0, BindingType::TextureCube)
+                        .with_visibility(ShaderStageFlags::FRAGMENT),
+                )
+                .with_entry(
+                    BindingLayoutEntry::new(1, BindingType::TextureCube)
+                        .with_visibility(ShaderStageFlags::FRAGMENT),
+                )
+                .with_entry(
+                    BindingLayoutEntry::new(2, BindingType::Texture)
+                        .with_visibility(ShaderStageFlags::FRAGMENT),
+                )
+                .with_entry(
+                    BindingLayoutEntry::new(3, BindingType::Sampler)
+                        .with_visibility(ShaderStageFlags::FRAGMENT),
+                )
+                .with_label("ibl_bindings"),
+        );
+
+        // Compose resolve shader
+        let mut shader_composer =
+            ShaderComposer::with_standard_library().expect("Failed to create shader composer");
+        let composed_resolve_shader = shader_composer
+            .compose(RESOLVE_SHADER_WGSL, &[])
+            .expect("Failed to compose resolve shader");
+
+        log::info!("Resolve shader composed with library imports");
+
+        // Create resolve material
+        let resolve_material = device
+            .create_material(
+                &MaterialDescriptor::new()
+                    .with_shader(ShaderSource::new(
+                        ShaderStage::Vertex,
+                        composed_resolve_shader.as_bytes().to_vec(),
+                        "vs_main",
+                    ))
+                    .with_shader(ShaderSource::new(
+                        ShaderStage::Fragment,
+                        composed_resolve_shader.as_bytes().to_vec(),
+                        "fs_main",
+                    ))
+                    .with_binding_layout(resolve_uniform_layout)
+                    .with_binding_layout(gbuffer_layout)
+                    .with_binding_layout(ibl_layout)
+                    .with_label("resolve_material"),
+            )
+            .expect("Failed to create resolve material");
+        self.resolve_material = Some(resolve_material.clone());
+
+        // Create binding groups
+        #[allow(clippy::arc_with_non_send_sync)]
+        let resolve_uniform_binding =
+            Arc::new(BindingGroup::new().with_buffer(0, resolve_uniform_buffer));
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let gbuffer_binding = Arc::new(
+            BindingGroup::new()
+                .with_texture(0, self.gbuffer_albedo.clone().unwrap())
+                .with_texture(1, self.gbuffer_normal_metallic.clone().unwrap())
+                .with_texture(2, self.gbuffer_position_roughness.clone().unwrap())
+                .with_sampler(3, gbuffer_sampler),
+        );
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        let ibl_binding = Arc::new(
+            BindingGroup::new()
+                .with_texture(0, self.irradiance_cubemap.clone().unwrap())
+                .with_texture(1, self.prefilter_cubemap.clone().unwrap())
+                .with_texture(2, self.brdf_lut.clone().unwrap())
+                .with_sampler(3, self.ibl_sampler.clone().unwrap()),
+        );
+
+        // Create material instance
+        let resolve_material_instance = Arc::new(
+            MaterialInstance::new(resolve_material)
+                .with_binding_group(resolve_uniform_binding)
+                .with_binding_group(gbuffer_binding)
+                .with_binding_group(ibl_binding),
+        );
+        self.resolve_material_instance = Some(resolve_material_instance);
+
+        // Create a minimal mesh for fullscreen triangle (shader generates vertices)
+        let resolve_vertex_layout = Arc::new(
+            VertexLayout::new()
+                .with_buffer(VertexBufferLayout::new(4))
+                .with_label("resolve_vertex_layout"),
+        );
+
+        let resolve_mesh = device
+            .create_mesh(
+                &MeshDescriptor::new(resolve_vertex_layout)
+                    .with_vertex_count(3)
+                    .with_label("resolve_triangle"),
+            )
+            .expect("Failed to create resolve mesh");
+
+        if let Some(vb) = resolve_mesh.vertex_buffer(0) {
+            let dummy_data: [f32; 3] = [0.0, 0.0, 0.0];
+            device.write_buffer(vb, 0, bytemuck::cast_slice(&dummy_data));
+        }
+        self.resolve_mesh = Some(resolve_mesh);
+
+        log::info!("Resolve pass resources created");
+    }
+
+    fn update_resolve_uniforms(&self, ctx: &AppContext) {
+        let uniforms = ResolveUniforms {
+            camera_pos: self.camera.position().extend(1.0).to_array(),
+            screen_size: [
+                ctx.width() as f32,
+                ctx.height() as f32,
+                1.0 / ctx.width() as f32,
+                1.0 / ctx.height() as f32,
+            ],
+        };
+
+        if let Some(buffer) = &self.resolve_uniform_buffer {
+            ctx.device()
+                .write_buffer(buffer, 0, bytemuck::bytes_of(&uniforms));
+        }
     }
 
     fn create_sphere_instances(&self) -> Vec<SphereInstance> {
@@ -1391,19 +1646,22 @@ fn importance_sample_ggx(xi: glam::Vec2, n: Vec3, roughness: f32) -> Vec3 {
 
 impl AppHandler for PbrIblDemo {
     fn on_init(&mut self, ctx: &mut AppContext) {
-        log::info!("Initializing PBR IBL Demo");
+        log::info!("Initializing Deferred PBR IBL Demo");
         log::info!(
             "Grid: {}x{} spheres with varying metallic/roughness",
             GRID_SIZE,
             GRID_SIZE
         );
-        log::info!("IBL: Cubemap-based (irradiance + prefiltered + BRDF LUT)");
+        log::info!("Deferred rendering with G-buffer + IBL resolve pass");
         log::info!("Controls:");
         log::info!("  - Left mouse drag: Rotate camera");
         log::info!("  - Scroll: Zoom");
         log::info!("  - H: Toggle UI visibility");
 
         self.create_gpu_resources(ctx);
+
+        // Create resolve pass resources (needs G-buffer textures to exist)
+        self.create_resolve_resources(ctx);
 
         // Initialize egui controller
         let mut egui_controller = EguiController::new(
@@ -1414,15 +1672,27 @@ impl AppHandler for PbrIblDemo {
             ctx.scale_factor(),
         );
 
-        // Register the albedo texture with egui for UI visualization
-        if let Some(albedo) = &self.albedo_texture {
-            let texture_id = egui_controller.register_user_texture(albedo.clone());
-            self.albedo_texture_id = Some(texture_id);
+        // Register all G-buffer textures with egui for UI visualization
+        if let Some(albedo) = &self.gbuffer_albedo {
+            let albedo_id = egui_controller.register_user_texture(albedo.clone());
+            self.gbuffer_albedo_id = Some(albedo_id);
+        }
+        if let Some(normal) = &self.gbuffer_normal_metallic {
+            let normal_id = egui_controller.register_user_texture(normal.clone());
+            self.gbuffer_normal_id = Some(normal_id);
+        }
+        if let Some(position) = &self.gbuffer_position_roughness {
+            let position_id = egui_controller.register_user_texture(position.clone());
+            self.gbuffer_position_id = Some(position_id);
+        }
 
-            // Pass the texture ID to the UI
-            if let Ok(mut ui) = self.egui_ui.write() {
-                ui.set_albedo_texture_id(Some(texture_id));
-            }
+        // Pass the texture IDs to the UI
+        if let Ok(mut ui) = self.egui_ui.write() {
+            ui.set_gbuffer_texture_ids(
+                self.gbuffer_albedo_id,
+                self.gbuffer_normal_id,
+                self.gbuffer_position_id,
+            );
         }
 
         self.egui_controller = Some(egui_controller);
@@ -1431,16 +1701,22 @@ impl AppHandler for PbrIblDemo {
     fn on_resize(&mut self, ctx: &mut AppContext) {
         self.create_depth_texture(ctx);
 
-        // Update the registered albedo texture after resize
-        if let (Some(egui), Some(texture_id), Some(albedo)) = (
-            &mut self.egui_controller,
-            self.albedo_texture_id,
-            &self.albedo_texture,
-        ) {
-            egui.update_user_texture(texture_id, albedo.clone());
-        }
+        // Recreate resolve resources with new G-buffer textures
+        self.create_resolve_resources(ctx);
 
+        // Update the registered G-buffer textures with egui after resize
         if let Some(egui) = &mut self.egui_controller {
+            if let (Some(id), Some(tex)) = (self.gbuffer_albedo_id, &self.gbuffer_albedo) {
+                egui.update_user_texture(id, tex.clone());
+            }
+            if let (Some(id), Some(tex)) = (self.gbuffer_normal_id, &self.gbuffer_normal_metallic) {
+                egui.update_user_texture(id, tex.clone());
+            }
+            if let (Some(id), Some(tex)) =
+                (self.gbuffer_position_id, &self.gbuffer_position_roughness)
+            {
+                egui.update_user_texture(id, tex.clone());
+            }
             egui.on_resize(ctx.width(), ctx.height());
         }
     }
@@ -1478,6 +1754,7 @@ impl AppHandler for PbrIblDemo {
 
         self.update_camera_buffer(ctx);
         self.update_skybox_buffer(ctx);
+        self.update_resolve_uniforms(ctx);
         true
     }
 
@@ -1494,19 +1771,32 @@ impl AppHandler for PbrIblDemo {
             log::info!("IBL textures uploaded via transfer pass");
         }
 
-        let mut render_pass = GraphicsPass::new("main".into());
+        // === Pass 1: G-Buffer Pass ===
+        // Render geometry to G-buffer textures (albedo, normal+metallic, position+roughness)
+        let mut gbuffer_pass = GraphicsPass::new("gbuffer".into());
 
-        if let (Some(depth), Some(albedo)) = (&self.depth_texture, &self.albedo_texture) {
-            render_pass.set_render_targets(
+        if let (Some(depth), Some(albedo), Some(normal), Some(position)) = (
+            &self.depth_texture,
+            &self.gbuffer_albedo,
+            &self.gbuffer_normal_metallic,
+            &self.gbuffer_position_roughness,
+        ) {
+            gbuffer_pass.set_render_targets(
                 RenderTargetConfig::new()
-                    .with_color(
-                        ColorAttachment::from_surface(ctx.swapchain_texture())
-                            .with_clear_color(0.02, 0.02, 0.03, 1.0),
-                    )
-                    // G-buffer albedo output (MRT @location(1))
+                    // RT0: Albedo
                     .with_color(
                         ColorAttachment::from_texture(albedo.clone())
-                            .with_clear_color(0.0, 0.0, 0.0, 1.0),
+                            .with_clear_color(0.0, 0.0, 0.0, 0.0),
+                    )
+                    // RT1: Normal (RGB) + Metallic (A)
+                    .with_color(
+                        ColorAttachment::from_texture(normal.clone())
+                            .with_clear_color(0.5, 0.5, 0.5, 0.0),
+                    )
+                    // RT2: Position (RGB) + Roughness (A)
+                    .with_color(
+                        ColorAttachment::from_texture(position.clone())
+                            .with_clear_color(0.0, 0.0, 0.0, 0.0),
                     )
                     .with_depth_stencil(
                         DepthStencilAttachment::from_texture(depth.clone()).with_clear_depth(1.0),
@@ -1514,25 +1804,53 @@ impl AppHandler for PbrIblDemo {
             );
         }
 
-        // Draw skybox first (fullscreen triangle at far plane)
-        if let (Some(skybox_mesh), Some(skybox_instance)) =
-            (&self.skybox_mesh, &self.skybox_material_instance)
-        {
-            render_pass.add_draw(skybox_mesh.clone(), skybox_instance.clone());
-        }
-
-        // Draw PBR spheres
+        // Draw spheres to G-buffer
         if let (Some(mesh), Some(material_instance)) = (&self.mesh, &self.material_instance) {
-            render_pass.add_draw_instanced(
+            gbuffer_pass.add_draw_instanced(
                 mesh.clone(),
                 material_instance.clone(),
                 (GRID_SIZE * GRID_SIZE) as u32,
             );
         }
 
-        graph.add_graphics_pass(render_pass);
+        graph.add_graphics_pass(gbuffer_pass);
 
-        // Add egui pass
+        // === Pass 2: Skybox Pass ===
+        // Render skybox to swapchain (background)
+        let mut skybox_pass = GraphicsPass::new("skybox".into());
+
+        skybox_pass.set_render_targets(
+            RenderTargetConfig::new().with_color(
+                ColorAttachment::from_surface(ctx.swapchain_texture())
+                    .with_clear_color(0.02, 0.02, 0.03, 1.0),
+            ),
+        );
+
+        if let (Some(skybox_mesh), Some(skybox_instance)) =
+            (&self.skybox_mesh, &self.skybox_material_instance)
+        {
+            skybox_pass.add_draw(skybox_mesh.clone(), skybox_instance.clone());
+        }
+
+        graph.add_graphics_pass(skybox_pass);
+
+        // === Pass 3: Resolve/Lighting Pass ===
+        // Read G-buffer, apply IBL lighting, composite onto swapchain
+        let mut resolve_pass = GraphicsPass::new("resolve".into());
+
+        resolve_pass.set_render_targets(RenderTargetConfig::new().with_color(
+            ColorAttachment::from_surface(ctx.swapchain_texture()).with_load_op(LoadOp::Load), // Preserve skybox
+        ));
+
+        if let (Some(mesh), Some(material_instance)) =
+            (&self.resolve_mesh, &self.resolve_material_instance)
+        {
+            resolve_pass.add_draw(mesh.clone(), material_instance.clone());
+        }
+
+        graph.add_graphics_pass(resolve_pass);
+
+        // === Pass 4: Egui Pass ===
         if let Some(egui) = &mut self.egui_controller {
             let width = ctx.width();
             let height = ctx.height();
