@@ -60,6 +60,8 @@ pub fn convert_texture_format(format: TextureFormat) -> vk::Format {
         TextureFormat::Rgba8UnormSrgb => vk::Format::R8G8B8A8_SRGB,
         TextureFormat::Bgra8Unorm => vk::Format::B8G8R8A8_UNORM,
         TextureFormat::Bgra8UnormSrgb => vk::Format::B8G8R8A8_SRGB,
+        TextureFormat::Rgba10a2Unorm => vk::Format::A2B10G10R10_UNORM_PACK32,
+        TextureFormat::Bgra10a2Unorm => vk::Format::A2R10G10B10_UNORM_PACK32,
 
         // 64-bit formats
         TextureFormat::Rgba16Float => vk::Format::R16G16B16A16_SFLOAT,

@@ -3,8 +3,8 @@
 //! This module provides synchronization types for coordinating work
 //! between the CPU and GPU, and between different GPU operations.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::backend::GpuFence;
 use crate::instance::GraphicsInstance;
@@ -48,9 +48,7 @@ pub enum FenceStatus {
 /// Internal fence implementation.
 enum FenceInner {
     /// CPU-only fence for testing without GPU.
-    Dummy {
-        signaled: Arc<AtomicBool>,
-    },
+    Dummy { signaled: Arc<AtomicBool> },
     /// GPU-backed fence for real async rendering.
     /// The fence is boxed to reduce enum size (GpuFence is large due to backend variants).
     Gpu {

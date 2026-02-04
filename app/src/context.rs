@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use redlilium_graphics::{
     FramePipeline, FrameSchedule, GraphicsDevice, GraphicsInstance, RenderGraph, Surface,
-    SurfaceTexture,
+    SurfaceTexture, TextureFormat,
 };
 
 /// Application context providing access to graphics resources.
@@ -32,6 +32,10 @@ pub struct AppContext {
     pub(crate) delta_time: f32,
     /// Time since application start in seconds.
     pub(crate) elapsed_time: f32,
+    /// The surface texture format being used.
+    pub(crate) surface_format: TextureFormat,
+    /// Whether HDR output is currently active.
+    pub(crate) hdr_active: bool,
 }
 
 impl AppContext {
@@ -96,6 +100,21 @@ impl AppContext {
     /// Get the elapsed time since application start in seconds.
     pub fn elapsed_time(&self) -> f32 {
         self.elapsed_time
+    }
+
+    /// Get the surface texture format.
+    ///
+    /// This is the format used for the swapchain textures.
+    pub fn surface_format(&self) -> TextureFormat {
+        self.surface_format
+    }
+
+    /// Check if HDR output is currently active.
+    ///
+    /// Returns true if the surface is using an HDR format (like Rgba10a2Unorm
+    /// or Rgba16Float).
+    pub fn hdr_active(&self) -> bool {
+        self.hdr_active
     }
 }
 

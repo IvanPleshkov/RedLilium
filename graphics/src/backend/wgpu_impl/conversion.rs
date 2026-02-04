@@ -62,6 +62,8 @@ pub fn convert_texture_format(format: TextureFormat) -> wgpu::TextureFormat {
         TextureFormat::Rgba8UnormSrgb => wgpu::TextureFormat::Rgba8UnormSrgb,
         TextureFormat::Bgra8Unorm => wgpu::TextureFormat::Bgra8Unorm,
         TextureFormat::Bgra8UnormSrgb => wgpu::TextureFormat::Bgra8UnormSrgb,
+        TextureFormat::Rgba10a2Unorm => wgpu::TextureFormat::Rgb10a2Unorm,
+        TextureFormat::Bgra10a2Unorm => wgpu::TextureFormat::Rgb10a2Unorm, // wgpu uses RGB order
 
         // 64-bit formats
         TextureFormat::Rgba16Float => wgpu::TextureFormat::Rgba16Float,

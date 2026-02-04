@@ -122,11 +122,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Combine
     var color = ambient + lo;
 
+#ifdef HDR_OUTPUT
+    // HDR output: skip tone mapping and gamma correction
+    // The display will handle the HDR-to-SDR conversion if needed
+    // Clamp to reasonable HDR range (avoid extreme values)
+    color = clamp(color, vec3<f32>(0.0), vec3<f32>(10.0));
+#else
+    // SDR output: apply tonemapping and gamma correction
     // HDR tonemapping using library function (Reinhard)
     color = tonemap_reinhard(color);
 
     // Gamma correction using library function
     color = gamma_correct(color);
+#endif
 
     return vec4<f32>(color, 1.0);
 }

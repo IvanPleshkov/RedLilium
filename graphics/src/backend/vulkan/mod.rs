@@ -878,11 +878,12 @@ impl VulkanBackend {
         if signal_fence.is_some() {
             // Async path: queue command buffer for deferred destruction
             // It will be freed after the GPU finishes (tracked by frame pipeline)
-            self.deferred_destructor.queue(DeferredResource::CommandBuffers {
-                device: self.device.clone(),
-                command_pool: self.command_pool,
-                buffers: command_buffers,
-            });
+            self.deferred_destructor
+                .queue(DeferredResource::CommandBuffers {
+                    device: self.device.clone(),
+                    command_pool: self.command_pool,
+                    buffers: command_buffers,
+                });
         } else {
             // Sync path: wait for queue to idle, then free immediately
             unsafe { self.device.queue_wait_idle(self.graphics_queue) }.map_err(|e| {

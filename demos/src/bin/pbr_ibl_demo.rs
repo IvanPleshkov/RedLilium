@@ -22,7 +22,7 @@ use redlilium_graphics::{
     AddressMode, BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferDescriptor,
     BufferUsage, ColorAttachment, DepthStencilAttachment, Extent3d, FilterMode, FrameSchedule,
     GraphicsPass, IndexFormat, LoadOp, Material, MaterialDescriptor, MaterialInstance, Mesh,
-    MeshDescriptor, RenderGraph, RenderTargetConfig, SamplerDescriptor, ShaderComposer,
+    MeshDescriptor, RenderGraph, RenderTargetConfig, SamplerDescriptor, ShaderComposer, ShaderDef,
     ShaderSource, ShaderStage, ShaderStageFlags, TextureDescriptor, TextureFormat, TextureUsage,
     TransferConfig, TransferOperation, TransferPass, VertexAttribute, VertexAttributeFormat,
     VertexAttributeSemantic, VertexBufferLayout, VertexLayout,
@@ -590,6 +590,9 @@ struct PbrIblDemo {
     resolve_uniform_buffer: Option<Arc<redlilium_graphics::Buffer>>,
     resolve_mesh: Option<Arc<Mesh>>,
     gbuffer_sampler: Option<Arc<redlilium_graphics::Sampler>>,
+
+    // HDR output state
+    hdr_active: bool,
 }
 
 impl PbrIblDemo {
@@ -637,6 +640,7 @@ impl PbrIblDemo {
             resolve_uniform_buffer: None,
             resolve_mesh: None,
             gbuffer_sampler: None,
+            hdr_active: false,
         }
     }
 
@@ -1179,11 +1183,20 @@ impl PbrIblDemo {
                 .with_label("ibl_bindings"),
         );
 
-        // Compose resolve shader
+        // Compose resolve shader with HDR define if HDR is active
         let mut shader_composer =
             ShaderComposer::with_standard_library().expect("Failed to create shader composer");
+
+        let shader_defs: Vec<(&str, ShaderDef)> = if self.hdr_active {
+            log::info!("Compiling resolve shader with HDR_OUTPUT define");
+            vec![("HDR_OUTPUT", ShaderDef::Bool(true))]
+        } else {
+            log::info!("Compiling resolve shader for SDR output");
+            vec![]
+        };
+
         let composed_resolve_shader = shader_composer
-            .compose(RESOLVE_SHADER_WGSL, &[])
+            .compose(RESOLVE_SHADER_WGSL, &shader_defs)
             .expect("Failed to compose resolve shader");
 
         log::info!("Resolve shader composed with library imports");
@@ -1653,10 +1666,18 @@ impl AppHandler for PbrIblDemo {
             GRID_SIZE
         );
         log::info!("Deferred rendering with G-buffer + IBL resolve pass");
+        log::info!(
+            "Surface format: {:?}, HDR: {}",
+            ctx.surface_format(),
+            ctx.hdr_active()
+        );
         log::info!("Controls:");
         log::info!("  - Left mouse drag: Rotate camera");
         log::info!("  - Scroll: Zoom");
         log::info!("  - H: Toggle UI visibility");
+
+        // Store HDR status for shader compilation
+        self.hdr_active = ctx.hdr_active();
 
         self.create_gpu_resources(ctx);
 
@@ -2000,7 +2021,7 @@ impl AppHandler for PbrIblDemo {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
-    let args = DefaultAppArgs::parse();
+    let args = DefaultAppArgs::parse().with_hdr(true);
     App::run(PbrIblDemo::new(), args);
 }
 

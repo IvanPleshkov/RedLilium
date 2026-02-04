@@ -123,6 +123,17 @@ pub trait AppArgs: Sized {
     fn validation(&self) -> bool {
         cfg!(debug_assertions)
     }
+
+    /// Get whether HDR (High Dynamic Range) output should be enabled.
+    ///
+    /// When enabled, the application will attempt to use an HDR surface format
+    /// (like Rgba10a2Unorm or Rgba16Float) if the display supports it.
+    /// If HDR is not available, it will fall back to a standard SDR format.
+    ///
+    /// Default: false
+    fn hdr(&self) -> bool {
+        false
+    }
 }
 
 // ============================================================================
@@ -252,6 +263,7 @@ pub struct DefaultAppArgs {
     vsync: bool,
     max_frames: Option<u64>,
     validation: bool,
+    hdr: bool,
 }
 
 impl Default for DefaultAppArgs {
@@ -266,6 +278,7 @@ impl Default for DefaultAppArgs {
             vsync: true,
             max_frames: None,
             validation: cfg!(debug_assertions),
+            hdr: false,
         }
     }
 }
@@ -301,6 +314,15 @@ impl DefaultAppArgs {
     /// Set the window title.
     pub fn with_title_str(mut self, title: impl Into<String>) -> Self {
         self.title = title.into();
+        self
+    }
+
+    /// Enable or disable HDR output.
+    ///
+    /// When enabled, the application will attempt to use an HDR surface format
+    /// if the display supports it.
+    pub fn with_hdr(mut self, hdr: bool) -> Self {
+        self.hdr = hdr;
         self
     }
 }
@@ -379,6 +401,11 @@ mod native {
         /// Disable GPU validation layers (faster but less safe).
         #[arg(long, conflicts_with = "validation")]
         pub no_validation: bool,
+
+        /// Enable HDR (High Dynamic Range) output if the display supports it.
+        /// Uses 10-bit color (HDR10) for wider color gamut and higher brightness.
+        #[arg(long)]
+        pub hdr: bool,
     }
 
     impl From<ClapArgs> for DefaultAppArgs {
@@ -422,6 +449,7 @@ mod native {
                 vsync: !args.no_vsync,
                 max_frames: args.max_frames,
                 validation,
+                hdr: args.hdr,
             }
         }
     }
@@ -477,6 +505,10 @@ impl AppArgs for DefaultAppArgs {
 
     fn validation(&self) -> bool {
         self.validation
+    }
+
+    fn hdr(&self) -> bool {
+        self.hdr
     }
 }
 

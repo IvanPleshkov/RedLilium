@@ -150,13 +150,42 @@ impl Surface {
     }
 
     /// Get the supported texture formats for this surface.
+    ///
+    /// This includes both standard SDR formats and HDR formats.
+    /// HDR formats (like `Rgba10a2Unorm` and `Rgba16Float`) enable
+    /// High Dynamic Range rendering when the display supports it.
     pub fn supported_formats(&self) -> Vec<TextureFormat> {
         vec![
+            // Standard SDR formats
             TextureFormat::Bgra8Unorm,
             TextureFormat::Bgra8UnormSrgb,
             TextureFormat::Rgba8Unorm,
             TextureFormat::Rgba8UnormSrgb,
+            // HDR formats (10-bit)
+            TextureFormat::Rgba10a2Unorm,
+            TextureFormat::Bgra10a2Unorm,
+            // HDR formats (16-bit float)
+            TextureFormat::Rgba16Float,
         ]
+    }
+
+    /// Get the supported HDR texture formats for this surface.
+    ///
+    /// Returns only HDR-capable formats. Use these when HDR output is desired
+    /// and the display supports it.
+    pub fn supported_hdr_formats(&self) -> Vec<TextureFormat> {
+        self.supported_formats()
+            .into_iter()
+            .filter(|f| f.is_hdr())
+            .collect()
+    }
+
+    /// Get the preferred HDR format for this surface.
+    ///
+    /// Returns `Rgba10a2Unorm` as the preferred HDR10 format, which is
+    /// widely supported and efficient for HDR content.
+    pub fn preferred_hdr_format(&self) -> TextureFormat {
+        TextureFormat::Rgba10a2Unorm
     }
 
     /// Get the supported present modes for this surface.

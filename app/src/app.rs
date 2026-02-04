@@ -9,7 +9,9 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::platform::windows::EventLoopBuilderExtWindows;
 use winit::window::{Window, WindowId};
 
-use redlilium_graphics::{GraphicsInstance, InstanceParameters, PresentMode, SurfaceConfiguration};
+use redlilium_graphics::{
+    GraphicsInstance, InstanceParameters, PresentMode, Surface, SurfaceConfiguration, TextureFormat,
+};
 
 use crate::args::{AppArgs, WindowMode};
 use crate::context::{AppContext, DrawContext};
@@ -172,8 +174,11 @@ where
             PresentMode::Immediate
         };
 
+        // Determine surface format - use HDR if requested and supported
+        let (surface_format, hdr_active) = self.select_surface_format(&surface);
+
         let config = SurfaceConfiguration::new(physical_size.width, physical_size.height)
-            .with_format(surface.preferred_format())
+            .with_format(surface_format)
             .with_present_mode(present_mode);
 
         if let Err(e) = surface.configure(&device, &config) {
@@ -185,11 +190,13 @@ where
         let pipeline = device.create_pipeline(2);
 
         log::info!(
-            "Graphics initialized: {} ({}x{} physical, scale_factor={})",
+            "Graphics initialized: {} ({}x{} physical, scale_factor={}, format={:?}, hdr={})",
             device.name(),
             physical_size.width,
             physical_size.height,
-            scale_factor
+            scale_factor,
+            surface_format,
+            hdr_active
         );
 
         self.context = Some(AppContext {
@@ -203,9 +210,42 @@ where
             frame_number: 0,
             delta_time: 0.0,
             elapsed_time: 0.0,
+            surface_format,
+            hdr_active,
         });
 
         true
+    }
+
+    /// Select the surface format based on HDR preference and availability.
+    ///
+    /// Returns (format, hdr_active) tuple.
+    fn select_surface_format(&self, surface: &Surface) -> (TextureFormat, bool) {
+        if self.args.hdr() {
+            // Try to use HDR format
+            let supported = surface.supported_formats();
+            let hdr_formats = surface.supported_hdr_formats();
+
+            if !hdr_formats.is_empty() {
+                // Prefer Rgba10a2Unorm (HDR10) as it's widely supported
+                let preferred = surface.preferred_hdr_format();
+                if supported.contains(&preferred) {
+                    log::info!("HDR enabled: using {:?}", preferred);
+                    return (preferred, true);
+                }
+                // Fall back to first available HDR format
+                let format = hdr_formats[0];
+                log::info!("HDR enabled: using {:?}", format);
+                return (format, true);
+            }
+
+            log::warn!("HDR requested but no HDR formats available, falling back to SDR");
+        }
+
+        // Use standard SDR format
+        let format = surface.preferred_format();
+        log::info!("Using SDR format: {:?}", format);
+        (format, false)
     }
 
     /// Handle resize.
@@ -225,7 +265,7 @@ where
             // Wait for current slot before reconfiguring
             ctx.pipeline.wait_current_slot();
 
-            // Reconfigure surface
+            // Reconfigure surface with the same format
             let present_mode = if self.args.vsync() {
                 PresentMode::Fifo
             } else {
@@ -233,7 +273,7 @@ where
             };
 
             let config = SurfaceConfiguration::new(width, height)
-                .with_format(ctx.surface.preferred_format())
+                .with_format(ctx.surface_format)
                 .with_present_mode(present_mode);
 
             if let Err(e) = ctx.surface.configure(&ctx.device, &config) {

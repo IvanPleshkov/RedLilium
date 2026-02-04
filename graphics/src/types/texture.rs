@@ -81,6 +81,10 @@ pub enum TextureFormat {
     Bgra8Unorm,
     /// 8-bit BGRA channels, sRGB.
     Bgra8UnormSrgb,
+    /// 10-bit RGB with 2-bit alpha, unsigned normalized (HDR10 compatible).
+    Rgba10a2Unorm,
+    /// 10-bit BGR with 2-bit alpha, unsigned normalized (HDR10 compatible).
+    Bgra10a2Unorm,
 
     // 64-bit formats
     /// 16-bit RGBA channels, float.
@@ -123,6 +127,24 @@ impl TextureFormat {
         matches!(self, Self::Depth24PlusStencil8 | Self::Depth32FloatStencil8)
     }
 
+    /// Returns true if this is an HDR (High Dynamic Range) format.
+    ///
+    /// HDR formats have higher precision or wider color gamut than standard 8-bit formats.
+    /// This includes 10-bit formats (HDR10) and floating-point formats.
+    pub fn is_hdr(&self) -> bool {
+        matches!(
+            self,
+            Self::Rgba10a2Unorm
+                | Self::Bgra10a2Unorm
+                | Self::Rgba16Float
+                | Self::Rgba32Float
+                | Self::R16Float
+                | Self::Rg16Float
+                | Self::R32Float
+                | Self::Rg32Float
+        )
+    }
+
     /// Returns the size in bytes per pixel/block.
     pub fn block_size(&self) -> u32 {
         match self {
@@ -135,6 +157,8 @@ impl TextureFormat {
             | Self::Rgba8UnormSrgb
             | Self::Bgra8Unorm
             | Self::Bgra8UnormSrgb
+            | Self::Rgba10a2Unorm
+            | Self::Bgra10a2Unorm
             | Self::Depth24Plus
             | Self::Depth24PlusStencil8
             | Self::Depth32Float => 4,
