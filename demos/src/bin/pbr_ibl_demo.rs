@@ -735,7 +735,9 @@ impl PbrIblDemo {
                 BufferUsage::COPY_SRC | BufferUsage::COPY_DST,
             ))
             .expect("Failed to create irradiance staging buffer");
-        device.write_buffer(&irradiance_staging, 0, irradiance_bytes);
+        device
+            .write_buffer(&irradiance_staging, 0, irradiance_bytes)
+            .expect("Failed to write irradiance staging buffer");
         self.irradiance_staging = Some(irradiance_staging);
 
         // Create staging buffers for each mip level with aligned bytes per row
@@ -779,7 +781,9 @@ impl PbrIblDemo {
                     BufferUsage::COPY_SRC | BufferUsage::COPY_DST,
                 ))
                 .expect("Failed to create prefilter staging buffer");
-            device.write_buffer(&buffer, 0, &padded_data);
+            device
+                .write_buffer(&buffer, 0, &padded_data)
+                .expect("Failed to write prefilter staging buffer");
             prefilter_staging.push(buffer);
         }
         self.prefilter_staging = Some(prefilter_staging);
@@ -811,7 +815,9 @@ impl PbrIblDemo {
                 BufferUsage::COPY_SRC | BufferUsage::COPY_DST,
             ))
             .expect("Failed to create BRDF staging buffer");
-        device.write_buffer(&brdf_staging, 0, &brdf_padded_data);
+        device
+            .write_buffer(&brdf_staging, 0, &brdf_padded_data)
+            .expect("Failed to write BRDF staging buffer");
         self.brdf_staging = Some(brdf_staging);
         self.brdf_aligned_bytes_per_row = brdf_aligned_bytes_per_row;
 
@@ -897,7 +903,9 @@ impl PbrIblDemo {
                 BufferUsage::STORAGE | BufferUsage::COPY_DST,
             ))
             .expect("Failed to create instance buffer");
-        device.write_buffer(&instance_buffer, 0, instance_data);
+        device
+            .write_buffer(&instance_buffer, 0, instance_data)
+            .expect("Failed to write instance buffer");
         self.instance_buffer = Some(instance_buffer.clone());
 
         // Create G-buffer material instance (only camera bindings, no IBL for G-buffer pass)
@@ -927,10 +935,14 @@ impl PbrIblDemo {
             .expect("Failed to create mesh");
 
         if let Some(vb) = mesh.vertex_buffer(0) {
-            device.write_buffer(vb, 0, bytemuck::cast_slice(&vertices));
+            device
+                .write_buffer(vb, 0, bytemuck::cast_slice(&vertices))
+                .expect("Failed to write vertex buffer");
         }
         if let Some(ib) = mesh.index_buffer() {
-            device.write_buffer(ib, 0, bytemuck::cast_slice(&indices));
+            device
+                .write_buffer(ib, 0, bytemuck::cast_slice(&indices))
+                .expect("Failed to write index buffer");
         }
         self.mesh = Some(mesh);
 
@@ -1033,7 +1045,9 @@ impl PbrIblDemo {
         // Write minimal vertex data (shader doesn't use it, just needs valid buffer)
         if let Some(vb) = skybox_mesh.vertex_buffer(0) {
             let dummy_data: [f32; 3] = [0.0, 0.0, 0.0];
-            device.write_buffer(vb, 0, bytemuck::cast_slice(&dummy_data));
+            device
+                .write_buffer(vb, 0, bytemuck::cast_slice(&dummy_data))
+                .expect("Failed to write skybox vertex buffer");
         }
         self.skybox_mesh = Some(skybox_mesh);
 
@@ -1272,7 +1286,9 @@ impl PbrIblDemo {
 
         if let Some(vb) = resolve_mesh.vertex_buffer(0) {
             let dummy_data: [f32; 3] = [0.0, 0.0, 0.0];
-            device.write_buffer(vb, 0, bytemuck::cast_slice(&dummy_data));
+            device
+                .write_buffer(vb, 0, bytemuck::cast_slice(&dummy_data))
+                .expect("Failed to write resolve mesh vertex buffer");
         }
         self.resolve_mesh = Some(resolve_mesh);
 
@@ -1292,7 +1308,8 @@ impl PbrIblDemo {
 
         if let Some(buffer) = &self.resolve_uniform_buffer {
             ctx.device()
-                .write_buffer(buffer, 0, bytemuck::bytes_of(&uniforms));
+                .write_buffer(buffer, 0, bytemuck::bytes_of(&uniforms))
+                .expect("Failed to write resolve uniform buffer");
         }
     }
 
@@ -1339,7 +1356,9 @@ impl PbrIblDemo {
         let instances = self.create_sphere_instances();
         let instance_data = bytemuck::cast_slice(&instances);
         if let Some(buffer) = &self.instance_buffer {
-            ctx.device().write_buffer(buffer, 0, instance_data);
+            ctx.device()
+                .write_buffer(buffer, 0, instance_data)
+                .expect("Failed to write instance buffer");
         }
     }
 
@@ -1357,7 +1376,8 @@ impl PbrIblDemo {
 
         if let Some(buffer) = &self.camera_buffer {
             ctx.device()
-                .write_buffer(buffer, 0, bytemuck::bytes_of(&uniforms));
+                .write_buffer(buffer, 0, bytemuck::bytes_of(&uniforms))
+                .expect("Failed to write camera uniform buffer");
         }
     }
 
@@ -1377,7 +1397,8 @@ impl PbrIblDemo {
 
         if let Some(buffer) = &self.skybox_uniform_buffer {
             ctx.device()
-                .write_buffer(buffer, 0, bytemuck::bytes_of(&uniforms));
+                .write_buffer(buffer, 0, bytemuck::bytes_of(&uniforms))
+                .expect("Failed to write skybox uniform buffer");
         }
     }
 

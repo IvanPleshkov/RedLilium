@@ -26,6 +26,8 @@ pub struct PipelineManager {
     pipeline_cache: Mutex<HashMap<u64, vk::Pipeline>>,
     /// Descriptor pool for allocating descriptor sets.
     descriptor_pool: vk::DescriptorPool,
+    /// Whether resources have been explicitly destroyed.
+    destroyed: bool,
 }
 
 impl PipelineManager {
@@ -79,6 +81,7 @@ impl PipelineManager {
             pipeline_layout_cache: Mutex::new(HashMap::new()),
             pipeline_cache: Mutex::new(HashMap::new()),
             descriptor_pool,
+            destroyed: false,
         })
     }
 
@@ -257,8 +260,18 @@ impl PipelineManager {
         blend_state: Option<&crate::materials::BlendState>,
         _dynamic_rendering: &ash::khr::dynamic_rendering::Device,
     ) -> Result<vk::Pipeline, GraphicsError> {
-        let vertex_entry_c = CString::new(vertex_entry).unwrap();
-        let fragment_entry_c = CString::new(fragment_entry).unwrap();
+        let vertex_entry_c = CString::new(vertex_entry).map_err(|e| {
+            GraphicsError::InvalidParameter(format!(
+                "Invalid vertex entry point name (contains null byte): {}",
+                e
+            ))
+        })?;
+        let fragment_entry_c = CString::new(fragment_entry).map_err(|e| {
+            GraphicsError::InvalidParameter(format!(
+                "Invalid fragment entry point name (contains null byte): {}",
+                e
+            ))
+        })?;
 
         let mut shader_stages = vec![
             vk::PipelineShaderStageCreateInfo::default()
@@ -425,33 +438,70 @@ impl PipelineManager {
     }
 }
 
+impl PipelineManager {
+    /// Explicitly destroy all resources.
+    ///
+    /// This must be called before the Vulkan device is destroyed.
+    /// After calling this method, the PipelineManager should not be used.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure:
+    /// - The GPU is idle (no pending operations using these resources)
+    /// - This is called before the Vulkan device is destroyed
+    pub unsafe fn destroy(&mut self) {
+        if self.destroyed {
+            return;
+        }
+
+        // Destroy cached pipelines
+        for (_, pipeline) in self.pipeline_cache.lock().drain() {
+            // SAFETY: Caller guarantees GPU is idle and device is valid
+            unsafe { self.device.destroy_pipeline(pipeline, None) };
+        }
+
+        // Destroy cached pipeline layouts
+        for (_, layout) in self.pipeline_layout_cache.lock().drain() {
+            // SAFETY: Caller guarantees GPU is idle and device is valid
+            unsafe { self.device.destroy_pipeline_layout(layout, None) };
+        }
+
+        // Destroy cached descriptor set layouts
+        for (_, layout) in self.descriptor_set_layout_cache.lock().drain() {
+            // SAFETY: Caller guarantees GPU is idle and device is valid
+            unsafe { self.device.destroy_descriptor_set_layout(layout, None) };
+        }
+
+        // Destroy cached shader modules
+        for (_, module) in self.shader_cache.lock().drain() {
+            // SAFETY: Caller guarantees GPU is idle and device is valid
+            unsafe { self.device.destroy_shader_module(module, None) };
+        }
+
+        // Destroy descriptor pool
+        // SAFETY: Caller guarantees GPU is idle and device is valid
+        unsafe {
+            self.device
+                .destroy_descriptor_pool(self.descriptor_pool, None)
+        };
+
+        self.destroyed = true;
+    }
+}
+
 impl Drop for PipelineManager {
     fn drop(&mut self) {
-        unsafe {
-            // Destroy cached pipelines
-            for (_, pipeline) in self.pipeline_cache.lock().drain() {
-                self.device.destroy_pipeline(pipeline, None);
-            }
-
-            // Destroy cached pipeline layouts
-            for (_, layout) in self.pipeline_layout_cache.lock().drain() {
-                self.device.destroy_pipeline_layout(layout, None);
-            }
-
-            // Destroy cached descriptor set layouts
-            for (_, layout) in self.descriptor_set_layout_cache.lock().drain() {
-                self.device.destroy_descriptor_set_layout(layout, None);
-            }
-
-            // Destroy cached shader modules
-            for (_, module) in self.shader_cache.lock().drain() {
-                self.device.destroy_shader_module(module, None);
-            }
-
-            // Destroy descriptor pool
-            self.device
-                .destroy_descriptor_pool(self.descriptor_pool, None);
+        if self.destroyed {
+            return;
         }
+
+        // If destroy() was not called explicitly, we have a problem:
+        // the device may already be destroyed. Log a warning but don't
+        // attempt to use the device as it may cause undefined behavior.
+        log::warn!(
+            "PipelineManager::drop() called without explicit destroy(). \
+             Resources may have leaked. Always call destroy() before dropping the device."
+        );
     }
 }
 

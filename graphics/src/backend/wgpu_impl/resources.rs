@@ -185,57 +185,103 @@ impl WgpuBackend {
         }
     }
 
+    /// Wait for a fence to be signaled with a timeout.
+    ///
+    /// Returns `true` if the fence was signaled, `false` if the timeout elapsed.
+    pub fn wait_fence_timeout(&self, fence: &GpuFence, timeout: std::time::Duration) -> bool {
+        if let GpuFence::Wgpu {
+            device,
+            submission_index,
+        } = fence
+            && let Ok(guard) = submission_index.lock()
+            && let Some(idx) = guard.clone()
+        {
+            // Wait for the specific submission with user-specified timeout
+            match device.poll(wgpu::PollType::Wait {
+                submission_index: Some(idx),
+                timeout: Some(timeout),
+            }) {
+                Ok(status) => status.is_queue_empty(),
+                Err(_) => false,
+            }
+        } else {
+            // No submission or not a wgpu fence - treat as signaled
+            true
+        }
+    }
+
     /// Signal a fence (for testing/dummy backend).
     pub fn signal_fence(&self, _fence: &GpuFence) {
         // wgpu fences are signaled automatically when GPU work completes
     }
 
     /// Write data to a buffer.
-    pub fn write_buffer(&self, buffer: &GpuBuffer, offset: u64, data: &[u8]) {
+    pub fn write_buffer(
+        &self,
+        buffer: &GpuBuffer,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<(), crate::error::GraphicsError> {
         if let GpuBuffer::Wgpu(wgpu_buffer) = buffer {
             self.queue.write_buffer(wgpu_buffer, offset, data);
+            Ok(())
+        } else {
+            Err(crate::error::GraphicsError::Internal(
+                "write_buffer called with non-Wgpu buffer".to_string(),
+            ))
         }
     }
 
     /// Write data to a texture.
-    pub fn write_texture(&self, texture: &GpuTexture, data: &[u8], descriptor: &TextureDescriptor) {
+    pub fn write_texture(
+        &self,
+        texture: &GpuTexture,
+        data: &[u8],
+        descriptor: &TextureDescriptor,
+    ) -> Result<(), crate::error::GraphicsError> {
         use crate::types::TextureDimension;
 
-        if let GpuTexture::Wgpu {
+        let GpuTexture::Wgpu {
             texture: wgpu_texture,
             ..
         } = texture
-        {
-            let format = convert_texture_format(descriptor.format);
-            let block_size = format.block_copy_size(None).unwrap_or(4);
-            let bytes_per_row = descriptor.size.width * block_size;
+        else {
+            return Err(crate::error::GraphicsError::Internal(
+                "write_texture called with non-Wgpu texture".to_string(),
+            ));
+        };
 
-            let depth_or_array_layers = match descriptor.dimension {
-                TextureDimension::Cube => 6,
-                TextureDimension::CubeArray => descriptor.size.depth * 6,
-                _ => descriptor.size.depth,
-            };
+        let format = convert_texture_format(descriptor.format);
+        let block_size = format.block_copy_size(None).unwrap_or(4);
+        let bytes_per_row = descriptor.size.width * block_size;
 
-            self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: wgpu_texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                data,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(bytes_per_row),
-                    rows_per_image: Some(descriptor.size.height),
-                },
-                wgpu::Extent3d {
-                    width: descriptor.size.width,
-                    height: descriptor.size.height,
-                    depth_or_array_layers,
-                },
-            );
-        }
+        let depth_or_array_layers = match descriptor.dimension {
+            TextureDimension::Cube => 6,
+            TextureDimension::CubeArray => descriptor.size.depth * 6,
+            _ => descriptor.size.depth,
+        };
+
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: wgpu_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(descriptor.size.height),
+            },
+            wgpu::Extent3d {
+                width: descriptor.size.width,
+                height: descriptor.size.height,
+                depth_or_array_layers,
+            },
+        );
+
+        Ok(())
     }
 
     /// Read data from a buffer.

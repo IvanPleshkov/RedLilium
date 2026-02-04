@@ -216,7 +216,8 @@ impl EguiRenderer {
             _padding: [0.0, 0.0],
         };
         self.device
-            .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+            .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms))
+            .expect("Failed to write egui uniform buffer");
     }
 
     /// Process texture updates from egui.
@@ -268,7 +269,9 @@ impl EguiRenderer {
 
                 // Re-upload the full texture
                 if let Some(texture) = self.textures.get(&id) {
-                    self.device.write_texture(texture, &data.pixels);
+                    self.device
+                        .write_texture(texture, &data.pixels)
+                        .expect("Failed to write egui texture");
                 }
                 return;
             }
@@ -295,7 +298,9 @@ impl EguiRenderer {
             .expect("Failed to create egui texture");
 
         // Upload pixel data
-        self.device.write_texture(&texture, &new_pixels);
+        self.device
+            .write_texture(&texture, &new_pixels)
+            .expect("Failed to write egui texture");
 
         // Store CPU-side data for future partial updates
         self.texture_data.insert(
@@ -438,13 +443,15 @@ impl EguiRenderer {
                     // Upload vertex data
                     if let Some(vb) = gpu_mesh.vertex_buffer(0) {
                         self.device
-                            .write_buffer(vb, 0, bytemuck::cast_slice(&vertices));
+                            .write_buffer(vb, 0, bytemuck::cast_slice(&vertices))
+                            .expect("Failed to write egui vertex buffer");
                     }
 
                     // Upload index data
                     if let Some(ib) = gpu_mesh.index_buffer() {
                         self.device
-                            .write_buffer(ib, 0, bytemuck::cast_slice(&mesh.indices));
+                            .write_buffer(ib, 0, bytemuck::cast_slice(&mesh.indices))
+                            .expect("Failed to write egui index buffer");
                     }
 
                     // Create texture binding group

@@ -84,6 +84,28 @@ impl DummyBackend {
         }
     }
 
+    /// Wait for a fence to be signaled with a timeout.
+    ///
+    /// Returns `true` if the fence was signaled, `false` if the timeout elapsed.
+    pub fn wait_fence_timeout(&self, fence: &GpuFence, timeout: std::time::Duration) -> bool {
+        match fence {
+            GpuFence::Dummy { signaled } => {
+                let start = std::time::Instant::now();
+                while !signaled.load(Ordering::Acquire) {
+                    if start.elapsed() >= timeout {
+                        return false;
+                    }
+                    std::thread::yield_now();
+                }
+                true
+            }
+            #[cfg(feature = "wgpu-backend")]
+            GpuFence::Wgpu { .. } => false,
+            #[cfg(feature = "vulkan-backend")]
+            GpuFence::Vulkan { .. } => false,
+        }
+    }
+
     /// Check if a fence is signaled (non-blocking).
     pub fn is_fence_signaled(&self, fence: &GpuFence) -> bool {
         match fence {
@@ -134,12 +156,18 @@ impl DummyBackend {
     }
 
     /// Write data to a buffer.
-    pub fn write_buffer(&self, _buffer: &GpuBuffer, offset: u64, data: &[u8]) {
+    pub fn write_buffer(
+        &self,
+        _buffer: &GpuBuffer,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<(), crate::error::GraphicsError> {
         log::trace!(
             "DummyBackend: write_buffer offset={} len={}",
             offset,
             data.len()
         );
+        Ok(())
     }
 
     /// Read data from a buffer.
@@ -155,7 +183,7 @@ impl DummyBackend {
         _texture: &GpuTexture,
         data: &[u8],
         descriptor: &TextureDescriptor,
-    ) {
+    ) -> Result<(), crate::error::GraphicsError> {
         log::trace!(
             "DummyBackend: write_texture {:?} ({}x{}) len={}",
             descriptor.label,
@@ -163,6 +191,7 @@ impl DummyBackend {
             descriptor.size.height,
             data.len()
         );
+        Ok(())
     }
 }
 

@@ -765,6 +765,19 @@ impl GpuBackend {
         }
     }
 
+    /// Wait for a fence to be signaled with a timeout.
+    ///
+    /// Returns `true` if the fence was signaled, `false` if the timeout elapsed.
+    pub fn wait_fence_timeout(&self, fence: &GpuFence, timeout: std::time::Duration) -> bool {
+        match self {
+            Self::Dummy(backend) => backend.wait_fence_timeout(fence, timeout),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(backend) => backend.wait_fence_timeout(fence, timeout),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => backend.wait_fence_timeout(fence, timeout),
+        }
+    }
+
     /// Check if a fence is signaled (non-blocking).
     pub fn is_fence_signaled(&self, fence: &GpuFence) -> bool {
         match self {
@@ -806,7 +819,12 @@ impl GpuBackend {
     }
 
     /// Write data to a buffer.
-    pub fn write_buffer(&self, buffer: &GpuBuffer, offset: u64, data: &[u8]) {
+    pub fn write_buffer(
+        &self,
+        buffer: &GpuBuffer,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<(), GraphicsError> {
         match self {
             Self::Dummy(backend) => backend.write_buffer(buffer, offset, data),
             #[cfg(feature = "wgpu-backend")]
@@ -830,7 +848,12 @@ impl GpuBackend {
     }
 
     /// Write data to a texture.
-    pub fn write_texture(&self, texture: &GpuTexture, data: &[u8], descriptor: &TextureDescriptor) {
+    pub fn write_texture(
+        &self,
+        texture: &GpuTexture,
+        data: &[u8],
+        descriptor: &TextureDescriptor,
+    ) -> Result<(), GraphicsError> {
         match self {
             Self::Dummy(backend) => backend.write_texture(texture, data, descriptor),
             #[cfg(feature = "wgpu-backend")]

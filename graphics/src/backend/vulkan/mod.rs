@@ -402,6 +402,11 @@ impl Drop for VulkanBackend {
             // Flush all pending deferred resources now that the device is idle
             self.deferred_destructor.flush_all();
 
+            // Destroy pipeline manager resources BEFORE destroying the device.
+            // PipelineManager holds Vulkan handles (descriptor pool, pipelines, etc.)
+            // that must be destroyed while the device is still valid.
+            self.pipeline_manager.destroy();
+
             // Destroy command pool
             self.device.destroy_command_pool(self.command_pool, None);
 
@@ -778,6 +783,28 @@ impl VulkanBackend {
         }
     }
 
+    /// Wait for a fence to be signaled with a timeout.
+    ///
+    /// Returns `true` if the fence was signaled, `false` if the timeout elapsed.
+    pub fn wait_fence_timeout(&self, fence: &GpuFence, timeout: std::time::Duration) -> bool {
+        if let GpuFence::Vulkan { device, fence, .. } = fence {
+            // Convert Duration to nanoseconds for Vulkan
+            let timeout_ns = timeout.as_nanos() as u64;
+            unsafe {
+                match device.wait_for_fences(&[*fence], true, timeout_ns) {
+                    Ok(()) => true,
+                    Err(vk::Result::TIMEOUT) => false,
+                    Err(e) => {
+                        log::error!("Fence wait failed: {:?}", e);
+                        false
+                    }
+                }
+            }
+        } else {
+            false
+        }
+    }
+
     /// Signal a fence (for testing/dummy backend).
     pub fn signal_fence(&self, _fence: &GpuFence) {
         // Vulkan fences are signaled by the GPU, not the CPU
@@ -1009,16 +1036,38 @@ impl VulkanBackend {
     }
 
     /// Write data to a buffer.
-    pub fn write_buffer(&self, buffer: &GpuBuffer, offset: u64, data: &[u8]) {
-        if let GpuBuffer::Vulkan { allocation, .. } = buffer
-            && let Some(allocation) = allocation.lock().as_ref()
-            && let Some(mapped_ptr) = allocation.mapped_ptr()
-        {
-            unsafe {
-                let dst = mapped_ptr.as_ptr().add(offset as usize);
-                std::ptr::copy_nonoverlapping(data.as_ptr(), dst as *mut u8, data.len());
-            }
+    ///
+    /// Returns an error if the buffer is not a Vulkan buffer or is not mapped.
+    pub fn write_buffer(
+        &self,
+        buffer: &GpuBuffer,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<(), GraphicsError> {
+        let GpuBuffer::Vulkan { allocation, .. } = buffer else {
+            return Err(GraphicsError::Internal(
+                "write_buffer called with non-Vulkan buffer".to_string(),
+            ));
+        };
+
+        let guard = allocation.lock();
+        let Some(allocation) = guard.as_ref() else {
+            return Err(GraphicsError::Internal(
+                "Buffer allocation is None".to_string(),
+            ));
+        };
+
+        let Some(mapped_ptr) = allocation.mapped_ptr() else {
+            return Err(GraphicsError::Internal(
+                "Buffer is not mapped for CPU access".to_string(),
+            ));
+        };
+
+        unsafe {
+            let dst = mapped_ptr.as_ptr().add(offset as usize);
+            std::ptr::copy_nonoverlapping(data.as_ptr(), dst as *mut u8, data.len());
         }
+        Ok(())
     }
 
     /// Read data from a buffer.
@@ -1041,19 +1090,22 @@ impl VulkanBackend {
     ///
     /// Uses a staging buffer to upload texture data. This creates a temporary
     /// command buffer, performs the copy, and waits for completion.
+    ///
+    /// Returns an error if the texture write fails.
     pub fn write_texture(
         &self,
         texture: &GpuTexture,
         data: &[u8],
         descriptor: &crate::types::TextureDescriptor,
-    ) {
+    ) -> Result<(), GraphicsError> {
         let GpuTexture::Vulkan { image, .. } = texture else {
-            log::warn!("write_texture called with non-Vulkan texture");
-            return;
+            return Err(GraphicsError::Internal(
+                "write_texture called with non-Vulkan texture".to_string(),
+            ));
         };
 
         if data.is_empty() {
-            return;
+            return Ok(());
         }
 
         log::debug!(
@@ -1070,14 +1122,13 @@ impl VulkanBackend {
             .usage(vk::BufferUsageFlags::TRANSFER_SRC)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
-        let staging_buffer = match unsafe { self.device.create_buffer(&staging_buffer_info, None) }
-        {
-            Ok(b) => b,
-            Err(e) => {
-                log::error!("Failed to create staging buffer: {:?}", e);
-                return;
-            }
-        };
+        let staging_buffer = unsafe { self.device.create_buffer(&staging_buffer_info, None) }
+            .map_err(|e| {
+                GraphicsError::ResourceCreationFailed(format!(
+                    "Failed to create staging buffer: {:?}",
+                    e
+                ))
+            })?;
 
         // Get memory requirements and allocate
         let mem_requirements =
@@ -1085,22 +1136,23 @@ impl VulkanBackend {
 
         let staging_allocation = {
             let mut allocator = self.allocator.lock();
-            match allocator.allocate(&gpu_allocator::vulkan::AllocationCreateDesc {
-                name: "texture_staging",
-                requirements: mem_requirements,
-                location: gpu_allocator::MemoryLocation::CpuToGpu,
-                linear: true,
-                allocation_scheme: gpu_allocator::vulkan::AllocationScheme::GpuAllocatorManaged,
-            }) {
-                Ok(a) => a,
-                Err(e) => {
-                    log::error!("Failed to allocate staging buffer memory: {}", e);
+            allocator
+                .allocate(&gpu_allocator::vulkan::AllocationCreateDesc {
+                    name: "texture_staging",
+                    requirements: mem_requirements,
+                    location: gpu_allocator::MemoryLocation::CpuToGpu,
+                    linear: true,
+                    allocation_scheme: gpu_allocator::vulkan::AllocationScheme::GpuAllocatorManaged,
+                })
+                .map_err(|e| {
                     unsafe {
                         self.device.destroy_buffer(staging_buffer, None);
                     }
-                    return;
-                }
-            }
+                    GraphicsError::ResourceCreationFailed(format!(
+                        "Failed to allocate staging buffer memory: {}",
+                        e
+                    ))
+                })?
         };
 
         // Bind memory to staging buffer
@@ -1111,7 +1163,6 @@ impl VulkanBackend {
                 staging_allocation.offset(),
             )
         } {
-            log::error!("Failed to bind staging buffer memory: {:?}", e);
             {
                 let mut allocator = self.allocator.lock();
                 let _ = allocator.free(staging_allocation);
@@ -1119,20 +1170,14 @@ impl VulkanBackend {
             unsafe {
                 self.device.destroy_buffer(staging_buffer, None);
             }
-            return;
+            return Err(GraphicsError::Internal(format!(
+                "Failed to bind staging buffer memory: {:?}",
+                e
+            )));
         }
 
         // Copy data to staging buffer
-        if let Some(mapped_ptr) = staging_allocation.mapped_ptr() {
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    data.as_ptr(),
-                    mapped_ptr.as_ptr() as *mut u8,
-                    data.len(),
-                );
-            }
-        } else {
-            log::error!("Staging buffer is not mapped");
+        let Some(mapped_ptr) = staging_allocation.mapped_ptr() else {
             {
                 let mut allocator = self.allocator.lock();
                 let _ = allocator.free(staging_allocation);
@@ -1140,7 +1185,17 @@ impl VulkanBackend {
             unsafe {
                 self.device.destroy_buffer(staging_buffer, None);
             }
-            return;
+            return Err(GraphicsError::Internal(
+                "Staging buffer is not mapped".to_string(),
+            ));
+        };
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                mapped_ptr.as_ptr() as *mut u8,
+                data.len(),
+            );
         }
 
         // Allocate command buffer
@@ -1152,7 +1207,6 @@ impl VulkanBackend {
         let cmd_buffers = match unsafe { self.device.allocate_command_buffers(&alloc_info) } {
             Ok(c) => c,
             Err(e) => {
-                log::error!("Failed to allocate command buffer: {:?}", e);
                 {
                     let mut allocator = self.allocator.lock();
                     let _ = allocator.free(staging_allocation);
@@ -1160,7 +1214,10 @@ impl VulkanBackend {
                 unsafe {
                     self.device.destroy_buffer(staging_buffer, None);
                 }
-                return;
+                return Err(GraphicsError::Internal(format!(
+                    "Failed to allocate command buffer: {:?}",
+                    e
+                )));
             }
         };
         let cmd = cmd_buffers[0];
@@ -1170,7 +1227,6 @@ impl VulkanBackend {
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
         if let Err(e) = unsafe { self.device.begin_command_buffer(cmd, &begin_info) } {
-            log::error!("Failed to begin command buffer: {:?}", e);
             unsafe {
                 self.device
                     .free_command_buffers(self.command_pool, &cmd_buffers);
@@ -1182,7 +1238,10 @@ impl VulkanBackend {
             unsafe {
                 self.device.destroy_buffer(staging_buffer, None);
             }
-            return;
+            return Err(GraphicsError::Internal(format!(
+                "Failed to begin command buffer: {:?}",
+                e
+            )));
         }
 
         // Transition image layout to TRANSFER_DST_OPTIMAL
@@ -1273,7 +1332,6 @@ impl VulkanBackend {
 
         // End command buffer
         if let Err(e) = unsafe { self.device.end_command_buffer(cmd) } {
-            log::error!("Failed to end command buffer: {:?}", e);
             unsafe {
                 self.device
                     .free_command_buffers(self.command_pool, &cmd_buffers);
@@ -1285,25 +1343,24 @@ impl VulkanBackend {
             unsafe {
                 self.device.destroy_buffer(staging_buffer, None);
             }
-            return;
+            return Err(GraphicsError::Internal(format!(
+                "Failed to end command buffer: {:?}",
+                e
+            )));
         }
 
         // Submit command buffer
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
 
-        if let Err(e) = unsafe {
+        let submit_result = unsafe {
             self.device
                 .queue_submit(self.graphics_queue, &[submit_info], vk::Fence::null())
-        } {
-            log::error!("Failed to submit command buffer: {:?}", e);
-        }
+        };
 
-        // Wait for completion
-        if let Err(e) = unsafe { self.device.queue_wait_idle(self.graphics_queue) } {
-            log::error!("Failed to wait for queue idle: {:?}", e);
-        }
+        // Wait for completion regardless of submit result
+        let wait_result = unsafe { self.device.queue_wait_idle(self.graphics_queue) };
 
-        // Cleanup
+        // Cleanup (always performed)
         unsafe {
             self.device
                 .free_command_buffers(self.command_pool, &cmd_buffers);
@@ -1315,6 +1372,16 @@ impl VulkanBackend {
         unsafe {
             self.device.destroy_buffer(staging_buffer, None);
         }
+
+        // Check results after cleanup
+        submit_result.map_err(|e| {
+            GraphicsError::Internal(format!("Failed to submit command buffer: {:?}", e))
+        })?;
+        wait_result.map_err(|e| {
+            GraphicsError::Internal(format!("Failed to wait for queue idle: {:?}", e))
+        })?;
+
+        Ok(())
     }
 
     fn encode_pass(&self, cmd: vk::CommandBuffer, pass: &Pass) -> Result<(), GraphicsError> {
@@ -2220,8 +2287,11 @@ impl VulkanBackend {
         _cmd: vk::CommandBuffer,
         _pass: &crate::graph::ComputePass,
     ) -> Result<(), GraphicsError> {
-        // TODO: Implement compute pass encoding
-        Ok(())
+        // Compute passes are not yet implemented in the Vulkan backend.
+        // Return an error to make this failure explicit rather than silently doing nothing.
+        Err(GraphicsError::FeatureNotSupported(
+            "Compute passes are not yet implemented in the Vulkan backend".to_string(),
+        ))
     }
 
     #[allow(dead_code)]

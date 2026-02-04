@@ -467,12 +467,17 @@ impl GraphicsDevice {
     ///
     /// ```ignore
     /// let vertices: &[f32] = &[0.0, 0.0, 1.0, 0.0, 0.5, 1.0];
-    /// device.write_buffer(&buffer, 0, bytemuck::cast_slice(vertices));
+    /// device.write_buffer(&buffer, 0, bytemuck::cast_slice(vertices))?;
     /// ```
-    pub fn write_buffer(&self, buffer: &Buffer, offset: u64, data: &[u8]) {
+    pub fn write_buffer(
+        &self,
+        buffer: &Buffer,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<(), crate::error::GraphicsError> {
         self.instance
             .backend()
-            .write_buffer(buffer.gpu_handle(), offset, data);
+            .write_buffer(buffer.gpu_handle(), offset, data)
     }
 
     /// Read data from a buffer.
@@ -508,12 +513,16 @@ impl GraphicsDevice {
     ///
     /// ```ignore
     /// let pixels: Vec<u8> = vec![255, 0, 0, 255, 0, 255, 0, 255, ...]; // RGBA data
-    /// device.write_texture(&texture, &pixels);
+    /// device.write_texture(&texture, &pixels)?;
     /// ```
-    pub fn write_texture(&self, texture: &Texture, data: &[u8]) {
+    pub fn write_texture(
+        &self,
+        texture: &Texture,
+        data: &[u8],
+    ) -> Result<(), crate::error::GraphicsError> {
         self.instance
             .backend()
-            .write_texture(texture.gpu_handle(), data, texture.descriptor());
+            .write_texture(texture.gpu_handle(), data, texture.descriptor())
     }
 
     /// Clean up dead weak references to released resources.

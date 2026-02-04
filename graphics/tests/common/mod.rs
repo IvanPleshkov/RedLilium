@@ -739,7 +739,9 @@ pub fn write_quad_vertices(ctx: &TestContext, mesh: &Mesh, vertices: &[QuadVerte
             vertices.len() * QuadVertex::SIZE,
         )
     };
-    ctx.device.write_buffer(vb, 0, bytes);
+    ctx.device
+        .write_buffer(vb, 0, bytes)
+        .expect("Failed to write quad vertex buffer");
 }
 
 /// Create a material that samples a texture and outputs its color.

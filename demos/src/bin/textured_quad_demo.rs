@@ -223,7 +223,9 @@ impl TexturedQuadDemo {
                 BufferUsage::COPY_SRC | BufferUsage::COPY_DST,
             ))
             .expect("Failed to create staging buffer");
-        device.write_buffer(&staging_buffer, 0, &padded_data);
+        device
+            .write_buffer(&staging_buffer, 0, &padded_data)
+            .expect("Failed to write staging buffer");
         self.staging_buffer = Some(staging_buffer);
         self.needs_texture_upload = true;
 
@@ -339,10 +341,14 @@ impl TexturedQuadDemo {
             .expect("Failed to create mesh");
 
         if let Some(vb) = mesh.vertex_buffer(0) {
-            device.write_buffer(vb, 0, bytemuck::cast_slice(&vertices));
+            device
+                .write_buffer(vb, 0, bytemuck::cast_slice(&vertices))
+                .expect("Failed to write vertex buffer");
         }
         if let Some(ib) = mesh.index_buffer() {
-            device.write_buffer(ib, 0, bytemuck::cast_slice(&indices));
+            device
+                .write_buffer(ib, 0, bytemuck::cast_slice(&indices))
+                .expect("Failed to write index buffer");
         }
         self.mesh = Some(mesh);
 
@@ -394,7 +400,8 @@ impl TexturedQuadDemo {
 
         if let Some(buffer) = &self.uniform_buffer {
             ctx.device()
-                .write_buffer(buffer, 0, bytemuck::bytes_of(&uniforms));
+                .write_buffer(buffer, 0, bytemuck::bytes_of(&uniforms))
+                .expect("Failed to write uniform buffer");
         }
     }
 

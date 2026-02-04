@@ -40,6 +40,8 @@ pub struct VulkanSwapchain {
     swapchain_loader: ash::khr::swapchain::Device,
     /// Command pool for freeing command buffers.
     command_pool: vk::CommandPool,
+    /// Whether resources have been destroyed.
+    destroyed: bool,
 }
 
 impl VulkanSwapchain {
@@ -54,6 +56,11 @@ impl VulkanSwapchain {
 
         // Choose format
         let formats = vulkan_backend.get_surface_formats(surface)?;
+        if formats.is_empty() {
+            return Err(GraphicsError::ResourceCreationFailed(
+                "No surface formats available".to_string(),
+            ));
+        }
         let surface_format = formats
             .iter()
             .find(|f| f.format == convert_texture_format(config.format))
@@ -223,6 +230,7 @@ impl VulkanSwapchain {
             device: vulkan_backend.device().clone(),
             swapchain_loader: vulkan_backend.swapchain_loader().clone(),
             command_pool: vulkan_backend.command_pool(),
+            destroyed: false,
         })
     }
 
@@ -231,10 +239,13 @@ impl VulkanSwapchain {
     /// Note: This is called automatically by Drop, but can be called explicitly
     /// if you need to control when destruction happens.
     pub fn destroy(&mut self) {
-        // Check if already destroyed (swapchain handle is null)
-        if self.swapchain == vk::SwapchainKHR::null() {
+        // Check if already destroyed using state flag (more reliable than null checks)
+        if self.destroyed {
             return;
         }
+
+        // Mark as destroyed first to prevent re-entry even if something fails below
+        self.destroyed = true;
 
         unsafe {
             let _ = self.device.device_wait_idle();
@@ -262,10 +273,12 @@ impl VulkanSwapchain {
                 self.device.destroy_image_view(view, None);
             }
 
-            // Destroy swapchain
-            self.swapchain_loader
-                .destroy_swapchain(self.swapchain, None);
-            self.swapchain = vk::SwapchainKHR::null();
+            // Destroy swapchain (only if it was successfully created)
+            if self.swapchain != vk::SwapchainKHR::null() {
+                self.swapchain_loader
+                    .destroy_swapchain(self.swapchain, None);
+                self.swapchain = vk::SwapchainKHR::null();
+            }
         }
     }
 
@@ -313,8 +326,19 @@ impl VulkanSwapchain {
         })?;
 
         self.current_image_index = image_index;
-        let image = self.images[image_index as usize];
-        let view = self.image_views[image_index as usize];
+
+        // Validate image index to prevent out-of-bounds access
+        let image_idx = image_index as usize;
+        if image_idx >= self.images.len() || image_idx >= self.image_views.len() {
+            return Err(GraphicsError::Internal(format!(
+                "Invalid swapchain image index {} (have {} images)",
+                image_index,
+                self.images.len()
+            )));
+        }
+
+        let image = self.images[image_idx];
+        let view = self.image_views[image_idx];
         let swapchain_handle = self.swapchain;
         let present_cmd = self.present_command_buffers[current_frame];
 

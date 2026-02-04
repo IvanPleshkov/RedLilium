@@ -193,15 +193,8 @@ impl Fence {
                 true
             }
             FenceInner::Gpu { fence, instance } => {
-                // For GPU fences, we poll with short sleeps until timeout
-                let start = std::time::Instant::now();
-                while !instance.backend().is_fence_signaled(fence) {
-                    if start.elapsed() >= timeout {
-                        return false;
-                    }
-                    std::thread::sleep(std::time::Duration::from_micros(100));
-                }
-                true
+                // Use proper backend wait with timeout instead of polling
+                instance.backend().wait_fence_timeout(fence, timeout)
             }
         }
     }
@@ -246,10 +239,14 @@ impl Clone for Fence {
                 },
             },
             FenceInner::Gpu { .. } => {
-                // GPU fences cannot be cloned - create a new dummy one
-                // This maintains API compatibility but logs a warning
-                log::warn!("Cloning GPU fence creates a dummy fence - use with caution");
-                Self::new_signaled()
+                // GPU fences cannot be cloned because they represent unique GPU state.
+                // Cloning would create a fence with incorrect signaled status, leading
+                // to synchronization bugs (waiting on a fence that's already signaled
+                // or never signals). Panic to catch this programming error early.
+                panic!(
+                    "GPU fences cannot be cloned. Each GPU fence represents unique GPU state. \
+                     If you need to share fence state, use Arc<Fence> instead."
+                );
             }
         }
     }

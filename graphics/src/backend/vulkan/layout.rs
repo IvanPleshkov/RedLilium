@@ -115,11 +115,22 @@ impl TextureLayout {
             Self::ColorAttachment => vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
             Self::DepthStencilAttachment => vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
             Self::DepthStencilReadOnly => vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-            Self::ShaderReadOnly => vk::PipelineStageFlags::FRAGMENT_SHADER,
+            // ShaderReadOnly textures can be sampled from vertex, fragment, or compute shaders.
+            // Use all shader stages to ensure correct synchronization.
+            Self::ShaderReadOnly => {
+                vk::PipelineStageFlags::VERTEX_SHADER
+                    | vk::PipelineStageFlags::FRAGMENT_SHADER
+                    | vk::PipelineStageFlags::COMPUTE_SHADER
+            }
             Self::TransferSrc => vk::PipelineStageFlags::TRANSFER,
             Self::TransferDst => vk::PipelineStageFlags::TRANSFER,
             Self::PresentSrc => vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-            Self::General => vk::PipelineStageFlags::COMPUTE_SHADER,
+            // General layout is used for storage images accessed from any shader stage.
+            Self::General => {
+                vk::PipelineStageFlags::VERTEX_SHADER
+                    | vk::PipelineStageFlags::FRAGMENT_SHADER
+                    | vk::PipelineStageFlags::COMPUTE_SHADER
+            }
         }
     }
 
@@ -130,11 +141,22 @@ impl TextureLayout {
             Self::ColorAttachment => vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
             Self::DepthStencilAttachment => vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
             Self::DepthStencilReadOnly => vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-            Self::ShaderReadOnly => vk::PipelineStageFlags::FRAGMENT_SHADER,
+            // ShaderReadOnly textures can be sampled from vertex, fragment, or compute shaders.
+            // Use all shader stages to ensure correct synchronization.
+            Self::ShaderReadOnly => {
+                vk::PipelineStageFlags::VERTEX_SHADER
+                    | vk::PipelineStageFlags::FRAGMENT_SHADER
+                    | vk::PipelineStageFlags::COMPUTE_SHADER
+            }
             Self::TransferSrc => vk::PipelineStageFlags::TRANSFER,
             Self::TransferDst => vk::PipelineStageFlags::TRANSFER,
             Self::PresentSrc => vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-            Self::General => vk::PipelineStageFlags::COMPUTE_SHADER,
+            // General layout is used for storage images accessed from any shader stage.
+            Self::General => {
+                vk::PipelineStageFlags::VERTEX_SHADER
+                    | vk::PipelineStageFlags::FRAGMENT_SHADER
+                    | vk::PipelineStageFlags::COMPUTE_SHADER
+            }
         }
     }
 
