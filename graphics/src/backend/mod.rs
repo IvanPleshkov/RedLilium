@@ -802,6 +802,17 @@ impl GpuBackend {
         }
     }
 
+    /// Write data to a texture.
+    pub fn write_texture(&self, texture: &GpuTexture, data: &[u8], descriptor: &TextureDescriptor) {
+        match self {
+            Self::Dummy(backend) => backend.write_texture(texture, data, descriptor),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(backend) => backend.write_texture(texture, data, descriptor),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => backend.write_texture(texture, data, descriptor),
+        }
+    }
+
     /// Create a surface from a window.
     ///
     /// # Safety

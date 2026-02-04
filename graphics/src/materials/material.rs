@@ -62,6 +62,138 @@ impl ShaderSource {
     }
 }
 
+/// Blend factor for blending operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum BlendFactor {
+    /// 0.0
+    #[default]
+    Zero,
+    /// 1.0
+    One,
+    /// Source color
+    Src,
+    /// 1 - source color
+    OneMinusSrc,
+    /// Source alpha
+    SrcAlpha,
+    /// 1 - source alpha
+    OneMinusSrcAlpha,
+    /// Destination color
+    Dst,
+    /// 1 - destination color
+    OneMinusDst,
+    /// Destination alpha
+    DstAlpha,
+    /// 1 - destination alpha
+    OneMinusDstAlpha,
+    /// min(source alpha, 1 - destination alpha)
+    SrcAlphaSaturated,
+    /// Constant color
+    Constant,
+    /// 1 - constant color
+    OneMinusConstant,
+}
+
+/// Blend operation for combining colors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum BlendOperation {
+    /// source + destination
+    #[default]
+    Add,
+    /// source - destination
+    Subtract,
+    /// destination - source
+    ReverseSubtract,
+    /// min(source, destination)
+    Min,
+    /// max(source, destination)
+    Max,
+}
+
+/// Blend component configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BlendComponent {
+    /// Source factor.
+    pub src_factor: BlendFactor,
+    /// Destination factor.
+    pub dst_factor: BlendFactor,
+    /// Blend operation.
+    pub operation: BlendOperation,
+}
+
+impl Default for BlendComponent {
+    fn default() -> Self {
+        Self {
+            src_factor: BlendFactor::One,
+            dst_factor: BlendFactor::Zero,
+            operation: BlendOperation::Add,
+        }
+    }
+}
+
+impl BlendComponent {
+    /// Create an over blending component (standard alpha blending).
+    pub fn over() -> Self {
+        Self {
+            src_factor: BlendFactor::SrcAlpha,
+            dst_factor: BlendFactor::OneMinusSrcAlpha,
+            operation: BlendOperation::Add,
+        }
+    }
+
+    /// Create a premultiplied alpha blending component.
+    pub fn premultiplied() -> Self {
+        Self {
+            src_factor: BlendFactor::One,
+            dst_factor: BlendFactor::OneMinusSrcAlpha,
+            operation: BlendOperation::Add,
+        }
+    }
+}
+
+/// Blend state for color blending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct BlendState {
+    /// Color blend component.
+    pub color: BlendComponent,
+    /// Alpha blend component.
+    pub alpha: BlendComponent,
+}
+
+impl BlendState {
+    /// Create a standard alpha blending state (src over dst).
+    pub fn alpha_blending() -> Self {
+        Self {
+            color: BlendComponent::over(),
+            alpha: BlendComponent::over(),
+        }
+    }
+
+    /// Create a premultiplied alpha blending state.
+    pub fn premultiplied_alpha() -> Self {
+        Self {
+            color: BlendComponent::premultiplied(),
+            alpha: BlendComponent::premultiplied(),
+        }
+    }
+
+    /// Create an additive blending state.
+    pub fn additive() -> Self {
+        Self {
+            color: BlendComponent {
+                src_factor: BlendFactor::One,
+                dst_factor: BlendFactor::One,
+                operation: BlendOperation::Add,
+            },
+            alpha: BlendComponent {
+                src_factor: BlendFactor::One,
+                dst_factor: BlendFactor::One,
+                operation: BlendOperation::Add,
+            },
+        }
+    }
+}
+
 /// Descriptor for creating a material.
 #[derive(Debug, Clone, Default)]
 pub struct MaterialDescriptor {
@@ -76,6 +208,9 @@ pub struct MaterialDescriptor {
     /// Used to verify mesh compatibility at draw time (debug builds).
     /// Wrapped in `Arc` to enable sharing and efficient pointer comparison.
     pub vertex_layout: Option<Arc<VertexLayout>>,
+
+    /// Blend state for color blending. If None, blending is disabled.
+    pub blend_state: Option<BlendState>,
 
     /// Optional label for debugging.
     pub label: Option<String>,
@@ -102,6 +237,12 @@ impl MaterialDescriptor {
     /// Set the expected vertex layout for mesh compatibility checking.
     pub fn with_vertex_layout(mut self, layout: Arc<VertexLayout>) -> Self {
         self.vertex_layout = Some(layout);
+        self
+    }
+
+    /// Set the blend state for color blending.
+    pub fn with_blend_state(mut self, blend_state: BlendState) -> Self {
+        self.blend_state = Some(blend_state);
         self
     }
 

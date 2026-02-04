@@ -160,6 +160,47 @@ impl WgpuBackend {
         }
     }
 
+    /// Write data to a texture.
+    pub fn write_texture(&self, texture: &GpuTexture, data: &[u8], descriptor: &TextureDescriptor) {
+        use crate::types::TextureDimension;
+
+        if let GpuTexture::Wgpu {
+            texture: wgpu_texture,
+            ..
+        } = texture
+        {
+            let format = convert_texture_format(descriptor.format);
+            let block_size = format.block_copy_size(None).unwrap_or(4);
+            let bytes_per_row = descriptor.size.width * block_size;
+
+            let depth_or_array_layers = match descriptor.dimension {
+                TextureDimension::Cube => 6,
+                TextureDimension::CubeArray => descriptor.size.depth * 6,
+                _ => descriptor.size.depth,
+            };
+
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: wgpu_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                data,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(descriptor.size.height),
+                },
+                wgpu::Extent3d {
+                    width: descriptor.size.width,
+                    height: descriptor.size.height,
+                    depth_or_array_layers,
+                },
+            );
+        }
+    }
+
     /// Read data from a buffer.
     pub fn read_buffer(&self, buffer: &GpuBuffer, offset: u64, size: u64) -> Vec<u8> {
         if let GpuBuffer::Wgpu(wgpu_buffer) = buffer {

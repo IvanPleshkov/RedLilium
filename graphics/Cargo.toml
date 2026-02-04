@@ -18,9 +18,13 @@ static_assertions.workspace = true
 glam = "0.31"
 winit = "0.30"
 raw-window-handle = "0.6"
+bytemuck = { version = "1.18", features = ["derive"] }
 
 # Shader composition
 naga_oil.workspace = true
+
+# UI
+egui = "0.33.3"
 
 # Optional GPU backend dependencies
 wgpu = { workspace = true, optional = true }

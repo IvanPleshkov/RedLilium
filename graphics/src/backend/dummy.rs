@@ -148,6 +148,22 @@ impl DummyBackend {
         // Return zeroed data
         vec![0u8; size as usize]
     }
+
+    /// Write data to a texture.
+    pub fn write_texture(
+        &self,
+        _texture: &GpuTexture,
+        data: &[u8],
+        descriptor: &TextureDescriptor,
+    ) {
+        log::trace!(
+            "DummyBackend: write_texture {:?} ({}x{}) len={}",
+            descriptor.label,
+            descriptor.size.width,
+            descriptor.size.height,
+            data.len()
+        );
+    }
 }
 
 impl Default for DummyBackend {

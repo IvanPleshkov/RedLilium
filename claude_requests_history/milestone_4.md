@@ -118,3 +118,17 @@ How can I do this?
 ## Request 15:
 Please audit shader library in `graphics` crate.
 I want to define a folder in a workspace with shader library and avoid shaders in the rust code as strings.
+
+## Request 16:
+Please audit `graphics` crate.
+I want to add support of UI library:
+https://github.com/emilk/egui
+of version "0.33.3".
+Please make an intergration into the graphics.
+Shader please add to the shader library and include into standart shader library.
+Make please the integration in the egui folder in graphics crate and try to avoid unnecessary changes to other parts.
+Do not touch backends if possible.
+Proposal of design:
+There is EguiController structure with `Arc<dyn EguiApp>`, where EguiApp is a trait to handle egui events.
+EguiController has inside all resources and has a function to create a render graph to send it into frame scheduler.
+Add also to PRB demo a ui with example of usage with different controls.

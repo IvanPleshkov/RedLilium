@@ -1003,6 +1003,27 @@ impl VulkanBackend {
         vec![0u8; size as usize]
     }
 
+    /// Write data to a texture.
+    ///
+    /// Note: For Vulkan, direct texture writes typically require staging buffers
+    /// and command buffer submission. This is a simplified implementation that
+    /// logs a warning - full texture upload should use transfer passes.
+    pub fn write_texture(
+        &self,
+        _texture: &GpuTexture,
+        data: &[u8],
+        descriptor: &crate::types::TextureDescriptor,
+    ) {
+        log::warn!(
+            "VulkanBackend: write_texture {:?} ({}x{}) len={} - direct texture writes require transfer passes",
+            descriptor.label,
+            descriptor.size.width,
+            descriptor.size.height,
+            data.len()
+        );
+        // For proper implementation, use a staging buffer and transfer pass
+    }
+
     fn encode_pass(&self, cmd: vk::CommandBuffer, pass: &Pass) -> Result<(), GraphicsError> {
         match pass {
             Pass::Graphics(graphics_pass) => self.encode_graphics_pass(cmd, graphics_pass),

@@ -6,6 +6,7 @@ use crate::materials::BoundResource;
 use crate::materials::MaterialInstance;
 use crate::mesh::Mesh;
 use crate::resources::Buffer;
+use crate::types::ScissorRect;
 
 use super::resource_usage::{BufferAccessMode, PassResourceUsage, TextureAccessMode};
 use super::target::{RenderTarget, RenderTargetConfig};
@@ -134,6 +135,8 @@ pub struct DrawCommand {
     pub instance_count: u32,
     /// First instance index (default 0).
     pub first_instance: u32,
+    /// Optional scissor rectangle for clipping.
+    pub scissor_rect: Option<ScissorRect>,
 }
 
 impl DrawCommand {
@@ -153,6 +156,7 @@ impl DrawCommand {
             material,
             instance_count: 1,
             first_instance: 0,
+            scissor_rect: None,
         }
     }
 
@@ -165,6 +169,12 @@ impl DrawCommand {
     /// Set the first instance index.
     pub fn with_first_instance(mut self, first: u32) -> Self {
         self.first_instance = first;
+        self
+    }
+
+    /// Set the scissor rectangle for clipping.
+    pub fn with_scissor_rect(mut self, rect: ScissorRect) -> Self {
+        self.scissor_rect = Some(rect);
         self
     }
 
@@ -489,6 +499,21 @@ impl GraphicsPass {
     ) {
         self.draw_commands
             .push(DrawCommand::new(mesh, material).with_instance_count(instance_count));
+    }
+
+    /// Add a draw command with a scissor rectangle for clipping.
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if the mesh and material are incompatible.
+    pub fn add_draw_with_scissor(
+        &mut self,
+        mesh: Arc<Mesh>,
+        material: Arc<MaterialInstance>,
+        scissor_rect: ScissorRect,
+    ) {
+        self.draw_commands
+            .push(DrawCommand::new(mesh, material).with_scissor_rect(scissor_rect));
     }
 
     /// Add a pre-built draw command.

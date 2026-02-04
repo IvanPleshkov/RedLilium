@@ -63,6 +63,7 @@
 pub mod backend;
 pub mod compiler;
 pub mod device;
+pub mod egui;
 pub mod error;
 pub mod graph;
 pub mod instance;
@@ -91,8 +92,9 @@ pub use instance::{
     AdapterInfo, AdapterType, BackendType, GraphicsInstance, InstanceParameters, WgpuBackendType,
 };
 pub use materials::{
-    BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BoundResource, Material,
-    MaterialDescriptor, MaterialInstance, ShaderSource, ShaderStage, ShaderStageFlags,
+    BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BlendComponent, BlendFactor,
+    BlendOperation, BlendState, BoundResource, Material, MaterialDescriptor, MaterialInstance,
+    ShaderSource, ShaderStage, ShaderStageFlags,
 };
 pub use mesh::{
     IndexFormat, Mesh, MeshDescriptor, PrimitiveTopology, VertexAttribute, VertexAttributeFormat,

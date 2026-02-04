@@ -17,4 +17,7 @@ mod material;
 
 pub use bindings::{BindingLayout, BindingLayoutEntry, BindingType, ShaderStageFlags};
 pub use instance::{BindingGroup, BoundResource, MaterialInstance};
-pub use material::{Material, MaterialDescriptor, ShaderSource, ShaderStage};
+pub use material::{
+    BlendComponent, BlendFactor, BlendOperation, BlendState, Material, MaterialDescriptor,
+    ShaderSource, ShaderStage,
+};

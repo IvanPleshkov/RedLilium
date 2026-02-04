@@ -10,6 +10,7 @@
 //! - `color.wgsl` - Color space conversions and tone mapping
 //! - `brdf.wgsl` - PBR BRDF functions (Cook-Torrance)
 //! - `ibl.wgsl` - Image-based lighting utilities
+//! - `egui.wgsl` - Egui UI rendering utilities
 //!
 //! # Available Modules
 //!
@@ -19,6 +20,7 @@
 //! | `redlilium::color` | Color space conversions and tone mapping |
 //! | `redlilium::brdf` | PBR BRDF functions (Cook-Torrance) |
 //! | `redlilium::ibl` | Image-based lighting utilities |
+//! | `redlilium::egui` | Egui UI rendering utilities |
 //!
 //! # Example
 //!
@@ -50,6 +52,9 @@ const BRDF_MODULE: &str = include_str!("../../../shaders/library/brdf.wgsl");
 /// Image-based lighting utilities.
 const IBL_MODULE: &str = include_str!("../../../shaders/library/ibl.wgsl");
 
+/// Egui UI rendering utilities.
+const EGUI_MODULE: &str = include_str!("../../../shaders/library/egui.wgsl");
+
 // =============================================================================
 // ShaderLibrary
 // =============================================================================
@@ -67,6 +72,7 @@ impl ShaderLibrary {
     /// - `redlilium::color` - Color processing
     /// - `redlilium::brdf` - PBR BRDF functions
     /// - `redlilium::ibl` - Image-based lighting
+    /// - `redlilium::egui` - Egui UI rendering utilities
     pub fn standard() -> Self {
         Self {
             modules: vec![
@@ -74,6 +80,7 @@ impl ShaderLibrary {
                 ("redlilium::color", COLOR_MODULE),
                 ("redlilium::brdf", BRDF_MODULE),
                 ("redlilium::ibl", IBL_MODULE),
+                ("redlilium::egui", EGUI_MODULE),
             ],
         }
     }
@@ -106,11 +113,12 @@ mod tests {
         let library = ShaderLibrary::standard();
         let modules: Vec<_> = library.modules().collect();
 
-        assert_eq!(modules.len(), 4);
+        assert_eq!(modules.len(), 5);
         assert!(modules.iter().any(|(name, _)| *name == "redlilium::math"));
         assert!(modules.iter().any(|(name, _)| *name == "redlilium::color"));
         assert!(modules.iter().any(|(name, _)| *name == "redlilium::brdf"));
         assert!(modules.iter().any(|(name, _)| *name == "redlilium::ibl"));
+        assert!(modules.iter().any(|(name, _)| *name == "redlilium::egui"));
     }
 
     #[test]
@@ -145,5 +153,9 @@ mod tests {
 
         assert!(IBL_MODULE.contains("#define_import_path redlilium::ibl"));
         assert!(IBL_MODULE.contains("fn ibl_ambient"));
+
+        assert!(EGUI_MODULE.contains("#define_import_path redlilium::egui"));
+        assert!(EGUI_MODULE.contains("struct EguiUniforms"));
+        assert!(EGUI_MODULE.contains("fn srgb_to_linear"));
     }
 }

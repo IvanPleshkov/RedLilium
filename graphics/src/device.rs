@@ -494,6 +494,28 @@ impl GraphicsDevice {
             .read_buffer(buffer.gpu_handle(), offset, size)
     }
 
+    /// Write data to a texture.
+    ///
+    /// Uploads pixel data to the texture. The data should be in the format
+    /// matching the texture's format.
+    ///
+    /// # Arguments
+    ///
+    /// * `texture` - The texture to write to
+    /// * `data` - The pixel data to upload
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let pixels: Vec<u8> = vec![255, 0, 0, 255, 0, 255, 0, 255, ...]; // RGBA data
+    /// device.write_texture(&texture, &pixels);
+    /// ```
+    pub fn write_texture(&self, texture: &Texture, data: &[u8]) {
+        self.instance
+            .backend()
+            .write_texture(texture.gpu_handle(), data, texture.descriptor());
+    }
+
     /// Clean up dead weak references to released resources.
     pub fn cleanup_dead_resources(&self) {
         if let Ok(mut buffers) = self.buffers.write() {

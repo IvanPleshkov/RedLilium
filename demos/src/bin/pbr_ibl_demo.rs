@@ -14,7 +14,7 @@
 //! - https://learnopengl.com/PBR/IBL/Specular-IBL
 
 use std::f32::consts::PI;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use glam::{Mat4, Vec3};
 use redlilium_app::{App, AppArgs, AppContext, AppHandler, DefaultAppArgs, DrawContext};
@@ -26,6 +26,7 @@ use redlilium_graphics::{
     ShaderSource, ShaderStage, ShaderStageFlags, TextureDescriptor, TextureFormat, TextureUsage,
     TransferConfig, TransferOperation, TransferPass, VertexAttribute, VertexAttributeFormat,
     VertexAttributeSemantic, VertexBufferLayout, VertexLayout,
+    egui::{EguiApp, EguiController, egui},
 };
 use winit::event::KeyEvent;
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -179,6 +180,198 @@ fn generate_sphere(radius: f32, segments: u32, rings: u32) -> (Vec<PbrVertex>, V
     (vertices, indices)
 }
 
+// === Egui UI ===
+
+/// UI state shared between the demo and egui
+#[derive(Clone)]
+pub struct PbrUiState {
+    /// Base color RGB (0.0-1.0)
+    pub base_color: [f32; 3],
+    /// Skybox MIP level (0-7)
+    pub skybox_mip_level: f32,
+    /// Camera auto-rotation enabled
+    pub auto_rotate: bool,
+    /// Camera zoom level
+    pub camera_distance: f32,
+    /// Whether the UI is visible
+    pub ui_visible: bool,
+    /// Grid spacing
+    pub sphere_spacing: f32,
+    /// Whether to show the info panel
+    pub show_info: bool,
+}
+
+impl Default for PbrUiState {
+    fn default() -> Self {
+        Self {
+            base_color: [0.9, 0.1, 0.1],
+            skybox_mip_level: 0.0,
+            auto_rotate: true,
+            camera_distance: 8.0,
+            ui_visible: true,
+            sphere_spacing: SPHERE_SPACING,
+            show_info: true,
+        }
+    }
+}
+
+/// Egui application for the PBR demo UI
+pub struct PbrUi {
+    state: PbrUiState,
+    state_changed: bool,
+}
+
+impl Default for PbrUi {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PbrUi {
+    pub fn new() -> Self {
+        Self {
+            state: PbrUiState::default(),
+            state_changed: true,
+        }
+    }
+
+    pub fn state(&self) -> &PbrUiState {
+        &self.state
+    }
+
+    pub fn take_state_changed(&mut self) -> bool {
+        let changed = self.state_changed;
+        self.state_changed = false;
+        changed
+    }
+
+    pub fn set_camera_distance(&mut self, distance: f32) {
+        self.state.camera_distance = distance;
+    }
+
+    pub fn toggle_visibility(&mut self) {
+        self.state.ui_visible = !self.state.ui_visible;
+    }
+}
+
+impl EguiApp for PbrUi {
+    fn setup(&mut self, ctx: &egui::Context) {
+        // Configure egui style
+        let mut style = (*ctx.style()).clone();
+        style.visuals.window_corner_radius = egui::CornerRadius::same(8);
+        style.spacing.slider_width = 200.0;
+        ctx.set_style(style);
+    }
+
+    fn update(&mut self, ctx: &egui::Context) {
+        if !self.state.ui_visible {
+            return;
+        }
+
+        egui::Window::new("PBR Controls")
+            .default_pos([10.0, 10.0])
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.heading("Material");
+                ui.separator();
+
+                // Base color picker
+                ui.horizontal(|ui| {
+                    ui.label("Base Color:");
+                    if ui
+                        .color_edit_button_rgb(&mut self.state.base_color)
+                        .changed()
+                    {
+                        self.state_changed = true;
+                    }
+                });
+
+                ui.add_space(10.0);
+                ui.heading("Environment");
+                ui.separator();
+
+                // Skybox mip level slider
+                ui.horizontal(|ui| {
+                    ui.label("Skybox Blur:");
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut self.state.skybox_mip_level, 0.0..=7.0)
+                                .step_by(0.5),
+                        )
+                        .changed()
+                    {
+                        self.state_changed = true;
+                    }
+                });
+
+                ui.add_space(10.0);
+                ui.heading("Camera");
+                ui.separator();
+
+                // Auto-rotate checkbox
+                if ui
+                    .checkbox(&mut self.state.auto_rotate, "Auto Rotate")
+                    .changed()
+                {
+                    self.state_changed = true;
+                }
+
+                // Camera distance slider
+                ui.horizontal(|ui| {
+                    ui.label("Distance:");
+                    if ui
+                        .add(egui::Slider::new(
+                            &mut self.state.camera_distance,
+                            2.0..=20.0,
+                        ))
+                        .changed()
+                    {
+                        self.state_changed = true;
+                    }
+                });
+
+                ui.add_space(10.0);
+                ui.heading("Grid");
+                ui.separator();
+
+                // Sphere spacing slider
+                ui.horizontal(|ui| {
+                    ui.label("Spacing:");
+                    if ui
+                        .add(egui::Slider::new(&mut self.state.sphere_spacing, 1.0..=3.0))
+                        .changed()
+                    {
+                        self.state_changed = true;
+                    }
+                });
+
+                ui.add_space(10.0);
+
+                // Show info checkbox
+                ui.checkbox(&mut self.state.show_info, "Show Info Panel");
+            });
+
+        // Info panel
+        if self.state.show_info {
+            egui::Window::new("Info")
+                .default_pos([10.0, 400.0])
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label("PBR IBL Demo");
+                    ui.separator();
+                    ui.label(format!("Grid: {}x{} spheres", GRID_SIZE, GRID_SIZE));
+                    ui.label("Rows: Roughness (top=smooth)");
+                    ui.label("Cols: Metallic (left=dielectric)");
+                    ui.separator();
+                    ui.label("Controls:");
+                    ui.label("  H: Toggle UI");
+                    ui.label("  LMB Drag: Rotate camera");
+                    ui.label("  Scroll: Zoom");
+                });
+        }
+    }
+}
+
 // === HDR Loading ===
 
 const HDR_URL: &str = "https://raw.githubusercontent.com/JoeyDeVries/LearnOpenGL/master/resources/textures/hdr/newport_loft.hdr";
@@ -297,6 +490,11 @@ struct PbrIblDemo {
     brdf_size: (u32, u32),
     brdf_aligned_bytes_per_row: u32,
     needs_ibl_upload: bool,
+
+    // Egui UI
+    egui_controller: Option<EguiController>,
+    egui_ui: Arc<RwLock<PbrUi>>,
+    needs_instance_update: bool,
 }
 
 impl PbrIblDemo {
@@ -330,6 +528,9 @@ impl PbrIblDemo {
             brdf_size: (0, 0),
             brdf_aligned_bytes_per_row: 0,
             needs_ibl_upload: false,
+            egui_controller: None,
+            egui_ui: Arc::new(RwLock::new(PbrUi::new())),
+            needs_instance_update: false,
         }
     }
 
@@ -775,13 +976,28 @@ impl PbrIblDemo {
     }
 
     fn create_sphere_instances(&self) -> Vec<SphereInstance> {
+        // Get base color from UI if available
+        let base_color = if let Ok(ui) = self.egui_ui.read() {
+            let c = ui.state().base_color;
+            [c[0], c[1], c[2], 1.0]
+        } else {
+            [0.9, 0.1, 0.1, 1.0]
+        };
+
+        // Get spacing from UI if available
+        let spacing = if let Ok(ui) = self.egui_ui.read() {
+            ui.state().sphere_spacing
+        } else {
+            SPHERE_SPACING
+        };
+
         let mut instances = Vec::with_capacity(GRID_SIZE * GRID_SIZE);
-        let offset = (GRID_SIZE as f32 - 1.0) * SPHERE_SPACING / 2.0;
+        let offset = (GRID_SIZE as f32 - 1.0) * spacing / 2.0;
 
         for row in 0..GRID_SIZE {
             for col in 0..GRID_SIZE {
-                let x = col as f32 * SPHERE_SPACING - offset;
-                let z = row as f32 * SPHERE_SPACING - offset;
+                let x = col as f32 * spacing - offset;
+                let z = row as f32 * spacing - offset;
 
                 let model = Mat4::from_translation(Vec3::new(x, 0.0, z));
                 let metallic = col as f32 / (GRID_SIZE - 1) as f32;
@@ -789,13 +1005,21 @@ impl PbrIblDemo {
 
                 instances.push(SphereInstance {
                     model: model.to_cols_array_2d(),
-                    base_color: [0.9, 0.1, 0.1, 1.0], // Red
+                    base_color,
                     metallic_roughness: [metallic, roughness, 0.0, 0.0],
                 });
             }
         }
 
         instances
+    }
+
+    fn update_sphere_instances(&mut self, ctx: &AppContext) {
+        let instances = self.create_sphere_instances();
+        let instance_data = bytemuck::cast_slice(&instances);
+        if let Some(buffer) = &self.instance_buffer {
+            ctx.device().write_buffer(buffer, 0, instance_data);
+        }
     }
 
     fn update_camera_buffer(&self, ctx: &AppContext) {
@@ -1124,19 +1348,57 @@ impl AppHandler for PbrIblDemo {
         log::info!("Controls:");
         log::info!("  - Left mouse drag: Rotate camera");
         log::info!("  - Scroll: Zoom");
-        log::info!("  - Shift+0-7: Change skybox MIP level (0=sharp, higher=blurry)");
+        log::info!("  - H: Toggle UI visibility");
 
         self.create_gpu_resources(ctx);
+
+        // Initialize egui controller
+        self.egui_controller = Some(EguiController::new(
+            ctx.device().clone(),
+            self.egui_ui.clone(),
+            ctx.width(),
+            ctx.height(),
+        ));
     }
 
     fn on_resize(&mut self, ctx: &mut AppContext) {
         self.create_depth_texture(ctx);
+        if let Some(egui) = &mut self.egui_controller {
+            egui.on_resize(ctx.width(), ctx.height());
+        }
     }
 
     fn on_update(&mut self, ctx: &mut AppContext) -> bool {
-        if !self.mouse_pressed {
-            self.camera.rotate(ctx.delta_time() * 0.15, 0.0);
+        // Process UI state changes
+        if let Ok(mut ui) = self.egui_ui.write() {
+            if ui.take_state_changed() {
+                let state = ui.state().clone();
+
+                // Update skybox mip level
+                self.skybox_mip_level = state.skybox_mip_level;
+
+                // Update camera distance
+                self.camera.distance = state.camera_distance;
+
+                // Update sphere instances if color or spacing changed
+                self.needs_instance_update = true;
+            }
+
+            // Sync camera distance back to UI
+            ui.set_camera_distance(self.camera.distance);
+
+            // Auto-rotate if enabled
+            if ui.state().auto_rotate && !self.mouse_pressed {
+                self.camera.rotate(ctx.delta_time() * 0.15, 0.0);
+            }
         }
+
+        // Update instances if needed
+        if self.needs_instance_update {
+            self.update_sphere_instances(ctx);
+            self.needs_instance_update = false;
+        }
+
         self.update_camera_buffer(ctx);
         self.update_skybox_buffer(ctx);
         true
@@ -1188,12 +1450,32 @@ impl AppHandler for PbrIblDemo {
 
         graph.add_graphics_pass(render_pass);
 
+        // Add egui pass
+        if let Some(egui) = &mut self.egui_controller {
+            let width = ctx.width();
+            let height = ctx.height();
+            let elapsed = ctx.elapsed_time() as f64;
+
+            egui.begin_frame(elapsed);
+            if let Some(egui_pass) = egui.end_frame(ctx.swapchain_texture(), width, height) {
+                graph.add_graphics_pass(egui_pass);
+            }
+        }
+
         let _handle = ctx.submit("main", &graph, &[]);
         ctx.finish(&[])
     }
 
     fn on_mouse_move(&mut self, _ctx: &mut AppContext, x: f64, y: f64) {
-        if self.mouse_pressed {
+        // Forward to egui
+        let egui_wants_pointer = if let Some(egui) = &mut self.egui_controller {
+            egui.on_mouse_move(x, y)
+        } else {
+            false
+        };
+
+        // Only handle camera if egui doesn't want the input
+        if self.mouse_pressed && !egui_wants_pointer {
             let dx = (x - self.last_mouse_x) as f32 * 0.005;
             let dy = (y - self.last_mouse_y) as f32 * 0.005;
             self.camera.rotate(-dx, -dy);
@@ -1208,16 +1490,41 @@ impl AppHandler for PbrIblDemo {
         button: winit::event::MouseButton,
         pressed: bool,
     ) {
-        if button == winit::event::MouseButton::Left {
+        // Forward to egui
+        let egui_wants_pointer = if let Some(egui) = &mut self.egui_controller {
+            egui.on_mouse_button(button, pressed)
+        } else {
+            false
+        };
+
+        // Only handle camera if egui doesn't want the input
+        if button == winit::event::MouseButton::Left && !egui_wants_pointer {
             self.mouse_pressed = pressed;
         }
     }
 
     fn on_mouse_scroll(&mut self, _ctx: &mut AppContext, _dx: f32, dy: f32) {
-        self.camera.zoom(dy * 0.5);
+        // Forward to egui
+        let egui_wants_pointer = if let Some(egui) = &mut self.egui_controller {
+            egui.on_mouse_scroll(winit::event::MouseScrollDelta::LineDelta(0.0, dy))
+        } else {
+            false
+        };
+
+        // Only handle camera if egui doesn't want the input
+        if !egui_wants_pointer {
+            self.camera.zoom(dy * 0.5);
+        }
     }
 
     fn on_key(&mut self, _ctx: &mut AppContext, event: &KeyEvent) {
+        // Forward to egui
+        let egui_wants_keyboard = if let Some(egui) = &mut self.egui_controller {
+            egui.on_key(event)
+        } else {
+            false
+        };
+
         // Track shift key state
         if let PhysicalKey::Code(KeyCode::ShiftLeft | KeyCode::ShiftRight) = event.physical_key {
             self.shift_pressed = event.state.is_pressed();
@@ -1226,6 +1533,19 @@ impl AppHandler for PbrIblDemo {
 
         // Only handle key press events
         if !event.state.is_pressed() {
+            return;
+        }
+
+        // H key toggles UI visibility (always handled, not passed to egui)
+        if let PhysicalKey::Code(KeyCode::KeyH) = event.physical_key {
+            if let Ok(mut ui) = self.egui_ui.write() {
+                ui.toggle_visibility();
+            }
+            return;
+        }
+
+        // Don't handle other keys if egui wants keyboard input
+        if egui_wants_keyboard {
             return;
         }
 
