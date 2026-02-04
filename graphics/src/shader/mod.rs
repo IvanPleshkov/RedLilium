@@ -43,7 +43,7 @@ use naga_oil::compose::{
 
 use crate::error::GraphicsError;
 
-pub use library::ShaderLibrary;
+pub use library::{EGUI_SHADER_SOURCE, ShaderLibrary};
 
 /// Shader composer for resolving imports and composing final shaders.
 ///

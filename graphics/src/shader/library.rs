@@ -10,7 +10,7 @@
 //! - `color.wgsl` - Color space conversions and tone mapping
 //! - `brdf.wgsl` - PBR BRDF functions (Cook-Torrance)
 //! - `ibl.wgsl` - Image-based lighting utilities
-//! - `egui.wgsl` - Egui UI rendering utilities
+//! - `egui.wgsl` - Complete egui shader with types, utilities, and entry points
 //!
 //! # Available Modules
 //!
@@ -52,8 +52,14 @@ const BRDF_MODULE: &str = include_str!("../../../shaders/library/brdf.wgsl");
 /// Image-based lighting utilities.
 const IBL_MODULE: &str = include_str!("../../../shaders/library/ibl.wgsl");
 
-/// Egui UI rendering utilities.
+/// Complete egui shader with types, utilities, and entry points.
+/// This shader includes both the importable module (`redlilium::egui`) and the entry points.
+/// Use `EGUI_SHADER_SOURCE` to access the full shader for rendering.
 const EGUI_MODULE: &str = include_str!("../../../shaders/library/egui.wgsl");
+
+/// Complete egui shader source with vertex and fragment entry points.
+/// This is the same as `EGUI_MODULE` but exported for use by the egui renderer.
+pub const EGUI_SHADER_SOURCE: &str = EGUI_MODULE;
 
 // =============================================================================
 // ShaderLibrary
@@ -157,5 +163,8 @@ mod tests {
         assert!(EGUI_MODULE.contains("#define_import_path redlilium::egui"));
         assert!(EGUI_MODULE.contains("struct EguiUniforms"));
         assert!(EGUI_MODULE.contains("fn srgb_to_linear"));
+        // Verify egui shader contains entry points (now in same file)
+        assert!(EGUI_SHADER_SOURCE.contains("fn vs_main"));
+        assert!(EGUI_SHADER_SOURCE.contains("fn fs_main"));
     }
 }
