@@ -114,3 +114,7 @@ Please refactor command line argument parsing and propose better way to select w
 Please audit `graphics` crate and propose which shader language I can use.
 I want to have a shader library with imports to avoid shader code duplications.
 How can I do this?
+
+## Request 15:
+Please audit shader library in `graphics` crate.
+I want to define a folder in a workspace with shader library and avoid shaders in the rust code as strings.
