@@ -19,6 +19,9 @@ glam = "0.31"
 winit = "0.30"
 raw-window-handle = "0.6"
 
+# Shader composition
+naga_oil.workspace = true
+
 # Optional GPU backend dependencies
 wgpu = { workspace = true, optional = true }
 ash = { workspace = true, optional = true }

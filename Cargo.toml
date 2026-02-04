@@ -42,7 +42,8 @@ ash = "0.38.0"
 gpu-allocator = "0.28"
 parking_lot = "0.12"
 pollster = "0.4"
-naga = { version = "24.0", features = ["wgsl-in", "spv-out"] }
+naga = { version = "24.0", features = ["wgsl-in", "wgsl-out", "spv-out"] }
+naga_oil = "0.17"
 
 # Math and data
 glam = "0.30"

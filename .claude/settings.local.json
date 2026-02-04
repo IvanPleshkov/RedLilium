@@ -34,7 +34,8 @@
       "Bash(cargo run:*)",
       "WebFetch(domain:learnopengl.com)",
       "Bash(bash:*)",
-      "Bash(RUSTFLAGS=\"-W warnings\" cargo build:*)"
+      "Bash(RUSTFLAGS=\"-W warnings\" cargo build:*)",
+      "WebFetch(domain:crates.io)"
     ],
     "deny": [
       "Read(claude_requests_history/**)",

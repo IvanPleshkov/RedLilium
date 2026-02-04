@@ -22,18 +22,26 @@ use redlilium_graphics::{
     AddressMode, BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferDescriptor,
     BufferUsage, ColorAttachment, DepthStencilAttachment, Extent3d, FilterMode, FrameSchedule,
     GraphicsPass, IndexFormat, Material, MaterialDescriptor, MaterialInstance, Mesh,
-    MeshDescriptor, RenderGraph, RenderTargetConfig, SamplerDescriptor, ShaderSource, ShaderStage,
-    ShaderStageFlags, TextureDescriptor, TextureFormat, TextureUsage, TransferConfig,
-    TransferOperation, TransferPass, VertexAttribute, VertexAttributeFormat,
+    MeshDescriptor, RenderGraph, RenderTargetConfig, SamplerDescriptor, ShaderComposer,
+    ShaderSource, ShaderStage, ShaderStageFlags, TextureDescriptor, TextureFormat, TextureUsage,
+    TransferConfig, TransferOperation, TransferPass, VertexAttribute, VertexAttributeFormat,
     VertexAttributeSemantic, VertexBufferLayout, VertexLayout,
 };
 use winit::event::KeyEvent;
 use winit::keyboard::{KeyCode, PhysicalKey};
 
 // === WGSL Shaders ===
+//
+// These shaders use the RedLilium shader library via `#import` directives.
+// The imports are resolved by ShaderComposer at runtime.
 
-/// Main PBR shader with IBL
+/// Main PBR shader with IBL - uses shader library imports
 const PBR_SHADER_WGSL: &str = r#"
+// Import shader library modules with explicit items
+#import redlilium::math::{PI, INV_PI}
+#import redlilium::brdf::{calculate_f0, fresnel_schlick_roughness, pbr_direct_lighting}
+#import redlilium::color::{tonemap_reinhard, gamma_correct}
+
 // Camera uniforms
 struct CameraUniforms {
     view_proj: mat4x4<f32>,
@@ -96,38 +104,8 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
-const PI: f32 = 3.14159265359;
+// IBL constants
 const MAX_REFLECTION_LOD: f32 = 4.0;
-
-fn distribution_ggx(n: vec3<f32>, h: vec3<f32>, roughness: f32) -> f32 {
-    let a = roughness * roughness;
-    let a2 = a * a;
-    let n_dot_h = max(dot(n, h), 0.0);
-    let n_dot_h2 = n_dot_h * n_dot_h;
-
-    let denom = n_dot_h2 * (a2 - 1.0) + 1.0;
-    return a2 / (PI * denom * denom);
-}
-
-fn geometry_schlick_ggx(n_dot_v: f32, roughness: f32) -> f32 {
-    let r = roughness + 1.0;
-    let k = (r * r) / 8.0;
-    return n_dot_v / (n_dot_v * (1.0 - k) + k);
-}
-
-fn geometry_smith(n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, roughness: f32) -> f32 {
-    let n_dot_v = max(dot(n, v), 0.0);
-    let n_dot_l = max(dot(n, l), 0.0);
-    return geometry_schlick_ggx(n_dot_v, roughness) * geometry_schlick_ggx(n_dot_l, roughness);
-}
-
-fn fresnel_schlick(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
-    return f0 + (1.0 - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
-}
-
-fn fresnel_schlick_roughness(cos_theta: f32, f0: vec3<f32>, roughness: f32) -> vec3<f32> {
-    return f0 + (max(vec3<f32>(1.0 - roughness), f0) - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
-}
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
@@ -141,41 +119,26 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let n_dot_v = max(dot(n, v), 0.0);
 
-    // Calculate reflectance at normal incidence
-    var f0 = vec3<f32>(0.04);
-    f0 = mix(f0, albedo, metallic);
+    // Calculate F0 using library function
+    let f0 = calculate_f0(albedo, metallic);
 
     // === Direct lighting ===
     // Simple directional light (sun-like)
     let light_dir = normalize(vec3<f32>(1.0, 1.0, 0.5));
     let light_color = vec3<f32>(1.0, 0.98, 0.95) * 3.0;
 
-    let h = normalize(v + light_dir);
-    let radiance = light_color;
+    // Use library function for direct lighting
+    var lo = pbr_direct_lighting(n, v, light_dir, albedo, metallic, roughness, light_color);
 
-    // Cook-Torrance BRDF
-    let ndf = distribution_ggx(n, h, roughness);
-    let g = geometry_smith(n, v, light_dir, roughness);
-    let f = fresnel_schlick(max(dot(h, v), 0.0), f0);
-
-    let numerator = ndf * g * f;
-    let denominator = 4.0 * max(dot(n, v), 0.0) * max(dot(n, light_dir), 0.0) + 0.0001;
-    let specular_direct = numerator / denominator;
-
-    let ks_direct = f;
-    var kd_direct = vec3<f32>(1.0) - ks_direct;
-    kd_direct = kd_direct * (1.0 - metallic);
-
-    let n_dot_l = max(dot(n, light_dir), 0.0);
-    var lo = (kd_direct * albedo / PI + specular_direct) * radiance * n_dot_l;
-
-    // Fill light
+    // Fill light (simple diffuse-only)
     let fill_light_dir = normalize(vec3<f32>(-0.5, -0.3, -1.0));
     let fill_light_color = vec3<f32>(0.3, 0.4, 0.5) * 0.5;
     let fill_n_dot_l = max(dot(n, fill_light_dir), 0.0);
-    lo = lo + kd_direct * albedo * fill_light_color * fill_n_dot_l;
+    let kd_fill = (1.0 - metallic);
+    lo = lo + kd_fill * albedo * INV_PI * fill_light_color * fill_n_dot_l;
 
     // === IBL ambient lighting ===
+    // Use library functions for Fresnel
     let f_ibl = fresnel_schlick_roughness(n_dot_v, f0, roughness);
     let ks_ibl = f_ibl;
     let kd_ibl = (vec3<f32>(1.0) - ks_ibl) * (1.0 - metallic);
@@ -194,18 +157,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Combine
     var color = ambient + lo;
 
-    // HDR tonemapping (Reinhard)
-    color = color / (color + vec3<f32>(1.0));
+    // HDR tonemapping using library function (Reinhard)
+    color = tonemap_reinhard(color);
 
-    // Gamma correction
-    color = pow(color, vec3<f32>(1.0 / 2.2));
+    // Gamma correction using library function
+    color = gamma_correct(color);
 
     return vec4<f32>(color, 1.0);
 }
 "#;
 
 /// Skybox shader - renders environment cubemap as background
+/// Uses shader library for tone mapping and gamma correction
 const SKYBOX_SHADER_WGSL: &str = r#"
+#import redlilium::color::{tonemap_reinhard, gamma_correct}
+
 struct SkyboxUniforms {
     inv_view_proj: mat4x4<f32>,
     camera_pos: vec4<f32>,
@@ -243,9 +209,9 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let color = textureSampleLevel(env_map, env_sampler, in.view_dir, uniforms.mip_level).rgb;
 
-    // Tonemap and gamma correct
-    let mapped = color / (color + vec3<f32>(1.0));
-    let corrected = pow(mapped, vec3<f32>(1.0 / 2.2));
+    // Tonemap and gamma correct using library functions
+    let mapped = tonemap_reinhard(color);
+    let corrected = gamma_correct(mapped);
 
     return vec4<f32>(corrected, 1.0);
 }
@@ -768,18 +734,28 @@ impl PbrIblDemo {
                 .with_label("ibl_bindings"),
         );
 
-        // Create PBR material
+        // Compose PBR shader using shader library
+        // This resolves #import directives and inlines library functions
+        let mut shader_composer =
+            ShaderComposer::with_standard_library().expect("Failed to create shader composer");
+        let composed_pbr_shader = shader_composer
+            .compose(PBR_SHADER_WGSL, &[])
+            .expect("Failed to compose PBR shader");
+
+        log::info!("PBR shader composed with library imports");
+
+        // Create PBR material with composed shader
         let material = device
             .create_material(
                 &MaterialDescriptor::new()
                     .with_shader(ShaderSource::new(
                         ShaderStage::Vertex,
-                        PBR_SHADER_WGSL.as_bytes().to_vec(),
+                        composed_pbr_shader.as_bytes().to_vec(),
                         "vs_main",
                     ))
                     .with_shader(ShaderSource::new(
                         ShaderStage::Fragment,
-                        PBR_SHADER_WGSL.as_bytes().to_vec(),
+                        composed_pbr_shader.as_bytes().to_vec(),
                         "fs_main",
                     ))
                     .with_binding_layout(camera_binding_layout)
@@ -882,18 +858,27 @@ impl PbrIblDemo {
                 .with_label("skybox_bindings"),
         );
 
+        // Compose skybox shader using shader library
+        let mut shader_composer =
+            ShaderComposer::with_standard_library().expect("Failed to create shader composer");
+        let composed_skybox_shader = shader_composer
+            .compose(SKYBOX_SHADER_WGSL, &[])
+            .expect("Failed to compose skybox shader");
+
+        log::info!("Skybox shader composed with library imports");
+
         // Create skybox material (no vertex layout needed for fullscreen triangle)
         let skybox_material = device
             .create_material(
                 &MaterialDescriptor::new()
                     .with_shader(ShaderSource::new(
                         ShaderStage::Vertex,
-                        SKYBOX_SHADER_WGSL.as_bytes().to_vec(),
+                        composed_skybox_shader.as_bytes().to_vec(),
                         "vs_main",
                     ))
                     .with_shader(ShaderSource::new(
                         ShaderStage::Fragment,
-                        SKYBOX_SHADER_WGSL.as_bytes().to_vec(),
+                        composed_skybox_shader.as_bytes().to_vec(),
                         "fs_main",
                     ))
                     .with_binding_layout(skybox_binding_layout)

@@ -109,3 +109,8 @@ Check also for texture, sampler, etc.
 Please audit `app` and `demos` crates.
 It seems the backend choosing between vulkan and wgpu with vulkan is not obvious.
 Please refactor command line argument parsing and propose better way to select wgpu internal params.
+
+## Request 14:
+Please audit `graphics` crate and propose which shader language I can use.
+I want to have a shader library with imports to avoid shader code duplications.
+How can I do this?

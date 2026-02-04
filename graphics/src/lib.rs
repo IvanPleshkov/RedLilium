@@ -72,6 +72,7 @@ pub mod pipeline;
 pub mod resize;
 pub mod resources;
 pub mod scheduler;
+pub mod shader;
 pub mod swapchain;
 pub mod types;
 
@@ -101,6 +102,7 @@ pub use pipeline::FramePipeline;
 pub use resize::{ResizeEvent, ResizeManager, ResizeStrategy};
 pub use resources::{Buffer, Sampler, Texture};
 pub use scheduler::{Fence, FenceStatus, FrameSchedule, GraphHandle, Semaphore};
+pub use shader::{ShaderComposer, ShaderDef, ShaderLibrary};
 pub use swapchain::{PresentMode, Surface, SurfaceConfiguration, SurfaceTexture};
 pub use types::{
     AddressMode, BufferDescriptor, BufferUsage, ClearValue, CompareFunction,
