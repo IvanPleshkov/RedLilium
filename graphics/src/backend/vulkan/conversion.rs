@@ -217,3 +217,64 @@ pub fn convert_present_mode(mode: crate::swapchain::PresentMode) -> vk::PresentM
         crate::swapchain::PresentMode::FifoRelaxed => vk::PresentModeKHR::FIFO_RELAXED,
     }
 }
+
+/// Convert BlendFactor to Vulkan blend factor.
+pub fn convert_blend_factor(factor: crate::materials::BlendFactor) -> vk::BlendFactor {
+    match factor {
+        crate::materials::BlendFactor::Zero => vk::BlendFactor::ZERO,
+        crate::materials::BlendFactor::One => vk::BlendFactor::ONE,
+        crate::materials::BlendFactor::Src => vk::BlendFactor::SRC_COLOR,
+        crate::materials::BlendFactor::OneMinusSrc => vk::BlendFactor::ONE_MINUS_SRC_COLOR,
+        crate::materials::BlendFactor::SrcAlpha => vk::BlendFactor::SRC_ALPHA,
+        crate::materials::BlendFactor::OneMinusSrcAlpha => vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+        crate::materials::BlendFactor::Dst => vk::BlendFactor::DST_COLOR,
+        crate::materials::BlendFactor::OneMinusDst => vk::BlendFactor::ONE_MINUS_DST_COLOR,
+        crate::materials::BlendFactor::DstAlpha => vk::BlendFactor::DST_ALPHA,
+        crate::materials::BlendFactor::OneMinusDstAlpha => vk::BlendFactor::ONE_MINUS_DST_ALPHA,
+        crate::materials::BlendFactor::SrcAlphaSaturated => vk::BlendFactor::SRC_ALPHA_SATURATE,
+        crate::materials::BlendFactor::Constant => vk::BlendFactor::CONSTANT_COLOR,
+        crate::materials::BlendFactor::OneMinusConstant => {
+            vk::BlendFactor::ONE_MINUS_CONSTANT_COLOR
+        }
+    }
+}
+
+/// Convert BlendOperation to Vulkan blend op.
+pub fn convert_blend_operation(op: crate::materials::BlendOperation) -> vk::BlendOp {
+    match op {
+        crate::materials::BlendOperation::Add => vk::BlendOp::ADD,
+        crate::materials::BlendOperation::Subtract => vk::BlendOp::SUBTRACT,
+        crate::materials::BlendOperation::ReverseSubtract => vk::BlendOp::REVERSE_SUBTRACT,
+        crate::materials::BlendOperation::Min => vk::BlendOp::MIN,
+        crate::materials::BlendOperation::Max => vk::BlendOp::MAX,
+    }
+}
+
+/// Convert BlendComponent to Vulkan blend attachment state fields.
+pub fn convert_blend_component(
+    component: &crate::materials::BlendComponent,
+) -> (vk::BlendFactor, vk::BlendFactor, vk::BlendOp) {
+    (
+        convert_blend_factor(component.src_factor),
+        convert_blend_factor(component.dst_factor),
+        convert_blend_operation(component.operation),
+    )
+}
+
+/// Convert BlendState to Vulkan pipeline color blend attachment state.
+pub fn convert_blend_state(
+    state: &crate::materials::BlendState,
+) -> vk::PipelineColorBlendAttachmentState {
+    let (color_src, color_dst, color_op) = convert_blend_component(&state.color);
+    let (alpha_src, alpha_dst, alpha_op) = convert_blend_component(&state.alpha);
+
+    vk::PipelineColorBlendAttachmentState::default()
+        .blend_enable(true)
+        .src_color_blend_factor(color_src)
+        .dst_color_blend_factor(color_dst)
+        .color_blend_op(color_op)
+        .src_alpha_blend_factor(alpha_src)
+        .dst_alpha_blend_factor(alpha_dst)
+        .alpha_blend_op(alpha_op)
+        .color_write_mask(vk::ColorComponentFlags::RGBA)
+}

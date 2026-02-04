@@ -1005,23 +1005,282 @@ impl VulkanBackend {
 
     /// Write data to a texture.
     ///
-    /// Note: For Vulkan, direct texture writes typically require staging buffers
-    /// and command buffer submission. This is a simplified implementation that
-    /// logs a warning - full texture upload should use transfer passes.
+    /// Uses a staging buffer to upload texture data. This creates a temporary
+    /// command buffer, performs the copy, and waits for completion.
     pub fn write_texture(
         &self,
-        _texture: &GpuTexture,
+        texture: &GpuTexture,
         data: &[u8],
         descriptor: &crate::types::TextureDescriptor,
     ) {
-        log::warn!(
-            "VulkanBackend: write_texture {:?} ({}x{}) len={} - direct texture writes require transfer passes",
+        let GpuTexture::Vulkan { image, .. } = texture else {
+            log::warn!("write_texture called with non-Vulkan texture");
+            return;
+        };
+
+        if data.is_empty() {
+            return;
+        }
+
+        log::debug!(
+            "VulkanBackend: write_texture {:?} ({}x{}) len={}",
             descriptor.label,
             descriptor.size.width,
             descriptor.size.height,
             data.len()
         );
-        // For proper implementation, use a staging buffer and transfer pass
+
+        // Create staging buffer
+        let staging_buffer_info = vk::BufferCreateInfo::default()
+            .size(data.len() as u64)
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+        let staging_buffer = match unsafe { self.device.create_buffer(&staging_buffer_info, None) }
+        {
+            Ok(b) => b,
+            Err(e) => {
+                log::error!("Failed to create staging buffer: {:?}", e);
+                return;
+            }
+        };
+
+        // Get memory requirements and allocate
+        let mem_requirements =
+            unsafe { self.device.get_buffer_memory_requirements(staging_buffer) };
+
+        let staging_allocation = {
+            let mut allocator = self.allocator.lock();
+            match allocator.allocate(&gpu_allocator::vulkan::AllocationCreateDesc {
+                name: "texture_staging",
+                requirements: mem_requirements,
+                location: gpu_allocator::MemoryLocation::CpuToGpu,
+                linear: true,
+                allocation_scheme: gpu_allocator::vulkan::AllocationScheme::GpuAllocatorManaged,
+            }) {
+                Ok(a) => a,
+                Err(e) => {
+                    log::error!("Failed to allocate staging buffer memory: {}", e);
+                    unsafe {
+                        self.device.destroy_buffer(staging_buffer, None);
+                    }
+                    return;
+                }
+            }
+        };
+
+        // Bind memory to staging buffer
+        if let Err(e) = unsafe {
+            self.device.bind_buffer_memory(
+                staging_buffer,
+                staging_allocation.memory(),
+                staging_allocation.offset(),
+            )
+        } {
+            log::error!("Failed to bind staging buffer memory: {:?}", e);
+            {
+                let mut allocator = self.allocator.lock();
+                let _ = allocator.free(staging_allocation);
+            }
+            unsafe {
+                self.device.destroy_buffer(staging_buffer, None);
+            }
+            return;
+        }
+
+        // Copy data to staging buffer
+        if let Some(mapped_ptr) = staging_allocation.mapped_ptr() {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    data.as_ptr(),
+                    mapped_ptr.as_ptr() as *mut u8,
+                    data.len(),
+                );
+            }
+        } else {
+            log::error!("Staging buffer is not mapped");
+            {
+                let mut allocator = self.allocator.lock();
+                let _ = allocator.free(staging_allocation);
+            }
+            unsafe {
+                self.device.destroy_buffer(staging_buffer, None);
+            }
+            return;
+        }
+
+        // Allocate command buffer
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(self.command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+
+        let cmd_buffers = match unsafe { self.device.allocate_command_buffers(&alloc_info) } {
+            Ok(c) => c,
+            Err(e) => {
+                log::error!("Failed to allocate command buffer: {:?}", e);
+                {
+                    let mut allocator = self.allocator.lock();
+                    let _ = allocator.free(staging_allocation);
+                }
+                unsafe {
+                    self.device.destroy_buffer(staging_buffer, None);
+                }
+                return;
+            }
+        };
+        let cmd = cmd_buffers[0];
+
+        // Begin command buffer
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+        if let Err(e) = unsafe { self.device.begin_command_buffer(cmd, &begin_info) } {
+            log::error!("Failed to begin command buffer: {:?}", e);
+            unsafe {
+                self.device
+                    .free_command_buffers(self.command_pool, &cmd_buffers);
+            }
+            {
+                let mut allocator = self.allocator.lock();
+                let _ = allocator.free(staging_allocation);
+            }
+            unsafe {
+                self.device.destroy_buffer(staging_buffer, None);
+            }
+            return;
+        }
+
+        // Transition image layout to TRANSFER_DST_OPTIMAL
+        let barrier = vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(*image)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .src_access_mask(vk::AccessFlags::empty())
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
+
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[barrier],
+            );
+        }
+
+        // Copy buffer to image
+        let region = vk::BufferImageCopy::default()
+            .buffer_offset(0)
+            .buffer_row_length(0) // 0 means tightly packed
+            .buffer_image_height(0)
+            .image_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: 0,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+            .image_extent(vk::Extent3D {
+                width: descriptor.size.width,
+                height: descriptor.size.height,
+                depth: 1,
+            });
+
+        unsafe {
+            self.device.cmd_copy_buffer_to_image(
+                cmd,
+                staging_buffer,
+                *image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[region],
+            );
+        }
+
+        // Transition image layout to SHADER_READ_ONLY_OPTIMAL
+        let barrier = vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(*image)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ);
+
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[barrier],
+            );
+        }
+
+        // End command buffer
+        if let Err(e) = unsafe { self.device.end_command_buffer(cmd) } {
+            log::error!("Failed to end command buffer: {:?}", e);
+            unsafe {
+                self.device
+                    .free_command_buffers(self.command_pool, &cmd_buffers);
+            }
+            {
+                let mut allocator = self.allocator.lock();
+                let _ = allocator.free(staging_allocation);
+            }
+            unsafe {
+                self.device.destroy_buffer(staging_buffer, None);
+            }
+            return;
+        }
+
+        // Submit command buffer
+        let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
+
+        if let Err(e) = unsafe {
+            self.device
+                .queue_submit(self.graphics_queue, &[submit_info], vk::Fence::null())
+        } {
+            log::error!("Failed to submit command buffer: {:?}", e);
+        }
+
+        // Wait for completion
+        if let Err(e) = unsafe { self.device.queue_wait_idle(self.graphics_queue) } {
+            log::error!("Failed to wait for queue idle: {:?}", e);
+        }
+
+        // Cleanup
+        unsafe {
+            self.device
+                .free_command_buffers(self.command_pool, &cmd_buffers);
+        }
+        {
+            let mut allocator = self.allocator.lock();
+            let _ = allocator.free(staging_allocation);
+        }
+        unsafe {
+            self.device.destroy_buffer(staging_buffer, None);
+        }
     }
 
     fn encode_pass(&self, cmd: vk::CommandBuffer, pass: &Pass) -> Result<(), GraphicsError> {
@@ -1331,6 +1590,7 @@ impl VulkanBackend {
             pipeline_layout,
             &color_formats,
             depth_format,
+            material.blend_state(),
             &self.dynamic_rendering,
         )?;
 
@@ -1522,6 +1782,26 @@ impl VulkanBackend {
             }
         }
 
+        // Set per-draw scissor rect if specified
+        let custom_scissor = draw_cmd.scissor_rect.is_some();
+        if let Some(scissor) = &draw_cmd.scissor_rect {
+            // Convert ScissorRect to Vulkan Rect2D
+            // Note: x and y can be negative in ScissorRect but Vulkan offset uses i32
+            let vk_scissor = vk::Rect2D {
+                offset: vk::Offset2D {
+                    x: scissor.x,
+                    y: scissor.y,
+                },
+                extent: vk::Extent2D {
+                    width: scissor.width,
+                    height: scissor.height,
+                },
+            };
+            unsafe {
+                self.device.cmd_set_scissor(cmd, 0, &[vk_scissor]);
+            }
+        }
+
         // Issue draw call
         log::debug!(
             "Issuing draw call: indexed={}, vertex_count={}, index_count={}, instance_count={}",
@@ -1570,6 +1850,17 @@ impl VulkanBackend {
                     0,
                     draw_cmd.first_instance,
                 );
+            }
+        }
+
+        // Restore default scissor if we set a custom one
+        if custom_scissor && let Some((width, height)) = render_targets.dimensions() {
+            let default_scissor = vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: vk::Extent2D { width, height },
+            };
+            unsafe {
+                self.device.cmd_set_scissor(cmd, 0, &[default_scissor]);
             }
         }
 

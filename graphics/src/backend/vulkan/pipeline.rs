@@ -11,7 +11,7 @@ use crate::materials::{BindingLayout, BindingType, ShaderStage};
 use crate::mesh::{Mesh, VertexAttributeFormat};
 use crate::types::TextureFormat;
 
-use super::conversion::convert_texture_format;
+use super::conversion::{convert_blend_state, convert_texture_format};
 
 /// Manages Vulkan pipelines and related resources.
 pub struct PipelineManager {
@@ -254,6 +254,7 @@ impl PipelineManager {
         pipeline_layout: vk::PipelineLayout,
         color_formats: &[TextureFormat],
         depth_format: Option<TextureFormat>,
+        blend_state: Option<&crate::materials::BlendState>,
         _dynamic_rendering: &ash::khr::dynamic_rendering::Device,
     ) -> Result<vk::Pipeline, GraphicsError> {
         let vertex_entry_c = CString::new(vertex_entry).unwrap();
@@ -342,9 +343,14 @@ impl PipelineManager {
         let color_blend_attachments: Vec<vk::PipelineColorBlendAttachmentState> = color_formats
             .iter()
             .map(|_| {
-                vk::PipelineColorBlendAttachmentState::default()
-                    .color_write_mask(vk::ColorComponentFlags::RGBA)
-                    .blend_enable(false)
+                if let Some(state) = blend_state {
+                    convert_blend_state(state)
+                } else {
+                    // Default: no blending (replace)
+                    vk::PipelineColorBlendAttachmentState::default()
+                        .color_write_mask(vk::ColorComponentFlags::RGBA)
+                        .blend_enable(false)
+                }
             })
             .collect();
 
