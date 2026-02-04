@@ -70,6 +70,7 @@ pub mod instance;
 pub mod materials;
 pub mod mesh;
 pub mod pipeline;
+pub mod profiling;
 pub mod resize;
 pub mod resources;
 pub mod scheduler;

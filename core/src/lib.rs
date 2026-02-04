@@ -2,6 +2,8 @@
 //!
 //! Core crate for RedLilium Engine basic utilities.
 
+pub mod profiling;
+
 /// Core library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

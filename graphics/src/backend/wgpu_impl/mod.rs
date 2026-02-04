@@ -35,6 +35,7 @@ impl SurfaceTextureView {
 
 use crate::error::GraphicsError;
 use crate::graph::{CompiledGraph, RenderGraph};
+use crate::profiling::profile_scope;
 
 use super::GpuFence;
 
@@ -223,6 +224,8 @@ impl WgpuBackend {
         compiled: &CompiledGraph,
         signal_fence: Option<&GpuFence>,
     ) -> Result<(), GraphicsError> {
+        profile_scope!("wgpu_execute_graph");
+
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -233,14 +236,20 @@ impl WgpuBackend {
         let passes = graph.passes();
 
         // Process each pass in compiled order
-        for handle in compiled.pass_order() {
-            let pass = &passes[handle.index()];
-            self.encode_pass(&mut encoder, pass)?;
+        {
+            profile_scope!("record_passes");
+            for handle in compiled.pass_order() {
+                let pass = &passes[handle.index()];
+                self.encode_pass(&mut encoder, pass)?;
+            }
         }
 
         // Submit commands
         let command_buffer = encoder.finish();
-        let submission_index = self.queue.submit(std::iter::once(command_buffer));
+        let submission_index = {
+            profile_scope!("queue_submit");
+            self.queue.submit(std::iter::once(command_buffer))
+        };
 
         // Store submission index in fence for async polling
         if let Some(GpuFence::Wgpu {

@@ -23,6 +23,7 @@ use parking_lot::Mutex;
 
 use crate::error::GraphicsError;
 use crate::graph::{CompiledGraph, Pass, RenderGraph, RenderTarget};
+use crate::profiling::profile_scope;
 use crate::types::{BufferDescriptor, SamplerDescriptor, TextureDescriptor};
 
 use super::{GpuBuffer, GpuFence, GpuSampler, GpuTexture};
@@ -827,6 +828,8 @@ impl VulkanBackend {
         compiled: &CompiledGraph,
         signal_fence: Option<&GpuFence>,
     ) -> Result<(), GraphicsError> {
+        profile_scope!("vulkan_execute_graph");
+
         // Reset descriptor pool at the start of each graph execution.
         // When async (fence provided), this relies on the frame pipeline ensuring
         // proper synchronization before reusing descriptor sets.
@@ -857,16 +860,19 @@ impl VulkanBackend {
         let passes = graph.passes();
 
         // Process each pass in compiled order
-        for handle in compiled.pass_order() {
-            let pass = &passes[handle.index()];
+        {
+            profile_scope!("record_passes");
+            for handle in compiled.pass_order() {
+                let pass = &passes[handle.index()];
 
-            // Infer resource usage and generate barriers
-            let usage = pass.infer_resource_usage();
-            let barriers = self.generate_barriers_for_pass(&usage);
-            barriers.submit(&self.device, cmd);
+                // Infer resource usage and generate barriers
+                let usage = pass.infer_resource_usage();
+                let barriers = self.generate_barriers_for_pass(&usage);
+                barriers.submit(&self.device, cmd);
 
-            // Encode the pass
-            self.encode_pass(cmd, pass)?;
+                // Encode the pass
+                self.encode_pass(cmd, pass)?;
+            }
         }
 
         // End command buffer
@@ -888,18 +894,21 @@ impl VulkanBackend {
         });
 
         // Submit command buffer
-        let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
+        {
+            profile_scope!("queue_submit");
+            let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
 
-        unsafe {
-            self.device.queue_submit(
-                self.graphics_queue,
-                &[submit_info],
-                fence.unwrap_or(vk::Fence::null()),
-            )
+            unsafe {
+                self.device.queue_submit(
+                    self.graphics_queue,
+                    &[submit_info],
+                    fence.unwrap_or(vk::Fence::null()),
+                )
+            }
+            .map_err(|e| {
+                GraphicsError::Internal(format!("Failed to submit command buffer: {:?}", e))
+            })?;
         }
-        .map_err(|e| {
-            GraphicsError::Internal(format!("Failed to submit command buffer: {:?}", e))
-        })?;
 
         // Handle sync vs async paths
         if signal_fence.is_some() {

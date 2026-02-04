@@ -10,8 +10,10 @@ default = ["dummy", "wgpu-backend", "vulkan-backend"]
 dummy = []
 wgpu-backend = ["dep:wgpu", "dep:pollster"]
 vulkan-backend = ["dep:ash", "dep:ash-window", "dep:gpu-allocator", "dep:parking_lot", "dep:naga"]
+profiling = ["dep:tracy-client", "redlilium-core/profiling"]
 
 [dependencies]
+redlilium-core = { path = "../core" }
 log.workspace = true
 bitflags.workspace = true
 static_assertions.workspace = true
@@ -34,6 +36,9 @@ gpu-allocator = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
 pollster = { workspace = true, optional = true }
 naga = { workspace = true, optional = true }
+
+# Profiling (optional)
+tracy-client = { workspace = true, optional = true }
 
 [dev-dependencies]
 rstest.workspace = true

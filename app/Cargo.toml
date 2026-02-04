@@ -6,6 +6,10 @@ license.workspace = true
 repository.workspace = true
 description = "Application framework for RedLilium Engine"
 
+[features]
+default = []
+profiling = ["redlilium-core/profiling", "redlilium-graphics/profiling"]
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 

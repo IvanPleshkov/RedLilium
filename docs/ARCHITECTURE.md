@@ -351,6 +351,96 @@ When the application exits, call `FramePipeline::wait_idle()` before destroying 
 
 During shutdown, `wait_idle()` ensures all pending GPU work completes. The Vulkan backend then flushes all deferred destruction queues, safely destroying any pending resources before the device is destroyed.
 
+### Profiling Support
+
+The engine includes optional profiling support via [Tracy](https://github.com/wolfpld/tracy), a real-time frame profiler. Enable it with the `profiling` Cargo feature:
+
+```toml
+[dependencies]
+redlilium-graphics = { version = "0.1", features = ["profiling"] }
+```
+
+Or at build time:
+
+```bash
+cargo run --features profiling
+```
+
+**Running Demos with Profiling:**
+
+To run any demo with profiling enabled across all crates:
+
+```bash
+# Run PBR IBL demo with Tracy profiling
+cargo run -p redlilium-demos --bin pbr_ibl_demo --features profiling
+
+# Run window demo with profiling
+cargo run -p redlilium-demos --bin window_demo --features profiling
+
+# Run textured quad demo with profiling
+cargo run -p redlilium-demos --bin textured_quad_demo --features profiling
+```
+
+The `profiling` feature on the demos crate automatically enables profiling in all dependent crates (core, ecs, graphics, app).
+
+**Connecting Tracy:**
+
+1. Download Tracy from https://github.com/wolfpld/tracy/releases
+2. Run your application with the `profiling` feature enabled
+3. Launch the Tracy GUI and connect to your running application
+4. View real-time CPU zones, frame times, and performance metrics
+
+**CPU Profiling Zones:**
+
+Built-in profiling zones track key operations:
+- Frame boundaries (`frame_mark!`)
+- Frame begin/end (`begin_frame`, `end_frame`)
+- Fence waits (`wait_fence`, `wait_idle`)
+- Graph submission (`submit_graph`, `present`)
+- Backend execution (`vulkan_execute_graph`, `wgpu_execute_graph`)
+- Pass recording and queue submission
+
+**Custom Profiling:**
+
+Use the provided macros to instrument your code:
+
+```rust
+use redlilium_graphics::profiling::{profile_scope, profile_function, frame_mark};
+
+fn game_update() {
+    profile_function!();  // Profiles entire function
+
+    {
+        profile_scope!("physics_update");
+        // Physics code...
+    }
+
+    {
+        profile_scope!("ai_update");
+        // AI code...
+    }
+}
+```
+
+**GPU Profiling (Advanced):**
+
+Tracy supports GPU profiling via timestamp queries. The engine provides `GpuProfileContext` for this:
+
+```rust
+use redlilium_graphics::profiling::GpuProfileContext;
+
+// Create during device initialization
+let gpu_ctx = GpuProfileContext::new_vulkan("Main Queue", initial_timestamp, timestamp_period);
+
+// Record zones around GPU work (requires manual timestamp query management)
+```
+
+GPU profiling requires backend-specific integration with timestamp queries. See the Tracy documentation for details on timestamp synchronization.
+
+**Zero-Overhead:**
+
+When the `profiling` feature is disabled (default), all profiling macros compile to no-ops with zero runtime overhead.
+
 ### Typical Frame Flow
 
 ```rust

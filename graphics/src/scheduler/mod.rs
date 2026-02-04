@@ -54,6 +54,7 @@ use std::sync::Arc;
 
 use crate::device::GraphicsDevice;
 use crate::graph::{CompiledGraph, RenderGraph};
+use crate::profiling::profile_scope;
 
 /// Handle to a submitted graph in the frame schedule.
 ///
@@ -204,6 +205,7 @@ impl FrameSchedule {
         wait_for: &[GraphHandle],
     ) -> GraphHandle {
         let name = name.into();
+        profile_scope!("submit_graph");
 
         // Validate wait_for handles
         for &handle in wait_for {
@@ -225,6 +227,7 @@ impl FrameSchedule {
         // Actually execute the graph on the GPU if we have a device
         if let Some(device) = &self.device {
             if let Ok(compiled) = graph.compile() {
+                profile_scope!("execute_graph");
                 let backend = device.instance().backend();
                 if let Err(e) = backend.execute_graph(graph, &compiled, None) {
                     log::error!("Failed to execute graph '{}': {}", name, e);
@@ -273,6 +276,7 @@ impl FrameSchedule {
         wait_for: &[GraphHandle],
     ) -> GraphHandle {
         let name = name.into();
+        profile_scope!("submit_compiled");
 
         // Validate wait_for handles
         for &handle in wait_for {
@@ -287,6 +291,7 @@ impl FrameSchedule {
 
         // Actually execute the graph on the GPU if we have a device
         if let Some(device) = &self.device {
+            profile_scope!("execute_graph");
             let backend = device.instance().backend();
             if let Err(e) = backend.execute_graph(graph, compiled, None) {
                 log::error!("Failed to execute graph '{}': {}", name, e);
@@ -341,6 +346,8 @@ impl FrameSchedule {
         graph: &RenderGraph,
         wait_for: &[GraphHandle],
     ) {
+        profile_scope!("present");
+
         assert!(
             self.fence.is_none(),
             "present() has already been called on this schedule"
@@ -366,6 +373,7 @@ impl FrameSchedule {
             let fence = Fence::new_gpu(instance);
 
             if let Ok(compiled) = graph.compile() {
+                profile_scope!("execute_present");
                 let backend = device.instance().backend();
                 // Pass the GPU fence - execute_graph returns immediately (async)
                 if let Err(e) = backend.execute_graph(graph, &compiled, fence.gpu_fence()) {
@@ -441,6 +449,8 @@ impl FrameSchedule {
     /// pipeline.end_frame(schedule);
     /// ```
     pub fn finish(&mut self, wait_for: &[GraphHandle]) {
+        profile_scope!("finish");
+
         assert!(
             self.fence.is_none(),
             "finish() or present() has already been called on this schedule"

@@ -63,6 +63,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::device::GraphicsDevice;
+use crate::profiling::{frame_mark, profile_scope};
 use crate::scheduler::{Fence, FrameSchedule};
 
 /// Manages multiple frames in flight for CPU-GPU parallelism.
@@ -196,14 +197,18 @@ impl FramePipeline {
     /// }
     /// ```
     pub fn begin_frame(&mut self) -> FrameSchedule {
+        profile_scope!("begin_frame");
+
         // Wait for previous work in this slot to complete
         if let Some(fence) = &self.frame_fences[self.current_slot] {
+            profile_scope!("wait_fence");
             fence.wait();
         }
 
         // Now that the GPU has finished with the old frame, advance the deferred
         // destruction system to clean up resources that were dropped
         if let Some(device) = &self.device {
+            profile_scope!("advance_deferred");
             device.advance_deferred_destruction();
         }
 
@@ -253,6 +258,8 @@ impl FramePipeline {
     /// }
     /// ```
     pub fn begin_frame_timeout(&mut self, timeout: Duration) -> Option<FrameSchedule> {
+        profile_scope!("begin_frame_timeout");
+
         if let Some(fence) = &self.frame_fences[self.current_slot]
             && !fence.wait_timeout(timeout)
         {
@@ -262,6 +269,7 @@ impl FramePipeline {
         // Now that the GPU has finished with the old frame, advance the deferred
         // destruction system to clean up resources that were dropped
         if let Some(device) = &self.device {
+            profile_scope!("advance_deferred");
             device.advance_deferred_destruction();
         }
 
@@ -305,6 +313,8 @@ impl FramePipeline {
     /// pipeline.end_frame(schedule);  // Takes ownership
     /// ```
     pub fn end_frame(&mut self, mut schedule: FrameSchedule) {
+        profile_scope!("end_frame");
+
         let fence = schedule.take_fence();
 
         log::trace!(
@@ -318,6 +328,9 @@ impl FramePipeline {
 
         // Advance to next slot
         self.current_slot = (self.current_slot + 1) % self.frames_in_flight;
+
+        // Mark frame end for Tracy
+        frame_mark!();
     }
 
     /// Wait for the current frame slot to be ready.
@@ -396,6 +409,8 @@ impl FramePipeline {
     /// drop(device);          // Safe to destroy
     /// ```
     pub fn wait_idle(&self) {
+        profile_scope!("wait_idle");
+
         log::trace!("Waiting for GPU idle ({} slots)", self.frames_in_flight);
 
         for (i, fence) in self.frame_fences.iter().enumerate() {
