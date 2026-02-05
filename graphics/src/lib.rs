@@ -98,8 +98,9 @@ pub use materials::{
     ShaderSource, ShaderStage, ShaderStageFlags,
 };
 pub use mesh::{
-    IndexFormat, Mesh, MeshDescriptor, PrimitiveTopology, VertexAttribute, VertexAttributeFormat,
-    VertexAttributeSemantic, VertexBufferLayout, VertexLayout, VertexStepMode,
+    CpuMesh, IndexFormat, Mesh, MeshDescriptor, PrimitiveTopology, VertexAttribute,
+    VertexAttributeFormat, VertexAttributeSemantic, VertexBufferLayout, VertexLayout,
+    VertexStepMode,
 };
 pub use pipeline::FramePipeline;
 pub use resize::{ResizeEvent, ResizeManager, ResizeStrategy};

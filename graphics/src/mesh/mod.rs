@@ -4,6 +4,7 @@
 //!
 //! - [`VertexLayout`] - Describes vertex attributes across multiple buffers
 //! - [`VertexBufferLayout`] - Describes a single vertex buffer binding
+//! - [`CpuMesh`] - CPU-side mesh with raw vertex/index data
 //! - [`Mesh`] - GPU mesh with one or more vertex buffers and topology
 //!
 //! # Multiple Vertex Buffers
@@ -22,8 +23,11 @@
 mod data;
 mod layout;
 
-pub use data::{IndexFormat, Mesh, MeshDescriptor, PrimitiveTopology};
+pub use data::{CpuMesh, IndexFormat, Mesh, MeshDescriptor, PrimitiveTopology};
 pub use layout::{
     VertexAttribute, VertexAttributeFormat, VertexAttributeSemantic, VertexBufferLayout,
     VertexLayout, VertexStepMode,
 };
+
+// Re-export generators from core
+pub use redlilium_core::mesh::generators;

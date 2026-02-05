@@ -18,6 +18,7 @@ use std::sync::{Arc, RwLock};
 
 use glam::{Mat4, Vec3};
 use redlilium_app::{App, AppArgs, AppContext, AppHandler, DefaultAppArgs, DrawContext};
+use redlilium_core::mesh::generators;
 use redlilium_core::profiling::{
     create_profiled_allocator, profile_function, profile_memory_stats, profile_message,
     profile_scope,
@@ -29,11 +30,10 @@ create_profiled_allocator!(GLOBAL_ALLOCATOR, 32);
 use redlilium_graphics::{
     AddressMode, BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferDescriptor,
     BufferUsage, ColorAttachment, DepthStencilAttachment, Extent3d, FilterMode, FrameSchedule,
-    GraphicsPass, IndexFormat, LoadOp, Material, MaterialDescriptor, MaterialInstance, Mesh,
-    MeshDescriptor, RenderGraph, RenderTargetConfig, SamplerDescriptor, ShaderComposer, ShaderDef,
-    ShaderSource, ShaderStage, ShaderStageFlags, TextureDescriptor, TextureFormat, TextureUsage,
-    TransferConfig, TransferOperation, TransferPass, VertexAttribute, VertexAttributeFormat,
-    VertexAttributeSemantic, VertexBufferLayout, VertexLayout,
+    GraphicsPass, LoadOp, Material, MaterialDescriptor, MaterialInstance, Mesh, MeshDescriptor,
+    RenderGraph, RenderTargetConfig, SamplerDescriptor, ShaderComposer, ShaderDef, ShaderSource,
+    ShaderStage, ShaderStageFlags, TextureDescriptor, TextureFormat, TextureUsage, TransferConfig,
+    TransferOperation, TransferPass, VertexBufferLayout, VertexLayout,
     egui::{EguiApp, EguiController, egui},
 };
 use winit::event::KeyEvent;
@@ -104,15 +104,7 @@ impl OrbitCamera {
     }
 }
 
-// === Vertex and Instance Data ===
-
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct PbrVertex {
-    position: [f32; 3],
-    normal: [f32; 3],
-    uv: [f32; 2],
-}
+// === Instance and Uniform Data ===
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -146,52 +138,6 @@ struct SkyboxUniforms {
 struct ResolveUniforms {
     camera_pos: [f32; 4],  // 16 bytes
     screen_size: [f32; 4], // xy = dimensions, zw = 1/dimensions
-}
-
-// === Mesh Generation ===
-
-fn generate_sphere(radius: f32, segments: u32, rings: u32) -> (Vec<PbrVertex>, Vec<u32>) {
-    let mut vertices = Vec::new();
-    let mut indices = Vec::new();
-
-    for ring in 0..=rings {
-        let theta = ring as f32 * PI / rings as f32;
-        let sin_theta = theta.sin();
-        let cos_theta = theta.cos();
-
-        for segment in 0..=segments {
-            let phi = segment as f32 * 2.0 * PI / segments as f32;
-            let sin_phi = phi.sin();
-            let cos_phi = phi.cos();
-
-            let x = sin_theta * cos_phi;
-            let y = cos_theta;
-            let z = sin_theta * sin_phi;
-
-            vertices.push(PbrVertex {
-                position: [x * radius, y * radius, z * radius],
-                normal: [x, y, z],
-                uv: [segment as f32 / segments as f32, ring as f32 / rings as f32],
-            });
-        }
-    }
-
-    for ring in 0..rings {
-        for segment in 0..segments {
-            let current = ring * (segments + 1) + segment;
-            let next = current + segments + 1;
-
-            indices.push(current);
-            indices.push(next);
-            indices.push(current + 1);
-
-            indices.push(current + 1);
-            indices.push(next);
-            indices.push(next + 1);
-        }
-    }
-
-    (vertices, indices)
 }
 
 // === Egui UI ===
@@ -658,32 +604,9 @@ impl PbrIblDemo {
 
         let device = ctx.device();
 
-        // Create vertex layout
-        let vertex_layout = Arc::new(
-            VertexLayout::new()
-                .with_buffer(VertexBufferLayout::new(
-                    std::mem::size_of::<PbrVertex>() as u32
-                ))
-                .with_attribute(VertexAttribute {
-                    semantic: VertexAttributeSemantic::Position,
-                    format: VertexAttributeFormat::Float3,
-                    offset: 0,
-                    buffer_index: 0,
-                })
-                .with_attribute(VertexAttribute {
-                    semantic: VertexAttributeSemantic::Normal,
-                    format: VertexAttributeFormat::Float3,
-                    offset: 12,
-                    buffer_index: 0,
-                })
-                .with_attribute(VertexAttribute {
-                    semantic: VertexAttributeSemantic::TexCoord0,
-                    format: VertexAttributeFormat::Float2,
-                    offset: 24,
-                    buffer_index: 0,
-                })
-                .with_label("pbr_vertex_layout"),
-        );
+        // Generate sphere mesh on CPU
+        let sphere_cpu = generators::generate_sphere(0.5, 32, 16);
+        let vertex_layout = sphere_cpu.layout().clone();
 
         // Load HDR environment and compute IBL data on CPU
         log::info!("Loading HDR environment map...");
@@ -934,27 +857,10 @@ impl PbrIblDemo {
         // Store IBL binding group for resolve pass (created later after G-buffer textures exist)
         // We'll create the resolve material and its bindings in create_resolve_resources()
 
-        // Create sphere mesh
-        let (vertices, indices) = generate_sphere(0.5, 32, 16);
+        // Create GPU mesh from CPU sphere
         let mesh = device
-            .create_mesh(
-                &MeshDescriptor::new(vertex_layout)
-                    .with_vertex_count(vertices.len() as u32)
-                    .with_indices(IndexFormat::Uint32, indices.len() as u32)
-                    .with_label("sphere"),
-            )
-            .expect("Failed to create mesh");
-
-        if let Some(vb) = mesh.vertex_buffer(0) {
-            device
-                .write_buffer(vb, 0, bytemuck::cast_slice(&vertices))
-                .expect("Failed to write vertex buffer");
-        }
-        if let Some(ib) = mesh.index_buffer() {
-            device
-                .write_buffer(ib, 0, bytemuck::cast_slice(&indices))
-                .expect("Failed to write index buffer");
-        }
+            .create_mesh_from_cpu(&sphere_cpu)
+            .expect("Failed to create sphere mesh");
         self.mesh = Some(mesh);
 
         // Create skybox material and resources

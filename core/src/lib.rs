@@ -2,6 +2,7 @@
 //!
 //! Core crate for RedLilium Engine basic utilities.
 
+pub mod mesh;
 pub mod profiling;
 
 /// Core library version

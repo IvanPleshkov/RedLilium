@@ -8,7 +8,7 @@ use std::sync::{Arc, RwLock, Weak};
 use crate::error::GraphicsError;
 use crate::instance::GraphicsInstance;
 use crate::materials::{Material, MaterialDescriptor};
-use crate::mesh::{Mesh, MeshDescriptor};
+use crate::mesh::{CpuMesh, Mesh, MeshDescriptor};
 use crate::pipeline::FramePipeline;
 use crate::profiling::profile_scope;
 use crate::resources::{Buffer, Sampler, Texture};
@@ -386,6 +386,51 @@ impl GraphicsDevice {
             buffer_count,
             descriptor.index_count
         );
+
+        Ok(mesh)
+    }
+
+    /// Create a GPU mesh from a CPU mesh, uploading vertex and index data.
+    ///
+    /// This is a convenience method that:
+    /// 1. Creates a GPU mesh with the appropriate buffers
+    /// 2. Writes the vertex data from the CpuMesh into each buffer slot
+    /// 3. Writes the index data if present
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use redlilium_core::mesh::generators;
+    ///
+    /// let sphere = generators::generate_sphere(1.0, 32, 16);
+    /// let gpu_mesh = device.create_mesh_from_cpu(&sphere)?;
+    /// ```
+    pub fn create_mesh_from_cpu(
+        self: &Arc<Self>,
+        cpu_mesh: &CpuMesh,
+    ) -> Result<Arc<Mesh>, GraphicsError> {
+        profile_scope!("create_mesh_from_cpu");
+
+        let descriptor = cpu_mesh.to_descriptor();
+        let mesh = self.create_mesh(&descriptor)?;
+
+        // Write vertex data for each buffer slot
+        for i in 0..cpu_mesh.buffer_count() {
+            if let (Some(gpu_buffer), Some(cpu_data)) =
+                (mesh.vertex_buffer(i), cpu_mesh.vertex_buffer_data(i))
+                && !cpu_data.is_empty()
+            {
+                self.write_buffer(gpu_buffer, 0, cpu_data)?;
+            }
+        }
+
+        // Write index data if present
+        if let (Some(gpu_index_buffer), Some(cpu_index_data)) =
+            (mesh.index_buffer(), cpu_mesh.index_data())
+            && !cpu_index_data.is_empty()
+        {
+            self.write_buffer(gpu_index_buffer, 0, cpu_index_data)?;
+        }
 
         Ok(mesh)
     }

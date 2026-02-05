@@ -11,6 +11,7 @@ profiling = ["dep:tracy-client"]
 
 [dependencies]
 log.workspace = true
+bytemuck = { workspace = true }
 
 # Profiling (optional)
 tracy-client = { workspace = true, optional = true }

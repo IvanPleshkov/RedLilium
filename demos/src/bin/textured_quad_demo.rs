@@ -14,17 +14,16 @@ use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
 use redlilium_app::{App, AppArgs, AppContext, AppHandler, DefaultAppArgs, DrawContext};
+use redlilium_core::mesh::generators;
 use redlilium_graphics::{
     AddressMode, BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferDescriptor,
-    BufferUsage, ColorAttachment, DepthStencilAttachment, Extent3d, FilterMode, FrameSchedule,
-    GraphicsPass, IndexFormat, Material, MaterialDescriptor, MaterialInstance, Mesh,
-    MeshDescriptor, RenderGraph, RenderTargetConfig, SamplerDescriptor, ShaderSource, ShaderStage,
-    ShaderStageFlags, TextureDescriptor, TextureFormat, TextureUsage, TransferConfig,
-    TransferOperation, TransferPass, VertexAttribute, VertexAttributeFormat,
-    VertexAttributeSemantic, VertexBufferLayout, VertexLayout,
+    BufferTextureCopyRegion, BufferTextureLayout, BufferUsage, ColorAttachment,
+    DepthStencilAttachment, Extent3d, FilterMode, FrameSchedule, GraphicsPass, Material,
+    MaterialDescriptor, MaterialInstance, Mesh, RenderGraph, RenderTargetConfig, SamplerDescriptor,
+    ShaderSource, ShaderStage, ShaderStageFlags, TextureCopyLocation, TextureDescriptor,
+    TextureFormat, TextureUsage, TransferConfig, TransferOperation, TransferPass, VertexLayout,
     resize::{ResizeManager, ResizeStrategy},
 };
-use redlilium_graphics::{BufferTextureCopyRegion, BufferTextureLayout, TextureCopyLocation};
 
 // === WGSL Shader ===
 
@@ -63,14 +62,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
-// === Vertex Data ===
-
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct QuadVertex {
-    position: [f32; 3],
-    uv: [f32; 2],
-}
+// === Uniform Data ===
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -154,25 +146,7 @@ impl TexturedQuadDemo {
         let device = ctx.device();
 
         // Create vertex layout for position + uv
-        let vertex_layout = Arc::new(
-            VertexLayout::new()
-                .with_buffer(VertexBufferLayout::new(
-                    std::mem::size_of::<QuadVertex>() as u32
-                ))
-                .with_attribute(VertexAttribute {
-                    semantic: VertexAttributeSemantic::Position,
-                    format: VertexAttributeFormat::Float3,
-                    offset: 0,
-                    buffer_index: 0,
-                })
-                .with_attribute(VertexAttribute {
-                    semantic: VertexAttributeSemantic::TexCoord0,
-                    format: VertexAttributeFormat::Float2,
-                    offset: 12,
-                    buffer_index: 0,
-                })
-                .with_label("quad_vertex_layout"),
-        );
+        let vertex_layout = VertexLayout::position_uv();
 
         // Load image from URL
         log::info!("Loading Lenna test image...");
@@ -305,51 +279,11 @@ impl TexturedQuadDemo {
         self.material_instance = Some(material_instance);
 
         // Create quad mesh (centered, aspect-ratio correct)
-        // The quad will be sized to display the texture with correct aspect ratio
         let aspect = tex_width as f32 / tex_height as f32;
-        let half_width = 0.5 * aspect;
-        let half_height = 0.5;
-
-        let vertices = [
-            QuadVertex {
-                position: [-half_width, -half_height, 0.0],
-                uv: [0.0, 1.0],
-            },
-            QuadVertex {
-                position: [half_width, -half_height, 0.0],
-                uv: [1.0, 1.0],
-            },
-            QuadVertex {
-                position: [half_width, half_height, 0.0],
-                uv: [1.0, 0.0],
-            },
-            QuadVertex {
-                position: [-half_width, half_height, 0.0],
-                uv: [0.0, 0.0],
-            },
-        ];
-
-        let indices: [u32; 6] = [0, 1, 2, 2, 3, 0];
-
+        let quad_cpu = generators::generate_quad(0.5 * aspect, 0.5);
         let mesh = device
-            .create_mesh(
-                &MeshDescriptor::new(vertex_layout)
-                    .with_vertex_count(vertices.len() as u32)
-                    .with_indices(IndexFormat::Uint32, indices.len() as u32)
-                    .with_label("quad"),
-            )
-            .expect("Failed to create mesh");
-
-        if let Some(vb) = mesh.vertex_buffer(0) {
-            device
-                .write_buffer(vb, 0, bytemuck::cast_slice(&vertices))
-                .expect("Failed to write vertex buffer");
-        }
-        if let Some(ib) = mesh.index_buffer() {
-            device
-                .write_buffer(ib, 0, bytemuck::cast_slice(&indices))
-                .expect("Failed to write index buffer");
-        }
+            .create_mesh_from_cpu(&quad_cpu)
+            .expect("Failed to create quad mesh");
         self.mesh = Some(mesh);
 
         // Create depth texture
