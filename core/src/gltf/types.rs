@@ -11,8 +11,9 @@ use crate::texture::CpuTexture;
 /// A loaded glTF document containing all scenes and resources.
 ///
 /// Scenes hold their own meshes, cameras, skins, and animations (see [`Scene`]).
-/// The document holds shared resources (materials, textures, samplers)
-/// that are referenced by index from scene resources.
+/// The document holds shared resources (materials, textures) that are referenced
+/// by index from scene resources. Samplers are embedded in [`TextureRef`] via
+/// `Arc<CpuSampler>`.
 #[derive(Debug)]
 pub struct GltfDocument {
     /// All scenes in the document.
@@ -23,8 +24,8 @@ pub struct GltfDocument {
     pub materials: Vec<CpuMaterial>,
     /// All textures (CPU-side pixel data).
     pub textures: Vec<CpuTexture>,
-    /// All samplers.
-    pub samplers: Vec<CpuSampler>,
     /// New vertex layouts created during loading (not found in shared_layouts).
     pub new_layouts: Vec<Arc<VertexLayout>>,
+    /// New samplers created during loading (not found in shared_samplers).
+    pub new_samplers: Vec<Arc<CpuSampler>>,
 }

@@ -31,6 +31,13 @@ pub(crate) struct LoadContext {
     /// New layouts created during loading.
     new_layouts: Vec<Arc<VertexLayout>>,
 
+    /// Shared samplers passed in by the caller.
+    shared_samplers: Vec<Arc<CpuSampler>>,
+    /// New samplers created during loading.
+    new_samplers: Vec<Arc<CpuSampler>>,
+    /// Loaded sampler Arcs indexed by glTF sampler index.
+    sampler_arcs: Vec<Arc<CpuSampler>>,
+
     /// Mapping from glTF mesh index → range of flat CpuMesh indices.
     /// Populated by `load_meshes`, used by `load_scenes`.
     mesh_index_map: Vec<Vec<usize>>,
@@ -42,12 +49,16 @@ impl LoadContext {
         document: gltf_dep::Document,
         buffers: Vec<Vec<u8>>,
         shared_layouts: &[Arc<VertexLayout>],
+        shared_samplers: &[Arc<CpuSampler>],
     ) -> Self {
         Self {
             document,
             buffers,
             shared_layouts: shared_layouts.to_vec(),
             new_layouts: Vec::new(),
+            shared_samplers: shared_samplers.to_vec(),
+            new_samplers: Vec::new(),
+            sampler_arcs: Vec::new(),
             mesh_index_map: Vec::new(),
         }
     }
@@ -114,9 +125,15 @@ impl LoadContext {
         Ok(images)
     }
 
-    /// Load all samplers as CpuSamplers.
-    pub fn load_samplers(&self) -> Vec<CpuSampler> {
-        self.document
+    /// Load all samplers as shared `Arc<CpuSampler>`.
+    ///
+    /// Reuses structurally matching samplers from `shared_samplers`. New
+    /// samplers are stored in `new_samplers`. The resulting `sampler_arcs`
+    /// vector is indexed by glTF sampler index and used by
+    /// `resolve_texture_sampler`.
+    pub fn load_samplers(&mut self) {
+        self.sampler_arcs = self
+            .document
             .samplers()
             .map(|sampler| {
                 let (min_filter, mipmap_filter) = sampler
@@ -128,7 +145,7 @@ impl LoadContext {
                     .map(map_mag_filter)
                     .unwrap_or(FilterMode::Nearest);
 
-                CpuSampler {
+                let cpu_sampler = CpuSampler {
                     name: None,
                     mag_filter,
                     min_filter,
@@ -137,9 +154,11 @@ impl LoadContext {
                     address_mode_v: map_wrapping(sampler.wrap_t()),
                     address_mode_w: AddressMode::ClampToEdge,
                     ..Default::default()
-                }
+                };
+
+                find_or_create_sampler(cpu_sampler, &self.shared_samplers, &mut self.new_samplers)
             })
-            .collect()
+            .collect();
     }
 
     /// Load all materials as property-based CpuMaterials.
@@ -266,9 +285,16 @@ impl LoadContext {
         }
     }
 
-    /// Resolve glTF texture index and sampler index.
-    fn resolve_texture_sampler(&self, tex: &gltf_dep::Texture<'_>) -> (usize, Option<usize>) {
-        (tex.index(), tex.sampler().index())
+    /// Resolve glTF texture index and shared sampler.
+    fn resolve_texture_sampler(
+        &self,
+        tex: &gltf_dep::Texture<'_>,
+    ) -> (usize, Option<Arc<CpuSampler>>) {
+        let sampler = tex
+            .sampler()
+            .index()
+            .map(|idx| Arc::clone(&self.sampler_arcs[idx]));
+        (tex.index(), sampler)
     }
 
     /// Load all cameras.
@@ -529,9 +555,9 @@ impl LoadContext {
         self.document.default_scene().map(|s| s.index())
     }
 
-    /// Consume the context and return new layouts.
-    pub fn into_new_layouts(self) -> Vec<Arc<VertexLayout>> {
-        self.new_layouts
+    /// Consume the context and return new layouts and new samplers.
+    pub fn into_new_resources(self) -> (Vec<Arc<VertexLayout>>, Vec<Arc<CpuSampler>>) {
+        (self.new_layouts, self.new_samplers)
     }
 }
 
@@ -563,6 +589,47 @@ fn load_node(node: &gltf_dep::Node<'_>, mesh_index_map: &[Vec<usize>]) -> SceneN
             .map(|c| load_node(&c, mesh_index_map))
             .collect(),
     }
+}
+
+/// Check if two samplers are structurally equal (ignoring name).
+fn samplers_structurally_equal(a: &CpuSampler, b: &CpuSampler) -> bool {
+    a.address_mode_u == b.address_mode_u
+        && a.address_mode_v == b.address_mode_v
+        && a.address_mode_w == b.address_mode_w
+        && a.mag_filter == b.mag_filter
+        && a.min_filter == b.min_filter
+        && a.mipmap_filter == b.mipmap_filter
+        && a.lod_min_clamp == b.lod_min_clamp
+        && a.lod_max_clamp == b.lod_max_clamp
+        && a.compare == b.compare
+        && a.anisotropy_clamp == b.anisotropy_clamp
+}
+
+/// Find or create a shared sampler.
+///
+/// Searches `existing_samplers` for a structural match. If found, returns the
+/// existing Arc. Otherwise, creates a new Arc and appends it to `new_samplers`.
+fn find_or_create_sampler(
+    sampler: CpuSampler,
+    existing_samplers: &[Arc<CpuSampler>],
+    new_samplers: &mut Vec<Arc<CpuSampler>>,
+) -> Arc<CpuSampler> {
+    // Search in pre-existing shared samplers
+    for existing in existing_samplers {
+        if samplers_structurally_equal(&sampler, existing) {
+            return Arc::clone(existing);
+        }
+    }
+    // Search in newly created samplers
+    for new_sampler in new_samplers.iter() {
+        if samplers_structurally_equal(&sampler, new_sampler) {
+            return Arc::clone(new_sampler);
+        }
+    }
+    // Create a new one
+    let arc = Arc::new(sampler);
+    new_samplers.push(Arc::clone(&arc));
+    arc
 }
 
 /// Decoded image data (internal, not exposed).

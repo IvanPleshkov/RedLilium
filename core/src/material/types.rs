@@ -5,6 +5,10 @@
 //! bridges format-specific loaders (glTF, FBX, etc.) with the generic
 //! graphics material system.
 
+use std::sync::Arc;
+
+use crate::sampler::CpuSampler;
+
 /// Well-known material property semantics.
 ///
 /// Standard PBR metallic-roughness properties plus extensibility via [`Custom`](Self::Custom).
@@ -56,14 +60,26 @@ pub enum MaterialValue {
 }
 
 /// Reference to a texture with sampler and UV set.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct TextureRef {
     /// Index into the owning container's texture array.
     pub texture: usize,
-    /// Index into the owning container's sampler array.
-    pub sampler: Option<usize>,
+    /// Shared sampler configuration (Arc-shared across materials).
+    pub sampler: Option<Arc<CpuSampler>>,
     /// Texture coordinate set index (0, 1, …).
     pub tex_coord: u32,
+}
+
+impl PartialEq for TextureRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.texture == other.texture
+            && self.tex_coord == other.tex_coord
+            && match (&self.sampler, &other.sampler) {
+                (Some(a), Some(b)) => **a == **b,
+                (None, None) => true,
+                _ => false,
+            }
+    }
 }
 
 /// A single material property: semantic tag + typed value.
@@ -263,7 +279,7 @@ mod tests {
                 semantic: MaterialSemantic::BaseColorTexture,
                 value: MaterialValue::Texture(TextureRef {
                     texture: 0,
-                    sampler: Some(1),
+                    sampler: Some(Arc::new(CpuSampler::linear())),
                     tex_coord: 0,
                 }),
             });
@@ -282,7 +298,7 @@ mod tests {
             .get_texture(&MaterialSemantic::BaseColorTexture)
             .unwrap();
         assert_eq!(tex.texture, 0);
-        assert_eq!(tex.sampler, Some(1));
+        assert!(tex.sampler.is_some());
 
         assert!(mat.get(&MaterialSemantic::RoughnessFactor).is_none());
     }

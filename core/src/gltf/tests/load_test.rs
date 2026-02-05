@@ -12,7 +12,7 @@ fn default_scene(doc: &crate::gltf::GltfDocument) -> &crate::scene::Scene {
 
 #[test]
 fn test_load_toy_car() {
-    let doc = load_gltf(TOY_CAR_GLB, &[]).expect("failed to load ToyCar.glb");
+    let doc = load_gltf(TOY_CAR_GLB, &[], &[]).expect("failed to load ToyCar.glb");
     let scene = default_scene(&doc);
 
     println!("Loaded {} meshes", scene.meshes.len());
@@ -44,7 +44,7 @@ fn test_load_toy_car() {
 
 #[test]
 fn test_toy_car_materials_on_meshes() {
-    let doc = load_gltf(TOY_CAR_GLB, &[]).expect("failed to load ToyCar.glb");
+    let doc = load_gltf(TOY_CAR_GLB, &[], &[]).expect("failed to load ToyCar.glb");
     let scene = default_scene(&doc);
 
     assert!(!doc.materials.is_empty(), "expected materials");
@@ -73,7 +73,7 @@ fn test_toy_car_materials_on_meshes() {
 
 #[test]
 fn test_toy_car_has_textures() {
-    let doc = load_gltf(TOY_CAR_GLB, &[]).expect("failed to load ToyCar.glb");
+    let doc = load_gltf(TOY_CAR_GLB, &[], &[]).expect("failed to load ToyCar.glb");
 
     assert!(!doc.textures.is_empty(), "expected textures");
 
@@ -98,7 +98,7 @@ fn test_toy_car_has_textures() {
 
 #[test]
 fn test_toy_car_has_scene() {
-    let doc = load_gltf(TOY_CAR_GLB, &[]).expect("failed to load ToyCar.glb");
+    let doc = load_gltf(TOY_CAR_GLB, &[], &[]).expect("failed to load ToyCar.glb");
 
     assert!(!doc.scenes.is_empty(), "expected at least one scene");
     let scene = default_scene(&doc);
