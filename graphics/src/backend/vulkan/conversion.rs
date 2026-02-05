@@ -76,6 +76,7 @@ pub fn convert_texture_format(format: TextureFormat) -> vk::Format {
         TextureFormat::Depth24PlusStencil8 => vk::Format::D24_UNORM_S8_UINT,
         TextureFormat::Depth32Float => vk::Format::D32_SFLOAT,
         TextureFormat::Depth32FloatStencil8 => vk::Format::D32_SFLOAT_S8_UINT,
+        _ => vk::Format::R8G8B8A8_UNORM,
     }
 }
 

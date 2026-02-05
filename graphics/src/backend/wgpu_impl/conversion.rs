@@ -78,6 +78,7 @@ pub fn convert_texture_format(format: TextureFormat) -> wgpu::TextureFormat {
         TextureFormat::Depth24PlusStencil8 => wgpu::TextureFormat::Depth24PlusStencil8,
         TextureFormat::Depth32Float => wgpu::TextureFormat::Depth32Float,
         TextureFormat::Depth32FloatStencil8 => wgpu::TextureFormat::Depth32FloatStencil8,
+        _ => wgpu::TextureFormat::Rgba8Unorm,
     }
 }
 

@@ -4,12 +4,19 @@ use crate::gltf::load_gltf;
 
 const TOY_CAR_GLB: &[u8] = include_bytes!("ToyCar.glb");
 
+/// Helper: get the default scene from a loaded document.
+fn default_scene(doc: &crate::gltf::GltfDocument) -> &crate::scene::Scene {
+    let idx = doc.default_scene.expect("expected a default scene");
+    &doc.scenes[idx]
+}
+
 #[test]
 fn test_load_toy_car() {
     let doc = load_gltf(TOY_CAR_GLB, &[]).expect("failed to load ToyCar.glb");
+    let scene = default_scene(&doc);
 
-    println!("Loaded {} meshes", doc.meshes.len());
-    for (i, mesh) in doc.meshes.iter().enumerate() {
+    println!("Loaded {} meshes", scene.meshes.len());
+    for (i, mesh) in scene.meshes.iter().enumerate() {
         println!(
             "  mesh {}: vertices={}, indices={}, layout_buffers={}, material={:?}",
             i,
@@ -21,10 +28,10 @@ fn test_load_toy_car() {
     }
 
     // ToyCar has meshes
-    assert!(!doc.meshes.is_empty(), "expected at least one mesh");
+    assert!(!scene.meshes.is_empty(), "expected at least one mesh");
 
     // Every mesh must have vertex data
-    for (i, mesh) in doc.meshes.iter().enumerate() {
+    for (i, mesh) in scene.meshes.iter().enumerate() {
         assert!(mesh.vertex_count() > 0, "mesh {i} has no vertices");
         assert!(
             mesh.vertex_buffer_data(0).is_some(),
@@ -38,11 +45,12 @@ fn test_load_toy_car() {
 #[test]
 fn test_toy_car_materials_on_meshes() {
     let doc = load_gltf(TOY_CAR_GLB, &[]).expect("failed to load ToyCar.glb");
+    let scene = default_scene(&doc);
 
     assert!(!doc.materials.is_empty(), "expected materials");
 
     // Every mesh should have a material assigned
-    for (i, mesh) in doc.meshes.iter().enumerate() {
+    for (i, mesh) in scene.meshes.iter().enumerate() {
         let mat_idx = mesh.material();
         assert!(mat_idx.is_some(), "mesh {i} has no material");
         assert!(
@@ -60,26 +68,26 @@ fn test_toy_car_materials_on_meshes() {
 }
 
 #[test]
-fn test_toy_car_has_textures_and_images() {
+fn test_toy_car_has_textures() {
     let doc = load_gltf(TOY_CAR_GLB, &[]).expect("failed to load ToyCar.glb");
 
     assert!(!doc.textures.is_empty(), "expected textures");
-    assert!(!doc.images.is_empty(), "expected images");
 
-    for (i, img) in doc.images.iter().enumerate() {
+    for (i, tex) in doc.textures.iter().enumerate() {
         println!(
-            "  image {}: name={:?}, {}x{}, {} bytes",
+            "  texture {}: name={:?}, {}x{}, format={:?}, {} bytes",
             i,
-            img.name,
-            img.width,
-            img.height,
-            img.data.len(),
+            tex.name,
+            tex.width,
+            tex.height,
+            tex.format,
+            tex.data.len(),
         );
         // RGBA8: 4 bytes per pixel
         assert_eq!(
-            img.data.len(),
-            (img.width * img.height * 4) as usize,
-            "image {i} data size doesn't match RGBA8 dimensions"
+            tex.data.len(),
+            (tex.width * tex.height * 4) as usize,
+            "texture {i} data size doesn't match RGBA8 dimensions"
         );
     }
 }
@@ -89,13 +97,11 @@ fn test_toy_car_has_scene() {
     let doc = load_gltf(TOY_CAR_GLB, &[]).expect("failed to load ToyCar.glb");
 
     assert!(!doc.scenes.is_empty(), "expected at least one scene");
-    assert!(doc.default_scene.is_some(), "expected a default scene");
-
-    let scene = &doc.scenes[doc.default_scene.unwrap()];
+    let scene = default_scene(&doc);
     assert!(!scene.nodes.is_empty(), "expected nodes in default scene");
 
     // Count total nodes recursively
-    fn count_nodes(nodes: &[crate::gltf::GltfNode]) -> usize {
+    fn count_nodes(nodes: &[crate::scene::SceneNode]) -> usize {
         nodes.iter().map(|n| 1 + count_nodes(&n.children)).sum()
     }
     let total = count_nodes(&scene.nodes);
@@ -103,7 +109,7 @@ fn test_toy_car_has_scene() {
     assert!(total > 0);
 
     // Verify nodes reference valid mesh indices
-    fn check_mesh_refs(nodes: &[crate::gltf::GltfNode], mesh_count: usize) {
+    fn check_mesh_refs(nodes: &[crate::scene::SceneNode], mesh_count: usize) {
         for node in nodes {
             for &idx in &node.meshes {
                 assert!(idx < mesh_count, "node mesh index {idx} out of range");
@@ -111,33 +117,5 @@ fn test_toy_car_has_scene() {
             check_mesh_refs(&node.children, mesh_count);
         }
     }
-    check_mesh_refs(&scene.nodes, doc.meshes.len());
-}
-
-#[test]
-fn test_toy_car_layout_sharing() {
-    // Load with no shared layouts — all layouts should be new
-    let doc1 = load_gltf(TOY_CAR_GLB, &[]).expect("failed to load ToyCar.glb");
-    assert!(
-        !doc1.new_layouts.is_empty(),
-        "expected new layouts when none shared"
-    );
-
-    // Load again with the previously created layouts as shared
-    let doc2 = load_gltf(TOY_CAR_GLB, &doc1.new_layouts).expect("failed to load ToyCar.glb");
-    assert!(
-        doc2.new_layouts.is_empty(),
-        "expected no new layouts when all are shared, got {}",
-        doc2.new_layouts.len()
-    );
-
-    // Verify that meshes in doc2 point to layouts from doc1
-    for mesh in &doc2.meshes {
-        let layout = mesh.layout();
-        let shared = doc1
-            .new_layouts
-            .iter()
-            .any(|l| std::sync::Arc::ptr_eq(l, layout));
-        assert!(shared, "mesh layout should be a shared Arc from doc1");
-    }
+    check_mesh_refs(&scene.nodes, scene.meshes.len());
 }

@@ -6,6 +6,9 @@
 use std::sync::Arc;
 
 use crate::mesh::{CpuMesh, VertexLayout};
+use crate::sampler::{AddressMode, CpuSampler, FilterMode};
+use crate::scene::{CameraProjection, NodeTransform, Scene, SceneCamera, SceneNode, SceneSkin};
+use crate::texture::{CpuTexture, TextureFormat};
 
 use super::error::GltfError;
 use super::types::*;
@@ -44,8 +47,35 @@ impl LoadContext {
         }
     }
 
-    /// Load all images, decoding to RGBA8.
-    pub fn load_images(&self) -> Result<Vec<GltfImage>, GltfError> {
+    /// Decode all images and build CpuTextures by inlining image data
+    /// for each glTF texture.
+    pub fn load_textures(&self) -> Result<Vec<CpuTexture>, GltfError> {
+        let images = self.decode_images()?;
+
+        let textures = self
+            .document
+            .textures()
+            .map(|tex| {
+                let image_index = tex.source().index();
+                let image = &images[image_index];
+                let mut cpu_tex = CpuTexture::new(
+                    image.width,
+                    image.height,
+                    TextureFormat::Rgba8Unorm,
+                    image.data.clone(),
+                );
+                if let Some(name) = tex.name() {
+                    cpu_tex = cpu_tex.with_name(name);
+                }
+                cpu_tex
+            })
+            .collect();
+
+        Ok(textures)
+    }
+
+    /// Decode all images to RGBA8.
+    fn decode_images(&self) -> Result<Vec<DecodedImage>, GltfError> {
         let mut images = Vec::new();
 
         for image in self.document.images() {
@@ -61,25 +91,12 @@ impl LoadContext {
                     let end = start + view.length();
                     let image_bytes = &buffer_data[start..end];
 
-                    let decoded = decode_image(image_bytes, mime_type)?;
-                    images.push(GltfImage {
-                        name: image.name().map(String::from),
-                        data: decoded.data,
-                        width: decoded.width,
-                        height: decoded.height,
-                    });
+                    images.push(decode_image(image_bytes, mime_type)?);
                 }
                 gltf_dep::image::Source::Uri { uri, mime_type } => {
-                    // Check for embedded base64 data URI
                     if let Some(data) = parse_data_uri(uri) {
                         let mime = mime_type.unwrap_or("image/png");
-                        let decoded = decode_image(&data, mime)?;
-                        images.push(GltfImage {
-                            name: image.name().map(String::from),
-                            data: decoded.data,
-                            width: decoded.width,
-                            height: decoded.height,
-                        });
+                        images.push(decode_image(&data, mime)?);
                     } else {
                         return Err(GltfError::ImageDecode(format!(
                             "external URI images not supported: {uri}"
@@ -92,27 +109,30 @@ impl LoadContext {
         Ok(images)
     }
 
-    /// Load all samplers.
-    pub fn load_samplers(&self) -> Vec<GltfSampler> {
+    /// Load all samplers as CpuSamplers.
+    pub fn load_samplers(&self) -> Vec<CpuSampler> {
         self.document
             .samplers()
-            .map(|sampler| GltfSampler {
-                mag_filter: sampler.mag_filter().map(map_mag_filter),
-                min_filter: sampler.min_filter().map(map_min_filter),
-                wrap_s: map_wrapping(sampler.wrap_s()),
-                wrap_t: map_wrapping(sampler.wrap_t()),
-            })
-            .collect()
-    }
+            .map(|sampler| {
+                let (min_filter, mipmap_filter) = sampler
+                    .min_filter()
+                    .map(map_min_filter)
+                    .unwrap_or((FilterMode::Nearest, FilterMode::Nearest));
+                let mag_filter = sampler
+                    .mag_filter()
+                    .map(map_mag_filter)
+                    .unwrap_or(FilterMode::Nearest);
 
-    /// Load all textures.
-    pub fn load_textures(&self) -> Vec<GltfTexture> {
-        self.document
-            .textures()
-            .map(|tex| GltfTexture {
-                name: tex.name().map(String::from),
-                image: tex.source().index(),
-                sampler: tex.sampler().index(),
+                CpuSampler {
+                    name: None,
+                    mag_filter,
+                    min_filter,
+                    mipmap_filter,
+                    address_mode_u: map_wrapping(sampler.wrap_s()),
+                    address_mode_v: map_wrapping(sampler.wrap_t()),
+                    address_mode_w: AddressMode::ClampToEdge,
+                    ..Default::default()
+                }
             })
             .collect()
     }
@@ -126,33 +146,32 @@ impl LoadContext {
                 GltfMaterial {
                     name: mat.name().map(String::from),
                     base_color_factor: pbr.base_color_factor(),
-                    base_color_texture: pbr.base_color_texture().map(|t| GltfTextureRef {
-                        index: t.texture().index(),
-                        tex_coord: t.tex_coord(),
-                    }),
+                    base_color_texture: pbr.base_color_texture().map(|t| self.map_texture_ref(&t)),
                     metallic_factor: pbr.metallic_factor(),
                     roughness_factor: pbr.roughness_factor(),
-                    metallic_roughness_texture: pbr.metallic_roughness_texture().map(|t| {
-                        GltfTextureRef {
-                            index: t.texture().index(),
+                    metallic_roughness_texture: pbr
+                        .metallic_roughness_texture()
+                        .map(|t| self.map_texture_ref(&t)),
+                    normal_texture: mat.normal_texture().map(|t| {
+                        let (texture, sampler) = self.resolve_texture_sampler(&t.texture());
+                        GltfNormalTextureRef {
+                            texture,
+                            sampler,
                             tex_coord: t.tex_coord(),
+                            scale: t.scale(),
                         }
                     }),
-                    normal_texture: mat.normal_texture().map(|t| GltfNormalTextureRef {
-                        index: t.texture().index(),
-                        tex_coord: t.tex_coord(),
-                        scale: t.scale(),
-                    }),
-                    occlusion_texture: mat.occlusion_texture().map(|t| GltfOcclusionTextureRef {
-                        index: t.texture().index(),
-                        tex_coord: t.tex_coord(),
-                        strength: t.strength(),
+                    occlusion_texture: mat.occlusion_texture().map(|t| {
+                        let (texture, sampler) = self.resolve_texture_sampler(&t.texture());
+                        GltfOcclusionTextureRef {
+                            texture,
+                            sampler,
+                            tex_coord: t.tex_coord(),
+                            strength: t.strength(),
+                        }
                     }),
                     emissive_factor: mat.emissive_factor(),
-                    emissive_texture: mat.emissive_texture().map(|t| GltfTextureRef {
-                        index: t.texture().index(),
-                        tex_coord: t.tex_coord(),
-                    }),
+                    emissive_texture: mat.emissive_texture().map(|t| self.map_texture_ref(&t)),
                     alpha_mode: match mat.alpha_mode() {
                         gltf_dep::material::AlphaMode::Opaque => GltfAlphaMode::Opaque,
                         gltf_dep::material::AlphaMode::Mask => GltfAlphaMode::Mask,
@@ -165,22 +184,35 @@ impl LoadContext {
             .collect()
     }
 
+    /// Map a glTF texture info to a GltfTextureRef with sampler index.
+    fn map_texture_ref(&self, t: &gltf_dep::texture::Info<'_>) -> GltfTextureRef {
+        let (texture, sampler) = self.resolve_texture_sampler(&t.texture());
+        GltfTextureRef {
+            texture,
+            sampler,
+            tex_coord: t.tex_coord(),
+        }
+    }
+
+    /// Resolve glTF texture index and sampler index.
+    fn resolve_texture_sampler(&self, tex: &gltf_dep::Texture<'_>) -> (usize, Option<usize>) {
+        (tex.index(), tex.sampler().index())
+    }
+
     /// Load all cameras.
-    pub fn load_cameras(&self) -> Vec<GltfCamera> {
+    pub fn load_cameras(&self) -> Vec<SceneCamera> {
         self.document
             .cameras()
             .map(|cam| {
                 let projection = match cam.projection() {
-                    gltf_dep::camera::Projection::Perspective(p) => {
-                        GltfCameraProjection::Perspective {
-                            yfov: p.yfov(),
-                            aspect: p.aspect_ratio(),
-                            znear: p.znear(),
-                            zfar: p.zfar(),
-                        }
-                    }
+                    gltf_dep::camera::Projection::Perspective(p) => CameraProjection::Perspective {
+                        yfov: p.yfov(),
+                        aspect: p.aspect_ratio(),
+                        znear: p.znear(),
+                        zfar: p.zfar(),
+                    },
                     gltf_dep::camera::Projection::Orthographic(o) => {
-                        GltfCameraProjection::Orthographic {
+                        CameraProjection::Orthographic {
                             xmag: o.xmag(),
                             ymag: o.ymag(),
                             znear: o.znear(),
@@ -188,7 +220,7 @@ impl LoadContext {
                         }
                     }
                 };
-                GltfCamera {
+                SceneCamera {
                     name: cam.name().map(String::from),
                     projection,
                 }
@@ -290,7 +322,7 @@ impl LoadContext {
     }
 
     /// Load all skins.
-    pub fn load_skins(&self) -> Result<Vec<GltfSkin>, GltfError> {
+    pub fn load_skins(&self) -> Result<Vec<SceneSkin>, GltfError> {
         let mut result = Vec::new();
 
         for skin in self.document.skins() {
@@ -309,7 +341,7 @@ impl LoadContext {
                 ]
             };
 
-            result.push(GltfSkin {
+            result.push(SceneSkin {
                 name: skin.name().map(String::from),
                 joints,
                 inverse_bind_matrices,
@@ -374,18 +406,45 @@ impl LoadContext {
         Ok(result)
     }
 
-    /// Load all scenes as node trees.
+    /// Load all scenes as node trees with embedded resources.
     ///
     /// Must be called after `load_meshes` so that `mesh_index_map` is populated.
-    pub fn load_scenes(&self) -> Vec<GltfScene> {
+    /// Takes ownership of document-level resources and embeds them into each scene.
+    pub fn load_scenes(
+        &self,
+        mut meshes: Vec<CpuMesh>,
+        mut cameras: Vec<SceneCamera>,
+        mut skins: Vec<SceneSkin>,
+    ) -> Vec<Scene> {
+        let scene_count = self.document.scenes().count();
+
         self.document
             .scenes()
-            .map(|scene| GltfScene {
-                name: scene.name().map(String::from),
-                nodes: scene
-                    .nodes()
-                    .map(|n| load_node(&n, &self.mesh_index_map))
-                    .collect(),
+            .enumerate()
+            .map(|(i, scene)| {
+                let is_last = i == scene_count - 1;
+                Scene {
+                    name: scene.name().map(String::from),
+                    nodes: scene
+                        .nodes()
+                        .map(|n| load_node(&n, &self.mesh_index_map))
+                        .collect(),
+                    meshes: if is_last {
+                        std::mem::take(&mut meshes)
+                    } else {
+                        meshes.clone()
+                    },
+                    cameras: if is_last {
+                        std::mem::take(&mut cameras)
+                    } else {
+                        cameras.clone()
+                    },
+                    skins: if is_last {
+                        std::mem::take(&mut skins)
+                    } else {
+                        skins.clone()
+                    },
+                }
             })
             .collect()
     }
@@ -406,7 +465,7 @@ impl LoadContext {
 /// Recursively load a node and its children.
 ///
 /// `mesh_index_map` maps glTF mesh index → list of flat CpuMesh indices.
-fn load_node(node: &gltf_dep::Node<'_>, mesh_index_map: &[Vec<usize>]) -> GltfNode {
+fn load_node(node: &gltf_dep::Node<'_>, mesh_index_map: &[Vec<usize>]) -> SceneNode {
     let (translation, rotation, scale) = node.transform().decomposed();
 
     let meshes = node
@@ -414,9 +473,9 @@ fn load_node(node: &gltf_dep::Node<'_>, mesh_index_map: &[Vec<usize>]) -> GltfNo
         .map(|m| mesh_index_map[m.index()].clone())
         .unwrap_or_default();
 
-    GltfNode {
+    SceneNode {
         name: node.name().map(String::from),
-        transform: GltfTransform {
+        transform: NodeTransform {
             translation,
             rotation,
             scale,
@@ -431,7 +490,7 @@ fn load_node(node: &gltf_dep::Node<'_>, mesh_index_map: &[Vec<usize>]) -> GltfNo
     }
 }
 
-/// Decode image bytes to RGBA8 using the `image` crate.
+/// Decoded image data (internal, not exposed).
 struct DecodedImage {
     data: Vec<u8>,
     width: u32,
@@ -502,32 +561,40 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
     Some(result)
 }
 
-/// Map glTF magnification filter.
-fn map_mag_filter(filter: gltf_dep::texture::MagFilter) -> GltfFilter {
+/// Map glTF magnification filter to core FilterMode.
+fn map_mag_filter(filter: gltf_dep::texture::MagFilter) -> FilterMode {
     match filter {
-        gltf_dep::texture::MagFilter::Nearest => GltfFilter::Nearest,
-        gltf_dep::texture::MagFilter::Linear => GltfFilter::Linear,
+        gltf_dep::texture::MagFilter::Nearest => FilterMode::Nearest,
+        gltf_dep::texture::MagFilter::Linear => FilterMode::Linear,
     }
 }
 
-/// Map glTF minification filter (collapse mipmap variants to Nearest/Linear).
-fn map_min_filter(filter: gltf_dep::texture::MinFilter) -> GltfFilter {
+/// Map glTF minification filter to core FilterMode pair (min_filter, mipmap_filter).
+fn map_min_filter(filter: gltf_dep::texture::MinFilter) -> (FilterMode, FilterMode) {
     match filter {
-        gltf_dep::texture::MinFilter::Nearest
-        | gltf_dep::texture::MinFilter::NearestMipmapNearest
-        | gltf_dep::texture::MinFilter::NearestMipmapLinear => GltfFilter::Nearest,
-        gltf_dep::texture::MinFilter::Linear
-        | gltf_dep::texture::MinFilter::LinearMipmapNearest
-        | gltf_dep::texture::MinFilter::LinearMipmapLinear => GltfFilter::Linear,
+        gltf_dep::texture::MinFilter::Nearest => (FilterMode::Nearest, FilterMode::Nearest),
+        gltf_dep::texture::MinFilter::Linear => (FilterMode::Linear, FilterMode::Nearest),
+        gltf_dep::texture::MinFilter::NearestMipmapNearest => {
+            (FilterMode::Nearest, FilterMode::Nearest)
+        }
+        gltf_dep::texture::MinFilter::NearestMipmapLinear => {
+            (FilterMode::Nearest, FilterMode::Linear)
+        }
+        gltf_dep::texture::MinFilter::LinearMipmapNearest => {
+            (FilterMode::Linear, FilterMode::Nearest)
+        }
+        gltf_dep::texture::MinFilter::LinearMipmapLinear => {
+            (FilterMode::Linear, FilterMode::Linear)
+        }
     }
 }
 
-/// Map glTF wrapping mode.
-fn map_wrapping(wrap: gltf_dep::texture::WrappingMode) -> GltfWrapping {
+/// Map glTF wrapping mode to core AddressMode.
+fn map_wrapping(wrap: gltf_dep::texture::WrappingMode) -> AddressMode {
     match wrap {
-        gltf_dep::texture::WrappingMode::ClampToEdge => GltfWrapping::ClampToEdge,
-        gltf_dep::texture::WrappingMode::MirroredRepeat => GltfWrapping::MirroredRepeat,
-        gltf_dep::texture::WrappingMode::Repeat => GltfWrapping::Repeat,
+        gltf_dep::texture::WrappingMode::ClampToEdge => AddressMode::ClampToEdge,
+        gltf_dep::texture::WrappingMode::MirroredRepeat => AddressMode::MirrorRepeat,
+        gltf_dep::texture::WrappingMode::Repeat => AddressMode::Repeat,
     }
 }
 
@@ -659,7 +726,7 @@ mod tests {
 
     #[test]
     fn test_default_transform() {
-        let t = GltfTransform::default();
+        let t = NodeTransform::default();
         assert_eq!(t.translation, [0.0, 0.0, 0.0]);
         assert_eq!(t.rotation, [0.0, 0.0, 0.0, 1.0]);
         assert_eq!(t.scale, [1.0, 1.0, 1.0]);

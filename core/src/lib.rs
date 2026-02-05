@@ -6,6 +6,9 @@
 pub mod gltf;
 pub mod mesh;
 pub mod profiling;
+pub mod sampler;
+pub mod scene;
+pub mod texture;
 
 /// Core library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

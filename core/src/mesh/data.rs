@@ -170,6 +170,7 @@ impl MeshDescriptor {
 /// Like [`VertexLayout`] and [`MeshDescriptor`], `CpuMesh` supports multiple
 /// vertex buffers. Each buffer slot stores its raw byte data. The number
 /// of buffers must match the layout's buffer count.
+#[derive(Clone)]
 pub struct CpuMesh {
     layout: Arc<VertexLayout>,
     topology: PrimitiveTopology,

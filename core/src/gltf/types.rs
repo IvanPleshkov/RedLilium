@@ -5,85 +5,32 @@
 
 use std::sync::Arc;
 
-use crate::mesh::{CpuMesh, VertexLayout};
+use crate::mesh::VertexLayout;
+use crate::sampler::CpuSampler;
+use crate::scene::Scene;
+use crate::texture::CpuTexture;
 
 /// A loaded glTF document containing all scenes and resources.
+///
+/// Scenes hold their own meshes, cameras, and skins (see [`Scene`]).
+/// The document holds glTF-specific resources (materials, textures,
+/// samplers, animations) that are shared across scenes.
 #[derive(Debug)]
 pub struct GltfDocument {
     /// All scenes in the document.
-    pub scenes: Vec<GltfScene>,
+    pub scenes: Vec<Scene>,
     /// Index of the default scene, if specified.
     pub default_scene: Option<usize>,
-    /// All meshes as a flat list. Each `CpuMesh` carries its material
-    /// index via [`CpuMesh::material()`]. Nodes reference meshes by
-    /// indices into this array.
-    pub meshes: Vec<CpuMesh>,
     /// All materials.
     pub materials: Vec<GltfMaterial>,
-    /// All textures (reference an image + sampler).
-    pub textures: Vec<GltfTexture>,
-    /// All decoded images (RGBA8 pixel data).
-    pub images: Vec<GltfImage>,
+    /// All textures (CPU-side pixel data).
+    pub textures: Vec<CpuTexture>,
     /// All samplers.
-    pub samplers: Vec<GltfSampler>,
-    /// All cameras.
-    pub cameras: Vec<GltfCamera>,
+    pub samplers: Vec<CpuSampler>,
     /// All animations.
     pub animations: Vec<GltfAnimation>,
-    /// All skins.
-    pub skins: Vec<GltfSkin>,
     /// New vertex layouts created during loading (not found in shared_layouts).
     pub new_layouts: Vec<Arc<VertexLayout>>,
-}
-
-// -- Scene & Nodes --
-
-/// A glTF scene containing a tree of nodes.
-#[derive(Debug)]
-pub struct GltfScene {
-    /// Scene name.
-    pub name: Option<String>,
-    /// Root nodes of the scene.
-    pub nodes: Vec<GltfNode>,
-}
-
-/// A node in the scene graph.
-#[derive(Debug)]
-pub struct GltfNode {
-    /// Node name.
-    pub name: Option<String>,
-    /// Local transform (translation, rotation, scale).
-    pub transform: GltfTransform,
-    /// Indices into `GltfDocument::meshes` (one per primitive of the
-    /// original glTF mesh). Empty if the node has no mesh.
-    pub meshes: Vec<usize>,
-    /// Index into `GltfDocument::cameras`.
-    pub camera: Option<usize>,
-    /// Index into `GltfDocument::skins`.
-    pub skin: Option<usize>,
-    /// Child nodes.
-    pub children: Vec<GltfNode>,
-}
-
-/// Node transform decomposed into translation, rotation, and scale.
-#[derive(Debug, Clone)]
-pub struct GltfTransform {
-    /// Translation [x, y, z].
-    pub translation: [f32; 3],
-    /// Rotation quaternion [x, y, z, w].
-    pub rotation: [f32; 4],
-    /// Scale [x, y, z].
-    pub scale: [f32; 3],
-}
-
-impl Default for GltfTransform {
-    fn default() -> Self {
-        Self {
-            translation: [0.0, 0.0, 0.0],
-            rotation: [0.0, 0.0, 0.0, 1.0],
-            scale: [1.0, 1.0, 1.0],
-        }
-    }
 }
 
 // -- Materials --
@@ -119,11 +66,13 @@ pub struct GltfMaterial {
     pub double_sided: bool,
 }
 
-/// Reference to a texture with a specific tex coord set.
+/// Reference to a texture with a specific tex coord set and optional sampler.
 #[derive(Debug, Clone)]
 pub struct GltfTextureRef {
     /// Index into `GltfDocument::textures`.
-    pub index: usize,
+    pub texture: usize,
+    /// Index into `GltfDocument::samplers`, if any.
+    pub sampler: Option<usize>,
     /// Texture coordinate set index (0 or 1).
     pub tex_coord: u32,
 }
@@ -132,7 +81,9 @@ pub struct GltfTextureRef {
 #[derive(Debug, Clone)]
 pub struct GltfNormalTextureRef {
     /// Index into `GltfDocument::textures`.
-    pub index: usize,
+    pub texture: usize,
+    /// Index into `GltfDocument::samplers`, if any.
+    pub sampler: Option<usize>,
     /// Texture coordinate set index.
     pub tex_coord: u32,
     /// Normal map scale factor.
@@ -143,7 +94,9 @@ pub struct GltfNormalTextureRef {
 #[derive(Debug, Clone)]
 pub struct GltfOcclusionTextureRef {
     /// Index into `GltfDocument::textures`.
-    pub index: usize,
+    pub texture: usize,
+    /// Index into `GltfDocument::samplers`, if any.
+    pub sampler: Option<usize>,
     /// Texture coordinate set index.
     pub tex_coord: u32,
     /// Occlusion strength (0.0 = no occlusion, 1.0 = full occlusion).
@@ -160,104 +113,6 @@ pub enum GltfAlphaMode {
     Mask,
     /// Alpha blending.
     Blend,
-}
-
-// -- Textures & Images --
-
-/// A texture combining an image and a sampler.
-#[derive(Debug, Clone)]
-pub struct GltfTexture {
-    /// Texture name.
-    pub name: Option<String>,
-    /// Index into `GltfDocument::images`.
-    pub image: usize,
-    /// Index into `GltfDocument::samplers`, if any.
-    pub sampler: Option<usize>,
-}
-
-/// A decoded image (always RGBA8).
-#[derive(Debug, Clone)]
-pub struct GltfImage {
-    /// Image name.
-    pub name: Option<String>,
-    /// Raw RGBA8 pixel data.
-    pub data: Vec<u8>,
-    /// Image width in pixels.
-    pub width: u32,
-    /// Image height in pixels.
-    pub height: u32,
-}
-
-/// Texture sampler parameters.
-#[derive(Debug, Clone)]
-pub struct GltfSampler {
-    /// Magnification filter.
-    pub mag_filter: Option<GltfFilter>,
-    /// Minification filter.
-    pub min_filter: Option<GltfFilter>,
-    /// Wrapping mode for S (U) coordinate.
-    pub wrap_s: GltfWrapping,
-    /// Wrapping mode for T (V) coordinate.
-    pub wrap_t: GltfWrapping,
-}
-
-/// Texture filter mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GltfFilter {
-    /// Nearest-neighbor filtering.
-    Nearest,
-    /// Linear (bilinear) filtering.
-    Linear,
-}
-
-/// Texture wrapping mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum GltfWrapping {
-    /// Clamp to edge.
-    ClampToEdge,
-    /// Mirrored repeat.
-    MirroredRepeat,
-    /// Repeat (tile).
-    #[default]
-    Repeat,
-}
-
-// -- Cameras --
-
-/// A camera definition.
-#[derive(Debug, Clone)]
-pub struct GltfCamera {
-    /// Camera name.
-    pub name: Option<String>,
-    /// Projection type and parameters.
-    pub projection: GltfCameraProjection,
-}
-
-/// Camera projection parameters.
-#[derive(Debug, Clone)]
-pub enum GltfCameraProjection {
-    /// Perspective projection.
-    Perspective {
-        /// Vertical field of view in radians.
-        yfov: f32,
-        /// Aspect ratio (width/height), if specified.
-        aspect: Option<f32>,
-        /// Near clipping plane distance.
-        znear: f32,
-        /// Far clipping plane distance, if specified.
-        zfar: Option<f32>,
-    },
-    /// Orthographic projection.
-    Orthographic {
-        /// Horizontal magnification.
-        xmag: f32,
-        /// Vertical magnification.
-        ymag: f32,
-        /// Near clipping plane distance.
-        znear: f32,
-        /// Far clipping plane distance.
-        zfar: f32,
-    },
 }
 
 // -- Animations --
@@ -309,19 +164,4 @@ pub enum GltfInterpolation {
     Step,
     /// Cubic spline interpolation (with in/out tangents).
     CubicSpline,
-}
-
-// -- Skins --
-
-/// A skin for skeletal animation.
-#[derive(Debug, Clone)]
-pub struct GltfSkin {
-    /// Skin name.
-    pub name: Option<String>,
-    /// Joint node indices (in glTF document node order).
-    pub joints: Vec<usize>,
-    /// Inverse bind matrices (column-major 4x4, one per joint).
-    pub inverse_bind_matrices: Vec<[f32; 16]>,
-    /// Root skeleton node index, if specified.
-    pub skeleton: Option<usize>,
 }

@@ -1,13 +1,59 @@
-//! Sampler types and descriptors.
+//! CPU-side sampler types and filter/address mode definitions.
 
-// Re-export CPU-side types from core.
-pub use redlilium_core::sampler::{AddressMode, CompareFunction, FilterMode};
+/// Texture filtering mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum FilterMode {
+    /// Nearest neighbor filtering.
+    #[default]
+    Nearest,
+    /// Linear filtering.
+    Linear,
+}
 
-/// Descriptor for creating a sampler.
+/// Texture address mode (wrapping behavior).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum AddressMode {
+    /// Clamp to edge.
+    #[default]
+    ClampToEdge,
+    /// Repeat.
+    Repeat,
+    /// Mirrored repeat.
+    MirrorRepeat,
+    /// Clamp to border color.
+    ClampToBorder,
+}
+
+/// Comparison function for depth/shadow sampling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CompareFunction {
+    /// Never pass.
+    Never,
+    /// Pass if less than.
+    Less,
+    /// Pass if equal.
+    Equal,
+    /// Pass if less than or equal.
+    LessEqual,
+    /// Pass if greater than.
+    Greater,
+    /// Pass if not equal.
+    NotEqual,
+    /// Pass if greater than or equal.
+    GreaterEqual,
+    /// Always pass.
+    Always,
+}
+
+/// CPU-side sampler configuration.
+///
+/// Describes how a texture is sampled: filtering, address modes, LOD clamping,
+/// and optional comparison function. This is a format-agnostic descriptor
+/// separate from any GPU resource.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SamplerDescriptor {
-    /// Debug label for the sampler.
-    pub label: Option<String>,
+pub struct CpuSampler {
+    /// Sampler name.
+    pub name: Option<String>,
     /// Address mode for U coordinate.
     pub address_mode_u: AddressMode,
     /// Address mode for V coordinate.
@@ -30,12 +76,7 @@ pub struct SamplerDescriptor {
     pub anisotropy_clamp: u16,
 }
 
-impl SamplerDescriptor {
-    /// Create a new sampler descriptor with default settings.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
+impl CpuSampler {
     /// Create a linear filtering sampler.
     pub fn linear() -> Self {
         Self {
@@ -48,17 +89,12 @@ impl SamplerDescriptor {
 
     /// Create a nearest neighbor filtering sampler.
     pub fn nearest() -> Self {
-        Self {
-            mag_filter: FilterMode::Nearest,
-            min_filter: FilterMode::Nearest,
-            mipmap_filter: FilterMode::Nearest,
-            ..Default::default()
-        }
+        Self::default()
     }
 
-    /// Set the debug label.
-    pub fn with_label(mut self, label: impl Into<String>) -> Self {
-        self.label = Some(label.into());
+    /// Set the sampler name.
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
         self
     }
 
@@ -83,10 +119,10 @@ impl SamplerDescriptor {
     }
 }
 
-impl Default for SamplerDescriptor {
+impl Default for CpuSampler {
     fn default() -> Self {
         Self {
-            label: None,
+            name: None,
             address_mode_u: AddressMode::ClampToEdge,
             address_mode_v: AddressMode::ClampToEdge,
             address_mode_w: AddressMode::ClampToEdge,
