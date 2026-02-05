@@ -1,6 +1,9 @@
 //! Integration test: load the ToyCar.glb sample model.
 
+use std::sync::Arc;
+
 use crate::gltf::load_gltf;
+use crate::material::CpuMaterial;
 
 const TOY_CAR_GLB: &[u8] = include_bytes!("ToyCar.glb");
 
@@ -10,9 +13,24 @@ fn default_scene(doc: &crate::gltf::GltfDocument) -> &crate::scene::Scene {
     &doc.scenes[idx]
 }
 
+/// Collect all unique materials from a document's meshes.
+fn collect_materials(doc: &crate::gltf::GltfDocument) -> Vec<Arc<CpuMaterial>> {
+    let mut materials: Vec<Arc<CpuMaterial>> = Vec::new();
+    for scene in &doc.scenes {
+        for mesh in &scene.meshes {
+            if let Some(mat) = mesh.material()
+                && !materials.iter().any(|m| Arc::ptr_eq(m, mat))
+            {
+                materials.push(Arc::clone(mat));
+            }
+        }
+    }
+    materials
+}
+
 #[test]
 fn test_load_toy_car() {
-    let doc = load_gltf(TOY_CAR_GLB, &[], &[]).expect("failed to load ToyCar.glb");
+    let doc = load_gltf(TOY_CAR_GLB, &[], &[], &[]).expect("failed to load ToyCar.glb");
     let scene = default_scene(&doc);
 
     println!("Loaded {} meshes", scene.meshes.len());
@@ -23,7 +41,7 @@ fn test_load_toy_car() {
             mesh.vertex_count(),
             mesh.index_count(),
             mesh.layout().buffer_count(),
-            mesh.material(),
+            mesh.material().map(|m| m.name.as_deref()),
         );
     }
 
@@ -44,22 +62,18 @@ fn test_load_toy_car() {
 
 #[test]
 fn test_toy_car_materials_on_meshes() {
-    let doc = load_gltf(TOY_CAR_GLB, &[], &[]).expect("failed to load ToyCar.glb");
+    let doc = load_gltf(TOY_CAR_GLB, &[], &[], &[]).expect("failed to load ToyCar.glb");
     let scene = default_scene(&doc);
 
-    assert!(!doc.materials.is_empty(), "expected materials");
+    let materials = collect_materials(&doc);
+    assert!(!materials.is_empty(), "expected materials");
 
     // Every mesh should have a material assigned
     for (i, mesh) in scene.meshes.iter().enumerate() {
-        let mat_idx = mesh.material();
-        assert!(mat_idx.is_some(), "mesh {i} has no material");
-        assert!(
-            mat_idx.unwrap() < doc.materials.len(),
-            "mesh {i} material index out of range"
-        );
+        assert!(mesh.material().is_some(), "mesh {i} has no material");
     }
 
-    for (i, mat) in doc.materials.iter().enumerate() {
+    for (i, mat) in materials.iter().enumerate() {
         use crate::material::MaterialSemantic;
         let base_color = mat.get_vec4(&MaterialSemantic::BaseColorFactor);
         let metallic = mat.get_float(&MaterialSemantic::MetallicFactor);
@@ -75,11 +89,13 @@ fn test_toy_car_materials_on_meshes() {
 fn test_toy_car_has_textures() {
     use crate::material::{MaterialSemantic, MaterialValue, TextureSource};
 
-    let doc = load_gltf(TOY_CAR_GLB, &[], &[]).expect("failed to load ToyCar.glb");
+    let doc = load_gltf(TOY_CAR_GLB, &[], &[], &[]).expect("failed to load ToyCar.glb");
+
+    let materials = collect_materials(&doc);
 
     // Collect all textures referenced by materials
     let mut texture_count = 0;
-    for mat in &doc.materials {
+    for mat in &materials {
         for prop in &mat.properties {
             if let MaterialValue::Texture(tex_ref) = &prop.value
                 && let TextureSource::Cpu(cpu_tex) = &tex_ref.texture
@@ -106,7 +122,7 @@ fn test_toy_car_has_textures() {
     assert!(texture_count > 0, "expected textures in materials");
 
     // Verify base color textures are accessible via get_texture
-    for mat in &doc.materials {
+    for mat in &materials {
         if let Some(tex_ref) = mat.get_texture(&MaterialSemantic::BaseColorTexture) {
             assert!(
                 matches!(&tex_ref.texture, TextureSource::Cpu(_)),
@@ -118,7 +134,7 @@ fn test_toy_car_has_textures() {
 
 #[test]
 fn test_toy_car_has_scene() {
-    let doc = load_gltf(TOY_CAR_GLB, &[], &[]).expect("failed to load ToyCar.glb");
+    let doc = load_gltf(TOY_CAR_GLB, &[], &[], &[]).expect("failed to load ToyCar.glb");
 
     assert!(!doc.scenes.is_empty(), "expected at least one scene");
     let scene = default_scene(&doc);

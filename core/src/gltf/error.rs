@@ -1,6 +1,6 @@
-//! Error types for glTF loading.
+//! Error types for glTF loading and export.
 
-/// Errors that can occur during glTF loading.
+/// Errors that can occur during glTF loading or export.
 #[derive(Debug)]
 pub enum GltfError {
     /// Failed to parse the glTF document.
@@ -20,6 +20,8 @@ pub enum GltfError {
     AccessorError(String),
     /// Error resolving buffer data.
     BufferError(String),
+    /// Error during glTF export.
+    ExportError(String),
 }
 
 impl std::fmt::Display for GltfError {
@@ -36,6 +38,7 @@ impl std::fmt::Display for GltfError {
             }
             Self::AccessorError(msg) => write!(f, "accessor error: {msg}"),
             Self::BufferError(msg) => write!(f, "buffer error: {msg}"),
+            Self::ExportError(msg) => write!(f, "export error: {msg}"),
         }
     }
 }

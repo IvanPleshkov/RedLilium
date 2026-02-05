@@ -39,6 +39,13 @@ pub(crate) struct LoadContext {
     /// Loaded sampler Arcs indexed by glTF sampler index.
     sampler_arcs: Vec<Arc<CpuSampler>>,
 
+    /// Shared materials passed in by the caller.
+    shared_materials: Vec<Arc<CpuMaterial>>,
+    /// New materials created during loading.
+    new_materials: Vec<Arc<CpuMaterial>>,
+    /// Loaded material Arcs indexed by glTF material index.
+    material_arcs: Vec<Arc<CpuMaterial>>,
+
     /// Loaded texture Arcs indexed by glTF texture index.
     texture_arcs: Vec<Arc<CpuTexture>>,
 
@@ -54,6 +61,7 @@ impl LoadContext {
         buffers: Vec<Vec<u8>>,
         shared_layouts: &[Arc<VertexLayout>],
         shared_samplers: &[Arc<CpuSampler>],
+        shared_materials: &[Arc<CpuMaterial>],
     ) -> Self {
         Self {
             document,
@@ -63,6 +71,9 @@ impl LoadContext {
             shared_samplers: shared_samplers.to_vec(),
             new_samplers: Vec::new(),
             sampler_arcs: Vec::new(),
+            shared_materials: shared_materials.to_vec(),
+            new_materials: Vec::new(),
+            material_arcs: Vec::new(),
             texture_arcs: Vec::new(),
             mesh_index_map: Vec::new(),
         }
@@ -169,101 +180,109 @@ impl LoadContext {
             .collect();
     }
 
-    /// Load all materials as property-based CpuMaterials.
-    pub fn load_materials(&self) -> Vec<CpuMaterial> {
-        self.document
-            .materials()
-            .map(|mat| {
-                let pbr = mat.pbr_metallic_roughness();
+    /// Load all materials as shared `Arc<CpuMaterial>`.
+    ///
+    /// Reuses structurally matching materials from `shared_materials`. New
+    /// materials are stored in `new_materials`. The resulting `material_arcs`
+    /// vector is indexed by glTF material index and used by `load_meshes`.
+    pub fn load_materials(&mut self) {
+        let materials: Vec<gltf_dep::Material<'_>> = self.document.materials().collect();
+        let mut result = Vec::with_capacity(materials.len());
 
-                // PBR scalar factors
-                let mut props = vec![
-                    MaterialProperty {
-                        semantic: MaterialSemantic::BaseColorFactor,
-                        value: MaterialValue::Vec4(pbr.base_color_factor()),
-                    },
-                    MaterialProperty {
-                        semantic: MaterialSemantic::MetallicFactor,
-                        value: MaterialValue::Float(pbr.metallic_factor()),
-                    },
-                    MaterialProperty {
-                        semantic: MaterialSemantic::RoughnessFactor,
-                        value: MaterialValue::Float(pbr.roughness_factor()),
-                    },
-                    MaterialProperty {
-                        semantic: MaterialSemantic::EmissiveFactor,
-                        value: MaterialValue::Vec3(mat.emissive_factor()),
-                    },
-                ];
+        for mat in &materials {
+            let pbr = mat.pbr_metallic_roughness();
 
-                // PBR textures
-                if let Some(t) = pbr.base_color_texture() {
-                    props.push(self.map_material_texture(&t, MaterialSemantic::BaseColorTexture));
-                }
-                if let Some(t) = pbr.metallic_roughness_texture() {
-                    props.push(
-                        self.map_material_texture(&t, MaterialSemantic::MetallicRoughnessTexture),
-                    );
-                }
-                if let Some(t) = mat.normal_texture() {
-                    props.push(MaterialProperty {
-                        semantic: MaterialSemantic::NormalTexture,
-                        value: MaterialValue::Texture(
-                            self.texture_ref_from(&t.texture(), t.tex_coord()),
-                        ),
-                    });
-                    props.push(MaterialProperty {
-                        semantic: MaterialSemantic::NormalScale,
-                        value: MaterialValue::Float(t.scale()),
-                    });
-                }
-                if let Some(t) = mat.occlusion_texture() {
-                    props.push(MaterialProperty {
-                        semantic: MaterialSemantic::OcclusionTexture,
-                        value: MaterialValue::Texture(
-                            self.texture_ref_from(&t.texture(), t.tex_coord()),
-                        ),
-                    });
-                    props.push(MaterialProperty {
-                        semantic: MaterialSemantic::OcclusionStrength,
-                        value: MaterialValue::Float(t.strength()),
-                    });
-                }
-                if let Some(t) = mat.emissive_texture() {
-                    props.push(self.map_material_texture(&t, MaterialSemantic::EmissiveTexture));
-                }
+            // PBR scalar factors
+            let mut props = vec![
+                MaterialProperty {
+                    semantic: MaterialSemantic::BaseColorFactor,
+                    value: MaterialValue::Vec4(pbr.base_color_factor()),
+                },
+                MaterialProperty {
+                    semantic: MaterialSemantic::MetallicFactor,
+                    value: MaterialValue::Float(pbr.metallic_factor()),
+                },
+                MaterialProperty {
+                    semantic: MaterialSemantic::RoughnessFactor,
+                    value: MaterialValue::Float(pbr.roughness_factor()),
+                },
+                MaterialProperty {
+                    semantic: MaterialSemantic::EmissiveFactor,
+                    value: MaterialValue::Vec3(mat.emissive_factor()),
+                },
+            ];
 
-                // Alpha cutoff (only meaningful for Mask mode, but store it if present)
-                if let Some(cutoff) = mat.alpha_cutoff() {
-                    props.push(MaterialProperty {
-                        semantic: MaterialSemantic::AlphaCutoff,
-                        value: MaterialValue::Float(cutoff),
-                    });
-                } else if matches!(mat.alpha_mode(), gltf_dep::material::AlphaMode::Mask) {
-                    props.push(MaterialProperty {
-                        semantic: MaterialSemantic::AlphaCutoff,
-                        value: MaterialValue::Float(0.5),
-                    });
-                }
+            // PBR textures
+            if let Some(t) = pbr.base_color_texture() {
+                props.push(self.map_material_texture(&t, MaterialSemantic::BaseColorTexture));
+            }
+            if let Some(t) = pbr.metallic_roughness_texture() {
+                props.push(
+                    self.map_material_texture(&t, MaterialSemantic::MetallicRoughnessTexture),
+                );
+            }
+            if let Some(t) = mat.normal_texture() {
+                props.push(MaterialProperty {
+                    semantic: MaterialSemantic::NormalTexture,
+                    value: MaterialValue::Texture(
+                        self.texture_ref_from(&t.texture(), t.tex_coord()),
+                    ),
+                });
+                props.push(MaterialProperty {
+                    semantic: MaterialSemantic::NormalScale,
+                    value: MaterialValue::Float(t.scale()),
+                });
+            }
+            if let Some(t) = mat.occlusion_texture() {
+                props.push(MaterialProperty {
+                    semantic: MaterialSemantic::OcclusionTexture,
+                    value: MaterialValue::Texture(
+                        self.texture_ref_from(&t.texture(), t.tex_coord()),
+                    ),
+                });
+                props.push(MaterialProperty {
+                    semantic: MaterialSemantic::OcclusionStrength,
+                    value: MaterialValue::Float(t.strength()),
+                });
+            }
+            if let Some(t) = mat.emissive_texture() {
+                props.push(self.map_material_texture(&t, MaterialSemantic::EmissiveTexture));
+            }
 
-                let alpha_mode = match mat.alpha_mode() {
-                    gltf_dep::material::AlphaMode::Opaque => AlphaMode::Opaque,
-                    gltf_dep::material::AlphaMode::Mask => AlphaMode::Mask,
-                    gltf_dep::material::AlphaMode::Blend => AlphaMode::Blend,
-                };
+            // Alpha cutoff (only meaningful for Mask mode, but store it if present)
+            if let Some(cutoff) = mat.alpha_cutoff() {
+                props.push(MaterialProperty {
+                    semantic: MaterialSemantic::AlphaCutoff,
+                    value: MaterialValue::Float(cutoff),
+                });
+            } else if matches!(mat.alpha_mode(), gltf_dep::material::AlphaMode::Mask) {
+                props.push(MaterialProperty {
+                    semantic: MaterialSemantic::AlphaCutoff,
+                    value: MaterialValue::Float(0.5),
+                });
+            }
 
-                let mut cpu_mat = CpuMaterial {
-                    name: mat.name().map(String::from),
-                    alpha_mode,
-                    double_sided: mat.double_sided(),
-                    properties: props,
-                };
-                if mat.name().is_none() {
-                    cpu_mat.name = None;
-                }
-                cpu_mat
-            })
-            .collect()
+            let alpha_mode = match mat.alpha_mode() {
+                gltf_dep::material::AlphaMode::Opaque => AlphaMode::Opaque,
+                gltf_dep::material::AlphaMode::Mask => AlphaMode::Mask,
+                gltf_dep::material::AlphaMode::Blend => AlphaMode::Blend,
+            };
+
+            let cpu_mat = CpuMaterial {
+                name: mat.name().map(String::from),
+                alpha_mode,
+                double_sided: mat.double_sided(),
+                properties: props,
+            };
+
+            result.push(find_or_create_material(
+                cpu_mat,
+                &self.shared_materials,
+                &mut self.new_materials,
+            ));
+        }
+
+        self.material_arcs = result;
     }
 
     /// Map a glTF texture info to a MaterialProperty with the given semantic.
@@ -338,7 +357,8 @@ impl LoadContext {
     /// Load all meshes with vertex interleaving and layout sharing.
     ///
     /// Returns a flat list of `CpuMesh` (one per glTF primitive). Each mesh
-    /// carries its material index via `CpuMesh::material()`. Also populates
+    /// carries its material via `CpuMesh::material()`. Must be called after
+    /// `load_materials` so that `material_arcs` is populated. Also populates
     /// `self.mesh_index_map` so that `load_scenes` can map glTF mesh indices
     /// to flat CpuMesh indices.
     pub fn load_meshes(&mut self) -> Result<Vec<CpuMesh>, GltfError> {
@@ -413,7 +433,7 @@ impl LoadContext {
                 let mut cpu_mesh =
                     vertex::build_cpu_mesh(shared_layout, topology, vertex_data, index_data, label);
                 if let Some(mat_idx) = primitive.material().index() {
-                    cpu_mesh = cpu_mesh.with_material(mat_idx);
+                    cpu_mesh = cpu_mesh.with_material(Arc::clone(&self.material_arcs[mat_idx]));
                 }
 
                 let flat_idx = result.len();
@@ -564,9 +584,16 @@ impl LoadContext {
         self.document.default_scene().map(|s| s.index())
     }
 
-    /// Consume the context and return new layouts and new samplers.
-    pub fn into_new_resources(self) -> (Vec<Arc<VertexLayout>>, Vec<Arc<CpuSampler>>) {
-        (self.new_layouts, self.new_samplers)
+    /// Consume the context and return new layouts, samplers, and materials.
+    #[allow(clippy::type_complexity)]
+    pub fn into_new_resources(
+        self,
+    ) -> (
+        Vec<Arc<VertexLayout>>,
+        Vec<Arc<CpuSampler>>,
+        Vec<Arc<CpuMaterial>>,
+    ) {
+        (self.new_layouts, self.new_samplers, self.new_materials)
     }
 }
 
@@ -638,6 +665,86 @@ fn find_or_create_sampler(
     // Create a new one
     let arc = Arc::new(sampler);
     new_samplers.push(Arc::clone(&arc));
+    arc
+}
+
+/// Check if two material values are structurally equal.
+///
+/// For textures, compares data content (width, height, format, pixel data)
+/// instead of using Arc::ptr_eq, since freshly loaded textures won't share
+/// pointers with existing ones. Samplers are compared structurally.
+fn material_values_structurally_equal(a: &MaterialValue, b: &MaterialValue) -> bool {
+    match (a, b) {
+        (MaterialValue::Float(a), MaterialValue::Float(b)) => a == b,
+        (MaterialValue::Vec3(a), MaterialValue::Vec3(b)) => a == b,
+        (MaterialValue::Vec4(a), MaterialValue::Vec4(b)) => a == b,
+        (MaterialValue::Texture(a), MaterialValue::Texture(b)) => {
+            if a.tex_coord != b.tex_coord {
+                return false;
+            }
+            let tex_eq = match (&a.texture, &b.texture) {
+                (TextureSource::Cpu(ta), TextureSource::Cpu(tb)) => {
+                    Arc::ptr_eq(ta, tb)
+                        || (ta.width == tb.width
+                            && ta.height == tb.height
+                            && ta.format == tb.format
+                            && ta.data == tb.data)
+                }
+                (TextureSource::Named(a), TextureSource::Named(b)) => a == b,
+                _ => false,
+            };
+            let sampler_eq = match (&a.sampler, &b.sampler) {
+                (Some(sa), Some(sb)) => Arc::ptr_eq(sa, sb) || samplers_structurally_equal(sa, sb),
+                (None, None) => true,
+                _ => false,
+            };
+            tex_eq && sampler_eq
+        }
+        _ => false,
+    }
+}
+
+/// Check if two materials are structurally equal (ignoring name).
+///
+/// Compares alpha_mode, double_sided, and all properties in an order-independent
+/// way. For texture values, compares texture data by content and samplers
+/// structurally.
+fn materials_structurally_equal(a: &CpuMaterial, b: &CpuMaterial) -> bool {
+    if a.alpha_mode != b.alpha_mode || a.double_sided != b.double_sided {
+        return false;
+    }
+    if a.properties.len() != b.properties.len() {
+        return false;
+    }
+    // Order-independent comparison: each property in a must have a match in b
+    a.properties.iter().all(|pa| {
+        b.properties.iter().any(|pb| {
+            pa.semantic == pb.semantic && material_values_structurally_equal(&pa.value, &pb.value)
+        })
+    })
+}
+
+/// Find or create a shared material.
+///
+/// Searches `existing_materials` for a structural match. If found, returns the
+/// existing Arc. Otherwise, creates a new Arc and appends it to `new_materials`.
+fn find_or_create_material(
+    material: CpuMaterial,
+    existing_materials: &[Arc<CpuMaterial>],
+    new_materials: &mut Vec<Arc<CpuMaterial>>,
+) -> Arc<CpuMaterial> {
+    for existing in existing_materials {
+        if materials_structurally_equal(&material, existing) {
+            return Arc::clone(existing);
+        }
+    }
+    for new_mat in new_materials.iter() {
+        if materials_structurally_equal(&material, new_mat) {
+            return Arc::clone(new_mat);
+        }
+    }
+    let arc = Arc::new(material);
+    new_materials.push(Arc::clone(&arc));
     arc
 }
 
