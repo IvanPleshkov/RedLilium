@@ -5,13 +5,18 @@
 
 use std::sync::Arc;
 
+use crate::material::{
+    AlphaMode, CpuMaterial, MaterialProperty, MaterialSemantic, MaterialValue, TextureRef,
+};
 use crate::mesh::{CpuMesh, VertexLayout};
 use crate::sampler::{AddressMode, CpuSampler, FilterMode};
-use crate::scene::{CameraProjection, NodeTransform, Scene, SceneCamera, SceneNode, SceneSkin};
+use crate::scene::{
+    Animation, AnimationChannel, AnimationProperty, CameraProjection, Interpolation, NodeTransform,
+    Scene, SceneCamera, SceneNode, SceneSkin,
+};
 use crate::texture::{CpuTexture, TextureFormat};
 
 use super::error::GltfError;
-use super::types::*;
 use super::vertex;
 
 /// Internal loading context that holds resolved data during loading.
@@ -137,60 +142,127 @@ impl LoadContext {
             .collect()
     }
 
-    /// Load all materials.
-    pub fn load_materials(&self) -> Vec<GltfMaterial> {
+    /// Load all materials as property-based CpuMaterials.
+    pub fn load_materials(&self) -> Vec<CpuMaterial> {
         self.document
             .materials()
             .map(|mat| {
                 let pbr = mat.pbr_metallic_roughness();
-                GltfMaterial {
-                    name: mat.name().map(String::from),
-                    base_color_factor: pbr.base_color_factor(),
-                    base_color_texture: pbr.base_color_texture().map(|t| self.map_texture_ref(&t)),
-                    metallic_factor: pbr.metallic_factor(),
-                    roughness_factor: pbr.roughness_factor(),
-                    metallic_roughness_texture: pbr
-                        .metallic_roughness_texture()
-                        .map(|t| self.map_texture_ref(&t)),
-                    normal_texture: mat.normal_texture().map(|t| {
-                        let (texture, sampler) = self.resolve_texture_sampler(&t.texture());
-                        GltfNormalTextureRef {
-                            texture,
-                            sampler,
-                            tex_coord: t.tex_coord(),
-                            scale: t.scale(),
-                        }
-                    }),
-                    occlusion_texture: mat.occlusion_texture().map(|t| {
-                        let (texture, sampler) = self.resolve_texture_sampler(&t.texture());
-                        GltfOcclusionTextureRef {
-                            texture,
-                            sampler,
-                            tex_coord: t.tex_coord(),
-                            strength: t.strength(),
-                        }
-                    }),
-                    emissive_factor: mat.emissive_factor(),
-                    emissive_texture: mat.emissive_texture().map(|t| self.map_texture_ref(&t)),
-                    alpha_mode: match mat.alpha_mode() {
-                        gltf_dep::material::AlphaMode::Opaque => GltfAlphaMode::Opaque,
-                        gltf_dep::material::AlphaMode::Mask => GltfAlphaMode::Mask,
-                        gltf_dep::material::AlphaMode::Blend => GltfAlphaMode::Blend,
+
+                // PBR scalar factors
+                let mut props = vec![
+                    MaterialProperty {
+                        semantic: MaterialSemantic::BaseColorFactor,
+                        value: MaterialValue::Vec4(pbr.base_color_factor()),
                     },
-                    alpha_cutoff: mat.alpha_cutoff().unwrap_or(0.5),
-                    double_sided: mat.double_sided(),
+                    MaterialProperty {
+                        semantic: MaterialSemantic::MetallicFactor,
+                        value: MaterialValue::Float(pbr.metallic_factor()),
+                    },
+                    MaterialProperty {
+                        semantic: MaterialSemantic::RoughnessFactor,
+                        value: MaterialValue::Float(pbr.roughness_factor()),
+                    },
+                    MaterialProperty {
+                        semantic: MaterialSemantic::EmissiveFactor,
+                        value: MaterialValue::Vec3(mat.emissive_factor()),
+                    },
+                ];
+
+                // PBR textures
+                if let Some(t) = pbr.base_color_texture() {
+                    props.push(self.map_material_texture(&t, MaterialSemantic::BaseColorTexture));
                 }
+                if let Some(t) = pbr.metallic_roughness_texture() {
+                    props.push(
+                        self.map_material_texture(&t, MaterialSemantic::MetallicRoughnessTexture),
+                    );
+                }
+                if let Some(t) = mat.normal_texture() {
+                    props.push(MaterialProperty {
+                        semantic: MaterialSemantic::NormalTexture,
+                        value: MaterialValue::Texture(
+                            self.texture_ref_from(&t.texture(), t.tex_coord()),
+                        ),
+                    });
+                    props.push(MaterialProperty {
+                        semantic: MaterialSemantic::NormalScale,
+                        value: MaterialValue::Float(t.scale()),
+                    });
+                }
+                if let Some(t) = mat.occlusion_texture() {
+                    props.push(MaterialProperty {
+                        semantic: MaterialSemantic::OcclusionTexture,
+                        value: MaterialValue::Texture(
+                            self.texture_ref_from(&t.texture(), t.tex_coord()),
+                        ),
+                    });
+                    props.push(MaterialProperty {
+                        semantic: MaterialSemantic::OcclusionStrength,
+                        value: MaterialValue::Float(t.strength()),
+                    });
+                }
+                if let Some(t) = mat.emissive_texture() {
+                    props.push(self.map_material_texture(&t, MaterialSemantic::EmissiveTexture));
+                }
+
+                // Alpha cutoff (only meaningful for Mask mode, but store it if present)
+                if let Some(cutoff) = mat.alpha_cutoff() {
+                    props.push(MaterialProperty {
+                        semantic: MaterialSemantic::AlphaCutoff,
+                        value: MaterialValue::Float(cutoff),
+                    });
+                } else if matches!(mat.alpha_mode(), gltf_dep::material::AlphaMode::Mask) {
+                    props.push(MaterialProperty {
+                        semantic: MaterialSemantic::AlphaCutoff,
+                        value: MaterialValue::Float(0.5),
+                    });
+                }
+
+                let alpha_mode = match mat.alpha_mode() {
+                    gltf_dep::material::AlphaMode::Opaque => AlphaMode::Opaque,
+                    gltf_dep::material::AlphaMode::Mask => AlphaMode::Mask,
+                    gltf_dep::material::AlphaMode::Blend => AlphaMode::Blend,
+                };
+
+                let mut cpu_mat = CpuMaterial {
+                    name: mat.name().map(String::from),
+                    alpha_mode,
+                    double_sided: mat.double_sided(),
+                    properties: props,
+                };
+                if mat.name().is_none() {
+                    cpu_mat.name = None;
+                }
+                cpu_mat
             })
             .collect()
     }
 
-    /// Map a glTF texture info to a GltfTextureRef with sampler index.
-    fn map_texture_ref(&self, t: &gltf_dep::texture::Info<'_>) -> GltfTextureRef {
+    /// Map a glTF texture info to a MaterialProperty with the given semantic.
+    fn map_material_texture(
+        &self,
+        t: &gltf_dep::texture::Info<'_>,
+        semantic: MaterialSemantic,
+    ) -> MaterialProperty {
         let (texture, sampler) = self.resolve_texture_sampler(&t.texture());
-        GltfTextureRef {
+        MaterialProperty {
+            semantic,
+            value: MaterialValue::Texture(TextureRef {
+                texture,
+                sampler,
+                tex_coord: t.tex_coord(),
+            }),
+        }
+    }
+
+    /// Build a TextureRef from a glTF normal or occlusion texture.
+    fn texture_ref_from(&self, tex: &gltf_dep::Texture<'_>, tex_coord: u32) -> TextureRef {
+        let (texture, sampler) = self.resolve_texture_sampler(tex);
+        TextureRef {
             texture,
             sampler,
-            tex_coord: t.tex_coord(),
+            tex_coord,
         }
     }
 
@@ -353,7 +425,7 @@ impl LoadContext {
     }
 
     /// Load all animations.
-    pub fn load_animations(&self) -> Result<Vec<GltfAnimation>, GltfError> {
+    pub fn load_animations(&self) -> Result<Vec<Animation>, GltfError> {
         let mut result = Vec::new();
 
         for anim in self.document.animations() {
@@ -363,23 +435,19 @@ impl LoadContext {
                 let target = channel.target();
                 let target_node = target.node().index();
                 let property = match target.property() {
-                    gltf_dep::animation::Property::Translation => {
-                        GltfAnimationProperty::Translation
-                    }
-                    gltf_dep::animation::Property::Rotation => GltfAnimationProperty::Rotation,
-                    gltf_dep::animation::Property::Scale => GltfAnimationProperty::Scale,
+                    gltf_dep::animation::Property::Translation => AnimationProperty::Translation,
+                    gltf_dep::animation::Property::Rotation => AnimationProperty::Rotation,
+                    gltf_dep::animation::Property::Scale => AnimationProperty::Scale,
                     gltf_dep::animation::Property::MorphTargetWeights => {
-                        GltfAnimationProperty::MorphTargetWeights
+                        AnimationProperty::MorphTargetWeights
                     }
                 };
 
                 let sampler = channel.sampler();
                 let interpolation = match sampler.interpolation() {
-                    gltf_dep::animation::Interpolation::Linear => GltfInterpolation::Linear,
-                    gltf_dep::animation::Interpolation::Step => GltfInterpolation::Step,
-                    gltf_dep::animation::Interpolation::CubicSpline => {
-                        GltfInterpolation::CubicSpline
-                    }
+                    gltf_dep::animation::Interpolation::Linear => Interpolation::Linear,
+                    gltf_dep::animation::Interpolation::Step => Interpolation::Step,
+                    gltf_dep::animation::Interpolation::CubicSpline => Interpolation::CubicSpline,
                 };
 
                 let input_accessor = sampler.input();
@@ -388,7 +456,7 @@ impl LoadContext {
                 let timestamps = read_f32_accessor(&input_accessor, &self.buffers)?;
                 let values = read_f32_accessor(&output_accessor, &self.buffers)?;
 
-                channels.push(GltfAnimationChannel {
+                channels.push(AnimationChannel {
                     target_node,
                     property,
                     interpolation,
@@ -397,10 +465,11 @@ impl LoadContext {
                 });
             }
 
-            result.push(GltfAnimation {
-                name: anim.name().map(String::from),
-                channels,
-            });
+            let mut animation = Animation::new().with_channels(channels);
+            if let Some(name) = anim.name() {
+                animation = animation.with_name(name);
+            }
+            result.push(animation);
         }
 
         Ok(result)
@@ -415,6 +484,7 @@ impl LoadContext {
         mut meshes: Vec<CpuMesh>,
         mut cameras: Vec<SceneCamera>,
         mut skins: Vec<SceneSkin>,
+        mut animations: Vec<Animation>,
     ) -> Vec<Scene> {
         let scene_count = self.document.scenes().count();
 
@@ -443,6 +513,11 @@ impl LoadContext {
                         std::mem::take(&mut skins)
                     } else {
                         skins.clone()
+                    },
+                    animations: if is_last {
+                        std::mem::take(&mut animations)
+                    } else {
+                        animations.clone()
                     },
                 }
             })

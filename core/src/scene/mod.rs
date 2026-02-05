@@ -8,7 +8,11 @@
 //! - [`NodeTransform`] — TRS transform using plain arrays
 //! - [`SceneCamera`] / [`CameraProjection`] — Camera definitions
 //! - [`SceneSkin`] — Skeletal animation skin
+//! - [`Animation`] / [`AnimationChannel`] — Keyframe animations
 
 mod types;
 
-pub use types::{CameraProjection, NodeTransform, Scene, SceneCamera, SceneNode, SceneSkin};
+pub use types::{
+    Animation, AnimationChannel, AnimationProperty, CameraProjection, Interpolation, NodeTransform,
+    Scene, SceneCamera, SceneNode, SceneSkin,
+};

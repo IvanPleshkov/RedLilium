@@ -60,9 +60,13 @@ fn test_toy_car_materials_on_meshes() {
     }
 
     for (i, mat) in doc.materials.iter().enumerate() {
+        use crate::material::MaterialSemantic;
+        let base_color = mat.get_vec4(&MaterialSemantic::BaseColorFactor);
+        let metallic = mat.get_float(&MaterialSemantic::MetallicFactor);
+        let roughness = mat.get_float(&MaterialSemantic::RoughnessFactor);
         println!(
-            "  material {}: name={:?}, base_color={:?}, metallic={}, roughness={}",
-            i, mat.name, mat.base_color_factor, mat.metallic_factor, mat.roughness_factor,
+            "  material {}: name={:?}, base_color={:?}, metallic={:?}, roughness={:?}",
+            i, mat.name, base_color, metallic, roughness,
         );
     }
 }

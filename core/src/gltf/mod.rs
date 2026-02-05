@@ -53,8 +53,9 @@ use crate::mesh::VertexLayout;
 /// # Returns
 ///
 /// A [`GltfDocument`] containing all loaded scenes, meshes, materials,
-/// textures, samplers, cameras, animations, and skins. New vertex layouts
-/// created during loading are in [`GltfDocument::new_layouts`].
+/// textures, samplers, cameras, and skins. Animations are embedded in
+/// each [`Scene`]. New vertex layouts created during loading are in
+/// [`GltfDocument::new_layouts`].
 pub fn load_gltf(
     data: &[u8],
     shared_layouts: &[Arc<VertexLayout>],
@@ -72,7 +73,7 @@ pub fn load_gltf(
     let meshes = ctx.load_meshes()?;
     let skins = ctx.load_skins()?;
     let animations = ctx.load_animations()?;
-    let scenes = ctx.load_scenes(meshes, cameras, skins);
+    let scenes = ctx.load_scenes(meshes, cameras, skins, animations);
     let default_scene = ctx.default_scene();
     let new_layouts = ctx.into_new_layouts();
 
@@ -82,7 +83,6 @@ pub fn load_gltf(
         materials,
         textures,
         samplers,
-        animations,
         new_layouts,
     })
 }

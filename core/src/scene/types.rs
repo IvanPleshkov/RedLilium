@@ -157,6 +157,8 @@ pub struct Scene {
     pub cameras: Vec<SceneCamera>,
     /// All skins referenced by nodes in this scene.
     pub skins: Vec<SceneSkin>,
+    /// All animations in this scene.
+    pub animations: Vec<Animation>,
 }
 
 impl Scene {
@@ -168,6 +170,7 @@ impl Scene {
             meshes: Vec::new(),
             cameras: Vec::new(),
             skins: Vec::new(),
+            animations: Vec::new(),
         }
     }
 
@@ -203,6 +206,13 @@ impl Scene {
     #[must_use]
     pub fn with_skins(mut self, skins: Vec<SceneSkin>) -> Self {
         self.skins = skins;
+        self
+    }
+
+    /// Set the animations.
+    #[must_use]
+    pub fn with_animations(mut self, animations: Vec<Animation>) -> Self {
+        self.animations = animations;
         self
     }
 }
@@ -264,6 +274,90 @@ pub struct SceneSkin {
     pub inverse_bind_matrices: Vec<[f32; 16]>,
     /// Root skeleton node index, if specified.
     pub skeleton: Option<usize>,
+}
+
+// -- Animations --
+
+/// An animation containing one or more channels.
+///
+/// Each channel targets a specific node property (translation, rotation,
+/// scale, or morph weights) with keyframed data.
+#[derive(Debug, Clone)]
+pub struct Animation {
+    /// Animation name.
+    pub name: Option<String>,
+    /// Animation channels (one per target node + property).
+    pub channels: Vec<AnimationChannel>,
+}
+
+impl Animation {
+    /// Creates a new empty animation.
+    pub fn new() -> Self {
+        Self {
+            name: None,
+            channels: Vec::new(),
+        }
+    }
+
+    /// Set the animation name.
+    #[must_use]
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Set the channels.
+    #[must_use]
+    pub fn with_channels(mut self, channels: Vec<AnimationChannel>) -> Self {
+        self.channels = channels;
+        self
+    }
+}
+
+impl Default for Animation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A single animation channel targeting a node property.
+#[derive(Debug, Clone)]
+pub struct AnimationChannel {
+    /// Target node index in the scene.
+    pub target_node: usize,
+    /// The property being animated.
+    pub property: AnimationProperty,
+    /// Interpolation method.
+    pub interpolation: Interpolation,
+    /// Keyframe timestamps in seconds.
+    pub timestamps: Vec<f32>,
+    /// Keyframe values (flat array, stride depends on property).
+    pub values: Vec<f32>,
+}
+
+/// The property being animated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimationProperty {
+    /// Translation [x, y, z] — 3 floats per keyframe.
+    Translation,
+    /// Rotation quaternion [x, y, z, w] — 4 floats per keyframe.
+    Rotation,
+    /// Scale [x, y, z] — 3 floats per keyframe.
+    Scale,
+    /// Morph target weights — N floats per keyframe.
+    MorphTargetWeights,
+}
+
+/// Animation interpolation method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Interpolation {
+    /// Linear interpolation.
+    #[default]
+    Linear,
+    /// Step (nearest) interpolation.
+    Step,
+    /// Cubic spline interpolation (with in/out tangents).
+    CubicSpline,
 }
 
 #[cfg(test)]

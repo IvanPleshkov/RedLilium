@@ -4,6 +4,7 @@
 
 #[cfg(feature = "gltf")]
 pub mod gltf;
+pub mod material;
 pub mod mesh;
 pub mod profiling;
 pub mod sampler;
