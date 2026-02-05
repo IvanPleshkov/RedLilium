@@ -24,43 +24,11 @@ use crate::texture::CpuTexture;
 
 use super::error::GltfError;
 
-/// Export scenes to a binary glTF (`.glb`) file.
-///
-/// Materials, textures, and samplers are collected from meshes via their
-/// `Arc<CpuMaterial>` references and deduplicated using Arc pointer identity.
-///
-/// # Texture handling
-///
-/// - [`TextureSource::Cpu`] — encodes RGBA8 data as PNG and embeds it in the GLB.
-/// - [`TextureSource::Named`] — saved as an external texture URI reference.
-///
-/// # Example
-///
-/// ```ignore
-/// use redlilium_core::gltf::save_gltf;
-///
-/// let scenes: Vec<&Scene> = doc.scenes.iter().collect();
-/// let glb = save_gltf(&scenes, doc.default_scene).unwrap();
-/// std::fs::write("output.glb", &glb).unwrap();
-/// ```
-pub fn save_gltf(scenes: &[&Scene], default_scene: Option<usize>) -> Result<Vec<u8>, GltfError> {
-    let mut ctx = ExportContext::new();
-
-    ctx.collect_resources(scenes);
-    ctx.build_images()?;
-    ctx.build_samplers();
-    ctx.build_materials();
-    ctx.build_scenes(scenes)?;
-    ctx.set_default_scene(default_scene);
-    ctx.finalize_buffer();
-    ctx.to_glb()
-}
-
 // ---------------------------------------------------------------------------
-// Internal export context
+// Export context
 // ---------------------------------------------------------------------------
 
-struct ExportContext {
+pub(super) struct ExportContext {
     root: gj::Root,
     buffer_data: Vec<u8>,
 
@@ -77,7 +45,7 @@ struct ExportContext {
 }
 
 impl ExportContext {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             root: gj::Root::default(),
             buffer_data: Vec::new(),
@@ -94,7 +62,7 @@ impl ExportContext {
 
     // -- Step 1: Collect unique resources from scenes -------------------------
 
-    fn collect_resources(&mut self, scenes: &[&Scene]) {
+    pub(super) fn collect_resources(&mut self, scenes: &[&Scene]) {
         // Collect unique materials from all meshes
         for scene in scenes {
             for mesh in &scene.meshes {
@@ -137,7 +105,7 @@ impl ExportContext {
 
     // -- Step 2: Build images ------------------------------------------------
 
-    fn build_images(&mut self) -> Result<(), GltfError> {
+    pub(super) fn build_images(&mut self) -> Result<(), GltfError> {
         // Clone the list to avoid borrowing self immutably while mutating
         let textures = self.cpu_textures.clone();
         for cpu_tex in &textures {
@@ -159,7 +127,7 @@ impl ExportContext {
 
     // -- Step 3: Build samplers ----------------------------------------------
 
-    fn build_samplers(&mut self) {
+    pub(super) fn build_samplers(&mut self) {
         let samplers = self.sampler_list.clone();
         for sampler in &samplers {
             self.root.samplers.push(gj::texture::Sampler {
@@ -231,7 +199,7 @@ impl ExportContext {
 
     // -- Step 4: Build materials ---------------------------------------------
 
-    fn build_materials(&mut self) {
+    pub(super) fn build_materials(&mut self) {
         let materials = self.material_list.clone();
         for mat in &materials {
             let base_color_factor = mat
@@ -348,7 +316,7 @@ impl ExportContext {
 
     // -- Step 5: Build scenes ------------------------------------------------
 
-    fn build_scenes(&mut self, scenes: &[&Scene]) -> Result<(), GltfError> {
+    pub(super) fn build_scenes(&mut self, scenes: &[&Scene]) -> Result<(), GltfError> {
         for scene in scenes {
             let scene_mesh_offset = self.root.meshes.len() as u32;
             self.build_meshes(&scene.meshes)?;
@@ -794,7 +762,7 @@ impl ExportContext {
         Ok(())
     }
 
-    fn set_default_scene(&mut self, default_scene: Option<usize>) {
+    pub(super) fn set_default_scene(&mut self, default_scene: Option<usize>) {
         self.root.scene = default_scene.map(|i| gj::Index::new(i as u32));
         self.root.asset = gj::Asset {
             generator: Some("RedLilium Engine".into()),
@@ -887,7 +855,7 @@ impl ExportContext {
         acc_idx
     }
 
-    fn finalize_buffer(&mut self) {
+    pub(super) fn finalize_buffer(&mut self) {
         if !self.buffer_data.is_empty() {
             self.root.buffers.push(gj::Buffer {
                 byte_length: gj::validation::USize64(self.buffer_data.len() as u64),
@@ -901,7 +869,7 @@ impl ExportContext {
 
     // -- GLB assembly --------------------------------------------------------
 
-    fn to_glb(&self) -> Result<Vec<u8>, GltfError> {
+    pub(super) fn to_glb(&self) -> Result<Vec<u8>, GltfError> {
         let json_bytes = self
             .root
             .to_vec()

@@ -38,7 +38,6 @@ pub mod types;
 mod vertex;
 
 pub use error::GltfError;
-pub use exporter::save_gltf;
 pub use types::*;
 
 use std::sync::Arc;
@@ -46,6 +45,7 @@ use std::sync::Arc;
 use crate::material::CpuMaterial;
 use crate::mesh::VertexLayout;
 use crate::sampler::CpuSampler;
+use crate::scene::Scene;
 
 /// Load a glTF document from binary data.
 ///
@@ -108,4 +108,36 @@ pub fn load_gltf(
         new_samplers,
         new_materials,
     })
+}
+
+/// Export scenes to a binary glTF (`.glb`) file.
+///
+/// Materials, textures, and samplers are collected from meshes via their
+/// `Arc<CpuMaterial>` references and deduplicated using Arc pointer identity.
+///
+/// # Texture handling
+///
+/// - [`TextureSource::Cpu`] — encodes RGBA8 data as PNG and embeds it in the GLB.
+/// - [`TextureSource::Named`] — saved as an external texture URI reference.
+///
+/// # Example
+///
+/// ```ignore
+/// use redlilium_core::gltf::save_gltf;
+///
+/// let scenes: Vec<&Scene> = doc.scenes.iter().collect();
+/// let glb = save_gltf(&scenes, doc.default_scene).unwrap();
+/// std::fs::write("output.glb", &glb).unwrap();
+/// ```
+pub fn save_gltf(scenes: &[&Scene], default_scene: Option<usize>) -> Result<Vec<u8>, GltfError> {
+    let mut ctx = exporter::ExportContext::new();
+
+    ctx.collect_resources(scenes);
+    ctx.build_images()?;
+    ctx.build_samplers();
+    ctx.build_materials();
+    ctx.build_scenes(scenes)?;
+    ctx.set_default_scene(default_scene);
+    ctx.finalize_buffer();
+    ctx.to_glb()
 }
