@@ -178,6 +178,7 @@ pub struct CpuMesh {
     index_data: Option<Vec<u8>>,
     index_format: Option<IndexFormat>,
     index_count: u32,
+    material: Option<usize>,
     label: Option<String>,
 }
 
@@ -196,6 +197,7 @@ impl CpuMesh {
             index_data: None,
             index_format: None,
             index_count: 0,
+            material: None,
             label: None,
         }
     }
@@ -230,9 +232,23 @@ impl CpuMesh {
         self
     }
 
+    /// Set raw index data bytes directly with format and count.
+    pub fn with_raw_index_data(mut self, data: Vec<u8>, format: IndexFormat, count: u32) -> Self {
+        self.index_data = Some(data);
+        self.index_format = Some(format);
+        self.index_count = count;
+        self
+    }
+
     /// Set the primitive topology.
     pub fn with_topology(mut self, topology: PrimitiveTopology) -> Self {
         self.topology = topology;
+        self
+    }
+
+    /// Set the material index.
+    pub fn with_material(mut self, index: usize) -> Self {
+        self.material = Some(index);
         self
     }
 
@@ -282,6 +298,11 @@ impl CpuMesh {
         self.index_data.is_some()
     }
 
+    /// Get the material index, if set.
+    pub fn material(&self) -> Option<usize> {
+        self.material
+    }
+
     /// Get the debug label.
     pub fn label(&self) -> Option<&str> {
         self.label.as_deref()
@@ -317,6 +338,7 @@ impl std::fmt::Debug for CpuMesh {
             .field("vertex_count", &self.vertex_count)
             .field("buffer_count", &self.vertex_buffers.len())
             .field("index_count", &self.index_count)
+            .field("material", &self.material)
             .field("layout", &self.layout.label)
             .finish()
     }
