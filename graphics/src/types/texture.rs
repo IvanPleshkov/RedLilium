@@ -4,7 +4,7 @@ use super::Extent3d;
 use bitflags::bitflags;
 
 // Re-export CPU-side types from core.
-pub use redlilium_core::texture::{TextureDimension, TextureFormat};
+pub use redlilium_core::texture::{CpuTexture, TextureDimension, TextureFormat};
 
 bitflags! {
     /// Usage flags for textures.

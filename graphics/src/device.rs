@@ -12,7 +12,10 @@ use crate::mesh::{CpuMesh, Mesh, MeshDescriptor};
 use crate::pipeline::FramePipeline;
 use crate::profiling::profile_scope;
 use crate::resources::{Buffer, Sampler, Texture};
-use crate::types::{BufferDescriptor, BufferUsage, SamplerDescriptor, TextureDescriptor};
+use crate::types::{
+    BufferDescriptor, BufferUsage, CpuSampler, CpuTexture, Extent3d, SamplerDescriptor,
+    TextureDescriptor, TextureUsage,
+};
 
 /// Capabilities of a graphics device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -208,6 +211,47 @@ impl GraphicsDevice {
         Ok(texture)
     }
 
+    /// Create a GPU texture from a CPU-side texture.
+    ///
+    /// This is a convenience method that:
+    /// 1. Creates a GPU texture with `TEXTURE_BINDING | COPY_DST` usage
+    /// 2. Writes the pixel data from the `CpuTexture` into it
+    ///
+    /// For textures that need custom usage flags, mip levels, or multisampling,
+    /// use [`create_texture`] with a [`TextureDescriptor`] instead.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use redlilium_core::texture::{CpuTexture, TextureFormat};
+    ///
+    /// let cpu_tex = CpuTexture::new(256, 256, TextureFormat::Rgba8Unorm, pixel_data);
+    /// let gpu_tex = device.create_texture_from_cpu(&cpu_tex)?;
+    /// ```
+    pub fn create_texture_from_cpu(
+        self: &Arc<Self>,
+        cpu_texture: &CpuTexture,
+    ) -> Result<Arc<Texture>, GraphicsError> {
+        profile_scope!("create_texture_from_cpu");
+
+        let descriptor = TextureDescriptor {
+            label: cpu_texture.name.clone(),
+            size: Extent3d::new_2d(cpu_texture.width, cpu_texture.height),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: cpu_texture.dimension,
+            format: cpu_texture.format,
+            usage: TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST,
+        };
+        let texture = self.create_texture(&descriptor)?;
+
+        if !cpu_texture.data.is_empty() {
+            self.write_texture(&texture, &cpu_texture.data)?;
+        }
+
+        Ok(texture)
+    }
+
     /// Create a texture sampler.
     ///
     /// # Errors
@@ -237,6 +281,39 @@ impl GraphicsDevice {
         log::trace!("GraphicsDevice: created sampler {:?}", descriptor.label);
 
         Ok(sampler)
+    }
+
+    /// Create a GPU sampler from a CPU-side sampler.
+    ///
+    /// This is a convenience method that converts a [`CpuSampler`] to a
+    /// [`SamplerDescriptor`] and creates the GPU sampler.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use redlilium_core::sampler::CpuSampler;
+    ///
+    /// let cpu_sampler = CpuSampler::linear().with_name("my_sampler");
+    /// let gpu_sampler = device.create_sampler_from_cpu(&cpu_sampler)?;
+    /// ```
+    pub fn create_sampler_from_cpu(
+        self: &Arc<Self>,
+        cpu_sampler: &CpuSampler,
+    ) -> Result<Arc<Sampler>, GraphicsError> {
+        let descriptor = SamplerDescriptor {
+            label: cpu_sampler.name.clone(),
+            address_mode_u: cpu_sampler.address_mode_u,
+            address_mode_v: cpu_sampler.address_mode_v,
+            address_mode_w: cpu_sampler.address_mode_w,
+            mag_filter: cpu_sampler.mag_filter,
+            min_filter: cpu_sampler.min_filter,
+            mipmap_filter: cpu_sampler.mipmap_filter,
+            lod_min_clamp: cpu_sampler.lod_min_clamp,
+            lod_max_clamp: cpu_sampler.lod_max_clamp,
+            compare: cpu_sampler.compare,
+            anisotropy_clamp: cpu_sampler.anisotropy_clamp,
+        };
+        self.create_sampler(&descriptor)
     }
 
     /// Create a material.

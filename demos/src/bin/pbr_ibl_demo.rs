@@ -28,11 +28,11 @@ use redlilium_core::profiling::{
 // Set callstack depth to 32 for detailed allocation tracking (0 for minimal overhead).
 create_profiled_allocator!(GLOBAL_ALLOCATOR, 32);
 use redlilium_graphics::{
-    AddressMode, BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferDescriptor,
-    BufferUsage, ColorAttachment, DepthStencilAttachment, Extent3d, FilterMode, FrameSchedule,
+    BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferDescriptor, BufferUsage,
+    ColorAttachment, CpuSampler, CpuTexture, DepthStencilAttachment, Extent3d, FrameSchedule,
     GraphicsPass, LoadOp, Material, MaterialDescriptor, MaterialInstance, Mesh, MeshDescriptor,
-    RenderGraph, RenderTargetConfig, SamplerDescriptor, ShaderComposer, ShaderDef, ShaderSource,
-    ShaderStage, ShaderStageFlags, TextureDescriptor, TextureFormat, TextureUsage, TransferConfig,
+    RenderGraph, RenderTargetConfig, ShaderComposer, ShaderDef, ShaderSource, ShaderStage,
+    ShaderStageFlags, TextureDescriptor, TextureFormat, TextureUsage, TransferConfig,
     TransferOperation, TransferPass, VertexBufferLayout, VertexLayout,
     egui::{EguiApp, EguiController, egui},
 };
@@ -411,7 +411,7 @@ impl EguiApp for PbrUi {
 const HDR_URL: &str = "https://raw.githubusercontent.com/JoeyDeVries/LearnOpenGL/master/resources/textures/hdr/newport_loft.hdr";
 const BRDF_LUT_URL: &str = "https://learnopengl.com/img/pbr/ibl_brdf_lut.png";
 
-fn load_brdf_lut_from_url(url: &str) -> Result<(u32, u32, Vec<u8>), String> {
+fn load_brdf_lut_from_url(url: &str) -> Result<CpuTexture, String> {
     use std::io::Read;
 
     log::info!("Downloading BRDF LUT from: {}", url);
@@ -444,7 +444,7 @@ fn load_brdf_lut_from_url(url: &str) -> Result<(u32, u32, Vec<u8>), String> {
         rg_data.push(pixel[1]); // G channel = bias
     }
 
-    Ok((width, height, rg_data))
+    Ok(CpuTexture::new(width, height, TextureFormat::Rg8Unorm, rg_data).with_name("brdf_lut"))
 }
 
 fn load_hdr_from_url(url: &str) -> Result<(u32, u32, Vec<f32>), String> {
@@ -520,9 +520,6 @@ struct PbrIblDemo {
     irradiance_staging: Option<Arc<redlilium_graphics::Buffer>>,
     prefilter_staging: Option<Vec<Arc<redlilium_graphics::Buffer>>>,
     prefilter_aligned_bytes_per_row: Vec<u32>,
-    brdf_staging: Option<Arc<redlilium_graphics::Buffer>>,
-    brdf_size: (u32, u32),
-    brdf_aligned_bytes_per_row: u32,
     needs_ibl_upload: bool,
 
     // Egui UI
@@ -576,9 +573,6 @@ impl PbrIblDemo {
             irradiance_staging: None,
             prefilter_staging: None,
             prefilter_aligned_bytes_per_row: Vec::new(),
-            brdf_staging: None,
-            brdf_size: (0, 0),
-            brdf_aligned_bytes_per_row: 0,
             needs_ibl_upload: false,
             egui_controller: None,
             egui_ui: Arc::new(RwLock::new(PbrUi::new())),
@@ -617,8 +611,7 @@ impl PbrIblDemo {
         let (irradiance_data, prefilter_data) = compute_ibl_cpu(&hdr_data, hdr_width, hdr_height);
 
         // Load BRDF LUT from LearnOpenGL
-        let (brdf_width, brdf_height, brdf_data) =
-            load_brdf_lut_from_url(BRDF_LUT_URL).expect("Failed to load BRDF LUT");
+        let brdf_cpu = load_brdf_lut_from_url(BRDF_LUT_URL).expect("Failed to load BRDF LUT");
 
         // Create IBL textures
         let irradiance_cubemap = device
@@ -648,18 +641,9 @@ impl PbrIblDemo {
         self.prefilter_cubemap = Some(prefilter_cubemap);
 
         let brdf_lut = device
-            .create_texture(
-                &TextureDescriptor::new_2d(
-                    brdf_width,
-                    brdf_height,
-                    TextureFormat::Rg8Unorm,
-                    TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST,
-                )
-                .with_label("brdf_lut"),
-            )
+            .create_texture_from_cpu(&brdf_cpu)
             .expect("Failed to create BRDF LUT");
         self.brdf_lut = Some(brdf_lut);
-        self.brdf_size = (brdf_width, brdf_height);
 
         // Create staging buffers for IBL data upload
         let irradiance_bytes: &[u8] = bytemuck::cast_slice(&irradiance_data);
@@ -723,52 +707,11 @@ impl PbrIblDemo {
         self.prefilter_staging = Some(prefilter_staging);
         self.prefilter_aligned_bytes_per_row = prefilter_aligned_bytes_per_row;
 
-        // BRDF staging buffer needs aligned bytes per row (256-byte alignment for WebGPU)
-        let brdf_bytes_per_row = brdf_width * 2; // 2 bytes per pixel (Rg8Unorm)
-        let brdf_aligned_bytes_per_row = brdf_bytes_per_row.div_ceil(COPY_BYTES_PER_ROW_ALIGNMENT)
-            * COPY_BYTES_PER_ROW_ALIGNMENT;
-
-        // Create padded buffer if alignment is needed
-        let brdf_padded_data = if brdf_aligned_bytes_per_row != brdf_bytes_per_row {
-            let mut padded = vec![0u8; (brdf_aligned_bytes_per_row * brdf_height) as usize];
-            for y in 0..brdf_height {
-                let src_start = (y * brdf_bytes_per_row) as usize;
-                let src_end = src_start + brdf_bytes_per_row as usize;
-                let dst_start = (y * brdf_aligned_bytes_per_row) as usize;
-                padded[dst_start..dst_start + brdf_bytes_per_row as usize]
-                    .copy_from_slice(&brdf_data[src_start..src_end]);
-            }
-            padded
-        } else {
-            brdf_data
-        };
-
-        let brdf_staging = device
-            .create_buffer(&BufferDescriptor::new(
-                brdf_padded_data.len() as u64,
-                BufferUsage::COPY_SRC | BufferUsage::COPY_DST,
-            ))
-            .expect("Failed to create BRDF staging buffer");
-        device
-            .write_buffer(&brdf_staging, 0, &brdf_padded_data)
-            .expect("Failed to write BRDF staging buffer");
-        self.brdf_staging = Some(brdf_staging);
-        self.brdf_aligned_bytes_per_row = brdf_aligned_bytes_per_row;
-
         self.needs_ibl_upload = true;
 
         // Create IBL sampler
         let ibl_sampler = device
-            .create_sampler(&SamplerDescriptor {
-                label: Some("ibl_sampler".into()),
-                mag_filter: FilterMode::Linear,
-                min_filter: FilterMode::Linear,
-                mipmap_filter: FilterMode::Linear,
-                address_mode_u: AddressMode::ClampToEdge,
-                address_mode_v: AddressMode::ClampToEdge,
-                address_mode_w: AddressMode::ClampToEdge,
-                ..Default::default()
-            })
+            .create_sampler_from_cpu(&CpuSampler::linear().with_name("ibl_sampler"))
             .expect("Failed to create IBL sampler");
         self.ibl_sampler = Some(ibl_sampler);
 
@@ -1043,16 +986,7 @@ impl PbrIblDemo {
 
         // Create G-buffer sampler
         let gbuffer_sampler = device
-            .create_sampler(&SamplerDescriptor {
-                label: Some("gbuffer_sampler".into()),
-                mag_filter: FilterMode::Nearest,
-                min_filter: FilterMode::Nearest,
-                mipmap_filter: FilterMode::Nearest,
-                address_mode_u: AddressMode::ClampToEdge,
-                address_mode_v: AddressMode::ClampToEdge,
-                address_mode_w: AddressMode::ClampToEdge,
-                ..Default::default()
-            })
+            .create_sampler_from_cpu(&CpuSampler::nearest().with_name("gbuffer_sampler"))
             .expect("Failed to create G-buffer sampler");
         self.gbuffer_sampler = Some(gbuffer_sampler.clone());
 
@@ -1384,20 +1318,7 @@ impl PbrIblDemo {
             }
         }
 
-        // Upload BRDF LUT
-        if let (Some(staging), Some(texture)) = (&self.brdf_staging, &self.brdf_lut) {
-            let (brdf_width, brdf_height) = self.brdf_size;
-            let region = BufferTextureCopyRegion::new(
-                BufferTextureLayout::new(0, Some(self.brdf_aligned_bytes_per_row), None),
-                TextureCopyLocation::base(),
-                Extent3d::new_2d(brdf_width, brdf_height),
-            );
-            config = config.with_operation(TransferOperation::upload_texture(
-                staging.clone(),
-                texture.clone(),
-                vec![region],
-            ));
-        }
+        // BRDF LUT is uploaded directly via create_texture_from_cpu()
 
         config
     }

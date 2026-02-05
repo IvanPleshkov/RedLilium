@@ -109,8 +109,8 @@ pub use scheduler::{Fence, FenceStatus, FrameSchedule, GraphHandle, Semaphore};
 pub use shader::{ShaderComposer, ShaderDef, ShaderLibrary};
 pub use swapchain::{PresentMode, Surface, SurfaceConfiguration, SurfaceTexture};
 pub use types::{
-    AddressMode, BufferDescriptor, BufferUsage, ClearValue, CompareFunction,
-    DrawIndexedIndirectArgs, DrawIndirectArgs, Extent3d, FilterMode, SamplerDescriptor,
+    AddressMode, BufferDescriptor, BufferUsage, ClearValue, CompareFunction, CpuSampler,
+    CpuTexture, DrawIndexedIndirectArgs, DrawIndirectArgs, Extent3d, FilterMode, SamplerDescriptor,
     ScissorRect, TextureDescriptor, TextureDimension, TextureFormat, TextureUsage, Viewport,
 };
 

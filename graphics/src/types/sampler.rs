@@ -1,7 +1,7 @@
 //! Sampler types and descriptors.
 
 // Re-export CPU-side types from core.
-pub use redlilium_core::sampler::{AddressMode, CompareFunction, FilterMode};
+pub use redlilium_core::sampler::{AddressMode, CompareFunction, CpuSampler, FilterMode};
 
 /// Descriptor for creating a sampler.
 #[derive(Debug, Clone, PartialEq)]
