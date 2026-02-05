@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use crate::sampler::CpuSampler;
+use crate::texture::CpuTexture;
 
 /// Well-known material property semantics.
 ///
@@ -59,11 +60,20 @@ pub enum MaterialValue {
     Texture(TextureRef),
 }
 
+/// How a texture is sourced.
+#[derive(Debug, Clone)]
+pub enum TextureSource {
+    /// Owned CPU texture data (Arc-shared across materials).
+    Cpu(Arc<CpuTexture>),
+    /// Named texture reference (resolved externally by the application).
+    Named(String),
+}
+
 /// Reference to a texture with sampler and UV set.
 #[derive(Debug, Clone)]
 pub struct TextureRef {
-    /// Index into the owning container's texture array.
-    pub texture: usize,
+    /// The texture source (owned data or named reference).
+    pub texture: TextureSource,
     /// Shared sampler configuration (Arc-shared across materials).
     pub sampler: Option<Arc<CpuSampler>>,
     /// Texture coordinate set index (0, 1, …).
@@ -72,8 +82,12 @@ pub struct TextureRef {
 
 impl PartialEq for TextureRef {
     fn eq(&self, other: &Self) -> bool {
-        self.texture == other.texture
-            && self.tex_coord == other.tex_coord
+        self.tex_coord == other.tex_coord
+            && match (&self.texture, &other.texture) {
+                (TextureSource::Cpu(a), TextureSource::Cpu(b)) => Arc::ptr_eq(a, b),
+                (TextureSource::Named(a), TextureSource::Named(b)) => a == b,
+                _ => false,
+            }
             && match (&self.sampler, &other.sampler) {
                 (Some(a), Some(b)) => **a == **b,
                 (None, None) => true,
@@ -278,7 +292,7 @@ mod tests {
             .with_property(MaterialProperty {
                 semantic: MaterialSemantic::BaseColorTexture,
                 value: MaterialValue::Texture(TextureRef {
-                    texture: 0,
+                    texture: TextureSource::Named("test_texture".into()),
                     sampler: Some(Arc::new(CpuSampler::linear())),
                     tex_coord: 0,
                 }),
@@ -297,7 +311,7 @@ mod tests {
         let tex = mat
             .get_texture(&MaterialSemantic::BaseColorTexture)
             .unwrap();
-        assert_eq!(tex.texture, 0);
+        assert!(matches!(&tex.texture, TextureSource::Named(n) if n == "test_texture"));
         assert!(tex.sampler.is_some());
 
         assert!(mat.get(&MaterialSemantic::RoughnessFactor).is_none());

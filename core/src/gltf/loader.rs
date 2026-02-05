@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::material::{
     AlphaMode, CpuMaterial, MaterialProperty, MaterialSemantic, MaterialValue, TextureRef,
+    TextureSource,
 };
 use crate::mesh::{CpuMesh, VertexLayout};
 use crate::sampler::{AddressMode, CpuSampler, FilterMode};
@@ -38,6 +39,9 @@ pub(crate) struct LoadContext {
     /// Loaded sampler Arcs indexed by glTF sampler index.
     sampler_arcs: Vec<Arc<CpuSampler>>,
 
+    /// Loaded texture Arcs indexed by glTF texture index.
+    texture_arcs: Vec<Arc<CpuTexture>>,
+
     /// Mapping from glTF mesh index → range of flat CpuMesh indices.
     /// Populated by `load_meshes`, used by `load_scenes`.
     mesh_index_map: Vec<Vec<usize>>,
@@ -59,16 +63,20 @@ impl LoadContext {
             shared_samplers: shared_samplers.to_vec(),
             new_samplers: Vec::new(),
             sampler_arcs: Vec::new(),
+            texture_arcs: Vec::new(),
             mesh_index_map: Vec::new(),
         }
     }
 
-    /// Decode all images and build CpuTextures by inlining image data
-    /// for each glTF texture.
-    pub fn load_textures(&self) -> Result<Vec<CpuTexture>, GltfError> {
+    /// Decode all images and build `Arc<CpuTexture>` for each glTF texture.
+    ///
+    /// Stores the results in `self.texture_arcs`, indexed by glTF texture
+    /// index. Used by `resolve_texture_sampler` to embed textures directly
+    /// into [`TextureRef`].
+    pub fn load_textures(&mut self) -> Result<(), GltfError> {
         let images = self.decode_images()?;
 
-        let textures = self
+        self.texture_arcs = self
             .document
             .textures()
             .map(|tex| {
@@ -83,11 +91,11 @@ impl LoadContext {
                 if let Some(name) = tex.name() {
                     cpu_tex = cpu_tex.with_name(name);
                 }
-                cpu_tex
+                Arc::new(cpu_tex)
             })
             .collect();
 
-        Ok(textures)
+        Ok(())
     }
 
     /// Decode all images to RGBA8.
@@ -268,7 +276,7 @@ impl LoadContext {
         MaterialProperty {
             semantic,
             value: MaterialValue::Texture(TextureRef {
-                texture,
+                texture: TextureSource::Cpu(texture),
                 sampler,
                 tex_coord: t.tex_coord(),
             }),
@@ -279,22 +287,23 @@ impl LoadContext {
     fn texture_ref_from(&self, tex: &gltf_dep::Texture<'_>, tex_coord: u32) -> TextureRef {
         let (texture, sampler) = self.resolve_texture_sampler(tex);
         TextureRef {
-            texture,
+            texture: TextureSource::Cpu(texture),
             sampler,
             tex_coord,
         }
     }
 
-    /// Resolve glTF texture index and shared sampler.
+    /// Resolve glTF texture Arc and shared sampler.
     fn resolve_texture_sampler(
         &self,
         tex: &gltf_dep::Texture<'_>,
-    ) -> (usize, Option<Arc<CpuSampler>>) {
+    ) -> (Arc<CpuTexture>, Option<Arc<CpuSampler>>) {
+        let texture = Arc::clone(&self.texture_arcs[tex.index()]);
         let sampler = tex
             .sampler()
             .index()
             .map(|idx| Arc::clone(&self.sampler_arcs[idx]));
-        (tex.index(), sampler)
+        (texture, sampler)
     }
 
     /// Load all cameras.

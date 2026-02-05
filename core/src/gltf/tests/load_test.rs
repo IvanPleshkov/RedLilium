@@ -73,26 +73,46 @@ fn test_toy_car_materials_on_meshes() {
 
 #[test]
 fn test_toy_car_has_textures() {
+    use crate::material::{MaterialSemantic, MaterialValue, TextureSource};
+
     let doc = load_gltf(TOY_CAR_GLB, &[], &[]).expect("failed to load ToyCar.glb");
 
-    assert!(!doc.textures.is_empty(), "expected textures");
+    // Collect all textures referenced by materials
+    let mut texture_count = 0;
+    for mat in &doc.materials {
+        for prop in &mat.properties {
+            if let MaterialValue::Texture(tex_ref) = &prop.value
+                && let TextureSource::Cpu(cpu_tex) = &tex_ref.texture
+            {
+                println!(
+                    "  texture in {:?}: name={:?}, {}x{}, format={:?}, {} bytes",
+                    prop.semantic,
+                    cpu_tex.name,
+                    cpu_tex.width,
+                    cpu_tex.height,
+                    cpu_tex.format,
+                    cpu_tex.data.len(),
+                );
+                // RGBA8: 4 bytes per pixel
+                assert_eq!(
+                    cpu_tex.data.len(),
+                    (cpu_tex.width * cpu_tex.height * 4) as usize,
+                    "texture data size doesn't match RGBA8 dimensions"
+                );
+                texture_count += 1;
+            }
+        }
+    }
+    assert!(texture_count > 0, "expected textures in materials");
 
-    for (i, tex) in doc.textures.iter().enumerate() {
-        println!(
-            "  texture {}: name={:?}, {}x{}, format={:?}, {} bytes",
-            i,
-            tex.name,
-            tex.width,
-            tex.height,
-            tex.format,
-            tex.data.len(),
-        );
-        // RGBA8: 4 bytes per pixel
-        assert_eq!(
-            tex.data.len(),
-            (tex.width * tex.height * 4) as usize,
-            "texture {i} data size doesn't match RGBA8 dimensions"
-        );
+    // Verify base color textures are accessible via get_texture
+    for mat in &doc.materials {
+        if let Some(tex_ref) = mat.get_texture(&MaterialSemantic::BaseColorTexture) {
+            assert!(
+                matches!(&tex_ref.texture, TextureSource::Cpu(_)),
+                "expected Cpu texture source"
+            );
+        }
     }
 }
 

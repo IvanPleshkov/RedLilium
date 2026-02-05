@@ -15,4 +15,5 @@ mod types;
 
 pub use types::{
     AlphaMode, CpuMaterial, MaterialProperty, MaterialSemantic, MaterialValue, TextureRef,
+    TextureSource,
 };

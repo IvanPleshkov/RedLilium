@@ -59,11 +59,11 @@ use crate::sampler::CpuSampler;
 /// # Returns
 ///
 /// A [`GltfDocument`] containing all loaded scenes, meshes, materials,
-/// textures, cameras, and skins. Samplers are embedded in material
-/// [`TextureRef`] entries via `Arc<CpuSampler>`. Animations are embedded
-/// in each [`Scene`]. New vertex layouts and samplers created during
-/// loading are in [`GltfDocument::new_layouts`] and
-/// [`GltfDocument::new_samplers`].
+/// cameras, and skins. Textures and samplers are embedded in material
+/// [`TextureRef`] entries via `Arc<CpuTexture>` and `Arc<CpuSampler>`.
+/// Animations are embedded in each [`Scene`]. New vertex layouts and
+/// samplers created during loading are in [`GltfDocument::new_layouts`]
+/// and [`GltfDocument::new_samplers`].
 pub fn load_gltf(
     data: &[u8],
     shared_layouts: &[Arc<VertexLayout>],
@@ -75,7 +75,7 @@ pub fn load_gltf(
     let buffers = loader::resolve_buffers(&gltf.document, blob)?;
     let mut ctx = loader::LoadContext::new(gltf.document, buffers, shared_layouts, shared_samplers);
 
-    let textures = ctx.load_textures()?;
+    ctx.load_textures()?;
     ctx.load_samplers();
     let materials = ctx.load_materials();
     let cameras = ctx.load_cameras();
@@ -90,7 +90,6 @@ pub fn load_gltf(
         scenes,
         default_scene,
         materials,
-        textures,
         new_layouts,
         new_samplers,
     })
