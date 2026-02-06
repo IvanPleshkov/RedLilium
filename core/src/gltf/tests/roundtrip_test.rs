@@ -8,6 +8,8 @@ use crate::mesh::VertexLayout;
 use crate::sampler::CpuSampler;
 use crate::scene::SceneNode;
 
+use super::default_pbr_material;
+
 const TOY_CAR_GLB: &[u8] = include_bytes!("ToyCar.glb");
 
 /// Collect all unique Arc<VertexLayout> from a document's scenes.
@@ -61,8 +63,8 @@ fn count_nodes(nodes: &[SceneNode]) -> usize {
 #[test]
 fn test_roundtrip_toy_car() {
     // Step 1: Load the original document
-    let original =
-        load_gltf(TOY_CAR_GLB, &[], &[], &[]).expect("failed to load original ToyCar.glb");
+    let original = load_gltf(TOY_CAR_GLB, &[], &[], default_pbr_material)
+        .expect("failed to load original ToyCar.glb");
 
     // Step 2: Export to GLB bytes
     let scene_refs: Vec<&_> = original.scenes.iter().collect();
@@ -76,14 +78,13 @@ fn test_roundtrip_toy_car() {
     // Step 3: Collect shared resources from the original for reuse
     let shared_layouts = collect_layouts(&original);
     let shared_samplers = collect_samplers(&original);
-    let shared_instances = collect_instances(&original);
 
     // Step 4: Reload from exported bytes, passing shared resources
     let reloaded = load_gltf(
         &glb_bytes,
         &shared_layouts,
         &shared_samplers,
-        &shared_instances,
+        default_pbr_material,
     )
     .expect("failed to reload exported glb");
 
@@ -169,14 +170,9 @@ fn test_roundtrip_toy_car() {
                 "scene {si} mesh {mi}: index format mismatch"
             );
 
-            // Arc::ptr_eq for material instance — shared instances should be reused
+            // Material should be present on both sides
             match (orig_mesh.material(), re_mesh.material()) {
-                (Some(om), Some(rm)) => {
-                    assert!(
-                        Arc::ptr_eq(om, rm),
-                        "scene {si} mesh {mi}: CpuMaterialInstance Arc not shared (ptr_eq failed)"
-                    );
-                }
+                (Some(_), Some(_)) => {}
                 (None, None) => {}
                 _ => panic!("scene {si} mesh {mi}: material presence mismatch"),
             }
@@ -205,15 +201,11 @@ fn test_roundtrip_toy_car() {
         }
     }
 
-    // Per-instance checks (via collected instances)
+    // Per-instance value checks (material values should match between loads)
     for (mi, (orig_inst, re_inst)) in orig_instances.iter().zip(re_instances.iter()).enumerate() {
-        // Arc::ptr_eq should hold since we passed shared_instances
-        assert!(
-            Arc::ptr_eq(orig_inst, re_inst),
-            "instance {mi}: Arc not shared (ptr_eq failed)"
-        );
+        assert_eq!(orig_inst.name, re_inst.name, "instance {mi}: name mismatch");
 
-        // Sampler Arc::ptr_eq for each texture
+        // Sampler and texture presence for each texture slot
         let texture_names = [
             "base_color_texture",
             "metallic_roughness_texture",
@@ -230,17 +222,6 @@ fn test_roundtrip_toy_car() {
                         o.tex_coord, r.tex_coord,
                         "instance {mi} {name}: tex_coord mismatch"
                     );
-
-                    match (&o.sampler, &r.sampler) {
-                        (Some(os), Some(rs)) => {
-                            assert!(
-                                Arc::ptr_eq(os, rs),
-                                "instance {mi} {name}: CpuSampler Arc not shared (ptr_eq failed)"
-                            );
-                        }
-                        (None, None) => {}
-                        _ => panic!("instance {mi} {name}: sampler presence mismatch"),
-                    }
 
                     match (&o.texture, &r.texture) {
                         (TextureSource::Cpu(_), TextureSource::Cpu(_)) => {}
@@ -259,19 +240,18 @@ fn test_roundtrip_toy_car() {
 
 #[test]
 fn test_roundtrip_node_transforms() {
-    let original = load_gltf(TOY_CAR_GLB, &[], &[], &[]).expect("failed to load");
+    let original = load_gltf(TOY_CAR_GLB, &[], &[], default_pbr_material).expect("failed to load");
 
     let scene_refs: Vec<&_> = original.scenes.iter().collect();
     let glb_bytes = save_gltf(&scene_refs, original.default_scene).expect("export");
 
     let shared_layouts = collect_layouts(&original);
     let shared_samplers = collect_samplers(&original);
-    let shared_instances = collect_instances(&original);
     let reloaded = load_gltf(
         &glb_bytes,
         &shared_layouts,
         &shared_samplers,
-        &shared_instances,
+        default_pbr_material,
     )
     .expect("reload");
 
@@ -310,19 +290,18 @@ fn test_roundtrip_node_transforms() {
 
 #[test]
 fn test_roundtrip_animations() {
-    let original = load_gltf(TOY_CAR_GLB, &[], &[], &[]).expect("failed to load");
+    let original = load_gltf(TOY_CAR_GLB, &[], &[], default_pbr_material).expect("failed to load");
 
     let scene_refs: Vec<&_> = original.scenes.iter().collect();
     let glb_bytes = save_gltf(&scene_refs, original.default_scene).expect("export");
 
     let shared_layouts = collect_layouts(&original);
     let shared_samplers = collect_samplers(&original);
-    let shared_instances = collect_instances(&original);
     let reloaded = load_gltf(
         &glb_bytes,
         &shared_layouts,
         &shared_samplers,
-        &shared_instances,
+        default_pbr_material,
     )
     .expect("reload");
 

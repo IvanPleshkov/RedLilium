@@ -5,6 +5,8 @@ use std::sync::Arc;
 use crate::gltf::load_gltf;
 use crate::material::CpuMaterialInstance;
 
+use super::default_pbr_material;
+
 const TOY_CAR_GLB: &[u8] = include_bytes!("ToyCar.glb");
 
 /// Helper: get the default scene from a loaded document.
@@ -30,7 +32,8 @@ fn collect_instances(doc: &crate::gltf::GltfDocument) -> Vec<Arc<CpuMaterialInst
 
 #[test]
 fn test_load_toy_car() {
-    let doc = load_gltf(TOY_CAR_GLB, &[], &[], &[]).expect("failed to load ToyCar.glb");
+    let doc =
+        load_gltf(TOY_CAR_GLB, &[], &[], default_pbr_material).expect("failed to load ToyCar.glb");
     let scene = default_scene(&doc);
 
     println!("Loaded {} meshes", scene.meshes.len());
@@ -62,7 +65,8 @@ fn test_load_toy_car() {
 
 #[test]
 fn test_toy_car_materials_on_meshes() {
-    let doc = load_gltf(TOY_CAR_GLB, &[], &[], &[]).expect("failed to load ToyCar.glb");
+    let doc =
+        load_gltf(TOY_CAR_GLB, &[], &[], default_pbr_material).expect("failed to load ToyCar.glb");
     let scene = default_scene(&doc);
 
     let instances = collect_instances(&doc);
@@ -88,7 +92,8 @@ fn test_toy_car_materials_on_meshes() {
 fn test_toy_car_has_textures() {
     use crate::material::TextureSource;
 
-    let doc = load_gltf(TOY_CAR_GLB, &[], &[], &[]).expect("failed to load ToyCar.glb");
+    let doc =
+        load_gltf(TOY_CAR_GLB, &[], &[], default_pbr_material).expect("failed to load ToyCar.glb");
 
     let instances = collect_instances(&doc);
 
@@ -131,7 +136,8 @@ fn test_toy_car_has_textures() {
 
 #[test]
 fn test_toy_car_has_scene() {
-    let doc = load_gltf(TOY_CAR_GLB, &[], &[], &[]).expect("failed to load ToyCar.glb");
+    let doc =
+        load_gltf(TOY_CAR_GLB, &[], &[], default_pbr_material).expect("failed to load ToyCar.glb");
 
     assert!(!doc.scenes.is_empty(), "expected at least one scene");
     let scene = default_scene(&doc);

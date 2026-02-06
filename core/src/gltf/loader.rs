@@ -5,9 +5,7 @@
 
 use std::sync::Arc;
 
-use crate::material::{
-    AlphaMode, CpuMaterial, CpuMaterialInstance, MaterialValue, TextureRef, TextureSource,
-};
+use crate::material::{AlphaMode, CpuMaterialInstance, TextureRef, TextureSource};
 use crate::mesh::{CpuMesh, VertexLayout};
 use crate::sampler::{AddressMode, CpuSampler, FilterMode};
 use crate::scene::{
@@ -17,6 +15,7 @@ use crate::scene::{
 use crate::texture::{CpuTexture, TextureFormat};
 
 use super::error::GltfError;
+use super::types::GltfMaterial;
 use super::vertex;
 
 /// Internal loading context that holds resolved data during loading.
@@ -38,15 +37,6 @@ pub(crate) struct LoadContext {
     /// Loaded sampler Arcs indexed by glTF sampler index.
     sampler_arcs: Vec<Arc<CpuSampler>>,
 
-    /// Material declarations extracted from shared instances.
-    shared_declarations: Vec<Arc<CpuMaterial>>,
-    /// New declarations created during loading.
-    new_declarations: Vec<Arc<CpuMaterial>>,
-
-    /// Shared material instances passed in by the caller.
-    shared_instances: Vec<Arc<CpuMaterialInstance>>,
-    /// New material instances created during loading.
-    new_instances: Vec<Arc<CpuMaterialInstance>>,
     /// Loaded instance Arcs indexed by glTF material index.
     instance_arcs: Vec<Arc<CpuMaterialInstance>>,
 
@@ -65,19 +55,7 @@ impl LoadContext {
         buffers: Vec<Vec<u8>>,
         shared_layouts: &[Arc<VertexLayout>],
         shared_samplers: &[Arc<CpuSampler>],
-        shared_instances: &[Arc<CpuMaterialInstance>],
     ) -> Self {
-        // Extract unique declarations from shared instances
-        let mut shared_declarations: Vec<Arc<CpuMaterial>> = Vec::new();
-        for inst in shared_instances {
-            if !shared_declarations
-                .iter()
-                .any(|d| Arc::ptr_eq(d, &inst.material))
-            {
-                shared_declarations.push(Arc::clone(&inst.material));
-            }
-        }
-
         Self {
             document,
             buffers,
@@ -86,10 +64,6 @@ impl LoadContext {
             shared_samplers: shared_samplers.to_vec(),
             new_samplers: Vec::new(),
             sampler_arcs: Vec::new(),
-            shared_declarations,
-            new_declarations: Vec::new(),
-            shared_instances: shared_instances.to_vec(),
-            new_instances: Vec::new(),
             instance_arcs: Vec::new(),
             texture_arcs: Vec::new(),
             mesh_index_map: Vec::new(),
@@ -197,27 +171,24 @@ impl LoadContext {
             .collect();
     }
 
-    /// Load all materials as shared `Arc<CpuMaterialInstance>`.
+    /// Load all materials via a user-provided callback.
     ///
-    /// For each glTF material, creates a `CpuMaterial` declaration (shared by
-    /// pipeline config) and a `CpuMaterialInstance` (shared by full value
-    /// equality). The resulting `instance_arcs` vector is indexed by glTF
-    /// material index and used by `load_meshes`.
-    pub fn load_materials(&mut self) {
+    /// For each glTF material, extracts PBR properties and textures into a
+    /// [`GltfMaterial`] and passes it to `material_fn`. The callback returns
+    /// an `Arc<CpuMaterialInstance>` that the loader assigns to meshes.
+    ///
+    /// The resulting `instance_arcs` vector is indexed by glTF material index
+    /// and used by `load_meshes`.
+    pub fn load_materials(
+        &mut self,
+        material_fn: &mut impl FnMut(&GltfMaterial) -> Arc<CpuMaterialInstance>,
+    ) {
         let materials: Vec<gltf_dep::Material<'_>> = self.document.materials().collect();
         let mut result = Vec::with_capacity(materials.len());
 
         for mat in &materials {
             let pbr = mat.pbr_metallic_roughness();
 
-            // Detect which textures are present
-            let has_base_color_tex = pbr.base_color_texture().is_some();
-            let has_metallic_roughness_tex = pbr.metallic_roughness_texture().is_some();
-            let has_normal_tex = mat.normal_texture().is_some();
-            let has_occlusion_tex = mat.occlusion_texture().is_some();
-            let has_emissive_tex = mat.emissive_texture().is_some();
-
-            // Map alpha mode with embedded cutoff
             let alpha_mode = match mat.alpha_mode() {
                 gltf_dep::material::AlphaMode::Opaque => AlphaMode::Opaque,
                 gltf_dep::material::AlphaMode::Mask => {
@@ -227,68 +198,38 @@ impl LoadContext {
                 gltf_dep::material::AlphaMode::Blend => AlphaMode::Blend,
             };
 
-            // Find or create shared declaration
-            let declaration = CpuMaterial::pbr_metallic_roughness(
-                alpha_mode,
-                mat.double_sided(),
-                has_base_color_tex,
-                has_metallic_roughness_tex,
-                has_normal_tex,
-                has_occlusion_tex,
-                has_emissive_tex,
-            );
-            let shared_decl = find_or_create_declaration(
-                declaration,
-                &self.shared_declarations,
-                &mut self.new_declarations,
-            );
+            let mut normal_scale = 1.0f32;
+            let mut occlusion_strength = 1.0f32;
 
-            // Build values in order matching the declaration bindings.
-            // Indices 0-5 are always the uniform properties.
-            let mut values = vec![
-                MaterialValue::Vec4(pbr.base_color_factor()),
-                MaterialValue::Float(pbr.metallic_factor()),
-                MaterialValue::Float(pbr.roughness_factor()),
-                MaterialValue::Vec3(mat.emissive_factor()),
-                MaterialValue::Float(1.0), // normal_scale default
-                MaterialValue::Float(1.0), // occlusion_strength default
-            ];
+            let normal_texture = mat.normal_texture().map(|t| {
+                normal_scale = t.scale();
+                self.texture_ref_from(&t.texture(), t.tex_coord())
+            });
+            let occlusion_texture = mat.occlusion_texture().map(|t| {
+                occlusion_strength = t.strength();
+                self.texture_ref_from(&t.texture(), t.tex_coord())
+            });
 
-            // Texture values are appended in the same order as the declaration:
-            // base_color, metallic_roughness, normal, occlusion, emissive.
-            if let Some(t) = pbr.base_color_texture() {
-                values.push(MaterialValue::Texture(self.build_texture_ref(&t)));
-            }
-            if let Some(t) = pbr.metallic_roughness_texture() {
-                values.push(MaterialValue::Texture(self.build_texture_ref(&t)));
-            }
-            if let Some(t) = mat.normal_texture() {
-                values[4] = MaterialValue::Float(t.scale());
-                values.push(MaterialValue::Texture(
-                    self.texture_ref_from(&t.texture(), t.tex_coord()),
-                ));
-            }
-            if let Some(t) = mat.occlusion_texture() {
-                values[5] = MaterialValue::Float(t.strength());
-                values.push(MaterialValue::Texture(
-                    self.texture_ref_from(&t.texture(), t.tex_coord()),
-                ));
-            }
-            if let Some(t) = mat.emissive_texture() {
-                values.push(MaterialValue::Texture(self.build_texture_ref(&t)));
-            }
-
-            let instance = CpuMaterialInstance {
-                material: shared_decl,
+            let gltf_mat = GltfMaterial {
                 name: mat.name().map(String::from),
-                values,
+                alpha_mode,
+                double_sided: mat.double_sided(),
+                base_color_factor: pbr.base_color_factor(),
+                metallic_factor: pbr.metallic_factor(),
+                roughness_factor: pbr.roughness_factor(),
+                emissive_factor: mat.emissive_factor(),
+                normal_scale,
+                occlusion_strength,
+                base_color_texture: pbr.base_color_texture().map(|t| self.build_texture_ref(&t)),
+                metallic_roughness_texture: pbr
+                    .metallic_roughness_texture()
+                    .map(|t| self.build_texture_ref(&t)),
+                normal_texture,
+                occlusion_texture,
+                emissive_texture: mat.emissive_texture().map(|t| self.build_texture_ref(&t)),
             };
 
-            result.push(find_or_create_instance(
-                instance,
-                &self.shared_instances,
-                &mut self.new_instances,
-            ));
+            result.push(material_fn(&gltf_mat));
         }
 
         self.instance_arcs = result;
@@ -586,16 +527,9 @@ impl LoadContext {
         self.document.default_scene().map(|s| s.index())
     }
 
-    /// Consume the context and return new layouts, samplers, and material instances.
-    #[allow(clippy::type_complexity)]
-    pub fn into_new_resources(
-        self,
-    ) -> (
-        Vec<Arc<VertexLayout>>,
-        Vec<Arc<CpuSampler>>,
-        Vec<Arc<CpuMaterialInstance>>,
-    ) {
-        (self.new_layouts, self.new_samplers, self.new_instances)
+    /// Consume the context and return new layouts and samplers.
+    pub fn into_new_resources(self) -> (Vec<Arc<VertexLayout>>, Vec<Arc<CpuSampler>>) {
+        (self.new_layouts, self.new_samplers)
     }
 }
 
@@ -667,105 +601,6 @@ fn find_or_create_sampler(
     // Create a new one
     let arc = Arc::new(sampler);
     new_samplers.push(Arc::clone(&arc));
-    arc
-}
-
-/// Check if two material declarations are structurally equal (ignoring name).
-fn declarations_structurally_equal(a: &CpuMaterial, b: &CpuMaterial) -> bool {
-    a.alpha_mode == b.alpha_mode
-        && a.double_sided == b.double_sided
-        && a.bindings.len() == b.bindings.len()
-        && a.bindings.iter().zip(b.bindings.iter()).all(|(ba, bb)| {
-            ba.name == bb.name && ba.value_type == bb.value_type && ba.binding == bb.binding
-        })
-}
-
-/// Find or create a shared material declaration.
-fn find_or_create_declaration(
-    decl: CpuMaterial,
-    existing: &[Arc<CpuMaterial>],
-    new_decls: &mut Vec<Arc<CpuMaterial>>,
-) -> Arc<CpuMaterial> {
-    for e in existing {
-        if declarations_structurally_equal(&decl, e) {
-            return Arc::clone(e);
-        }
-    }
-    for n in new_decls.iter() {
-        if declarations_structurally_equal(&decl, n) {
-            return Arc::clone(n);
-        }
-    }
-    let arc = Arc::new(decl);
-    new_decls.push(Arc::clone(&arc));
-    arc
-}
-
-/// Check if two material values are structurally equal.
-///
-/// For textures, compares data content (width, height, format, pixel data)
-/// instead of using Arc::ptr_eq, since freshly loaded textures won't share
-/// pointers with existing ones. Samplers are compared structurally.
-fn material_values_structurally_equal(a: &MaterialValue, b: &MaterialValue) -> bool {
-    match (a, b) {
-        (MaterialValue::Float(a), MaterialValue::Float(b)) => a == b,
-        (MaterialValue::Vec3(a), MaterialValue::Vec3(b)) => a == b,
-        (MaterialValue::Vec4(a), MaterialValue::Vec4(b)) => a == b,
-        (MaterialValue::Texture(a), MaterialValue::Texture(b)) => {
-            if a.tex_coord != b.tex_coord {
-                return false;
-            }
-            let tex_eq = match (&a.texture, &b.texture) {
-                (TextureSource::Cpu(ta), TextureSource::Cpu(tb)) => {
-                    Arc::ptr_eq(ta, tb)
-                        || (ta.width == tb.width
-                            && ta.height == tb.height
-                            && ta.format == tb.format
-                            && ta.data == tb.data)
-                }
-                (TextureSource::Named(a), TextureSource::Named(b)) => a == b,
-                _ => false,
-            };
-            let sampler_eq = match (&a.sampler, &b.sampler) {
-                (Some(sa), Some(sb)) => Arc::ptr_eq(sa, sb) || samplers_structurally_equal(sa, sb),
-                (None, None) => true,
-                _ => false,
-            };
-            tex_eq && sampler_eq
-        }
-        _ => false,
-    }
-}
-
-/// Check if two material instances are structurally equal (ignoring name).
-fn instances_structurally_equal(a: &CpuMaterialInstance, b: &CpuMaterialInstance) -> bool {
-    (Arc::ptr_eq(&a.material, &b.material)
-        || declarations_structurally_equal(&a.material, &b.material))
-        && a.values.len() == b.values.len()
-        && a.values
-            .iter()
-            .zip(b.values.iter())
-            .all(|(va, vb)| material_values_structurally_equal(va, vb))
-}
-
-/// Find or create a shared material instance.
-fn find_or_create_instance(
-    inst: CpuMaterialInstance,
-    existing: &[Arc<CpuMaterialInstance>],
-    new_insts: &mut Vec<Arc<CpuMaterialInstance>>,
-) -> Arc<CpuMaterialInstance> {
-    for e in existing {
-        if instances_structurally_equal(&inst, e) {
-            return Arc::clone(e);
-        }
-    }
-    for n in new_insts.iter() {
-        if instances_structurally_equal(&inst, n) {
-            return Arc::clone(n);
-        }
-    }
-    let arc = Arc::new(inst);
-    new_insts.push(Arc::clone(&arc));
     arc
 }
 
