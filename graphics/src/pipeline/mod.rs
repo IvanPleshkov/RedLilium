@@ -62,6 +62,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use redlilium_core::pool::Poolable;
+
 use crate::device::GraphicsDevice;
 use crate::error::GraphicsError;
 use crate::graph::RenderGraph;
@@ -377,10 +379,10 @@ impl FramePipeline {
             self.ring_buffers[self.current_slot] = Some(ring);
         }
 
-        // Recycle graphs: clear submitted graphs and merge back to pool
+        // Recycle graphs: reset submitted graphs and merge back to pool
         let mut pool = schedule.take_graph_pool();
         for mut graph in schedule.take_submitted_graphs() {
-            graph.clear(); // Clears passes, edges, and compiled cache
+            graph.reset(); // Resets passes, edges, and compiled cache
             pool.push(graph);
         }
         self.graph_pool = pool;

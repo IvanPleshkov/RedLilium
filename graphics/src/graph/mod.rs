@@ -48,7 +48,7 @@ pub use pass::{ComputePass, DrawCommand, GraphicsPass, IndirectDrawCommand, Pass
 // Re-export compiler types for convenience
 pub use crate::compiler::{CompiledGraph, GraphError, compile};
 
-use redlilium_core::pool::Pooled;
+use redlilium_core::pool::{Poolable, Pooled};
 
 /// Handle to a pass in the render graph.
 ///
@@ -256,12 +256,10 @@ impl RenderGraph {
     pub fn invalidate_compiled(&mut self) {
         self.compiled.release();
     }
+}
 
-    /// Clear all passes from the graph.
-    ///
-    /// This clears passes, edges, and the cached compiled graph,
-    /// but preserves allocated capacity for reuse.
-    pub fn clear(&mut self) {
+impl Poolable for RenderGraph {
+    fn reset(&mut self) {
         self.passes.clear();
         self.edges.clear();
         self.compiled.release();
@@ -304,11 +302,11 @@ mod tests {
     }
 
     #[test]
-    fn test_clear() {
+    fn test_reset() {
         let mut graph = RenderGraph::new();
         graph.add_graphics_pass(GraphicsPass::new("test_pass".into()));
 
-        graph.clear();
+        graph.reset();
 
         assert_eq!(graph.pass_count(), 0);
     }
