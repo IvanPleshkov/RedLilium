@@ -63,8 +63,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::device::GraphicsDevice;
+use crate::error::GraphicsError;
 use crate::profiling::{frame_mark, profile_scope};
+use crate::resources::RingBuffer;
 use crate::scheduler::{Fence, FrameSchedule};
+use crate::types::BufferUsage;
 
 /// Manages multiple frames in flight for CPU-GPU parallelism.
 ///
@@ -112,6 +115,10 @@ pub struct FramePipeline {
 
     /// Total frames started (for debugging/profiling).
     frame_count: u64,
+
+    /// Per-frame ring buffers for streaming data. `None` if not configured or
+    /// temporarily moved to FrameSchedule during a frame.
+    ring_buffers: Vec<Option<RingBuffer>>,
 }
 
 impl std::fmt::Debug for FramePipeline {
@@ -122,6 +129,7 @@ impl std::fmt::Debug for FramePipeline {
             .field("current_slot", &self.current_slot)
             .field("frames_in_flight", &self.frames_in_flight)
             .field("frame_count", &self.frame_count)
+            .field("has_ring_buffers", &self.has_ring_buffers())
             .finish()
     }
 }
@@ -149,6 +157,7 @@ impl FramePipeline {
             current_slot: 0,
             frames_in_flight,
             frame_count: 0,
+            ring_buffers: Vec::new(),
         }
     }
 
@@ -173,6 +182,7 @@ impl FramePipeline {
             current_slot: 0,
             frames_in_flight,
             frame_count: 0,
+            ring_buffers: Vec::new(),
         }
     }
 
@@ -220,10 +230,22 @@ impl FramePipeline {
             self.current_slot
         );
 
+        // Take ring buffer for this slot (if configured) and reset it
+        let ring_buffer = if !self.ring_buffers.is_empty() {
+            self.ring_buffers[self.current_slot].take().map(|mut rb| {
+                rb.reset();
+                rb
+            })
+        } else {
+            None
+        };
+
         // Create schedule with device if available
         match &self.device {
-            Some(device) => FrameSchedule::new_with_device(device.clone()),
-            None => FrameSchedule::new(),
+            Some(device) => {
+                FrameSchedule::new_with_device(device.clone(), self.current_slot, ring_buffer)
+            }
+            None => FrameSchedule::new_with_ring_buffer(ring_buffer),
         }
     }
 
@@ -281,10 +303,22 @@ impl FramePipeline {
             self.current_slot
         );
 
+        // Take ring buffer for this slot (if configured) and reset it
+        let ring_buffer = if !self.ring_buffers.is_empty() {
+            self.ring_buffers[self.current_slot].take().map(|mut rb| {
+                rb.reset();
+                rb
+            })
+        } else {
+            None
+        };
+
         // Create schedule with device if available
         let schedule = match &self.device {
-            Some(device) => FrameSchedule::new_with_device(device.clone()),
-            None => FrameSchedule::new(),
+            Some(device) => {
+                FrameSchedule::new_with_device(device.clone(), self.current_slot, ring_buffer)
+            }
+            None => FrameSchedule::new_with_ring_buffer(ring_buffer),
         };
 
         Some(schedule)
@@ -316,6 +350,13 @@ impl FramePipeline {
         profile_scope!("end_frame");
 
         let fence = schedule.take_fence();
+
+        // Return ring buffer to its slot (if configured)
+        if !self.ring_buffers.is_empty()
+            && let Some(ring) = schedule.take_ring_buffer()
+        {
+            self.ring_buffers[self.current_slot] = Some(ring);
+        }
 
         log::trace!(
             "End frame {} (slot {})",
@@ -473,6 +514,92 @@ impl FramePipeline {
     /// Useful for debugging and profiling.
     pub fn frame_count(&self) -> u64 {
         self.frame_count
+    }
+
+    /// Create ring buffers for per-frame uniform/vertex data streaming.
+    ///
+    /// This creates one ring buffer per frame slot, allowing efficient CPU-GPU
+    /// streaming without synchronization overhead. Call this once during initialization.
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` - Size of each ring buffer in bytes
+    /// * `usage` - Buffer usage flags (RING flag is added automatically)
+    /// * `label` - Debug label for the buffers (slot number is appended)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// pipeline.create_ring_buffers(
+    ///     64 * 1024,  // 64 KB per frame
+    ///     BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+    ///     "per_frame_uniforms",
+    /// )?;
+    /// ```
+    pub fn create_ring_buffers(
+        &mut self,
+        capacity: u64,
+        usage: BufferUsage,
+        label: &str,
+    ) -> Result<(), GraphicsError> {
+        self.create_ring_buffers_with_alignment(
+            capacity,
+            usage,
+            label,
+            RingBuffer::DEFAULT_ALIGNMENT,
+        )
+    }
+
+    /// Create ring buffers with custom alignment.
+    ///
+    /// Like [`create_ring_buffers`](Self::create_ring_buffers), but allows
+    /// specifying custom alignment for allocations.
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` - Size of each ring buffer in bytes
+    /// * `usage` - Buffer usage flags
+    /// * `label` - Debug label for the buffers
+    /// * `alignment` - Allocation alignment (must be power of 2)
+    pub fn create_ring_buffers_with_alignment(
+        &mut self,
+        capacity: u64,
+        usage: BufferUsage,
+        label: &str,
+        alignment: u64,
+    ) -> Result<(), GraphicsError> {
+        let device = self
+            .device
+            .as_ref()
+            .ok_or_else(|| GraphicsError::InvalidParameter("No device configured".to_string()))?;
+
+        self.ring_buffers = Vec::with_capacity(self.frames_in_flight);
+        for slot in 0..self.frames_in_flight {
+            let slot_label = format!("{}_slot{}", label, slot);
+            let ring = RingBuffer::with_alignment(device, capacity, usage, &slot_label, alignment)?;
+            self.ring_buffers.push(Some(ring));
+        }
+
+        log::info!(
+            "FramePipeline: created {} ring buffers of {} bytes each for '{}'",
+            self.frames_in_flight,
+            capacity,
+            label
+        );
+
+        Ok(())
+    }
+
+    /// Check if ring buffers have been configured.
+    pub fn has_ring_buffers(&self) -> bool {
+        !self.ring_buffers.is_empty()
+    }
+
+    /// Get the ring buffer capacity (if configured).
+    pub fn ring_buffer_capacity(&self) -> Option<u64> {
+        self.ring_buffers
+            .first()
+            .and_then(|opt| opt.as_ref().map(|rb| rb.capacity()))
     }
 
     /// Check if a specific frame slot is ready (non-blocking).

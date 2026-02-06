@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use redlilium_graphics::{
-    FramePipeline, FrameSchedule, GraphicsDevice, GraphicsInstance, RenderGraph, Surface,
-    SurfaceTexture, TextureFormat,
+    FramePipeline, FrameSchedule, GraphicsDevice, GraphicsInstance, RenderGraph, RingAllocation,
+    RingBuffer, Surface, SurfaceTexture, TextureFormat,
 };
 
 /// Application context providing access to graphics resources.
@@ -176,6 +176,52 @@ impl<'a> DrawContext<'a> {
     /// Get the elapsed time since application start in seconds.
     pub fn elapsed_time(&self) -> f32 {
         self.app.elapsed_time
+    }
+
+    /// Get the frame slot index for this frame.
+    ///
+    /// The slot index cycles from 0 to `frames_in_flight - 1`.
+    pub fn frame_slot(&self) -> usize {
+        self.schedule.frame_slot()
+    }
+
+    /// Check if this frame has a ring buffer configured.
+    ///
+    /// Ring buffers are configured via [`FramePipeline::create_ring_buffers`](redlilium_graphics::FramePipeline::create_ring_buffers).
+    pub fn has_ring_buffer(&self) -> bool {
+        self.schedule.has_ring_buffer()
+    }
+
+    /// Get read-only access to the ring buffer (if configured).
+    pub fn ring_buffer(&self) -> Option<&RingBuffer> {
+        self.schedule.ring_buffer()
+    }
+
+    /// Get mutable access to the ring buffer (if configured).
+    pub fn ring_buffer_mut(&mut self) -> Option<&mut RingBuffer> {
+        self.schedule.ring_buffer_mut()
+    }
+
+    /// Allocate space from the ring buffer.
+    ///
+    /// Returns `None` if no ring buffer is configured or if there isn't
+    /// enough space remaining.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - Size of the allocation in bytes
+    pub fn allocate(&mut self, size: u64) -> Option<RingAllocation> {
+        self.schedule.allocate(size)
+    }
+
+    /// Allocate space from the ring buffer with custom alignment.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - Size of the allocation in bytes
+    /// * `alignment` - Required alignment (must be power of 2)
+    pub fn allocate_aligned(&mut self, size: u64, alignment: u64) -> Option<RingAllocation> {
+        self.schedule.allocate_aligned(size, alignment)
     }
 
     /// Get the current swapchain texture.

@@ -31,8 +31,8 @@ use redlilium_graphics::{
     BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferDescriptor, BufferUsage,
     ColorAttachment, CpuSampler, CpuTexture, DepthStencilAttachment, Extent3d, FrameSchedule,
     GraphicsPass, LoadOp, Material, MaterialDescriptor, MaterialInstance, Mesh, MeshDescriptor,
-    RenderGraph, RenderTargetConfig, ShaderComposer, ShaderDef, ShaderSource, ShaderStage,
-    ShaderStageFlags, TextureDescriptor, TextureFormat, TextureUsage, TransferConfig,
+    RenderGraph, RenderTargetConfig, RingAllocation, ShaderComposer, ShaderDef, ShaderSource,
+    ShaderStage, ShaderStageFlags, TextureDescriptor, TextureFormat, TextureUsage, TransferConfig,
     TransferOperation, TransferPass, VertexBufferLayout, VertexLayout,
     egui::{EguiApp, EguiController, egui},
 };
@@ -485,6 +485,19 @@ const SPHERE_SPACING: f32 = 1.5;
 const IRRADIANCE_SIZE: u32 = 32;
 const PREFILTER_SIZE: u32 = 128;
 
+/// Per-frame uniform allocation offsets from the ring buffer.
+///
+/// These allocations demonstrate how ring buffers can be used for per-frame
+/// uniform data. In a full implementation with dynamic uniform buffer offsets,
+/// these offsets would be passed to bind groups for zero-copy uniform updates.
+#[derive(Default)]
+#[allow(dead_code)] // Fields stored for demonstration/future dynamic offset support
+struct FrameUniformAllocations {
+    camera: Option<RingAllocation>,
+    skybox: Option<RingAllocation>,
+    resolve: Option<RingAllocation>,
+}
+
 struct PbrIblDemo {
     camera: OrbitCamera,
     mouse_pressed: bool,
@@ -498,6 +511,9 @@ struct PbrIblDemo {
     camera_buffer: Option<Arc<redlilium_graphics::Buffer>>,
     instance_buffer: Option<Arc<redlilium_graphics::Buffer>>,
     depth_texture: Option<Arc<redlilium_graphics::Texture>>,
+
+    // Per-frame uniform allocations from ring buffer
+    frame_allocations: FrameUniformAllocations,
 
     // Skybox resources
     skybox_material: Option<Arc<Material>>,
@@ -559,6 +575,7 @@ impl PbrIblDemo {
             camera_buffer: None,
             instance_buffer: None,
             depth_texture: None,
+            frame_allocations: FrameUniformAllocations::default(),
             skybox_material: None,
             skybox_material_instance: None,
             skybox_uniform_buffer: None,
@@ -1555,6 +1572,21 @@ impl AppHandler for PbrIblDemo {
         // Create resolve pass resources (needs G-buffer textures to exist)
         self.create_resolve_resources(ctx);
 
+        // Initialize per-frame ring buffer for uniform data streaming
+        // This demonstrates efficient per-frame uniform updates without GPU stalls
+        ctx.pipeline_mut()
+            .create_ring_buffers(
+                4 * 1024, // 4 KB per frame (enough for camera, skybox, resolve uniforms)
+                BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+                "per_frame_uniforms",
+            )
+            .expect("Failed to create per-frame ring buffers");
+        log::info!(
+            "Created per-frame ring buffers: {} frames x {} bytes",
+            ctx.pipeline().frames_in_flight(),
+            ctx.pipeline().ring_buffer_capacity().unwrap_or(0)
+        );
+
         // Initialize egui controller
         let mut egui_controller = EguiController::new(
             ctx.device().clone(),
@@ -1654,6 +1686,32 @@ impl AppHandler for PbrIblDemo {
 
     fn on_draw(&mut self, mut ctx: DrawContext) -> FrameSchedule {
         profile_scope!("on_draw");
+
+        // Allocate space for per-frame uniforms from the ring buffer.
+        // The ring buffer is automatically reset by FramePipeline::begin_frame().
+        // These allocations return offsets that can be used with dynamic uniform
+        // buffer offsets for fully optimal streaming. For this demo, we demonstrate
+        // the allocation pattern - the actual buffer writes still go to the fixed
+        // uniform buffers bound to the material instances.
+        if ctx.has_ring_buffer() {
+            self.frame_allocations = FrameUniformAllocations {
+                camera: ctx.allocate(std::mem::size_of::<CameraUniforms>() as u64),
+                skybox: ctx.allocate(std::mem::size_of::<SkyboxUniforms>() as u64),
+                resolve: ctx.allocate(std::mem::size_of::<ResolveUniforms>() as u64),
+            };
+
+            // Log ring buffer usage on first few frames
+            if let Some(ring) = ctx.ring_buffer()
+                && ctx.frame_number() < 3
+            {
+                log::debug!(
+                    "Ring buffer slot {}: allocated {} bytes, {} remaining",
+                    ctx.frame_slot(),
+                    ring.used(),
+                    ring.remaining()
+                );
+            }
+        }
 
         let mut graph = RenderGraph::new();
 

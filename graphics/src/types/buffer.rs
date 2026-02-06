@@ -24,6 +24,16 @@ bitflags! {
         const MAP_READ = 1 << 7;
         /// Buffer is mappable for CPU write.
         const MAP_WRITE = 1 << 8;
+        /// Buffer is optimized for ring buffer streaming (frequent partial updates).
+        ///
+        /// This hint allows backends to choose optimal memory types for streaming data:
+        /// - Host-visible, coherent memory for low-latency writes
+        /// - Proper alignment for partial buffer updates
+        ///
+        /// Used by [`RingBuffer`] for efficient per-frame data streaming.
+        ///
+        /// [`RingBuffer`]: crate::resources::RingBuffer
+        const RING = 1 << 9;
     }
 }
 

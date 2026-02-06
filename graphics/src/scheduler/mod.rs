@@ -55,6 +55,7 @@ use std::sync::Arc;
 use crate::device::GraphicsDevice;
 use crate::graph::{CompiledGraph, RenderGraph};
 use crate::profiling::profile_scope;
+use crate::resources::{RingAllocation, RingBuffer};
 
 /// Handle to a submitted graph in the frame schedule.
 ///
@@ -137,12 +138,17 @@ pub struct FrameSchedule {
     semaphore_counter: u64,
     /// Fence signaled when frame completes (set by present()).
     fence: Option<Fence>,
+    /// The frame slot index (for per-frame resource management).
+    frame_slot: usize,
+    /// Ring buffer for this frame (if configured in FramePipeline).
+    ring_buffer: Option<RingBuffer>,
 }
 
 impl std::fmt::Debug for FrameSchedule {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FrameSchedule")
             .field("device", &self.device.as_ref().map(|d| d.name()))
+            .field("frame_slot", &self.frame_slot)
             .field("submitted", &self.submitted)
             .field("semaphore_counter", &self.semaphore_counter)
             .field("fence", &self.fence)
@@ -161,19 +167,89 @@ impl FrameSchedule {
             submitted: Vec::new(),
             semaphore_counter: 0,
             fence: None,
+            frame_slot: 0,
+            ring_buffer: None,
+        }
+    }
+
+    /// Create a new frame schedule with an optional ring buffer (for testing).
+    #[allow(dead_code)]
+    pub(crate) fn new_with_ring_buffer(ring_buffer: Option<RingBuffer>) -> Self {
+        Self {
+            device: None,
+            submitted: Vec::new(),
+            semaphore_counter: 0,
+            fence: None,
+            frame_slot: 0,
+            ring_buffer,
         }
     }
 
     /// Create a new frame schedule with a device for GPU execution.
     ///
     /// This is called internally by [`FramePipeline::begin_frame`](crate::pipeline::FramePipeline::begin_frame).
-    pub(crate) fn new_with_device(device: Arc<GraphicsDevice>) -> Self {
+    pub(crate) fn new_with_device(
+        device: Arc<GraphicsDevice>,
+        frame_slot: usize,
+        ring_buffer: Option<RingBuffer>,
+    ) -> Self {
         Self {
             device: Some(device),
             submitted: Vec::new(),
             semaphore_counter: 0,
             fence: None,
+            frame_slot,
+            ring_buffer,
         }
+    }
+
+    /// Get the frame slot index for this schedule.
+    ///
+    /// The slot index cycles from 0 to `frames_in_flight - 1`.
+    pub fn frame_slot(&self) -> usize {
+        self.frame_slot
+    }
+
+    /// Check if this schedule has a ring buffer configured.
+    pub fn has_ring_buffer(&self) -> bool {
+        self.ring_buffer.is_some()
+    }
+
+    /// Get read-only access to the ring buffer (if configured).
+    pub fn ring_buffer(&self) -> Option<&RingBuffer> {
+        self.ring_buffer.as_ref()
+    }
+
+    /// Get mutable access to the ring buffer (if configured).
+    pub fn ring_buffer_mut(&mut self) -> Option<&mut RingBuffer> {
+        self.ring_buffer.as_mut()
+    }
+
+    /// Allocate space from the ring buffer.
+    ///
+    /// Returns `None` if no ring buffer is configured or if there isn't
+    /// enough space remaining.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - Size of the allocation in bytes
+    pub fn allocate(&mut self, size: u64) -> Option<RingAllocation> {
+        self.ring_buffer.as_mut()?.allocate(size)
+    }
+
+    /// Allocate space from the ring buffer with custom alignment.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - Size of the allocation in bytes
+    /// * `alignment` - Required alignment (must be power of 2)
+    pub fn allocate_aligned(&mut self, size: u64, alignment: u64) -> Option<RingAllocation> {
+        self.ring_buffer.as_mut()?.allocate_aligned(size, alignment)
+    }
+
+    /// Take ownership of the ring buffer (called by FramePipeline::end_frame).
+    pub(crate) fn take_ring_buffer(&mut self) -> Option<RingBuffer> {
+        self.ring_buffer.take()
     }
 
     /// Submit a graph for immediate execution.

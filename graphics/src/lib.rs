@@ -104,7 +104,7 @@ pub use mesh::{
 };
 pub use pipeline::FramePipeline;
 pub use resize::{ResizeEvent, ResizeManager, ResizeStrategy};
-pub use resources::{Buffer, Sampler, Texture};
+pub use resources::{Buffer, RingAllocation, RingBuffer, Sampler, Texture};
 pub use scheduler::{Fence, FenceStatus, FrameSchedule, GraphHandle, Semaphore};
 pub use shader::{ShaderComposer, ShaderDef, ShaderLibrary};
 pub use swapchain::{PresentMode, Surface, SurfaceConfiguration, SurfaceTexture};
