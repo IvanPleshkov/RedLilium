@@ -92,12 +92,16 @@ fn test_buffer_copy_roundtrip(#[case] backend: Backend) {
     // Download depends on upload
     graph.add_dependency(download_handle, upload_handle);
 
-    // Execute the graph
-    ctx.execute_graph(&graph);
+    // Verify the graph compiles correctly before executing
+    let pass_count = graph
+        .compile()
+        .expect("Graph should compile")
+        .pass_order()
+        .len();
+    assert_eq!(pass_count, 2);
 
-    // Verify the graph was compiled correctly
-    let compiled = graph.compile().expect("Graph should compile");
-    assert_eq!(compiled.pass_order().len(), 2);
+    // Execute the graph
+    ctx.execute_graph(graph);
 
     // In a real backend test, we would verify:
     // let readback_data = map_buffer_read(&readback);
@@ -143,12 +147,16 @@ fn test_buffer_copy_partial(#[case] backend: Backend) {
     ));
     graph.add_transfer_pass(transfer);
 
-    // Execute
-    ctx.execute_graph(&graph);
+    // Verify graph structure before executing
+    let pass_count = graph
+        .compile()
+        .expect("Graph should compile")
+        .pass_order()
+        .len();
+    assert_eq!(pass_count, 1);
 
-    // Verify graph structure
-    let compiled = graph.compile().expect("Graph should compile");
-    assert_eq!(compiled.pass_order().len(), 1);
+    // Execute
+    ctx.execute_graph(graph);
 }
 
 // ============================================================================
@@ -202,12 +210,16 @@ fn test_render_single_quad(#[case] backend: Backend) {
     // Copy depends on render
     graph.add_dependency(copy_handle, render_handle);
 
-    // Execute
-    ctx.execute_graph(&graph);
+    // Verify graph structure before executing
+    let pass_count = graph
+        .compile()
+        .expect("Graph should compile")
+        .pass_order()
+        .len();
+    assert_eq!(pass_count, 2);
 
-    // Verify graph structure
-    let compiled = graph.compile().expect("Graph should compile");
-    assert_eq!(compiled.pass_order().len(), 2);
+    // Execute
+    ctx.execute_graph(graph);
 
     // In a real backend test, we would verify the rendered pixels:
     // let data = map_buffer_read(&readback);
@@ -258,7 +270,7 @@ fn test_render_clear_color(#[case] backend: Backend) {
 
     graph.add_dependency(copy_handle, render_handle);
 
-    ctx.execute_graph(&graph);
+    ctx.execute_graph(graph);
 
     // Read back and verify clear color
     let data = ctx.device.read_buffer(&readback, 0, readback_size);
@@ -333,11 +345,15 @@ fn test_render_depth_buffer_two_quads(#[case] backend: Backend) {
 
     graph.add_dependency(copy_handle, render_handle);
 
-    ctx.execute_graph(&graph);
+    // Verify graph structure before executing
+    let pass_count = graph
+        .compile()
+        .expect("Graph should compile")
+        .pass_order()
+        .len();
+    assert_eq!(pass_count, 2);
 
-    // Verify graph
-    let compiled = graph.compile().expect("Graph should compile");
-    assert_eq!(compiled.pass_order().len(), 2);
+    ctx.execute_graph(graph);
 
     // In a real test, verify that the front (green) quad is visible:
     // let data = map_buffer_read(&readback);
@@ -393,7 +409,7 @@ fn test_render_depth_buffer_reverse_order(#[case] backend: Backend) {
 
     graph.add_dependency(copy_handle, render_handle);
 
-    ctx.execute_graph(&graph);
+    ctx.execute_graph(graph);
 
     // Result should be the same as test_render_depth_buffer_two_quads
 }
@@ -470,11 +486,15 @@ fn test_render_multiple_targets(#[case] backend: Backend) {
     graph.add_dependency(copy1_handle, render_handle);
     graph.add_dependency(copy2_handle, render_handle);
 
-    ctx.execute_graph(&graph);
+    // Verify graph structure before executing
+    let pass_count = graph
+        .compile()
+        .expect("Graph should compile")
+        .pass_order()
+        .len();
+    assert_eq!(pass_count, 4); // 1 render + 3 copies
 
-    // Verify graph structure
-    let compiled = graph.compile().expect("Graph should compile");
-    assert_eq!(compiled.pass_order().len(), 4); // 1 render + 3 copies
+    ctx.execute_graph(graph);
 
     // In a real test:
     // let data0 = map_buffer_read(&readback0);
@@ -533,10 +553,15 @@ fn test_render_mrt_different_formats(#[case] backend: Backend) {
 
     // These are independent passes, no dependency needed
 
-    ctx.execute_graph(&graph);
+    // Verify graph structure before executing
+    let pass_count = graph
+        .compile()
+        .expect("Graph should compile")
+        .pass_order()
+        .len();
+    assert_eq!(pass_count, 2);
 
-    let compiled = graph.compile().expect("Graph should compile");
-    assert_eq!(compiled.pass_order().len(), 2);
+    ctx.execute_graph(graph);
 }
 
 // ============================================================================
@@ -549,7 +574,7 @@ fn test_render_mrt_different_formats(#[case] backend: Backend) {
 #[case::vulkan(Backend::Vulkan)]
 #[case::webgpu(Backend::WebGpu)]
 fn test_empty_graph(#[case] _backend: Backend) {
-    let graph = RenderGraph::new();
+    let mut graph = RenderGraph::new();
 
     // Empty graph should compile successfully
     let compiled = graph.compile().expect("Empty graph should compile");
@@ -606,24 +631,26 @@ fn test_diamond_dependency_graph(#[case] backend: Backend) {
     graph.add_dependency(composite_handle, gbuffer_handle);
     graph.add_dependency(composite_handle, lighting_handle);
 
-    ctx.execute_graph(&graph);
+    // Verify topological order before executing
+    {
+        let compiled = graph.compile().expect("Diamond graph should compile");
+        assert_eq!(compiled.pass_order().len(), 4);
 
-    // Verify topological order
-    let compiled = graph.compile().expect("Diamond graph should compile");
-    assert_eq!(compiled.pass_order().len(), 4);
+        // Shadow must come before gbuffer and lighting
+        // Composite must come last
+        let order = compiled.pass_order();
+        let shadow_idx = order.iter().position(|&h| h == shadow_handle).unwrap();
+        let gbuffer_idx = order.iter().position(|&h| h == gbuffer_handle).unwrap();
+        let lighting_idx = order.iter().position(|&h| h == lighting_handle).unwrap();
+        let composite_idx = order.iter().position(|&h| h == composite_handle).unwrap();
 
-    // Shadow must come before gbuffer and lighting
-    // Composite must come last
-    let order = compiled.pass_order();
-    let shadow_idx = order.iter().position(|&h| h == shadow_handle).unwrap();
-    let gbuffer_idx = order.iter().position(|&h| h == gbuffer_handle).unwrap();
-    let lighting_idx = order.iter().position(|&h| h == lighting_handle).unwrap();
-    let composite_idx = order.iter().position(|&h| h == composite_handle).unwrap();
+        assert!(shadow_idx < gbuffer_idx);
+        assert!(shadow_idx < lighting_idx);
+        assert!(gbuffer_idx < composite_idx);
+        assert!(lighting_idx < composite_idx);
+    }
 
-    assert!(shadow_idx < gbuffer_idx);
-    assert!(shadow_idx < lighting_idx);
-    assert!(gbuffer_idx < composite_idx);
-    assert!(lighting_idx < composite_idx);
+    ctx.execute_graph(graph);
 }
 
 // ============================================================================
@@ -692,7 +719,7 @@ fn test_shader_render_half_quad(#[case] backend: Backend) {
     graph.add_dependency(copy_handle, render_handle);
 
     // Execute
-    ctx.execute_graph(&graph);
+    ctx.execute_graph(graph);
 
     // Read back the pixel data
     let data = ctx.device.read_buffer(&readback, 0, readback_size);
@@ -831,15 +858,19 @@ fn test_layout_tracking_multi_pass(#[case] backend: Backend) {
     let pass4_handle = graph.add_transfer_pass(pass4);
     graph.add_dependency(pass4_handle, pass2_handle);
 
+    // Verify graph structure before executing
+    let pass_count = graph
+        .compile()
+        .expect("Graph should compile")
+        .pass_order()
+        .len();
+    assert_eq!(pass_count, 4, "Should have 4 passes");
+
     // Execute the graph
     // If automatic barriers are incorrect, this would either:
     // - Cause Vulkan validation errors (layout mismatch)
     // - Produce incorrect pixel values (data hazards)
-    ctx.execute_graph(&graph);
-
-    // Verify graph structure
-    let compiled = graph.compile().expect("Graph should compile");
-    assert_eq!(compiled.pass_order().len(), 4, "Should have 4 passes");
+    ctx.execute_graph(graph);
 
     // Read back and verify RT1 (should be red from the rendered quad)
     let data1 = ctx.device.read_buffer(&readback1, 0, readback_size);

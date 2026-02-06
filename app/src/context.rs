@@ -229,13 +229,32 @@ impl<'a> DrawContext<'a> {
         &self.swapchain_texture
     }
 
+    /// Acquire a render graph from the pool.
+    ///
+    /// Returns a graph from the pool if available, or creates a new one.
+    /// The graph is cleared and ready for use.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut graph = ctx.acquire_graph();
+    /// graph.add_graphics_pass(pass);
+    /// let handle = ctx.submit("name", graph, &[]);
+    /// ```
+    pub fn acquire_graph(&mut self) -> RenderGraph {
+        self.schedule.acquire_graph()
+    }
+
     /// Submit a render graph to the frame schedule.
+    ///
+    /// Takes ownership of the graph for pooling. Use [`acquire_graph`](Self::acquire_graph)
+    /// to get a graph from the pool.
     ///
     /// Returns a handle that can be used as a dependency for other graphs.
     pub fn submit(
         &mut self,
         name: impl Into<String>,
-        graph: &RenderGraph,
+        graph: RenderGraph,
         wait_for: &[redlilium_graphics::GraphHandle],
     ) -> redlilium_graphics::GraphHandle {
         self.schedule.submit(name, graph, wait_for)

@@ -64,6 +64,7 @@ use std::time::Duration;
 
 use crate::device::GraphicsDevice;
 use crate::error::GraphicsError;
+use crate::graph::RenderGraph;
 use crate::profiling::{frame_mark, profile_scope};
 use crate::resources::RingBuffer;
 use crate::scheduler::{Fence, FrameSchedule};
@@ -119,6 +120,10 @@ pub struct FramePipeline {
     /// Per-frame ring buffers for streaming data. `None` if not configured or
     /// temporarily moved to FrameSchedule during a frame.
     ring_buffers: Vec<Option<RingBuffer>>,
+
+    /// Pool of reusable render graphs. Moved to FrameSchedule each frame,
+    /// then recycled back in end_frame.
+    graph_pool: Vec<RenderGraph>,
 }
 
 impl std::fmt::Debug for FramePipeline {
@@ -158,6 +163,7 @@ impl FramePipeline {
             frames_in_flight,
             frame_count: 0,
             ring_buffers: Vec::new(),
+            graph_pool: Vec::new(),
         }
     }
 
@@ -183,6 +189,7 @@ impl FramePipeline {
             frames_in_flight,
             frame_count: 0,
             ring_buffers: Vec::new(),
+            graph_pool: Vec::new(),
         }
     }
 
@@ -240,11 +247,17 @@ impl FramePipeline {
             None
         };
 
+        // Take graph pool for this frame
+        let graph_pool = std::mem::take(&mut self.graph_pool);
+
         // Create schedule with device if available
         match &self.device {
-            Some(device) => {
-                FrameSchedule::new_with_device(device.clone(), self.current_slot, ring_buffer)
-            }
+            Some(device) => FrameSchedule::new_with_device(
+                device.clone(),
+                self.current_slot,
+                ring_buffer,
+                graph_pool,
+            ),
             None => FrameSchedule::new_with_ring_buffer(ring_buffer),
         }
     }
@@ -313,11 +326,17 @@ impl FramePipeline {
             None
         };
 
+        // Take graph pool for this frame
+        let graph_pool = std::mem::take(&mut self.graph_pool);
+
         // Create schedule with device if available
         let schedule = match &self.device {
-            Some(device) => {
-                FrameSchedule::new_with_device(device.clone(), self.current_slot, ring_buffer)
-            }
+            Some(device) => FrameSchedule::new_with_device(
+                device.clone(),
+                self.current_slot,
+                ring_buffer,
+                graph_pool,
+            ),
             None => FrameSchedule::new_with_ring_buffer(ring_buffer),
         };
 
@@ -357,6 +376,14 @@ impl FramePipeline {
         {
             self.ring_buffers[self.current_slot] = Some(ring);
         }
+
+        // Recycle graphs: clear submitted graphs and merge back to pool
+        let mut pool = schedule.take_graph_pool();
+        for mut graph in schedule.take_submitted_graphs() {
+            graph.clear(); // Clears passes, edges, and compiled cache
+            pool.push(graph);
+        }
+        self.graph_pool = pool;
 
         log::trace!(
             "End frame {} (slot {})",
@@ -675,9 +702,8 @@ mod tests {
         let mut pipeline = FramePipeline::new(3);
         assert_eq!(pipeline.current_slot(), 0);
 
-        let present_graph = make_test_graph("present");
         let mut schedule = pipeline.begin_frame();
-        schedule.present("present", &present_graph, &[]);
+        schedule.present("present", make_test_graph("present"), &[]);
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 1);
 
@@ -685,14 +711,14 @@ mod tests {
         pipeline.signal_all_fences();
 
         let mut schedule = pipeline.begin_frame();
-        schedule.present("present", &present_graph, &[]);
+        schedule.present("present", make_test_graph("present"), &[]);
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 2);
 
         pipeline.signal_all_fences();
 
         let mut schedule = pipeline.begin_frame();
-        schedule.present("present", &present_graph, &[]);
+        schedule.present("present", make_test_graph("present"), &[]);
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 0); // Wraps around
     }
@@ -720,12 +746,11 @@ mod tests {
     #[test]
     fn test_frame_lifecycle() {
         let mut pipeline = FramePipeline::new(2);
-        let present_graph = make_test_graph("present");
 
         // Frame 0
         let mut schedule = pipeline.begin_frame();
         assert_eq!(pipeline.frame_count(), 1);
-        schedule.present("present", &present_graph, &[]);
+        schedule.present("present", make_test_graph("present"), &[]);
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 1);
 
@@ -735,7 +760,7 @@ mod tests {
         // Frame 1
         let mut schedule = pipeline.begin_frame();
         assert_eq!(pipeline.frame_count(), 2);
-        schedule.present("present", &present_graph, &[]);
+        schedule.present("present", make_test_graph("present"), &[]);
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 0);
 
@@ -790,7 +815,7 @@ mod tests {
 
         // Build a simple offscreen render
         let main_graph = make_test_graph("main");
-        let main = schedule.submit("main", &main_graph, &[]);
+        let main = schedule.submit("main", main_graph, &[]);
         schedule.finish(&[main]); // Use finish instead of present
 
         assert!(schedule.is_presented()); // is_presented returns true for finish too
@@ -810,9 +835,9 @@ mod tests {
         let main_graph = make_test_graph("main");
         let present_graph = make_test_graph("present");
 
-        let shadows = schedule.submit("shadows", &shadow_graph, &[]);
-        let main = schedule.submit("main", &main_graph, &[shadows]);
-        schedule.present("present", &present_graph, &[main]);
+        let shadows = schedule.submit("shadows", shadow_graph, &[]);
+        let main = schedule.submit("main", main_graph, &[shadows]);
+        schedule.present("present", present_graph, &[main]);
 
         assert_eq!(schedule.submitted_count(), 3);
         assert!(schedule.is_presented());

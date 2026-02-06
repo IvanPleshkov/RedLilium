@@ -433,7 +433,7 @@ impl AppHandler for TexturedQuadDemo {
 
         graph.add_graphics_pass(render_pass);
 
-        let _handle = ctx.submit("main", &graph, &[]);
+        let _handle = ctx.submit("main", graph, &[]);
         ctx.finish(&[])
     }
 

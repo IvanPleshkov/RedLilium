@@ -142,6 +142,10 @@ pub struct FrameSchedule {
     frame_slot: usize,
     /// Ring buffer for this frame (if configured in FramePipeline).
     ring_buffer: Option<RingBuffer>,
+    /// Pool of reusable render graphs (moved from FramePipeline each frame).
+    graph_pool: Vec<RenderGraph>,
+    /// Graphs submitted this frame (for recycling in end_frame).
+    submitted_graphs: Vec<RenderGraph>,
 }
 
 impl std::fmt::Debug for FrameSchedule {
@@ -169,6 +173,8 @@ impl FrameSchedule {
             fence: None,
             frame_slot: 0,
             ring_buffer: None,
+            graph_pool: Vec::new(),
+            submitted_graphs: Vec::new(),
         }
     }
 
@@ -182,6 +188,8 @@ impl FrameSchedule {
             fence: None,
             frame_slot: 0,
             ring_buffer,
+            graph_pool: Vec::new(),
+            submitted_graphs: Vec::new(),
         }
     }
 
@@ -192,6 +200,7 @@ impl FrameSchedule {
         device: Arc<GraphicsDevice>,
         frame_slot: usize,
         ring_buffer: Option<RingBuffer>,
+        graph_pool: Vec<RenderGraph>,
     ) -> Self {
         Self {
             device: Some(device),
@@ -200,6 +209,8 @@ impl FrameSchedule {
             fence: None,
             frame_slot,
             ring_buffer,
+            graph_pool,
+            submitted_graphs: Vec::new(),
         }
     }
 
@@ -252,32 +263,65 @@ impl FrameSchedule {
         self.ring_buffer.take()
     }
 
+    /// Acquire a render graph from the pool.
+    ///
+    /// Returns a graph from the pool if available, or creates a new one.
+    /// The graph is cleared and ready for use.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut graph = schedule.acquire_graph();
+    /// graph.add_graphics_pass(pass);
+    /// let handle = schedule.submit("name", graph, &[]);
+    /// ```
+    pub fn acquire_graph(&mut self) -> RenderGraph {
+        self.graph_pool.pop().unwrap_or_default()
+    }
+
+    /// Take ownership of the graph pool (called by FramePipeline::end_frame).
+    pub(crate) fn take_graph_pool(&mut self) -> Vec<RenderGraph> {
+        std::mem::take(&mut self.graph_pool)
+    }
+
+    /// Take ownership of the submitted graphs (called by FramePipeline::end_frame).
+    pub(crate) fn take_submitted_graphs(&mut self) -> Vec<RenderGraph> {
+        std::mem::take(&mut self.submitted_graphs)
+    }
+
     /// Submit a graph for immediate execution.
     ///
     /// The graph is submitted to the GPU immediately. If `wait_for` is non-empty,
     /// the GPU will wait for those graphs to complete before starting this one.
+    ///
+    /// Takes ownership of the graph for pooling. Use [`acquire_graph`](Self::acquire_graph)
+    /// to get a graph from the pool.
     ///
     /// Returns a handle that can be used as a dependency for subsequent graphs.
     ///
     /// # Arguments
     ///
     /// * `name` - Debug name for this graph submission
-    /// * `graph` - The render graph to execute
+    /// * `graph` - The render graph to execute (ownership transferred)
     /// * `wait_for` - Graphs that must complete before this one starts
     ///
     /// # Example
     ///
     /// ```ignore
-    /// // No dependencies - starts immediately
-    /// let shadows = schedule.submit("shadows", shadow_graph, &[]);
+    /// // Acquire from pool, configure, submit
+    /// let mut graph = schedule.acquire_graph();
+    /// graph.add_graphics_pass(shadow_pass);
+    /// let shadows = schedule.submit("shadows", graph, &[]);
     ///
-    /// // Waits for shadows to complete
-    /// let lighting = schedule.submit("lighting", light_graph, &[shadows]);
+    /// // Another graph waiting for shadows
+    /// let mut graph = schedule.acquire_graph();
+    /// graph.add_graphics_pass(light_pass);
+    /// let lighting = schedule.submit("lighting", graph, &[shadows]);
     /// ```
     pub fn submit(
         &mut self,
         name: impl Into<String>,
-        graph: &RenderGraph,
+        mut graph: RenderGraph,
         wait_for: &[GraphHandle],
     ) -> GraphHandle {
         let name = name.into();
@@ -302,10 +346,13 @@ impl FrameSchedule {
 
         // Actually execute the graph on the GPU if we have a device
         if let Some(device) = &self.device {
-            if let Ok(compiled) = graph.compile() {
+            // Compile first (may use cached result), then access via immutable borrow
+            let compile_result = graph.compile().map(|_| ());
+            if compile_result.is_ok() {
                 profile_scope!("execute_graph");
+                let compiled = graph.compiled().unwrap();
                 let backend = device.instance().backend();
-                if let Err(e) = backend.execute_graph(graph, &compiled, None) {
+                if let Err(e) = backend.execute_graph(&graph, compiled, None) {
                     log::error!("Failed to execute graph '{}': {}", name, e);
                 }
             } else {
@@ -330,24 +377,28 @@ impl FrameSchedule {
             completion,
             waited_for: wait_for.to_vec(),
         });
+
+        // Store graph for recycling at end of frame
+        self.submitted_graphs.push(graph);
+
         handle
     }
 
     /// Submit a pre-compiled graph for immediate execution.
     ///
     /// This is useful when you've already compiled the graph and want to avoid
-    /// recompilation.
+    /// recompilation. Takes ownership of the graph for pooling.
     ///
     /// # Arguments
     ///
     /// * `name` - Debug name for this graph submission
-    /// * `graph` - The render graph (needed for pass data)
+    /// * `graph` - The render graph (ownership transferred for pooling)
     /// * `compiled` - The pre-compiled graph
     /// * `wait_for` - Graphs that must complete before this one starts
     pub fn submit_compiled(
         &mut self,
         name: impl Into<String>,
-        graph: &RenderGraph,
+        graph: RenderGraph,
         compiled: &CompiledGraph,
         wait_for: &[GraphHandle],
     ) -> GraphHandle {
@@ -369,7 +420,7 @@ impl FrameSchedule {
         if let Some(device) = &self.device {
             profile_scope!("execute_graph");
             let backend = device.instance().backend();
-            if let Err(e) = backend.execute_graph(graph, compiled, None) {
+            if let Err(e) = backend.execute_graph(&graph, compiled, None) {
                 log::error!("Failed to execute graph '{}': {}", name, e);
             }
         }
@@ -386,6 +437,10 @@ impl FrameSchedule {
             completion,
             waited_for: wait_for.to_vec(),
         });
+
+        // Store graph for recycling at end of frame
+        self.submitted_graphs.push(graph);
+
         handle
     }
 
@@ -395,13 +450,16 @@ impl FrameSchedule {
     /// the specified dependencies, executes the graph, and presents
     /// the result to the swapchain.
     ///
+    /// Takes ownership of the graph for pooling. Use [`acquire_graph`](Self::acquire_graph)
+    /// to get a graph from the pool.
+    ///
     /// After calling this, the schedule is considered complete and should
     /// be returned to the pipeline via [`FramePipeline::end_frame`](crate::pipeline::FramePipeline::end_frame).
     ///
     /// # Arguments
     ///
     /// * `name` - Debug name for this graph submission
-    /// * `graph` - The render graph to execute
+    /// * `graph` - The render graph to execute (ownership transferred)
     /// * `wait_for` - Graphs that must complete before this one starts
     ///
     /// # Panics
@@ -412,14 +470,18 @@ impl FrameSchedule {
     ///
     /// ```ignore
     /// let mut schedule = pipeline.begin_frame();
-    /// let main = schedule.submit("main", main_graph, &[]);
-    /// schedule.present("present", final_graph, &[main]);
+    /// let mut graph = schedule.acquire_graph();
+    /// graph.add_graphics_pass(main_pass);
+    /// let main = schedule.submit("main", graph, &[]);
+    /// let mut present_graph = schedule.acquire_graph();
+    /// present_graph.add_graphics_pass(final_pass);
+    /// schedule.present("present", present_graph, &[main]);
     /// pipeline.end_frame(schedule);
     /// ```
     pub fn present(
         &mut self,
         name: impl Into<String>,
-        graph: &RenderGraph,
+        mut graph: RenderGraph,
         wait_for: &[GraphHandle],
     ) {
         profile_scope!("present");
@@ -448,11 +510,14 @@ impl FrameSchedule {
             let instance = Arc::clone(device.instance());
             let fence = Fence::new_gpu(instance);
 
-            if let Ok(compiled) = graph.compile() {
+            // Compile first (may use cached result), then access via immutable borrow
+            let compiled_ok = graph.compile().is_ok();
+            if compiled_ok {
                 profile_scope!("execute_present");
+                let compiled = graph.compiled().unwrap();
                 let backend = device.instance().backend();
                 // Pass the GPU fence - execute_graph returns immediately (async)
-                if let Err(e) = backend.execute_graph(graph, &compiled, fence.gpu_fence()) {
+                if let Err(e) = backend.execute_graph(&graph, compiled, fence.gpu_fence()) {
                     log::error!("Failed to execute present graph '{}': {}", name, e);
                 }
             } else {
@@ -479,6 +544,9 @@ impl FrameSchedule {
             completion,
             waited_for: wait_for.to_vec(),
         });
+
+        // Store graph for recycling at end of frame
+        self.submitted_graphs.push(graph);
 
         self.fence = Some(fence);
     }
@@ -602,7 +670,7 @@ mod tests {
         let mut schedule = FrameSchedule::new();
 
         let graph = make_test_graph("test");
-        let handle = schedule.submit("test", &graph, &[]);
+        let handle = schedule.submit("test", graph, &[]);
 
         assert_eq!(schedule.submitted_count(), 1);
         assert_eq!(handle.index(), 0);
@@ -616,9 +684,9 @@ mod tests {
         let depth_graph = make_test_graph("depth");
         let main_graph = make_test_graph("main");
 
-        let shadow = schedule.submit("shadows", &shadow_graph, &[]);
-        let depth = schedule.submit("depth", &depth_graph, &[]);
-        let main = schedule.submit("main", &main_graph, &[shadow, depth]);
+        let shadow = schedule.submit("shadows", shadow_graph, &[]);
+        let depth = schedule.submit("depth", depth_graph, &[]);
+        let main = schedule.submit("main", main_graph, &[shadow, depth]);
 
         assert_eq!(schedule.submitted_count(), 3);
         assert_eq!(main.index(), 2);
@@ -631,10 +699,10 @@ mod tests {
         let main_graph = make_test_graph("main");
         let present_graph = make_test_graph("present");
 
-        let main = schedule.submit("main", &main_graph, &[]);
+        let main = schedule.submit("main", main_graph, &[]);
         assert!(!schedule.is_presented());
 
-        schedule.present("present", &present_graph, &[main]);
+        schedule.present("present", present_graph, &[main]);
 
         assert_eq!(schedule.submitted_count(), 2);
         assert!(schedule.is_presented());
@@ -647,8 +715,8 @@ mod tests {
         let main_graph = make_test_graph("main");
         let present_graph = make_test_graph("present");
 
-        let main = schedule.submit("main", &main_graph, &[]);
-        schedule.present("present", &present_graph, &[main]);
+        let main = schedule.submit("main", main_graph, &[]);
+        schedule.present("present", present_graph, &[main]);
 
         let fence = schedule.take_fence();
         // In the dummy backend, fence is signaled immediately after present()
@@ -664,8 +732,8 @@ mod tests {
         let present1 = make_test_graph("present1");
         let present2 = make_test_graph("present2");
 
-        schedule.present("present1", &present1, &[]);
-        schedule.present("present2", &present2, &[]); // Panics
+        schedule.present("present1", present1, &[]);
+        schedule.present("present2", present2, &[]); // Panics
     }
 
     #[test]
@@ -673,7 +741,7 @@ mod tests {
     fn test_take_fence_without_present_panics() {
         let mut schedule = FrameSchedule::new();
         let main_graph = make_test_graph("main");
-        schedule.submit("main", &main_graph, &[]);
+        schedule.submit("main", main_graph, &[]);
         schedule.take_fence(); // Panics
     }
 
@@ -682,7 +750,7 @@ mod tests {
         let mut schedule = FrameSchedule::new();
 
         let main_graph = make_test_graph("main");
-        let main = schedule.submit("main", &main_graph, &[]);
+        let main = schedule.submit("main", main_graph, &[]);
         assert!(!schedule.is_presented());
 
         schedule.finish(&[main]);
@@ -695,7 +763,7 @@ mod tests {
     fn test_finish_empty_dependencies() {
         let mut schedule = FrameSchedule::new();
         let main_graph = make_test_graph("main");
-        schedule.submit("main", &main_graph, &[]);
+        schedule.submit("main", main_graph, &[]);
         schedule.finish(&[]); // Finish without waiting for any graph
 
         assert!(schedule.is_presented());
@@ -716,7 +784,7 @@ mod tests {
         let mut schedule = FrameSchedule::new();
 
         let present_graph = make_test_graph("present");
-        schedule.present("present", &present_graph, &[]);
+        schedule.present("present", present_graph, &[]);
         schedule.finish(&[]); // Panics
     }
 
@@ -728,9 +796,9 @@ mod tests {
         let main_graph = make_test_graph("main");
         let post_graph = make_test_graph("post");
 
-        schedule.submit("shadows", &shadow_graph, &[]);
-        schedule.submit("main", &main_graph, &[]);
-        schedule.present("post", &post_graph, &[]);
+        schedule.submit("shadows", shadow_graph, &[]);
+        schedule.submit("main", main_graph, &[]);
+        schedule.present("post", post_graph, &[]);
 
         let names: Vec<_> = schedule.submitted_names().collect();
         assert_eq!(names, vec!["shadows", "main", "post"]);
@@ -744,7 +812,7 @@ mod tests {
         // Try to depend on non-existent graph
         let invalid_handle = GraphHandle::new(999);
         let test_graph = make_test_graph("test");
-        schedule.submit("test", &test_graph, &[invalid_handle]);
+        schedule.submit("test", test_graph, &[invalid_handle]);
     }
 
     #[test]
@@ -766,11 +834,11 @@ mod tests {
         let main_graph = make_test_graph("main");
         let post_graph = make_test_graph("post");
 
-        let shadows = schedule.submit("shadows", &shadow_graph, &[]);
-        let depth = schedule.submit("depth", &depth_graph, &[shadows]);
-        let gbuffer = schedule.submit("gbuffer", &gbuffer_graph, &[shadows]);
-        let main = schedule.submit("main", &main_graph, &[depth, gbuffer]);
-        schedule.present("post", &post_graph, &[main]);
+        let shadows = schedule.submit("shadows", shadow_graph, &[]);
+        let depth = schedule.submit("depth", depth_graph, &[shadows]);
+        let gbuffer = schedule.submit("gbuffer", gbuffer_graph, &[shadows]);
+        let main = schedule.submit("main", main_graph, &[depth, gbuffer]);
+        schedule.present("post", post_graph, &[main]);
 
         assert_eq!(schedule.submitted_count(), 5);
         assert!(schedule.is_presented());

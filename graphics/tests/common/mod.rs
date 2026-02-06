@@ -188,7 +188,7 @@ impl TestContext {
     ///
     /// Uses [`FramePipeline`] and [`FrameSchedule`] internally for proper
     /// graph execution through the frame scheduling system.
-    pub fn execute_graph(&self, graph: &RenderGraph) {
+    pub fn execute_graph(&self, graph: RenderGraph) {
         let mut pipeline = self.pipeline.borrow_mut();
         let mut schedule = pipeline.begin_frame();
 

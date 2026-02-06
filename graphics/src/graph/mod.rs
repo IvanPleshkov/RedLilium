@@ -92,6 +92,12 @@ pub use transfer::{
 /// ```ignore
 /// let compiled = graph.compile()?;
 /// ```
+///
+/// # Compiled Graph Caching
+///
+/// The graph caches its compiled result. Calling `compile()` multiple times
+/// without modifying the graph returns the cached result. Any mutation
+/// (adding passes, dependencies, or clearing) invalidates the cache.
 #[derive(Debug, Default)]
 pub struct RenderGraph {
     /// All passes in the graph (direct storage, no Arc).
@@ -99,6 +105,8 @@ pub struct RenderGraph {
     /// Dependency edges stored as (dependent, dependency) pairs.
     /// Using edge list avoids per-pass Vec allocations.
     edges: Vec<(PassHandle, PassHandle)>,
+    /// Cached compiled result. Invalidated on any mutation.
+    compiled: Option<CompiledGraph>,
 }
 
 impl RenderGraph {
@@ -111,7 +119,10 @@ impl RenderGraph {
     ///
     /// The pass should be fully configured before adding.
     /// Returns a `PassHandle` for referencing this pass.
+    ///
+    /// Note: Adding a pass invalidates any cached compiled graph.
     pub fn add_graphics_pass(&mut self, pass: GraphicsPass) -> PassHandle {
+        self.compiled = None; // Invalidate cache
         let index = self.passes.len() as u32;
         self.passes.push(Pass::Graphics(pass));
         PassHandle::new(index)
@@ -121,7 +132,10 @@ impl RenderGraph {
     ///
     /// The pass should be fully configured before adding.
     /// Returns a `PassHandle` for referencing this pass.
+    ///
+    /// Note: Adding a pass invalidates any cached compiled graph.
     pub fn add_transfer_pass(&mut self, pass: TransferPass) -> PassHandle {
+        self.compiled = None; // Invalidate cache
         let index = self.passes.len() as u32;
         self.passes.push(Pass::Transfer(pass));
         PassHandle::new(index)
@@ -131,7 +145,10 @@ impl RenderGraph {
     ///
     /// The pass should be fully configured before adding.
     /// Returns a `PassHandle` for referencing this pass.
+    ///
+    /// Note: Adding a pass invalidates any cached compiled graph.
     pub fn add_compute_pass(&mut self, pass: ComputePass) -> PassHandle {
+        self.compiled = None; // Invalidate cache
         let index = self.passes.len() as u32;
         self.passes.push(Pass::Compute(pass));
         PassHandle::new(index)
@@ -140,6 +157,8 @@ impl RenderGraph {
     /// Add a dependency between passes.
     ///
     /// The `dependent` pass will execute after the `dependency` pass.
+    ///
+    /// Note: Adding a dependency invalidates any cached compiled graph.
     pub fn add_dependency(&mut self, dependent: PassHandle, dependency: PassHandle) {
         assert!(
             dependent.index() < self.passes.len(),
@@ -157,6 +176,7 @@ impl RenderGraph {
             .iter()
             .any(|&(d, dep)| d == dependent && dep == dependency);
         if !exists {
+            self.compiled = None; // Invalidate cache
             self.edges.push((dependent, dependency));
         }
     }
@@ -204,15 +224,40 @@ impl RenderGraph {
     /// - Resource lifetime analysis
     /// - Barrier placement optimization
     ///
+    /// The result is cached; subsequent calls return the cached result
+    /// until the graph is modified.
+    ///
     /// See [`crate::compiler`] module for implementation details.
-    pub fn compile(&self) -> Result<CompiledGraph, GraphError> {
-        compile(self)
+    pub fn compile(&mut self) -> Result<&CompiledGraph, GraphError> {
+        if self.compiled.is_none() {
+            self.compiled = Some(compile(self)?);
+        }
+        Ok(self.compiled.as_ref().unwrap())
+    }
+
+    /// Get the cached compiled graph, if available.
+    ///
+    /// Returns `None` if the graph hasn't been compiled yet or if
+    /// it has been modified since the last compilation.
+    pub fn compiled(&self) -> Option<&CompiledGraph> {
+        self.compiled.as_ref()
+    }
+
+    /// Invalidate the cached compiled graph.
+    ///
+    /// The next call to `compile()` will recompute the compilation.
+    pub fn invalidate_compiled(&mut self) {
+        self.compiled = None;
     }
 
     /// Clear all passes from the graph.
+    ///
+    /// This clears passes, edges, and the cached compiled graph,
+    /// but preserves allocated capacity for reuse.
     pub fn clear(&mut self) {
         self.passes.clear();
         self.edges.clear();
+        self.compiled = None;
     }
 }
 

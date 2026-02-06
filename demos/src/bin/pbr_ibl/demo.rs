@@ -1147,7 +1147,7 @@ impl AppHandler for PbrIblDemo {
             }
         }
 
-        let _handle = ctx.submit("main", &graph, &[]);
+        let _handle = ctx.submit("main", graph, &[]);
 
         // Report memory stats to Tracy
         profile_memory_stats!();

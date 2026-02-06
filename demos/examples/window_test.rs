@@ -183,7 +183,7 @@ impl WindowTestApp {
         let _pass_handle = graph.add_graphics_pass(pass);
 
         let mut schedule = pipeline.begin_frame();
-        let graph_handle = schedule.submit(format!("frame_{}", self.frame_count), &graph, &[]);
+        let graph_handle = schedule.submit(format!("frame_{}", self.frame_count), graph, &[]);
         schedule.finish(&[graph_handle]);
         pipeline.end_frame(schedule);
 
