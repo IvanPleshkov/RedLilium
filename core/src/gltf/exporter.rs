@@ -1,8 +1,8 @@
 //! glTF 2.0 exporter.
 //!
 //! Exports [`Scene`] data to binary glTF (`.glb`) format.
-//! Materials are collected from meshes via `Arc<CpuMaterial>` and deduplicated
-//! using Arc pointer identity, along with textures and samplers.
+//! Material instances are collected from meshes via `Arc<CpuMaterialInstance>`
+//! and deduplicated using Arc pointer identity, along with textures and samplers.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::Cursor;
@@ -10,9 +10,7 @@ use std::sync::Arc;
 
 use gltf_dep::json as gj;
 
-use crate::material::{
-    AlphaMode, CpuMaterial, MaterialSemantic, MaterialValue, TextureRef, TextureSource,
-};
+use crate::material::{AlphaMode, CpuMaterialInstance, TextureRef, TextureSource};
 use crate::mesh::{
     CpuMesh, IndexFormat, PrimitiveTopology, VertexAttributeFormat, VertexAttributeSemantic,
 };
@@ -33,8 +31,8 @@ pub(super) struct ExportContext {
     buffer_data: Vec<u8>,
 
     // Arc pointer → glTF index dedup maps
-    material_list: Vec<Arc<CpuMaterial>>,
-    material_map: HashMap<*const CpuMaterial, u32>,
+    instance_list: Vec<Arc<CpuMaterialInstance>>,
+    instance_map: HashMap<*const CpuMaterialInstance, u32>,
     cpu_textures: Vec<Arc<CpuTexture>>,
     texture_map: HashMap<*const CpuTexture, u32>,
     sampler_list: Vec<Arc<CpuSampler>>,
@@ -49,8 +47,8 @@ impl ExportContext {
         Self {
             root: gj::Root::default(),
             buffer_data: Vec::new(),
-            material_list: Vec::new(),
-            material_map: HashMap::new(),
+            instance_list: Vec::new(),
+            instance_map: HashMap::new(),
             cpu_textures: Vec::new(),
             texture_map: HashMap::new(),
             sampler_list: Vec::new(),
@@ -63,40 +61,38 @@ impl ExportContext {
     // -- Step 1: Collect unique resources from scenes -------------------------
 
     pub(super) fn collect_resources(&mut self, scenes: &[&Scene]) {
-        // Collect unique materials from all meshes
+        // Collect unique material instances from all meshes
         for scene in scenes {
             for mesh in &scene.meshes {
-                if let Some(mat_arc) = mesh.material() {
-                    let ptr = Arc::as_ptr(mat_arc);
-                    if !self.material_map.contains_key(&ptr) {
-                        let idx = self.material_list.len() as u32;
-                        self.material_map.insert(ptr, idx);
-                        self.material_list.push(Arc::clone(mat_arc));
+                if let Some(inst_arc) = mesh.material() {
+                    let ptr = Arc::as_ptr(inst_arc);
+                    if !self.instance_map.contains_key(&ptr) {
+                        let idx = self.instance_list.len() as u32;
+                        self.instance_map.insert(ptr, idx);
+                        self.instance_list.push(Arc::clone(inst_arc));
                     }
                 }
             }
         }
 
-        // Collect unique textures and samplers from collected materials
-        for mat in &self.material_list.clone() {
-            for prop in &mat.properties {
-                if let MaterialValue::Texture(tex_ref) = &prop.value {
-                    if let TextureSource::Cpu(arc) = &tex_ref.texture {
-                        let ptr = Arc::as_ptr(arc);
-                        if !self.texture_map.contains_key(&ptr) {
-                            let idx = self.cpu_textures.len() as u32;
-                            self.texture_map.insert(ptr, idx);
-                            self.cpu_textures.push(Arc::clone(arc));
-                        }
+        // Collect unique textures and samplers from collected instances
+        for inst in &self.instance_list.clone() {
+            for tex_ref in inst.textures() {
+                if let TextureSource::Cpu(arc) = &tex_ref.texture {
+                    let ptr = Arc::as_ptr(arc);
+                    if !self.texture_map.contains_key(&ptr) {
+                        let idx = self.cpu_textures.len() as u32;
+                        self.texture_map.insert(ptr, idx);
+                        self.cpu_textures.push(Arc::clone(arc));
                     }
+                }
 
-                    if let Some(sampler_arc) = &tex_ref.sampler {
-                        let ptr = Arc::as_ptr(sampler_arc);
-                        if !self.sampler_map.contains_key(&ptr) {
-                            let idx = self.sampler_list.len() as u32;
-                            self.sampler_map.insert(ptr, idx);
-                            self.sampler_list.push(Arc::clone(sampler_arc));
-                        }
+                if let Some(sampler_arc) = &tex_ref.sampler {
+                    let ptr = Arc::as_ptr(sampler_arc);
+                    if !self.sampler_map.contains_key(&ptr) {
+                        let idx = self.sampler_list.len() as u32;
+                        self.sampler_map.insert(ptr, idx);
+                        self.sampler_list.push(Arc::clone(sampler_arc));
                     }
                 }
             }
@@ -200,43 +196,34 @@ impl ExportContext {
     // -- Step 4: Build materials ---------------------------------------------
 
     pub(super) fn build_materials(&mut self) {
-        let materials = self.material_list.clone();
-        for mat in &materials {
-            let base_color_factor = mat
-                .get_vec4(&MaterialSemantic::BaseColorFactor)
-                .unwrap_or([1.0, 1.0, 1.0, 1.0]);
-            let metallic_factor = mat
-                .get_float(&MaterialSemantic::MetallicFactor)
-                .unwrap_or(1.0);
-            let roughness_factor = mat
-                .get_float(&MaterialSemantic::RoughnessFactor)
-                .unwrap_or(1.0);
-            let emissive_factor = mat
-                .get_vec3(&MaterialSemantic::EmissiveFactor)
-                .unwrap_or([0.0, 0.0, 0.0]);
+        let instances = self.instance_list.clone();
+        for inst in &instances {
+            let base_color_factor = inst.get_vec4("base_color").unwrap_or([1.0, 1.0, 1.0, 1.0]);
+            let metallic_factor = inst.get_float("metallic").unwrap_or(1.0);
+            let roughness_factor = inst.get_float("roughness").unwrap_or(1.0);
+            let emissive_factor = inst.get_vec3("emissive").unwrap_or([0.0, 0.0, 0.0]);
 
-            let base_color_texture =
-                self.build_texture_info(mat, &MaterialSemantic::BaseColorTexture);
+            let base_color_texture = self.build_texture_info(inst, "base_color_texture");
             let metallic_roughness_texture =
-                self.build_texture_info(mat, &MaterialSemantic::MetallicRoughnessTexture);
-            let emissive_texture = self.build_texture_info(mat, &MaterialSemantic::EmissiveTexture);
+                self.build_texture_info(inst, "metallic_roughness_texture");
+            let emissive_texture = self.build_texture_info(inst, "emissive_texture");
 
-            let normal_texture = self.build_normal_texture_info(mat);
-            let occlusion_texture = self.build_occlusion_texture_info(mat);
+            let normal_texture = self.build_normal_texture_info(inst);
+            let occlusion_texture = self.build_occlusion_texture_info(inst);
 
-            let alpha_mode = match mat.alpha_mode {
+            let alpha_mode = match inst.material.alpha_mode {
                 AlphaMode::Opaque => {
                     gj::validation::Checked::Valid(gj::material::AlphaMode::Opaque)
                 }
-                AlphaMode::Mask => gj::validation::Checked::Valid(gj::material::AlphaMode::Mask),
+                AlphaMode::Mask { .. } => {
+                    gj::validation::Checked::Valid(gj::material::AlphaMode::Mask)
+                }
                 AlphaMode::Blend => gj::validation::Checked::Valid(gj::material::AlphaMode::Blend),
             };
 
-            let alpha_cutoff = if mat.alpha_mode == AlphaMode::Mask {
-                mat.get_float(&MaterialSemantic::AlphaCutoff)
-                    .map(gj::material::AlphaCutoff)
-            } else {
-                None
+            let alpha_cutoff = match inst.material.alpha_mode {
+                AlphaMode::Mask { cutoff } => Some(gj::material::AlphaCutoff(cutoff)),
+                _ => None,
             };
 
             let pbr = gj::material::PbrMetallicRoughness {
@@ -250,10 +237,10 @@ impl ExportContext {
             };
 
             self.root.materials.push(gj::Material {
-                name: mat.name.clone(),
+                name: inst.name.clone(),
                 alpha_cutoff,
                 alpha_mode,
-                double_sided: mat.double_sided,
+                double_sided: inst.material.double_sided,
                 pbr_metallic_roughness: pbr,
                 normal_texture,
                 occlusion_texture,
@@ -267,10 +254,10 @@ impl ExportContext {
 
     fn build_texture_info(
         &mut self,
-        mat: &CpuMaterial,
-        semantic: &MaterialSemantic,
+        inst: &CpuMaterialInstance,
+        name: &str,
     ) -> Option<gj::texture::Info> {
-        let tex_ref = mat.get_texture(semantic)?;
+        let tex_ref = inst.get_texture(name)?;
         let tex_idx = self.resolve_texture_index(tex_ref)?;
         Some(gj::texture::Info {
             index: gj::Index::new(tex_idx),
@@ -282,11 +269,11 @@ impl ExportContext {
 
     fn build_normal_texture_info(
         &mut self,
-        mat: &CpuMaterial,
+        inst: &CpuMaterialInstance,
     ) -> Option<gj::material::NormalTexture> {
-        let tex_ref = mat.get_texture(&MaterialSemantic::NormalTexture)?;
+        let tex_ref = inst.get_texture("normal_texture")?;
         let tex_idx = self.resolve_texture_index(tex_ref)?;
-        let scale = mat.get_float(&MaterialSemantic::NormalScale).unwrap_or(1.0);
+        let scale = inst.get_float("normal_scale").unwrap_or(1.0);
         Some(gj::material::NormalTexture {
             index: gj::Index::new(tex_idx),
             scale,
@@ -298,13 +285,11 @@ impl ExportContext {
 
     fn build_occlusion_texture_info(
         &mut self,
-        mat: &CpuMaterial,
+        inst: &CpuMaterialInstance,
     ) -> Option<gj::material::OcclusionTexture> {
-        let tex_ref = mat.get_texture(&MaterialSemantic::OcclusionTexture)?;
+        let tex_ref = inst.get_texture("occlusion_texture")?;
         let tex_idx = self.resolve_texture_index(tex_ref)?;
-        let strength = mat
-            .get_float(&MaterialSemantic::OcclusionStrength)
-            .unwrap_or(1.0);
+        let strength = inst.get_float("occlusion_strength").unwrap_or(1.0);
         Some(gj::material::OcclusionTexture {
             index: gj::Index::new(tex_idx),
             strength: gj::material::StrengthFactor(strength),
@@ -430,7 +415,7 @@ impl ExportContext {
                 indices: indices_accessor,
                 material: mesh
                     .material()
-                    .map(|m| gj::Index::new(*self.material_map.get(&Arc::as_ptr(m)).unwrap())),
+                    .map(|m| gj::Index::new(*self.instance_map.get(&Arc::as_ptr(m)).unwrap())),
                 mode: gj::validation::Checked::Valid(mode),
                 targets: None,
             };

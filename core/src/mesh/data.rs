@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use crate::material::CpuMaterial;
+use crate::material::CpuMaterialInstance;
 
 use super::layout::VertexLayout;
 
@@ -181,7 +181,7 @@ pub struct CpuMesh {
     index_data: Option<Vec<u8>>,
     index_format: Option<IndexFormat>,
     index_count: u32,
-    material: Option<Arc<CpuMaterial>>,
+    material: Option<Arc<CpuMaterialInstance>>,
     label: Option<String>,
 }
 
@@ -249,8 +249,8 @@ impl CpuMesh {
         self
     }
 
-    /// Set the material.
-    pub fn with_material(mut self, material: Arc<CpuMaterial>) -> Self {
+    /// Set the material instance.
+    pub fn with_material(mut self, material: Arc<CpuMaterialInstance>) -> Self {
         self.material = Some(material);
         self
     }
@@ -301,8 +301,8 @@ impl CpuMesh {
         self.index_data.is_some()
     }
 
-    /// Get the material, if set.
-    pub fn material(&self) -> Option<&Arc<CpuMaterial>> {
+    /// Get the material instance, if set.
+    pub fn material(&self) -> Option<&Arc<CpuMaterialInstance>> {
         self.material.as_ref()
     }
 

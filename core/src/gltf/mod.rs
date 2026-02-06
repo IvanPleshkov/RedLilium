@@ -4,13 +4,13 @@
 //! meshes, materials, textures, animations, skins, and scene graphs.
 //! Exports scenes and materials back to binary glTF (`.glb`) format.
 //!
-//! # Layout, Sampler, and Material Sharing
+//! # Layout, Sampler, and Material Instance Sharing
 //!
 //! The loader takes slices of `Arc<VertexLayout>`, `Arc<CpuSampler>`, and
-//! `Arc<CpuMaterial>` and reuses matching instances via structural equality
-//! (ignoring labels/names). New resources created during loading are returned
-//! in [`GltfDocument::new_layouts`], [`GltfDocument::new_samplers`], and
-//! [`GltfDocument::new_materials`].
+//! `Arc<CpuMaterialInstance>` and reuses matching instances via structural
+//! equality (ignoring labels/names). New resources created during loading are
+//! returned in [`GltfDocument::new_layouts`], [`GltfDocument::new_samplers`],
+//! and [`GltfDocument::new_instances`].
 //!
 //! # Example
 //!
@@ -26,7 +26,7 @@
 //! println!("Meshes: {}", doc.scenes[0].meshes.len());
 //! println!("New layouts: {}", doc.new_layouts.len());
 //! println!("New samplers: {}", doc.new_samplers.len());
-//! println!("New materials: {}", doc.new_materials.len());
+//! println!("New instances: {}", doc.new_instances.len());
 //! ```
 
 mod error;
@@ -42,7 +42,7 @@ pub use types::*;
 
 use std::sync::Arc;
 
-use crate::material::CpuMaterial;
+use crate::material::CpuMaterialInstance;
 use crate::mesh::VertexLayout;
 use crate::sampler::CpuSampler;
 use crate::scene::Scene;
@@ -61,22 +61,22 @@ use crate::scene::Scene;
 /// * `shared_samplers` - Existing samplers to share. The loader will reuse
 ///   samplers that match structurally (same filter modes, address modes, LOD
 ///   clamps, compare function, anisotropy — name is ignored).
-/// * `shared_materials` - Existing materials to share. The loader will reuse
-///   materials that match structurally (same properties, alpha mode,
-///   double-sided — name is ignored).
+/// * `shared_instances` - Existing material instances to share. The loader
+///   will reuse instances that match structurally (same material declaration,
+///   values — name is ignored).
 ///
 /// # Returns
 ///
 /// A [`GltfDocument`] containing all loaded scenes with meshes, cameras,
-/// skins, and animations. Materials are embedded in each mesh via
-/// `Arc<CpuMaterial>`. New vertex layouts, samplers, and materials created
-/// during loading are in [`GltfDocument::new_layouts`],
-/// [`GltfDocument::new_samplers`], and [`GltfDocument::new_materials`].
+/// skins, and animations. Material instances are embedded in each mesh via
+/// `Arc<CpuMaterialInstance>`. New vertex layouts, samplers, and material
+/// instances created during loading are in [`GltfDocument::new_layouts`],
+/// [`GltfDocument::new_samplers`], and [`GltfDocument::new_instances`].
 pub fn load_gltf(
     data: &[u8],
     shared_layouts: &[Arc<VertexLayout>],
     shared_samplers: &[Arc<CpuSampler>],
-    shared_materials: &[Arc<CpuMaterial>],
+    shared_instances: &[Arc<CpuMaterialInstance>],
 ) -> Result<GltfDocument, GltfError> {
     let gltf = gltf_dep::Gltf::from_slice(data)?;
     let blob = gltf.blob.clone();
@@ -87,7 +87,7 @@ pub fn load_gltf(
         buffers,
         shared_layouts,
         shared_samplers,
-        shared_materials,
+        shared_instances,
     );
 
     ctx.load_textures()?;
@@ -99,21 +99,22 @@ pub fn load_gltf(
     let animations = ctx.load_animations()?;
     let scenes = ctx.load_scenes(meshes, cameras, skins, animations);
     let default_scene = ctx.default_scene();
-    let (new_layouts, new_samplers, new_materials) = ctx.into_new_resources();
+    let (new_layouts, new_samplers, new_instances) = ctx.into_new_resources();
 
     Ok(GltfDocument {
         scenes,
         default_scene,
         new_layouts,
         new_samplers,
-        new_materials,
+        new_instances,
     })
 }
 
 /// Export scenes to a binary glTF (`.glb`) file.
 ///
-/// Materials, textures, and samplers are collected from meshes via their
-/// `Arc<CpuMaterial>` references and deduplicated using Arc pointer identity.
+/// Material instances, textures, and samplers are collected from meshes via
+/// their `Arc<CpuMaterialInstance>` references and deduplicated using Arc
+/// pointer identity.
 ///
 /// # Texture handling
 ///

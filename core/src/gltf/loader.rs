@@ -6,8 +6,7 @@
 use std::sync::Arc;
 
 use crate::material::{
-    AlphaMode, CpuMaterial, MaterialProperty, MaterialSemantic, MaterialValue, TextureRef,
-    TextureSource,
+    AlphaMode, CpuMaterial, CpuMaterialInstance, MaterialValue, TextureRef, TextureSource,
 };
 use crate::mesh::{CpuMesh, VertexLayout};
 use crate::sampler::{AddressMode, CpuSampler, FilterMode};
@@ -39,12 +38,17 @@ pub(crate) struct LoadContext {
     /// Loaded sampler Arcs indexed by glTF sampler index.
     sampler_arcs: Vec<Arc<CpuSampler>>,
 
-    /// Shared materials passed in by the caller.
-    shared_materials: Vec<Arc<CpuMaterial>>,
-    /// New materials created during loading.
-    new_materials: Vec<Arc<CpuMaterial>>,
-    /// Loaded material Arcs indexed by glTF material index.
-    material_arcs: Vec<Arc<CpuMaterial>>,
+    /// Material declarations extracted from shared instances.
+    shared_declarations: Vec<Arc<CpuMaterial>>,
+    /// New declarations created during loading.
+    new_declarations: Vec<Arc<CpuMaterial>>,
+
+    /// Shared material instances passed in by the caller.
+    shared_instances: Vec<Arc<CpuMaterialInstance>>,
+    /// New material instances created during loading.
+    new_instances: Vec<Arc<CpuMaterialInstance>>,
+    /// Loaded instance Arcs indexed by glTF material index.
+    instance_arcs: Vec<Arc<CpuMaterialInstance>>,
 
     /// Loaded texture Arcs indexed by glTF texture index.
     texture_arcs: Vec<Arc<CpuTexture>>,
@@ -61,8 +65,19 @@ impl LoadContext {
         buffers: Vec<Vec<u8>>,
         shared_layouts: &[Arc<VertexLayout>],
         shared_samplers: &[Arc<CpuSampler>],
-        shared_materials: &[Arc<CpuMaterial>],
+        shared_instances: &[Arc<CpuMaterialInstance>],
     ) -> Self {
+        // Extract unique declarations from shared instances
+        let mut shared_declarations: Vec<Arc<CpuMaterial>> = Vec::new();
+        for inst in shared_instances {
+            if !shared_declarations
+                .iter()
+                .any(|d| Arc::ptr_eq(d, &inst.material))
+            {
+                shared_declarations.push(Arc::clone(&inst.material));
+            }
+        }
+
         Self {
             document,
             buffers,
@@ -71,9 +86,11 @@ impl LoadContext {
             shared_samplers: shared_samplers.to_vec(),
             new_samplers: Vec::new(),
             sampler_arcs: Vec::new(),
-            shared_materials: shared_materials.to_vec(),
-            new_materials: Vec::new(),
-            material_arcs: Vec::new(),
+            shared_declarations,
+            new_declarations: Vec::new(),
+            shared_instances: shared_instances.to_vec(),
+            new_instances: Vec::new(),
+            instance_arcs: Vec::new(),
             texture_arcs: Vec::new(),
             mesh_index_map: Vec::new(),
         }
@@ -180,11 +197,12 @@ impl LoadContext {
             .collect();
     }
 
-    /// Load all materials as shared `Arc<CpuMaterial>`.
+    /// Load all materials as shared `Arc<CpuMaterialInstance>`.
     ///
-    /// Reuses structurally matching materials from `shared_materials`. New
-    /// materials are stored in `new_materials`. The resulting `material_arcs`
-    /// vector is indexed by glTF material index and used by `load_meshes`.
+    /// For each glTF material, creates a `CpuMaterial` declaration (shared by
+    /// pipeline config) and a `CpuMaterialInstance` (shared by full value
+    /// equality). The resulting `instance_arcs` vector is indexed by glTF
+    /// material index and used by `load_meshes`.
     pub fn load_materials(&mut self) {
         let materials: Vec<gltf_dep::Material<'_>> = self.document.materials().collect();
         let mut result = Vec::with_capacity(materials.len());
@@ -192,113 +210,97 @@ impl LoadContext {
         for mat in &materials {
             let pbr = mat.pbr_metallic_roughness();
 
-            // PBR scalar factors
-            let mut props = vec![
-                MaterialProperty {
-                    semantic: MaterialSemantic::BaseColorFactor,
-                    value: MaterialValue::Vec4(pbr.base_color_factor()),
-                },
-                MaterialProperty {
-                    semantic: MaterialSemantic::MetallicFactor,
-                    value: MaterialValue::Float(pbr.metallic_factor()),
-                },
-                MaterialProperty {
-                    semantic: MaterialSemantic::RoughnessFactor,
-                    value: MaterialValue::Float(pbr.roughness_factor()),
-                },
-                MaterialProperty {
-                    semantic: MaterialSemantic::EmissiveFactor,
-                    value: MaterialValue::Vec3(mat.emissive_factor()),
-                },
-            ];
+            // Detect which textures are present
+            let has_base_color_tex = pbr.base_color_texture().is_some();
+            let has_metallic_roughness_tex = pbr.metallic_roughness_texture().is_some();
+            let has_normal_tex = mat.normal_texture().is_some();
+            let has_occlusion_tex = mat.occlusion_texture().is_some();
+            let has_emissive_tex = mat.emissive_texture().is_some();
 
-            // PBR textures
-            if let Some(t) = pbr.base_color_texture() {
-                props.push(self.map_material_texture(&t, MaterialSemantic::BaseColorTexture));
-            }
-            if let Some(t) = pbr.metallic_roughness_texture() {
-                props.push(
-                    self.map_material_texture(&t, MaterialSemantic::MetallicRoughnessTexture),
-                );
-            }
-            if let Some(t) = mat.normal_texture() {
-                props.push(MaterialProperty {
-                    semantic: MaterialSemantic::NormalTexture,
-                    value: MaterialValue::Texture(
-                        self.texture_ref_from(&t.texture(), t.tex_coord()),
-                    ),
-                });
-                props.push(MaterialProperty {
-                    semantic: MaterialSemantic::NormalScale,
-                    value: MaterialValue::Float(t.scale()),
-                });
-            }
-            if let Some(t) = mat.occlusion_texture() {
-                props.push(MaterialProperty {
-                    semantic: MaterialSemantic::OcclusionTexture,
-                    value: MaterialValue::Texture(
-                        self.texture_ref_from(&t.texture(), t.tex_coord()),
-                    ),
-                });
-                props.push(MaterialProperty {
-                    semantic: MaterialSemantic::OcclusionStrength,
-                    value: MaterialValue::Float(t.strength()),
-                });
-            }
-            if let Some(t) = mat.emissive_texture() {
-                props.push(self.map_material_texture(&t, MaterialSemantic::EmissiveTexture));
-            }
-
-            // Alpha cutoff (only meaningful for Mask mode, but store it if present)
-            if let Some(cutoff) = mat.alpha_cutoff() {
-                props.push(MaterialProperty {
-                    semantic: MaterialSemantic::AlphaCutoff,
-                    value: MaterialValue::Float(cutoff),
-                });
-            } else if matches!(mat.alpha_mode(), gltf_dep::material::AlphaMode::Mask) {
-                props.push(MaterialProperty {
-                    semantic: MaterialSemantic::AlphaCutoff,
-                    value: MaterialValue::Float(0.5),
-                });
-            }
-
+            // Map alpha mode with embedded cutoff
             let alpha_mode = match mat.alpha_mode() {
                 gltf_dep::material::AlphaMode::Opaque => AlphaMode::Opaque,
-                gltf_dep::material::AlphaMode::Mask => AlphaMode::Mask,
+                gltf_dep::material::AlphaMode::Mask => {
+                    let cutoff = mat.alpha_cutoff().unwrap_or(0.5);
+                    AlphaMode::Mask { cutoff }
+                }
                 gltf_dep::material::AlphaMode::Blend => AlphaMode::Blend,
             };
 
-            let cpu_mat = CpuMaterial {
-                name: mat.name().map(String::from),
+            // Find or create shared declaration
+            let declaration = CpuMaterial::pbr_metallic_roughness(
                 alpha_mode,
-                double_sided: mat.double_sided(),
-                properties: props,
+                mat.double_sided(),
+                has_base_color_tex,
+                has_metallic_roughness_tex,
+                has_normal_tex,
+                has_occlusion_tex,
+                has_emissive_tex,
+            );
+            let shared_decl = find_or_create_declaration(
+                declaration,
+                &self.shared_declarations,
+                &mut self.new_declarations,
+            );
+
+            // Build values in order matching the declaration bindings.
+            // Indices 0-5 are always the uniform properties.
+            let mut values = vec![
+                MaterialValue::Vec4(pbr.base_color_factor()),
+                MaterialValue::Float(pbr.metallic_factor()),
+                MaterialValue::Float(pbr.roughness_factor()),
+                MaterialValue::Vec3(mat.emissive_factor()),
+                MaterialValue::Float(1.0), // normal_scale default
+                MaterialValue::Float(1.0), // occlusion_strength default
+            ];
+
+            // Texture values are appended in the same order as the declaration:
+            // base_color, metallic_roughness, normal, occlusion, emissive.
+            if let Some(t) = pbr.base_color_texture() {
+                values.push(MaterialValue::Texture(self.build_texture_ref(&t)));
+            }
+            if let Some(t) = pbr.metallic_roughness_texture() {
+                values.push(MaterialValue::Texture(self.build_texture_ref(&t)));
+            }
+            if let Some(t) = mat.normal_texture() {
+                values[4] = MaterialValue::Float(t.scale());
+                values.push(MaterialValue::Texture(
+                    self.texture_ref_from(&t.texture(), t.tex_coord()),
+                ));
+            }
+            if let Some(t) = mat.occlusion_texture() {
+                values[5] = MaterialValue::Float(t.strength());
+                values.push(MaterialValue::Texture(
+                    self.texture_ref_from(&t.texture(), t.tex_coord()),
+                ));
+            }
+            if let Some(t) = mat.emissive_texture() {
+                values.push(MaterialValue::Texture(self.build_texture_ref(&t)));
+            }
+
+            let instance = CpuMaterialInstance {
+                material: shared_decl,
+                name: mat.name().map(String::from),
+                values,
             };
 
-            result.push(find_or_create_material(
-                cpu_mat,
-                &self.shared_materials,
-                &mut self.new_materials,
+            result.push(find_or_create_instance(
+                instance,
+                &self.shared_instances,
+                &mut self.new_instances,
             ));
         }
 
-        self.material_arcs = result;
+        self.instance_arcs = result;
     }
 
-    /// Map a glTF texture info to a MaterialProperty with the given semantic.
-    fn map_material_texture(
-        &self,
-        t: &gltf_dep::texture::Info<'_>,
-        semantic: MaterialSemantic,
-    ) -> MaterialProperty {
+    /// Build a TextureRef from a glTF texture info.
+    fn build_texture_ref(&self, t: &gltf_dep::texture::Info<'_>) -> TextureRef {
         let (texture, sampler) = self.resolve_texture_sampler(&t.texture());
-        MaterialProperty {
-            semantic,
-            value: MaterialValue::Texture(TextureRef {
-                texture: TextureSource::Cpu(texture),
-                sampler,
-                tex_coord: t.tex_coord(),
-            }),
+        TextureRef {
+            texture: TextureSource::Cpu(texture),
+            sampler,
+            tex_coord: t.tex_coord(),
         }
     }
 
@@ -357,10 +359,10 @@ impl LoadContext {
     /// Load all meshes with vertex interleaving and layout sharing.
     ///
     /// Returns a flat list of `CpuMesh` (one per glTF primitive). Each mesh
-    /// carries its material via `CpuMesh::material()`. Must be called after
-    /// `load_materials` so that `material_arcs` is populated. Also populates
-    /// `self.mesh_index_map` so that `load_scenes` can map glTF mesh indices
-    /// to flat CpuMesh indices.
+    /// carries its material instance via `CpuMesh::material()`. Must be called
+    /// after `load_materials` so that `instance_arcs` is populated. Also
+    /// populates `self.mesh_index_map` so that `load_scenes` can map glTF
+    /// mesh indices to flat CpuMesh indices.
     pub fn load_meshes(&mut self) -> Result<Vec<CpuMesh>, GltfError> {
         let mut result = Vec::new();
         let mut index_map = Vec::new();
@@ -429,11 +431,11 @@ impl LoadContext {
                     }
                 });
 
-                // Build CpuMesh with material
+                // Build CpuMesh with material instance
                 let mut cpu_mesh =
                     vertex::build_cpu_mesh(shared_layout, topology, vertex_data, index_data, label);
                 if let Some(mat_idx) = primitive.material().index() {
-                    cpu_mesh = cpu_mesh.with_material(Arc::clone(&self.material_arcs[mat_idx]));
+                    cpu_mesh = cpu_mesh.with_material(Arc::clone(&self.instance_arcs[mat_idx]));
                 }
 
                 let flat_idx = result.len();
@@ -584,16 +586,16 @@ impl LoadContext {
         self.document.default_scene().map(|s| s.index())
     }
 
-    /// Consume the context and return new layouts, samplers, and materials.
+    /// Consume the context and return new layouts, samplers, and material instances.
     #[allow(clippy::type_complexity)]
     pub fn into_new_resources(
         self,
     ) -> (
         Vec<Arc<VertexLayout>>,
         Vec<Arc<CpuSampler>>,
-        Vec<Arc<CpuMaterial>>,
+        Vec<Arc<CpuMaterialInstance>>,
     ) {
-        (self.new_layouts, self.new_samplers, self.new_materials)
+        (self.new_layouts, self.new_samplers, self.new_instances)
     }
 }
 
@@ -668,6 +670,37 @@ fn find_or_create_sampler(
     arc
 }
 
+/// Check if two material declarations are structurally equal (ignoring name).
+fn declarations_structurally_equal(a: &CpuMaterial, b: &CpuMaterial) -> bool {
+    a.alpha_mode == b.alpha_mode
+        && a.double_sided == b.double_sided
+        && a.bindings.len() == b.bindings.len()
+        && a.bindings.iter().zip(b.bindings.iter()).all(|(ba, bb)| {
+            ba.name == bb.name && ba.value_type == bb.value_type && ba.binding == bb.binding
+        })
+}
+
+/// Find or create a shared material declaration.
+fn find_or_create_declaration(
+    decl: CpuMaterial,
+    existing: &[Arc<CpuMaterial>],
+    new_decls: &mut Vec<Arc<CpuMaterial>>,
+) -> Arc<CpuMaterial> {
+    for e in existing {
+        if declarations_structurally_equal(&decl, e) {
+            return Arc::clone(e);
+        }
+    }
+    for n in new_decls.iter() {
+        if declarations_structurally_equal(&decl, n) {
+            return Arc::clone(n);
+        }
+    }
+    let arc = Arc::new(decl);
+    new_decls.push(Arc::clone(&arc));
+    arc
+}
+
 /// Check if two material values are structurally equal.
 ///
 /// For textures, compares data content (width, height, format, pixel data)
@@ -704,47 +737,35 @@ fn material_values_structurally_equal(a: &MaterialValue, b: &MaterialValue) -> b
     }
 }
 
-/// Check if two materials are structurally equal (ignoring name).
-///
-/// Compares alpha_mode, double_sided, and all properties in an order-independent
-/// way. For texture values, compares texture data by content and samplers
-/// structurally.
-fn materials_structurally_equal(a: &CpuMaterial, b: &CpuMaterial) -> bool {
-    if a.alpha_mode != b.alpha_mode || a.double_sided != b.double_sided {
-        return false;
-    }
-    if a.properties.len() != b.properties.len() {
-        return false;
-    }
-    // Order-independent comparison: each property in a must have a match in b
-    a.properties.iter().all(|pa| {
-        b.properties.iter().any(|pb| {
-            pa.semantic == pb.semantic && material_values_structurally_equal(&pa.value, &pb.value)
-        })
-    })
+/// Check if two material instances are structurally equal (ignoring name).
+fn instances_structurally_equal(a: &CpuMaterialInstance, b: &CpuMaterialInstance) -> bool {
+    (Arc::ptr_eq(&a.material, &b.material)
+        || declarations_structurally_equal(&a.material, &b.material))
+        && a.values.len() == b.values.len()
+        && a.values
+            .iter()
+            .zip(b.values.iter())
+            .all(|(va, vb)| material_values_structurally_equal(va, vb))
 }
 
-/// Find or create a shared material.
-///
-/// Searches `existing_materials` for a structural match. If found, returns the
-/// existing Arc. Otherwise, creates a new Arc and appends it to `new_materials`.
-fn find_or_create_material(
-    material: CpuMaterial,
-    existing_materials: &[Arc<CpuMaterial>],
-    new_materials: &mut Vec<Arc<CpuMaterial>>,
-) -> Arc<CpuMaterial> {
-    for existing in existing_materials {
-        if materials_structurally_equal(&material, existing) {
-            return Arc::clone(existing);
+/// Find or create a shared material instance.
+fn find_or_create_instance(
+    inst: CpuMaterialInstance,
+    existing: &[Arc<CpuMaterialInstance>],
+    new_insts: &mut Vec<Arc<CpuMaterialInstance>>,
+) -> Arc<CpuMaterialInstance> {
+    for e in existing {
+        if instances_structurally_equal(&inst, e) {
+            return Arc::clone(e);
         }
     }
-    for new_mat in new_materials.iter() {
-        if materials_structurally_equal(&material, new_mat) {
-            return Arc::clone(new_mat);
+    for n in new_insts.iter() {
+        if instances_structurally_equal(&inst, n) {
+            return Arc::clone(n);
         }
     }
-    let arc = Arc::new(material);
-    new_materials.push(Arc::clone(&arc));
+    let arc = Arc::new(inst);
+    new_insts.push(Arc::clone(&arc));
     arc
 }
 

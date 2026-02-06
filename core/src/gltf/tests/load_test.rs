@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::gltf::load_gltf;
-use crate::material::CpuMaterial;
+use crate::material::CpuMaterialInstance;
 
 const TOY_CAR_GLB: &[u8] = include_bytes!("ToyCar.glb");
 
@@ -13,19 +13,19 @@ fn default_scene(doc: &crate::gltf::GltfDocument) -> &crate::scene::Scene {
     &doc.scenes[idx]
 }
 
-/// Collect all unique materials from a document's meshes.
-fn collect_materials(doc: &crate::gltf::GltfDocument) -> Vec<Arc<CpuMaterial>> {
-    let mut materials: Vec<Arc<CpuMaterial>> = Vec::new();
+/// Collect all unique material instances from a document's meshes.
+fn collect_instances(doc: &crate::gltf::GltfDocument) -> Vec<Arc<CpuMaterialInstance>> {
+    let mut instances: Vec<Arc<CpuMaterialInstance>> = Vec::new();
     for scene in &doc.scenes {
         for mesh in &scene.meshes {
-            if let Some(mat) = mesh.material()
-                && !materials.iter().any(|m| Arc::ptr_eq(m, mat))
+            if let Some(inst) = mesh.material()
+                && !instances.iter().any(|m| Arc::ptr_eq(m, inst))
             {
-                materials.push(Arc::clone(mat));
+                instances.push(Arc::clone(inst));
             }
         }
     }
-    materials
+    instances
 }
 
 #[test]
@@ -65,44 +65,41 @@ fn test_toy_car_materials_on_meshes() {
     let doc = load_gltf(TOY_CAR_GLB, &[], &[], &[]).expect("failed to load ToyCar.glb");
     let scene = default_scene(&doc);
 
-    let materials = collect_materials(&doc);
-    assert!(!materials.is_empty(), "expected materials");
+    let instances = collect_instances(&doc);
+    assert!(!instances.is_empty(), "expected material instances");
 
     // Every mesh should have a material assigned
     for (i, mesh) in scene.meshes.iter().enumerate() {
         assert!(mesh.material().is_some(), "mesh {i} has no material");
     }
 
-    for (i, mat) in materials.iter().enumerate() {
-        use crate::material::MaterialSemantic;
-        let base_color = mat.get_vec4(&MaterialSemantic::BaseColorFactor);
-        let metallic = mat.get_float(&MaterialSemantic::MetallicFactor);
-        let roughness = mat.get_float(&MaterialSemantic::RoughnessFactor);
+    for (i, inst) in instances.iter().enumerate() {
+        let base_color = inst.get_vec4("base_color");
+        let metallic = inst.get_float("metallic");
+        let roughness = inst.get_float("roughness");
         println!(
-            "  material {}: name={:?}, base_color={:?}, metallic={:?}, roughness={:?}",
-            i, mat.name, base_color, metallic, roughness,
+            "  instance {}: name={:?}, base_color={:?}, metallic={:?}, roughness={:?}",
+            i, inst.name, base_color, metallic, roughness,
         );
     }
 }
 
 #[test]
 fn test_toy_car_has_textures() {
-    use crate::material::{MaterialSemantic, MaterialValue, TextureSource};
+    use crate::material::TextureSource;
 
     let doc = load_gltf(TOY_CAR_GLB, &[], &[], &[]).expect("failed to load ToyCar.glb");
 
-    let materials = collect_materials(&doc);
+    let instances = collect_instances(&doc);
 
-    // Collect all textures referenced by materials
+    // Collect all textures referenced by material instances
     let mut texture_count = 0;
-    for mat in &materials {
-        for prop in &mat.properties {
-            if let MaterialValue::Texture(tex_ref) = &prop.value
-                && let TextureSource::Cpu(cpu_tex) = &tex_ref.texture
-            {
+    for inst in &instances {
+        for tex_ref in inst.textures() {
+            if let TextureSource::Cpu(cpu_tex) = &tex_ref.texture {
                 println!(
                     "  texture in {:?}: name={:?}, {}x{}, format={:?}, {} bytes",
-                    prop.semantic,
+                    inst.name,
                     cpu_tex.name,
                     cpu_tex.width,
                     cpu_tex.height,
@@ -122,8 +119,8 @@ fn test_toy_car_has_textures() {
     assert!(texture_count > 0, "expected textures in materials");
 
     // Verify base color textures are accessible via get_texture
-    for mat in &materials {
-        if let Some(tex_ref) = mat.get_texture(&MaterialSemantic::BaseColorTexture) {
+    for inst in &instances {
+        if let Some(tex_ref) = inst.get_texture("base_color_texture") {
             assert!(
                 matches!(&tex_ref.texture, TextureSource::Cpu(_)),
                 "expected Cpu texture source"

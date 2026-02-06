@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::gltf::{load_gltf, save_gltf};
-use crate::material::{CpuMaterial, MaterialSemantic, MaterialValue, TextureSource};
+use crate::material::{CpuMaterialInstance, TextureSource};
 use crate::mesh::VertexLayout;
 use crate::sampler::CpuSampler;
 use crate::scene::SceneNode;
@@ -24,13 +24,12 @@ fn collect_layouts(doc: &crate::gltf::GltfDocument) -> Vec<Arc<VertexLayout>> {
     layouts
 }
 
-/// Collect all unique Arc<CpuSampler> from a document's mesh materials.
+/// Collect all unique Arc<CpuSampler> from a document's mesh material instances.
 fn collect_samplers(doc: &crate::gltf::GltfDocument) -> Vec<Arc<CpuSampler>> {
     let mut samplers: Vec<Arc<CpuSampler>> = Vec::new();
-    for mat in &collect_materials(doc) {
-        for prop in &mat.properties {
-            if let MaterialValue::Texture(tex_ref) = &prop.value
-                && let Some(s) = &tex_ref.sampler
+    for inst in &collect_instances(doc) {
+        for tex_ref in inst.textures() {
+            if let Some(s) = &tex_ref.sampler
                 && !samplers.iter().any(|existing| Arc::ptr_eq(existing, s))
             {
                 samplers.push(Arc::clone(s));
@@ -40,19 +39,19 @@ fn collect_samplers(doc: &crate::gltf::GltfDocument) -> Vec<Arc<CpuSampler>> {
     samplers
 }
 
-/// Collect all unique Arc<CpuMaterial> from a document's meshes.
-fn collect_materials(doc: &crate::gltf::GltfDocument) -> Vec<Arc<CpuMaterial>> {
-    let mut materials: Vec<Arc<CpuMaterial>> = Vec::new();
+/// Collect all unique Arc<CpuMaterialInstance> from a document's meshes.
+fn collect_instances(doc: &crate::gltf::GltfDocument) -> Vec<Arc<CpuMaterialInstance>> {
+    let mut instances: Vec<Arc<CpuMaterialInstance>> = Vec::new();
     for scene in &doc.scenes {
         for mesh in &scene.meshes {
-            if let Some(mat) = mesh.material()
-                && !materials.iter().any(|m| Arc::ptr_eq(m, mat))
+            if let Some(inst) = mesh.material()
+                && !instances.iter().any(|m| Arc::ptr_eq(m, inst))
             {
-                materials.push(Arc::clone(mat));
+                instances.push(Arc::clone(inst));
             }
         }
     }
-    materials
+    instances
 }
 
 fn count_nodes(nodes: &[SceneNode]) -> usize {
@@ -77,14 +76,14 @@ fn test_roundtrip_toy_car() {
     // Step 3: Collect shared resources from the original for reuse
     let shared_layouts = collect_layouts(&original);
     let shared_samplers = collect_samplers(&original);
-    let shared_materials = collect_materials(&original);
+    let shared_instances = collect_instances(&original);
 
     // Step 4: Reload from exported bytes, passing shared resources
     let reloaded = load_gltf(
         &glb_bytes,
         &shared_layouts,
         &shared_samplers,
-        &shared_materials,
+        &shared_instances,
     )
     .expect("failed to reload exported glb");
 
@@ -101,13 +100,13 @@ fn test_roundtrip_toy_car() {
         "default scene mismatch"
     );
 
-    // Material count
-    let orig_materials = collect_materials(&original);
-    let re_materials = collect_materials(&reloaded);
+    // Material instance count
+    let orig_instances = collect_instances(&original);
+    let re_instances = collect_instances(&reloaded);
     assert_eq!(
-        orig_materials.len(),
-        re_materials.len(),
-        "material count mismatch"
+        orig_instances.len(),
+        re_instances.len(),
+        "material instance count mismatch"
     );
 
     // Per-scene checks
@@ -170,12 +169,12 @@ fn test_roundtrip_toy_car() {
                 "scene {si} mesh {mi}: index format mismatch"
             );
 
-            // Arc::ptr_eq for material — shared materials should be reused
+            // Arc::ptr_eq for material instance — shared instances should be reused
             match (orig_mesh.material(), re_mesh.material()) {
                 (Some(om), Some(rm)) => {
                     assert!(
                         Arc::ptr_eq(om, rm),
-                        "scene {si} mesh {mi}: CpuMaterial Arc not shared (ptr_eq failed)"
+                        "scene {si} mesh {mi}: CpuMaterialInstance Arc not shared (ptr_eq failed)"
                     );
                 }
                 (None, None) => {}
@@ -206,52 +205,53 @@ fn test_roundtrip_toy_car() {
         }
     }
 
-    // Per-material checks (via collected materials)
-    for (mi, (orig_mat, re_mat)) in orig_materials.iter().zip(re_materials.iter()).enumerate() {
-        // Arc::ptr_eq should hold since we passed shared_materials
+    // Per-instance checks (via collected instances)
+    for (mi, (orig_inst, re_inst)) in orig_instances.iter().zip(re_instances.iter()).enumerate() {
+        // Arc::ptr_eq should hold since we passed shared_instances
         assert!(
-            Arc::ptr_eq(orig_mat, re_mat),
-            "material {mi}: Arc not shared (ptr_eq failed)"
+            Arc::ptr_eq(orig_inst, re_inst),
+            "instance {mi}: Arc not shared (ptr_eq failed)"
         );
 
-        // Sampler Arc::ptr_eq for each texture property
-        for semantic in &[
-            MaterialSemantic::BaseColorTexture,
-            MaterialSemantic::MetallicRoughnessTexture,
-            MaterialSemantic::NormalTexture,
-            MaterialSemantic::OcclusionTexture,
-            MaterialSemantic::EmissiveTexture,
-        ] {
-            let orig_tex = orig_mat.get_texture(semantic);
-            let re_tex = re_mat.get_texture(semantic);
+        // Sampler Arc::ptr_eq for each texture
+        let texture_names = [
+            "base_color_texture",
+            "metallic_roughness_texture",
+            "normal_texture",
+            "occlusion_texture",
+            "emissive_texture",
+        ];
+        for name in &texture_names {
+            let orig_tex = orig_inst.get_texture(name);
+            let re_tex = re_inst.get_texture(name);
             match (orig_tex, re_tex) {
                 (Some(o), Some(r)) => {
                     assert_eq!(
                         o.tex_coord, r.tex_coord,
-                        "material {mi} {semantic:?}: tex_coord mismatch"
+                        "instance {mi} {name}: tex_coord mismatch"
                     );
 
                     match (&o.sampler, &r.sampler) {
                         (Some(os), Some(rs)) => {
                             assert!(
                                 Arc::ptr_eq(os, rs),
-                                "material {mi} {semantic:?}: CpuSampler Arc not shared (ptr_eq failed)"
+                                "instance {mi} {name}: CpuSampler Arc not shared (ptr_eq failed)"
                             );
                         }
                         (None, None) => {}
-                        _ => panic!("material {mi} {semantic:?}: sampler presence mismatch"),
+                        _ => panic!("instance {mi} {name}: sampler presence mismatch"),
                     }
 
                     match (&o.texture, &r.texture) {
                         (TextureSource::Cpu(_), TextureSource::Cpu(_)) => {}
                         (TextureSource::Named(a), TextureSource::Named(b)) => {
-                            assert_eq!(a, b, "material {mi} {semantic:?}: named texture mismatch");
+                            assert_eq!(a, b, "instance {mi} {name}: named texture mismatch");
                         }
-                        _ => panic!("material {mi} {semantic:?}: texture source type mismatch"),
+                        _ => panic!("instance {mi} {name}: texture source type mismatch"),
                     }
                 }
                 (None, None) => {}
-                _ => panic!("material {mi} {semantic:?}: texture presence mismatch"),
+                _ => panic!("instance {mi} {name}: texture presence mismatch"),
             }
         }
     }
@@ -266,12 +266,12 @@ fn test_roundtrip_node_transforms() {
 
     let shared_layouts = collect_layouts(&original);
     let shared_samplers = collect_samplers(&original);
-    let shared_materials = collect_materials(&original);
+    let shared_instances = collect_instances(&original);
     let reloaded = load_gltf(
         &glb_bytes,
         &shared_layouts,
         &shared_samplers,
-        &shared_materials,
+        &shared_instances,
     )
     .expect("reload");
 
@@ -317,12 +317,12 @@ fn test_roundtrip_animations() {
 
     let shared_layouts = collect_layouts(&original);
     let shared_samplers = collect_samplers(&original);
-    let shared_materials = collect_materials(&original);
+    let shared_instances = collect_instances(&original);
     let reloaded = load_gltf(
         &glb_bytes,
         &shared_layouts,
         &shared_samplers,
-        &shared_materials,
+        &shared_instances,
     )
     .expect("reload");
 
