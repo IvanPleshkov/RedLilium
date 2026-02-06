@@ -39,13 +39,15 @@
 
 use std::collections::VecDeque;
 
-use crate::graph::{PassHandle, RenderGraph};
+use redlilium_core::pool::Poolable;
+
+use crate::graph::{Pass, PassHandle, RenderGraph};
 
 /// A compiled render graph ready for execution.
 ///
 /// Contains a topologically sorted pass order that respects all dependencies.
 /// Passes are executed sequentially in this order within a single command buffer.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct CompiledGraph {
     /// Optimized pass execution order as handles.
     pass_order: Vec<PassHandle>,
@@ -53,6 +55,7 @@ pub struct CompiledGraph {
 
 impl CompiledGraph {
     /// Create a new compiled graph with the given pass order.
+    #[cfg(test)]
     pub(crate) fn new(pass_order: Vec<PassHandle>) -> Self {
         Self { pass_order }
     }
@@ -73,6 +76,12 @@ impl CompiledGraph {
     /// Check if the compiled graph is empty.
     pub fn is_empty(&self) -> bool {
         self.pass_order.is_empty()
+    }
+}
+
+impl Poolable for CompiledGraph {
+    fn reset(&mut self) {
+        self.pass_order.clear();
     }
 }
 
@@ -129,11 +138,28 @@ impl std::error::Error for GraphError {}
 /// assert_eq!(compiled.pass_order(), &[pass1, pass2]);
 /// ```
 pub fn compile(graph: &RenderGraph) -> Result<CompiledGraph, GraphError> {
-    let n = graph.pass_count();
+    let mut result = CompiledGraph::default();
+    compile_into(graph.passes(), graph.edges(), &mut result)?;
+    Ok(result)
+}
+
+/// Compile a render graph into an existing [`CompiledGraph`], reusing its allocation.
+///
+/// This is the in-place variant of [`compile`]. It clears the target and fills
+/// it with the topologically sorted pass order. Used internally by
+/// [`RenderGraph::compile`](crate::graph::RenderGraph::compile) to avoid
+/// reallocating the pass order vector each frame.
+pub(crate) fn compile_into(
+    passes: &[Pass],
+    edges: &[(PassHandle, PassHandle)],
+    target: &mut CompiledGraph,
+) -> Result<(), GraphError> {
+    let n = passes.len();
+    target.pass_order.clear();
 
     // Empty graph compiles to empty result
     if n == 0 {
-        return Ok(CompiledGraph::new(Vec::new()));
+        return Ok(());
     }
 
     // Kahn's algorithm for topological sort
@@ -146,7 +172,7 @@ pub fn compile(graph: &RenderGraph) -> Result<CompiledGraph, GraphError> {
     // Compute in-degree for each pass
     // Edge (dependent, dependency) means dependent has one more in-degree
     let mut in_degree = vec![0u32; n];
-    for &(dependent, _dependency) in graph.edges() {
+    for &(dependent, _dependency) in edges {
         in_degree[dependent.index()] += 1;
     }
 
@@ -156,13 +182,11 @@ pub fn compile(graph: &RenderGraph) -> Result<CompiledGraph, GraphError> {
         .filter(|&h| in_degree[h.index()] == 0)
         .collect();
 
-    let mut result = Vec::with_capacity(n);
-
     while let Some(handle) = queue.pop_front() {
-        result.push(handle);
+        target.pass_order.push(handle);
 
         // Find passes that depend on this one and reduce their in-degree
-        for &(dependent, dependency) in graph.edges() {
+        for &(dependent, dependency) in edges {
             if dependency == handle {
                 in_degree[dependent.index()] -= 1;
                 if in_degree[dependent.index()] == 0 {
@@ -173,11 +197,12 @@ pub fn compile(graph: &RenderGraph) -> Result<CompiledGraph, GraphError> {
     }
 
     // If we didn't process all passes, there's a cycle
-    if result.len() != n {
+    if target.pass_order.len() != n {
+        target.pass_order.clear();
         return Err(GraphError::CyclicDependency);
     }
 
-    Ok(CompiledGraph::new(result))
+    Ok(())
 }
 
 #[cfg(test)]

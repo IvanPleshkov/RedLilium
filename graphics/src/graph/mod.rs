@@ -48,6 +48,8 @@ pub use pass::{ComputePass, DrawCommand, GraphicsPass, IndirectDrawCommand, Pass
 // Re-export compiler types for convenience
 pub use crate::compiler::{CompiledGraph, GraphError, compile};
 
+use redlilium_core::pool::Pooled;
+
 /// Handle to a pass in the render graph.
 ///
 /// `PassHandle` is `Copy` and cheap to pass around. It is only valid within
@@ -105,8 +107,9 @@ pub struct RenderGraph {
     /// Dependency edges stored as (dependent, dependency) pairs.
     /// Using edge list avoids per-pass Vec allocations.
     edges: Vec<(PassHandle, PassHandle)>,
-    /// Cached compiled result. Invalidated on any mutation.
-    compiled: Option<CompiledGraph>,
+    /// Cached compiled result. Uses [`Pooled`] to preserve allocation
+    /// across invalidations instead of deallocating with `Option<T>`.
+    compiled: Pooled<CompiledGraph>,
 }
 
 impl RenderGraph {
@@ -122,7 +125,7 @@ impl RenderGraph {
     ///
     /// Note: Adding a pass invalidates any cached compiled graph.
     pub fn add_graphics_pass(&mut self, pass: GraphicsPass) -> PassHandle {
-        self.compiled = None; // Invalidate cache
+        self.compiled.release(); // Invalidate cache
         let index = self.passes.len() as u32;
         self.passes.push(Pass::Graphics(pass));
         PassHandle::new(index)
@@ -135,7 +138,7 @@ impl RenderGraph {
     ///
     /// Note: Adding a pass invalidates any cached compiled graph.
     pub fn add_transfer_pass(&mut self, pass: TransferPass) -> PassHandle {
-        self.compiled = None; // Invalidate cache
+        self.compiled.release(); // Invalidate cache
         let index = self.passes.len() as u32;
         self.passes.push(Pass::Transfer(pass));
         PassHandle::new(index)
@@ -148,7 +151,7 @@ impl RenderGraph {
     ///
     /// Note: Adding a pass invalidates any cached compiled graph.
     pub fn add_compute_pass(&mut self, pass: ComputePass) -> PassHandle {
-        self.compiled = None; // Invalidate cache
+        self.compiled.release(); // Invalidate cache
         let index = self.passes.len() as u32;
         self.passes.push(Pass::Compute(pass));
         PassHandle::new(index)
@@ -176,7 +179,7 @@ impl RenderGraph {
             .iter()
             .any(|&(d, dep)| d == dependent && dep == dependency);
         if !exists {
-            self.compiled = None; // Invalidate cache
+            self.compiled.release(); // Invalidate cache
             self.edges.push((dependent, dependency));
         }
     }
@@ -229,10 +232,14 @@ impl RenderGraph {
     ///
     /// See [`crate::compiler`] module for implementation details.
     pub fn compile(&mut self) -> Result<&CompiledGraph, GraphError> {
-        if self.compiled.is_none() {
-            self.compiled = Some(compile(self)?);
+        if !self.compiled.is_active() {
+            let target = self.compiled.activate();
+            if let Err(e) = crate::compiler::compile_into(&self.passes, &self.edges, target) {
+                self.compiled.release();
+                return Err(e);
+            }
         }
-        Ok(self.compiled.as_ref().unwrap())
+        Ok(self.compiled.get().unwrap())
     }
 
     /// Get the cached compiled graph, if available.
@@ -240,14 +247,14 @@ impl RenderGraph {
     /// Returns `None` if the graph hasn't been compiled yet or if
     /// it has been modified since the last compilation.
     pub fn compiled(&self) -> Option<&CompiledGraph> {
-        self.compiled.as_ref()
+        self.compiled.get()
     }
 
     /// Invalidate the cached compiled graph.
     ///
     /// The next call to `compile()` will recompute the compilation.
     pub fn invalidate_compiled(&mut self) {
-        self.compiled = None;
+        self.compiled.release();
     }
 
     /// Clear all passes from the graph.
@@ -257,7 +264,7 @@ impl RenderGraph {
     pub fn clear(&mut self) {
         self.passes.clear();
         self.edges.clear();
-        self.compiled = None;
+        self.compiled.release();
     }
 }
 

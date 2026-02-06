@@ -37,7 +37,10 @@
       "Bash(RUSTFLAGS=\"-W warnings\" cargo build:*)",
       "WebFetch(domain:crates.io)",
       "Bash(grep:*)",
-      "Bash(cargo metadata:*)"
+      "Bash(cargo metadata:*)",
+      "WebFetch(domain:gfx-rs.github.io)",
+      "WebFetch(domain:wgpu.rs)",
+      "WebFetch(domain:deepwiki.com)"
     ],
     "deny": [
       "Read(claude_requests_history/**)",

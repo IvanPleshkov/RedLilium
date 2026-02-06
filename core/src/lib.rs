@@ -6,6 +6,7 @@
 pub mod gltf;
 pub mod material;
 pub mod mesh;
+pub mod pool;
 pub mod profiling;
 pub mod sampler;
 pub mod scene;
