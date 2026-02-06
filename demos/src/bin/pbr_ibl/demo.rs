@@ -1,504 +1,48 @@
-//! # PBR IBL Demo
-//!
-//! Demonstrates:
-//! - Forward PBR rendering with Image-Based Lighting (IBL)
-//! - HDR environment map converted to cubemap
-//! - Irradiance cubemap for diffuse IBL
-//! - Pre-filtered environment map for specular IBL
-//! - BRDF Look-Up Table for split-sum approximation
-//! - Orbit camera (no ECS)
-//! - Grid of PBR spheres with varying metallic/roughness
-//!
-//! Based on LearnOpenGL IBL tutorials:
-//! - https://learnopengl.com/PBR/IBL/Diffuse-irradiance
-//! - https://learnopengl.com/PBR/IBL/Specular-IBL
+//! PBR IBL Demo application.
 
-use std::f32::consts::PI;
 use std::sync::{Arc, RwLock};
 
 use glam::{Mat4, Vec3};
-use redlilium_app::{App, AppArgs, AppContext, AppHandler, DefaultAppArgs, DrawContext};
+use redlilium_app::{AppContext, AppHandler, DrawContext};
 use redlilium_core::mesh::generators;
 use redlilium_core::profiling::{
-    create_profiled_allocator, profile_function, profile_memory_stats, profile_message,
-    profile_scope,
+    profile_function, profile_memory_stats, profile_message, profile_scope,
 };
-
-// Enable memory allocation tracking with Tracy.
-// Set callstack depth to 32 for detailed allocation tracking (0 for minimal overhead).
-create_profiled_allocator!(GLOBAL_ALLOCATOR, 32);
 use redlilium_graphics::{
     BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferDescriptor, BufferUsage,
-    ColorAttachment, CpuSampler, CpuTexture, DepthStencilAttachment, Extent3d, FrameSchedule,
-    GraphicsPass, LoadOp, Material, MaterialDescriptor, MaterialInstance, Mesh, MeshDescriptor,
-    RenderGraph, RenderTargetConfig, RingAllocation, ShaderComposer, ShaderDef, ShaderSource,
-    ShaderStage, ShaderStageFlags, TextureDescriptor, TextureFormat, TextureUsage, TransferConfig,
+    ColorAttachment, CpuSampler, DepthStencilAttachment, Extent3d, FrameSchedule, GraphicsPass,
+    LoadOp, Material, MaterialDescriptor, MaterialInstance, Mesh, MeshDescriptor, RenderGraph,
+    RenderTargetConfig, RingAllocation, ShaderComposer, ShaderDef, ShaderSource, ShaderStage,
+    ShaderStageFlags, TextureDescriptor, TextureFormat, TextureUsage, TransferConfig,
     TransferOperation, TransferPass, VertexBufferLayout, VertexLayout,
-    egui::{EguiApp, EguiController, egui},
+    egui::{EguiController, egui},
 };
 use winit::event::KeyEvent;
 use winit::keyboard::{KeyCode, PhysicalKey};
 
-// === WGSL Shaders ===
-//
+use crate::camera::OrbitCamera;
+use crate::ibl::compute_ibl_cpu;
+use crate::resources::{BRDF_LUT_URL, HDR_URL, load_brdf_lut_from_url, load_hdr_from_url};
+use crate::ui::PbrUi;
+use crate::uniforms::{CameraUniforms, ResolveUniforms, SkyboxUniforms, SphereInstance};
+use crate::{GRID_SIZE, IRRADIANCE_SIZE, PREFILTER_SIZE, SPHERE_SPACING};
+
 // Shaders are loaded from external files in demos/shaders/.
-// They use the RedLilium shader library via `#import` directives,
-// which are resolved by ShaderComposer at runtime.
-
-/// G-buffer pass shader - outputs to multiple render targets
-const GBUFFER_SHADER_WGSL: &str = include_str!("../../shaders/deferred_gbuffer.wgsl");
-
-/// Resolve/lighting pass shader - reads G-buffer and applies IBL
-const RESOLVE_SHADER_WGSL: &str = include_str!("../../shaders/deferred_resolve.wgsl");
-
-/// Skybox shader - renders environment cubemap as background
-const SKYBOX_SHADER_WGSL: &str = include_str!("../../shaders/skybox.wgsl");
-
-// === Orbit Camera ===
-
-struct OrbitCamera {
-    target: Vec3,
-    distance: f32,
-    azimuth: f32,
-    elevation: f32,
-    fov: f32,
-    near: f32,
-    far: f32,
-}
-
-impl OrbitCamera {
-    fn new() -> Self {
-        Self {
-            target: Vec3::ZERO,
-            distance: 8.0,
-            azimuth: 0.5,
-            elevation: 0.4,
-            fov: PI / 4.0,
-            near: 0.1,
-            far: 100.0,
-        }
-    }
-
-    fn rotate(&mut self, delta_azimuth: f32, delta_elevation: f32) {
-        self.azimuth += delta_azimuth;
-        self.elevation = (self.elevation + delta_elevation).clamp(-PI / 2.0 + 0.1, PI / 2.0 - 0.1);
-    }
-
-    fn zoom(&mut self, delta: f32) {
-        self.distance = (self.distance - delta).clamp(2.0, 20.0);
-    }
-
-    fn position(&self) -> Vec3 {
-        let x = self.distance * self.elevation.cos() * self.azimuth.sin();
-        let y = self.distance * self.elevation.sin();
-        let z = self.distance * self.elevation.cos() * self.azimuth.cos();
-        self.target + Vec3::new(x, y, z)
-    }
-
-    fn view_matrix(&self) -> Mat4 {
-        Mat4::look_at_rh(self.position(), self.target, Vec3::Y)
-    }
-
-    fn projection_matrix(&self, aspect_ratio: f32) -> Mat4 {
-        Mat4::perspective_rh(self.fov, aspect_ratio, self.near, self.far)
-    }
-}
-
-// === Instance and Uniform Data ===
-
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct CameraUniforms {
-    view_proj: [[f32; 4]; 4],
-    view: [[f32; 4]; 4],
-    proj: [[f32; 4]; 4],
-    camera_pos: [f32; 4],
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct SphereInstance {
-    model: [[f32; 4]; 4],
-    base_color: [f32; 4],
-    metallic_roughness: [f32; 4],
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct SkyboxUniforms {
-    inv_view_proj: [[f32; 4]; 4], // 64 bytes, offset 0
-    camera_pos: [f32; 4],         // 16 bytes, offset 64
-    mip_level: f32,               // 4 bytes, offset 80
-    _pad0: [f32; 3],              // 12 bytes padding before vec3 (which has 16-byte alignment)
-    _pad1: [f32; 4],              // Additional padding to match WGSL vec3<f32> + struct alignment
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct ResolveUniforms {
-    camera_pos: [f32; 4],  // 16 bytes
-    screen_size: [f32; 4], // xy = dimensions, zw = 1/dimensions
-}
-
-// === Egui UI ===
-
-/// UI state shared between the demo and egui
-#[derive(Clone)]
-pub struct PbrUiState {
-    /// Base color RGB (0.0-1.0)
-    pub base_color: [f32; 3],
-    /// Skybox MIP level (0-7)
-    pub skybox_mip_level: f32,
-    /// Camera auto-rotation enabled
-    pub auto_rotate: bool,
-    /// Camera zoom level
-    pub camera_distance: f32,
-    /// Whether the UI is visible
-    pub ui_visible: bool,
-    /// Grid spacing
-    pub sphere_spacing: f32,
-    /// Whether to show the info panel
-    pub show_info: bool,
-    /// Whether to show the G-buffer preview panel
-    pub show_gbuffer: bool,
-    /// Texture IDs for G-buffer visualization
-    pub gbuffer_albedo_id: Option<egui::TextureId>,
-    pub gbuffer_normal_id: Option<egui::TextureId>,
-    pub gbuffer_position_id: Option<egui::TextureId>,
-}
-
-impl Default for PbrUiState {
-    fn default() -> Self {
-        Self {
-            base_color: [0.9, 0.1, 0.1],
-            skybox_mip_level: 0.0,
-            auto_rotate: true,
-            camera_distance: 8.0,
-            ui_visible: true,
-            sphere_spacing: SPHERE_SPACING,
-            show_info: true,
-            show_gbuffer: true,
-            gbuffer_albedo_id: None,
-            gbuffer_normal_id: None,
-            gbuffer_position_id: None,
-        }
-    }
-}
-
-/// Egui application for the PBR demo UI
-pub struct PbrUi {
-    state: PbrUiState,
-    state_changed: bool,
-}
-
-impl Default for PbrUi {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl PbrUi {
-    pub fn new() -> Self {
-        Self {
-            state: PbrUiState::default(),
-            state_changed: true,
-        }
-    }
-
-    pub fn state(&self) -> &PbrUiState {
-        &self.state
-    }
-
-    pub fn take_state_changed(&mut self) -> bool {
-        let changed = self.state_changed;
-        self.state_changed = false;
-        changed
-    }
-
-    pub fn set_camera_distance(&mut self, distance: f32) {
-        self.state.camera_distance = distance;
-    }
-
-    pub fn toggle_visibility(&mut self) {
-        self.state.ui_visible = !self.state.ui_visible;
-    }
-
-    pub fn set_gbuffer_texture_ids(
-        &mut self,
-        albedo: Option<egui::TextureId>,
-        normal: Option<egui::TextureId>,
-        position: Option<egui::TextureId>,
-    ) {
-        self.state.gbuffer_albedo_id = albedo;
-        self.state.gbuffer_normal_id = normal;
-        self.state.gbuffer_position_id = position;
-    }
-}
-
-impl EguiApp for PbrUi {
-    fn setup(&mut self, ctx: &egui::Context) {
-        // Configure egui style
-        let mut style = (*ctx.style()).clone();
-        style.visuals.window_corner_radius = egui::CornerRadius::same(8);
-        style.spacing.slider_width = 200.0;
-        ctx.set_style(style);
-    }
-
-    fn update(&mut self, ctx: &egui::Context) {
-        if !self.state.ui_visible {
-            return;
-        }
-
-        egui::Window::new("PBR Controls")
-            .default_pos([10.0, 10.0])
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.heading("Material");
-                ui.separator();
-
-                // Base color picker
-                ui.horizontal(|ui| {
-                    ui.label("Base Color:");
-                    if ui
-                        .color_edit_button_rgb(&mut self.state.base_color)
-                        .changed()
-                    {
-                        self.state_changed = true;
-                    }
-                });
-
-                ui.add_space(10.0);
-                ui.heading("Environment");
-                ui.separator();
-
-                // Skybox mip level slider
-                ui.horizontal(|ui| {
-                    ui.label("Skybox Blur:");
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut self.state.skybox_mip_level, 0.0..=7.0)
-                                .step_by(0.5),
-                        )
-                        .changed()
-                    {
-                        self.state_changed = true;
-                    }
-                });
-
-                ui.add_space(10.0);
-                ui.heading("Camera");
-                ui.separator();
-
-                // Auto-rotate checkbox
-                if ui
-                    .checkbox(&mut self.state.auto_rotate, "Auto Rotate")
-                    .changed()
-                {
-                    self.state_changed = true;
-                }
-
-                // Camera distance slider
-                ui.horizontal(|ui| {
-                    ui.label("Distance:");
-                    if ui
-                        .add(egui::Slider::new(
-                            &mut self.state.camera_distance,
-                            2.0..=20.0,
-                        ))
-                        .changed()
-                    {
-                        self.state_changed = true;
-                    }
-                });
-
-                ui.add_space(10.0);
-                ui.heading("Grid");
-                ui.separator();
-
-                // Sphere spacing slider
-                ui.horizontal(|ui| {
-                    ui.label("Spacing:");
-                    if ui
-                        .add(egui::Slider::new(&mut self.state.sphere_spacing, 1.0..=3.0))
-                        .changed()
-                    {
-                        self.state_changed = true;
-                    }
-                });
-
-                ui.add_space(10.0);
-                ui.heading("Debug");
-                ui.separator();
-
-                // Show info checkbox
-                ui.checkbox(&mut self.state.show_info, "Show Info Panel");
-
-                // Show G-buffer checkbox
-                ui.checkbox(&mut self.state.show_gbuffer, "Show G-Buffer");
-            });
-
-        // Info panel
-        if self.state.show_info {
-            egui::Window::new("Info")
-                .default_pos([10.0, 400.0])
-                .resizable(false)
-                .show(ctx, |ui| {
-                    ui.label("Deferred PBR IBL Demo");
-                    ui.separator();
-                    ui.label(format!("Grid: {}x{} spheres", GRID_SIZE, GRID_SIZE));
-                    ui.label("Rows: Roughness (top=smooth)");
-                    ui.label("Cols: Metallic (left=dielectric)");
-                    ui.separator();
-                    ui.label("Deferred Rendering Pipeline:");
-                    ui.label("  1. G-Buffer Pass (MRT)");
-                    ui.label("  2. Skybox Pass");
-                    ui.label("  3. Resolve/Lighting Pass");
-                    ui.separator();
-                    ui.label("Controls:");
-                    ui.label("  H: Toggle UI");
-                    ui.label("  LMB Drag: Rotate camera");
-                    ui.label("  Scroll: Zoom");
-                });
-        }
-
-        // G-buffer preview window showing all render targets
-        if self.state.show_gbuffer {
-            egui::Window::new("G-Buffer")
-                .default_pos([ctx.available_rect().right() - 420.0, 10.0])
-                .default_width(400.0)
-                .resizable(true)
-                .show(ctx, |ui| {
-                    let preview_size = egui::vec2(120.0, 90.0);
-
-                    ui.horizontal(|ui| {
-                        // Albedo
-                        ui.vertical(|ui| {
-                            ui.label("Albedo");
-                            if let Some(id) = self.state.gbuffer_albedo_id {
-                                ui.image(egui::load::SizedTexture::new(id, preview_size));
-                            } else {
-                                ui.label("(not available)");
-                            }
-                        });
-
-                        // Normal + Metallic
-                        ui.vertical(|ui| {
-                            ui.label("Normal+Metal");
-                            if let Some(id) = self.state.gbuffer_normal_id {
-                                ui.image(egui::load::SizedTexture::new(id, preview_size));
-                            } else {
-                                ui.label("(not available)");
-                            }
-                        });
-
-                        // Position + Roughness
-                        ui.vertical(|ui| {
-                            ui.label("Pos+Rough");
-                            if let Some(id) = self.state.gbuffer_position_id {
-                                ui.image(egui::load::SizedTexture::new(id, preview_size));
-                            } else {
-                                ui.label("(not available)");
-                            }
-                        });
-                    });
-                });
-        }
-    }
-}
-
-// === HDR Loading ===
-
-const HDR_URL: &str = "https://raw.githubusercontent.com/JoeyDeVries/LearnOpenGL/master/resources/textures/hdr/newport_loft.hdr";
-const BRDF_LUT_URL: &str = "https://learnopengl.com/img/pbr/ibl_brdf_lut.png";
-
-fn load_brdf_lut_from_url(url: &str) -> Result<CpuTexture, String> {
-    use std::io::Read;
-
-    log::info!("Downloading BRDF LUT from: {}", url);
-
-    let response = ureq::get(url)
-        .call()
-        .map_err(|e| format!("Failed to download BRDF LUT: {e}"))?;
-
-    let mut data = Vec::new();
-    response
-        .into_reader()
-        .read_to_end(&mut data)
-        .map_err(|e| format!("Failed to read BRDF LUT data: {e}"))?;
-
-    log::info!("Downloaded {} bytes, parsing PNG...", data.len());
-
-    let img =
-        image::load_from_memory(&data).map_err(|e| format!("Failed to decode BRDF LUT: {e}"))?;
-
-    let width = img.width();
-    let height = img.height();
-
-    log::info!("BRDF LUT image: {}x{}", width, height);
-
-    // Convert to RG8 (we only need red and green channels)
-    let rgba = img.to_rgba8();
-    let mut rg_data = Vec::with_capacity((width * height * 2) as usize);
-    for pixel in rgba.pixels() {
-        rg_data.push(pixel[0]); // R channel = scale
-        rg_data.push(pixel[1]); // G channel = bias
-    }
-
-    Ok(CpuTexture::new(width, height, TextureFormat::Rg8Unorm, rg_data).with_name("brdf_lut"))
-}
-
-fn load_hdr_from_url(url: &str) -> Result<(u32, u32, Vec<f32>), String> {
-    use std::io::Read;
-
-    log::info!("Downloading HDR texture from: {}", url);
-
-    let response = ureq::get(url)
-        .call()
-        .map_err(|e| format!("Failed to download HDR: {e}"))?;
-
-    let mut data = Vec::new();
-    response
-        .into_reader()
-        .read_to_end(&mut data)
-        .map_err(|e| format!("Failed to read HDR data: {e}"))?;
-
-    log::info!("Downloaded {} bytes, parsing HDR...", data.len());
-
-    let img = image::load_from_memory_with_format(&data, image::ImageFormat::Hdr)
-        .map_err(|e| format!("Failed to decode HDR: {e}"))?;
-
-    let width = img.width();
-    let height = img.height();
-
-    log::info!("HDR image: {}x{}", width, height);
-
-    let rgba32f = img.to_rgba32f();
-    let rgba_data: Vec<f32> = rgba32f.into_raw();
-
-    Ok((width, height, rgba_data))
-}
-
-// === Demo Application ===
-
-const GRID_SIZE: usize = 5;
-const SPHERE_SPACING: f32 = 1.5;
-const IRRADIANCE_SIZE: u32 = 32;
-const PREFILTER_SIZE: u32 = 128;
+const GBUFFER_SHADER_WGSL: &str = include_str!("../../../shaders/deferred_gbuffer.wgsl");
+const RESOLVE_SHADER_WGSL: &str = include_str!("../../../shaders/deferred_resolve.wgsl");
+const SKYBOX_SHADER_WGSL: &str = include_str!("../../../shaders/skybox.wgsl");
 
 /// Per-frame uniform allocation offsets from the ring buffer.
-///
-/// These allocations demonstrate how ring buffers can be used for per-frame
-/// uniform data. In a full implementation with dynamic uniform buffer offsets,
-/// these offsets would be passed to bind groups for zero-copy uniform updates.
 #[derive(Default)]
-#[allow(dead_code)] // Fields stored for demonstration/future dynamic offset support
+#[allow(dead_code)]
 struct FrameUniformAllocations {
     camera: Option<RingAllocation>,
     skybox: Option<RingAllocation>,
     resolve: Option<RingAllocation>,
 }
 
-struct PbrIblDemo {
+/// The main PBR IBL demo application.
+pub struct PbrIblDemo {
     camera: OrbitCamera,
     mouse_pressed: bool,
     last_mouse_x: f64,
@@ -563,7 +107,7 @@ struct PbrIblDemo {
 }
 
 impl PbrIblDemo {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             camera: OrbitCamera::new(),
             mouse_pressed: false,
@@ -814,9 +358,6 @@ impl PbrIblDemo {
             Arc::new(MaterialInstance::new(material).with_binding_group(camera_binding_group));
         self.material_instance = Some(material_instance);
 
-        // Store IBL binding group for resolve pass (created later after G-buffer textures exist)
-        // We'll create the resolve material and its bindings in create_resolve_resources()
-
         // Create GPU mesh from CPU sphere
         let mesh = device
             .create_mesh_from_cpu(&sphere_cpu)
@@ -906,7 +447,6 @@ impl PbrIblDemo {
         self.skybox_material_instance = Some(skybox_material_instance);
 
         // Create a minimal mesh for fullscreen triangle (shader uses vertex_index only)
-        // Need a buffer but no attributes since the shader doesn't consume any vertex inputs
         let skybox_vertex_layout = Arc::new(
             VertexLayout::new()
                 .with_buffer(VertexBufferLayout::new(4)) // Minimal stride, no attributes
@@ -1335,211 +875,14 @@ impl PbrIblDemo {
             }
         }
 
-        // BRDF LUT is uploaded directly via create_texture_from_cpu()
-
         config
     }
 }
 
-// === IBL Computation Helpers ===
-
-fn compute_ibl_cpu(hdr_data: &[f32], hdr_width: u32, hdr_height: u32) -> (Vec<u16>, Vec<Vec<u16>>) {
-    // Sample direction from equirectangular map
-    let sample_equirect = |dir: Vec3| -> Vec3 {
-        let inv_atan = glam::vec2(
-            0.5 * std::f32::consts::FRAC_1_PI,
-            std::f32::consts::FRAC_1_PI,
-        );
-        let uv = glam::vec2(dir.z.atan2(dir.x), dir.y.asin()) * inv_atan + 0.5;
-
-        let x = ((uv.x * hdr_width as f32) as u32).min(hdr_width - 1);
-        let y = (((1.0 - uv.y) * hdr_height as f32) as u32).min(hdr_height - 1);
-        let idx = ((y * hdr_width + x) * 4) as usize;
-
-        Vec3::new(hdr_data[idx], hdr_data[idx + 1], hdr_data[idx + 2])
-    };
-
-    // Compute irradiance cubemap
-    log::info!("Computing irradiance cubemap...");
-    let mut irradiance_data =
-        Vec::with_capacity((IRRADIANCE_SIZE * IRRADIANCE_SIZE * 6 * 4) as usize);
-
-    for face in 0..6 {
-        for y in 0..IRRADIANCE_SIZE {
-            for x in 0..IRRADIANCE_SIZE {
-                let dir = cubemap_dir(face, x, y, IRRADIANCE_SIZE);
-                let irradiance = compute_irradiance(dir, &sample_equirect);
-                irradiance_data.push(f32_to_f16_bits(irradiance.x));
-                irradiance_data.push(f32_to_f16_bits(irradiance.y));
-                irradiance_data.push(f32_to_f16_bits(irradiance.z));
-                irradiance_data.push(f32_to_f16_bits(1.0));
-            }
-        }
+impl Default for PbrIblDemo {
+    fn default() -> Self {
+        Self::new()
     }
-
-    // Compute pre-filtered environment map with mipmaps
-    log::info!("Computing pre-filtered environment map...");
-    let mip_levels = (PREFILTER_SIZE as f32).log2().floor() as u32 + 1;
-    let mut prefilter_data = Vec::with_capacity(mip_levels as usize);
-
-    for mip in 0..mip_levels {
-        let mip_size = (PREFILTER_SIZE >> mip).max(1);
-        let roughness = mip as f32 / (mip_levels - 1) as f32;
-        let mut mip_data = Vec::with_capacity((mip_size * mip_size * 6 * 4) as usize);
-
-        for face in 0..6 {
-            for y in 0..mip_size {
-                for x in 0..mip_size {
-                    let dir = cubemap_dir(face, x, y, mip_size);
-                    let prefiltered = compute_prefiltered(dir, roughness, &sample_equirect);
-                    mip_data.push(f32_to_f16_bits(prefiltered.x));
-                    mip_data.push(f32_to_f16_bits(prefiltered.y));
-                    mip_data.push(f32_to_f16_bits(prefiltered.z));
-                    mip_data.push(f32_to_f16_bits(1.0));
-                }
-            }
-        }
-        prefilter_data.push(mip_data);
-    }
-
-    (irradiance_data, prefilter_data)
-}
-
-/// Convert f32 to f16 bits (IEEE 754 half-precision)
-fn f32_to_f16_bits(val: f32) -> u16 {
-    let bits = val.to_bits();
-    let sign = (bits >> 31) & 1;
-    let exp = ((bits >> 23) & 0xFF) as i32;
-    let mantissa = bits & 0x7FFFFF;
-
-    if exp == 0 {
-        // Zero or denormalized
-        0
-    } else if exp == 0xFF {
-        // Infinity or NaN
-        ((sign << 15) | 0x7C00 | (mantissa >> 13).min(0x3FF)) as u16
-    } else {
-        let new_exp = exp - 127 + 15;
-        if new_exp >= 31 {
-            // Overflow to infinity
-            ((sign << 15) | 0x7C00) as u16
-        } else if new_exp <= 0 {
-            // Underflow to zero or denorm
-            0
-        } else {
-            ((sign << 15) | ((new_exp as u32) << 10) | (mantissa >> 13)) as u16
-        }
-    }
-}
-
-/// Get cubemap direction for a given face, pixel, and size
-fn cubemap_dir(face: u32, x: u32, y: u32, size: u32) -> Vec3 {
-    let u = (x as f32 + 0.5) / size as f32 * 2.0 - 1.0;
-    let v = (y as f32 + 0.5) / size as f32 * 2.0 - 1.0;
-
-    let dir = match face {
-        0 => Vec3::new(1.0, -v, -u),  // +X
-        1 => Vec3::new(-1.0, -v, u),  // -X
-        2 => Vec3::new(u, 1.0, v),    // +Y
-        3 => Vec3::new(u, -1.0, -v),  // -Y
-        4 => Vec3::new(u, -v, 1.0),   // +Z
-        _ => Vec3::new(-u, -v, -1.0), // -Z
-    };
-
-    dir.normalize()
-}
-
-/// Compute irradiance for a given normal direction
-fn compute_irradiance<F: Fn(Vec3) -> Vec3>(normal: Vec3, sample_env: &F) -> Vec3 {
-    let mut irradiance = Vec3::ZERO;
-
-    let up = if normal.y.abs() < 0.999 {
-        Vec3::Y
-    } else {
-        Vec3::X
-    };
-    let right = normal.cross(up).normalize();
-    let up = normal.cross(right);
-
-    let sample_delta = 0.05;
-    let mut nr_samples = 0.0;
-
-    let mut phi = 0.0f32;
-    while phi < 2.0 * PI {
-        let mut theta = 0.0f32;
-        while theta < 0.5 * PI {
-            let tangent_sample = Vec3::new(
-                theta.sin() * phi.cos(),
-                theta.sin() * phi.sin(),
-                theta.cos(),
-            );
-            let sample_vec =
-                tangent_sample.x * right + tangent_sample.y * up + tangent_sample.z * normal;
-
-            irradiance += sample_env(sample_vec) * theta.cos() * theta.sin();
-            nr_samples += 1.0;
-
-            theta += sample_delta;
-        }
-        phi += sample_delta;
-    }
-
-    PI * irradiance / nr_samples
-}
-
-/// Compute pre-filtered environment map value
-fn compute_prefiltered<F: Fn(Vec3) -> Vec3>(normal: Vec3, roughness: f32, sample_env: &F) -> Vec3 {
-    let r = normal;
-    let v = r;
-
-    let sample_count = 128u32;
-    let mut prefiltered = Vec3::ZERO;
-    let mut total_weight = 0.0;
-
-    for i in 0..sample_count {
-        let xi = hammersley(i, sample_count);
-        let h = importance_sample_ggx(xi, normal, roughness);
-        let l = (2.0 * v.dot(h) * h - v).normalize();
-
-        let n_dot_l = normal.dot(l).max(0.0);
-        if n_dot_l > 0.0 {
-            prefiltered += sample_env(l) * n_dot_l;
-            total_weight += n_dot_l;
-        }
-    }
-
-    prefiltered / total_weight.max(0.001)
-}
-
-/// Hammersley sequence for low-discrepancy sampling
-fn hammersley(i: u32, n: u32) -> glam::Vec2 {
-    glam::vec2(i as f32 / n as f32, radical_inverse_vdc(i))
-}
-
-fn radical_inverse_vdc(mut bits: u32) -> f32 {
-    bits = bits.rotate_right(16);
-    bits = ((bits & 0x55555555) << 1) | ((bits & 0xAAAAAAAA) >> 1);
-    bits = ((bits & 0x33333333) << 2) | ((bits & 0xCCCCCCCC) >> 2);
-    bits = ((bits & 0x0F0F0F0F) << 4) | ((bits & 0xF0F0F0F0) >> 4);
-    bits = ((bits & 0x00FF00FF) << 8) | ((bits & 0xFF00FF00) >> 8);
-    bits as f32 * 2.328_306_4e-10
-}
-
-/// GGX importance sampling
-fn importance_sample_ggx(xi: glam::Vec2, n: Vec3, roughness: f32) -> Vec3 {
-    let a = roughness * roughness;
-
-    let phi = 2.0 * PI * xi.x;
-    let cos_theta = ((1.0 - xi.y) / (1.0 + (a * a - 1.0) * xi.y)).sqrt();
-    let sin_theta = (1.0 - cos_theta * cos_theta).sqrt();
-
-    let h = Vec3::new(phi.cos() * sin_theta, phi.sin() * sin_theta, cos_theta);
-
-    let up = if n.z.abs() < 0.999 { Vec3::Z } else { Vec3::X };
-    let tangent = n.cross(up).normalize();
-    let bitangent = n.cross(tangent);
-
-    (tangent * h.x + bitangent * h.y + n * h.z).normalize()
 }
 
 impl AppHandler for PbrIblDemo {
@@ -1573,10 +916,9 @@ impl AppHandler for PbrIblDemo {
         self.create_resolve_resources(ctx);
 
         // Initialize per-frame ring buffer for uniform data streaming
-        // This demonstrates efficient per-frame uniform updates without GPU stalls
         ctx.pipeline_mut()
             .create_ring_buffers(
-                4 * 1024, // 4 KB per frame (enough for camera, skybox, resolve uniforms)
+                4 * 1024, // 4 KB per frame
                 BufferUsage::UNIFORM | BufferUsage::COPY_DST,
                 "per_frame_uniforms",
             )
@@ -1688,11 +1030,6 @@ impl AppHandler for PbrIblDemo {
         profile_scope!("on_draw");
 
         // Allocate space for per-frame uniforms from the ring buffer.
-        // The ring buffer is automatically reset by FramePipeline::begin_frame().
-        // These allocations return offsets that can be used with dynamic uniform
-        // buffer offsets for fully optimal streaming. For this demo, we demonstrate
-        // the allocation pattern - the actual buffer writes still go to the fixed
-        // uniform buffers bound to the material instances.
         if ctx.has_ring_buffer() {
             self.frame_allocations = FrameUniformAllocations {
                 camera: ctx.allocate(std::mem::size_of::<CameraUniforms>() as u64),
@@ -1726,7 +1063,6 @@ impl AppHandler for PbrIblDemo {
         }
 
         // === Pass 1: G-Buffer Pass ===
-        // Render geometry to G-buffer textures (albedo, normal+metallic, position+roughness)
         let mut gbuffer_pass = GraphicsPass::new("gbuffer".into());
 
         if let (Some(depth), Some(albedo), Some(normal), Some(position)) = (
@@ -1737,17 +1073,14 @@ impl AppHandler for PbrIblDemo {
         ) {
             gbuffer_pass.set_render_targets(
                 RenderTargetConfig::new()
-                    // RT0: Albedo
                     .with_color(
                         ColorAttachment::from_texture(albedo.clone())
                             .with_clear_color(0.0, 0.0, 0.0, 0.0),
                     )
-                    // RT1: Normal (RGB) + Metallic (A)
                     .with_color(
                         ColorAttachment::from_texture(normal.clone())
                             .with_clear_color(0.5, 0.5, 0.5, 0.0),
                     )
-                    // RT2: Position (RGB) + Roughness (A)
                     .with_color(
                         ColorAttachment::from_texture(position.clone())
                             .with_clear_color(0.0, 0.0, 0.0, 0.0),
@@ -1770,7 +1103,6 @@ impl AppHandler for PbrIblDemo {
         graph.add_graphics_pass(gbuffer_pass);
 
         // === Pass 2: Skybox Pass ===
-        // Render skybox to swapchain (background)
         let mut skybox_pass = GraphicsPass::new("skybox".into());
 
         skybox_pass.set_render_targets(
@@ -1789,11 +1121,10 @@ impl AppHandler for PbrIblDemo {
         graph.add_graphics_pass(skybox_pass);
 
         // === Pass 3: Resolve/Lighting Pass ===
-        // Read G-buffer, apply IBL lighting, composite onto swapchain
         let mut resolve_pass = GraphicsPass::new("resolve".into());
 
         resolve_pass.set_render_targets(RenderTargetConfig::new().with_color(
-            ColorAttachment::from_surface(ctx.swapchain_texture()).with_load_op(LoadOp::Load), // Preserve skybox
+            ColorAttachment::from_surface(ctx.swapchain_texture()).with_load_op(LoadOp::Load),
         ));
 
         if let (Some(mesh), Some(material_instance)) =
@@ -1944,7 +1275,6 @@ impl AppHandler for PbrIblDemo {
                 log::info!("Skybox MIP level: {}", self.skybox_mip_level);
             }
 
-            // Note: Number keys without shift reserved for future G-buffer debug visualization
             _ => {}
         }
     }
@@ -1952,17 +1282,4 @@ impl AppHandler for PbrIblDemo {
     fn on_shutdown(&mut self, _ctx: &mut AppContext) {
         log::info!("Shutting down PBR IBL Demo");
     }
-}
-
-// === Entry Point ===
-
-#[cfg(not(target_arch = "wasm32"))]
-fn main() {
-    let args = DefaultAppArgs::parse().with_hdr(true);
-    App::run(PbrIblDemo::new(), args);
-}
-
-#[cfg(target_arch = "wasm32")]
-fn main() {
-    // Entry point for wasm
 }

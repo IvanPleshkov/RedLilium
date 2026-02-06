@@ -42,7 +42,7 @@ path = "src/bin/window_demo.rs"
 
 [[bin]]
 name = "pbr_ibl_demo"
-path = "src/bin/pbr_ibl_demo.rs"
+path = "src/bin/pbr_ibl/main.rs"
 
 [[bin]]
 name = "textured_quad_demo"
