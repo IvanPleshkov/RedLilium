@@ -7,23 +7,31 @@ use ash::vk;
 use parking_lot::Mutex;
 
 use crate::error::GraphicsError;
-use crate::materials::{BindingLayout, BindingType, ShaderStage};
+use crate::materials::{BindingLayout, BindingType, Material, ShaderStage};
 use crate::mesh::{Mesh, VertexAttributeFormat};
 use crate::types::TextureFormat;
 
 use super::conversion::{convert_blend_state, convert_texture_format};
 
+/// Cached pipeline with its associated layouts.
+struct CachedVulkanPipeline {
+    pipeline: vk::Pipeline,
+    pipeline_layout: vk::PipelineLayout,
+    descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
+}
+
+/// Result of a pipeline cache lookup.
+pub struct PipelineCacheResult {
+    pub pipeline: vk::Pipeline,
+    pub pipeline_layout: vk::PipelineLayout,
+    pub descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
+}
+
 /// Manages Vulkan pipelines and related resources.
 pub struct PipelineManager {
     device: ash::Device,
-    /// Cache of compiled shader modules.
-    shader_cache: Mutex<HashMap<u64, vk::ShaderModule>>,
-    /// Cache of descriptor set layouts.
-    descriptor_set_layout_cache: Mutex<HashMap<u64, vk::DescriptorSetLayout>>,
-    /// Cache of pipeline layouts.
-    pipeline_layout_cache: Mutex<HashMap<u64, vk::PipelineLayout>>,
-    /// Cache of graphics pipelines.
-    pipeline_cache: Mutex<HashMap<u64, vk::Pipeline>>,
+    /// Combined pipeline cache: key -> pipeline + layouts.
+    cache: Mutex<HashMap<u64, CachedVulkanPipeline>>,
     /// Descriptor pool for allocating descriptor sets.
     descriptor_pool: vk::DescriptorPool,
     /// Whether resources have been explicitly destroyed.
@@ -76,10 +84,7 @@ impl PipelineManager {
 
         Ok(Self {
             device,
-            shader_cache: Mutex::new(HashMap::new()),
-            descriptor_set_layout_cache: Mutex::new(HashMap::new()),
-            pipeline_layout_cache: Mutex::new(HashMap::new()),
-            pipeline_cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(HashMap::new()),
             descriptor_pool,
             destroyed: false,
         })
@@ -416,6 +421,105 @@ impl PipelineManager {
         Ok(pipelines[0])
     }
 
+    /// Look up a cached pipeline or create one on cache miss.
+    ///
+    /// On hit, returns cached Vulkan handles (cheap copy).
+    /// On miss, compiles shaders, creates layouts and pipeline, caches them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn get_or_create_pipeline(
+        &self,
+        cache_key: u64,
+        material: &Material,
+        mesh: &Mesh,
+        color_formats: &[TextureFormat],
+        depth_format: Option<TextureFormat>,
+        dynamic_rendering: &ash::khr::dynamic_rendering::Device,
+    ) -> Result<PipelineCacheResult, GraphicsError> {
+        // Cache hit: return copies of Vulkan handles (raw u64 IDs, not refcounted).
+        {
+            let cache = self.cache.lock();
+            if let Some(cached) = cache.get(&cache_key) {
+                return Ok(PipelineCacheResult {
+                    pipeline: cached.pipeline,
+                    pipeline_layout: cached.pipeline_layout,
+                    descriptor_set_layouts: cached.descriptor_set_layouts.clone(),
+                });
+            }
+        }
+
+        // Cache miss: create everything.
+        let shaders = material.shaders();
+        let mut vertex_module = None;
+        let mut fragment_module = None;
+        let mut vertex_entry: &str = "vs_main";
+        let mut fragment_entry: &str = "fs_main";
+
+        for shader in shaders {
+            let module = self.compile_shader(&shader.source, shader.stage, &shader.entry_point)?;
+            match shader.stage {
+                ShaderStage::Vertex => {
+                    vertex_module = Some(module);
+                    vertex_entry = &shader.entry_point;
+                }
+                ShaderStage::Fragment => {
+                    fragment_module = Some(module);
+                    fragment_entry = &shader.entry_point;
+                }
+                ShaderStage::Compute => {}
+            }
+        }
+
+        let vertex_module = vertex_module.ok_or_else(|| {
+            GraphicsError::ShaderCompilationFailed("No vertex shader provided".into())
+        })?;
+
+        // Descriptor set layouts
+        let descriptor_set_layouts: Vec<vk::DescriptorSetLayout> = material
+            .binding_layouts()
+            .iter()
+            .map(|layout| self.create_descriptor_set_layout(layout))
+            .collect::<Result<_, _>>()?;
+
+        let pipeline_layout = self.create_pipeline_layout(&descriptor_set_layouts)?;
+
+        let pipeline = self.create_graphics_pipeline(
+            vertex_module,
+            fragment_module,
+            vertex_entry,
+            fragment_entry,
+            mesh,
+            pipeline_layout,
+            color_formats,
+            depth_format,
+            material.blend_state(),
+            dynamic_rendering,
+        )?;
+
+        // Shader modules are baked into the pipeline; destroy them now.
+        unsafe {
+            self.device.destroy_shader_module(vertex_module, None);
+            if let Some(frag) = fragment_module {
+                self.device.destroy_shader_module(frag, None);
+            }
+        }
+
+        // Insert into cache
+        self.cache.lock().insert(
+            cache_key,
+            CachedVulkanPipeline {
+                pipeline,
+                pipeline_layout,
+                descriptor_set_layouts: descriptor_set_layouts.clone(),
+            },
+        );
+
+        Ok(PipelineCacheResult {
+            pipeline,
+            pipeline_layout,
+            descriptor_set_layouts,
+        })
+    }
+
     /// Get the descriptor pool.
     #[allow(dead_code)]
     pub fn descriptor_pool(&self) -> vk::DescriptorPool {
@@ -454,28 +558,17 @@ impl PipelineManager {
             return;
         }
 
-        // Destroy cached pipelines
-        for (_, pipeline) in self.pipeline_cache.lock().drain() {
-            // SAFETY: Caller guarantees GPU is idle and device is valid
-            unsafe { self.device.destroy_pipeline(pipeline, None) };
-        }
-
-        // Destroy cached pipeline layouts
-        for (_, layout) in self.pipeline_layout_cache.lock().drain() {
-            // SAFETY: Caller guarantees GPU is idle and device is valid
-            unsafe { self.device.destroy_pipeline_layout(layout, None) };
-        }
-
-        // Destroy cached descriptor set layouts
-        for (_, layout) in self.descriptor_set_layout_cache.lock().drain() {
-            // SAFETY: Caller guarantees GPU is idle and device is valid
-            unsafe { self.device.destroy_descriptor_set_layout(layout, None) };
-        }
-
-        // Destroy cached shader modules
-        for (_, module) in self.shader_cache.lock().drain() {
-            // SAFETY: Caller guarantees GPU is idle and device is valid
-            unsafe { self.device.destroy_shader_module(module, None) };
+        // Destroy all cached pipelines and their associated layouts.
+        // SAFETY: Caller guarantees GPU is idle and device is valid.
+        for (_, cached) in self.cache.lock().drain() {
+            unsafe {
+                self.device.destroy_pipeline(cached.pipeline, None);
+                self.device
+                    .destroy_pipeline_layout(cached.pipeline_layout, None);
+                for layout in cached.descriptor_set_layouts {
+                    self.device.destroy_descriptor_set_layout(layout, None);
+                }
+            }
         }
 
         // Destroy descriptor pool

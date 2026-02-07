@@ -1613,7 +1613,7 @@ impl VulkanBackend {
     ) -> Result<(), GraphicsError> {
         use crate::materials::BoundResource;
 
-        let material = draw_cmd.material.material();
+        let material_arc = draw_cmd.material.material();
         let mesh = &draw_cmd.mesh;
 
         // Take scratch buffers — reuses capacity from previous draws.
@@ -1642,64 +1642,35 @@ impl VulkanBackend {
             .as_ref()
             .map(|a| a.target.format());
 
-        // Compile shaders — borrow entry points from shader instead of cloning
-        let shaders = material.shaders();
-        let mut vertex_module = None;
-        let mut fragment_module = None;
-        let mut vertex_entry: &str = "vs_main";
-        let mut fragment_entry: &str = "fs_main";
+        // Pipeline cache key (same strategy as wgpu backend):
+        // Material Arc pointer captures shaders, blend state, binding layouts.
+        // VertexLayout Arc pointer captures buffer strides, step modes, attributes.
+        // Topology + render target formats complete the pipeline configuration.
+        let cache_key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (std::sync::Arc::as_ptr(material_arc) as usize).hash(&mut h);
+            (std::sync::Arc::as_ptr(mesh.layout()) as usize).hash(&mut h);
+            mesh.topology().hash(&mut h);
+            scratch_color_formats.hash(&mut h);
+            depth_format.hash(&mut h);
+            h.finish()
+        };
 
-        for shader in shaders {
-            let module = self.pipeline_manager.compile_shader(
-                &shader.source,
-                shader.stage,
-                &shader.entry_point,
-            )?;
-
-            match shader.stage {
-                crate::materials::ShaderStage::Vertex => {
-                    vertex_module = Some(module);
-                    vertex_entry = &shader.entry_point;
-                }
-                crate::materials::ShaderStage::Fragment => {
-                    fragment_module = Some(module);
-                    fragment_entry = &shader.entry_point;
-                }
-                crate::materials::ShaderStage::Compute => {}
-            }
-        }
-
-        let vertex_module = vertex_module.ok_or_else(|| {
-            GraphicsError::ShaderCompilationFailed("No vertex shader provided".into())
-        })?;
-
-        // Create descriptor set layouts from material binding layouts
-        let binding_layouts = material.binding_layouts();
-        scratch_ds_layouts.clear();
-
-        for layout in binding_layouts {
-            let ds_layout = self.pipeline_manager.create_descriptor_set_layout(layout)?;
-            scratch_ds_layouts.push(ds_layout);
-        }
-
-        // Create pipeline layout
-        let pipeline_layout = self
-            .pipeline_manager
-            .create_pipeline_layout(&*scratch_ds_layouts)?;
-
-        // Create graphics pipeline
-        let pipeline = self.pipeline_manager.create_graphics_pipeline(
-            vertex_module,
-            fragment_module,
-            vertex_entry,
-            fragment_entry,
+        let result = self.pipeline_manager.get_or_create_pipeline(
+            cache_key,
+            material_arc,
             mesh,
-            pipeline_layout,
             scratch_color_formats,
             depth_format,
-            material.blend_state(),
             &self.dynamic_rendering,
         )?;
+
+        let pipeline = result.pipeline;
+        let pipeline_layout = result.pipeline_layout;
+
+        scratch_ds_layouts.clear();
+        scratch_ds_layouts.extend_from_slice(&result.descriptor_set_layouts);
 
         // Create and bind descriptor sets
         let material_instance = &draw_cmd.material;
@@ -1714,7 +1685,7 @@ impl VulkanBackend {
             let descriptor_set = self.pipeline_manager.allocate_descriptor_set(*ds_layout)?;
 
             // Get the corresponding binding layout to look up binding types
-            let binding_layout = binding_layouts.get(group_idx);
+            let binding_layout = material_arc.binding_layouts().get(group_idx);
 
             // Write descriptor set entries — reuse scratch Vecs across binding groups
             scratch_buffer_infos.clear();
@@ -1953,21 +1924,6 @@ impl VulkanBackend {
             unsafe {
                 self.device.cmd_set_scissor(cmd, 0, &[default_scissor]);
             }
-        }
-
-        // Note: In a real implementation, we would cache pipelines and descriptor sets
-        // and destroy them properly. For now, we'll leak them until a proper caching
-        // mechanism is implemented.
-        // TODO: Implement proper pipeline and descriptor set caching/cleanup
-
-        // Clean up shader modules (not cached yet)
-        unsafe {
-            self.device.destroy_shader_module(vertex_module, None);
-            if let Some(frag) = fragment_module {
-                self.device.destroy_shader_module(frag, None);
-            }
-            // Note: We're leaking the pipeline and descriptor set layouts here
-            // They should be cached and properly destroyed
         }
 
         Ok(())
