@@ -16,10 +16,14 @@ use std::sync::Arc;
 /// Vecs are cleared between draws but retain their capacity across frames.
 #[derive(Default)]
 struct WgpuEncoderScratch {
+    // Backing storage for types without Rust lifetimes:
     color_formats: Vec<Option<wgpu::TextureFormat>>,
     color_targets: Vec<Option<wgpu::ColorTargetState>>,
     bind_group_layout_entries: Vec<wgpu::BindGroupLayoutEntry>,
     vertex_attributes: Vec<Vec<wgpu::VertexAttribute>>,
+    // GPU handle Vecs (no lifetimes, safe to pool):
+    bind_group_layouts: Vec<wgpu::BindGroupLayout>,
+    bind_groups: Vec<wgpu::BindGroup>,
 }
 
 /// A texture view for a surface texture (swapchain image).

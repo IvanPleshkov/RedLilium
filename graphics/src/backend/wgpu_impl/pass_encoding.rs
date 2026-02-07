@@ -3,7 +3,7 @@
 use redlilium_core::profile_scope;
 
 use crate::error::GraphicsError;
-use crate::graph::{DrawCommand, Pass, RenderTargetConfig};
+use crate::graph::Pass;
 use crate::materials::ShaderStage;
 use crate::mesh::IndexFormat;
 
@@ -45,7 +45,6 @@ impl WgpuBackend {
 
         // Get render targets configuration
         let Some(render_targets) = pass.render_targets() else {
-            // No render targets configured, skip this pass
             log::trace!(
                 "Skipping graphics pass '{}': no render targets",
                 pass.name()
@@ -53,52 +52,42 @@ impl WgpuBackend {
             return Ok(());
         };
 
-        // Build color attachments
+        // Build color attachments (1 alloc per pass — acceptable)
         let color_attachments: Vec<Option<wgpu::RenderPassColorAttachment>> = render_targets
             .color_attachments
             .iter()
-            .map(|attachment| {
-                match &attachment.target {
-                    RenderTarget::Texture { texture, .. } => {
-                        let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() else {
-                            return None;
-                        };
-
-                        let load_op = convert_load_op(&attachment.load_op());
-                        let store_op = convert_store_op(&attachment.store_op());
-
+            .map(|attachment| match &attachment.target {
+                RenderTarget::Texture { texture, .. } => {
+                    let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() else {
+                        return None;
+                    };
+                    Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: convert_load_op(&attachment.load_op()),
+                            store: convert_store_op(&attachment.store_op()),
+                        },
+                        depth_slice: None,
+                    })
+                }
+                RenderTarget::Surface { view, .. } => {
+                    if let Some(surface_view) = view {
                         Some(wgpu::RenderPassColorAttachment {
-                            view,
+                            view: surface_view.view(),
                             resolve_target: None,
                             ops: wgpu::Operations {
-                                load: load_op,
-                                store: store_op,
+                                load: convert_load_op(&attachment.load_op()),
+                                store: convert_store_op(&attachment.store_op()),
                             },
                             depth_slice: None,
                         })
-                    }
-                    RenderTarget::Surface { view, .. } => {
-                        // Use the surface texture view if available
-                        if let Some(surface_view) = view {
-                            let load_op = convert_load_op(&attachment.load_op());
-                            let store_op = convert_store_op(&attachment.store_op());
-
-                            Some(wgpu::RenderPassColorAttachment {
-                                view: surface_view.view(),
-                                resolve_target: None,
-                                ops: wgpu::Operations {
-                                    load: load_op,
-                                    store: store_op,
-                                },
-                                depth_slice: None,
-                            })
-                        } else {
-                            log::warn!(
-                                "Pass '{}' has surface attachment but no texture view available",
-                                pass.name()
-                            );
-                            None
-                        }
+                    } else {
+                        log::warn!(
+                            "Pass '{}' has surface attachment but no texture view available",
+                            pass.name()
+                        );
+                        None
                     }
                 }
             })
@@ -113,7 +102,6 @@ impl WgpuBackend {
                     let GpuTexture::Wgpu { view, .. } = attachment.texture().gpu_handle() else {
                         panic!("Invalid depth texture GPU handle");
                     };
-
                     wgpu::RenderPassDepthStencilAttachment {
                         view,
                         depth_ops: Some(wgpu::Operations {
@@ -129,7 +117,7 @@ impl WgpuBackend {
         let has_depth = depth_stencil_attachment.is_some();
         if !has_valid_color && !has_depth {
             log::trace!(
-                "Skipping graphics pass '{}': no valid attachments (surface-only passes not yet supported)",
+                "Skipping graphics pass '{}': no valid attachments",
                 pass.name()
             );
             return Ok(());
@@ -145,325 +133,306 @@ impl WgpuBackend {
             multiview_mask: None,
         });
 
-        // Set viewport with [0, 1] depth range (wgpu/D3D convention)
-        // This is the standard coordinate system used by wgpu and matches the Vulkan backend.
+        // Set viewport
         if let Some((width, height)) = render_targets.dimensions() {
-            render_pass.set_viewport(
-                0.0,           // x
-                0.0,           // y
-                width as f32,  // width
-                height as f32, // height
-                0.0,           // min_depth (near plane)
-                1.0,           // max_depth (far plane)
-            );
-
-            // Set scissor to match render area
+            render_pass.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
             render_pass.set_scissor_rect(0, 0, width, height);
         }
 
-        // Encode draw commands
-        for draw_cmd in pass.draw_commands() {
-            self.encode_draw_command(&mut render_pass, draw_cmd, render_targets)?;
-        }
-
-        Ok(())
-    }
-
-    fn encode_draw_command<'a>(
-        &'a self,
-        render_pass: &mut wgpu::RenderPass<'a>,
-        draw_cmd: &'a DrawCommand,
-        render_targets: &RenderTargetConfig,
-    ) -> Result<(), GraphicsError> {
-        let material = draw_cmd.material.material();
-        let mesh = &draw_cmd.mesh;
-
-        // Take scratch buffers — reuses capacity from previous draws.
-        // Destructure to allow independent field borrows (MutexGuard prevents
-        // field-level borrowing, but destructuring into separate references does).
+        // Lock scratch ONCE for all draw commands in this pass.
+        // Destructure to allow independent field borrows.
         let scratch = &mut *self.encoder_scratch.lock().unwrap();
         let super::WgpuEncoderScratch {
             color_formats: scratch_color_formats,
             color_targets: scratch_color_targets,
             bind_group_layout_entries: scratch_bgl_entries,
             vertex_attributes: scratch_vertex_attrs,
+            bind_group_layouts: scratch_bind_group_layouts,
+            bind_groups: scratch_bind_groups,
         } = scratch;
 
-        // Get color target formats (using target.format() which works for both textures and surfaces)
-        scratch_color_formats.clear();
-        scratch_color_formats.extend(
-            render_targets
-                .color_attachments
-                .iter()
-                .map(|a| Some(convert_texture_format(a.target.format()))),
-        );
+        // Reusable Vec for types with Rust lifetimes (can't go in scratch).
+        // Allocated once, cleared per bind group — after the first draw, capacity is warm.
+        let mut bind_group_entries: Vec<wgpu::BindGroupEntry> = Vec::new();
 
-        // Get depth format if present (depth attachments are always textures, never surfaces)
-        let depth_format = render_targets
-            .depth_stencil_attachment
-            .as_ref()
-            .map(|a| convert_texture_format(a.target.format()));
+        // Encode each draw command (inlined to reuse all Vecs across draws)
+        for draw_cmd in pass.draw_commands() {
+            let material = draw_cmd.material.material();
+            let mesh = &draw_cmd.mesh;
 
-        // Create shader modules from material
-        let shaders = material.shaders();
-        let mut vertex_module = None;
-        let mut fragment_module = None;
-        let mut vertex_entry: &str = "vs_main";
-        let mut fragment_entry: &str = "fs_main";
+            // -- Color formats --
+            scratch_color_formats.clear();
+            scratch_color_formats.extend(
+                render_targets
+                    .color_attachments
+                    .iter()
+                    .map(|a| Some(convert_texture_format(a.target.format()))),
+            );
 
-        for shader in shaders {
-            let source = std::str::from_utf8(&shader.source).map_err(|e| {
-                GraphicsError::ShaderCompilationFailed(format!("Invalid UTF-8 in shader: {e}"))
-            })?;
+            let depth_format = render_targets
+                .depth_stencil_attachment
+                .as_ref()
+                .map(|a| convert_texture_format(a.target.format()));
 
-            let module = self
-                .device
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: material.label(),
-                    source: wgpu::ShaderSource::Wgsl(source.into()),
-                });
+            // -- Shader modules --
+            let shaders = material.shaders();
+            let mut vertex_module = None;
+            let mut fragment_module = None;
+            let mut vertex_entry: &str = "vs_main";
+            let mut fragment_entry: &str = "fs_main";
 
-            match shader.stage {
-                ShaderStage::Vertex => {
-                    vertex_module = Some(module);
-                    vertex_entry = &shader.entry_point;
+            for shader in shaders {
+                let source = std::str::from_utf8(&shader.source).map_err(|e| {
+                    GraphicsError::ShaderCompilationFailed(format!("Invalid UTF-8 in shader: {e}"))
+                })?;
+
+                let module = self
+                    .device
+                    .create_shader_module(wgpu::ShaderModuleDescriptor {
+                        label: material.label(),
+                        source: wgpu::ShaderSource::Wgsl(source.into()),
+                    });
+
+                match shader.stage {
+                    ShaderStage::Vertex => {
+                        vertex_module = Some(module);
+                        vertex_entry = &shader.entry_point;
+                    }
+                    ShaderStage::Fragment => {
+                        fragment_module = Some(module);
+                        fragment_entry = &shader.entry_point;
+                    }
+                    ShaderStage::Compute => {}
                 }
-                ShaderStage::Fragment => {
-                    fragment_module = Some(module);
-                    fragment_entry = &shader.entry_point;
-                }
-                ShaderStage::Compute => {}
             }
-        }
 
-        let vertex_module = vertex_module.ok_or_else(|| {
-            GraphicsError::ShaderCompilationFailed("No vertex shader provided".into())
-        })?;
+            let Some(vertex_module) = vertex_module else {
+                return Err(GraphicsError::ShaderCompilationFailed(
+                    "No vertex shader provided".into(),
+                ));
+            };
 
-        // Build vertex buffer layouts — collect attributes per buffer first, then
-        // build layouts referencing them (avoids Box::leak of attribute slices)
-        let layout = mesh.layout();
-        let buffer_count = layout.buffers.len();
+            // -- Vertex buffer layouts --
+            let layout = mesh.layout();
+            let buffer_count = layout.buffers.len();
 
-        // Reuse inner Vecs from scratch, adding more if needed
-        for attr_vec in scratch_vertex_attrs.iter_mut() {
-            attr_vec.clear();
-        }
-        scratch_vertex_attrs.resize_with(buffer_count, Vec::new);
-
-        for attr in &layout.attributes {
-            let idx = attr.buffer_index as usize;
-            if idx < buffer_count {
-                scratch_vertex_attrs[idx].push(wgpu::VertexAttribute {
-                    format: convert_vertex_format(attr.format),
-                    offset: attr.offset as u64,
-                    shader_location: attr.semantic.index(),
-                });
+            for attr_vec in scratch_vertex_attrs.iter_mut() {
+                attr_vec.clear();
             }
-        }
+            scratch_vertex_attrs.resize_with(buffer_count, Vec::new);
 
-        let vertex_buffer_layouts: Vec<wgpu::VertexBufferLayout> = layout
-            .buffers
-            .iter()
-            .enumerate()
-            .map(|(i, buffer)| wgpu::VertexBufferLayout {
-                array_stride: buffer.stride as u64,
-                step_mode: convert_step_mode(buffer.step_mode),
-                attributes: &scratch_vertex_attrs[i],
-            })
-            .collect();
-
-        // Create bind group layouts from material binding layouts
-        let binding_layouts = material.binding_layouts();
-        let mut bind_group_layouts: Vec<wgpu::BindGroupLayout> =
-            Vec::with_capacity(binding_layouts.len());
-
-        for bg_layout in binding_layouts {
-            scratch_bgl_entries.clear();
-            scratch_bgl_entries.extend(bg_layout.entries.iter().map(|entry| {
-                wgpu::BindGroupLayoutEntry {
-                    binding: entry.binding,
-                    visibility: convert_shader_stages(entry.visibility),
-                    ty: convert_binding_type(entry.binding_type),
-                    count: None,
-                }
-            }));
-
-            bind_group_layouts.push(self.device.create_bind_group_layout(
-                &wgpu::BindGroupLayoutDescriptor {
-                    label: bg_layout.label.as_deref(),
-                    entries: scratch_bgl_entries,
-                },
-            ));
-        }
-
-        // Create pipeline layout — build refs inline, no separate Vec needed
-        let bind_group_layout_refs: Vec<&wgpu::BindGroupLayout> =
-            bind_group_layouts.iter().collect();
-
-        let pipeline_layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Draw Pipeline Layout"),
-                bind_group_layouts: &bind_group_layout_refs,
-                immediate_size: 0,
-            });
-
-        // Create bind groups from material instance binding groups
-        // Reuse a single entries Vec across iterations
-        let material_instance = &draw_cmd.material;
-        let mut bind_group_entries: Vec<wgpu::BindGroupEntry<'a>> = Vec::new();
-        let mut bind_groups: Vec<wgpu::BindGroup> = Vec::with_capacity(bind_group_layouts.len());
-
-        for (binding_group, bg_layout) in material_instance
-            .binding_groups()
-            .iter()
-            .zip(bind_group_layouts.iter())
-        {
-            bind_group_entries.clear();
-            for entry in &binding_group.entries {
-                let resource = match &entry.resource {
-                    crate::materials::BoundResource::Buffer(buffer) => {
-                        if let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() {
-                            Some(wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: wgpu_buffer,
-                                offset: 0,
-                                size: None,
-                            }))
-                        } else {
-                            None
-                        }
-                    }
-                    crate::materials::BoundResource::Texture(texture) => {
-                        if let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() {
-                            Some(wgpu::BindingResource::TextureView(view))
-                        } else {
-                            None
-                        }
-                    }
-                    crate::materials::BoundResource::Sampler(sampler) => {
-                        if let crate::backend::GpuSampler::Wgpu(wgpu_sampler) = sampler.gpu_handle()
-                        {
-                            Some(wgpu::BindingResource::Sampler(wgpu_sampler))
-                        } else {
-                            None
-                        }
-                    }
-                    crate::materials::BoundResource::CombinedTextureSampler { texture, .. } => {
-                        // For combined, just use the texture view
-                        if let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() {
-                            Some(wgpu::BindingResource::TextureView(view))
-                        } else {
-                            None
-                        }
-                    }
-                };
-                if let Some(r) = resource {
-                    bind_group_entries.push(wgpu::BindGroupEntry {
-                        binding: entry.binding,
-                        resource: r,
+            for attr in &layout.attributes {
+                let idx = attr.buffer_index as usize;
+                if idx < buffer_count {
+                    scratch_vertex_attrs[idx].push(wgpu::VertexAttribute {
+                        format: convert_vertex_format(attr.format),
+                        offset: attr.offset as u64,
+                        shader_location: attr.semantic.index(),
                     });
                 }
             }
 
-            bind_groups.push(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: binding_group.label.as_deref(),
-                layout: bg_layout,
-                entries: &bind_group_entries,
-            }));
-        }
+            // -- Bind group layouts --
+            let binding_layouts = material.binding_layouts();
+            scratch_bind_group_layouts.clear();
 
-        // Build color targets with material's blend state
-        let wgpu_blend_state = material
-            .blend_state()
-            .map(convert_blend_state)
-            .unwrap_or(wgpu::BlendState::REPLACE);
+            for bg_layout in binding_layouts {
+                scratch_bgl_entries.clear();
+                scratch_bgl_entries.extend(bg_layout.entries.iter().map(|entry| {
+                    wgpu::BindGroupLayoutEntry {
+                        binding: entry.binding,
+                        visibility: convert_shader_stages(entry.visibility),
+                        ty: convert_binding_type(entry.binding_type),
+                        count: None,
+                    }
+                }));
 
-        scratch_color_targets.clear();
-        scratch_color_targets.extend(scratch_color_formats.iter().map(|format| {
-            format.map(|f| wgpu::ColorTargetState {
-                format: f,
-                blend: Some(wgpu_blend_state),
-                write_mask: wgpu::ColorWrites::ALL,
-            })
-        }));
-
-        // Create render pipeline
-        let pipeline = self
-            .device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: material.label(),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &vertex_module,
-                    entry_point: Some(vertex_entry),
-                    buffers: &vertex_buffer_layouts,
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                },
-                fragment: fragment_module.as_ref().map(|module| wgpu::FragmentState {
-                    module,
-                    entry_point: Some(fragment_entry),
-                    targets: scratch_color_targets,
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: convert_topology(mesh.topology()),
-                    strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: None,
-                    polygon_mode: wgpu::PolygonMode::Fill,
-                    unclipped_depth: false,
-                    conservative: false,
-                },
-                depth_stencil: depth_format.map(|format| wgpu::DepthStencilState {
-                    format,
-                    depth_write_enabled: true,
-                    depth_compare: wgpu::CompareFunction::LessEqual,
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            });
-
-        // Set the pipeline
-        render_pass.set_pipeline(&pipeline);
-
-        // Bind bind groups
-        for (index, bind_group) in bind_groups.iter().enumerate() {
-            render_pass.set_bind_group(index as u32, bind_group, &[]);
-        }
-
-        // Bind vertex buffers
-        for (slot, buffer) in mesh.vertex_buffers().iter().enumerate() {
-            if let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() {
-                render_pass.set_vertex_buffer(slot as u32, wgpu_buffer.slice(..));
+                scratch_bind_group_layouts.push(self.device.create_bind_group_layout(
+                    &wgpu::BindGroupLayoutDescriptor {
+                        label: bg_layout.label.as_deref(),
+                        entries: scratch_bgl_entries,
+                    },
+                ));
             }
-        }
 
-        // Issue draw call
-        if mesh.is_indexed() {
-            // Bind index buffer
-            if let Some(index_buffer) = mesh.index_buffer()
-                && let GpuBuffer::Wgpu(wgpu_buffer) = index_buffer.gpu_handle()
+            // -- Pipeline layout (scoped refs to release borrow before bind group creation) --
+            let pipeline_layout = {
+                let refs: Vec<&wgpu::BindGroupLayout> = scratch_bind_group_layouts.iter().collect();
+                self.device
+                    .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("Draw Pipeline Layout"),
+                        bind_group_layouts: &refs,
+                        immediate_size: 0,
+                    })
+            };
+
+            // -- Bind groups --
+            let material_instance = &draw_cmd.material;
+            scratch_bind_groups.clear();
+
+            for (binding_group, bg_layout) in material_instance
+                .binding_groups()
+                .iter()
+                .zip(scratch_bind_group_layouts.iter())
             {
-                let index_format = match mesh.index_format().unwrap_or(IndexFormat::Uint16) {
-                    IndexFormat::Uint16 => wgpu::IndexFormat::Uint16,
-                    IndexFormat::Uint32 => wgpu::IndexFormat::Uint32,
-                };
-                render_pass.set_index_buffer(wgpu_buffer.slice(..), index_format);
+                bind_group_entries.clear();
+                for entry in &binding_group.entries {
+                    let resource = match &entry.resource {
+                        crate::materials::BoundResource::Buffer(buffer) => {
+                            if let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() {
+                                Some(wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                    buffer: wgpu_buffer,
+                                    offset: 0,
+                                    size: None,
+                                }))
+                            } else {
+                                None
+                            }
+                        }
+                        crate::materials::BoundResource::Texture(texture) => {
+                            if let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() {
+                                Some(wgpu::BindingResource::TextureView(view))
+                            } else {
+                                None
+                            }
+                        }
+                        crate::materials::BoundResource::Sampler(sampler) => {
+                            if let crate::backend::GpuSampler::Wgpu(wgpu_sampler) =
+                                sampler.gpu_handle()
+                            {
+                                Some(wgpu::BindingResource::Sampler(wgpu_sampler))
+                            } else {
+                                None
+                            }
+                        }
+                        crate::materials::BoundResource::CombinedTextureSampler {
+                            texture, ..
+                        } => {
+                            if let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() {
+                                Some(wgpu::BindingResource::TextureView(view))
+                            } else {
+                                None
+                            }
+                        }
+                    };
+                    if let Some(r) = resource {
+                        bind_group_entries.push(wgpu::BindGroupEntry {
+                            binding: entry.binding,
+                            resource: r,
+                        });
+                    }
+                }
+
+                scratch_bind_groups.push(self.device.create_bind_group(
+                    &wgpu::BindGroupDescriptor {
+                        label: binding_group.label.as_deref(),
+                        layout: bg_layout,
+                        entries: &bind_group_entries,
+                    },
+                ));
             }
-            render_pass.draw_indexed(
-                0..mesh.index_count(),
-                0,
-                draw_cmd.first_instance..(draw_cmd.first_instance + draw_cmd.instance_count),
-            );
-        } else {
-            render_pass.draw(
-                0..mesh.vertex_count(),
-                draw_cmd.first_instance..(draw_cmd.first_instance + draw_cmd.instance_count),
-            );
+
+            // -- Color targets --
+            let wgpu_blend_state = material
+                .blend_state()
+                .map(convert_blend_state)
+                .unwrap_or(wgpu::BlendState::REPLACE);
+
+            scratch_color_targets.clear();
+            scratch_color_targets.extend(scratch_color_formats.iter().map(|format| {
+                format.map(|f| wgpu::ColorTargetState {
+                    format: f,
+                    blend: Some(wgpu_blend_state),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })
+            }));
+
+            // -- Create render pipeline (scoped vertex_buffer_layouts to release borrow
+            //    of scratch_vertex_attrs before next iteration mutates it) --
+            let pipeline = {
+                let vertex_buffer_layouts: Vec<wgpu::VertexBufferLayout> = layout
+                    .buffers
+                    .iter()
+                    .enumerate()
+                    .map(|(i, buffer)| wgpu::VertexBufferLayout {
+                        array_stride: buffer.stride as u64,
+                        step_mode: convert_step_mode(buffer.step_mode),
+                        attributes: &scratch_vertex_attrs[i],
+                    })
+                    .collect();
+
+                self.device
+                    .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: material.label(),
+                        layout: Some(&pipeline_layout),
+                        vertex: wgpu::VertexState {
+                            module: &vertex_module,
+                            entry_point: Some(vertex_entry),
+                            buffers: &vertex_buffer_layouts,
+                            compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        },
+                        fragment: fragment_module.as_ref().map(|module| wgpu::FragmentState {
+                            module,
+                            entry_point: Some(fragment_entry),
+                            targets: scratch_color_targets,
+                            compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        }),
+                        primitive: wgpu::PrimitiveState {
+                            topology: convert_topology(mesh.topology()),
+                            strip_index_format: None,
+                            front_face: wgpu::FrontFace::Ccw,
+                            cull_mode: None,
+                            polygon_mode: wgpu::PolygonMode::Fill,
+                            unclipped_depth: false,
+                            conservative: false,
+                        },
+                        depth_stencil: depth_format.map(|format| wgpu::DepthStencilState {
+                            format,
+                            depth_write_enabled: true,
+                            depth_compare: wgpu::CompareFunction::LessEqual,
+                            stencil: wgpu::StencilState::default(),
+                            bias: wgpu::DepthBiasState::default(),
+                        }),
+                        multisample: wgpu::MultisampleState::default(),
+                        multiview_mask: None,
+                        cache: None,
+                    })
+            };
+
+            // -- Record into render pass --
+            render_pass.set_pipeline(&pipeline);
+
+            for (index, bind_group) in scratch_bind_groups.iter().enumerate() {
+                render_pass.set_bind_group(index as u32, bind_group, &[]);
+            }
+
+            for (slot, buffer) in mesh.vertex_buffers().iter().enumerate() {
+                if let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() {
+                    render_pass.set_vertex_buffer(slot as u32, wgpu_buffer.slice(..));
+                }
+            }
+
+            if mesh.is_indexed() {
+                if let Some(index_buffer) = mesh.index_buffer()
+                    && let GpuBuffer::Wgpu(wgpu_buffer) = index_buffer.gpu_handle()
+                {
+                    let index_format = match mesh.index_format().unwrap_or(IndexFormat::Uint16) {
+                        IndexFormat::Uint16 => wgpu::IndexFormat::Uint16,
+                        IndexFormat::Uint32 => wgpu::IndexFormat::Uint32,
+                    };
+                    render_pass.set_index_buffer(wgpu_buffer.slice(..), index_format);
+                }
+                render_pass.draw_indexed(
+                    0..mesh.index_count(),
+                    0,
+                    draw_cmd.first_instance..(draw_cmd.first_instance + draw_cmd.instance_count),
+                );
+            } else {
+                render_pass.draw(
+                    0..mesh.vertex_count(),
+                    draw_cmd.first_instance..(draw_cmd.first_instance + draw_cmd.instance_count),
+                );
+            }
         }
 
         Ok(())
@@ -526,14 +495,12 @@ impl WgpuBackend {
                 let block_size = format.block_size();
 
                 for region in regions {
-                    // Compute bytes_per_row if not specified (and align to 256 bytes as required by wgpu)
                     let bytes_per_row =
                         region
                             .buffer_layout
                             .bytes_per_row
                             .or(if region.extent.height > 1 {
                                 let unpadded = region.extent.width * block_size;
-                                // wgpu requires 256-byte alignment for bytes_per_row
                                 Some((unpadded + 255) & !255)
                             } else {
                                 None
@@ -592,14 +559,12 @@ impl WgpuBackend {
                 let block_size = format.block_size();
 
                 for region in regions {
-                    // Compute bytes_per_row if not specified (and align to 256 bytes as required by wgpu)
                     let bytes_per_row =
                         region
                             .buffer_layout
                             .bytes_per_row
                             .or(if region.extent.height > 1 {
                                 let unpadded = region.extent.width * block_size;
-                                // wgpu requires 256-byte alignment for bytes_per_row
                                 Some((unpadded + 255) & !255)
                             } else {
                                 None
