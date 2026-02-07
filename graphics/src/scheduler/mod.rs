@@ -53,7 +53,7 @@ pub use sync::{Fence, FenceStatus, Semaphore};
 use std::sync::Arc;
 
 use crate::device::GraphicsDevice;
-use crate::graph::{CompiledGraph, RenderGraph};
+use crate::graph::RenderGraph;
 use crate::resources::{RingAllocation, RingBuffer};
 use redlilium_core::profiling::profile_scope;
 
@@ -369,66 +369,6 @@ impl FrameSchedule {
                 .map(|s| s.id().to_string())
                 .collect::<Vec<_>>()
                 .join(",")
-        );
-
-        let handle = GraphHandle::new(self.submitted.len() as u32);
-        self.submitted.push(SubmittedGraph {
-            name,
-            completion,
-            waited_for: wait_for.to_vec(),
-        });
-
-        // Store graph for recycling at end of frame
-        self.submitted_graphs.push(graph);
-
-        handle
-    }
-
-    /// Submit a pre-compiled graph for immediate execution.
-    ///
-    /// This is useful when you've already compiled the graph and want to avoid
-    /// recompilation. Takes ownership of the graph for pooling.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - Debug name for this graph submission
-    /// * `graph` - The render graph (ownership transferred for pooling)
-    /// * `compiled` - The pre-compiled graph
-    /// * `wait_for` - Graphs that must complete before this one starts
-    pub fn submit_compiled(
-        &mut self,
-        name: impl Into<String>,
-        graph: RenderGraph,
-        compiled: &CompiledGraph,
-        wait_for: &[GraphHandle],
-    ) -> GraphHandle {
-        let name = name.into();
-        profile_scope!("submit_compiled");
-
-        // Validate wait_for handles
-        for &handle in wait_for {
-            assert!(
-                handle.index() < self.submitted.len(),
-                "Invalid dependency handle"
-            );
-        }
-
-        // Create completion semaphore for this graph
-        let completion = Semaphore::new(self.next_semaphore_id());
-
-        // Actually execute the graph on the GPU if we have a device
-        if let Some(device) = &self.device {
-            profile_scope!("execute_graph");
-            let backend = device.instance().backend();
-            if let Err(e) = backend.execute_graph(&graph, compiled, None) {
-                log::error!("Failed to execute graph '{}': {}", name, e);
-            }
-        }
-
-        log::trace!(
-            "Submitted compiled graph '{}' (waiting for {} dependencies)",
-            name,
-            wait_for.len()
         );
 
         let handle = GraphHandle::new(self.submitted.len() as u32);
