@@ -15,8 +15,13 @@
 
 mod camera;
 mod demo;
+mod gbuffer;
 mod ibl;
+mod ibl_textures;
+mod resolve_pass;
 mod resources;
+mod skybox_pass;
+mod sphere_grid;
 mod ui;
 mod uniforms;
 
