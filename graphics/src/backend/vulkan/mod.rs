@@ -316,6 +316,10 @@ impl VulkanBackend {
 
         // Advance layout tracker to new frame (resets layout state)
         self.layout_tracker.lock().advance_frame();
+
+        // Reset descriptor pool — safe because the fence wait guarantees
+        // the GPU is done with all descriptor sets from this frame slot.
+        let _ = self.pipeline_manager.reset_descriptor_pool();
     }
 
     /// Get the layout tracker for direct access (for testing).
@@ -845,11 +849,6 @@ impl VulkanBackend {
     ) -> Result<(), GraphicsError> {
         profile_scope!("vulkan_execute_graph");
 
-        // Reset descriptor pool at the start of each graph execution.
-        // When async (fence provided), this relies on the frame pipeline ensuring
-        // proper synchronization before reusing descriptor sets.
-        self.pipeline_manager.reset_descriptor_pool()?;
-
         // Allocate command buffer
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(self.command_pool)
@@ -1088,8 +1087,9 @@ impl VulkanBackend {
 
     /// Write data to a texture.
     ///
-    /// Uses a staging buffer to upload texture data. This creates a temporary
-    /// command buffer, performs the copy, and waits for completion.
+    /// Uses a staging buffer to upload texture data. The staging buffer and
+    /// command buffer are submitted asynchronously and cleaned up via deferred
+    /// destruction after the GPU finishes.
     ///
     /// Returns an error if the texture write fails.
     pub fn write_texture(
@@ -1341,7 +1341,7 @@ impl VulkanBackend {
             )));
         }
 
-        // Submit command buffer
+        // Submit command buffer (no fence, no wait — staging resources are deferred)
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
 
         let submit_result = unsafe {
@@ -1349,29 +1349,38 @@ impl VulkanBackend {
                 .queue_submit(self.graphics_queue, &[submit_info], vk::Fence::null())
         };
 
-        // Wait for completion regardless of submit result
-        let wait_result = unsafe { self.device.queue_wait_idle(self.graphics_queue) };
+        if let Err(e) = submit_result {
+            // On submit failure, clean up immediately since nothing was submitted
+            unsafe {
+                self.device
+                    .free_command_buffers(self.command_pool, &cmd_buffers);
+            }
+            {
+                let mut allocator = self.allocator.lock();
+                let _ = allocator.free(staging_allocation);
+            }
+            unsafe {
+                self.device.destroy_buffer(staging_buffer, None);
+            }
+            return Err(GraphicsError::Internal(format!(
+                "Failed to submit command buffer: {:?}",
+                e
+            )));
+        }
 
-        // Cleanup (always performed)
-        unsafe {
-            self.device
-                .free_command_buffers(self.command_pool, &cmd_buffers);
-        }
-        {
-            let mut allocator = self.allocator.lock();
-            let _ = allocator.free(staging_allocation);
-        }
-        unsafe {
-            self.device.destroy_buffer(staging_buffer, None);
-        }
-
-        // Check results after cleanup
-        submit_result.map_err(|e| {
-            GraphicsError::Internal(format!("Failed to submit command buffer: {:?}", e))
-        })?;
-        wait_result.map_err(|e| {
-            GraphicsError::Internal(format!("Failed to wait for queue idle: {:?}", e))
-        })?;
+        // Defer destruction of staging resources until the GPU is done.
+        // The deferred destructor holds them for MAX_FRAMES_IN_FLIGHT frames.
+        self.deferred_destructor
+            .queue(DeferredResource::CommandBuffers {
+                device: self.device.clone(),
+                command_pool: self.command_pool,
+                buffers: cmd_buffers,
+            });
+        self.deferred_destructor.queue(DeferredResource::Buffer {
+            device: self.device.clone(),
+            buffer: staging_buffer,
+            allocation: Some(staging_allocation),
+        });
 
         Ok(())
     }
