@@ -707,10 +707,6 @@ impl GraphicsPass {
                     RenderTarget::Texture { texture, .. } => {
                         usage
                             .add_texture(Arc::clone(texture), TextureAccessMode::RenderTargetWrite);
-                        // LoadOp::Load reads existing contents before writing
-                        if matches!(color.load_op, LoadOp::Load) {
-                            usage.add_texture(Arc::clone(texture), TextureAccessMode::ShaderRead);
-                        }
                     }
                     RenderTarget::Surface { .. } => {
                         let access = if matches!(color.load_op, LoadOp::Load) {

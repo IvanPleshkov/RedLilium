@@ -1133,7 +1133,7 @@ impl AppHandler for PbrIblDemo {
             resolve_pass.add_draw(mesh.clone(), material_instance.clone());
         }
 
-        graph.add_graphics_pass(resolve_pass);
+        let resolve_handle = graph.add_graphics_pass(resolve_pass);
 
         // === Pass 4: Egui Pass ===
         if let Some(egui) = &mut self.egui_controller {
@@ -1144,7 +1144,11 @@ impl AppHandler for PbrIblDemo {
 
             egui.begin_frame(elapsed);
             if let Some(egui_pass) = egui.end_frame(&render_target, width, height) {
-                graph.add_graphics_pass(egui_pass);
+                let egui_handle = graph.add_graphics_pass(egui_pass);
+                // Both resolve and egui use LoadOp::Load on the surface (read-modify-write).
+                // The auto-dependency system can't infer ordering between two LoadOp::Load
+                // passes on the same resource, so we must specify it explicitly.
+                graph.add_dependency(egui_handle, resolve_handle);
             }
         }
 

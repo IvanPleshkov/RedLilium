@@ -313,18 +313,18 @@ impl FrameSchedule {
             .collect();
 
         // Compile and execute the graph on the GPU
-        let compile_result = graph
-            .compile(RenderGraphCompilationMode::Strict)
-            .map(|_| ());
-        if compile_result.is_ok() {
-            profile_scope!("execute_graph");
-            let compiled = graph.compiled().unwrap();
-            let backend = self.device.instance().backend();
-            if let Err(e) = backend.execute_graph(&graph, compiled, None) {
-                log::error!("Failed to execute graph '{}': {}", name, e);
+        match graph.compile(RenderGraphCompilationMode::Strict) {
+            Ok(_) => {
+                profile_scope!("execute_graph");
+                let compiled = graph.compiled().unwrap();
+                let backend = self.device.instance().backend();
+                if let Err(e) = backend.execute_graph(&graph, compiled, None) {
+                    log::error!("Failed to execute graph '{}': {}", name, e);
+                }
             }
-        } else {
-            log::error!("Failed to compile graph '{}'", name);
+            Err(e) => {
+                log::error!("Failed to compile graph '{}': {}", name, e);
+            }
         }
 
         let handle = GraphHandle::new(self.submitted.len() as u32);
@@ -405,17 +405,19 @@ impl FrameSchedule {
         let fence = Fence::new_gpu(instance);
 
         // Compile first (may use cached result), then access via immutable borrow
-        let compiled_ok = graph.compile(RenderGraphCompilationMode::Strict).is_ok();
-        if compiled_ok {
-            profile_scope!("execute_present");
-            let compiled = graph.compiled().unwrap();
-            let backend = self.device.instance().backend();
-            // Pass the GPU fence - execute_graph returns immediately (async)
-            if let Err(e) = backend.execute_graph(&graph, compiled, fence.gpu_fence()) {
-                log::error!("Failed to execute present graph '{}': {}", name, e);
+        match graph.compile(RenderGraphCompilationMode::Strict) {
+            Ok(_) => {
+                profile_scope!("execute_present");
+                let compiled = graph.compiled().unwrap();
+                let backend = self.device.instance().backend();
+                // Pass the GPU fence - execute_graph returns immediately (async)
+                if let Err(e) = backend.execute_graph(&graph, compiled, fence.gpu_fence()) {
+                    log::error!("Failed to execute present graph '{}': {}", name, e);
+                }
             }
-        } else {
-            log::error!("Failed to compile present graph '{}'", name);
+            Err(e) => {
+                log::error!("Failed to compile present graph '{}': {}", name, e);
+            }
         }
 
         self.submitted.push(SubmittedGraph {

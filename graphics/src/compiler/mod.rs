@@ -40,7 +40,7 @@ use std::sync::Arc;
 use redlilium_core::pool::Poolable;
 use redlilium_core::profiling::{profile_function, profile_scope};
 
-use crate::graph::resource_usage::PassResourceUsage;
+use crate::graph::resource_usage::{PassResourceUsage, SurfaceAccess};
 use crate::graph::{Pass, PassHandle, RenderGraph};
 
 /// Controls how the compiler handles ambiguous pass ordering.
@@ -323,14 +323,18 @@ fn analyze_resource_conflict(a: &PassResourceUsage, b: &PassResourceUsage) -> (b
 
     // Check surface conflicts (swapchain is a single shared resource)
     if let (Some(sa), Some(sb)) = (a.surface_access, b.surface_access) {
-        if sa.is_write() && sb.is_read() {
+        // Both access the surface → always WAW (both variants write)
+        has_waw = true;
+
+        // Direction: Write (Clear) → ReadWrite (Load).
+        // A pass that loads the surface should come after one that clears it.
+        // ReadWrite + ReadWrite is WAW only: both load-modify-store,
+        // the ordering is ambiguous without explicit dependency.
+        if matches!(sa, SurfaceAccess::Write) && sb.is_read() {
             a_before_b = true;
         }
-        if sb.is_write() && sa.is_read() {
+        if matches!(sb, SurfaceAccess::Write) && sa.is_read() {
             b_before_a = true;
-        }
-        if sa.is_write() && sb.is_write() {
-            has_waw = true;
         }
     }
 
