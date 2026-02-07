@@ -214,9 +214,10 @@ impl Fence {
         }
     }
 
-    /// Signal the fence (for CPU-only/testing mode).
+    /// Signal the fence (for testing mode).
     ///
     /// For GPU-backed fences, the GPU signals automatically when work completes.
+    #[cfg(test)]
     pub(crate) fn signal(&self) {
         match &self.inner {
             FenceInner::Dummy { signaled } => {

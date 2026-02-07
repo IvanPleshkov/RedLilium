@@ -545,7 +545,7 @@ impl GraphicsDevice {
             "GraphicsDevice: created pipeline with {} frames in flight",
             frames_in_flight
         );
-        FramePipeline::new_with_device(Arc::clone(self), frames_in_flight)
+        FramePipeline::new(Arc::clone(self), frames_in_flight)
     }
 
     /// Get the number of live buffers created by this device.

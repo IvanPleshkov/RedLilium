@@ -105,7 +105,7 @@ use redlilium_core::profiling::{frame_mark, profile_scope};
 /// thread (typically the main/render thread).
 pub struct FramePipeline {
     /// Device for executing graphs.
-    device: Option<Arc<GraphicsDevice>>,
+    device: Arc<GraphicsDevice>,
 
     /// Fences for each frame slot. `None` if slot hasn't been used yet.
     frame_fences: Vec<Option<Fence>>,
@@ -131,7 +131,7 @@ pub struct FramePipeline {
 impl std::fmt::Debug for FramePipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FramePipeline")
-            .field("device", &self.device.as_ref().map(|d| d.name()))
+            .field("device", &self.device.name())
             .field("frame_fences", &self.frame_fences)
             .field("current_slot", &self.current_slot)
             .field("frames_in_flight", &self.frames_in_flight)
@@ -142,34 +142,7 @@ impl std::fmt::Debug for FramePipeline {
 }
 
 impl FramePipeline {
-    /// Create a new frame pipeline without a device (for testing).
-    ///
-    /// This is called internally by [`GraphicsDevice::create_pipeline`](crate::device::GraphicsDevice::create_pipeline).
-    ///
-    /// # Arguments
-    ///
-    /// * `frames_in_flight` - Number of frames that can be in flight simultaneously.
-    ///   Typically 2 or 3. Must be at least 1.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `frames_in_flight` is 0.
-    #[allow(dead_code)]
-    pub(crate) fn new(frames_in_flight: usize) -> Self {
-        assert!(frames_in_flight > 0, "frames_in_flight must be at least 1");
-
-        Self {
-            device: None,
-            frame_fences: (0..frames_in_flight).map(|_| None).collect(),
-            current_slot: 0,
-            frames_in_flight,
-            frame_count: 0,
-            ring_buffers: Vec::new(),
-            graph_pool: Vec::new(),
-        }
-    }
-
-    /// Create a new frame pipeline with a device for GPU execution.
+    /// Create a new frame pipeline.
     ///
     /// This is called internally by [`GraphicsDevice::create_pipeline`](crate::device::GraphicsDevice::create_pipeline).
     ///
@@ -177,15 +150,16 @@ impl FramePipeline {
     ///
     /// * `device` - The graphics device for executing graphs.
     /// * `frames_in_flight` - Number of frames that can be in flight simultaneously.
+    ///   Typically 2 or 3. Must be at least 1.
     ///
     /// # Panics
     ///
     /// Panics if `frames_in_flight` is 0.
-    pub(crate) fn new_with_device(device: Arc<GraphicsDevice>, frames_in_flight: usize) -> Self {
+    pub(crate) fn new(device: Arc<GraphicsDevice>, frames_in_flight: usize) -> Self {
         assert!(frames_in_flight > 0, "frames_in_flight must be at least 1");
 
         Self {
-            device: Some(device),
+            device,
             frame_fences: (0..frames_in_flight).map(|_| None).collect(),
             current_slot: 0,
             frames_in_flight,
@@ -226,9 +200,9 @@ impl FramePipeline {
 
         // Now that the GPU has finished with the old frame, advance the deferred
         // destruction system to clean up resources that were dropped
-        if let Some(device) = &self.device {
+        {
             profile_scope!("advance_deferred");
-            device.advance_deferred_destruction();
+            self.device.advance_deferred_destruction();
         }
 
         self.frame_count += 1;
@@ -252,16 +226,12 @@ impl FramePipeline {
         // Take graph pool for this frame
         let graph_pool = std::mem::take(&mut self.graph_pool);
 
-        // Create schedule with device if available
-        match &self.device {
-            Some(device) => FrameSchedule::new_with_device(
-                device.clone(),
-                self.current_slot,
-                ring_buffer,
-                graph_pool,
-            ),
-            None => FrameSchedule::new_with_ring_buffer(ring_buffer),
-        }
+        FrameSchedule::new(
+            self.device.clone(),
+            self.current_slot,
+            ring_buffer,
+            graph_pool,
+        )
     }
 
     /// Begin a new frame with a timeout.
@@ -305,9 +275,9 @@ impl FramePipeline {
 
         // Now that the GPU has finished with the old frame, advance the deferred
         // destruction system to clean up resources that were dropped
-        if let Some(device) = &self.device {
+        {
             profile_scope!("advance_deferred");
-            device.advance_deferred_destruction();
+            self.device.advance_deferred_destruction();
         }
 
         self.frame_count += 1;
@@ -331,18 +301,12 @@ impl FramePipeline {
         // Take graph pool for this frame
         let graph_pool = std::mem::take(&mut self.graph_pool);
 
-        // Create schedule with device if available
-        let schedule = match &self.device {
-            Some(device) => FrameSchedule::new_with_device(
-                device.clone(),
-                self.current_slot,
-                ring_buffer,
-                graph_pool,
-            ),
-            None => FrameSchedule::new_with_ring_buffer(ring_buffer),
-        };
-
-        Some(schedule)
+        Some(FrameSchedule::new(
+            self.device.clone(),
+            self.current_slot,
+            ring_buffer,
+            graph_pool,
+        ))
     }
 
     /// End the current frame.
@@ -597,15 +561,11 @@ impl FramePipeline {
         label: &str,
         alignment: u64,
     ) -> Result<(), GraphicsError> {
-        let device = self
-            .device
-            .as_ref()
-            .ok_or_else(|| GraphicsError::InvalidParameter("No device configured".to_string()))?;
-
         self.ring_buffers = Vec::with_capacity(self.frames_in_flight);
         for slot in 0..self.frames_in_flight {
             let slot_label = format!("{}_slot{}", label, slot);
-            let ring = RingBuffer::with_alignment(device, capacity, usage, &slot_label, alignment)?;
+            let ring =
+                RingBuffer::with_alignment(&self.device, capacity, usage, &slot_label, alignment)?;
             self.ring_buffers.push(Some(ring));
         }
 
@@ -668,6 +628,7 @@ impl FramePipeline {
 mod tests {
     use super::*;
     use crate::graph::{GraphicsPass, RenderGraph};
+    use crate::instance::GraphicsInstance;
 
     fn make_test_graph(name: &str) -> RenderGraph {
         let mut graph = RenderGraph::new();
@@ -675,23 +636,23 @@ mod tests {
         graph
     }
 
+    fn make_test_pipeline(frames_in_flight: usize) -> FramePipeline {
+        let instance = GraphicsInstance::new().unwrap();
+        let device = instance.create_device().unwrap();
+        FramePipeline::new(device, frames_in_flight)
+    }
+
     #[test]
     fn test_new() {
-        let pipeline = FramePipeline::new(2);
+        let pipeline = make_test_pipeline(2);
         assert_eq!(pipeline.frames_in_flight(), 2);
         assert_eq!(pipeline.current_slot(), 0);
         assert_eq!(pipeline.frame_count(), 0);
     }
 
     #[test]
-    #[should_panic(expected = "frames_in_flight must be at least 1")]
-    fn test_zero_frames_panics() {
-        FramePipeline::new(0);
-    }
-
-    #[test]
     fn test_begin_frame_returns_schedule() {
-        let mut pipeline = FramePipeline::new(2);
+        let mut pipeline = make_test_pipeline(2);
         let schedule = pipeline.begin_frame();
 
         assert_eq!(pipeline.frame_count(), 1);
@@ -701,7 +662,7 @@ mod tests {
 
     #[test]
     fn test_end_frame_advances_slot() {
-        let mut pipeline = FramePipeline::new(3);
+        let mut pipeline = make_test_pipeline(3);
         assert_eq!(pipeline.current_slot(), 0);
 
         let mut schedule = pipeline.begin_frame();
@@ -727,27 +688,27 @@ mod tests {
 
     #[test]
     fn test_is_slot_ready_unused() {
-        let pipeline = FramePipeline::new(2);
+        let pipeline = make_test_pipeline(2);
         assert!(pipeline.is_slot_ready(0));
         assert!(pipeline.is_slot_ready(1));
     }
 
     #[test]
     fn test_is_idle_initial() {
-        let pipeline = FramePipeline::new(2);
+        let pipeline = make_test_pipeline(2);
         assert!(pipeline.is_idle());
     }
 
     #[test]
     fn test_wait_idle_no_fences() {
-        let pipeline = FramePipeline::new(2);
+        let pipeline = make_test_pipeline(2);
         // Should return immediately when no fences
         pipeline.wait_idle();
     }
 
     #[test]
     fn test_frame_lifecycle() {
-        let mut pipeline = FramePipeline::new(2);
+        let mut pipeline = make_test_pipeline(2);
 
         // Frame 0
         let mut schedule = pipeline.begin_frame();
@@ -778,7 +739,7 @@ mod tests {
 
     #[test]
     fn test_begin_frame_timeout_ready() {
-        let mut pipeline = FramePipeline::new(2);
+        let mut pipeline = make_test_pipeline(2);
 
         // Should succeed immediately (no fence to wait on)
         let schedule = pipeline.begin_frame_timeout(Duration::from_millis(1));
@@ -788,7 +749,7 @@ mod tests {
 
     #[test]
     fn test_wait_idle_timeout_ready() {
-        let pipeline = FramePipeline::new(2);
+        let pipeline = make_test_pipeline(2);
 
         // Should succeed immediately (no fences)
         assert!(pipeline.wait_idle_timeout(Duration::from_millis(1)));
@@ -797,21 +758,21 @@ mod tests {
     #[test]
     #[should_panic(expected = "Invalid slot index")]
     fn test_is_slot_ready_invalid() {
-        let pipeline = FramePipeline::new(2);
+        let pipeline = make_test_pipeline(2);
         pipeline.is_slot_ready(5); // Invalid
     }
 
     #[test]
     #[should_panic(expected = "present() or finish() must be called before end_frame()")]
     fn test_end_frame_without_present_panics() {
-        let mut pipeline = FramePipeline::new(2);
+        let mut pipeline = make_test_pipeline(2);
         let schedule = pipeline.begin_frame();
         pipeline.end_frame(schedule); // Panics - no present() or finish() called
     }
 
     #[test]
     fn test_full_frame_with_finish() {
-        let mut pipeline = FramePipeline::new(2);
+        let mut pipeline = make_test_pipeline(2);
 
         let mut schedule = pipeline.begin_frame();
 
@@ -828,7 +789,7 @@ mod tests {
 
     #[test]
     fn test_full_frame_with_graphs() {
-        let mut pipeline = FramePipeline::new(2);
+        let mut pipeline = make_test_pipeline(2);
 
         let mut schedule = pipeline.begin_frame();
 
