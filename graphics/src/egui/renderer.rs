@@ -15,8 +15,8 @@ use crate::materials::{
     MaterialInstance, ShaderSource, ShaderStage, ShaderStageFlags,
 };
 use crate::mesh::{
-    IndexFormat, MeshDescriptor, VertexAttribute, VertexAttributeFormat, VertexAttributeSemantic,
-    VertexBufferLayout, VertexLayout,
+    IndexFormat, Mesh, PrimitiveTopology, VertexAttribute, VertexAttributeFormat,
+    VertexAttributeSemantic, VertexBufferLayout, VertexLayout,
 };
 use crate::resources::{Buffer, Sampler, Texture};
 use crate::shader::{EGUI_SHADER_SOURCE, ShaderComposer};
@@ -65,6 +65,29 @@ struct TextureData {
     pixels: Vec<u8>,
 }
 
+/// Default initial capacity for egui mesh vertex buffers.
+const DEFAULT_VERTEX_CAPACITY: u32 = 1024;
+
+/// Default initial capacity for egui mesh index buffers.
+const DEFAULT_INDEX_CAPACITY: u32 = 3072;
+
+/// Cached GPU buffers for a single egui mesh draw.
+struct CachedEguiMesh {
+    vertex_buffer: Arc<Buffer>,
+    index_buffer: Arc<Buffer>,
+    vertex_capacity: u32,
+    index_capacity: u32,
+}
+
+/// Pool of egui mesh GPU buffers, reused across frames.
+///
+/// Entries persist across frames to avoid GPU buffer reallocation.
+/// The scratch vertex buffer is cleared per-primitive but keeps its capacity.
+struct EguiMeshPool {
+    entries: Vec<CachedEguiMesh>,
+    vertices: Vec<EguiVertex>,
+}
+
 /// Manages GPU resources for egui rendering.
 pub struct EguiRenderer {
     device: Arc<GraphicsDevice>,
@@ -81,6 +104,8 @@ pub struct EguiRenderer {
     texture_binding_layout: Arc<BindingLayout>,
     /// Counter for generating unique user texture IDs.
     next_user_texture_id: u64,
+    /// Pool of GPU mesh buffers reused across frames.
+    mesh_pool: EguiMeshPool,
 }
 
 impl EguiRenderer {
@@ -198,6 +223,10 @@ impl EguiRenderer {
             uniform_binding_layout,
             texture_binding_layout,
             next_user_texture_id: 0,
+            mesh_pool: EguiMeshPool {
+                entries: Vec::new(),
+                vertices: Vec::new(),
+            },
         }
     }
 
@@ -373,7 +402,83 @@ impl EguiRenderer {
         }
     }
 
+    /// Get or grow a pooled mesh entry at the given index.
+    ///
+    /// If the entry doesn't exist or its buffers are too small, (re)allocates
+    /// with capacity grown by factor 2 from the current size, or the default
+    /// capacity, whichever is larger.
+    fn get_or_grow_mesh_entry<'a>(
+        device: &Arc<GraphicsDevice>,
+        pool: &'a mut EguiMeshPool,
+        index: usize,
+        vertex_count: u32,
+        index_count: u32,
+    ) -> &'a mut CachedEguiMesh {
+        let needs_realloc = if let Some(entry) = pool.entries.get(index) {
+            entry.vertex_capacity < vertex_count || entry.index_capacity < index_count
+        } else {
+            true
+        };
+
+        if needs_realloc {
+            let old_vcap = pool
+                .entries
+                .get(index)
+                .map_or(0, |e| e.vertex_capacity);
+            let old_icap = pool
+                .entries
+                .get(index)
+                .map_or(0, |e| e.index_capacity);
+
+            let new_vcap = vertex_count
+                .max(old_vcap.saturating_mul(2))
+                .max(DEFAULT_VERTEX_CAPACITY);
+            let new_icap = index_count
+                .max(old_icap.saturating_mul(2))
+                .max(DEFAULT_INDEX_CAPACITY);
+
+            let vertex_stride = std::mem::size_of::<EguiVertex>() as u64;
+            let vertex_buffer = device
+                .create_buffer(
+                    &BufferDescriptor::new(
+                        new_vcap as u64 * vertex_stride,
+                        BufferUsage::VERTEX | BufferUsage::COPY_DST,
+                    )
+                    .with_label("egui_pool_vertices"),
+                )
+                .expect("Failed to create egui pooled vertex buffer");
+
+            let index_buffer = device
+                .create_buffer(
+                    &BufferDescriptor::new(
+                        new_icap as u64 * std::mem::size_of::<u32>() as u64,
+                        BufferUsage::INDEX | BufferUsage::COPY_DST,
+                    )
+                    .with_label("egui_pool_indices"),
+                )
+                .expect("Failed to create egui pooled index buffer");
+
+            let entry = CachedEguiMesh {
+                vertex_buffer,
+                index_buffer,
+                vertex_capacity: new_vcap,
+                index_capacity: new_icap,
+            };
+
+            if index < pool.entries.len() {
+                pool.entries[index] = entry;
+            } else {
+                pool.entries.push(entry);
+            }
+        }
+
+        &mut pool.entries[index]
+    }
+
     /// Create a graphics pass for rendering egui primitives.
+    ///
+    /// Reuses pooled GPU buffers across frames, only reallocating when the
+    /// existing buffers are too small (growing by factor 2).
     ///
     /// # Arguments
     ///
@@ -383,7 +488,7 @@ impl EguiRenderer {
     /// * `screen_height` - Screen height in physical pixels
     /// * `pixels_per_point` - DPI scale factor for converting points to pixels
     pub fn create_graphics_pass(
-        &self,
+        &mut self,
         primitives: &[ClippedPrimitive],
         render_target: &RenderTarget,
         screen_width: u32,
@@ -402,6 +507,9 @@ impl EguiRenderer {
         #[allow(clippy::arc_with_non_send_sync)]
         let uniform_binding =
             Arc::new(BindingGroup::new().with_buffer(0, self.uniform_buffer.clone()));
+
+        let pool = &mut self.mesh_pool;
+        let mut mesh_index = 0;
 
         // Process each primitive
         for ClippedPrimitive {
@@ -424,34 +532,52 @@ impl EguiRenderer {
                         }
                     };
 
-                    // Convert vertices
-                    let vertices: Vec<EguiVertex> =
-                        mesh.vertices.iter().map(EguiVertex::from).collect();
+                    let vertex_count = mesh.vertices.len() as u32;
+                    let index_count = mesh.indices.len() as u32;
 
-                    // Create mesh
-                    let gpu_mesh = self
-                        .device
-                        .create_mesh(
-                            &MeshDescriptor::new(self.vertex_layout.clone())
-                                .with_vertex_count(vertices.len() as u32)
-                                .with_indices(IndexFormat::Uint32, mesh.indices.len() as u32)
-                                .with_label("egui_mesh"),
-                        )
-                        .expect("Failed to create egui mesh");
+                    // Convert vertices into reusable scratch buffer
+                    pool.vertices.clear();
+                    pool.vertices
+                        .extend(mesh.vertices.iter().map(EguiVertex::from));
 
-                    // Upload vertex data
-                    if let Some(vb) = gpu_mesh.vertex_buffer(0) {
-                        self.device
-                            .write_buffer(vb, 0, bytemuck::cast_slice(&vertices))
-                            .expect("Failed to write egui vertex buffer");
-                    }
+                    // Get or grow pooled GPU buffers for this draw
+                    Self::get_or_grow_mesh_entry(
+                        &self.device,
+                        pool,
+                        mesh_index,
+                        vertex_count,
+                        index_count,
+                    );
+                    let entry = &pool.entries[mesh_index];
 
-                    // Upload index data
-                    if let Some(ib) = gpu_mesh.index_buffer() {
-                        self.device
-                            .write_buffer(ib, 0, bytemuck::cast_slice(&mesh.indices))
-                            .expect("Failed to write egui index buffer");
-                    }
+                    // Clone buffer Arcs for upload and mesh construction
+                    let vb = entry.vertex_buffer.clone();
+                    let ib = entry.index_buffer.clone();
+
+                    // Upload vertex data to pooled buffer
+                    self.device
+                        .write_buffer(&vb, 0, bytemuck::cast_slice(&pool.vertices))
+                        .expect("Failed to write egui vertex buffer");
+
+                    // Upload index data to pooled buffer
+                    self.device
+                        .write_buffer(&ib, 0, bytemuck::cast_slice(&mesh.indices))
+                        .expect("Failed to write egui index buffer");
+
+                    // Construct a Mesh referencing the pooled buffers with actual counts
+                    let gpu_mesh = Arc::new(Mesh::new(
+                        Arc::clone(&self.device),
+                        self.vertex_layout.clone(),
+                        PrimitiveTopology::TriangleList,
+                        vec![vb],
+                        vertex_count,
+                        Some(ib),
+                        Some(IndexFormat::Uint32),
+                        index_count,
+                        Some("egui_mesh".into()),
+                    ));
+
+                    mesh_index += 1;
 
                     // Create texture binding group
                     #[allow(clippy::arc_with_non_send_sync)]
