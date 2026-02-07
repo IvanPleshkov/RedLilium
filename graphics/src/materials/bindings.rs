@@ -19,6 +19,9 @@ pub enum BindingType {
     /// Cubemap texture (for sampling environment maps).
     TextureCube,
 
+    /// 2D array texture (for sampling texture arrays in shaders).
+    Texture2DArray,
+
     /// Texture sampler.
     Sampler,
 
@@ -120,6 +123,14 @@ impl BindingLayout {
     /// Add a cubemap texture binding.
     pub fn with_texture_cube(self, binding: u32) -> Self {
         self.with_entry(BindingLayoutEntry::new(binding, BindingType::TextureCube))
+    }
+
+    /// Add a 2D array texture binding.
+    pub fn with_texture_2d_array(self, binding: u32) -> Self {
+        self.with_entry(BindingLayoutEntry::new(
+            binding,
+            BindingType::Texture2DArray,
+        ))
     }
 
     /// Add a sampler binding.

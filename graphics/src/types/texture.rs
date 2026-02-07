@@ -78,6 +78,28 @@ impl TextureDescriptor {
         }
     }
 
+    /// Create a new 2D array texture descriptor.
+    ///
+    /// A 2D array is a stack of `layer_count` 2D textures sharing the same dimensions
+    /// and format. Layers are indexed in shaders via the array index.
+    pub fn new_2d_array(
+        width: u32,
+        height: u32,
+        layer_count: u32,
+        format: TextureFormat,
+        usage: TextureUsage,
+    ) -> Self {
+        Self {
+            label: None,
+            size: Extent3d::new_3d(width, height, layer_count),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2Array,
+            format,
+            usage,
+        }
+    }
+
     /// Create a new 3D (volume) texture descriptor.
     pub fn new_3d(
         width: u32,

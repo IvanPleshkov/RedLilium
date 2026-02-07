@@ -554,7 +554,27 @@ impl VulkanBackend {
                 },
                 vk::ImageCreateFlags::empty(),
             ),
+            TextureDimension::D1Array => (
+                vk::ImageType::TYPE_1D,
+                descriptor.size.depth.max(1),
+                vk::Extent3D {
+                    width: descriptor.size.width,
+                    height: 1,
+                    depth: 1,
+                },
+                vk::ImageCreateFlags::empty(),
+            ),
             TextureDimension::D2 => (
+                vk::ImageType::TYPE_2D,
+                1,
+                vk::Extent3D {
+                    width: descriptor.size.width,
+                    height: descriptor.size.height,
+                    depth: 1,
+                },
+                vk::ImageCreateFlags::empty(),
+            ),
+            TextureDimension::D2Array => (
                 vk::ImageType::TYPE_2D,
                 descriptor.size.depth.max(1),
                 vk::Extent3D {
@@ -664,20 +684,10 @@ impl VulkanBackend {
 
         // Determine view type based on dimension
         let (view_type, layer_count) = match descriptor.dimension {
-            TextureDimension::D1 => {
-                if descriptor.size.depth > 1 {
-                    (vk::ImageViewType::TYPE_1D_ARRAY, array_layers)
-                } else {
-                    (vk::ImageViewType::TYPE_1D, 1)
-                }
-            }
-            TextureDimension::D2 => {
-                if array_layers > 1 {
-                    (vk::ImageViewType::TYPE_2D_ARRAY, array_layers)
-                } else {
-                    (vk::ImageViewType::TYPE_2D, 1)
-                }
-            }
+            TextureDimension::D1 => (vk::ImageViewType::TYPE_1D, 1),
+            TextureDimension::D1Array => (vk::ImageViewType::TYPE_1D_ARRAY, array_layers),
+            TextureDimension::D2 => (vk::ImageViewType::TYPE_2D, 1),
+            TextureDimension::D2Array => (vk::ImageViewType::TYPE_2D_ARRAY, array_layers),
             TextureDimension::D3 => (vk::ImageViewType::TYPE_3D, 1),
             TextureDimension::Cube => (vk::ImageViewType::CUBE, 6),
             TextureDimension::CubeArray => (vk::ImageViewType::CUBE_ARRAY, array_layers),
@@ -2098,8 +2108,11 @@ impl VulkanBackend {
                 // Vulkan requires z offset to be 0 for 2D images, with layer specified in subresource.
                 let uses_array_layers = matches!(
                     dimension,
-                    TextureDimension::Cube | TextureDimension::CubeArray
-                ) || (dimension == TextureDimension::D2 && src.depth() > 1);
+                    TextureDimension::D1Array
+                        | TextureDimension::D2Array
+                        | TextureDimension::Cube
+                        | TextureDimension::CubeArray
+                );
 
                 let copy_regions: Vec<vk::BufferImageCopy> = regions
                     .iter()
@@ -2190,8 +2203,11 @@ impl VulkanBackend {
                 // Vulkan requires z offset to be 0 for 2D images, with layer specified in subresource.
                 let uses_array_layers = matches!(
                     dimension,
-                    TextureDimension::Cube | TextureDimension::CubeArray
-                ) || (dimension == TextureDimension::D2 && dst.depth() > 1);
+                    TextureDimension::D1Array
+                        | TextureDimension::D2Array
+                        | TextureDimension::Cube
+                        | TextureDimension::CubeArray
+                );
 
                 let copy_regions: Vec<vk::BufferImageCopy> = regions
                     .iter()

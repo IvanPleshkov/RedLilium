@@ -183,6 +183,7 @@ impl PipelineManager {
                     BindingType::Sampler => vk::DescriptorType::SAMPLER,
                     BindingType::Texture => vk::DescriptorType::SAMPLED_IMAGE,
                     BindingType::TextureCube => vk::DescriptorType::SAMPLED_IMAGE,
+                    BindingType::Texture2DArray => vk::DescriptorType::SAMPLED_IMAGE,
                     BindingType::CombinedTextureSampler => {
                         vk::DescriptorType::COMBINED_IMAGE_SAMPLER
                     }

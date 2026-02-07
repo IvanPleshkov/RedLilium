@@ -40,7 +40,9 @@ impl WgpuBackend {
         // Convert our texture dimension to wgpu's
         let (wgpu_dimension, depth_or_array_layers) = match descriptor.dimension {
             TextureDimension::D1 => (wgpu::TextureDimension::D1, descriptor.size.depth),
+            TextureDimension::D1Array => (wgpu::TextureDimension::D1, descriptor.size.depth),
             TextureDimension::D2 => (wgpu::TextureDimension::D2, descriptor.size.depth),
+            TextureDimension::D2Array => (wgpu::TextureDimension::D2, descriptor.size.depth),
             TextureDimension::D3 => (wgpu::TextureDimension::D3, descriptor.size.depth),
             TextureDimension::Cube => (wgpu::TextureDimension::D2, 6),
             TextureDimension::CubeArray => (wgpu::TextureDimension::D2, descriptor.size.depth * 6),
@@ -64,13 +66,9 @@ impl WgpuBackend {
         // Create the appropriate view based on dimension
         let view_dimension = match descriptor.dimension {
             TextureDimension::D1 => wgpu::TextureViewDimension::D1,
-            TextureDimension::D2 => {
-                if descriptor.size.depth > 1 {
-                    wgpu::TextureViewDimension::D2Array
-                } else {
-                    wgpu::TextureViewDimension::D2
-                }
-            }
+            TextureDimension::D1Array => wgpu::TextureViewDimension::D1,
+            TextureDimension::D2 => wgpu::TextureViewDimension::D2,
+            TextureDimension::D2Array => wgpu::TextureViewDimension::D2Array,
             TextureDimension::D3 => wgpu::TextureViewDimension::D3,
             TextureDimension::Cube => wgpu::TextureViewDimension::Cube,
             TextureDimension::CubeArray => wgpu::TextureViewDimension::CubeArray,
@@ -259,7 +257,11 @@ impl WgpuBackend {
         let depth_or_array_layers = match descriptor.dimension {
             TextureDimension::Cube => 6,
             TextureDimension::CubeArray => descriptor.size.depth * 6,
-            _ => descriptor.size.depth,
+            TextureDimension::D1
+            | TextureDimension::D1Array
+            | TextureDimension::D2
+            | TextureDimension::D2Array
+            | TextureDimension::D3 => descriptor.size.depth,
         };
 
         self.queue.write_texture(
