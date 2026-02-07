@@ -303,22 +303,36 @@ impl FrameSchedule {
             );
         }
 
-        // Create completion semaphore for this graph
-        let completion = Semaphore::new(self.next_semaphore_id());
+        // Get semaphore ID before acquiring backend lock (avoids borrow conflict)
+        let semaphore_id = self.next_semaphore_id();
 
-        // Collect semaphores to wait on (used for future GPU synchronization)
-        let _wait_semaphores: Vec<&Semaphore> = wait_for
+        // Create GPU-backed completion semaphore for this graph
+        let backend = self.device.instance().backend();
+        let gpu_semaphore = backend.create_semaphore();
+        let completion = Semaphore::new(semaphore_id, gpu_semaphore);
+
+        // Collect GPU semaphores to wait on from dependency handles
+        let wait_gpu_semaphores: Vec<&crate::backend::GpuSemaphore> = wait_for
             .iter()
-            .map(|h| &self.submitted[h.index()].completion)
+            .map(|h| self.submitted[h.index()].completion.gpu_semaphore())
             .collect();
+
+        // Signal this graph's completion semaphore
+        let signal_gpu_semaphores: Vec<&crate::backend::GpuSemaphore> =
+            vec![completion.gpu_semaphore()];
 
         // Compile and execute the graph on the GPU
         match graph.compile(RenderGraphCompilationMode::Strict) {
             Ok(_) => {
                 profile_scope!("execute_graph");
                 let compiled = graph.compiled().unwrap();
-                let backend = self.device.instance().backend();
-                if let Err(e) = backend.execute_graph(&graph, compiled, None) {
+                if let Err(e) = backend.execute_graph(
+                    &graph,
+                    compiled,
+                    &wait_gpu_semaphores,
+                    &signal_gpu_semaphores,
+                    None,
+                ) {
                     log::error!("Failed to execute graph '{}': {}", name, e);
                 }
             }
@@ -397,21 +411,40 @@ impl FrameSchedule {
             );
         }
 
-        // Create completion semaphore
-        let completion = Semaphore::new(self.next_semaphore_id());
+        // Get semaphore ID before acquiring backend lock (avoids borrow conflict)
+        let semaphore_id = self.next_semaphore_id();
 
-        // Create GPU-backed fence for async execution
+        // Create GPU-backed fence first (acquires+releases backend read lock internally)
         let instance = Arc::clone(self.device.instance());
         let fence = Fence::new_gpu(instance);
 
-        // Compile first (may use cached result), then access via immutable borrow
+        // Create GPU-backed completion semaphore
+        let backend = self.device.instance().backend();
+        let gpu_semaphore = backend.create_semaphore();
+        let completion = Semaphore::new(semaphore_id, gpu_semaphore);
+
+        // Collect GPU semaphores to wait on from dependency handles
+        let wait_gpu_semaphores: Vec<&crate::backend::GpuSemaphore> = wait_for
+            .iter()
+            .map(|h| self.submitted[h.index()].completion.gpu_semaphore())
+            .collect();
+
+        // Signal this graph's completion semaphore
+        let signal_gpu_semaphores: Vec<&crate::backend::GpuSemaphore> =
+            vec![completion.gpu_semaphore()];
+
+        // Compile and execute with semaphores and fence
         match graph.compile(RenderGraphCompilationMode::Strict) {
             Ok(_) => {
                 profile_scope!("execute_present");
                 let compiled = graph.compiled().unwrap();
-                let backend = self.device.instance().backend();
-                // Pass the GPU fence - execute_graph returns immediately (async)
-                if let Err(e) = backend.execute_graph(&graph, compiled, fence.gpu_fence()) {
+                if let Err(e) = backend.execute_graph(
+                    &graph,
+                    compiled,
+                    &wait_gpu_semaphores,
+                    &signal_gpu_semaphores,
+                    fence.gpu_fence(),
+                ) {
                     log::error!("Failed to execute present graph '{}': {}", name, e);
                 }
             }

@@ -421,14 +421,8 @@ impl EguiRenderer {
         };
 
         if needs_realloc {
-            let old_vcap = pool
-                .entries
-                .get(index)
-                .map_or(0, |e| e.vertex_capacity);
-            let old_icap = pool
-                .entries
-                .get(index)
-                .map_or(0, |e| e.index_capacity);
+            let old_vcap = pool.entries.get(index).map_or(0, |e| e.vertex_capacity);
+            let old_icap = pool.entries.get(index).map_or(0, |e| e.index_capacity);
 
             let new_vcap = vertex_count
                 .max(old_vcap.saturating_mul(2))

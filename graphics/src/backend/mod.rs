@@ -740,6 +740,17 @@ impl GpuBackend {
         }
     }
 
+    /// Create a semaphore for GPU-GPU synchronization.
+    pub fn create_semaphore(&self) -> GpuSemaphore {
+        match self {
+            Self::Dummy(backend) => backend.create_semaphore(),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(backend) => backend.create_semaphore(),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => backend.create_semaphore(),
+        }
+    }
+
     /// Create a fence for CPU-GPU synchronization.
     pub fn create_fence(&self, signaled: bool) -> GpuFence {
         match self {
@@ -800,18 +811,44 @@ impl GpuBackend {
     /// Execute a compiled render graph.
     ///
     /// This records commands from the graph into a command buffer and submits it.
+    ///
+    /// # Arguments
+    ///
+    /// * `wait_semaphores` - GPU semaphores to wait on before execution begins
+    /// * `signal_semaphores` - GPU semaphores to signal when execution completes
+    /// * `signal_fence` - Optional fence to signal when execution completes (for CPU waiting)
     pub fn execute_graph(
         &self,
         graph: &RenderGraph,
         compiled: &CompiledGraph,
+        wait_semaphores: &[&GpuSemaphore],
+        signal_semaphores: &[&GpuSemaphore],
         signal_fence: Option<&GpuFence>,
     ) -> Result<(), GraphicsError> {
         match self {
-            Self::Dummy(backend) => backend.execute_graph(graph, compiled, signal_fence),
+            Self::Dummy(backend) => backend.execute_graph(
+                graph,
+                compiled,
+                wait_semaphores,
+                signal_semaphores,
+                signal_fence,
+            ),
             #[cfg(feature = "wgpu-backend")]
-            Self::Wgpu(backend) => backend.execute_graph(graph, compiled, signal_fence),
+            Self::Wgpu(backend) => backend.execute_graph(
+                graph,
+                compiled,
+                wait_semaphores,
+                signal_semaphores,
+                signal_fence,
+            ),
             #[cfg(feature = "vulkan-backend")]
-            Self::Vulkan(backend) => backend.execute_graph(graph, compiled, signal_fence),
+            Self::Vulkan(backend) => backend.execute_graph(
+                graph,
+                compiled,
+                wait_semaphores,
+                signal_semaphores,
+                signal_fence,
+            ),
         }
     }
 

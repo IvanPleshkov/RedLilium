@@ -10,7 +10,7 @@ use crate::error::GraphicsError;
 use crate::graph::{CompiledGraph, RenderGraph};
 use crate::types::{BufferDescriptor, SamplerDescriptor, TextureDescriptor};
 
-use super::{GpuBuffer, GpuFence, GpuSampler, GpuTexture};
+use super::{GpuBuffer, GpuFence, GpuSampler, GpuSemaphore, GpuTexture};
 
 /// Dummy GPU backend.
 #[derive(Debug)]
@@ -49,6 +49,11 @@ impl DummyBackend {
         _descriptor: &SamplerDescriptor,
     ) -> Result<GpuSampler, GraphicsError> {
         Ok(GpuSampler::Dummy)
+    }
+
+    /// Create a GPU semaphore (no-op for dummy backend).
+    pub fn create_semaphore(&self) -> GpuSemaphore {
+        GpuSemaphore::Dummy
     }
 
     /// Create a fence for CPU-GPU synchronization.
@@ -125,6 +130,8 @@ impl DummyBackend {
         &self,
         _graph: &RenderGraph,
         _compiled: &CompiledGraph,
+        _wait_semaphores: &[&GpuSemaphore],
+        _signal_semaphores: &[&GpuSemaphore],
         signal_fence: Option<&GpuFence>,
     ) -> Result<(), GraphicsError> {
         // Signal the fence immediately since we don't do real GPU work

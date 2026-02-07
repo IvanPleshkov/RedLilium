@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use crate::error::GraphicsError;
 use crate::types::{BufferDescriptor, SamplerDescriptor, TextureDescriptor};
 
-use super::super::{GpuBuffer, GpuFence, GpuSampler, GpuTexture};
+use super::super::{GpuBuffer, GpuFence, GpuSampler, GpuSemaphore, GpuTexture};
 use super::WgpuBackend;
 use super::conversion::{
     convert_address_mode, convert_buffer_usage, convert_compare_function, convert_filter_mode,
@@ -125,6 +125,11 @@ impl WgpuBackend {
             device: self.device.clone(),
             submission_index: Mutex::new(None),
         }
+    }
+
+    /// Create a GPU semaphore (no-op for wgpu; synchronization is implicit).
+    pub fn create_semaphore(&self) -> GpuSemaphore {
+        GpuSemaphore::Wgpu
     }
 
     /// Wait for a fence to be signaled.

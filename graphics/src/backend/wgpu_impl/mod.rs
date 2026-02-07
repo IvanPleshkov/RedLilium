@@ -255,6 +255,8 @@ impl WgpuBackend {
         &self,
         graph: &RenderGraph,
         compiled: &CompiledGraph,
+        _wait_semaphores: &[&super::GpuSemaphore],
+        _signal_semaphores: &[&super::GpuSemaphore],
         signal_fence: Option<&GpuFence>,
     ) -> Result<(), GraphicsError> {
         profile_scope!("wgpu_execute_graph");

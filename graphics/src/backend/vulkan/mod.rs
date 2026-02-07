@@ -26,7 +26,7 @@ use crate::graph::{CompiledGraph, Pass, RenderGraph, RenderTarget};
 use crate::types::{BufferDescriptor, SamplerDescriptor, TextureDescriptor};
 use redlilium_core::profiling::profile_scope;
 
-use super::{GpuBuffer, GpuFence, GpuSampler, GpuTexture};
+use super::{GpuBuffer, GpuFence, GpuSampler, GpuSemaphore, GpuTexture};
 
 pub use deferred::{DeferredDestructor, DeferredResource, MAX_FRAMES_IN_FLIGHT};
 pub use layout::{TextureLayout, TextureLayoutTracker, TextureUsageGraph};
@@ -749,6 +749,19 @@ impl VulkanBackend {
         })
     }
 
+    /// Create a GPU semaphore for GPU-GPU synchronization.
+    pub fn create_semaphore(&self) -> GpuSemaphore {
+        let semaphore_info = vk::SemaphoreCreateInfo::default();
+        let semaphore = unsafe { self.device.create_semaphore(&semaphore_info, None) }
+            .expect("Failed to create Vulkan semaphore");
+
+        GpuSemaphore::Vulkan {
+            device: self.device.clone(),
+            semaphore,
+            deferred: Arc::clone(&self.deferred_destructor),
+        }
+    }
+
     /// Create a fence for CPU-GPU synchronization.
     pub fn create_fence(&self, signaled: bool) -> GpuFence {
         let flags = if signaled {
@@ -845,6 +858,8 @@ impl VulkanBackend {
         &self,
         graph: &RenderGraph,
         compiled: &CompiledGraph,
+        wait_semaphores: &[&GpuSemaphore],
+        signal_semaphores: &[&GpuSemaphore],
         signal_fence: Option<&GpuFence>,
     ) -> Result<(), GraphicsError> {
         profile_scope!("vulkan_execute_graph");
@@ -894,6 +909,34 @@ impl VulkanBackend {
             GraphicsError::Internal(format!("Failed to end command buffer: {:?}", e))
         })?;
 
+        // Extract raw Vulkan semaphore handles
+        let vk_wait_semaphores: Vec<vk::Semaphore> = wait_semaphores
+            .iter()
+            .filter_map(|s| {
+                if let GpuSemaphore::Vulkan { semaphore, .. } = s {
+                    Some(*semaphore)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let wait_stage_masks: Vec<vk::PipelineStageFlags> = vk_wait_semaphores
+            .iter()
+            .map(|_| vk::PipelineStageFlags::ALL_COMMANDS)
+            .collect();
+
+        let vk_signal_semaphores: Vec<vk::Semaphore> = signal_semaphores
+            .iter()
+            .filter_map(|s| {
+                if let GpuSemaphore::Vulkan { semaphore, .. } = s {
+                    Some(*semaphore)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         // Get fence to signal
         let fence = signal_fence.and_then(|f| {
             if let GpuFence::Vulkan { fence, .. } = f {
@@ -907,10 +950,20 @@ impl VulkanBackend {
             }
         });
 
-        // Submit command buffer
+        // Submit command buffer with semaphores and fence
         {
             profile_scope!("queue_submit");
-            let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
+            let mut submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
+
+            if !vk_wait_semaphores.is_empty() {
+                submit_info = submit_info
+                    .wait_semaphores(&vk_wait_semaphores)
+                    .wait_dst_stage_mask(&wait_stage_masks);
+            }
+
+            if !vk_signal_semaphores.is_empty() {
+                submit_info = submit_info.signal_semaphores(&vk_signal_semaphores);
+            }
 
             unsafe {
                 self.device.queue_submit(
