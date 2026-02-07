@@ -102,7 +102,7 @@ pub use transfer::{
 /// The graph caches its compiled result. Calling `compile()` multiple times
 /// without modifying the graph returns the cached result. Any mutation
 /// (adding passes, dependencies, or clearing) invalidates the cache.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RenderGraph {
     /// All passes in the graph (direct storage, no Arc).
     passes: Vec<Pass>,
@@ -119,8 +119,13 @@ impl RenderGraph {
     ///
     /// Prefer [`FrameSchedule::acquire_graph`](crate::scheduler::FrameSchedule::acquire_graph)
     /// in frame loops to reuse pooled graphs and avoid memory leaks.
-    pub(crate) fn new() -> Self {
-        Self::default()
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        Self {
+            passes: Vec::new(),
+            edges: Vec::new(),
+            compiled: Pooled::default(),
+        }
     }
 
     /// Add a graphics pass to the graph.
@@ -264,6 +269,9 @@ impl RenderGraph {
 }
 
 impl Poolable for RenderGraph {
+    fn new_empty() -> Self {
+        Self::new()
+    }
     fn reset(&mut self) {
         self.passes.clear();
         self.edges.clear();

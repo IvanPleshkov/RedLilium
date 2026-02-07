@@ -80,6 +80,9 @@ impl CompiledGraph {
 }
 
 impl Poolable for CompiledGraph {
+    fn new_empty() -> Self {
+        Self::default()
+    }
     fn reset(&mut self) {
         self.pass_order.clear();
     }

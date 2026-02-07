@@ -73,7 +73,7 @@ fn test_buffer_copy_roundtrip(#[case] backend: Backend) {
     // 3. Map readback buffer and verify data
 
     // Create the transfer graph
-    let mut graph = RenderGraph::default();
+    let mut graph = RenderGraph::new();
 
     // First pass: staging -> gpu_buffer
     let mut upload = TransferPass::new("upload".into());
@@ -134,7 +134,7 @@ fn test_buffer_copy_partial(#[case] backend: Backend) {
     let dst = ctx.create_gpu_buffer(BUFFER_SIZE, BufferUsage::STORAGE);
 
     // Create transfer graph with partial copy
-    let mut graph = RenderGraph::default();
+    let mut graph = RenderGraph::new();
     let mut transfer = TransferPass::new("partial_copy".into());
     transfer.set_transfer_config(TransferConfig::new().with_operation(
         TransferOperation::copy_buffer(
@@ -192,7 +192,7 @@ fn test_render_single_quad(#[case] backend: Backend) {
     let readback = ctx.create_readback_buffer(readback_size);
 
     // Create render graph
-    let mut graph = RenderGraph::default();
+    let mut graph = RenderGraph::new();
 
     // Render pass - clear to black, would render red quad
     let render_pass = create_simple_render_pass("render_quad", render_target.clone(), CLEAR_COLOR);
@@ -257,7 +257,7 @@ fn test_render_clear_color(#[case] backend: Backend) {
     let readback = ctx.create_readback_buffer(readback_size);
 
     // Create graph with just a clear operation
-    let mut graph = RenderGraph::default();
+    let mut graph = RenderGraph::new();
 
     let render_pass = create_simple_render_pass("clear_only", render_target.clone(), CLEAR_COLOR);
     let render_handle = graph.add_graphics_pass(render_pass);
@@ -321,7 +321,7 @@ fn test_render_depth_buffer_two_quads(#[case] backend: Backend) {
     let readback = ctx.create_readback_buffer(readback_size);
 
     // Create render graph
-    let mut graph = RenderGraph::default();
+    let mut graph = RenderGraph::new();
 
     // Render pass with depth buffer
     let render_pass = create_render_pass_with_depth(
@@ -386,7 +386,7 @@ fn test_render_depth_buffer_reverse_order(#[case] backend: Backend) {
     let depth_target = ctx.create_depth_texture(WIDTH, HEIGHT);
     let readback = ctx.create_readback_buffer((WIDTH * HEIGHT * 4) as u64);
 
-    let mut graph = RenderGraph::default();
+    let mut graph = RenderGraph::new();
 
     let render_pass = create_render_pass_with_depth(
         "depth_reverse",
@@ -449,7 +449,7 @@ fn test_render_multiple_targets(#[case] backend: Backend) {
     let readback2 = ctx.create_readback_buffer(readback_size);
 
     // Create render graph
-    let mut graph = RenderGraph::default();
+    let mut graph = RenderGraph::new();
 
     // MRT render pass
     let mrt_pass = create_mrt_pass(
@@ -535,7 +535,7 @@ fn test_render_mrt_different_formats(#[case] backend: Backend) {
     );
 
     // Create graph
-    let mut graph = RenderGraph::default();
+    let mut graph = RenderGraph::new();
 
     // Note: In a real MRT setup, all targets need compatible formats for the same pass
     // This test might need adjustment based on actual GPU constraints
@@ -574,7 +574,7 @@ fn test_render_mrt_different_formats(#[case] backend: Backend) {
 #[case::vulkan(Backend::Vulkan)]
 #[case::webgpu(Backend::WebGpu)]
 fn test_empty_graph(#[case] _backend: Backend) {
-    let mut graph = RenderGraph::default();
+    let mut graph = RenderGraph::new();
 
     // Empty graph should compile successfully
     let compiled = graph.compile().expect("Empty graph should compile");
@@ -609,7 +609,7 @@ fn test_diamond_dependency_graph(#[case] backend: Backend) {
     let lighting_target = ctx.create_render_target(WIDTH, HEIGHT);
     let composite_target = ctx.create_render_target(WIDTH, HEIGHT);
 
-    let mut graph = RenderGraph::default();
+    let mut graph = RenderGraph::new();
 
     // Shadow pass (root)
     let shadow = create_simple_render_pass("shadow", shadow_target, [1.0, 1.0, 1.0, 1.0]);
@@ -700,7 +700,7 @@ fn test_shader_render_half_quad(#[case] backend: Backend) {
     let material_instance = create_material_instance(material);
 
     // Create render graph
-    let mut graph = RenderGraph::default();
+    let mut graph = RenderGraph::new();
 
     // Render pass - clear to black, render red quad in left half
     let mut render_pass =
@@ -819,7 +819,7 @@ fn test_layout_tracking_multi_pass(#[case] backend: Backend) {
     let red_instance = create_material_instance(red_material);
 
     // Build render graph
-    let mut graph = RenderGraph::default();
+    let mut graph = RenderGraph::new();
 
     // Pass 1: Render red quad to RT1
     // This tests: RT1: Undefined → ColorAttachment

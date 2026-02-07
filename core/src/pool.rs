@@ -23,6 +23,9 @@
 //! }
 //!
 //! impl Poolable for Buffer {
+//!     fn new_empty() -> Self {
+//!         Self::default()
+//!     }
 //!     fn reset(&mut self) {
 //!         self.data.clear();
 //!     }
@@ -44,9 +47,12 @@
 
 /// Trait for types that can be pooled and reused.
 ///
-/// Implementors must be able to clear their contents while preserving
-/// allocated capacity, and report whether they are in a cleared state.
-pub trait Poolable: Default {
+/// Implementors must be able to create an empty instance and clear their
+/// contents while preserving allocated capacity.
+pub trait Poolable {
+    /// Create a new empty instance for pool initialization.
+    fn new_empty() -> Self;
+
     /// Reset the value to an empty state, preserving allocated capacity.
     ///
     /// For example, call `Vec::clear()` rather than replacing with a new `Vec`.
@@ -112,8 +118,8 @@ impl<T: Poolable> Pooled<T> {
     pub fn release(&mut self) {
         if matches!(self, Self::Active(_)) {
             // Use mem::replace to safely move between variants.
-            // The temporary T::default() is zero-cost for types like Vec.
-            let taken = std::mem::replace(self, Self::Pooled(T::default()));
+            // The temporary T::new_empty() is zero-cost for types like Vec.
+            let taken = std::mem::replace(self, Self::Pooled(T::new_empty()));
             if let Self::Active(mut t) = taken {
                 t.reset();
                 *self = Self::Pooled(t);
@@ -129,7 +135,7 @@ impl<T: Poolable> Pooled<T> {
     /// If already active, returns a mutable reference to the existing value.
     pub fn activate(&mut self) -> &mut T {
         if matches!(self, Self::Pooled(_)) {
-            let taken = std::mem::replace(self, Self::Active(T::default()));
+            let taken = std::mem::replace(self, Self::Active(T::new_empty()));
             if let Self::Pooled(t) = taken {
                 *self = Self::Active(t);
             }
@@ -157,7 +163,7 @@ impl<T: Poolable> Pooled<T> {
 
 impl<T: Poolable> Default for Pooled<T> {
     fn default() -> Self {
-        Self::Pooled(T::default())
+        Self::Pooled(T::new_empty())
     }
 }
 
@@ -171,6 +177,9 @@ mod tests {
     }
 
     impl Poolable for TestBuffer {
+        fn new_empty() -> Self {
+            Self::default()
+        }
         fn reset(&mut self) {
             self.data.clear();
         }

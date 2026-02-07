@@ -276,7 +276,7 @@ impl FrameSchedule {
     /// let handle = schedule.submit("name", graph, &[]);
     /// ```
     pub fn acquire_graph(&mut self) -> RenderGraph {
-        self.graph_pool.pop().unwrap_or_default()
+        self.graph_pool.pop().unwrap_or_else(RenderGraph::new)
     }
 
     /// Take ownership of the graph pool (called by FramePipeline::end_frame).

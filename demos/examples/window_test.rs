@@ -36,7 +36,7 @@ use winit::window::{Window, WindowId};
 
 use redlilium_graphics::{
     BackendType, ColorAttachment, FramePipeline, GraphicsDevice, GraphicsInstance, GraphicsPass,
-    InstanceParameters, LoadOp, PresentMode, RenderGraph, RenderTargetConfig, StoreOp, Surface,
+    InstanceParameters, LoadOp, PresentMode, RenderTargetConfig, StoreOp, Surface,
     SurfaceConfiguration, WgpuBackendType,
 };
 
@@ -171,7 +171,9 @@ impl WindowTestApp {
         let hue = (self.frame_count as f32 / FRAMES_TO_RENDER as f32) * 360.0;
         let (r, g, b) = hue_to_rgb(hue);
 
-        let mut graph = RenderGraph::default();
+        let mut schedule = pipeline.begin_frame();
+
+        let mut graph = schedule.acquire_graph();
         let mut pass = GraphicsPass::new(format!("frame_{}", self.frame_count));
         pass.set_render_targets(
             RenderTargetConfig::new().with_color(
@@ -182,7 +184,6 @@ impl WindowTestApp {
         );
         let _pass_handle = graph.add_graphics_pass(pass);
 
-        let mut schedule = pipeline.begin_frame();
         let graph_handle = schedule.submit(format!("frame_{}", self.frame_count), graph, &[]);
         schedule.finish(&[graph_handle]);
         pipeline.end_frame(schedule);

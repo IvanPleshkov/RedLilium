@@ -339,7 +339,7 @@ pub const CENTERED_QUAD_VERTICES: [QuadVertex; 6] = [
 /// Create a simple transfer graph that copies between buffers.
 #[allow(dead_code)]
 pub fn create_buffer_copy_graph(src: Arc<Buffer>, dst: Arc<Buffer>) -> RenderGraph {
-    let mut graph = RenderGraph::default();
+    let mut graph = RenderGraph::new();
 
     let mut transfer = TransferPass::new("buffer_copy".into());
     transfer.set_transfer_config(
