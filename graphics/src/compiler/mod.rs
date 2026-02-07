@@ -40,6 +40,7 @@
 use std::collections::VecDeque;
 
 use redlilium_core::pool::Poolable;
+use redlilium_core::profiling::{profile_function, profile_scope};
 
 use crate::graph::{Pass, PassHandle, RenderGraph};
 
@@ -157,6 +158,8 @@ pub(crate) fn compile_into(
     edges: &[(PassHandle, PassHandle)],
     target: &mut CompiledGraph,
 ) -> Result<(), GraphError> {
+    profile_function!();
+
     let n = passes.len();
     target.pass_order.clear();
 
@@ -174,9 +177,13 @@ pub(crate) fn compile_into(
 
     // Compute in-degree for each pass
     // Edge (dependent, dependency) means dependent has one more in-degree
-    let mut in_degree = vec![0u32; n];
-    for &(dependent, _dependency) in edges {
-        in_degree[dependent.index()] += 1;
+    let mut in_degree;
+    {
+        profile_scope!("compute_in_degree");
+        in_degree = vec![0u32; n];
+        for &(dependent, _dependency) in edges {
+            in_degree[dependent.index()] += 1;
+        }
     }
 
     // Queue passes with no dependencies
@@ -185,15 +192,18 @@ pub(crate) fn compile_into(
         .filter(|&h| in_degree[h.index()] == 0)
         .collect();
 
-    while let Some(handle) = queue.pop_front() {
-        target.pass_order.push(handle);
+    {
+        profile_scope!("topological_sort");
+        while let Some(handle) = queue.pop_front() {
+            target.pass_order.push(handle);
 
-        // Find passes that depend on this one and reduce their in-degree
-        for &(dependent, dependency) in edges {
-            if dependency == handle {
-                in_degree[dependent.index()] -= 1;
-                if in_degree[dependent.index()] == 0 {
-                    queue.push_back(dependent);
+            // Find passes that depend on this one and reduce their in-degree
+            for &(dependent, dependency) in edges {
+                if dependency == handle {
+                    in_degree[dependent.index()] -= 1;
+                    if in_degree[dependent.index()] == 0 {
+                        queue.push_back(dependent);
+                    }
                 }
             }
         }
