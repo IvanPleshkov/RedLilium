@@ -1030,7 +1030,7 @@ pub fn create_backend_with_params(
         BackendType::Vulkan => {
             #[cfg(feature = "vulkan-backend")]
             {
-                let backend = vulkan::VulkanBackend::new()?;
+                let backend = vulkan::VulkanBackend::with_params(params)?;
                 log::info!("Using Vulkan backend (requested)");
                 Ok(GpuBackend::Vulkan(backend))
             }
@@ -1066,7 +1066,7 @@ fn create_backend_auto(
     // Try Vulkan backend if wgpu unavailable (native Vulkan via ash)
     #[cfg(feature = "vulkan-backend")]
     {
-        match vulkan::VulkanBackend::new() {
+        match vulkan::VulkanBackend::with_params(params) {
             Ok(backend) => {
                 log::info!("Using Vulkan backend (ash)");
                 return Ok(GpuBackend::Vulkan(backend));
