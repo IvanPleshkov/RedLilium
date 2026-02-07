@@ -203,6 +203,34 @@ pub fn convert_load_op_depth(op: &crate::graph::LoadOp) -> (vk::AttachmentLoadOp
     }
 }
 
+/// Convert LoadOp to Vulkan attachment load op and clear value for stencil attachments.
+pub fn convert_load_op_stencil(
+    op: &crate::graph::LoadOp,
+) -> (vk::AttachmentLoadOp, vk::ClearValue) {
+    match op {
+        crate::graph::LoadOp::Load => (vk::AttachmentLoadOp::LOAD, vk::ClearValue::default()),
+        crate::graph::LoadOp::DontCare => {
+            (vk::AttachmentLoadOp::DONT_CARE, vk::ClearValue::default())
+        }
+        crate::graph::LoadOp::Clear(clear_value) => {
+            let stencil = match clear_value {
+                crate::types::ClearValue::Stencil(s) => *s,
+                crate::types::ClearValue::DepthStencil { stencil, .. } => *stencil,
+                _ => 0,
+            };
+            (
+                vk::AttachmentLoadOp::CLEAR,
+                vk::ClearValue {
+                    depth_stencil: vk::ClearDepthStencilValue {
+                        depth: 0.0,
+                        stencil,
+                    },
+                },
+            )
+        }
+    }
+}
+
 /// Convert StoreOp to Vulkan attachment store op.
 pub fn convert_store_op(op: &crate::graph::StoreOp) -> vk::AttachmentStoreOp {
     match op {

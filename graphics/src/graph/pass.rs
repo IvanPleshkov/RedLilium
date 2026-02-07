@@ -852,6 +852,57 @@ impl TransferPass {
 }
 
 // ============================================================================
+// Dispatch Command
+// ============================================================================
+
+/// A dispatch command for compute shader work.
+///
+/// Dispatch commands are submitted to compute passes to execute compute shaders.
+pub struct DispatchCommand {
+    /// The material instance with bound compute shader and resources.
+    pub material: Arc<MaterialInstance>,
+    /// Number of workgroups in the X dimension.
+    pub workgroup_count_x: u32,
+    /// Number of workgroups in the Y dimension.
+    pub workgroup_count_y: u32,
+    /// Number of workgroups in the Z dimension.
+    pub workgroup_count_z: u32,
+}
+
+impl DispatchCommand {
+    /// Create a new dispatch command.
+    pub fn new(
+        material: Arc<MaterialInstance>,
+        workgroup_count_x: u32,
+        workgroup_count_y: u32,
+        workgroup_count_z: u32,
+    ) -> Self {
+        Self {
+            material,
+            workgroup_count_x,
+            workgroup_count_y,
+            workgroup_count_z,
+        }
+    }
+}
+
+impl std::fmt::Debug for DispatchCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DispatchCommand")
+            .field("material", &self.material.label())
+            .field(
+                "workgroups",
+                &(
+                    self.workgroup_count_x,
+                    self.workgroup_count_y,
+                    self.workgroup_count_z,
+                ),
+            )
+            .finish()
+    }
+}
+
+// ============================================================================
 // Compute Pass
 // ============================================================================
 
@@ -861,13 +912,16 @@ impl TransferPass {
 #[derive(Debug)]
 pub struct ComputePass {
     name: String,
-    // Future: compute-specific configuration (dispatch size, etc.)
+    dispatch_commands: Vec<DispatchCommand>,
 }
 
 impl ComputePass {
     /// Create a new compute pass.
     pub fn new(name: String) -> Self {
-        Self { name }
+        Self {
+            name,
+            dispatch_commands: Vec::new(),
+        }
     }
 
     /// Get the pass name.
@@ -875,12 +929,70 @@ impl ComputePass {
         &self.name
     }
 
+    /// Add a dispatch command to this pass.
+    pub fn add_dispatch(
+        &mut self,
+        material: Arc<MaterialInstance>,
+        workgroup_count_x: u32,
+        workgroup_count_y: u32,
+        workgroup_count_z: u32,
+    ) {
+        self.dispatch_commands.push(DispatchCommand::new(
+            material,
+            workgroup_count_x,
+            workgroup_count_y,
+            workgroup_count_z,
+        ));
+    }
+
+    /// Add a pre-built dispatch command.
+    pub fn add_dispatch_command(&mut self, command: DispatchCommand) {
+        self.dispatch_commands.push(command);
+    }
+
+    /// Get all dispatch commands.
+    pub fn dispatch_commands(&self) -> &[DispatchCommand] {
+        &self.dispatch_commands
+    }
+
+    /// Clear all dispatch commands.
+    pub fn clear_dispatches(&mut self) {
+        self.dispatch_commands.clear();
+    }
+
+    /// Check if this pass has any dispatch commands.
+    pub fn has_dispatches(&self) -> bool {
+        !self.dispatch_commands.is_empty()
+    }
+
     /// Infer resource usage from the compute pass.
     ///
-    /// Currently returns empty usage as compute pass configuration
-    /// is not yet implemented.
+    /// Examines material bindings in dispatch commands to determine
+    /// which textures and buffers are used.
     pub fn infer_resource_usage(&self) -> PassResourceUsage {
-        // TODO: Extract usage from compute shader bindings when implemented
-        PassResourceUsage::new()
+        let mut usage = PassResourceUsage::new();
+
+        for cmd in &self.dispatch_commands {
+            Self::extract_material_textures(&cmd.material, &mut usage);
+        }
+
+        usage
+    }
+
+    /// Extract textures from a material instance's bindings.
+    fn extract_material_textures(material: &MaterialInstance, usage: &mut PassResourceUsage) {
+        for group in material.binding_groups() {
+            for entry in &group.entries {
+                match &entry.resource {
+                    BoundResource::Texture(tex) => {
+                        usage.add_texture(Arc::clone(tex), TextureAccessMode::ShaderRead);
+                    }
+                    BoundResource::CombinedTextureSampler { texture, .. } => {
+                        usage.add_texture(Arc::clone(texture), TextureAccessMode::ShaderRead);
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 }

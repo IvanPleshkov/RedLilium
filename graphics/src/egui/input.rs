@@ -22,6 +22,9 @@ pub struct EguiInputState {
     pub pixels_per_point: f32,
     /// Events collected this frame.
     pub events: Vec<egui::Event>,
+    /// System clipboard for copy/paste (desktop only).
+    #[cfg(not(target_arch = "wasm32"))]
+    clipboard: Option<arboard::Clipboard>,
 }
 
 impl EguiInputState {
@@ -40,6 +43,8 @@ impl EguiInputState {
             ),
             pixels_per_point,
             events: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            clipboard: arboard::Clipboard::new().ok(),
         }
     }
 
@@ -141,6 +146,30 @@ impl EguiInputState {
                 repeat: false,
                 modifiers: self.modifiers,
             });
+
+            // Handle paste (Ctrl+V / Cmd+V)
+            #[cfg(not(target_arch = "wasm32"))]
+            if pressed
+                && key == Key::V
+                && self.modifiers.command
+                && let Some(clipboard) = &mut self.clipboard
+                && let Ok(text) = clipboard.get_text()
+                && !text.is_empty()
+            {
+                self.events.push(egui::Event::Paste(text));
+            }
+
+            // Handle copy (Ctrl+C / Cmd+C)
+            #[cfg(not(target_arch = "wasm32"))]
+            if pressed && key == Key::C && self.modifiers.command {
+                self.events.push(egui::Event::Copy);
+            }
+
+            // Handle cut (Ctrl+X / Cmd+X)
+            #[cfg(not(target_arch = "wasm32"))]
+            if pressed && key == Key::X && self.modifiers.command {
+                self.events.push(egui::Event::Cut);
+            }
         }
     }
 
@@ -192,8 +221,13 @@ impl EguiInputState {
         // Handle cursor icon changes, copy/paste, etc.
         // In egui 0.33, clipboard operations are in output.commands
         for command in &output.commands {
-            if let egui::OutputCommand::CopyText(_text) = command {
-                // TODO: copy to clipboard
+            if let egui::OutputCommand::CopyText(text) = command {
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(clipboard) = &mut self.clipboard
+                    && let Err(e) = clipboard.set_text(text)
+                {
+                    log::warn!("Failed to copy to clipboard: {}", e);
+                }
             }
         }
     }

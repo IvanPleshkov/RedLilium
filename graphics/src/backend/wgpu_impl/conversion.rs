@@ -182,6 +182,22 @@ pub fn convert_depth_load_op(op: &crate::graph::LoadOp) -> wgpu::LoadOp<f32> {
     }
 }
 
+/// Convert LoadOp to wgpu load op for stencil attachments.
+pub fn convert_stencil_load_op(op: &crate::graph::LoadOp) -> wgpu::LoadOp<u32> {
+    match op {
+        crate::graph::LoadOp::Load => wgpu::LoadOp::Load,
+        crate::graph::LoadOp::DontCare => wgpu::LoadOp::Load, // wgpu doesn't have DontCare for stencil
+        crate::graph::LoadOp::Clear(clear_value) => {
+            let stencil = match clear_value {
+                crate::types::ClearValue::Stencil(s) => *s,
+                crate::types::ClearValue::DepthStencil { stencil, .. } => *stencil,
+                _ => 0,
+            };
+            wgpu::LoadOp::Clear(stencil)
+        }
+    }
+}
+
 /// Convert StoreOp to wgpu store op.
 pub fn convert_store_op(op: &crate::graph::StoreOp) -> wgpu::StoreOp {
     match op {

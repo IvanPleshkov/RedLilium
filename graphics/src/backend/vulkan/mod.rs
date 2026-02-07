@@ -1542,6 +1542,44 @@ impl VulkanBackend {
                     }
                 });
 
+        // Build stencil attachment if format has a stencil component
+        let stencil_attachment = render_targets
+            .depth_stencil_attachment
+            .as_ref()
+            .filter(|attachment| attachment.target.format().has_stencil())
+            .and_then(|attachment| {
+                let (load_op, clear_value) =
+                    conversion::convert_load_op_stencil(&attachment.stencil_load_op());
+                let store_op = conversion::convert_store_op(&attachment.stencil_store_op());
+
+                match &attachment.target {
+                    RenderTarget::Texture { texture, .. } => {
+                        let GpuTexture::Vulkan { view, .. } = texture.gpu_handle() else {
+                            return None;
+                        };
+
+                        Some(
+                            vk::RenderingAttachmentInfo::default()
+                                .image_view(*view)
+                                .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                                .load_op(load_op)
+                                .store_op(store_op)
+                                .clear_value(clear_value),
+                        )
+                    }
+                    RenderTarget::Surface { vulkan_view, .. } => {
+                        vulkan_view.as_ref().map(|surface_view| {
+                            vk::RenderingAttachmentInfo::default()
+                                .image_view(surface_view.view())
+                                .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                                .load_op(load_op)
+                                .store_op(store_op)
+                                .clear_value(clear_value)
+                        })
+                    }
+                }
+            });
+
         // Determine render area from first attachment
         let render_area = render_targets
             .dimensions()
@@ -1605,6 +1643,10 @@ impl VulkanBackend {
 
         if let Some(ref depth) = depth_attachment {
             rendering_info = rendering_info.depth_attachment(depth);
+        }
+
+        if let Some(ref stencil) = stencil_attachment {
+            rendering_info = rendering_info.stencil_attachment(stencil);
         }
 
         // Begin dynamic rendering
@@ -2279,14 +2321,221 @@ impl VulkanBackend {
 
     fn encode_compute_pass(
         &self,
-        _cmd: vk::CommandBuffer,
-        _pass: &crate::graph::ComputePass,
+        cmd: vk::CommandBuffer,
+        pass: &crate::graph::ComputePass,
     ) -> Result<(), GraphicsError> {
-        // Compute passes are not yet implemented in the Vulkan backend.
-        // Return an error to make this failure explicit rather than silently doing nothing.
-        Err(GraphicsError::FeatureNotSupported(
-            "Compute passes are not yet implemented in the Vulkan backend".to_string(),
-        ))
+        use crate::materials::BoundResource;
+
+        if !pass.has_dispatches() {
+            return Ok(());
+        }
+
+        for dispatch_cmd in pass.dispatch_commands() {
+            let material_arc = dispatch_cmd.material.material();
+
+            // Cache key: material Arc pointer only (no mesh/topology/render targets for compute)
+            let cache_key = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                (std::sync::Arc::as_ptr(material_arc) as usize).hash(&mut h);
+                h.finish()
+            };
+
+            let result = self
+                .pipeline_manager
+                .get_or_create_compute_pipeline(cache_key, material_arc)?;
+
+            let pipeline = result.pipeline;
+            let pipeline_layout = result.pipeline_layout;
+
+            let scratch = &mut *self.encoder_scratch.lock();
+            let VulkanEncoderScratch {
+                descriptor_set_layouts: scratch_ds_layouts,
+                descriptor_sets: scratch_ds_sets,
+                buffer_infos: scratch_buffer_infos,
+                image_infos: scratch_image_infos,
+                ..
+            } = scratch;
+
+            scratch_ds_layouts.clear();
+            scratch_ds_layouts.extend_from_slice(&result.descriptor_set_layouts);
+
+            // Create and bind descriptor sets
+            let material_instance = &dispatch_cmd.material;
+            let binding_groups = material_instance.binding_groups();
+
+            scratch_ds_sets.clear();
+            for (group_idx, (group, ds_layout)) in binding_groups
+                .iter()
+                .zip(scratch_ds_layouts.iter())
+                .enumerate()
+            {
+                let descriptor_set = self.pipeline_manager.allocate_descriptor_set(*ds_layout)?;
+
+                let binding_layout = material_arc.binding_layouts().get(group_idx);
+
+                scratch_buffer_infos.clear();
+                scratch_image_infos.clear();
+
+                for entry in &group.entries {
+                    match &entry.resource {
+                        BoundResource::Buffer(buffer) => {
+                            if let GpuBuffer::Vulkan {
+                                buffer: vk_buffer,
+                                size,
+                                ..
+                            } = buffer.gpu_handle()
+                            {
+                                scratch_buffer_infos.push(vk::DescriptorBufferInfo {
+                                    buffer: *vk_buffer,
+                                    offset: 0,
+                                    range: *size,
+                                });
+                            }
+                        }
+                        BoundResource::Texture(texture) => {
+                            if let GpuTexture::Vulkan { view, .. } = texture.gpu_handle() {
+                                scratch_image_infos.push(vk::DescriptorImageInfo {
+                                    sampler: vk::Sampler::null(),
+                                    image_view: *view,
+                                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                                });
+                            }
+                        }
+                        BoundResource::Sampler(sampler) => {
+                            if let GpuSampler::Vulkan {
+                                sampler: vk_sampler,
+                                ..
+                            } = sampler.gpu_handle()
+                            {
+                                scratch_image_infos.push(vk::DescriptorImageInfo {
+                                    sampler: *vk_sampler,
+                                    image_view: vk::ImageView::null(),
+                                    image_layout: vk::ImageLayout::UNDEFINED,
+                                });
+                            }
+                        }
+                        BoundResource::CombinedTextureSampler { texture, sampler } => {
+                            if let (
+                                GpuTexture::Vulkan { view, .. },
+                                GpuSampler::Vulkan {
+                                    sampler: vk_sampler,
+                                    ..
+                                },
+                            ) = (texture.gpu_handle(), sampler.gpu_handle())
+                            {
+                                scratch_image_infos.push(vk::DescriptorImageInfo {
+                                    sampler: *vk_sampler,
+                                    image_view: *view,
+                                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Build write descriptors
+                let mut writes: Vec<vk::WriteDescriptorSet> = Vec::new();
+                let mut buffer_idx = 0;
+                let mut image_idx = 0;
+                for entry in &group.entries {
+                    let binding_type = binding_layout.and_then(|layout| {
+                        layout
+                            .entries
+                            .iter()
+                            .find(|e| e.binding == entry.binding)
+                            .map(|e| e.binding_type)
+                    });
+
+                    let write = match &entry.resource {
+                        BoundResource::Buffer(_) => {
+                            let info = &scratch_buffer_infos[buffer_idx..buffer_idx + 1];
+                            buffer_idx += 1;
+                            let descriptor_type = if binding_type
+                                == Some(crate::materials::BindingType::StorageBuffer)
+                            {
+                                vk::DescriptorType::STORAGE_BUFFER
+                            } else {
+                                vk::DescriptorType::UNIFORM_BUFFER
+                            };
+                            vk::WriteDescriptorSet::default()
+                                .dst_set(descriptor_set)
+                                .dst_binding(entry.binding)
+                                .descriptor_type(descriptor_type)
+                                .buffer_info(info)
+                        }
+                        BoundResource::Texture(_) => {
+                            let info = &scratch_image_infos[image_idx..image_idx + 1];
+                            image_idx += 1;
+                            vk::WriteDescriptorSet::default()
+                                .dst_set(descriptor_set)
+                                .dst_binding(entry.binding)
+                                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                                .image_info(info)
+                        }
+                        BoundResource::Sampler(_) => {
+                            let info = &scratch_image_infos[image_idx..image_idx + 1];
+                            image_idx += 1;
+                            vk::WriteDescriptorSet::default()
+                                .dst_set(descriptor_set)
+                                .dst_binding(entry.binding)
+                                .descriptor_type(vk::DescriptorType::SAMPLER)
+                                .image_info(info)
+                        }
+                        BoundResource::CombinedTextureSampler { .. } => {
+                            let info = &scratch_image_infos[image_idx..image_idx + 1];
+                            image_idx += 1;
+                            vk::WriteDescriptorSet::default()
+                                .dst_set(descriptor_set)
+                                .dst_binding(entry.binding)
+                                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                                .image_info(info)
+                        }
+                    };
+                    writes.push(write);
+                }
+
+                if !writes.is_empty() {
+                    unsafe {
+                        self.device.update_descriptor_sets(&writes, &[]);
+                    }
+                }
+
+                scratch_ds_sets.push(descriptor_set);
+            }
+
+            // Bind pipeline
+            unsafe {
+                self.device
+                    .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline);
+            }
+
+            // Bind descriptor sets
+            if !scratch_ds_sets.is_empty() {
+                unsafe {
+                    self.device.cmd_bind_descriptor_sets(
+                        cmd,
+                        vk::PipelineBindPoint::COMPUTE,
+                        pipeline_layout,
+                        0,
+                        scratch_ds_sets,
+                        &[],
+                    );
+                }
+            }
+
+            // Dispatch
+            unsafe {
+                self.device.cmd_dispatch(
+                    cmd,
+                    dispatch_cmd.workgroup_count_x,
+                    dispatch_cmd.workgroup_count_y,
+                    dispatch_cmd.workgroup_count_z,
+                );
+            }
+        }
+
+        Ok(())
     }
 
     #[allow(dead_code)]

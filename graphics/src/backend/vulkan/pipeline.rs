@@ -520,6 +520,113 @@ impl PipelineManager {
         })
     }
 
+    /// Create a compute pipeline.
+    pub fn create_compute_pipeline(
+        &self,
+        compute_module: vk::ShaderModule,
+        compute_entry: &str,
+        pipeline_layout: vk::PipelineLayout,
+    ) -> Result<vk::Pipeline, GraphicsError> {
+        let compute_entry_c = CString::new(compute_entry).map_err(|e| {
+            GraphicsError::InvalidParameter(format!(
+                "Invalid compute entry point name (contains null byte): {}",
+                e
+            ))
+        })?;
+
+        let stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::COMPUTE)
+            .module(compute_module)
+            .name(&compute_entry_c);
+
+        let pipeline_info = vk::ComputePipelineCreateInfo::default()
+            .stage(stage)
+            .layout(pipeline_layout);
+
+        let pipelines = unsafe {
+            self.device
+                .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+        }
+        .map_err(|(_, e)| {
+            GraphicsError::ResourceCreationFailed(format!(
+                "Failed to create compute pipeline: {:?}",
+                e
+            ))
+        })?;
+
+        Ok(pipelines[0])
+    }
+
+    /// Look up a cached compute pipeline or create one on cache miss.
+    pub fn get_or_create_compute_pipeline(
+        &self,
+        cache_key: u64,
+        material: &Material,
+    ) -> Result<PipelineCacheResult, GraphicsError> {
+        // Cache hit
+        {
+            let cache = self.cache.lock();
+            if let Some(cached) = cache.get(&cache_key) {
+                return Ok(PipelineCacheResult {
+                    pipeline: cached.pipeline,
+                    pipeline_layout: cached.pipeline_layout,
+                    descriptor_set_layouts: cached.descriptor_set_layouts.clone(),
+                });
+            }
+        }
+
+        // Cache miss: create everything
+        let shaders = material.shaders();
+        let mut compute_module = None;
+        let mut compute_entry: &str = "main";
+
+        for shader in shaders {
+            if shader.stage == ShaderStage::Compute {
+                let module =
+                    self.compile_shader(&shader.source, shader.stage, &shader.entry_point)?;
+                compute_module = Some(module);
+                compute_entry = &shader.entry_point;
+            }
+        }
+
+        let compute_module = compute_module.ok_or_else(|| {
+            GraphicsError::ShaderCompilationFailed("No compute shader provided".into())
+        })?;
+
+        // Descriptor set layouts
+        let descriptor_set_layouts: Vec<vk::DescriptorSetLayout> = material
+            .binding_layouts()
+            .iter()
+            .map(|layout| self.create_descriptor_set_layout(layout))
+            .collect::<Result<_, _>>()?;
+
+        let pipeline_layout = self.create_pipeline_layout(&descriptor_set_layouts)?;
+
+        let pipeline =
+            self.create_compute_pipeline(compute_module, compute_entry, pipeline_layout)?;
+
+        // Shader module is baked into the pipeline; destroy it now
+        unsafe {
+            self.device.destroy_shader_module(compute_module, None);
+        }
+
+        // Insert into cache
+        self.cache.lock().insert(
+            cache_key,
+            CachedVulkanPipeline {
+                pipeline,
+                pipeline_layout,
+                descriptor_set_layouts: descriptor_set_layouts.clone(),
+            },
+        );
+
+        Ok(PipelineCacheResult {
+            pipeline,
+            pipeline_layout,
+            descriptor_set_layouts,
+        })
+    }
+
     /// Get the descriptor pool.
     #[allow(dead_code)]
     pub fn descriptor_pool(&self) -> vk::DescriptorPool {

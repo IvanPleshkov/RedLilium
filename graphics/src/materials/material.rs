@@ -60,6 +60,11 @@ impl ShaderSource {
     pub fn fragment(source: impl Into<Vec<u8>>, entry_point: impl Into<String>) -> Self {
         Self::new(ShaderStage::Fragment, source, entry_point)
     }
+
+    /// Create a compute shader source.
+    pub fn compute(source: impl Into<Vec<u8>>, entry_point: impl Into<String>) -> Self {
+        Self::new(ShaderStage::Compute, source, entry_point)
+    }
 }
 
 /// Blend factor for blending operations.

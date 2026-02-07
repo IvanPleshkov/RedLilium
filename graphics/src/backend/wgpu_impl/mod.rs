@@ -37,6 +37,12 @@ struct CachedPipeline {
     bind_group_layouts: Vec<wgpu::BindGroupLayout>,
 }
 
+/// Cached compute pipeline with its bind group layouts.
+struct CachedComputePipeline {
+    pipeline: wgpu::ComputePipeline,
+    bind_group_layouts: Vec<wgpu::BindGroupLayout>,
+}
+
 /// A texture view for a surface texture (swapchain image).
 ///
 /// This wraps the wgpu::TextureView from the surface texture for use in render passes.
@@ -76,6 +82,7 @@ pub struct WgpuBackend {
     queue: Arc<wgpu::Queue>,
     encoder_scratch: std::sync::Mutex<WgpuEncoderScratch>,
     pipeline_cache: std::sync::Mutex<HashMap<u64, CachedPipeline>>,
+    compute_pipeline_cache: std::sync::Mutex<HashMap<u64, CachedComputePipeline>>,
 }
 
 impl std::fmt::Debug for WgpuBackend {
@@ -149,6 +156,7 @@ impl WgpuBackend {
             queue: Arc::new(queue),
             encoder_scratch: std::sync::Mutex::new(WgpuEncoderScratch::default()),
             pipeline_cache: std::sync::Mutex::new(HashMap::new()),
+            compute_pipeline_cache: std::sync::Mutex::new(HashMap::new()),
         })
     }
 

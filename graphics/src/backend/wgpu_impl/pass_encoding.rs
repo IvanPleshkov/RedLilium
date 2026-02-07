@@ -11,8 +11,8 @@ use super::super::{GpuBuffer, GpuTexture};
 use super::WgpuBackend;
 use super::conversion::{
     convert_binding_type, convert_blend_state, convert_depth_load_op, convert_load_op,
-    convert_shader_stages, convert_step_mode, convert_store_op, convert_texture_format,
-    convert_topology, convert_vertex_format,
+    convert_shader_stages, convert_stencil_load_op, convert_step_mode, convert_store_op,
+    convert_texture_format, convert_topology, convert_vertex_format,
 };
 
 impl WgpuBackend {
@@ -103,13 +103,21 @@ impl WgpuBackend {
                     let GpuTexture::Wgpu { view, .. } = attachment.texture().gpu_handle() else {
                         panic!("Invalid depth texture GPU handle");
                     };
+                    let stencil_ops = if attachment.target.format().has_stencil() {
+                        Some(wgpu::Operations {
+                            load: convert_stencil_load_op(&attachment.stencil_load_op()),
+                            store: convert_store_op(&attachment.stencil_store_op()),
+                        })
+                    } else {
+                        None
+                    };
                     wgpu::RenderPassDepthStencilAttachment {
                         view,
                         depth_ops: Some(wgpu::Operations {
                             load: convert_depth_load_op(&attachment.depth_load_op()),
                             store: convert_store_op(&attachment.depth_store_op()),
                         }),
-                        stencil_ops: None, // TODO: Add stencil support
+                        stencil_ops,
                     }
                 });
 
@@ -707,12 +715,223 @@ impl WgpuBackend {
         encoder: &mut wgpu::CommandEncoder,
         pass: &crate::graph::ComputePass,
     ) -> Result<(), GraphicsError> {
-        let _compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        if !pass.has_dispatches() {
+            return Ok(());
+        }
+
+        let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some(pass.name()),
             timestamp_writes: None,
         });
 
-        // TODO: Encode compute dispatches
+        let scratch = &mut *self.encoder_scratch.lock().unwrap();
+        let super::WgpuEncoderScratch {
+            bind_group_layout_entries: scratch_bgl_entries,
+            bind_group_layouts: scratch_bind_group_layouts,
+            bind_groups: scratch_bind_groups,
+            ..
+        } = scratch;
+
+        let mut bind_group_entries: Vec<wgpu::BindGroupEntry> = Vec::new();
+
+        for dispatch_cmd in pass.dispatch_commands() {
+            let material_arc = dispatch_cmd.material.material();
+
+            // Cache key: material Arc pointer only (no mesh/topology/render targets for compute)
+            let cache_key = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                (std::sync::Arc::as_ptr(material_arc) as usize).hash(&mut h);
+                h.finish()
+            };
+
+            // Pipeline: try cache first, create on miss
+            let pipeline = 'pipeline: {
+                {
+                    let cache = self.compute_pipeline_cache.lock().unwrap();
+                    if let Some(cached) = cache.get(&cache_key) {
+                        let p = cached.pipeline.clone();
+                        scratch_bind_group_layouts.clear();
+                        scratch_bind_group_layouts
+                            .extend(cached.bind_group_layouts.iter().cloned());
+                        break 'pipeline p;
+                    }
+                }
+
+                // Cache miss: create shader module, layouts, and pipeline
+                let material = material_arc.as_ref();
+                let shaders = material.shaders();
+                let mut compute_module = None;
+                let mut compute_entry: &str = "main";
+
+                for shader in shaders {
+                    if shader.stage == ShaderStage::Compute {
+                        let source = std::str::from_utf8(&shader.source).map_err(|e| {
+                            GraphicsError::ShaderCompilationFailed(format!(
+                                "Invalid UTF-8 in shader: {e}"
+                            ))
+                        })?;
+
+                        let module =
+                            self.device
+                                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                                    label: material.label(),
+                                    source: wgpu::ShaderSource::Wgsl(source.into()),
+                                });
+
+                        compute_module = Some(module);
+                        compute_entry = &shader.entry_point;
+                    }
+                }
+
+                let Some(compute_module) = compute_module else {
+                    return Err(GraphicsError::ShaderCompilationFailed(
+                        "No compute shader provided".into(),
+                    ));
+                };
+
+                // Bind group layouts
+                let binding_layouts = material.binding_layouts();
+                scratch_bind_group_layouts.clear();
+
+                for bg_layout in binding_layouts {
+                    scratch_bgl_entries.clear();
+                    scratch_bgl_entries.extend(bg_layout.entries.iter().map(|entry| {
+                        wgpu::BindGroupLayoutEntry {
+                            binding: entry.binding,
+                            visibility: convert_shader_stages(entry.visibility),
+                            ty: convert_binding_type(entry.binding_type),
+                            count: None,
+                        }
+                    }));
+
+                    scratch_bind_group_layouts.push(self.device.create_bind_group_layout(
+                        &wgpu::BindGroupLayoutDescriptor {
+                            label: bg_layout.label.as_deref(),
+                            entries: scratch_bgl_entries,
+                        },
+                    ));
+                }
+
+                // Pipeline layout
+                let pipeline_layout = {
+                    let refs: Vec<&wgpu::BindGroupLayout> =
+                        scratch_bind_group_layouts.iter().collect();
+                    self.device
+                        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                            label: Some("Compute Pipeline Layout"),
+                            bind_group_layouts: &refs,
+                            immediate_size: 0,
+                        })
+                };
+
+                // Create compute pipeline
+                let pipeline =
+                    self.device
+                        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                            label: material.label(),
+                            layout: Some(&pipeline_layout),
+                            module: &compute_module,
+                            entry_point: Some(compute_entry),
+                            compilation_options: wgpu::PipelineCompilationOptions::default(),
+                            cache: None,
+                        });
+
+                // Store in cache
+                {
+                    let mut cache = self.compute_pipeline_cache.lock().unwrap();
+                    cache.insert(
+                        cache_key,
+                        super::CachedComputePipeline {
+                            pipeline: pipeline.clone(),
+                            bind_group_layouts: scratch_bind_group_layouts.clone(),
+                        },
+                    );
+                }
+
+                pipeline
+            };
+
+            // Bind groups
+            let material_instance = &dispatch_cmd.material;
+            scratch_bind_groups.clear();
+
+            for (binding_group, bg_layout) in material_instance
+                .binding_groups()
+                .iter()
+                .zip(scratch_bind_group_layouts.iter())
+            {
+                bind_group_entries.clear();
+                for entry in &binding_group.entries {
+                    let resource = match &entry.resource {
+                        crate::materials::BoundResource::Buffer(buffer) => {
+                            if let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() {
+                                Some(wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                    buffer: wgpu_buffer,
+                                    offset: 0,
+                                    size: None,
+                                }))
+                            } else {
+                                None
+                            }
+                        }
+                        crate::materials::BoundResource::Texture(texture) => {
+                            if let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() {
+                                Some(wgpu::BindingResource::TextureView(view))
+                            } else {
+                                None
+                            }
+                        }
+                        crate::materials::BoundResource::Sampler(sampler) => {
+                            if let crate::backend::GpuSampler::Wgpu(wgpu_sampler) =
+                                sampler.gpu_handle()
+                            {
+                                Some(wgpu::BindingResource::Sampler(wgpu_sampler))
+                            } else {
+                                None
+                            }
+                        }
+                        crate::materials::BoundResource::CombinedTextureSampler {
+                            texture, ..
+                        } => {
+                            if let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() {
+                                Some(wgpu::BindingResource::TextureView(view))
+                            } else {
+                                None
+                            }
+                        }
+                    };
+                    if let Some(r) = resource {
+                        bind_group_entries.push(wgpu::BindGroupEntry {
+                            binding: entry.binding,
+                            resource: r,
+                        });
+                    }
+                }
+
+                scratch_bind_groups.push(self.device.create_bind_group(
+                    &wgpu::BindGroupDescriptor {
+                        label: binding_group.label.as_deref(),
+                        layout: bg_layout,
+                        entries: &bind_group_entries,
+                    },
+                ));
+            }
+
+            // Record into compute pass
+            compute_pass.set_pipeline(&pipeline);
+
+            for (index, bind_group) in scratch_bind_groups.iter().enumerate() {
+                compute_pass.set_bind_group(index as u32, bind_group, &[]);
+            }
+
+            compute_pass.dispatch_workgroups(
+                dispatch_cmd.workgroup_count_x,
+                dispatch_cmd.workgroup_count_y,
+                dispatch_cmd.workgroup_count_z,
+            );
+        }
+
         Ok(())
     }
 }

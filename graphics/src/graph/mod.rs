@@ -44,7 +44,10 @@ pub mod resource_usage;
 mod target;
 mod transfer;
 
-pub use pass::{ComputePass, DrawCommand, GraphicsPass, IndirectDrawCommand, Pass, TransferPass};
+pub use pass::{
+    ComputePass, DispatchCommand, DrawCommand, GraphicsPass, IndirectDrawCommand, Pass,
+    TransferPass,
+};
 
 // Re-export compiler types for convenience
 pub use crate::compiler::{CompiledGraph, GraphError, RenderGraphCompilationMode, compile};

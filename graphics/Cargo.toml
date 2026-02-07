@@ -28,6 +28,10 @@ naga_oil.workspace = true
 # UI
 egui = "0.33.3"
 
+# Clipboard (desktop only, not available on WASM)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+arboard = "3"
+
 # Optional GPU backend dependencies
 wgpu = { workspace = true, optional = true }
 ash = { workspace = true, optional = true }
