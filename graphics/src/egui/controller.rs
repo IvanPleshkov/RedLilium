@@ -11,9 +11,9 @@ use winit::keyboard::ModifiersState;
 use super::ArcEguiApp;
 use super::input::EguiInputState;
 use super::renderer::EguiRenderer;
-use crate::graph::{GraphicsPass, RenderGraph};
+use crate::GraphicsDevice;
+use crate::graph::{GraphicsPass, RenderTarget};
 use crate::resources::Texture;
-use crate::{GraphicsDevice, SurfaceTexture};
 
 /// Controller for egui UI integration.
 ///
@@ -182,7 +182,7 @@ impl EguiController {
     /// Returns the graphics pass for rendering egui, or `None` if there's nothing to render.
     pub fn end_frame(
         &mut self,
-        surface_texture: &SurfaceTexture,
+        render_target: &RenderTarget,
         screen_width: u32,
         screen_height: u32,
     ) -> Option<GraphicsPass> {
@@ -214,33 +214,11 @@ impl EguiController {
         // Create graphics pass
         Some(self.renderer.create_graphics_pass(
             &primitives,
-            surface_texture,
+            render_target,
             screen_width,
             screen_height,
             output.pixels_per_point,
         ))
-    }
-
-    /// Create a render graph containing the egui pass.
-    ///
-    /// This is a convenience method that creates a complete render graph.
-    /// For more control, use `begin_frame` and `end_frame` separately.
-    pub fn create_render_graph(
-        &mut self,
-        surface_texture: &SurfaceTexture,
-        screen_width: u32,
-        screen_height: u32,
-        elapsed_time: f64,
-    ) -> RenderGraph {
-        self.begin_frame(elapsed_time);
-
-        let mut graph = RenderGraph::new();
-
-        if let Some(pass) = self.end_frame(surface_texture, screen_width, screen_height) {
-            graph.add_graphics_pass(pass);
-        }
-
-        graph
     }
 
     /// Register a user-managed texture with egui.

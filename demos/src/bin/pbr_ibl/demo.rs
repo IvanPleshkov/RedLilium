@@ -11,7 +11,7 @@ use redlilium_core::profiling::{
 use redlilium_graphics::{
     BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferDescriptor, BufferUsage,
     ColorAttachment, CpuSampler, DepthStencilAttachment, Extent3d, FrameSchedule, GraphicsPass,
-    LoadOp, Material, MaterialDescriptor, MaterialInstance, Mesh, MeshDescriptor,
+    LoadOp, Material, MaterialDescriptor, MaterialInstance, Mesh, MeshDescriptor, RenderTarget,
     RenderTargetConfig, RingAllocation, ShaderComposer, ShaderDef, ShaderSource, ShaderStage,
     ShaderStageFlags, TextureDescriptor, TextureFormat, TextureUsage, TransferConfig,
     TransferOperation, TransferPass, VertexBufferLayout, VertexLayout,
@@ -1140,9 +1140,10 @@ impl AppHandler for PbrIblDemo {
             let width = ctx.width();
             let height = ctx.height();
             let elapsed = ctx.elapsed_time() as f64;
+            let render_target = RenderTarget::from_surface(ctx.swapchain_texture());
 
             egui.begin_frame(elapsed);
-            if let Some(egui_pass) = egui.end_frame(ctx.swapchain_texture(), width, height) {
+            if let Some(egui_pass) = egui.end_frame(&render_target, width, height) {
                 graph.add_graphics_pass(egui_pass);
             }
         }

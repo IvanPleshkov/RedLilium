@@ -8,7 +8,8 @@ use std::sync::Arc;
 use egui::epaint::{ImageDelta, Primitive, Vertex};
 use egui::{ClippedPrimitive, TextureId, TexturesDelta};
 
-use crate::graph::{ColorAttachment, GraphicsPass, LoadOp, RenderTargetConfig};
+use crate::GraphicsDevice;
+use crate::graph::{ColorAttachment, GraphicsPass, LoadOp, RenderTarget, RenderTargetConfig};
 use crate::materials::{
     BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, Material, MaterialDescriptor,
     MaterialInstance, ShaderSource, ShaderStage, ShaderStageFlags,
@@ -23,7 +24,6 @@ use crate::types::{
     AddressMode, BufferDescriptor, BufferUsage, FilterMode, SamplerDescriptor, TextureDescriptor,
     TextureFormat, TextureUsage,
 };
-use crate::{GraphicsDevice, SurfaceTexture};
 
 /// Egui vertex data matching egui's Vertex structure.
 #[repr(C)]
@@ -378,14 +378,14 @@ impl EguiRenderer {
     /// # Arguments
     ///
     /// * `primitives` - The tessellated egui primitives to render
-    /// * `surface_texture` - The surface texture to render to
+    /// * `render_target` - The render target to render to (surface or texture)
     /// * `screen_width` - Screen width in physical pixels
     /// * `screen_height` - Screen height in physical pixels
     /// * `pixels_per_point` - DPI scale factor for converting points to pixels
     pub fn create_graphics_pass(
         &self,
         primitives: &[ClippedPrimitive],
-        surface_texture: &SurfaceTexture,
+        render_target: &RenderTarget,
         screen_width: u32,
         screen_height: u32,
         pixels_per_point: f32,
@@ -394,9 +394,8 @@ impl EguiRenderer {
 
         // Set render target (draw on top of existing content)
         pass.set_render_targets(
-            RenderTargetConfig::new().with_color(
-                ColorAttachment::from_surface(surface_texture).with_load_op(LoadOp::Load),
-            ),
+            RenderTargetConfig::new()
+                .with_color(ColorAttachment::new(render_target.clone()).with_load_op(LoadOp::Load)),
         );
 
         // Create uniform binding group
