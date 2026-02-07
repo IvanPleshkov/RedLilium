@@ -130,7 +130,6 @@ impl ShaderComposer {
             })
             .map_err(|e| composer_error_to_graphics_error(e, name))?;
 
-        log::debug!("Added shader module: {}", name);
         Ok(())
     }
 

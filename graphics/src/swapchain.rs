@@ -302,8 +302,6 @@ impl Surface {
         // Acquire the backend-specific surface texture
         let gpu_texture = self.acquire_gpu_texture()?;
 
-        log::trace!("Acquired surface texture, frame index: {}", frame_index);
-
         Ok(SurfaceTexture {
             device,
             instance: Arc::clone(&self.instance),
@@ -393,7 +391,6 @@ impl SurfaceTexture {
         if let Ok(mut presented) = self.presented.write() {
             *presented = true;
         }
-        log::trace!("Presenting frame {}", self.frame_index);
 
         if let Some(gpu_texture) = self.gpu_texture.take() {
             gpu_texture.present(&self.instance.backend(), self.frame_index);
@@ -414,13 +411,8 @@ impl std::fmt::Debug for SurfaceTexture {
 
 impl Drop for SurfaceTexture {
     fn drop(&mut self) {
-        let presented = self.presented.read().map(|p| *p).unwrap_or(false);
-        if !presented {
-            log::trace!(
-                "SurfaceTexture dropped without presenting (frame {})",
-                self.frame_index
-            );
-        }
+        // Note: If the SurfaceTexture is dropped without presenting,
+        // the frame will be skipped. This is intentional behavior.
     }
 }
 

@@ -394,7 +394,7 @@ pub fn present_vulkan_frame(
     render_finished_semaphore: vk::Semaphore,
     in_flight_fence: vk::Fence,
     present_command_buffer: vk::CommandBuffer,
-    frame_index: u64,
+    _frame_index: u64,
 ) -> Result<(), GraphicsError> {
     let cmd = present_command_buffer;
     let command_buffers = [cmd];
@@ -497,20 +497,9 @@ pub fn present_vulkan_frame(
     };
 
     match result {
-        Ok(_) => {
-            log::trace!(
-                "Presented Vulkan frame {}, image index: {}",
-                frame_index,
-                image_index
-            );
-            Ok(())
-        }
+        Ok(_) | Err(vk::Result::SUBOPTIMAL_KHR) => Ok(()),
         Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
             log::warn!("Swapchain out of date, needs recreation");
-            Ok(())
-        }
-        Err(vk::Result::SUBOPTIMAL_KHR) => {
-            log::trace!("Swapchain suboptimal");
             Ok(())
         }
         Err(e) => Err(GraphicsError::Internal(format!(

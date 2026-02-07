@@ -192,9 +192,8 @@ impl EguiInputState {
         // Handle cursor icon changes, copy/paste, etc.
         // In egui 0.33, clipboard operations are in output.commands
         for command in &output.commands {
-            if let egui::OutputCommand::CopyText(text) = command {
-                // In a real implementation, you'd copy to clipboard here
-                log::debug!("Egui wants to copy: {}", text);
+            if let egui::OutputCommand::CopyText(_text) = command {
+                // TODO: copy to clipboard
             }
         }
     }

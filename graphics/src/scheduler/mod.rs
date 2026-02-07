@@ -306,8 +306,8 @@ impl FrameSchedule {
         // Create completion semaphore for this graph
         let completion = Semaphore::new(self.next_semaphore_id());
 
-        // Collect semaphores to wait on
-        let wait_semaphores: Vec<&Semaphore> = wait_for
+        // Collect semaphores to wait on (used for future GPU synchronization)
+        let _wait_semaphores: Vec<&Semaphore> = wait_for
             .iter()
             .map(|h| &self.submitted[h.index()].completion)
             .collect();
@@ -324,17 +324,6 @@ impl FrameSchedule {
         } else {
             log::error!("Failed to compile graph '{}'", name);
         }
-
-        log::trace!(
-            "Submitted graph '{}' (waiting for {} dependencies, semaphores: [{}])",
-            name,
-            wait_for.len(),
-            wait_semaphores
-                .iter()
-                .map(|s| s.id().to_string())
-                .collect::<Vec<_>>()
-                .join(",")
-        );
 
         let handle = GraphHandle::new(self.submitted.len() as u32);
         self.submitted.push(SubmittedGraph {
@@ -427,12 +416,6 @@ impl FrameSchedule {
             log::error!("Failed to compile present graph '{}'", name);
         }
 
-        log::trace!(
-            "Submitted present graph '{}' (waiting for {} dependencies)",
-            name,
-            wait_for.len()
-        );
-
         self.submitted.push(SubmittedGraph {
             name,
             completion,
@@ -508,11 +491,6 @@ impl FrameSchedule {
         // We create a signaled fence to indicate completion.
         let instance = Arc::clone(self.device.instance());
         let fence = Fence::new_gpu(instance);
-
-        log::trace!(
-            "Finish schedule (waiting for {} dependencies)",
-            wait_for.len()
-        );
 
         self.fence = Some(fence);
     }

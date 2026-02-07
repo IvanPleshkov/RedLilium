@@ -108,7 +108,6 @@ impl DeferredResource {
                     log::error!("Failed to free buffer allocation: {}", e);
                 }
                 unsafe { device.destroy_buffer(buffer, None) };
-                log::trace!("Deferred: destroyed buffer {:?}", buffer);
             }
             DeferredResource::Texture {
                 device,
@@ -126,19 +125,15 @@ impl DeferredResource {
                     device.destroy_image_view(view, None);
                     device.destroy_image(image, None);
                 }
-                log::trace!("Deferred: destroyed texture {:?}", image);
             }
             DeferredResource::Sampler { device, sampler } => {
                 unsafe { device.destroy_sampler(sampler, None) };
-                log::trace!("Deferred: destroyed sampler {:?}", sampler);
             }
             DeferredResource::Fence { device, fence } => {
                 unsafe { device.destroy_fence(fence, None) };
-                log::trace!("Deferred: destroyed fence {:?}", fence);
             }
             DeferredResource::Semaphore { device, semaphore } => {
                 unsafe { device.destroy_semaphore(semaphore, None) };
-                log::trace!("Deferred: destroyed semaphore {:?}", semaphore);
             }
             DeferredResource::CommandBuffers {
                 device,
@@ -146,7 +141,6 @@ impl DeferredResource {
                 buffers,
             } => {
                 unsafe { device.free_command_buffers(command_pool, &buffers) };
-                log::trace!("Deferred: freed {} command buffers", buffers.len());
             }
         }
     }
@@ -167,10 +161,6 @@ impl DeferredResource {
                 // Drop allocation without freeing - will be cleaned up when allocator is dropped
                 drop(allocation);
                 unsafe { device.destroy_buffer(buffer, None) };
-                log::trace!(
-                    "Deferred: destroyed buffer {:?} (allocation leaked)",
-                    buffer
-                );
             }
             DeferredResource::Texture {
                 device,
@@ -184,22 +174,15 @@ impl DeferredResource {
                     device.destroy_image_view(view, None);
                     device.destroy_image(image, None);
                 }
-                log::trace!(
-                    "Deferred: destroyed texture {:?} (allocation leaked)",
-                    image
-                );
             }
             DeferredResource::Sampler { device, sampler } => {
                 unsafe { device.destroy_sampler(sampler, None) };
-                log::trace!("Deferred: destroyed sampler {:?}", sampler);
             }
             DeferredResource::Fence { device, fence } => {
                 unsafe { device.destroy_fence(fence, None) };
-                log::trace!("Deferred: destroyed fence {:?}", fence);
             }
             DeferredResource::Semaphore { device, semaphore } => {
                 unsafe { device.destroy_semaphore(semaphore, None) };
-                log::trace!("Deferred: destroyed semaphore {:?}", semaphore);
             }
             DeferredResource::CommandBuffers {
                 device,
@@ -207,7 +190,6 @@ impl DeferredResource {
                 buffers,
             } => {
                 unsafe { device.free_command_buffers(command_pool, &buffers) };
-                log::trace!("Deferred: freed {} command buffers", buffers.len());
             }
         }
     }
@@ -298,12 +280,6 @@ impl DeferredDestructor {
                 .collect();
 
             if !resources.is_empty() {
-                log::trace!(
-                    "Deferred: destroying {} resources from frame {}",
-                    resources.len(),
-                    current.saturating_sub(MAX_FRAMES_IN_FLIGHT)
-                );
-
                 // Try to get the allocator
                 let allocator_guard = self.allocator.lock();
                 if let Some(weak_alloc) = allocator_guard.as_ref() {
@@ -361,9 +337,7 @@ impl DeferredDestructor {
             }
         }
 
-        if total > 0 {
-            log::debug!("Deferred: flushed {} pending resources on shutdown", total);
-        }
+        let _ = total; // suppress unused warning
     }
 
     /// Get the number of resources currently pending destruction.

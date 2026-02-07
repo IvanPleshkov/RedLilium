@@ -964,12 +964,6 @@ impl VulkanBackend {
         let mut tracker = self.layout_tracker.lock();
         let mut batch = BarrierBatch::new();
 
-        log::debug!(
-            "Generating barriers: {} texture usages, {} buffer usages",
-            usage.texture_usages.len(),
-            usage.buffer_usages.len()
-        );
-
         // Generate texture (image) barriers
         for decl in &usage.texture_usages {
             // Get Vulkan image info from the texture
@@ -998,12 +992,6 @@ impl VulkanBackend {
             };
 
             // Add barrier if layout change is needed
-            log::debug!(
-                "Texture barrier: {:?} -> {:?} (label: {:?})",
-                current_layout,
-                required_layout,
-                decl.texture.label()
-            );
             batch.add_image_barrier(
                 texture_id,
                 *image,
@@ -1132,14 +1120,6 @@ impl VulkanBackend {
         if data.is_empty() {
             return Ok(());
         }
-
-        log::debug!(
-            "VulkanBackend: write_texture {:?} ({}x{}) len={}",
-            descriptor.label,
-            descriptor.size.width,
-            descriptor.size.height,
-            data.len()
-        );
 
         // Create staging buffer
         let staging_buffer_info = vk::BufferCreateInfo::default()
@@ -1424,10 +1404,6 @@ impl VulkanBackend {
         pass: &crate::graph::GraphicsPass,
     ) -> Result<(), GraphicsError> {
         let Some(render_targets) = pass.render_targets() else {
-            log::trace!(
-                "Skipping graphics pass '{}': no render targets",
-                pass.name()
-            );
             return Ok(());
         };
 
@@ -1528,15 +1504,6 @@ impl VulkanBackend {
                 },
             })
             .unwrap_or_default();
-
-        log::debug!(
-            "Graphics pass '{}': render_area={}x{}, color_attachments={}, depth={}",
-            pass.name(),
-            render_area.extent.width,
-            render_area.extent.height,
-            color_attachments.len(),
-            depth_attachment.is_some()
-        );
 
         // NOTE: Layout transitions are now handled automatically by the barrier
         // generation system in execute_graph() before each pass is encoded.
@@ -1873,14 +1840,6 @@ impl VulkanBackend {
             }
 
             if !writes.is_empty() {
-                log::debug!(
-                    "Writing {} descriptors to set: {:?}",
-                    writes.len(),
-                    writes
-                        .iter()
-                        .map(|w| (w.dst_binding, w.descriptor_type))
-                        .collect::<Vec<_>>()
-                );
                 unsafe {
                     self.device.update_descriptor_sets(&writes, &[]);
                 }
@@ -1943,14 +1902,6 @@ impl VulkanBackend {
         }
 
         // Issue draw call
-        log::debug!(
-            "Issuing draw call: indexed={}, vertex_count={}, index_count={}, instance_count={}",
-            mesh.is_indexed(),
-            mesh.vertex_count(),
-            mesh.index_count(),
-            draw_cmd.instance_count
-        );
-
         if mesh.is_indexed() {
             // Bind index buffer
             if let Some(index_buffer) = mesh.index_buffer()

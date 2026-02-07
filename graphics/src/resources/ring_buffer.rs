@@ -158,13 +158,6 @@ impl RingBuffer {
 
         let buffer = device.create_buffer(&descriptor)?;
 
-        log::trace!(
-            "RingBuffer: created '{}' with capacity {} bytes (aligned to {})",
-            label,
-            aligned_capacity,
-            alignment
-        );
-
         Ok(Self {
             buffer,
             capacity: aligned_capacity,
@@ -278,7 +271,6 @@ impl RingBuffer {
         if self.write_offset > 0 {
             self.wrap_count += 1;
             self.write_offset = 0;
-            log::trace!("RingBuffer: reset, wrap_count={}", self.wrap_count);
         }
     }
 

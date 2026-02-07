@@ -149,12 +149,6 @@ impl GraphicsDevice {
             buffers.push(Arc::downgrade(&buffer));
         }
 
-        log::trace!(
-            "GraphicsDevice: created buffer {:?}, size={}",
-            descriptor.label,
-            descriptor.size
-        );
-
         Ok(buffer)
     }
 
@@ -200,13 +194,6 @@ impl GraphicsDevice {
         if let Ok(mut textures) = self.textures.write() {
             textures.push(Arc::downgrade(&texture));
         }
-
-        log::trace!(
-            "GraphicsDevice: created texture {:?}, size={}x{}",
-            descriptor.label,
-            descriptor.size.width,
-            descriptor.size.height
-        );
 
         Ok(texture)
     }
@@ -278,8 +265,6 @@ impl GraphicsDevice {
             samplers.push(Arc::downgrade(&sampler));
         }
 
-        log::trace!("GraphicsDevice: created sampler {:?}", descriptor.label);
-
         Ok(sampler)
     }
 
@@ -334,8 +319,6 @@ impl GraphicsDevice {
         if let Ok(mut materials) = self.materials.write() {
             materials.push(Arc::downgrade(&material));
         }
-
-        log::trace!("GraphicsDevice: created material {:?}", descriptor.label);
 
         Ok(material)
     }
@@ -456,14 +439,6 @@ impl GraphicsDevice {
             meshes.push(Arc::downgrade(&mesh));
         }
 
-        log::trace!(
-            "GraphicsDevice: created mesh {:?}, vertices={}, buffers={}, indices={}",
-            descriptor.label,
-            descriptor.vertex_count,
-            buffer_count,
-            descriptor.index_count
-        );
-
         Ok(mesh)
     }
 
@@ -541,10 +516,6 @@ impl GraphicsDevice {
     /// pipeline.wait_idle();
     /// ```
     pub fn create_pipeline(self: &Arc<Self>, frames_in_flight: usize) -> FramePipeline {
-        log::trace!(
-            "GraphicsDevice: created pipeline with {} frames in flight",
-            frames_in_flight
-        );
         FramePipeline::new(Arc::clone(self), frames_in_flight)
     }
 

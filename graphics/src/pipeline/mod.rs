@@ -207,12 +207,6 @@ impl FramePipeline {
 
         self.frame_count += 1;
 
-        log::trace!(
-            "Begin frame {} (slot {})",
-            self.frame_count,
-            self.current_slot
-        );
-
         // Take ring buffer for this slot (if configured) and reset it
         let ring_buffer = if !self.ring_buffers.is_empty() {
             self.ring_buffers[self.current_slot].take().map(|mut rb| {
@@ -282,12 +276,6 @@ impl FramePipeline {
 
         self.frame_count += 1;
 
-        log::trace!(
-            "Begin frame {} (slot {})",
-            self.frame_count,
-            self.current_slot
-        );
-
         // Take ring buffer for this slot (if configured) and reset it
         let ring_buffer = if !self.ring_buffers.is_empty() {
             self.ring_buffers[self.current_slot].take().map(|mut rb| {
@@ -351,12 +339,6 @@ impl FramePipeline {
         }
         self.graph_pool = pool;
 
-        log::trace!(
-            "End frame {} (slot {})",
-            self.frame_count,
-            self.current_slot
-        );
-
         // Store fence for this slot
         self.frame_fences[self.current_slot] = Some(fence);
 
@@ -389,7 +371,6 @@ impl FramePipeline {
     /// ```
     pub fn wait_current_slot(&self) {
         if let Some(fence) = &self.frame_fences[self.current_slot] {
-            log::trace!("Waiting for current slot {}...", self.current_slot);
             fence.wait();
         }
     }
@@ -445,16 +426,9 @@ impl FramePipeline {
     pub fn wait_idle(&self) {
         profile_scope!("wait_idle");
 
-        log::trace!("Waiting for GPU idle ({} slots)", self.frames_in_flight);
-
-        for (i, fence) in self.frame_fences.iter().enumerate() {
-            if let Some(f) = fence {
-                log::trace!("Waiting for slot {}...", i);
-                f.wait();
-            }
+        for fence in self.frame_fences.iter().flatten() {
+            fence.wait();
         }
-
-        log::trace!("GPU idle");
     }
 
     /// Wait for all in-flight GPU work with a timeout.

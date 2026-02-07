@@ -317,13 +317,6 @@ impl ResizeManager {
         self.pending_size = Some(new_size);
         self.last_event_time = Instant::now();
         self.is_actively_resizing = true;
-
-        log::trace!(
-            "Resize event: {}x{} (pending, debounce={}ms)",
-            width,
-            height,
-            self.debounce_duration.as_millis()
-        );
     }
 
     /// Check if resize should be applied.
@@ -353,14 +346,6 @@ impl ResizeManager {
             self.current_size = (width, height);
             self.is_actively_resizing = false;
 
-            log::trace!(
-                "Resize applied: {}x{} -> {}x{}",
-                previous.0,
-                previous.1,
-                width,
-                height
-            );
-
             return Some(ResizeEvent {
                 width,
                 height,
@@ -385,14 +370,6 @@ impl ResizeManager {
             let previous = self.current_size;
             self.current_size = (width, height);
             self.is_actively_resizing = false;
-
-            log::trace!(
-                "Resize forced: {}x{} -> {}x{}",
-                previous.0,
-                previous.1,
-                width,
-                height
-            );
 
             return Some(ResizeEvent {
                 width,

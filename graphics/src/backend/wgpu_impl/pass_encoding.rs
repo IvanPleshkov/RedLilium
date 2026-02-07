@@ -45,10 +45,6 @@ impl WgpuBackend {
 
         // Get render targets configuration
         let Some(render_targets) = pass.render_targets() else {
-            log::trace!(
-                "Skipping graphics pass '{}': no render targets",
-                pass.name()
-            );
             return Ok(());
         };
 
@@ -121,10 +117,6 @@ impl WgpuBackend {
         let has_valid_color = color_attachments.iter().any(|a| a.is_some());
         let has_depth = depth_stencil_attachment.is_some();
         if !has_valid_color && !has_depth {
-            log::trace!(
-                "Skipping graphics pass '{}': no valid attachments",
-                pass.name()
-            );
             return Ok(());
         }
 

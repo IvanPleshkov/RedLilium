@@ -28,36 +28,26 @@ impl DummyBackend {
     }
 
     /// Create a buffer resource.
-    pub fn create_buffer(&self, descriptor: &BufferDescriptor) -> Result<GpuBuffer, GraphicsError> {
-        log::trace!(
-            "DummyBackend: creating buffer {:?} (size: {})",
-            descriptor.label,
-            descriptor.size
-        );
+    pub fn create_buffer(
+        &self,
+        _descriptor: &BufferDescriptor,
+    ) -> Result<GpuBuffer, GraphicsError> {
         Ok(GpuBuffer::Dummy)
     }
 
     /// Create a texture resource.
     pub fn create_texture(
         &self,
-        descriptor: &TextureDescriptor,
+        _descriptor: &TextureDescriptor,
     ) -> Result<GpuTexture, GraphicsError> {
-        log::trace!(
-            "DummyBackend: creating texture {:?} ({}x{}x{})",
-            descriptor.label,
-            descriptor.size.width,
-            descriptor.size.height,
-            descriptor.size.depth
-        );
         Ok(GpuTexture::Dummy)
     }
 
     /// Create a sampler resource.
     pub fn create_sampler(
         &self,
-        descriptor: &SamplerDescriptor,
+        _descriptor: &SamplerDescriptor,
     ) -> Result<GpuSampler, GraphicsError> {
-        log::trace!("DummyBackend: creating sampler {:?}", descriptor.label);
         Ok(GpuSampler::Dummy)
     }
 
@@ -134,19 +124,9 @@ impl DummyBackend {
     pub fn execute_graph(
         &self,
         _graph: &RenderGraph,
-        compiled: &CompiledGraph,
+        _compiled: &CompiledGraph,
         signal_fence: Option<&GpuFence>,
     ) -> Result<(), GraphicsError> {
-        log::trace!(
-            "DummyBackend: executing graph with {} passes",
-            compiled.pass_order().len()
-        );
-
-        // Log each pass for debugging
-        for (i, _handle) in compiled.pass_order().iter().enumerate() {
-            log::trace!("DummyBackend: executing pass {}", i);
-        }
-
         // Signal the fence immediately since we don't do real GPU work
         if let Some(fence) = signal_fence {
             self.signal_fence(fence);
@@ -159,20 +139,14 @@ impl DummyBackend {
     pub fn write_buffer(
         &self,
         _buffer: &GpuBuffer,
-        offset: u64,
-        data: &[u8],
+        _offset: u64,
+        _data: &[u8],
     ) -> Result<(), crate::error::GraphicsError> {
-        log::trace!(
-            "DummyBackend: write_buffer offset={} len={}",
-            offset,
-            data.len()
-        );
         Ok(())
     }
 
     /// Read data from a buffer.
-    pub fn read_buffer(&self, _buffer: &GpuBuffer, offset: u64, size: u64) -> Vec<u8> {
-        log::trace!("DummyBackend: read_buffer offset={} size={}", offset, size);
+    pub fn read_buffer(&self, _buffer: &GpuBuffer, _offset: u64, size: u64) -> Vec<u8> {
         // Return zeroed data
         vec![0u8; size as usize]
     }
@@ -181,16 +155,9 @@ impl DummyBackend {
     pub fn write_texture(
         &self,
         _texture: &GpuTexture,
-        data: &[u8],
-        descriptor: &TextureDescriptor,
+        _data: &[u8],
+        _descriptor: &TextureDescriptor,
     ) -> Result<(), crate::error::GraphicsError> {
-        log::trace!(
-            "DummyBackend: write_texture {:?} ({}x{}) len={}",
-            descriptor.label,
-            descriptor.size.width,
-            descriptor.size.height,
-            data.len()
-        );
         Ok(())
     }
 }

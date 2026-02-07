@@ -361,13 +361,10 @@ impl GpuSurfaceTexture {
     /// Takes the backend for Vulkan presentation.
     pub fn present(self, backend: &GpuBackend, frame_index: u64) {
         match self {
-            Self::Dummy => {
-                log::trace!("Presenting dummy frame {}", frame_index);
-            }
+            Self::Dummy => {}
             #[cfg(feature = "wgpu-backend")]
             Self::Wgpu { texture, .. } => {
                 wgpu_impl::swapchain::present_surface_texture(texture);
-                log::trace!("Presented wgpu frame {}", frame_index);
             }
             #[cfg(feature = "vulkan-backend")]
             Self::Vulkan {

@@ -118,13 +118,9 @@ impl WgpuBackend {
     /// - `signaled=false`: Same as above - wgpu cannot represent an unsignaled fence
     ///   without pending work. The fence becomes meaningful only after `execute_graph`
     ///   stores a submission index.
-    pub fn create_fence(&self, signaled: bool) -> GpuFence {
-        if !signaled {
-            log::debug!(
-                "wgpu fence created with signaled=false, but wgpu fences track submissions, \
-                 not binary state. Fence will appear signaled until work is submitted."
-            );
-        }
+    pub fn create_fence(&self, _signaled: bool) -> GpuFence {
+        // Note: wgpu fences track submissions, not binary state.
+        // Fence will appear signaled until work is submitted.
         GpuFence::Wgpu {
             device: self.device.clone(),
             submission_index: Mutex::new(None),

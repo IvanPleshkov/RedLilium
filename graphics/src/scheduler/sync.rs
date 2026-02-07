@@ -225,7 +225,6 @@ impl Fence {
             }
             FenceInner::Gpu { .. } => {
                 // GPU signals the fence automatically - this is a no-op
-                log::trace!("signal() called on GPU fence - GPU will signal automatically");
             }
         }
     }
