@@ -10,12 +10,12 @@ use crate::instance::GraphicsInstance;
 use crate::materials::{Material, MaterialDescriptor};
 use crate::mesh::{CpuMesh, Mesh, MeshDescriptor};
 use crate::pipeline::FramePipeline;
-use crate::profiling::profile_scope;
 use crate::resources::{Buffer, Sampler, Texture};
 use crate::types::{
     BufferDescriptor, BufferUsage, CpuSampler, CpuTexture, Extent3d, SamplerDescriptor,
     TextureDescriptor, TextureUsage,
 };
+use redlilium_core::profiling::profile_scope;
 
 /// Capabilities of a graphics device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

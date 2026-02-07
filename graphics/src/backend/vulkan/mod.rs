@@ -23,8 +23,8 @@ use parking_lot::Mutex;
 
 use crate::error::GraphicsError;
 use crate::graph::{CompiledGraph, Pass, RenderGraph, RenderTarget};
-use crate::profiling::profile_scope;
 use crate::types::{BufferDescriptor, SamplerDescriptor, TextureDescriptor};
+use redlilium_core::profiling::profile_scope;
 
 use super::{GpuBuffer, GpuFence, GpuSampler, GpuTexture};
 

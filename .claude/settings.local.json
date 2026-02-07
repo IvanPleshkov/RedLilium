@@ -43,7 +43,6 @@
       "WebFetch(domain:deepwiki.com)"
     ],
     "deny": [
-      "Read(claude_requests_history/**)",
       "Read(target/**)"
     ]
   }

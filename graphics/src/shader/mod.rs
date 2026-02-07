@@ -42,7 +42,7 @@ use naga_oil::compose::{
 };
 
 use crate::error::GraphicsError;
-use crate::profiling::profile_scope;
+use redlilium_core::profiling::profile_scope;
 
 pub use library::{EGUI_SHADER_SOURCE, ShaderLibrary};
 

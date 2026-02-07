@@ -62,7 +62,7 @@ impl SurfaceTextureView {
 
 use crate::error::GraphicsError;
 use crate::graph::{CompiledGraph, RenderGraph};
-use crate::profiling::profile_scope;
+use redlilium_core::profiling::profile_scope;
 
 use super::GpuFence;
 

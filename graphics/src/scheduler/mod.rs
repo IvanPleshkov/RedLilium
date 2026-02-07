@@ -54,8 +54,8 @@ use std::sync::Arc;
 
 use crate::device::GraphicsDevice;
 use crate::graph::{CompiledGraph, RenderGraph};
-use crate::profiling::profile_scope;
 use crate::resources::{RingAllocation, RingBuffer};
+use redlilium_core::profiling::profile_scope;
 
 /// Handle to a submitted graph in the frame schedule.
 ///

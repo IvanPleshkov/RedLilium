@@ -67,10 +67,10 @@ use redlilium_core::pool::Poolable;
 use crate::device::GraphicsDevice;
 use crate::error::GraphicsError;
 use crate::graph::RenderGraph;
-use crate::profiling::{frame_mark, profile_scope};
 use crate::resources::RingBuffer;
 use crate::scheduler::{Fence, FrameSchedule};
 use crate::types::BufferUsage;
+use redlilium_core::profiling::{frame_mark, profile_scope};
 
 /// Manages multiple frames in flight for CPU-GPU parallelism.
 ///
