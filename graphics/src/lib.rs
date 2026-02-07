@@ -37,23 +37,24 @@
 //! ## Example
 //!
 //! ```ignore
-//! use redlilium_graphics::{GraphicsInstance, GraphicsPass, RenderGraph};
+//! use redlilium_graphics::{GraphicsInstance, GraphicsPass};
 //!
 //! let instance = GraphicsInstance::new()?;
 //! let device = instance.create_device()?;
 //! let mut pipeline = device.create_pipeline(2);  // 2 frames in flight
 //!
-//! // Build a render graph
-//! let mut graph = RenderGraph::new();
-//! let geometry = graph.add_graphics_pass(GraphicsPass::new("geometry".into()));
-//! let lighting = graph.add_graphics_pass(GraphicsPass::new("lighting".into()));
-//! graph.add_dependency(lighting, geometry);
-//!
 //! // Frame loop
 //! while running {
 //!     let mut schedule = pipeline.begin_frame();
-//!     let main = schedule.submit("main", graph.compile()?, &[]);
-//!     schedule.present("present", post_graph.compile()?, &[main]);
+//!
+//!     // Acquire a pooled graph (avoids per-frame allocation)
+//!     let mut graph = schedule.acquire_graph();
+//!     let geometry = graph.add_graphics_pass(GraphicsPass::new("geometry".into()));
+//!     let lighting = graph.add_graphics_pass(GraphicsPass::new("lighting".into()));
+//!     graph.add_dependency(lighting, geometry);
+//!
+//!     let main = schedule.submit("main", graph, &[]);
+//!     schedule.present("present", post_graph, &[main]);
 //!     pipeline.end_frame(schedule);
 //! }
 //!

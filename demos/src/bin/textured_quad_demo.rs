@@ -19,7 +19,7 @@ use redlilium_graphics::{
     AddressMode, BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferDescriptor,
     BufferTextureCopyRegion, BufferTextureLayout, BufferUsage, ColorAttachment,
     DepthStencilAttachment, Extent3d, FilterMode, FrameSchedule, GraphicsPass, Material,
-    MaterialDescriptor, MaterialInstance, Mesh, RenderGraph, RenderTargetConfig, SamplerDescriptor,
+    MaterialDescriptor, MaterialInstance, Mesh, RenderTargetConfig, SamplerDescriptor,
     ShaderSource, ShaderStage, ShaderStageFlags, TextureCopyLocation, TextureDescriptor,
     TextureFormat, TextureUsage, TransferConfig, TransferOperation, TransferPass, VertexLayout,
     resize::{ResizeManager, ResizeStrategy},
@@ -398,7 +398,7 @@ impl AppHandler for TexturedQuadDemo {
     }
 
     fn on_draw(&mut self, mut ctx: DrawContext) -> FrameSchedule {
-        let mut graph = RenderGraph::new();
+        let mut graph = ctx.acquire_graph();
 
         // Upload texture on first frame via TransferPass
         if self.needs_texture_upload {

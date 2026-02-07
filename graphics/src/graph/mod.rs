@@ -24,9 +24,10 @@
 //! # Example
 //!
 //! ```ignore
-//! use redlilium_graphics::{RenderGraph, GraphicsPass, ColorAttachment, RenderTargetConfig};
+//! use redlilium_graphics::{GraphicsPass, ColorAttachment, RenderTargetConfig};
 //!
-//! let mut graph = RenderGraph::new();
+//! // In a frame loop, use schedule.acquire_graph() to recycle pooled graphs.
+//! let mut graph = schedule.acquire_graph();
 //!
 //! // Create and configure pass before adding
 //! let mut pass = GraphicsPass::new("main".into());
@@ -81,7 +82,8 @@ pub use transfer::{
 /// Build a graph by adding passes:
 ///
 /// ```ignore
-/// let mut graph = RenderGraph::new();
+/// // In a frame loop, use schedule.acquire_graph() to recycle pooled graphs.
+/// let mut graph = schedule.acquire_graph();
 /// let geometry = graph.add_graphics_pass(GraphicsPass::new("geometry".into()));
 /// let lighting = graph.add_graphics_pass(GraphicsPass::new("lighting".into()));
 /// graph.add_dependency(lighting, geometry);
@@ -114,7 +116,10 @@ pub struct RenderGraph {
 
 impl RenderGraph {
     /// Create a new empty render graph.
-    pub fn new() -> Self {
+    ///
+    /// Prefer [`FrameSchedule::acquire_graph`](crate::scheduler::FrameSchedule::acquire_graph)
+    /// in frame loops to reuse pooled graphs and avoid memory leaks.
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 

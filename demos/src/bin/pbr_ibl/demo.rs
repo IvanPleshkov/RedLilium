@@ -11,7 +11,7 @@ use redlilium_core::profiling::{
 use redlilium_graphics::{
     BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferDescriptor, BufferUsage,
     ColorAttachment, CpuSampler, DepthStencilAttachment, Extent3d, FrameSchedule, GraphicsPass,
-    LoadOp, Material, MaterialDescriptor, MaterialInstance, Mesh, MeshDescriptor, RenderGraph,
+    LoadOp, Material, MaterialDescriptor, MaterialInstance, Mesh, MeshDescriptor,
     RenderTargetConfig, RingAllocation, ShaderComposer, ShaderDef, ShaderSource, ShaderStage,
     ShaderStageFlags, TextureDescriptor, TextureFormat, TextureUsage, TransferConfig,
     TransferOperation, TransferPass, VertexBufferLayout, VertexLayout,
@@ -1050,7 +1050,7 @@ impl AppHandler for PbrIblDemo {
             }
         }
 
-        let mut graph = RenderGraph::new();
+        let mut graph = ctx.acquire_graph();
 
         // Upload IBL textures on first frame
         if self.needs_ibl_upload {

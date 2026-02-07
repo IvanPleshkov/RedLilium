@@ -26,9 +26,9 @@
 //! # Example
 //!
 //! ```ignore
-//! use redlilium_graphics::{RenderGraph, GraphicsPass};
+//! use redlilium_graphics::GraphicsPass;
 //!
-//! let mut graph = RenderGraph::new();
+//! let mut graph = schedule.acquire_graph();
 //! let geometry = graph.add_graphics_pass(GraphicsPass::new("geometry".into()));
 //! let lighting = graph.add_graphics_pass(GraphicsPass::new("lighting".into()));
 //! graph.add_dependency(lighting, geometry);

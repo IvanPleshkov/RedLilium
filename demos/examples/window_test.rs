@@ -171,7 +171,7 @@ impl WindowTestApp {
         let hue = (self.frame_count as f32 / FRAMES_TO_RENDER as f32) * 360.0;
         let (r, g, b) = hue_to_rgb(hue);
 
-        let mut graph = RenderGraph::new();
+        let mut graph = RenderGraph::default();
         let mut pass = GraphicsPass::new(format!("frame_{}", self.frame_count));
         pass.set_render_targets(
             RenderTargetConfig::new().with_color(
