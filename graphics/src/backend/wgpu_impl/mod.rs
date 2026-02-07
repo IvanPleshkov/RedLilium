@@ -8,6 +8,7 @@ mod pass_encoding;
 mod resources;
 pub mod swapchain;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Scratch buffers reused across draw commands to avoid per-draw heap allocations.
@@ -17,13 +18,23 @@ use std::sync::Arc;
 #[derive(Default)]
 struct WgpuEncoderScratch {
     // Backing storage for types without Rust lifetimes:
-    color_formats: Vec<Option<wgpu::TextureFormat>>,
     color_targets: Vec<Option<wgpu::ColorTargetState>>,
     bind_group_layout_entries: Vec<wgpu::BindGroupLayoutEntry>,
     vertex_attributes: Vec<Vec<wgpu::VertexAttribute>>,
+    color_formats: Vec<Option<wgpu::TextureFormat>>,
     // GPU handle Vecs (no lifetimes, safe to pool):
     bind_group_layouts: Vec<wgpu::BindGroupLayout>,
     bind_groups: Vec<wgpu::BindGroup>,
+}
+
+/// Cached render pipeline with its bind group layouts.
+///
+/// wgpu resource types are internally reference-counted; cloning is a refcount bump.
+/// Bind group layouts are cached alongside the pipeline because they are needed
+/// to create per-frame bind groups.
+struct CachedPipeline {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layouts: Vec<wgpu::BindGroupLayout>,
 }
 
 /// A texture view for a surface texture (swapchain image).
@@ -64,6 +75,7 @@ pub struct WgpuBackend {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     encoder_scratch: std::sync::Mutex<WgpuEncoderScratch>,
+    pipeline_cache: std::sync::Mutex<HashMap<u64, CachedPipeline>>,
 }
 
 impl std::fmt::Debug for WgpuBackend {
@@ -136,6 +148,7 @@ impl WgpuBackend {
             device: Arc::new(device),
             queue: Arc::new(queue),
             encoder_scratch: std::sync::Mutex::new(WgpuEncoderScratch::default()),
+            pipeline_cache: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -214,10 +227,12 @@ impl WgpuBackend {
                 GraphicsError::ResourceCreationFailed(format!("Device creation failed: {e}"))
             })?;
 
-        // Update the backend with new adapter and device
+        // Update the backend with new adapter and device.
+        // Clear pipeline cache since cached pipelines belong to the old device.
         self.adapter = new_adapter;
         self.device = Arc::new(new_device);
         self.queue = Arc::new(new_queue);
+        self.pipeline_cache.lock().unwrap().clear();
 
         Ok(true)
     }
