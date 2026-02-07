@@ -34,6 +34,19 @@ pub use layout::{TextureLayout, TextureLayoutTracker, TextureUsageGraph};
 use self::barriers::{BarrierBatch, BufferId};
 use self::layout::TextureId;
 
+/// Scratch buffers reused across draw commands to avoid per-draw heap allocations.
+///
+/// Contains only plain value types without Rust lifetimes. Vecs are cleared
+/// between draws but retain their capacity across frames.
+#[derive(Default)]
+struct VulkanEncoderScratch {
+    color_formats: Vec<crate::types::TextureFormat>,
+    descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
+    descriptor_sets: Vec<vk::DescriptorSet>,
+    buffer_infos: Vec<vk::DescriptorBufferInfo>,
+    image_infos: Vec<vk::DescriptorImageInfo>,
+}
+
 /// A texture view for a Vulkan surface texture (swapchain image).
 ///
 /// This wraps the Vulkan image view from the swapchain for use in render passes.
@@ -136,6 +149,8 @@ pub struct VulkanBackend {
     layout_tracker: Mutex<TextureLayoutTracker>,
     /// Pipeline manager for shader compilation and pipeline creation.
     pipeline_manager: pipeline::PipelineManager,
+    /// Scratch buffers for allocation reuse during pass encoding.
+    encoder_scratch: Mutex<VulkanEncoderScratch>,
 }
 
 impl std::fmt::Debug for VulkanBackend {
@@ -230,6 +245,7 @@ impl VulkanBackend {
             deferred_destructor,
             layout_tracker,
             pipeline_manager,
+            encoder_scratch: Mutex::new(VulkanEncoderScratch::default()),
         })
     }
 
@@ -1633,12 +1649,25 @@ impl VulkanBackend {
         let material = draw_cmd.material.material();
         let mesh = &draw_cmd.mesh;
 
+        // Take scratch buffers — reuses capacity from previous draws.
+        // Destructure to allow independent field borrows.
+        let scratch = &mut *self.encoder_scratch.lock();
+        let VulkanEncoderScratch {
+            color_formats: scratch_color_formats,
+            descriptor_set_layouts: scratch_ds_layouts,
+            descriptor_sets: scratch_ds_sets,
+            buffer_infos: scratch_buffer_infos,
+            image_infos: scratch_image_infos,
+        } = scratch;
+
         // Get color target formats
-        let color_formats: Vec<crate::types::TextureFormat> = render_targets
-            .color_attachments
-            .iter()
-            .map(|a| a.target.format())
-            .collect();
+        scratch_color_formats.clear();
+        scratch_color_formats.extend(
+            render_targets
+                .color_attachments
+                .iter()
+                .map(|a| a.target.format()),
+        );
 
         // Get depth format if present
         let depth_format = render_targets
@@ -1646,12 +1675,12 @@ impl VulkanBackend {
             .as_ref()
             .map(|a| a.target.format());
 
-        // Compile shaders
+        // Compile shaders — borrow entry points from shader instead of cloning
         let shaders = material.shaders();
         let mut vertex_module = None;
         let mut fragment_module = None;
-        let mut vertex_entry = "vs_main".to_string();
-        let mut fragment_entry = "fs_main".to_string();
+        let mut vertex_entry: &str = "vs_main";
+        let mut fragment_entry: &str = "fs_main";
 
         for shader in shaders {
             let module = self.pipeline_manager.compile_shader(
@@ -1663,11 +1692,11 @@ impl VulkanBackend {
             match shader.stage {
                 crate::materials::ShaderStage::Vertex => {
                     vertex_module = Some(module);
-                    vertex_entry = shader.entry_point.clone();
+                    vertex_entry = &shader.entry_point;
                 }
                 crate::materials::ShaderStage::Fragment => {
                     fragment_module = Some(module);
-                    fragment_entry = shader.entry_point.clone();
+                    fragment_entry = &shader.entry_point;
                 }
                 crate::materials::ShaderStage::Compute => {}
             }
@@ -1679,27 +1708,27 @@ impl VulkanBackend {
 
         // Create descriptor set layouts from material binding layouts
         let binding_layouts = material.binding_layouts();
-        let mut descriptor_set_layouts = Vec::new();
+        scratch_ds_layouts.clear();
 
         for layout in binding_layouts {
             let ds_layout = self.pipeline_manager.create_descriptor_set_layout(layout)?;
-            descriptor_set_layouts.push(ds_layout);
+            scratch_ds_layouts.push(ds_layout);
         }
 
         // Create pipeline layout
         let pipeline_layout = self
             .pipeline_manager
-            .create_pipeline_layout(&descriptor_set_layouts)?;
+            .create_pipeline_layout(&*scratch_ds_layouts)?;
 
         // Create graphics pipeline
         let pipeline = self.pipeline_manager.create_graphics_pipeline(
             vertex_module,
             fragment_module,
-            &vertex_entry,
-            &fragment_entry,
+            vertex_entry,
+            fragment_entry,
             mesh,
             pipeline_layout,
-            &color_formats,
+            scratch_color_formats,
             depth_format,
             material.blend_state(),
             &self.dynamic_rendering,
@@ -1709,10 +1738,10 @@ impl VulkanBackend {
         let material_instance = &draw_cmd.material;
         let binding_groups = material_instance.binding_groups();
 
-        let mut descriptor_sets = Vec::new();
+        scratch_ds_sets.clear();
         for (group_idx, (group, ds_layout)) in binding_groups
             .iter()
-            .zip(descriptor_set_layouts.iter())
+            .zip(scratch_ds_layouts.iter())
             .enumerate()
         {
             let descriptor_set = self.pipeline_manager.allocate_descriptor_set(*ds_layout)?;
@@ -1720,10 +1749,9 @@ impl VulkanBackend {
             // Get the corresponding binding layout to look up binding types
             let binding_layout = binding_layouts.get(group_idx);
 
-            // Write descriptor set entries
-            let mut writes: Vec<vk::WriteDescriptorSet> = Vec::new();
-            let mut buffer_infos: Vec<vk::DescriptorBufferInfo> = Vec::new();
-            let mut image_infos: Vec<vk::DescriptorImageInfo> = Vec::new();
+            // Write descriptor set entries — reuse scratch Vecs across binding groups
+            scratch_buffer_infos.clear();
+            scratch_image_infos.clear();
 
             for entry in &group.entries {
                 match &entry.resource {
@@ -1734,7 +1762,7 @@ impl VulkanBackend {
                             ..
                         } = buffer.gpu_handle()
                         {
-                            buffer_infos.push(vk::DescriptorBufferInfo {
+                            scratch_buffer_infos.push(vk::DescriptorBufferInfo {
                                 buffer: *vk_buffer,
                                 offset: 0,
                                 range: *size,
@@ -1743,7 +1771,7 @@ impl VulkanBackend {
                     }
                     BoundResource::Texture(texture) => {
                         if let GpuTexture::Vulkan { view, .. } = texture.gpu_handle() {
-                            image_infos.push(vk::DescriptorImageInfo {
+                            scratch_image_infos.push(vk::DescriptorImageInfo {
                                 sampler: vk::Sampler::null(),
                                 image_view: *view,
                                 image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
@@ -1756,7 +1784,7 @@ impl VulkanBackend {
                             ..
                         } = sampler.gpu_handle()
                         {
-                            image_infos.push(vk::DescriptorImageInfo {
+                            scratch_image_infos.push(vk::DescriptorImageInfo {
                                 sampler: *vk_sampler,
                                 image_view: vk::ImageView::null(),
                                 image_layout: vk::ImageLayout::UNDEFINED,
@@ -1772,7 +1800,7 @@ impl VulkanBackend {
                             },
                         ) = (texture.gpu_handle(), sampler.gpu_handle())
                         {
-                            image_infos.push(vk::DescriptorImageInfo {
+                            scratch_image_infos.push(vk::DescriptorImageInfo {
                                 sampler: *vk_sampler,
                                 image_view: *view,
                                 image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
@@ -1783,6 +1811,7 @@ impl VulkanBackend {
             }
 
             // Build write descriptors
+            let mut writes: Vec<vk::WriteDescriptorSet> = Vec::new();
             let mut buffer_idx = 0;
             let mut image_idx = 0;
             for entry in &group.entries {
@@ -1797,7 +1826,7 @@ impl VulkanBackend {
 
                 let write = match &entry.resource {
                     BoundResource::Buffer(_) => {
-                        let info = &buffer_infos[buffer_idx..buffer_idx + 1];
+                        let info = &scratch_buffer_infos[buffer_idx..buffer_idx + 1];
                         buffer_idx += 1;
                         // Use the binding type from layout, defaulting to UNIFORM_BUFFER
                         let descriptor_type =
@@ -1813,7 +1842,7 @@ impl VulkanBackend {
                             .buffer_info(info)
                     }
                     BoundResource::Texture(_) => {
-                        let info = &image_infos[image_idx..image_idx + 1];
+                        let info = &scratch_image_infos[image_idx..image_idx + 1];
                         image_idx += 1;
                         vk::WriteDescriptorSet::default()
                             .dst_set(descriptor_set)
@@ -1822,7 +1851,7 @@ impl VulkanBackend {
                             .image_info(info)
                     }
                     BoundResource::Sampler(_) => {
-                        let info = &image_infos[image_idx..image_idx + 1];
+                        let info = &scratch_image_infos[image_idx..image_idx + 1];
                         image_idx += 1;
                         vk::WriteDescriptorSet::default()
                             .dst_set(descriptor_set)
@@ -1831,7 +1860,7 @@ impl VulkanBackend {
                             .image_info(info)
                     }
                     BoundResource::CombinedTextureSampler { .. } => {
-                        let info = &image_infos[image_idx..image_idx + 1];
+                        let info = &scratch_image_infos[image_idx..image_idx + 1];
                         image_idx += 1;
                         vk::WriteDescriptorSet::default()
                             .dst_set(descriptor_set)
@@ -1857,7 +1886,7 @@ impl VulkanBackend {
                 }
             }
 
-            descriptor_sets.push(descriptor_set);
+            scratch_ds_sets.push(descriptor_set);
         }
 
         // Bind pipeline
@@ -1867,14 +1896,14 @@ impl VulkanBackend {
         }
 
         // Bind descriptor sets
-        if !descriptor_sets.is_empty() {
+        if !scratch_ds_sets.is_empty() {
             unsafe {
                 self.device.cmd_bind_descriptor_sets(
                     cmd,
                     vk::PipelineBindPoint::GRAPHICS,
                     pipeline_layout,
                     0,
-                    &descriptor_sets,
+                    scratch_ds_sets,
                     &[],
                 );
             }

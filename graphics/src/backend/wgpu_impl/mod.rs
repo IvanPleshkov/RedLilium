@@ -10,6 +10,18 @@ pub mod swapchain;
 
 use std::sync::Arc;
 
+/// Scratch buffers reused across draw commands to avoid per-draw heap allocations.
+///
+/// Only contains types without Rust lifetimes (can be stored long-term).
+/// Vecs are cleared between draws but retain their capacity across frames.
+#[derive(Default)]
+struct WgpuEncoderScratch {
+    color_formats: Vec<Option<wgpu::TextureFormat>>,
+    color_targets: Vec<Option<wgpu::ColorTargetState>>,
+    bind_group_layout_entries: Vec<wgpu::BindGroupLayoutEntry>,
+    vertex_attributes: Vec<Vec<wgpu::VertexAttribute>>,
+}
+
 /// A texture view for a surface texture (swapchain image).
 ///
 /// This wraps the wgpu::TextureView from the surface texture for use in render passes.
@@ -47,6 +59,7 @@ pub struct WgpuBackend {
     adapter: wgpu::Adapter,
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
+    encoder_scratch: std::sync::Mutex<WgpuEncoderScratch>,
 }
 
 impl std::fmt::Debug for WgpuBackend {
@@ -118,6 +131,7 @@ impl WgpuBackend {
             adapter,
             device: Arc::new(device),
             queue: Arc::new(queue),
+            encoder_scratch: std::sync::Mutex::new(WgpuEncoderScratch::default()),
         })
     }
 
