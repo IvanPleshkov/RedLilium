@@ -84,9 +84,9 @@ pub use error::GraphicsError;
 pub use graph::{
     BufferCopyRegion, BufferTextureCopyRegion, BufferTextureLayout, ColorAttachment, CompiledGraph,
     ComputePass, DepthStencilAttachment, DrawCommand, GraphError, GraphicsPass,
-    IndirectDrawCommand, LoadOp, Pass, PassHandle, RenderGraph, RenderTarget, RenderTargetConfig,
-    StoreOp, TextureCopyLocation, TextureCopyRegion, TextureOrigin, TransferConfig,
-    TransferOperation, TransferPass,
+    IndirectDrawCommand, LoadOp, Pass, PassHandle, RenderGraph, RenderGraphCompilationMode,
+    RenderTarget, RenderTargetConfig, StoreOp, TextureCopyLocation, TextureCopyRegion,
+    TextureOrigin, TransferConfig, TransferOperation, TransferPass,
     resource_usage::{PassResourceUsage, TextureAccessMode, TextureUsageDecl},
 };
 pub use instance::{

@@ -53,7 +53,7 @@ pub use sync::{Fence, FenceStatus, Semaphore};
 use std::sync::Arc;
 
 use crate::device::GraphicsDevice;
-use crate::graph::RenderGraph;
+use crate::graph::{RenderGraph, RenderGraphCompilationMode};
 use crate::resources::{RingAllocation, RingBuffer};
 use redlilium_core::profiling::profile_scope;
 
@@ -313,7 +313,9 @@ impl FrameSchedule {
             .collect();
 
         // Compile and execute the graph on the GPU
-        let compile_result = graph.compile().map(|_| ());
+        let compile_result = graph
+            .compile(RenderGraphCompilationMode::Strict)
+            .map(|_| ());
         if compile_result.is_ok() {
             profile_scope!("execute_graph");
             let compiled = graph.compiled().unwrap();
@@ -403,7 +405,7 @@ impl FrameSchedule {
         let fence = Fence::new_gpu(instance);
 
         // Compile first (may use cached result), then access via immutable borrow
-        let compiled_ok = graph.compile().is_ok();
+        let compiled_ok = graph.compile(RenderGraphCompilationMode::Strict).is_ok();
         if compiled_ok {
             profile_scope!("execute_present");
             let compiled = graph.compiled().unwrap();

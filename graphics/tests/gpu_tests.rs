@@ -34,8 +34,8 @@ use common::{
     generate_test_pattern, get_pixel, readback_buffer_size, verify_pixel, write_quad_vertices,
 };
 use redlilium_graphics::{
-    BufferUsage, RenderGraph, TextureFormat, TextureUsage, TransferConfig, TransferOperation,
-    TransferPass,
+    BufferUsage, RenderGraph, RenderGraphCompilationMode, TextureFormat, TextureUsage,
+    TransferConfig, TransferOperation, TransferPass,
 };
 
 // ============================================================================
@@ -94,7 +94,7 @@ fn test_buffer_copy_roundtrip(#[case] backend: Backend) {
 
     // Verify the graph compiles correctly before executing
     let pass_count = graph
-        .compile()
+        .compile(RenderGraphCompilationMode::Automatic)
         .expect("Graph should compile")
         .pass_order()
         .len();
@@ -149,7 +149,7 @@ fn test_buffer_copy_partial(#[case] backend: Backend) {
 
     // Verify graph structure before executing
     let pass_count = graph
-        .compile()
+        .compile(RenderGraphCompilationMode::Automatic)
         .expect("Graph should compile")
         .pass_order()
         .len();
@@ -212,7 +212,7 @@ fn test_render_single_quad(#[case] backend: Backend) {
 
     // Verify graph structure before executing
     let pass_count = graph
-        .compile()
+        .compile(RenderGraphCompilationMode::Automatic)
         .expect("Graph should compile")
         .pass_order()
         .len();
@@ -347,7 +347,7 @@ fn test_render_depth_buffer_two_quads(#[case] backend: Backend) {
 
     // Verify graph structure before executing
     let pass_count = graph
-        .compile()
+        .compile(RenderGraphCompilationMode::Automatic)
         .expect("Graph should compile")
         .pass_order()
         .len();
@@ -488,7 +488,7 @@ fn test_render_multiple_targets(#[case] backend: Backend) {
 
     // Verify graph structure before executing
     let pass_count = graph
-        .compile()
+        .compile(RenderGraphCompilationMode::Automatic)
         .expect("Graph should compile")
         .pass_order()
         .len();
@@ -555,7 +555,7 @@ fn test_render_mrt_different_formats(#[case] backend: Backend) {
 
     // Verify graph structure before executing
     let pass_count = graph
-        .compile()
+        .compile(RenderGraphCompilationMode::Automatic)
         .expect("Graph should compile")
         .pass_order()
         .len();
@@ -577,7 +577,9 @@ fn test_empty_graph(#[case] _backend: Backend) {
     let mut graph = RenderGraph::new();
 
     // Empty graph should compile successfully
-    let compiled = graph.compile().expect("Empty graph should compile");
+    let compiled = graph
+        .compile(RenderGraphCompilationMode::Automatic)
+        .expect("Empty graph should compile");
     assert_eq!(compiled.pass_order().len(), 0);
 }
 
@@ -633,7 +635,9 @@ fn test_diamond_dependency_graph(#[case] backend: Backend) {
 
     // Verify topological order before executing
     {
-        let compiled = graph.compile().expect("Diamond graph should compile");
+        let compiled = graph
+            .compile(RenderGraphCompilationMode::Automatic)
+            .expect("Diamond graph should compile");
         assert_eq!(compiled.pass_order().len(), 4);
 
         // Shadow must come before gbuffer and lighting
@@ -860,7 +864,7 @@ fn test_layout_tracking_multi_pass(#[case] backend: Backend) {
 
     // Verify graph structure before executing
     let pass_count = graph
-        .compile()
+        .compile(RenderGraphCompilationMode::Automatic)
         .expect("Graph should compile")
         .pass_order()
         .len();

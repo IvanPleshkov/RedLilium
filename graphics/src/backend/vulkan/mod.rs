@@ -875,15 +875,15 @@ impl VulkanBackend {
         // Get all passes from the graph
         let passes = graph.passes();
 
-        // Process each pass in compiled order
+        // Process each pass in compiled order using pre-computed resource usages
         {
             profile_scope!("record_passes");
-            for handle in compiled.pass_order() {
+            let pass_usages = compiled.pass_usages();
+            for (i, handle) in compiled.pass_order().iter().enumerate() {
                 let pass = &passes[handle.index()];
 
-                // Infer resource usage and generate barriers
-                let usage = pass.infer_resource_usage();
-                let barriers = self.generate_barriers_for_pass(&usage);
+                // Generate barriers from pre-computed resource usage
+                let barriers = self.generate_barriers_for_pass(&pass_usages[i]);
                 barriers.submit(&self.device, cmd);
 
                 // Encode the pass

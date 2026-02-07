@@ -8,8 +8,10 @@ use crate::mesh::Mesh;
 use crate::resources::Buffer;
 use crate::types::ScissorRect;
 
-use super::resource_usage::{BufferAccessMode, PassResourceUsage, TextureAccessMode};
-use super::target::{RenderTarget, RenderTargetConfig};
+use super::resource_usage::{
+    BufferAccessMode, PassResourceUsage, SurfaceAccess, TextureAccessMode,
+};
+use super::target::{LoadOp, RenderTarget, RenderTargetConfig};
 use super::transfer::{TransferConfig, TransferOperation};
 
 /// A pass in the render graph.
@@ -699,10 +701,25 @@ impl GraphicsPass {
 
         // Infer from render targets
         if let Some(targets) = &self.render_targets {
-            // Color attachments are written to
+            // Color attachments
             for color in &targets.color_attachments {
-                if let RenderTarget::Texture { texture, .. } = &color.target {
-                    usage.add_texture(Arc::clone(texture), TextureAccessMode::RenderTargetWrite);
+                match &color.target {
+                    RenderTarget::Texture { texture, .. } => {
+                        usage
+                            .add_texture(Arc::clone(texture), TextureAccessMode::RenderTargetWrite);
+                        // LoadOp::Load reads existing contents before writing
+                        if matches!(color.load_op, LoadOp::Load) {
+                            usage.add_texture(Arc::clone(texture), TextureAccessMode::ShaderRead);
+                        }
+                    }
+                    RenderTarget::Surface { .. } => {
+                        let access = if matches!(color.load_op, LoadOp::Load) {
+                            SurfaceAccess::ReadWrite
+                        } else {
+                            SurfaceAccess::Write
+                        };
+                        usage.set_surface_access(access);
+                    }
                 }
                 // Resolve targets are also written to
                 if let Some(RenderTarget::Texture { texture, .. }) = &color.resolve_target {

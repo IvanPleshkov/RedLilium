@@ -47,7 +47,7 @@ mod transfer;
 pub use pass::{ComputePass, DrawCommand, GraphicsPass, IndirectDrawCommand, Pass, TransferPass};
 
 // Re-export compiler types for convenience
-pub use crate::compiler::{CompiledGraph, GraphError, compile};
+pub use crate::compiler::{CompiledGraph, GraphError, RenderGraphCompilationMode, compile};
 
 use redlilium_core::pool::{Poolable, Pooled};
 
@@ -233,18 +233,21 @@ impl RenderGraph {
     /// Compile the graph for execution.
     ///
     /// This performs:
+    /// - Resource usage inference for each pass
+    /// - Auto-dependency generation from resource access patterns
     /// - Topological sorting of passes
-    /// - Resource lifetime analysis
-    /// - Barrier placement optimization
     ///
     /// The result is cached; subsequent calls return the cached result
     /// until the graph is modified.
     ///
     /// See [`crate::compiler`] module for implementation details.
-    pub fn compile(&mut self) -> Result<&CompiledGraph, GraphError> {
+    pub fn compile(
+        &mut self,
+        mode: RenderGraphCompilationMode,
+    ) -> Result<&CompiledGraph, GraphError> {
         if !self.compiled.is_active() {
             let target = self.compiled.activate();
-            if let Err(e) = crate::compiler::compile_into(&self.passes, &self.edges, target) {
+            if let Err(e) = crate::compiler::compile_into(&self.passes, &self.edges, mode, target) {
                 self.compiled.release();
                 return Err(e);
             }
@@ -377,7 +380,9 @@ mod tests {
         let pass2 = graph.add_graphics_pass(GraphicsPass::new("lighting".into()));
         graph.add_dependency(pass2, pass1);
 
-        let compiled = graph.compile().unwrap();
+        let compiled = graph
+            .compile(RenderGraphCompilationMode::Automatic)
+            .unwrap();
         assert_eq!(compiled.pass_order().len(), 2);
     }
 

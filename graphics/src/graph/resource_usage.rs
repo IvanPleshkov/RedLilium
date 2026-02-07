@@ -298,6 +298,27 @@ impl BufferUsageDecl {
     }
 }
 
+/// How the swapchain surface is accessed by a pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SurfaceAccess {
+    /// Write only (Clear or DontCare load op).
+    Write,
+    /// Read existing contents then write (Load op).
+    ReadWrite,
+}
+
+impl SurfaceAccess {
+    /// Check if this access reads the surface.
+    pub fn is_read(self) -> bool {
+        matches!(self, Self::ReadWrite)
+    }
+
+    /// Check if this access writes the surface.
+    pub fn is_write(self) -> bool {
+        true // Both variants write
+    }
+}
+
 /// Resource usage declarations for a pass.
 ///
 /// This collects all texture and buffer usages for a pass, enabling the barrier
@@ -308,6 +329,8 @@ pub struct PassResourceUsage {
     pub texture_usages: Vec<TextureUsageDecl>,
     /// All buffer usages declared for this pass.
     pub buffer_usages: Vec<BufferUsageDecl>,
+    /// Surface (swapchain) access mode, if the pass renders to the surface.
+    pub surface_access: Option<SurfaceAccess>,
 }
 
 impl PassResourceUsage {
@@ -380,10 +403,23 @@ impl PassResourceUsage {
     // Combined Methods
     // ========================================================================
 
+    /// Set the surface access mode.
+    pub fn set_surface_access(&mut self, access: SurfaceAccess) {
+        self.surface_access = Some(access);
+    }
+
+    /// Check if this pass accesses the surface.
+    pub fn has_surface_access(&self) -> bool {
+        self.surface_access.is_some()
+    }
+
     /// Merge another resource usage into this one.
     pub fn merge(&mut self, other: PassResourceUsage) {
         self.texture_usages.extend(other.texture_usages);
         self.buffer_usages.extend(other.buffer_usages);
+        if other.surface_access.is_some() {
+            self.surface_access = other.surface_access;
+        }
     }
 
     /// Check if any texture usage is a write operation.
@@ -406,19 +442,25 @@ impl PassResourceUsage {
         self.buffer_usages.iter().any(|u| u.access.is_read())
     }
 
-    /// Check if any usage (texture or buffer) is a write operation.
+    /// Check if any usage (texture, buffer, or surface) is a write operation.
     pub fn has_writes(&self) -> bool {
-        self.has_texture_writes() || self.has_buffer_writes()
+        self.has_texture_writes()
+            || self.has_buffer_writes()
+            || self.surface_access.is_some_and(|a| a.is_write())
     }
 
-    /// Check if any usage (texture or buffer) is a read operation.
+    /// Check if any usage (texture, buffer, or surface) is a read operation.
     pub fn has_reads(&self) -> bool {
-        self.has_texture_reads() || self.has_buffer_reads()
+        self.has_texture_reads()
+            || self.has_buffer_reads()
+            || self.surface_access.is_some_and(|a| a.is_read())
     }
 
     /// Check if there are any resource usages.
     pub fn is_empty(&self) -> bool {
-        self.texture_usages.is_empty() && self.buffer_usages.is_empty()
+        self.texture_usages.is_empty()
+            && self.buffer_usages.is_empty()
+            && self.surface_access.is_none()
     }
 }
 

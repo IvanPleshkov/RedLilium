@@ -6,7 +6,8 @@ use redlilium_graphics::{CpuTexture, TextureFormat};
 pub const HDR_URL: &str = "https://raw.githubusercontent.com/JoeyDeVries/LearnOpenGL/master/resources/textures/hdr/newport_loft.hdr";
 
 /// URL for the pre-computed BRDF Look-Up Table.
-pub const BRDF_LUT_URL: &str = "https://learnopengl.com/img/pbr/ibl_brdf_lut.png";
+pub const BRDF_LUT_URL: &str =
+    "https://github.com/HectorMF/BRDFGenerator/raw/master/BRDF%20LUT.png?raw=true";
 
 /// Load a BRDF LUT from a URL.
 ///
