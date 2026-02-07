@@ -162,20 +162,19 @@ impl std::fmt::Debug for VulkanBackend {
 }
 
 impl VulkanBackend {
-    /// Create a new Vulkan backend.
+    /// Create a new Vulkan backend with explicit validation setting.
     ///
     /// This initializes the Vulkan instance, selects a physical device,
     /// creates a logical device, and sets up the memory allocator.
-    ///
-    /// Validation layers are enabled in debug builds by default.
-    pub fn new() -> Result<Self, GraphicsError> {
+    pub fn with_params(
+        params: &crate::instance::InstanceParameters,
+    ) -> Result<Self, GraphicsError> {
         // Load Vulkan entry points
         let entry = unsafe { ash::Entry::load() }.map_err(|e| {
             GraphicsError::InitializationFailed(format!("Failed to load Vulkan: {}", e))
         })?;
 
-        // Enable validation in debug builds
-        let validation_enabled = cfg!(debug_assertions);
+        let validation_enabled = params.validation;
 
         // Create instance with validation layers
         let (instance, debug_messenger, debug_utils) =
@@ -926,27 +925,15 @@ impl VulkanBackend {
             })?;
         }
 
-        // Handle sync vs async paths
-        if signal_fence.is_some() {
-            // Async path: queue command buffer for deferred destruction
-            // It will be freed after the GPU finishes (tracked by frame pipeline)
-            self.deferred_destructor
-                .queue(DeferredResource::CommandBuffers {
-                    device: self.device.clone(),
-                    command_pool: self.command_pool,
-                    buffers: command_buffers,
-                });
-        } else {
-            // Sync path: wait for queue to idle, then free immediately
-            unsafe { self.device.queue_wait_idle(self.graphics_queue) }.map_err(|e| {
-                GraphicsError::Internal(format!("Failed to wait for queue idle: {:?}", e))
-            })?;
-
-            unsafe {
-                self.device
-                    .free_command_buffers(self.command_pool, &command_buffers);
-            }
-        }
+        // Always defer command buffer destruction to avoid blocking on queue_wait_idle.
+        // The deferred destructor frees them after enough frames pass (GPU is done).
+        // VulkanBackend::drop() calls device_wait_idle + flush_all as a safety net.
+        self.deferred_destructor
+            .queue(DeferredResource::CommandBuffers {
+                device: self.device.clone(),
+                command_pool: self.command_pool,
+                buffers: command_buffers,
+            });
 
         Ok(())
     }
