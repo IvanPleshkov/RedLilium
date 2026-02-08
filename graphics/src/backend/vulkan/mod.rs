@@ -8,7 +8,6 @@ pub mod barriers;
 mod command;
 pub(crate) mod conversion;
 mod debug;
-pub mod deferred;
 mod device;
 mod instance;
 pub mod layout;
@@ -16,6 +15,7 @@ mod pipeline;
 pub mod swapchain;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ash::vk;
 use gpu_allocator::vulkan::Allocator;
@@ -28,7 +28,8 @@ use redlilium_core::profiling::profile_scope;
 
 use super::{GpuBuffer, GpuFence, GpuSampler, GpuSemaphore, GpuTexture};
 
-pub use deferred::{DeferredDestructor, DeferredResource, MAX_FRAMES_IN_FLIGHT};
+/// Maximum number of frames in flight for per-slot resource tracking.
+pub const MAX_FRAMES_IN_FLIGHT: usize = 3;
 pub use layout::{TextureLayout, TextureLayoutTracker, TextureUsageGraph};
 
 use self::barriers::{BarrierBatch, BufferId};
@@ -128,7 +129,7 @@ pub struct VulkanBackend {
     graphics_queue: vk::Queue,
     /// Graphics queue family index.
     graphics_queue_family: u32,
-    /// Memory allocator (wrapped in Arc for sharing with deferred destructor).
+    /// Memory allocator (wrapped in Arc for sharing with GPU resource Drop impls).
     allocator: Arc<Mutex<Allocator>>,
     /// Command pool for graphics operations.
     command_pool: vk::CommandPool,
@@ -141,8 +142,10 @@ pub struct VulkanBackend {
     surface_loader: ash::khr::surface::Instance,
     /// Swapchain extension.
     swapchain_loader: ash::khr::swapchain::Device,
-    /// Deferred destructor for safe resource cleanup.
-    deferred_destructor: Arc<DeferredDestructor>,
+    /// Per-slot command buffers awaiting free after fence wait.
+    per_slot_command_buffers: [Mutex<Vec<vk::CommandBuffer>>; MAX_FRAMES_IN_FLIGHT],
+    /// Current frame slot index for command buffer tracking.
+    current_slot: AtomicUsize,
     /// Layout tracker for automatic barrier placement.
     /// Uses interior mutability since execute_graph takes &self.
     layout_tracker: Mutex<TextureLayoutTracker>,
@@ -191,16 +194,12 @@ impl VulkanBackend {
 
         let graphics_queue = unsafe { device.get_device_queue(graphics_queue_family, 0) };
 
-        // Create memory allocator (wrapped in Arc for sharing with deferred destructor)
+        // Create memory allocator (wrapped in Arc for sharing with GPU resource Drop impls)
         let allocator = Arc::new(Mutex::new(allocator::create_allocator(
             &instance,
             physical_device,
             device.clone(),
         )?));
-
-        // Create deferred destructor
-        let deferred_destructor = Arc::new(DeferredDestructor::new());
-        deferred_destructor.set_allocator(Arc::downgrade(&allocator));
 
         // Create command pool
         let command_pool = command::create_command_pool(&device, graphics_queue_family)?;
@@ -240,7 +239,8 @@ impl VulkanBackend {
             dynamic_rendering,
             surface_loader,
             swapchain_loader,
-            deferred_destructor,
+            per_slot_command_buffers: Default::default(),
+            current_slot: AtomicUsize::new(0),
             layout_tracker,
             pipeline_manager,
             encoder_scratch: Mutex::new(VulkanEncoderScratch::default()),
@@ -292,15 +292,15 @@ impl VulkanBackend {
         self.command_pool
     }
 
-    /// Get the deferred destructor for safe resource cleanup.
-    pub fn deferred_destructor(&self) -> &Arc<DeferredDestructor> {
-        &self.deferred_destructor
+    /// Get the allocator for sharing with GPU resource Drop impls.
+    pub fn allocator(&self) -> &Arc<Mutex<Allocator>> {
+        &self.allocator
     }
 
     /// Advance to the next frame.
     ///
-    /// This advances both the deferred destructor (to clean up old resources)
-    /// and the layout tracker (to reset layout state for the new frame).
+    /// Frees command buffers from the oldest frame slot, advances the layout
+    /// tracker, and resets the descriptor pool.
     ///
     /// This should be called after waiting on a frame fence to ensure
     /// the GPU has finished with resources from older frames.
@@ -308,10 +308,26 @@ impl VulkanBackend {
     /// # Safety
     ///
     /// The caller must ensure that the GPU has finished executing all commands
-    /// from `MAX_FRAMES_IN_FLIGHT` frames ago.
+    /// from the oldest frame slot.
     pub unsafe fn advance_frame(&self) {
-        // SAFETY: Caller guarantees GPU has finished with old resources
-        unsafe { self.deferred_destructor.advance_frame() };
+        let current = self.current_slot.load(Ordering::Relaxed);
+        let oldest = (current + 1) % MAX_FRAMES_IN_FLIGHT;
+
+        // Free command buffers from oldest slot (GPU is done with them)
+        let old_buffers: Vec<_> = self.per_slot_command_buffers[oldest]
+            .lock()
+            .drain(..)
+            .collect();
+        if !old_buffers.is_empty() {
+            unsafe {
+                self.device
+                    .free_command_buffers(self.command_pool, &old_buffers)
+            };
+        }
+
+        // Advance to next slot
+        self.current_slot
+            .store((current + 1) % MAX_FRAMES_IN_FLIGHT, Ordering::SeqCst);
 
         // Advance layout tracker to new frame (resets layout state)
         self.layout_tracker.lock().advance_frame();
@@ -418,8 +434,13 @@ impl Drop for VulkanBackend {
             // Wait for device to be idle before cleanup
             let _ = self.device.device_wait_idle();
 
-            // Flush all pending deferred resources now that the device is idle
-            self.deferred_destructor.flush_all();
+            // Free all remaining per-slot command buffers
+            for slot in &self.per_slot_command_buffers {
+                let bufs: Vec<_> = slot.lock().drain(..).collect();
+                if !bufs.is_empty() {
+                    self.device.free_command_buffers(self.command_pool, &bufs);
+                }
+            }
 
             // Destroy pipeline manager resources BEFORE destroying the device.
             // PipelineManager holds Vulkan handles (descriptor pool, pipelines, etc.)
@@ -527,7 +548,7 @@ impl VulkanBackend {
             buffer,
             allocation: Mutex::new(Some(allocation)),
             size: descriptor.size,
-            deferred: Arc::clone(&self.deferred_destructor),
+            allocator: Arc::clone(&self.allocator),
         })
     }
 
@@ -716,7 +737,7 @@ impl VulkanBackend {
             allocation: Mutex::new(Some(allocation)),
             format,
             extent,
-            deferred: Arc::clone(&self.deferred_destructor),
+            allocator: Arc::clone(&self.allocator),
         })
     }
 
@@ -754,7 +775,6 @@ impl VulkanBackend {
         Ok(GpuSampler::Vulkan {
             device: self.device.clone(),
             sampler,
-            deferred: Arc::clone(&self.deferred_destructor),
         })
     }
 
@@ -853,7 +873,6 @@ impl VulkanBackend {
             pipeline,
             pipeline_layout,
             descriptor_set_layouts,
-            deferred: Arc::clone(&self.deferred_destructor),
         })
     }
 
@@ -908,7 +927,6 @@ impl VulkanBackend {
             pipeline,
             pipeline_layout,
             descriptor_set_layouts,
-            deferred: Arc::clone(&self.deferred_destructor),
         })
     }
 
@@ -921,7 +939,6 @@ impl VulkanBackend {
         GpuSemaphore::Vulkan {
             device: self.device.clone(),
             semaphore,
-            deferred: Arc::clone(&self.deferred_destructor),
         }
     }
 
@@ -941,7 +958,6 @@ impl VulkanBackend {
         GpuFence::Vulkan {
             device: self.device.clone(),
             fence,
-            deferred: Arc::clone(&self.deferred_destructor),
         }
     }
 
@@ -1140,15 +1156,11 @@ impl VulkanBackend {
             })?;
         }
 
-        // Always defer command buffer destruction to avoid blocking on queue_wait_idle.
-        // The deferred destructor frees them after enough frames pass (GPU is done).
-        // VulkanBackend::drop() calls device_wait_idle + flush_all as a safety net.
-        self.deferred_destructor
-            .queue(DeferredResource::CommandBuffers {
-                device: self.device.clone(),
-                command_pool: self.command_pool,
-                buffers: command_buffers,
-            });
+        // Track command buffers per-slot for deferred freeing after fence wait.
+        let slot = self.current_slot.load(Ordering::Relaxed);
+        self.per_slot_command_buffers[slot]
+            .lock()
+            .extend(command_buffers);
 
         Ok(())
     }
@@ -1557,17 +1569,26 @@ impl VulkanBackend {
             )));
         }
 
-        // Submit command buffer (no fence, no wait — staging resources are deferred)
+        // Submit and wait for the staging copy to complete synchronously.
+        // Texture uploads are one-time load operations, so a brief stall is acceptable
+        // and avoids the need to track staging resources per-frame.
+        let staging_fence = unsafe {
+            self.device
+                .create_fence(&vk::FenceCreateInfo::default(), None)
+        }
+        .map_err(|e| GraphicsError::Internal(format!("Failed to create staging fence: {:?}", e)))?;
+
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
 
         let submit_result = unsafe {
             self.device
-                .queue_submit(self.graphics_queue, &[submit_info], vk::Fence::null())
+                .queue_submit(self.graphics_queue, &[submit_info], staging_fence)
         };
 
         if let Err(e) = submit_result {
             // On submit failure, clean up immediately since nothing was submitted
             unsafe {
+                self.device.destroy_fence(staging_fence, None);
                 self.device
                     .free_command_buffers(self.command_pool, &cmd_buffers);
             }
@@ -1584,19 +1605,20 @@ impl VulkanBackend {
             )));
         }
 
-        // Defer destruction of staging resources until the GPU is done.
-        // The deferred destructor holds them for MAX_FRAMES_IN_FLIGHT frames.
-        self.deferred_destructor
-            .queue(DeferredResource::CommandBuffers {
-                device: self.device.clone(),
-                command_pool: self.command_pool,
-                buffers: cmd_buffers,
-            });
-        self.deferred_destructor.queue(DeferredResource::Buffer {
-            device: self.device.clone(),
-            buffer: staging_buffer,
-            allocation: Some(staging_allocation),
-        });
+        // Wait for staging copy to complete, then free staging resources immediately
+        let _ = unsafe {
+            self.device
+                .wait_for_fences(&[staging_fence], true, u64::MAX)
+        };
+        unsafe {
+            self.device.destroy_fence(staging_fence, None);
+            self.device
+                .free_command_buffers(self.command_pool, &cmd_buffers);
+            self.device.destroy_buffer(staging_buffer, None);
+        }
+        if let Err(e) = self.allocator.lock().free(staging_allocation) {
+            log::error!("Failed to free staging allocation: {}", e);
+        }
 
         Ok(())
     }

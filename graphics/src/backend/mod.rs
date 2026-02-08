@@ -33,11 +33,11 @@ use ash::vk;
 #[cfg(feature = "vulkan-backend")]
 use gpu_allocator::vulkan::Allocation;
 #[cfg(feature = "vulkan-backend")]
+use gpu_allocator::vulkan::Allocator;
+#[cfg(feature = "vulkan-backend")]
 use parking_lot::Mutex;
 #[cfg(feature = "vulkan-backend")]
 use parking_lot::RwLock;
-#[cfg(feature = "vulkan-backend")]
-use vulkan::DeferredDestructor;
 
 use crate::error::GraphicsError;
 use crate::graph::{CompiledGraph, RenderGraph};
@@ -58,8 +58,8 @@ pub enum GpuBuffer {
         buffer: vk::Buffer,
         allocation: Mutex<Option<Allocation>>,
         size: u64,
-        /// Deferred destructor for safe cleanup.
-        deferred: Arc<DeferredDestructor>,
+        /// Allocator for freeing memory on drop.
+        allocator: Arc<Mutex<Allocator>>,
     },
 }
 
@@ -99,8 +99,8 @@ pub enum GpuTexture {
         allocation: Mutex<Option<Allocation>>,
         format: vk::Format,
         extent: vk::Extent3D,
-        /// Deferred destructor for safe cleanup.
-        deferred: Arc<DeferredDestructor>,
+        /// Allocator for freeing memory on drop.
+        allocator: Arc<Mutex<Allocator>>,
     },
 }
 
@@ -145,8 +145,6 @@ pub enum GpuSampler {
     Vulkan {
         device: ash::Device,
         sampler: vk::Sampler,
-        /// Deferred destructor for safe cleanup.
-        deferred: Arc<DeferredDestructor>,
     },
 }
 
@@ -192,8 +190,6 @@ pub enum GpuPipeline {
         pipeline: vk::Pipeline,
         pipeline_layout: vk::PipelineLayout,
         descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
-        /// Deferred destructor for safe cleanup.
-        deferred: Arc<DeferredDestructor>,
     },
 }
 
@@ -263,8 +259,6 @@ pub enum GpuFence {
     Vulkan {
         device: ash::Device,
         fence: vk::Fence,
-        /// Deferred destructor for safe cleanup.
-        deferred: Arc<DeferredDestructor>,
     },
 }
 
@@ -304,8 +298,6 @@ pub enum GpuSemaphore {
     Vulkan {
         device: ash::Device,
         semaphore: vk::Semaphore,
-        /// Deferred destructor for safe cleanup.
-        deferred: Arc<DeferredDestructor>,
     },
 }
 
@@ -605,9 +597,10 @@ impl Drop for GpuSurface {
 // Vulkan Resource Cleanup (Drop implementations)
 // ============================================================================
 //
-// These Drop implementations use deferred destruction to ensure GPU resources
-// are not destroyed while the GPU may still be using them. Resources are queued
-// for destruction and only actually destroyed after enough frames have passed.
+// These Drop implementations destroy Vulkan resources directly.
+// Safety: Resources are kept alive by Arc references in render graphs until
+// FramePipeline::begin_frame() resets them after the fence wait, which
+// guarantees the GPU has finished using them.
 
 #[cfg(feature = "vulkan-backend")]
 impl Drop for GpuBuffer {
@@ -616,17 +609,16 @@ impl Drop for GpuBuffer {
             device,
             buffer,
             allocation,
-            deferred,
+            allocator,
             ..
         } = self
         {
-            // Take the allocation out and queue for deferred destruction
-            let alloc = allocation.lock().take();
-            deferred.queue(vulkan::DeferredResource::Buffer {
-                device: device.clone(),
-                buffer: *buffer,
-                allocation: alloc,
-            });
+            if let Some(alloc) = allocation.lock().take()
+                && let Err(e) = allocator.lock().free(alloc)
+            {
+                log::error!("Failed to free buffer allocation: {}", e);
+            }
+            unsafe { device.destroy_buffer(*buffer, None) };
         }
     }
 }
@@ -639,18 +631,19 @@ impl Drop for GpuTexture {
             image,
             view,
             allocation,
-            deferred,
+            allocator,
             ..
         } = self
         {
-            // Take the allocation out and queue for deferred destruction
-            let alloc = allocation.lock().take();
-            deferred.queue(vulkan::DeferredResource::Texture {
-                device: device.clone(),
-                image: *image,
-                view: *view,
-                allocation: alloc,
-            });
+            if let Some(alloc) = allocation.lock().take()
+                && let Err(e) = allocator.lock().free(alloc)
+            {
+                log::error!("Failed to free texture allocation: {}", e);
+            }
+            unsafe {
+                device.destroy_image_view(*view, None);
+                device.destroy_image(*image, None);
+            }
         }
     }
 }
@@ -658,16 +651,8 @@ impl Drop for GpuTexture {
 #[cfg(feature = "vulkan-backend")]
 impl Drop for GpuSampler {
     fn drop(&mut self) {
-        if let GpuSampler::Vulkan {
-            device,
-            sampler,
-            deferred,
-        } = self
-        {
-            deferred.queue(vulkan::DeferredResource::Sampler {
-                device: device.clone(),
-                sampler: *sampler,
-            });
+        if let GpuSampler::Vulkan { device, sampler } = self {
+            unsafe { device.destroy_sampler(*sampler, None) };
         }
     }
 }
@@ -675,16 +660,8 @@ impl Drop for GpuSampler {
 #[cfg(feature = "vulkan-backend")]
 impl Drop for GpuFence {
     fn drop(&mut self) {
-        if let GpuFence::Vulkan {
-            device,
-            fence,
-            deferred,
-        } = self
-        {
-            deferred.queue(vulkan::DeferredResource::Fence {
-                device: device.clone(),
-                fence: *fence,
-            });
+        if let GpuFence::Vulkan { device, fence } = self {
+            unsafe { device.destroy_fence(*fence, None) };
         }
     }
 }
@@ -692,16 +669,8 @@ impl Drop for GpuFence {
 #[cfg(feature = "vulkan-backend")]
 impl Drop for GpuSemaphore {
     fn drop(&mut self) {
-        if let GpuSemaphore::Vulkan {
-            device,
-            semaphore,
-            deferred,
-        } = self
-        {
-            deferred.queue(vulkan::DeferredResource::Semaphore {
-                device: device.clone(),
-                semaphore: *semaphore,
-            });
+        if let GpuSemaphore::Vulkan { device, semaphore } = self {
+            unsafe { device.destroy_semaphore(*semaphore, None) };
         }
     }
 }
@@ -714,15 +683,15 @@ impl Drop for GpuPipeline {
             pipeline,
             pipeline_layout,
             descriptor_set_layouts,
-            deferred,
         } = self
         {
-            deferred.queue(vulkan::DeferredResource::Pipeline {
-                device: device.clone(),
-                pipeline: *pipeline,
-                pipeline_layout: *pipeline_layout,
-                descriptor_set_layouts: std::mem::take(descriptor_set_layouts),
-            });
+            unsafe {
+                device.destroy_pipeline(*pipeline, None);
+                device.destroy_pipeline_layout(*pipeline_layout, None);
+                for layout in descriptor_set_layouts {
+                    device.destroy_descriptor_set_layout(*layout, None);
+                }
+            }
         }
     }
 }

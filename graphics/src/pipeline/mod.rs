@@ -68,7 +68,7 @@ use crate::device::GraphicsDevice;
 use crate::error::GraphicsError;
 use crate::graph::RenderGraph;
 use crate::resources::RingBuffer;
-use crate::scheduler::{Fence, FrameSchedule};
+use crate::scheduler::{Fence, FrameSchedule, SubmittedGraph};
 use crate::types::BufferUsage;
 use redlilium_core::profiling::{frame_mark, profile_scope};
 
@@ -126,6 +126,13 @@ pub struct FramePipeline {
     /// Pool of reusable render graphs. Moved to FrameSchedule each frame,
     /// then recycled back in end_frame.
     graph_pool: Vec<RenderGraph>,
+
+    /// Per-slot submitted graphs kept alive until fence wait guarantees GPU is done.
+    /// Resetting these after fence wait drops Arc references to GPU resources safely.
+    slot_graphs: Vec<Vec<RenderGraph>>,
+
+    /// Per-slot submitted metadata (keeps semaphores alive until fence wait).
+    slot_submitted: Vec<Vec<SubmittedGraph>>,
 }
 
 impl std::fmt::Debug for FramePipeline {
@@ -166,6 +173,8 @@ impl FramePipeline {
             frame_count: 0,
             ring_buffers: Vec::new(),
             graph_pool: Vec::new(),
+            slot_graphs: (0..frames_in_flight).map(|_| Vec::new()).collect(),
+            slot_submitted: (0..frames_in_flight).map(|_| Vec::new()).collect(),
         }
     }
 
@@ -198,12 +207,25 @@ impl FramePipeline {
             fence.wait();
         }
 
-        // Now that the GPU has finished with the old frame, advance the deferred
-        // destruction system to clean up resources that were dropped
+        // Advance backend frame state (layout tracker, descriptor pool,
+        // command buffer cleanup)
         {
-            profile_scope!("advance_deferred");
-            self.device.advance_deferred_destruction();
+            profile_scope!("advance_frame");
+            self.device.advance_frame();
         }
+
+        // Now safe: reset old graphs from this slot. The fence wait guarantees
+        // the GPU is done, so dropping Arc references to GPU resources is safe.
+        {
+            profile_scope!("recycle_slot_graphs");
+            for mut graph in self.slot_graphs[self.current_slot].drain(..) {
+                graph.reset();
+                self.graph_pool.push(graph);
+            }
+        }
+
+        // Drop old submitted metadata (destroys semaphores — safe after fence wait)
+        self.slot_submitted[self.current_slot].clear();
 
         self.frame_count += 1;
 
@@ -267,12 +289,24 @@ impl FramePipeline {
             return None;
         }
 
-        // Now that the GPU has finished with the old frame, advance the deferred
-        // destruction system to clean up resources that were dropped
+        // Advance backend frame state (layout tracker, descriptor pool,
+        // command buffer cleanup)
         {
-            profile_scope!("advance_deferred");
-            self.device.advance_deferred_destruction();
+            profile_scope!("advance_frame");
+            self.device.advance_frame();
         }
+
+        // Now safe: reset old graphs from this slot
+        {
+            profile_scope!("recycle_slot_graphs");
+            for mut graph in self.slot_graphs[self.current_slot].drain(..) {
+                graph.reset();
+                self.graph_pool.push(graph);
+            }
+        }
+
+        // Drop old submitted metadata (destroys semaphores — safe after fence wait)
+        self.slot_submitted[self.current_slot].clear();
 
         self.frame_count += 1;
 
@@ -331,13 +365,16 @@ impl FramePipeline {
             self.ring_buffers[self.current_slot] = Some(ring);
         }
 
-        // Recycle graphs: reset submitted graphs and merge back to pool
-        let mut pool = schedule.take_graph_pool();
-        for mut graph in schedule.take_submitted_graphs() {
-            graph.reset(); // Resets passes, edges, and compiled cache
-            pool.push(graph);
-        }
-        self.graph_pool = pool;
+        // Store submitted graphs per-slot (DON'T reset — GPU may still be using them).
+        // Their Arc references keep GPU resources alive until begin_frame() resets them
+        // after the fence wait guarantees the GPU is done.
+        self.slot_graphs[self.current_slot] = schedule.take_submitted_graphs();
+
+        // Store submitted metadata per-slot (keeps semaphores alive until fence wait)
+        self.slot_submitted[self.current_slot] = schedule.take_submitted();
+
+        // Return unused graphs to the pool directly
+        self.graph_pool.extend(schedule.take_graph_pool());
 
         // Store fence for this slot
         self.frame_fences[self.current_slot] = Some(fence);

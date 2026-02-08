@@ -658,30 +658,24 @@ impl GraphicsDevice {
         }
     }
 
-    /// Advance the deferred destruction system.
+    /// Advance per-frame backend state.
     ///
-    /// This should be called after a frame fence has been waited on, indicating
-    /// that the GPU has finished with resources from older frames. For the Vulkan
-    /// backend, this processes the deferred destruction queue and destroys resources
-    /// that are no longer in use.
+    /// This should be called after a frame fence has been waited on. For the
+    /// Vulkan backend, this frees command buffers from the completed frame,
+    /// advances the layout tracker, and resets the descriptor pool.
     ///
-    /// # Safety Note
-    ///
-    /// This method is safe to call - it internally handles the unsafe aspects
-    /// of GPU resource destruction. However, it should only be called after
-    /// waiting on a frame fence to ensure proper synchronization.
-    pub(crate) fn advance_deferred_destruction(&self) {
+    /// Also cleans up dead weak references to released resources.
+    pub(crate) fn advance_frame(&self) {
         use crate::backend::GpuBackend;
 
-        // Only Vulkan backend needs deferred destruction
         #[cfg(feature = "vulkan-backend")]
         if let GpuBackend::Vulkan(vulkan_backend) = &*self.instance.backend() {
             // SAFETY: This is called after waiting on a frame fence, which guarantees
-            // the GPU has finished with resources from MAX_FRAMES_IN_FLIGHT frames ago.
+            // the GPU has finished with resources from the oldest frame slot.
             unsafe { vulkan_backend.advance_frame() };
         }
 
-        // Also clean up dead weak references while we're at it
+        // Clean up dead weak references
         self.cleanup_dead_resources();
     }
 }

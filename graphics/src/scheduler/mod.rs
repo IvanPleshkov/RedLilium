@@ -75,7 +75,7 @@ impl GraphHandle {
 }
 
 /// Information about a submitted graph.
-struct SubmittedGraph {
+pub(crate) struct SubmittedGraph {
     /// Debug name for this graph.
     name: String,
     /// Semaphore signaled when this graph completes on GPU.
@@ -255,6 +255,11 @@ impl FrameSchedule {
     /// Take ownership of the submitted graphs (called by FramePipeline::end_frame).
     pub(crate) fn take_submitted_graphs(&mut self) -> Vec<RenderGraph> {
         std::mem::take(&mut self.submitted_graphs)
+    }
+
+    /// Take ownership of the submitted metadata (keeps semaphores alive per-slot).
+    pub(crate) fn take_submitted(&mut self) -> Vec<SubmittedGraph> {
+        std::mem::take(&mut self.submitted)
     }
 
     /// Submit a graph for immediate execution.

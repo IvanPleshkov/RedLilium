@@ -490,7 +490,7 @@ impl PipelineManager {
             return;
         }
 
-        // Pipelines are now owned by Materials and cleaned up via DeferredDestructor.
+        // Pipelines are owned by Materials and destroyed when their last Arc is dropped.
         // We only need to destroy the descriptor pool here.
 
         // Destroy descriptor pool
