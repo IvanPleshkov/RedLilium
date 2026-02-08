@@ -11,7 +11,7 @@
 //! Supporting types:
 //! - [`MaterialBindingDef`] — A single binding slot definition
 //! - [`MaterialValueType`] — Expected value type for a binding slot
-//! - [`MaterialValue`] — Typed property value (float, vec3, vec4, texture, sampler)
+//! - [`MaterialValue`] — Typed property value (float, vec3, vec4, texture)
 //! - [`TextureRef`] — Texture + sampler + UV set reference
 //! - [`AlphaMode`] — Alpha rendering mode (opaque, mask with cutoff, blend)
 
@@ -32,8 +32,6 @@ pub enum MaterialValueType {
     Vec4,
     /// Texture reference.
     Texture,
-    /// Sampler configuration.
-    Sampler,
 }
 
 /// Describes one binding slot in a [`CpuMaterial`].
@@ -63,8 +61,6 @@ pub enum MaterialValue {
     Vec4([f32; 4]),
     /// Texture reference.
     Texture(TextureRef),
-    /// Sampler configuration (Arc-shared across materials).
-    Sampler(Arc<CpuSampler>),
 }
 
 /// How a texture is sourced.
@@ -386,9 +382,6 @@ impl CpuMaterialInstance {
                     sampler: None,
                     tex_coord: 0,
                 }),
-                MaterialValueType::Sampler => {
-                    MaterialValue::Sampler(Arc::new(CpuSampler::default()))
-                }
             })
             .collect();
         Self {
@@ -456,22 +449,6 @@ impl CpuMaterialInstance {
     pub fn textures(&self) -> impl Iterator<Item = &TextureRef> {
         self.values.iter().filter_map(|v| match v {
             MaterialValue::Texture(t) => Some(t),
-            _ => None,
-        })
-    }
-
-    /// Get a sampler by binding name.
-    pub fn get_sampler(&self, name: &str) -> Option<&Arc<CpuSampler>> {
-        match self.get(name)? {
-            MaterialValue::Sampler(s) => Some(s),
-            _ => None,
-        }
-    }
-
-    /// Iterator over all sampler values in this instance.
-    pub fn samplers(&self) -> impl Iterator<Item = &Arc<CpuSampler>> {
-        self.values.iter().filter_map(|v| match v {
-            MaterialValue::Sampler(s) => Some(s),
             _ => None,
         })
     }
