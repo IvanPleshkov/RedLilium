@@ -394,17 +394,17 @@ impl FramePipeline {
     ///
     /// # When to Call
     ///
-    /// - Before resizing swapchain (only current slot needed)
-    /// - Before modifying resources used by current frame slot
+    /// - Before modifying resources used only by the current frame slot
+    ///
+    /// For swapchain resize, use [`wait_idle`](Self::wait_idle) instead — the
+    /// surface is shared across all slots, so all in-flight work must complete.
     ///
     /// # Example
     ///
     /// ```ignore
-    /// // Resize handling - only wait for current slot
-    /// if let Some(event) = resize_manager.update() {
-    ///     pipeline.wait_current_slot();
-    ///     surface.resize(event.width, event.height);
-    /// }
+    /// // Wait for current slot before modifying slot-local resources
+    /// pipeline.wait_current_slot();
+    /// update_slot_local_buffer(pipeline.current_slot());
     /// ```
     pub fn wait_current_slot(&self) {
         if let Some(fence) = &self.frame_fences[self.current_slot] {
@@ -465,6 +465,30 @@ impl FramePipeline {
 
         for fence in self.frame_fences.iter().flatten() {
             fence.wait();
+        }
+    }
+
+    /// Recycle all submitted graphs across every frame slot.
+    ///
+    /// This releases all `Arc` references (e.g. swapchain texture views) held
+    /// by graphs that were kept alive for GPU safety. **Must only be called
+    /// after [`wait_idle`](Self::wait_idle)** — the fence wait guarantees the
+    /// GPU is done with these resources.
+    ///
+    /// # When to Call
+    ///
+    /// Before reconfiguring the surface: render graphs store
+    /// `Arc<wgpu::TextureView>` clones of the swapchain back buffers. On DX12,
+    /// `ResizeBuffers` requires all back-buffer references to be released first.
+    pub fn recycle_all_graphs(&mut self) {
+        for slot_graphs in &mut self.slot_graphs {
+            for mut graph in slot_graphs.drain(..) {
+                graph.reset();
+                self.graph_pool.push(graph);
+            }
+        }
+        for slot_submitted in &mut self.slot_submitted {
+            slot_submitted.clear();
         }
     }
 

@@ -318,8 +318,14 @@ where
         ctx.width = width;
         ctx.height = height;
 
-        // Wait for current slot before reconfiguring
-        ctx.pipeline.wait_current_slot();
+        // Wait for ALL in-flight frames before reconfiguring the surface.
+        // The surface is shared across all frame slots, so any slot with
+        // pending GPU work could still reference the old swapchain textures.
+        ctx.pipeline.wait_idle();
+
+        // Recycle all submitted graphs to release Arc<TextureView> references
+        // to the old swapchain back buffers.
+        ctx.pipeline.recycle_all_graphs();
 
         // Reconfigure surface with the same format
         let present_mode = if self.args.vsync() {
