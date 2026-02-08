@@ -17,12 +17,9 @@
 //! let instance = GraphicsInstance::new()?;
 //! let surface = instance.create_surface(&window)?;
 //!
-//! let config = SurfaceConfiguration {
-//!     format: surface.preferred_format(),
-//!     width: 1920,
-//!     height: 1080,
-//!     present_mode: PresentMode::Fifo,
-//! };
+//! let config = SurfaceConfiguration::new(1920, 1080)
+//!     .with_format(surface.preferred_format())
+//!     .with_present_mode(PresentMode::Fifo);
 //! surface.configure(&device, &config);
 //!
 //! // In render loop:
@@ -68,6 +65,18 @@ pub struct SurfaceConfiguration {
     pub height: u32,
     /// Presentation mode (vsync behavior).
     pub present_mode: PresentMode,
+    /// Number of frames that can be in flight simultaneously.
+    ///
+    /// Controls how many sets of synchronization primitives (semaphores, fences)
+    /// the swapchain creates. Higher values allow more CPU-GPU overlap but
+    /// increase input latency and memory usage.
+    ///
+    /// | Count | Behavior |
+    /// |-------|----------|
+    /// | 1 | CPU waits for GPU every frame. Simple but slow. |
+    /// | 2 | Good balance. CPU works on N+1 while GPU renders N. (Default) |
+    /// | 3 | More overlap, higher latency. Useful for VR or heavy CPU work. |
+    pub frames_in_flight: usize,
 }
 
 impl SurfaceConfiguration {
@@ -78,6 +87,7 @@ impl SurfaceConfiguration {
             width,
             height,
             present_mode: PresentMode::default(),
+            frames_in_flight: 2,
         }
     }
 
@@ -90,6 +100,15 @@ impl SurfaceConfiguration {
     /// Set the present mode.
     pub fn with_present_mode(mut self, present_mode: PresentMode) -> Self {
         self.present_mode = present_mode;
+        self
+    }
+
+    /// Set the number of frames in flight.
+    ///
+    /// Must be at least 1. Defaults to 2.
+    pub fn with_frames_in_flight(mut self, frames_in_flight: usize) -> Self {
+        assert!(frames_in_flight > 0, "frames_in_flight must be at least 1");
+        self.frames_in_flight = frames_in_flight;
         self
     }
 }
@@ -289,13 +308,13 @@ impl Surface {
             .and_then(|d| d.clone())
             .ok_or_else(|| GraphicsError::InvalidParameter("surface not configured".to_string()))?;
 
-        // Increment frame index
+        // Increment frame index (cycles through frames in flight)
         let frame_index = {
             let mut idx = self.frame_index.write().map_err(|_| {
                 GraphicsError::Internal("failed to acquire frame index lock".to_string())
             })?;
             let current = *idx;
-            *idx = (*idx + 1) % 3; // Triple buffering
+            *idx = (*idx + 1) % config.frames_in_flight as u64;
             current
         };
 
@@ -445,5 +464,6 @@ mod tests {
         let config = SurfaceConfiguration::new(800, 600);
         assert_eq!(config.format, TextureFormat::Bgra8Unorm);
         assert_eq!(config.present_mode, PresentMode::Fifo);
+        assert_eq!(config.frames_in_flight, 2);
     }
 }

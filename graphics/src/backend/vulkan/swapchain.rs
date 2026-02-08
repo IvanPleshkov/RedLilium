@@ -11,11 +11,10 @@ use super::{VulkanBackend, VulkanImageView, VulkanSurfaceTextureView};
 use crate::error::GraphicsError;
 use crate::swapchain::SurfaceConfiguration;
 
-/// Maximum number of frames that can be in flight simultaneously.
-pub const MAX_FRAMES_IN_FLIGHT: usize = 2;
-
 /// Vulkan swapchain resources.
 pub struct VulkanSwapchain {
+    /// Number of frames in flight (from surface configuration).
+    pub(crate) frames_in_flight: usize,
     pub(crate) swapchain: vk::SwapchainKHR,
     pub(crate) images: Vec<vk::Image>,
     pub(crate) image_views: Vec<vk::ImageView>,
@@ -148,11 +147,12 @@ impl VulkanSwapchain {
         let semaphore_info = vk::SemaphoreCreateInfo::default();
         let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
 
-        let mut image_available_semaphores = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut render_finished_semaphores = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut in_flight_fences = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
+        let frames_in_flight = config.frames_in_flight;
+        let mut image_available_semaphores = Vec::with_capacity(frames_in_flight);
+        let mut render_finished_semaphores = Vec::with_capacity(frames_in_flight);
+        let mut in_flight_fences = Vec::with_capacity(frames_in_flight);
 
-        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+        for _ in 0..frames_in_flight {
             let image_available = unsafe {
                 vulkan_backend
                     .device()
@@ -193,7 +193,7 @@ impl VulkanSwapchain {
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(vulkan_backend.command_pool())
             .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(MAX_FRAMES_IN_FLIGHT as u32);
+            .command_buffer_count(frames_in_flight as u32);
 
         let present_command_buffers = unsafe {
             vulkan_backend
@@ -212,10 +212,11 @@ impl VulkanSwapchain {
             extent.width,
             extent.height,
             images.len(),
-            MAX_FRAMES_IN_FLIGHT
+            frames_in_flight
         );
 
         Ok(Self {
+            frames_in_flight,
             swapchain,
             images,
             image_views,
@@ -343,7 +344,7 @@ impl VulkanSwapchain {
         let present_cmd = self.present_command_buffers[current_frame];
 
         // Advance to next frame slot
-        self.current_frame = (current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+        self.current_frame = (current_frame + 1) % self.frames_in_flight;
 
         let vulkan_view = VulkanSurfaceTextureView {
             image,
