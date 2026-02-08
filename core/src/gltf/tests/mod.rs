@@ -3,17 +3,25 @@ use std::sync::Arc;
 use crate::gltf::GltfMaterial;
 use crate::material::{CpuMaterial, CpuMaterialInstance, MaterialValue};
 use crate::mesh::VertexLayout;
+use crate::sampler::CpuSampler;
 
 mod load_test;
 mod roundtrip_test;
 
+/// Default sampler callback for tests.
+///
+/// Simply wraps the parsed sampler in an `Arc`.
+fn default_sampler_fn(sampler: &CpuSampler) -> Arc<CpuSampler> {
+    Arc::new(sampler.clone())
+}
+
 /// Default PBR material callback for tests.
 ///
-/// Creates a `CpuMaterialInstance` using `CpuMaterial::pbr_metallic_roughness`,
-/// replicating the old built-in loader behavior.
-fn default_pbr_material(mat: &GltfMaterial) -> Arc<CpuMaterialInstance> {
+/// Creates a `CpuMaterialInstance` using `CpuMaterial::pbr_metallic_roughness`
+/// and the native vertex layout from the glTF primitive.
+fn default_pbr_material(mat: &GltfMaterial, layout: &VertexLayout) -> Arc<CpuMaterialInstance> {
     let declaration = CpuMaterial::pbr_metallic_roughness(
-        Arc::new(VertexLayout::new()),
+        Arc::new(layout.clone()),
         mat.alpha_mode,
         mat.double_sided,
         mat.base_color_texture.is_some(),

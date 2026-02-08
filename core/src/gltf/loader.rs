@@ -3,6 +3,7 @@
 //! The [`LoadContext`] holds all state needed during loading: resolved buffer
 //! data, layout cache, and the parsed glTF document.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::material::{AlphaMode, CpuMaterialInstance, TextureRef, TextureSource};
@@ -25,19 +26,14 @@ pub(crate) struct LoadContext {
     /// Resolved buffer data (one Vec<u8> per glTF buffer).
     buffers: Vec<Vec<u8>>,
 
-    /// Shared layouts passed in by the caller.
-    shared_layouts: Vec<Arc<VertexLayout>>,
-    /// New layouts created during loading.
-    new_layouts: Vec<Arc<VertexLayout>>,
-
-    /// Shared samplers passed in by the caller.
-    shared_samplers: Vec<Arc<CpuSampler>>,
-    /// New samplers created during loading.
-    new_samplers: Vec<Arc<CpuSampler>>,
     /// Loaded sampler Arcs indexed by glTF sampler index.
     sampler_arcs: Vec<Arc<CpuSampler>>,
 
-    /// Loaded instance Arcs indexed by glTF material index.
+    /// Parsed glTF material data, indexed by glTF material index.
+    /// Built by `prepare_gltf_materials`, consumed by `load_meshes`.
+    gltf_materials: Vec<GltfMaterial>,
+
+    /// Deduplicated material instances, populated by `load_meshes`.
     instance_arcs: Vec<Arc<CpuMaterialInstance>>,
 
     /// Loaded texture Arcs indexed by glTF texture index.
@@ -50,20 +46,12 @@ pub(crate) struct LoadContext {
 
 impl LoadContext {
     /// Create a new LoadContext from parsed glTF data.
-    pub fn new(
-        document: gltf_dep::Document,
-        buffers: Vec<Vec<u8>>,
-        shared_layouts: &[Arc<VertexLayout>],
-        shared_samplers: &[Arc<CpuSampler>],
-    ) -> Self {
+    pub fn new(document: gltf_dep::Document, buffers: Vec<Vec<u8>>) -> Self {
         Self {
             document,
             buffers,
-            shared_layouts: shared_layouts.to_vec(),
-            new_layouts: Vec::new(),
-            shared_samplers: shared_samplers.to_vec(),
-            new_samplers: Vec::new(),
             sampler_arcs: Vec::new(),
+            gltf_materials: Vec::new(),
             instance_arcs: Vec::new(),
             texture_arcs: Vec::new(),
             mesh_index_map: Vec::new(),
@@ -135,13 +123,13 @@ impl LoadContext {
         Ok(images)
     }
 
-    /// Load all samplers as shared `Arc<CpuSampler>`.
+    /// Load all samplers via user-provided callback.
     ///
-    /// Reuses structurally matching samplers from `shared_samplers`. New
-    /// samplers are stored in `new_samplers`. The resulting `sampler_arcs`
-    /// vector is indexed by glTF sampler index and used by
-    /// `resolve_texture_sampler`.
-    pub fn load_samplers(&mut self) {
+    /// For each glTF sampler, parses the filter and wrapping modes into a
+    /// [`CpuSampler`], then calls `sampler_fn` to get a shared `Arc`. The
+    /// callback controls sampler creation and sharing. Results are stored
+    /// in `self.sampler_arcs`, indexed by glTF sampler index.
+    pub fn load_samplers(&mut self, sampler_fn: &mut impl FnMut(&CpuSampler) -> Arc<CpuSampler>) {
         self.sampler_arcs = self
             .document
             .samplers()
@@ -166,73 +154,66 @@ impl LoadContext {
                     ..Default::default()
                 };
 
-                find_or_create_sampler(cpu_sampler, &self.shared_samplers, &mut self.new_samplers)
+                sampler_fn(&cpu_sampler)
             })
             .collect();
     }
 
-    /// Load all materials via a user-provided callback.
+    /// Parse all glTF materials into [`GltfMaterial`] structs.
     ///
-    /// For each glTF material, extracts PBR properties and textures into a
-    /// [`GltfMaterial`] and passes it to `material_fn`. The callback returns
-    /// an `Arc<CpuMaterialInstance>` that the loader assigns to meshes.
-    ///
-    /// The resulting `instance_arcs` vector is indexed by glTF material index
-    /// and used by `load_meshes`.
-    pub fn load_materials(
-        &mut self,
-        material_fn: &mut impl FnMut(&GltfMaterial) -> Arc<CpuMaterialInstance>,
-    ) {
-        let materials: Vec<gltf_dep::Material<'_>> = self.document.materials().collect();
-        let mut result = Vec::with_capacity(materials.len());
+    /// Extracts PBR properties and resolves texture/sampler references. The
+    /// parsed data is stored in `self.gltf_materials` for later use by
+    /// `load_meshes`, which calls the user's material callback per-primitive.
+    pub fn prepare_gltf_materials(&mut self) {
+        self.gltf_materials = self
+            .document
+            .materials()
+            .map(|mat| {
+                let pbr = mat.pbr_metallic_roughness();
 
-        for mat in &materials {
-            let pbr = mat.pbr_metallic_roughness();
+                let alpha_mode = match mat.alpha_mode() {
+                    gltf_dep::material::AlphaMode::Opaque => AlphaMode::Opaque,
+                    gltf_dep::material::AlphaMode::Mask => {
+                        let cutoff = mat.alpha_cutoff().unwrap_or(0.5);
+                        AlphaMode::Mask { cutoff }
+                    }
+                    gltf_dep::material::AlphaMode::Blend => AlphaMode::Blend,
+                };
 
-            let alpha_mode = match mat.alpha_mode() {
-                gltf_dep::material::AlphaMode::Opaque => AlphaMode::Opaque,
-                gltf_dep::material::AlphaMode::Mask => {
-                    let cutoff = mat.alpha_cutoff().unwrap_or(0.5);
-                    AlphaMode::Mask { cutoff }
+                let mut normal_scale = 1.0f32;
+                let mut occlusion_strength = 1.0f32;
+
+                let normal_texture = mat.normal_texture().map(|t| {
+                    normal_scale = t.scale();
+                    self.texture_ref_from(&t.texture(), t.tex_coord())
+                });
+                let occlusion_texture = mat.occlusion_texture().map(|t| {
+                    occlusion_strength = t.strength();
+                    self.texture_ref_from(&t.texture(), t.tex_coord())
+                });
+
+                GltfMaterial {
+                    name: mat.name().map(String::from),
+                    alpha_mode,
+                    double_sided: mat.double_sided(),
+                    base_color_factor: pbr.base_color_factor(),
+                    metallic_factor: pbr.metallic_factor(),
+                    roughness_factor: pbr.roughness_factor(),
+                    emissive_factor: mat.emissive_factor(),
+                    normal_scale,
+                    occlusion_strength,
+                    base_color_texture: pbr
+                        .base_color_texture()
+                        .map(|t| self.build_texture_ref(&t)),
+                    metallic_roughness_texture: pbr
+                        .metallic_roughness_texture()
+                        .map(|t| self.build_texture_ref(&t)),
+                    normal_texture,
+                    occlusion_texture,
+                    emissive_texture: mat.emissive_texture().map(|t| self.build_texture_ref(&t)),
                 }
-                gltf_dep::material::AlphaMode::Blend => AlphaMode::Blend,
-            };
-
-            let mut normal_scale = 1.0f32;
-            let mut occlusion_strength = 1.0f32;
-
-            let normal_texture = mat.normal_texture().map(|t| {
-                normal_scale = t.scale();
-                self.texture_ref_from(&t.texture(), t.tex_coord())
-            });
-            let occlusion_texture = mat.occlusion_texture().map(|t| {
-                occlusion_strength = t.strength();
-                self.texture_ref_from(&t.texture(), t.tex_coord())
-            });
-
-            let gltf_mat = GltfMaterial {
-                name: mat.name().map(String::from),
-                alpha_mode,
-                double_sided: mat.double_sided(),
-                base_color_factor: pbr.base_color_factor(),
-                metallic_factor: pbr.metallic_factor(),
-                roughness_factor: pbr.roughness_factor(),
-                emissive_factor: mat.emissive_factor(),
-                normal_scale,
-                occlusion_strength,
-                base_color_texture: pbr.base_color_texture().map(|t| self.build_texture_ref(&t)),
-                metallic_roughness_texture: pbr
-                    .metallic_roughness_texture()
-                    .map(|t| self.build_texture_ref(&t)),
-                normal_texture,
-                occlusion_texture,
-                emissive_texture: mat.emissive_texture().map(|t| self.build_texture_ref(&t)),
-            };
-
-            result.push(material_fn(&gltf_mat));
-        }
-
-        self.instance_arcs = result;
+            })
+            .collect();
     }
 
     /// Build a TextureRef from a glTF texture info.
@@ -297,16 +278,34 @@ impl LoadContext {
             .collect()
     }
 
-    /// Load all meshes with vertex interleaving and layout sharing.
+    /// Load all meshes with vertex interleaving.
     ///
-    /// Returns a flat list of `CpuMesh` (one per glTF primitive). Each mesh
-    /// carries its material index via `CpuMesh::material()`. Must be called
-    /// after `load_materials` so that material indices are valid. Also
-    /// populates `self.mesh_index_map` so that `load_scenes` can map glTF
-    /// mesh indices to flat CpuMesh indices.
-    pub fn load_meshes(&mut self) -> Result<Vec<CpuMesh>, GltfError> {
+    /// For each primitive, builds a native vertex layout from the glTF data,
+    /// then calls `material_fn` with the parsed [`GltfMaterial`] and a
+    /// reference to that native [`VertexLayout`]. The callback returns an
+    /// `Arc<CpuMaterialInstance>` whose `CpuMaterial::vertex_layout` determines
+    /// the final mesh layout. If the material's layout differs structurally
+    /// from the native one, vertex data is adapted to match.
+    ///
+    /// Must be called after `prepare_gltf_materials`. Also populates
+    /// `self.mesh_index_map` and `self.instance_arcs`.
+    pub fn load_meshes(
+        &mut self,
+        material_fn: &mut impl FnMut(&GltfMaterial, &VertexLayout) -> Arc<CpuMaterialInstance>,
+    ) -> Result<Vec<CpuMesh>, GltfError> {
         let mut result = Vec::new();
         let mut index_map = Vec::new();
+
+        // Internal layout dedup for callback cache key stability.
+        // Not exposed — the callback controls layout creation/sharing.
+        let mut layout_cache: Vec<Arc<VertexLayout>> = Vec::new();
+
+        // Cache: (glTF material index, native layout pointer) → callback result
+        let mut callback_cache: HashMap<(usize, *const VertexLayout), Arc<CpuMaterialInstance>> =
+            HashMap::new();
+        // Dedup: instance pointer → scene material index
+        let mut instance_map: HashMap<*const CpuMaterialInstance, usize> = HashMap::new();
+        let mut instance_list: Vec<Arc<CpuMaterialInstance>> = Vec::new();
 
         // Collect all accessors for data reading
         let accessors: Vec<gltf_dep::Accessor<'_>> = self.document.accessors().collect();
@@ -330,28 +329,52 @@ impl LoadContext {
                 // Map topology
                 let topology = vertex::map_topology(primitive.mode())?;
 
-                // If the primitive has a material, use its vertex layout as the
-                // target so that the mesh data matches what the GPU pipeline expects.
-                // Attributes missing from the primitive are zero-filled; extra
-                // primitive attributes not in the target layout are skipped.
-                let mat_idx = primitive.material().index();
-                let (shared_layout, interleave_attrs) = if let Some(idx) = mat_idx
-                    && self.instance_arcs[idx]
-                        .material
-                        .vertex_layout
-                        .buffer_count()
-                        == 1
+                // Dedup native layout internally (for stable cache keys)
+                let native_layout_arc =
+                    vertex::find_or_create_layout(native_layout, &[], &mut layout_cache);
+
+                // If the primitive has a material, call the callback with the
+                // parsed material data and the native vertex layout. The callback
+                // decides which vertex layout to use for the material. If the
+                // returned layout differs, adapt the vertex data to match.
+                let gltf_mat_idx = primitive.material().index();
+                let (mesh_layout, interleave_attrs, scene_mat_idx) = if let Some(mat_idx) =
+                    gltf_mat_idx
                 {
-                    let target = &self.instance_arcs[idx].material.vertex_layout;
-                    let adapted = vertex::adapt_attrs_to_target_layout(target, &native_attrs);
-                    (Arc::clone(target), adapted)
+                    // Get or create CpuMaterialInstance via callback (cached)
+                    let cache_key = (mat_idx, Arc::as_ptr(&native_layout_arc));
+                    let instance = if let Some(cached) = callback_cache.get(&cache_key) {
+                        Arc::clone(cached)
+                    } else {
+                        let inst = material_fn(&self.gltf_materials[mat_idx], &native_layout_arc);
+                        callback_cache.insert(cache_key, Arc::clone(&inst));
+                        inst
+                    };
+
+                    // Deduplicate instance in the scene materials list
+                    let inst_ptr = Arc::as_ptr(&instance);
+                    let inst_idx = if let Some(&idx) = instance_map.get(&inst_ptr) {
+                        idx
+                    } else {
+                        let idx = instance_list.len();
+                        instance_map.insert(inst_ptr, idx);
+                        instance_list.push(Arc::clone(&instance));
+                        idx
+                    };
+
+                    // Check if the material's layout matches the native one
+                    let target_layout = &instance.material.vertex_layout;
+                    if vertex::layouts_structurally_equal(target_layout, &native_layout_arc) {
+                        (Arc::clone(target_layout), native_attrs, Some(inst_idx))
+                    } else if target_layout.buffer_count() == 1 {
+                        let adapted =
+                            vertex::adapt_attrs_to_target_layout(target_layout, &native_attrs);
+                        (Arc::clone(target_layout), adapted, Some(inst_idx))
+                    } else {
+                        (native_layout_arc, native_attrs, Some(inst_idx))
+                    }
                 } else {
-                    let shared = vertex::find_or_create_layout(
-                        native_layout,
-                        &self.shared_layouts,
-                        &mut self.new_layouts,
-                    );
-                    (shared, native_attrs)
+                    (native_layout_arc, native_attrs, None)
                 };
 
                 // Get vertex count from POSITION accessor
@@ -359,7 +382,7 @@ impl LoadContext {
                 let vertex_count = pos_accessor.count() as u32;
 
                 // Get stride from the layout
-                let stride = shared_layout.buffer_stride(0);
+                let stride = mesh_layout.buffer_stride(0);
 
                 // Interleave vertex data
                 let vertex_data = vertex::interleave_vertices(
@@ -390,11 +413,11 @@ impl LoadContext {
                     }
                 });
 
-                // Build CpuMesh with material instance
+                // Build CpuMesh with scene material index
                 let mut cpu_mesh =
-                    vertex::build_cpu_mesh(shared_layout, topology, vertex_data, index_data, label);
-                if let Some(mat_idx) = primitive.material().index() {
-                    cpu_mesh = cpu_mesh.with_material(mat_idx);
+                    vertex::build_cpu_mesh(mesh_layout, topology, vertex_data, index_data, label);
+                if let Some(idx) = scene_mat_idx {
+                    cpu_mesh = cpu_mesh.with_material(idx);
                 }
 
                 let flat_idx = result.len();
@@ -406,6 +429,7 @@ impl LoadContext {
         }
 
         self.mesh_index_map = index_map;
+        self.instance_arcs = instance_list;
         Ok(result)
     }
 
@@ -551,17 +575,12 @@ impl LoadContext {
         self.document.default_scene().map(|s| s.index())
     }
 
-    /// Get a clone of the loaded material instances.
+    /// Get a clone of the deduplicated material instances.
     ///
-    /// Returns `Arc<CpuMaterialInstance>` for each glTF material index.
-    /// Used by `load_scenes` to embed materials into each scene.
+    /// Returns all unique `Arc<CpuMaterialInstance>` created during mesh
+    /// loading. Used by `load_scenes` to embed materials into each scene.
     pub fn material_instances(&self) -> Vec<Arc<CpuMaterialInstance>> {
         self.instance_arcs.clone()
-    }
-
-    /// Consume the context and return new layouts and samplers.
-    pub fn into_new_resources(self) -> (Vec<Arc<VertexLayout>>, Vec<Arc<CpuSampler>>) {
-        (self.new_layouts, self.new_samplers)
     }
 }
 
@@ -593,47 +612,6 @@ fn load_node(node: &gltf_dep::Node<'_>, mesh_index_map: &[Vec<usize>]) -> SceneN
             .map(|c| load_node(&c, mesh_index_map))
             .collect(),
     }
-}
-
-/// Check if two samplers are structurally equal (ignoring name).
-fn samplers_structurally_equal(a: &CpuSampler, b: &CpuSampler) -> bool {
-    a.address_mode_u == b.address_mode_u
-        && a.address_mode_v == b.address_mode_v
-        && a.address_mode_w == b.address_mode_w
-        && a.mag_filter == b.mag_filter
-        && a.min_filter == b.min_filter
-        && a.mipmap_filter == b.mipmap_filter
-        && a.lod_min_clamp == b.lod_min_clamp
-        && a.lod_max_clamp == b.lod_max_clamp
-        && a.compare == b.compare
-        && a.anisotropy_clamp == b.anisotropy_clamp
-}
-
-/// Find or create a shared sampler.
-///
-/// Searches `existing_samplers` for a structural match. If found, returns the
-/// existing Arc. Otherwise, creates a new Arc and appends it to `new_samplers`.
-fn find_or_create_sampler(
-    sampler: CpuSampler,
-    existing_samplers: &[Arc<CpuSampler>],
-    new_samplers: &mut Vec<Arc<CpuSampler>>,
-) -> Arc<CpuSampler> {
-    // Search in pre-existing shared samplers
-    for existing in existing_samplers {
-        if samplers_structurally_equal(&sampler, existing) {
-            return Arc::clone(existing);
-        }
-    }
-    // Search in newly created samplers
-    for new_sampler in new_samplers.iter() {
-        if samplers_structurally_equal(&sampler, new_sampler) {
-            return Arc::clone(new_sampler);
-        }
-    }
-    // Create a new one
-    let arc = Arc::new(sampler);
-    new_samplers.push(Arc::clone(&arc));
-    arc
 }
 
 /// Decoded image data (internal, not exposed).

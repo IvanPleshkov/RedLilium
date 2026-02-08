@@ -7,14 +7,13 @@ description = "Demo scenes showcasing RedLilium Engine capabilities"
 
 [features]
 default = []
-profiling = ["redlilium-core/profiling", "redlilium-ecs/profiling", "redlilium-graphics/profiling", "redlilium-app/profiling"]
+profiling = ["redlilium-core/profiling", "redlilium-graphics/profiling", "redlilium-app/profiling"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 redlilium-core = { path = "../core" }
-redlilium-ecs = { path = "../ecs" }
 redlilium-graphics = { path = "../graphics" }
 redlilium-app = { path = "../app" }
 winit.workspace = true

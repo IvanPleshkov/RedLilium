@@ -98,7 +98,7 @@ pub(crate) fn build_layout_from_primitive(
 ///
 /// Compares buffer count, strides, step modes, and all attributes
 /// (order-independent for attributes).
-fn layouts_structurally_equal(a: &VertexLayout, b: &VertexLayout) -> bool {
+pub(crate) fn layouts_structurally_equal(a: &VertexLayout, b: &VertexLayout) -> bool {
     if a.buffers.len() != b.buffers.len() {
         return false;
     }

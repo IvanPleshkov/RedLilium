@@ -48,24 +48,14 @@ Core utilities and common functionality shared across all crates.
 
 ### redlilium-ecs
 
-Entity-Component-System module built on [bevy_ecs](https://docs.rs/bevy_ecs):
+Custom ECS with integrated async compute support. See [ecs/DESIGN.md](../ecs/DESIGN.md) for detailed architecture.
 
-```
-ecs/
-├── components/         # ECS components
-│   ├── transform.rs    # Transform, GlobalTransform
-│   ├── hierarchy.rs    # ChildOf, Children, HierarchyDepth
-│   ├── material.rs     # Material, TextureHandle, AlphaMode
-│   ├── render_mesh.rs  # RenderMesh, MeshHandle, Aabb, RenderLayers
-│   └── collision.rs    # Collider, RigidBody, CollisionLayer
-└── systems/            # ECS systems
-    └── transform_propagation.rs  # Transform hierarchy propagation
-```
-
-Key types:
-- **Transform/GlobalTransform**: Local and world-space transforms
-- **RenderMesh/Material**: Rendering components
-- **ChildOf/Children**: Hierarchy relationship components
+Key design decisions:
+- **Sync systems + async compute**: ECS systems are synchronous (normal borrowing), compute tasks are async (own their data, yield at `.await` points)
+- **Unified thread pool**: Sync systems and async tasks share one work-stealing pool. Idle cores automatically pick up background compute work.
+- **Multiple worlds**: First-class support for independent ECS worlds sharing a thread pool
+- **Sparse set storage**: Simple, fast enough for thousands of entities, easy to implement
+- **Priority scheduling**: Critical (must finish this frame), High (should finish), Low (fills gaps)
 
 ### redlilium-graphics
 

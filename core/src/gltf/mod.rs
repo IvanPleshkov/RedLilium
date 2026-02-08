@@ -4,43 +4,49 @@
 //! meshes, materials, textures, animations, skins, and scene graphs.
 //! Exports scenes and materials back to binary glTF (`.glb`) format.
 //!
-//! # Layout and Sampler Sharing
+//! # Callbacks
 //!
-//! The loader takes slices of `Arc<VertexLayout>` and `Arc<CpuSampler>` and
-//! reuses matching instances via structural equality (ignoring labels/names).
-//! New resources created during loading are returned in
-//! [`GltfDocument::new_layouts`] and [`GltfDocument::new_samplers`].
+//! The loader delegates resource creation to user-provided callbacks:
 //!
-//! # Material Callback
+//! - **`material_fn`** — Called per mesh primitive with a [`GltfMaterial`]
+//!   (parsed PBR properties) and the native [`VertexLayout`] from the
+//!   primitive's glTF attributes. Returns an `Arc<CpuMaterialInstance>`
+//!   whose layout determines the mesh's final vertex format. If the
+//!   material's layout differs from the native one, vertex data is adapted
+//!   automatically. Results are cached by (material index, native layout).
 //!
-//! The loader delegates material creation to a user-provided callback. For each
-//! glTF material, the loader extracts PBR properties into a [`GltfMaterial`]
-//! and passes it to the callback, which returns an `Arc<CpuMaterialInstance>`.
-//! Material instances are stored in each scene's `materials` array, and meshes
-//! reference them by index. This lets the caller map glTF material data to
-//! their own shader system.
+//! - **`sampler_fn`** — Called per glTF sampler with a [`CpuSampler`]
+//!   containing the parsed filter and wrapping modes. Returns an
+//!   `Arc<CpuSampler>` for sharing. The resolved samplers are embedded
+//!   in [`TextureRef`] entries within [`GltfMaterial`].
 //!
 //! # Example
 //!
 //! ```ignore
 //! use redlilium_core::gltf::{load_gltf, GltfMaterial};
 //! use redlilium_core::material::*;
+//! use redlilium_core::mesh::VertexLayout;
+//! use redlilium_core::sampler::CpuSampler;
 //! use std::sync::Arc;
 //!
 //! let data = std::fs::read("model.glb").unwrap();
-//! let doc = load_gltf(&data, &[], &[], |mat: &GltfMaterial| {
-//!     let layout = Arc::new(VertexLayout::new());
-//!     let decl = CpuMaterial::pbr_metallic_roughness(
-//!         layout, mat.alpha_mode, mat.double_sided,
-//!         mat.base_color_texture.is_some(),
-//!         mat.metallic_roughness_texture.is_some(),
-//!         mat.normal_texture.is_some(),
-//!         mat.occlusion_texture.is_some(),
-//!         mat.emissive_texture.is_some(),
-//!     );
-//!     // ... build instance from decl and mat properties ...
-//!     Arc::new(CpuMaterialInstance::new(Arc::new(decl)))
-//! }).unwrap();
+//! let doc = load_gltf(
+//!     &data,
+//!     |mat: &GltfMaterial, layout: &VertexLayout| {
+//!         let layout = Arc::new(layout.clone());
+//!         let decl = CpuMaterial::pbr_metallic_roughness(
+//!             layout,
+//!             mat.alpha_mode, mat.double_sided,
+//!             mat.base_color_texture.is_some(),
+//!             mat.metallic_roughness_texture.is_some(),
+//!             mat.normal_texture.is_some(),
+//!             mat.occlusion_texture.is_some(),
+//!             mat.emissive_texture.is_some(),
+//!         );
+//!         Arc::new(CpuMaterialInstance::new(Arc::new(decl)))
+//!     },
+//!     |s: &CpuSampler| Arc::new(s.clone()),
+//! ).unwrap();
 //!
 //! println!("Scenes: {}", doc.scenes.len());
 //! println!("Meshes: {}", doc.scenes[0].meshes.len());
@@ -72,53 +78,48 @@ use crate::scene::Scene;
 /// # Arguments
 ///
 /// * `data` - Raw bytes of the `.glb` or `.gltf` file.
-/// * `shared_layouts` - Existing vertex layouts to share. The loader will
-///   reuse layouts that match structurally (same attributes, formats, offsets,
-///   buffers — label is ignored).
-/// * `shared_samplers` - Existing samplers to share. The loader will reuse
-///   samplers that match structurally (same filter modes, address modes, LOD
-///   clamps, compare function, anisotropy — name is ignored).
-/// * `material_fn` - Callback invoked for each glTF material. Receives a
-///   [`GltfMaterial`] with parsed PBR properties and resolved textures.
-///   Returns an `Arc<CpuMaterialInstance>` to assign to meshes.
+/// * `material_fn` - Callback invoked per mesh primitive. Receives a
+///   [`GltfMaterial`] with parsed PBR properties and a reference to the
+///   native [`VertexLayout`] built from the primitive's glTF attributes.
+///   Returns an `Arc<CpuMaterialInstance>` whose `CpuMaterial::vertex_layout`
+///   determines the mesh's final vertex format. Results are cached by
+///   (glTF material index, native layout).
+/// * `sampler_fn` - Callback invoked per glTF sampler. Receives a
+///   [`CpuSampler`] with parsed filter and wrapping modes. Returns an
+///   `Arc<CpuSampler>` to embed in texture references. Called during
+///   sampler loading, before material preparation.
 ///
 /// # Returns
 ///
 /// A [`GltfDocument`] containing all loaded scenes with meshes, cameras,
 /// skins, and animations. Material instances are stored in each scene's
 /// `materials` array. Meshes reference materials by index via
-/// `CpuMesh::material()`. New vertex layouts and samplers created during
-/// loading are in [`GltfDocument::new_layouts`] and
-/// [`GltfDocument::new_samplers`].
+/// `CpuMesh::material()`.
 pub fn load_gltf(
     data: &[u8],
-    shared_layouts: &[Arc<VertexLayout>],
-    shared_samplers: &[Arc<CpuSampler>],
-    mut material_fn: impl FnMut(&GltfMaterial) -> Arc<CpuMaterialInstance>,
+    mut material_fn: impl FnMut(&GltfMaterial, &VertexLayout) -> Arc<CpuMaterialInstance>,
+    mut sampler_fn: impl FnMut(&CpuSampler) -> Arc<CpuSampler>,
 ) -> Result<GltfDocument, GltfError> {
     let gltf = gltf_dep::Gltf::from_slice(data)?;
     let blob = gltf.blob.clone();
 
     let buffers = loader::resolve_buffers(&gltf.document, blob)?;
-    let mut ctx = loader::LoadContext::new(gltf.document, buffers, shared_layouts, shared_samplers);
+    let mut ctx = loader::LoadContext::new(gltf.document, buffers);
 
     ctx.load_textures()?;
-    ctx.load_samplers();
-    ctx.load_materials(&mut material_fn);
+    ctx.load_samplers(&mut sampler_fn);
+    ctx.prepare_gltf_materials();
     let cameras = ctx.load_cameras();
-    let meshes = ctx.load_meshes()?;
+    let meshes = ctx.load_meshes(&mut material_fn)?;
     let skins = ctx.load_skins()?;
     let animations = ctx.load_animations()?;
     let materials = ctx.material_instances();
     let scenes = ctx.load_scenes(meshes, materials, cameras, skins, animations);
     let default_scene = ctx.default_scene();
-    let (new_layouts, new_samplers) = ctx.into_new_resources();
 
     Ok(GltfDocument {
         scenes,
         default_scene,
-        new_layouts,
-        new_samplers,
     })
 }
 

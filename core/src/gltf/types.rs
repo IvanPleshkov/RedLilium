@@ -1,10 +1,6 @@
 //! Data types for glTF loading results.
 
-use std::sync::Arc;
-
 use crate::material::{AlphaMode, TextureRef};
-use crate::mesh::VertexLayout;
-use crate::sampler::CpuSampler;
 use crate::scene::Scene;
 
 /// A loaded glTF document containing all scenes and resources.
@@ -14,22 +10,25 @@ use crate::scene::Scene;
 /// Meshes reference materials by index via `CpuMesh::material()`. Textures
 /// and samplers are embedded in material [`TextureRef`] entries via
 /// `Arc<CpuTexture>` and `Arc<CpuSampler>`.
+///
+/// Vertex layouts are controlled entirely by the `material_fn` callback
+/// passed to [`load_gltf`](super::load_gltf). Samplers are controlled by
+/// the `sampler_fn` callback. Both callbacks receive raw glTF data and
+/// return engine-side `Arc` resources.
 #[derive(Debug)]
 pub struct GltfDocument {
     /// All scenes in the document.
     pub scenes: Vec<Scene>,
     /// Index of the default scene, if specified.
     pub default_scene: Option<usize>,
-    /// New vertex layouts created during loading (not found in shared_layouts).
-    pub new_layouts: Vec<Arc<VertexLayout>>,
-    /// New samplers created during loading (not found in shared_samplers).
-    pub new_samplers: Vec<Arc<CpuSampler>>,
 }
 
 /// Parsed glTF PBR metallic-roughness material properties.
 ///
-/// Passed to the user-provided material callback during loading so the caller
-/// can map glTF material data to their own shader/material system.
+/// Passed to the user-provided material callback along with the native
+/// [`VertexLayout`](crate::mesh::VertexLayout) from the mesh primitive.
+/// The callback can use the provided layout or choose a different one
+/// (the loader will adapt the vertex data if needed).
 ///
 /// Textures are already decoded and resolved as [`TextureRef`] values.
 #[derive(Debug, Clone)]
