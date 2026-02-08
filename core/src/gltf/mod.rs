@@ -16,7 +16,9 @@
 //! The loader delegates material creation to a user-provided callback. For each
 //! glTF material, the loader extracts PBR properties into a [`GltfMaterial`]
 //! and passes it to the callback, which returns an `Arc<CpuMaterialInstance>`.
-//! This lets the caller map glTF material data to their own shader system.
+//! Material instances are stored in each scene's `materials` array, and meshes
+//! reference them by index. This lets the caller map glTF material data to
+//! their own shader system.
 //!
 //! # Example
 //!
@@ -83,8 +85,9 @@ use crate::scene::Scene;
 /// # Returns
 ///
 /// A [`GltfDocument`] containing all loaded scenes with meshes, cameras,
-/// skins, and animations. Material instances are embedded in each mesh via
-/// `Arc<CpuMaterialInstance>`. New vertex layouts and samplers created during
+/// skins, and animations. Material instances are stored in each scene's
+/// `materials` array. Meshes reference materials by index via
+/// `CpuMesh::material()`. New vertex layouts and samplers created during
 /// loading are in [`GltfDocument::new_layouts`] and
 /// [`GltfDocument::new_samplers`].
 pub fn load_gltf(
@@ -106,7 +109,8 @@ pub fn load_gltf(
     let meshes = ctx.load_meshes()?;
     let skins = ctx.load_skins()?;
     let animations = ctx.load_animations()?;
-    let scenes = ctx.load_scenes(meshes, cameras, skins, animations);
+    let materials = ctx.material_instances();
+    let scenes = ctx.load_scenes(meshes, materials, cameras, skins, animations);
     let default_scene = ctx.default_scene();
     let (new_layouts, new_samplers) = ctx.into_new_resources();
 
@@ -120,9 +124,9 @@ pub fn load_gltf(
 
 /// Export scenes to a binary glTF (`.glb`) file.
 ///
-/// Material instances, textures, and samplers are collected from meshes via
-/// their `Arc<CpuMaterialInstance>` references and deduplicated using Arc
-/// pointer identity.
+/// Material instances are collected from each scene's `materials` array
+/// and deduplicated using Arc pointer identity. Textures and samplers
+/// are collected from those material instances.
 ///
 /// # Texture handling
 ///

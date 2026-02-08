@@ -8,8 +8,6 @@
 
 use std::sync::Arc;
 
-use crate::material::CpuMaterialInstance;
-
 use super::layout::VertexLayout;
 
 /// Primitive topology describing how vertices are assembled into primitives.
@@ -181,7 +179,7 @@ pub struct CpuMesh {
     index_data: Option<Vec<u8>>,
     index_format: Option<IndexFormat>,
     index_count: u32,
-    material: Option<Arc<CpuMaterialInstance>>,
+    material: Option<usize>,
     label: Option<String>,
 }
 
@@ -249,9 +247,9 @@ impl CpuMesh {
         self
     }
 
-    /// Set the material instance.
-    pub fn with_material(mut self, material: Arc<CpuMaterialInstance>) -> Self {
-        self.material = Some(material);
+    /// Set the material index (references `Scene::materials`).
+    pub fn with_material(mut self, material_index: usize) -> Self {
+        self.material = Some(material_index);
         self
     }
 
@@ -301,9 +299,9 @@ impl CpuMesh {
         self.index_data.is_some()
     }
 
-    /// Get the material instance, if set.
-    pub fn material(&self) -> Option<&Arc<CpuMaterialInstance>> {
-        self.material.as_ref()
+    /// Get the material index (into `Scene::materials`), if set.
+    pub fn material(&self) -> Option<usize> {
+        self.material
     }
 
     /// Get the debug label.
@@ -341,10 +339,7 @@ impl std::fmt::Debug for CpuMesh {
             .field("vertex_count", &self.vertex_count)
             .field("buffer_count", &self.vertex_buffers.len())
             .field("index_count", &self.index_count)
-            .field(
-                "material",
-                &self.material.as_ref().map(|m| m.name.as_deref()),
-            )
+            .field("material", &self.material)
             .field("layout", &self.layout.label)
             .finish()
     }

@@ -15,14 +15,12 @@ fn default_scene(doc: &crate::gltf::GltfDocument) -> &crate::scene::Scene {
     &doc.scenes[idx]
 }
 
-/// Collect all unique material instances from a document's meshes.
+/// Collect all unique material instances from a document's scenes.
 fn collect_instances(doc: &crate::gltf::GltfDocument) -> Vec<Arc<CpuMaterialInstance>> {
     let mut instances: Vec<Arc<CpuMaterialInstance>> = Vec::new();
     for scene in &doc.scenes {
-        for mesh in &scene.meshes {
-            if let Some(inst) = mesh.material()
-                && !instances.iter().any(|m| Arc::ptr_eq(m, inst))
-            {
+        for inst in &scene.materials {
+            if !instances.iter().any(|m| Arc::ptr_eq(m, inst)) {
                 instances.push(Arc::clone(inst));
             }
         }
@@ -44,7 +42,7 @@ fn test_load_toy_car() {
             mesh.vertex_count(),
             mesh.index_count(),
             mesh.layout().buffer_count(),
-            mesh.material().map(|m| m.name.as_deref()),
+            mesh.material(),
         );
     }
 

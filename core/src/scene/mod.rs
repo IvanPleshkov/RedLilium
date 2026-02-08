@@ -10,6 +10,9 @@
 //! - [`SceneSkin`] — Skeletal animation skin
 //! - [`Animation`] / [`AnimationChannel`] — Keyframe animations
 
+use std::sync::Arc;
+
+use crate::material::CpuMaterialInstance;
 use crate::mesh::CpuMesh;
 
 /// Node transform decomposed into translation, rotation, and scale.
@@ -160,6 +163,8 @@ pub struct Scene {
     pub nodes: Vec<SceneNode>,
     /// All meshes referenced by nodes in this scene.
     pub meshes: Vec<CpuMesh>,
+    /// All materials referenced by meshes in this scene.
+    pub materials: Vec<Arc<CpuMaterialInstance>>,
     /// All cameras referenced by nodes in this scene.
     pub cameras: Vec<SceneCamera>,
     /// All skins referenced by nodes in this scene.
@@ -175,6 +180,7 @@ impl Scene {
             name: None,
             nodes: Vec::new(),
             meshes: Vec::new(),
+            materials: Vec::new(),
             cameras: Vec::new(),
             skins: Vec::new(),
             animations: Vec::new(),
@@ -199,6 +205,13 @@ impl Scene {
     #[must_use]
     pub fn with_meshes(mut self, meshes: Vec<CpuMesh>) -> Self {
         self.meshes = meshes;
+        self
+    }
+
+    /// Set the materials.
+    #[must_use]
+    pub fn with_materials(mut self, materials: Vec<Arc<CpuMaterialInstance>>) -> Self {
+        self.materials = materials;
         self
     }
 

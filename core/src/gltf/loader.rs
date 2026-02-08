@@ -300,8 +300,8 @@ impl LoadContext {
     /// Load all meshes with vertex interleaving and layout sharing.
     ///
     /// Returns a flat list of `CpuMesh` (one per glTF primitive). Each mesh
-    /// carries its material instance via `CpuMesh::material()`. Must be called
-    /// after `load_materials` so that `instance_arcs` is populated. Also
+    /// carries its material index via `CpuMesh::material()`. Must be called
+    /// after `load_materials` so that material indices are valid. Also
     /// populates `self.mesh_index_map` so that `load_scenes` can map glTF
     /// mesh indices to flat CpuMesh indices.
     pub fn load_meshes(&mut self) -> Result<Vec<CpuMesh>, GltfError> {
@@ -324,17 +324,35 @@ impl LoadContext {
                 }
 
                 // Build layout from primitive attributes
-                let (layout, attrs) = vertex::build_layout_from_primitive(&primitive)?;
+                let (native_layout, native_attrs) =
+                    vertex::build_layout_from_primitive(&primitive)?;
 
                 // Map topology
                 let topology = vertex::map_topology(primitive.mode())?;
 
-                // Find or create shared layout
-                let shared_layout = vertex::find_or_create_layout(
-                    layout,
-                    &self.shared_layouts,
-                    &mut self.new_layouts,
-                );
+                // If the primitive has a material, use its vertex layout as the
+                // target so that the mesh data matches what the GPU pipeline expects.
+                // Attributes missing from the primitive are zero-filled; extra
+                // primitive attributes not in the target layout are skipped.
+                let mat_idx = primitive.material().index();
+                let (shared_layout, interleave_attrs) = if let Some(idx) = mat_idx
+                    && self.instance_arcs[idx]
+                        .material
+                        .vertex_layout
+                        .buffer_count()
+                        == 1
+                {
+                    let target = &self.instance_arcs[idx].material.vertex_layout;
+                    let adapted = vertex::adapt_attrs_to_target_layout(target, &native_attrs);
+                    (Arc::clone(target), adapted)
+                } else {
+                    let shared = vertex::find_or_create_layout(
+                        native_layout,
+                        &self.shared_layouts,
+                        &mut self.new_layouts,
+                    );
+                    (shared, native_attrs)
+                };
 
                 // Get vertex count from POSITION accessor
                 let pos_accessor = primitive.get(&gltf_dep::Semantic::Positions).unwrap();
@@ -345,7 +363,7 @@ impl LoadContext {
 
                 // Interleave vertex data
                 let vertex_data = vertex::interleave_vertices(
-                    &attrs,
+                    &interleave_attrs,
                     vertex_count,
                     stride,
                     &accessors,
@@ -376,7 +394,7 @@ impl LoadContext {
                 let mut cpu_mesh =
                     vertex::build_cpu_mesh(shared_layout, topology, vertex_data, index_data, label);
                 if let Some(mat_idx) = primitive.material().index() {
-                    cpu_mesh = cpu_mesh.with_material(Arc::clone(&self.instance_arcs[mat_idx]));
+                    cpu_mesh = cpu_mesh.with_material(mat_idx);
                 }
 
                 let flat_idx = result.len();
@@ -480,6 +498,7 @@ impl LoadContext {
     pub fn load_scenes(
         &self,
         mut meshes: Vec<CpuMesh>,
+        mut materials: Vec<Arc<CpuMaterialInstance>>,
         mut cameras: Vec<SceneCamera>,
         mut skins: Vec<SceneSkin>,
         mut animations: Vec<Animation>,
@@ -501,6 +520,11 @@ impl LoadContext {
                         std::mem::take(&mut meshes)
                     } else {
                         meshes.clone()
+                    },
+                    materials: if is_last {
+                        std::mem::take(&mut materials)
+                    } else {
+                        materials.clone()
                     },
                     cameras: if is_last {
                         std::mem::take(&mut cameras)
@@ -525,6 +549,14 @@ impl LoadContext {
     /// Get the default scene index.
     pub fn default_scene(&self) -> Option<usize> {
         self.document.default_scene().map(|s| s.index())
+    }
+
+    /// Get a clone of the loaded material instances.
+    ///
+    /// Returns `Arc<CpuMaterialInstance>` for each glTF material index.
+    /// Used by `load_scenes` to embed materials into each scene.
+    pub fn material_instances(&self) -> Vec<Arc<CpuMaterialInstance>> {
+        self.instance_arcs.clone()
     }
 
     /// Consume the context and return new layouts and samplers.

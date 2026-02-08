@@ -148,6 +148,38 @@ pub(crate) fn find_or_create_layout(
     arc
 }
 
+/// Build adapted AttributeInfo list to match a target vertex layout.
+///
+/// For each attribute in the target layout's buffer 0, finds the matching
+/// semantic in the primitive's native attributes. If found, creates an
+/// `AttributeInfo` with the target layout's offset but the primitive's
+/// accessor index. Missing attributes are omitted (zero-filled by the
+/// caller since the output buffer starts zeroed).
+///
+/// Attributes in the primitive but not in the target layout are skipped.
+pub(crate) fn adapt_attrs_to_target_layout(
+    target_layout: &VertexLayout,
+    native_attrs: &[AttributeInfo],
+) -> Vec<AttributeInfo> {
+    let mut adapted = Vec::new();
+
+    for target_attr in target_layout.attributes_for_buffer(0) {
+        if let Some(native) = native_attrs
+            .iter()
+            .find(|a| a.semantic == target_attr.semantic)
+        {
+            adapted.push(AttributeInfo {
+                semantic: target_attr.semantic,
+                format: target_attr.format,
+                offset: target_attr.offset,
+                accessor_index: native.accessor_index,
+            });
+        }
+    }
+
+    adapted
+}
+
 /// Map glTF primitive mode to our PrimitiveTopology.
 pub(crate) fn map_topology(mode: gltf_dep::mesh::Mode) -> Result<PrimitiveTopology, GltfError> {
     match mode {

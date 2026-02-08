@@ -10,10 +10,10 @@ use crate::scene::Scene;
 /// A loaded glTF document containing all scenes and resources.
 ///
 /// Scenes hold their own meshes, cameras, skins, and animations (see [`Scene`]).
-/// Material instances are embedded in each [`CpuMesh`] via `Arc<CpuMaterialInstance>`,
-/// shared across meshes that reference the same material. Textures and samplers
-/// are embedded in material [`TextureRef`] entries via `Arc<CpuTexture>` and
-/// `Arc<CpuSampler>`.
+/// Material instances are stored in each [`Scene`]'s `materials` array.
+/// Meshes reference materials by index via `CpuMesh::material()`. Textures
+/// and samplers are embedded in material [`TextureRef`] entries via
+/// `Arc<CpuTexture>` and `Arc<CpuSampler>`.
 #[derive(Debug)]
 pub struct GltfDocument {
     /// All scenes in the document.

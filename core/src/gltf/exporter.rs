@@ -1,7 +1,7 @@
 //! glTF 2.0 exporter.
 //!
 //! Exports [`Scene`] data to binary glTF (`.glb`) format.
-//! Material instances are collected from meshes via `Arc<CpuMaterialInstance>`
+//! Material instances are collected from each scene's `materials` array
 //! and deduplicated using Arc pointer identity, along with textures and samplers.
 
 use std::collections::{BTreeMap, HashMap};
@@ -61,16 +61,14 @@ impl ExportContext {
     // -- Step 1: Collect unique resources from scenes -------------------------
 
     pub(super) fn collect_resources(&mut self, scenes: &[&Scene]) {
-        // Collect unique material instances from all meshes
+        // Collect unique material instances from all scenes
         for scene in scenes {
-            for mesh in &scene.meshes {
-                if let Some(inst_arc) = mesh.material() {
-                    let ptr = Arc::as_ptr(inst_arc);
-                    if !self.instance_map.contains_key(&ptr) {
-                        let idx = self.instance_list.len() as u32;
-                        self.instance_map.insert(ptr, idx);
-                        self.instance_list.push(Arc::clone(inst_arc));
-                    }
+            for inst_arc in &scene.materials {
+                let ptr = Arc::as_ptr(inst_arc);
+                if !self.instance_map.contains_key(&ptr) {
+                    let idx = self.instance_list.len() as u32;
+                    self.instance_map.insert(ptr, idx);
+                    self.instance_list.push(Arc::clone(inst_arc));
                 }
             }
         }
@@ -304,7 +302,7 @@ impl ExportContext {
     pub(super) fn build_scenes(&mut self, scenes: &[&Scene]) -> Result<(), GltfError> {
         for scene in scenes {
             let scene_mesh_offset = self.root.meshes.len() as u32;
-            self.build_meshes(&scene.meshes)?;
+            self.build_meshes(&scene.meshes, &scene.materials)?;
 
             let scene_camera_offset = self.root.cameras.len() as u32;
             self.build_cameras(&scene.cameras);
@@ -331,7 +329,11 @@ impl ExportContext {
         Ok(())
     }
 
-    fn build_meshes(&mut self, meshes: &[CpuMesh]) -> Result<(), GltfError> {
+    fn build_meshes(
+        &mut self,
+        meshes: &[CpuMesh],
+        materials: &[Arc<CpuMaterialInstance>],
+    ) -> Result<(), GltfError> {
         for mesh in meshes {
             let layout = mesh.layout();
             let stride = layout.buffer_stride(0);
@@ -413,9 +415,10 @@ impl ExportContext {
                 extensions: None,
                 extras: gj::Extras::default(),
                 indices: indices_accessor,
-                material: mesh
-                    .material()
-                    .map(|m| gj::Index::new(*self.instance_map.get(&Arc::as_ptr(m)).unwrap())),
+                material: mesh.material().map(|mat_idx| {
+                    let inst_arc = &materials[mat_idx];
+                    gj::Index::new(*self.instance_map.get(&Arc::as_ptr(inst_arc)).unwrap())
+                }),
                 mode: gj::validation::Checked::Valid(mode),
                 targets: None,
             };

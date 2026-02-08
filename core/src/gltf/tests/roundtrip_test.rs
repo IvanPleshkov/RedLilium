@@ -41,14 +41,12 @@ fn collect_samplers(doc: &crate::gltf::GltfDocument) -> Vec<Arc<CpuSampler>> {
     samplers
 }
 
-/// Collect all unique Arc<CpuMaterialInstance> from a document's meshes.
+/// Collect all unique Arc<CpuMaterialInstance> from a document's scenes.
 fn collect_instances(doc: &crate::gltf::GltfDocument) -> Vec<Arc<CpuMaterialInstance>> {
     let mut instances: Vec<Arc<CpuMaterialInstance>> = Vec::new();
     for scene in &doc.scenes {
-        for mesh in &scene.meshes {
-            if let Some(inst) = mesh.material()
-                && !instances.iter().any(|m| Arc::ptr_eq(m, inst))
-            {
+        for inst in &scene.materials {
+            if !instances.iter().any(|m| Arc::ptr_eq(m, inst)) {
                 instances.push(Arc::clone(inst));
             }
         }
@@ -124,6 +122,12 @@ fn test_roundtrip_toy_car() {
         );
 
         assert_eq!(
+            orig_scene.materials.len(),
+            re_scene.materials.len(),
+            "scene {si}: material count mismatch"
+        );
+
+        assert_eq!(
             orig_scene.cameras.len(),
             re_scene.cameras.len(),
             "scene {si}: camera count mismatch"
@@ -170,12 +174,12 @@ fn test_roundtrip_toy_car() {
                 "scene {si} mesh {mi}: index format mismatch"
             );
 
-            // Material should be present on both sides
-            match (orig_mesh.material(), re_mesh.material()) {
-                (Some(_), Some(_)) => {}
-                (None, None) => {}
-                _ => panic!("scene {si} mesh {mi}: material presence mismatch"),
-            }
+            // Material index should match
+            assert_eq!(
+                orig_mesh.material(),
+                re_mesh.material(),
+                "scene {si} mesh {mi}: material index mismatch"
+            );
 
             // Vertex data byte equality
             let orig_vtx = orig_mesh.vertex_buffer_data(0).unwrap_or(&[]);
