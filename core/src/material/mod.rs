@@ -99,6 +99,18 @@ impl PartialEq for TextureRef {
     }
 }
 
+/// Polygon rasterization mode.
+///
+/// Affects pipeline state (how triangles are rasterized).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PolygonMode {
+    /// Fill triangles (default solid rendering).
+    #[default]
+    Fill,
+    /// Draw triangle edges only (wireframe).
+    Line,
+}
+
 /// Alpha rendering mode.
 ///
 /// Affects pipeline state (blend configuration), not shader bindings.
@@ -145,6 +157,8 @@ pub struct CpuMaterial {
     pub name: Option<String>,
     /// Alpha rendering mode.
     pub alpha_mode: AlphaMode,
+    /// Polygon rasterization mode (fill or wireframe).
+    pub polygon_mode: PolygonMode,
     /// Whether the material is double-sided.
     pub double_sided: bool,
     /// Expected vertex layout for meshes rendered with this material.
@@ -166,6 +180,7 @@ impl CpuMaterial {
         Self {
             name: None,
             alpha_mode: AlphaMode::Opaque,
+            polygon_mode: PolygonMode::Fill,
             double_sided: false,
             vertex_layout: Arc::new(VertexLayout::new()),
             topology: PrimitiveTopology::TriangleList,
@@ -179,6 +194,13 @@ impl CpuMaterial {
     #[must_use]
     pub fn with_vertex_layout(mut self, layout: Arc<VertexLayout>) -> Self {
         self.vertex_layout = layout;
+        self
+    }
+
+    /// Set the polygon rasterization mode.
+    #[must_use]
+    pub fn with_polygon_mode(mut self, mode: PolygonMode) -> Self {
+        self.polygon_mode = mode;
         self
     }
 
@@ -287,6 +309,7 @@ impl CpuMaterial {
         Self {
             name: None,
             alpha_mode,
+            polygon_mode: PolygonMode::Fill,
             double_sided,
             vertex_layout,
             topology: PrimitiveTopology::TriangleList,

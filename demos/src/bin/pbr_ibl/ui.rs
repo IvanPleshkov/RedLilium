@@ -21,6 +21,8 @@ pub struct PbrUiState {
     pub sphere_spacing: f32,
     /// Whether to show the info panel
     pub show_info: bool,
+    /// Whether to render wireframe
+    pub show_wireframe: bool,
     /// Whether to show the G-buffer preview panel
     pub show_gbuffer: bool,
     /// Texture IDs for G-buffer visualization
@@ -38,6 +40,7 @@ impl Default for PbrUiState {
             camera_distance: 8.0,
             ui_visible: true,
             sphere_spacing: SPHERE_SPACING,
+            show_wireframe: false,
             show_info: true,
             show_gbuffer: true,
             gbuffer_albedo_id: None,
@@ -191,6 +194,14 @@ impl EguiApp for PbrUi {
                 ui.add_space(10.0);
                 ui.heading("Debug");
                 ui.separator();
+
+                // Wireframe checkbox
+                if ui
+                    .checkbox(&mut self.state.show_wireframe, "Wireframe")
+                    .changed()
+                {
+                    self.state_changed = true;
+                }
 
                 // Show info checkbox
                 ui.checkbox(&mut self.state.show_info, "Show Info Panel");

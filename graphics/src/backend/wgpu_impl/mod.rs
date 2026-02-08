@@ -115,7 +115,7 @@ impl WgpuBackend {
         // Request device
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("RedLilium Device"),
-            required_features: wgpu::Features::empty(),
+            required_features: wgpu::Features::POLYGON_MODE_LINE,
             required_limits: wgpu::Limits::default(),
             memory_hints: wgpu::MemoryHints::default(),
             experimental_features: wgpu::ExperimentalFeatures::default(),
@@ -199,7 +199,7 @@ impl WgpuBackend {
         let (new_device, new_queue) =
             pollster::block_on(new_adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("RedLilium Device"),
-                required_features: wgpu::Features::empty(),
+                required_features: wgpu::Features::POLYGON_MODE_LINE,
                 required_limits: wgpu::Limits::default(),
                 memory_hints: wgpu::MemoryHints::default(),
                 experimental_features: wgpu::ExperimentalFeatures::default(),

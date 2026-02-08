@@ -836,6 +836,7 @@ impl VulkanBackend {
             &descriptor.color_formats,
             descriptor.depth_format,
             descriptor.blend_state.as_ref(),
+            descriptor.polygon_mode,
             &self.dynamic_rendering,
         )?;
 

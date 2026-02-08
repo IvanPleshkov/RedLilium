@@ -307,9 +307,19 @@ impl AppHandler for PbrIblDemo {
         }
 
         if let Some(spheres) = &self.spheres {
+            let show_wireframe = self
+                .egui_ui
+                .read()
+                .map(|ui| ui.state().show_wireframe)
+                .unwrap_or(false);
+            let material = if show_wireframe {
+                spheres.wireframe_material_instance.clone()
+            } else {
+                spheres.material_instance.clone()
+            };
             gbuffer_pass.add_draw_instanced(
                 spheres.mesh.clone(),
-                spheres.material_instance.clone(),
+                material,
                 (GRID_SIZE * GRID_SIZE) as u32,
             );
         }

@@ -7,8 +7,8 @@ use redlilium_core::mesh::generators;
 use redlilium_core::profiling::{profile_function, profile_scope};
 use redlilium_graphics::{
     BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferDescriptor, BufferUsage,
-    GraphicsDevice, MaterialDescriptor, MaterialInstance, ShaderComposer, ShaderSource,
-    ShaderStage, ShaderStageFlags, TextureFormat,
+    GraphicsDevice, MaterialDescriptor, MaterialInstance, PolygonMode, ShaderComposer,
+    ShaderSource, ShaderStage, ShaderStageFlags, TextureFormat,
 };
 
 use crate::camera::OrbitCamera;
@@ -21,6 +21,7 @@ const GBUFFER_SHADER_WGSL: &str = include_str!("../../../shaders/deferred_gbuffe
 /// Sphere grid with G-buffer material, instanced mesh, and camera/instance buffers.
 pub struct SphereGrid {
     pub material_instance: Arc<MaterialInstance>,
+    pub wireframe_material_instance: Arc<MaterialInstance>,
     pub mesh: Arc<redlilium_graphics::Mesh>,
     pub camera_buffer: Arc<redlilium_graphics::Buffer>,
     pub instance_buffer: Arc<redlilium_graphics::Buffer>,
@@ -57,29 +58,38 @@ impl SphereGrid {
             .expect("Failed to compose G-buffer shader");
         log::info!("G-buffer shader composed with library imports");
 
-        // Create G-buffer material
+        // Build base G-buffer material descriptor (shared between fill and wireframe)
+        let base_descriptor = MaterialDescriptor::new()
+            .with_shader(ShaderSource::new(
+                ShaderStage::Vertex,
+                composed_gbuffer_shader.as_bytes().to_vec(),
+                "vs_main",
+            ))
+            .with_shader(ShaderSource::new(
+                ShaderStage::Fragment,
+                composed_gbuffer_shader.as_bytes().to_vec(),
+                "fs_main",
+            ))
+            .with_binding_layout(camera_binding_layout)
+            .with_vertex_layout(vertex_layout)
+            .with_color_format(TextureFormat::Rgba8UnormSrgb)
+            .with_color_format(TextureFormat::Rgba16Float)
+            .with_color_format(TextureFormat::Rgba16Float)
+            .with_depth_format(TextureFormat::Depth32Float);
+
+        // Create fill material
         let material = device
-            .create_material(
-                &MaterialDescriptor::new()
-                    .with_shader(ShaderSource::new(
-                        ShaderStage::Vertex,
-                        composed_gbuffer_shader.as_bytes().to_vec(),
-                        "vs_main",
-                    ))
-                    .with_shader(ShaderSource::new(
-                        ShaderStage::Fragment,
-                        composed_gbuffer_shader.as_bytes().to_vec(),
-                        "fs_main",
-                    ))
-                    .with_binding_layout(camera_binding_layout)
-                    .with_vertex_layout(vertex_layout)
-                    .with_color_format(TextureFormat::Rgba8UnormSrgb)
-                    .with_color_format(TextureFormat::Rgba16Float)
-                    .with_color_format(TextureFormat::Rgba16Float)
-                    .with_depth_format(TextureFormat::Depth32Float)
-                    .with_label("gbuffer_material"),
-            )
+            .create_material(&base_descriptor.clone().with_label("gbuffer_material"))
             .expect("Failed to create G-buffer material");
+
+        // Create wireframe material
+        let wireframe_material = device
+            .create_material(
+                &base_descriptor
+                    .with_polygon_mode(PolygonMode::Line)
+                    .with_label("gbuffer_wireframe_material"),
+            )
+            .expect("Failed to create wireframe G-buffer material");
 
         // Create camera uniform buffer
         let camera_buffer = device
@@ -110,8 +120,12 @@ impl SphereGrid {
                 .with_buffer(1, instance_buffer.clone()),
         );
 
-        let material_instance =
-            Arc::new(MaterialInstance::new(material).with_binding_group(camera_binding_group));
+        let material_instance = Arc::new(
+            MaterialInstance::new(material).with_binding_group(camera_binding_group.clone()),
+        );
+        let wireframe_material_instance = Arc::new(
+            MaterialInstance::new(wireframe_material).with_binding_group(camera_binding_group),
+        );
 
         // Create GPU mesh
         let mesh = device
@@ -120,6 +134,7 @@ impl SphereGrid {
 
         Self {
             material_instance,
+            wireframe_material_instance,
             mesh,
             camera_buffer,
             instance_buffer,

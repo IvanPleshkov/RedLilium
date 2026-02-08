@@ -247,6 +247,7 @@ impl PipelineManager {
         color_formats: &[TextureFormat],
         depth_format: Option<TextureFormat>,
         blend_state: Option<&crate::materials::BlendState>,
+        polygon_mode: crate::materials::PolygonMode,
         _dynamic_rendering: &ash::khr::dynamic_rendering::Device,
     ) -> Result<vk::Pipeline, GraphicsError> {
         let vertex_entry_c = CString::new(vertex_entry).map_err(|e| {
@@ -331,7 +332,10 @@ impl PipelineManager {
         let rasterization_state = vk::PipelineRasterizationStateCreateInfo::default()
             .depth_clamp_enable(false)
             .rasterizer_discard_enable(false)
-            .polygon_mode(vk::PolygonMode::FILL)
+            .polygon_mode(match polygon_mode {
+                crate::materials::PolygonMode::Fill => vk::PolygonMode::FILL,
+                crate::materials::PolygonMode::Line => vk::PolygonMode::LINE,
+            })
             .line_width(1.0)
             .cull_mode(vk::CullModeFlags::NONE)
             .front_face(vk::FrontFace::CLOCKWISE)

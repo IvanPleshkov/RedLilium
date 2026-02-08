@@ -12,6 +12,7 @@ use crate::backend::GpuPipeline;
 use crate::device::GraphicsDevice;
 use crate::mesh::VertexLayout;
 use crate::types::TextureFormat;
+pub use redlilium_core::material::PolygonMode;
 use redlilium_core::mesh::PrimitiveTopology;
 
 use super::bindings::BindingLayout;
@@ -223,6 +224,9 @@ pub struct MaterialDescriptor {
     /// Primitive topology (how vertices are assembled into primitives).
     pub topology: PrimitiveTopology,
 
+    /// Polygon rasterization mode (fill or wireframe).
+    pub polygon_mode: PolygonMode,
+
     /// Color attachment formats for the render pass.
     pub color_formats: Vec<TextureFormat>,
 
@@ -241,6 +245,7 @@ impl Default for MaterialDescriptor {
             vertex_layout: Arc::new(VertexLayout::new()),
             blend_state: None,
             topology: PrimitiveTopology::TriangleList,
+            polygon_mode: PolygonMode::Fill,
             color_formats: Vec::new(),
             depth_format: None,
             label: None,
@@ -281,6 +286,12 @@ impl MaterialDescriptor {
     /// Set the primitive topology.
     pub fn with_topology(mut self, topology: PrimitiveTopology) -> Self {
         self.topology = topology;
+        self
+    }
+
+    /// Set the polygon rasterization mode.
+    pub fn with_polygon_mode(mut self, mode: PolygonMode) -> Self {
+        self.polygon_mode = mode;
         self
     }
 
@@ -384,6 +395,11 @@ impl Material {
     /// Get the primitive topology.
     pub fn topology(&self) -> PrimitiveTopology {
         self.descriptor.topology
+    }
+
+    /// Get the polygon rasterization mode.
+    pub fn polygon_mode(&self) -> PolygonMode {
+        self.descriptor.polygon_mode
     }
 
     /// Get the color attachment formats.
