@@ -10,7 +10,8 @@ use winit::platform::windows::EventLoopBuilderExtWindows;
 use winit::window::{Window, WindowId};
 
 use redlilium_graphics::{
-    GraphicsInstance, InstanceParameters, PresentMode, Surface, SurfaceConfiguration, TextureFormat,
+    GraphicsInstance, InstanceParameters, PresentMode, ResizeManager, ResizeStrategy, Surface,
+    SurfaceConfiguration, TextureFormat,
 };
 
 use crate::args::{AppArgs, WindowMode};
@@ -199,6 +200,12 @@ where
             hdr_active
         );
 
+        let resize_manager = ResizeManager::new(
+            (physical_size.width, physical_size.height),
+            self.args.resize_debounce_ms(),
+            ResizeStrategy::Stretch,
+        );
+
         self.context = Some(AppContext {
             instance,
             device,
@@ -212,6 +219,7 @@ where
             elapsed_time: 0.0,
             surface_format,
             hdr_active,
+            resize_manager,
         });
 
         true
@@ -248,45 +256,95 @@ where
         (format, false)
     }
 
-    /// Handle resize.
-    fn handle_resize(&mut self, width: u32, height: u32) {
+    /// Handle a resize event from the OS.
+    ///
+    /// Before any frame has been rendered, the resize is applied immediately
+    /// (matching the pre-debounce behavior) so the swapchain size is correct
+    /// for the first frame. After that, events are buffered in the
+    /// ResizeManager and applied after the debounce period.
+    fn handle_resize_event(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
         }
 
-        if let Some(ctx) = &mut self.context {
-            if ctx.width == width && ctx.height == height {
-                return;
+        // Before the first frame, apply immediately so the initial window
+        // size is correct for on_init resources. This matches the old
+        // immediate-resize behavior for startup.
+        let first_frame = self.context.as_ref().is_some_and(|c| c.frame_number == 0);
+        if first_frame {
+            self.apply_resize(width, height);
+            // Sync resize manager's internal size so it doesn't re-apply later
+            if let Some(ctx) = &mut self.context {
+                ctx.resize_manager.on_resize_event(width, height);
+                ctx.resize_manager.force_resize();
             }
-
-            ctx.width = width;
-            ctx.height = height;
-
-            // Wait for current slot before reconfiguring
-            ctx.pipeline.wait_current_slot();
-
-            // Reconfigure surface with the same format
-            let present_mode = if self.args.vsync() {
-                PresentMode::Fifo
-            } else {
-                PresentMode::Immediate
-            };
-
-            let config = SurfaceConfiguration::new(width, height)
-                .with_format(ctx.surface_format)
-                .with_present_mode(present_mode);
-
-            if let Err(e) = ctx.surface.configure(&ctx.device, &config) {
-                log::error!("Failed to reconfigure surface: {}", e);
-            }
-
-            // Notify handler
-            self.handler.on_resize(ctx);
+            return;
         }
+
+        if let Some(ctx) = &mut self.context {
+            ctx.resize_manager.on_resize_event(width, height);
+        }
+    }
+
+    /// Apply any pending debounced resize.
+    ///
+    /// Called at the top of [`render_frame`] to check if the debounce period has
+    /// elapsed and a resize should be applied.
+    fn apply_pending_resize(&mut self) {
+        let (width, height) = {
+            let ctx = match &mut self.context {
+                Some(c) => c,
+                None => return,
+            };
+            match ctx.resize_manager.update() {
+                Some(e) => (e.width, e.height),
+                None => return,
+            }
+        };
+        self.apply_resize(width, height);
+    }
+
+    /// Reconfigure the swapchain and notify the handler of a resize.
+    fn apply_resize(&mut self, width: u32, height: u32) {
+        let ctx = match &mut self.context {
+            Some(c) => c,
+            None => return,
+        };
+
+        if ctx.width == width && ctx.height == height {
+            return;
+        }
+
+        ctx.width = width;
+        ctx.height = height;
+
+        // Wait for current slot before reconfiguring
+        ctx.pipeline.wait_current_slot();
+
+        // Reconfigure surface with the same format
+        let present_mode = if self.args.vsync() {
+            PresentMode::Fifo
+        } else {
+            PresentMode::Immediate
+        };
+
+        let config = SurfaceConfiguration::new(width, height)
+            .with_format(ctx.surface_format)
+            .with_present_mode(present_mode);
+
+        if let Err(e) = ctx.surface.configure(&ctx.device, &config) {
+            log::error!("Failed to reconfigure surface: {}", e);
+        }
+
+        // Notify handler
+        self.handler.on_resize(ctx);
     }
 
     /// Render a frame.
     fn render_frame(&mut self) {
+        // Apply any pending debounced resize before rendering
+        self.apply_pending_resize();
+
         let now = Instant::now();
         let delta_time = now.duration_since(self.last_frame_time).as_secs_f32();
         self.last_frame_time = now;
@@ -423,7 +481,7 @@ where
             }
 
             WindowEvent::Resized(size) => {
-                self.handle_resize(size.width, size.height);
+                self.handle_resize_event(size.width, size.height);
             }
 
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {

@@ -134,6 +134,17 @@ pub trait AppArgs: Sized {
     fn hdr(&self) -> bool {
         false
     }
+
+    /// Get the resize debounce time in milliseconds.
+    ///
+    /// During continuous window resizing, the application buffers resize events
+    /// and only applies them after this debounce period. This prevents stuttering
+    /// caused by reconfiguring the swapchain on every OS resize event.
+    ///
+    /// Default: 50ms
+    fn resize_debounce_ms(&self) -> u64 {
+        50
+    }
 }
 
 // ============================================================================

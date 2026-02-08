@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use redlilium_graphics::{
-    FramePipeline, FrameSchedule, GraphicsDevice, GraphicsInstance, RenderGraph, RingAllocation,
-    RingBuffer, Surface, SurfaceTexture, TextureFormat,
+    FramePipeline, FrameSchedule, GraphicsDevice, GraphicsInstance, RenderGraph, ResizeManager,
+    RingAllocation, RingBuffer, Surface, SurfaceTexture, TextureFormat,
 };
 
 /// Application context providing access to graphics resources.
@@ -36,6 +36,8 @@ pub struct AppContext {
     pub(crate) surface_format: TextureFormat,
     /// Whether HDR output is currently active.
     pub(crate) hdr_active: bool,
+    /// Resize manager for debounced window resize handling.
+    pub(crate) resize_manager: ResizeManager,
 }
 
 impl AppContext {
@@ -115,6 +117,27 @@ impl AppContext {
     /// or Rgba16Float).
     pub fn hdr_active(&self) -> bool {
         self.hdr_active
+    }
+
+    /// Get the resize manager.
+    ///
+    /// Use this to query resize state (e.g., `is_resizing()`, `render_size()`).
+    pub fn resize_manager(&self) -> &ResizeManager {
+        &self.resize_manager
+    }
+
+    /// Get mutable access to the resize manager.
+    ///
+    /// Use this to customize resize behavior (e.g., change strategy or debounce time).
+    pub fn resize_manager_mut(&mut self) -> &mut ResizeManager {
+        &mut self.resize_manager
+    }
+
+    /// Check if the window is currently being resized.
+    ///
+    /// Returns true during the debounce period after a resize event.
+    pub fn is_resizing(&self) -> bool {
+        self.resize_manager.is_resizing()
     }
 }
 
