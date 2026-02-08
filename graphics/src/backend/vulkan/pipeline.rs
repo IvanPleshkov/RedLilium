@@ -1,37 +1,20 @@
 //! Vulkan pipeline management for shader compilation and graphics pipeline creation.
 
-use std::collections::HashMap;
 use std::ffi::CString;
 
 use ash::vk;
-use parking_lot::Mutex;
 
 use crate::error::GraphicsError;
-use crate::materials::{BindingLayout, BindingType, Material, ShaderStage};
-use crate::mesh::{Mesh, VertexAttributeFormat};
+use crate::materials::{BindingLayout, BindingType, ShaderStage};
+use crate::mesh::VertexAttributeFormat;
 use crate::types::TextureFormat;
+use redlilium_core::mesh::{PrimitiveTopology, VertexLayout};
 
 use super::conversion::{convert_blend_state, convert_texture_format};
 
-/// Cached pipeline with its associated layouts.
-struct CachedVulkanPipeline {
-    pipeline: vk::Pipeline,
-    pipeline_layout: vk::PipelineLayout,
-    descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
-}
-
-/// Result of a pipeline cache lookup.
-pub struct PipelineCacheResult {
-    pub pipeline: vk::Pipeline,
-    pub pipeline_layout: vk::PipelineLayout,
-    pub descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
-}
-
-/// Manages Vulkan pipelines and related resources.
+/// Manages Vulkan pipeline creation and descriptor pool resources.
 pub struct PipelineManager {
     device: ash::Device,
-    /// Combined pipeline cache: key -> pipeline + layouts.
-    cache: Mutex<HashMap<u64, CachedVulkanPipeline>>,
     /// Descriptor pool for allocating descriptor sets.
     descriptor_pool: vk::DescriptorPool,
     /// Whether resources have been explicitly destroyed.
@@ -84,7 +67,6 @@ impl PipelineManager {
 
         Ok(Self {
             device,
-            cache: Mutex::new(HashMap::new()),
             descriptor_pool,
             destroyed: false,
         })
@@ -259,7 +241,8 @@ impl PipelineManager {
         fragment_module: Option<vk::ShaderModule>,
         vertex_entry: &str,
         fragment_entry: &str,
-        mesh: &Mesh,
+        vertex_layout: &VertexLayout,
+        topology: PrimitiveTopology,
         pipeline_layout: vk::PipelineLayout,
         color_formats: &[TextureFormat],
         depth_format: Option<TextureFormat>,
@@ -295,10 +278,8 @@ impl PipelineManager {
             );
         }
 
-        // Build vertex input state from mesh layout
-        let layout = mesh.layout();
-
-        let binding_descriptions: Vec<vk::VertexInputBindingDescription> = layout
+        // Build vertex input state from material's vertex layout
+        let binding_descriptions: Vec<vk::VertexInputBindingDescription> = vertex_layout
             .buffers
             .iter()
             .enumerate()
@@ -310,7 +291,7 @@ impl PipelineManager {
             })
             .collect();
 
-        let attribute_descriptions: Vec<vk::VertexInputAttributeDescription> = layout
+        let attribute_descriptions: Vec<vk::VertexInputAttributeDescription> = vertex_layout
             .attributes
             .iter()
             .map(|attr| {
@@ -326,8 +307,16 @@ impl PipelineManager {
             .vertex_binding_descriptions(&binding_descriptions)
             .vertex_attribute_descriptions(&attribute_descriptions);
 
+        let vk_topology = match topology {
+            PrimitiveTopology::PointList => vk::PrimitiveTopology::POINT_LIST,
+            PrimitiveTopology::LineList => vk::PrimitiveTopology::LINE_LIST,
+            PrimitiveTopology::LineStrip => vk::PrimitiveTopology::LINE_STRIP,
+            PrimitiveTopology::TriangleList => vk::PrimitiveTopology::TRIANGLE_LIST,
+            PrimitiveTopology::TriangleStrip => vk::PrimitiveTopology::TRIANGLE_STRIP,
+        };
+
         let input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo::default()
-            .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+            .topology(vk_topology)
             .primitive_restart_enable(false);
 
         // Dynamic viewport and scissor
@@ -422,105 +411,6 @@ impl PipelineManager {
         Ok(pipelines[0])
     }
 
-    /// Look up a cached pipeline or create one on cache miss.
-    ///
-    /// On hit, returns cached Vulkan handles (cheap copy).
-    /// On miss, compiles shaders, creates layouts and pipeline, caches them.
-    #[allow(clippy::too_many_arguments)]
-    pub fn get_or_create_pipeline(
-        &self,
-        cache_key: u64,
-        material: &Material,
-        mesh: &Mesh,
-        color_formats: &[TextureFormat],
-        depth_format: Option<TextureFormat>,
-        dynamic_rendering: &ash::khr::dynamic_rendering::Device,
-    ) -> Result<PipelineCacheResult, GraphicsError> {
-        // Cache hit: return copies of Vulkan handles (raw u64 IDs, not refcounted).
-        {
-            let cache = self.cache.lock();
-            if let Some(cached) = cache.get(&cache_key) {
-                return Ok(PipelineCacheResult {
-                    pipeline: cached.pipeline,
-                    pipeline_layout: cached.pipeline_layout,
-                    descriptor_set_layouts: cached.descriptor_set_layouts.clone(),
-                });
-            }
-        }
-
-        // Cache miss: create everything.
-        let shaders = material.shaders();
-        let mut vertex_module = None;
-        let mut fragment_module = None;
-        let mut vertex_entry: &str = "vs_main";
-        let mut fragment_entry: &str = "fs_main";
-
-        for shader in shaders {
-            let module = self.compile_shader(&shader.source, shader.stage, &shader.entry_point)?;
-            match shader.stage {
-                ShaderStage::Vertex => {
-                    vertex_module = Some(module);
-                    vertex_entry = &shader.entry_point;
-                }
-                ShaderStage::Fragment => {
-                    fragment_module = Some(module);
-                    fragment_entry = &shader.entry_point;
-                }
-                ShaderStage::Compute => {}
-            }
-        }
-
-        let vertex_module = vertex_module.ok_or_else(|| {
-            GraphicsError::ShaderCompilationFailed("No vertex shader provided".into())
-        })?;
-
-        // Descriptor set layouts
-        let descriptor_set_layouts: Vec<vk::DescriptorSetLayout> = material
-            .binding_layouts()
-            .iter()
-            .map(|layout| self.create_descriptor_set_layout(layout))
-            .collect::<Result<_, _>>()?;
-
-        let pipeline_layout = self.create_pipeline_layout(&descriptor_set_layouts)?;
-
-        let pipeline = self.create_graphics_pipeline(
-            vertex_module,
-            fragment_module,
-            vertex_entry,
-            fragment_entry,
-            mesh,
-            pipeline_layout,
-            color_formats,
-            depth_format,
-            material.blend_state(),
-            dynamic_rendering,
-        )?;
-
-        // Shader modules are baked into the pipeline; destroy them now.
-        unsafe {
-            self.device.destroy_shader_module(vertex_module, None);
-            if let Some(frag) = fragment_module {
-                self.device.destroy_shader_module(frag, None);
-            }
-        }
-
-        // Insert into cache
-        self.cache.lock().insert(
-            cache_key,
-            CachedVulkanPipeline {
-                pipeline,
-                pipeline_layout,
-                descriptor_set_layouts: descriptor_set_layouts.clone(),
-            },
-        );
-
-        Ok(PipelineCacheResult {
-            pipeline,
-            pipeline_layout,
-            descriptor_set_layouts,
-        })
-    }
-
     /// Create a compute pipeline.
     pub fn create_compute_pipeline(
         &self,
@@ -556,76 +446,6 @@ impl PipelineManager {
         })?;
 
         Ok(pipelines[0])
-    }
-
-    /// Look up a cached compute pipeline or create one on cache miss.
-    pub fn get_or_create_compute_pipeline(
-        &self,
-        cache_key: u64,
-        material: &Material,
-    ) -> Result<PipelineCacheResult, GraphicsError> {
-        // Cache hit
-        {
-            let cache = self.cache.lock();
-            if let Some(cached) = cache.get(&cache_key) {
-                return Ok(PipelineCacheResult {
-                    pipeline: cached.pipeline,
-                    pipeline_layout: cached.pipeline_layout,
-                    descriptor_set_layouts: cached.descriptor_set_layouts.clone(),
-                });
-            }
-        }
-
-        // Cache miss: create everything
-        let shaders = material.shaders();
-        let mut compute_module = None;
-        let mut compute_entry: &str = "main";
-
-        for shader in shaders {
-            if shader.stage == ShaderStage::Compute {
-                let module =
-                    self.compile_shader(&shader.source, shader.stage, &shader.entry_point)?;
-                compute_module = Some(module);
-                compute_entry = &shader.entry_point;
-            }
-        }
-
-        let compute_module = compute_module.ok_or_else(|| {
-            GraphicsError::ShaderCompilationFailed("No compute shader provided".into())
-        })?;
-
-        // Descriptor set layouts
-        let descriptor_set_layouts: Vec<vk::DescriptorSetLayout> = material
-            .binding_layouts()
-            .iter()
-            .map(|layout| self.create_descriptor_set_layout(layout))
-            .collect::<Result<_, _>>()?;
-
-        let pipeline_layout = self.create_pipeline_layout(&descriptor_set_layouts)?;
-
-        let pipeline =
-            self.create_compute_pipeline(compute_module, compute_entry, pipeline_layout)?;
-
-        // Shader module is baked into the pipeline; destroy it now
-        unsafe {
-            self.device.destroy_shader_module(compute_module, None);
-        }
-
-        // Insert into cache
-        self.cache.lock().insert(
-            cache_key,
-            CachedVulkanPipeline {
-                pipeline,
-                pipeline_layout,
-                descriptor_set_layouts: descriptor_set_layouts.clone(),
-            },
-        );
-
-        Ok(PipelineCacheResult {
-            pipeline,
-            pipeline_layout,
-            descriptor_set_layouts,
-        })
     }
 
     /// Get the descriptor pool.
@@ -666,18 +486,8 @@ impl PipelineManager {
             return;
         }
 
-        // Destroy all cached pipelines and their associated layouts.
-        // SAFETY: Caller guarantees GPU is idle and device is valid.
-        for (_, cached) in self.cache.lock().drain() {
-            unsafe {
-                self.device.destroy_pipeline(cached.pipeline, None);
-                self.device
-                    .destroy_pipeline_layout(cached.pipeline_layout, None);
-                for layout in cached.descriptor_set_layouts {
-                    self.device.destroy_descriptor_set_layout(layout, None);
-                }
-            }
-        }
+        // Pipelines are now owned by Materials and cleaned up via DeferredDestructor.
+        // We only need to destroy the descriptor pool here.
 
         // Destroy descriptor pool
         // SAFETY: Caller guarantees GPU is idle and device is valid

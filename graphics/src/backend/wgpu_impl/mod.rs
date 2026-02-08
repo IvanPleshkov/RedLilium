@@ -8,7 +8,6 @@ mod pass_encoding;
 mod resources;
 pub mod swapchain;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Scratch buffers reused across draw commands to avoid per-draw heap allocations.
@@ -17,30 +16,9 @@ use std::sync::Arc;
 /// Vecs are cleared between draws but retain their capacity across frames.
 #[derive(Default)]
 struct WgpuEncoderScratch {
-    // Backing storage for types without Rust lifetimes:
-    color_targets: Vec<Option<wgpu::ColorTargetState>>,
-    bind_group_layout_entries: Vec<wgpu::BindGroupLayoutEntry>,
-    vertex_attributes: Vec<Vec<wgpu::VertexAttribute>>,
-    color_formats: Vec<Option<wgpu::TextureFormat>>,
     // GPU handle Vecs (no lifetimes, safe to pool):
     bind_group_layouts: Vec<wgpu::BindGroupLayout>,
     bind_groups: Vec<wgpu::BindGroup>,
-}
-
-/// Cached render pipeline with its bind group layouts.
-///
-/// wgpu resource types are internally reference-counted; cloning is a refcount bump.
-/// Bind group layouts are cached alongside the pipeline because they are needed
-/// to create per-frame bind groups.
-struct CachedPipeline {
-    pipeline: wgpu::RenderPipeline,
-    bind_group_layouts: Vec<wgpu::BindGroupLayout>,
-}
-
-/// Cached compute pipeline with its bind group layouts.
-struct CachedComputePipeline {
-    pipeline: wgpu::ComputePipeline,
-    bind_group_layouts: Vec<wgpu::BindGroupLayout>,
 }
 
 /// A texture view for a surface texture (swapchain image).
@@ -81,8 +59,6 @@ pub struct WgpuBackend {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     encoder_scratch: std::sync::Mutex<WgpuEncoderScratch>,
-    pipeline_cache: std::sync::Mutex<HashMap<u64, CachedPipeline>>,
-    compute_pipeline_cache: std::sync::Mutex<HashMap<u64, CachedComputePipeline>>,
 }
 
 impl std::fmt::Debug for WgpuBackend {
@@ -155,8 +131,6 @@ impl WgpuBackend {
             device: Arc::new(device),
             queue: Arc::new(queue),
             encoder_scratch: std::sync::Mutex::new(WgpuEncoderScratch::default()),
-            pipeline_cache: std::sync::Mutex::new(HashMap::new()),
-            compute_pipeline_cache: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -236,11 +210,12 @@ impl WgpuBackend {
             })?;
 
         // Update the backend with new adapter and device.
-        // Clear pipeline cache since cached pipelines belong to the old device.
+        // Note: Pipelines are now owned by Materials (GpuPipeline),
+        // so there's no pipeline cache to clear here. Materials created
+        // with the old device will need to be recreated by the caller.
         self.adapter = new_adapter;
         self.device = Arc::new(new_device);
         self.queue = Arc::new(new_queue);
-        self.pipeline_cache.lock().unwrap().clear();
 
         Ok(true)
     }

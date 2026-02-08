@@ -671,6 +671,7 @@ pub fn create_solid_color_material(ctx: &TestContext) -> Arc<Material> {
                     "fs_main",
                 ))
                 .with_vertex_layout(quad_vertex_layout())
+                .with_color_format(TextureFormat::Rgba8Unorm)
                 .with_label("solid_red_material"),
         )
         .expect("Failed to create material")
@@ -771,6 +772,7 @@ pub fn create_texture_sample_material(ctx: &TestContext) -> Arc<Material> {
                 ))
                 .with_vertex_layout(quad_vertex_layout())
                 .with_binding_layout(binding_layout)
+                .with_color_format(TextureFormat::Rgba8Unorm)
                 .with_label("texture_sample_material"),
         )
         .expect("Failed to create texture sample material")

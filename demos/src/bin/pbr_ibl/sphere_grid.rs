@@ -8,7 +8,7 @@ use redlilium_core::profiling::{profile_function, profile_scope};
 use redlilium_graphics::{
     BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferDescriptor, BufferUsage,
     GraphicsDevice, MaterialDescriptor, MaterialInstance, ShaderComposer, ShaderSource,
-    ShaderStage, ShaderStageFlags,
+    ShaderStage, ShaderStageFlags, TextureFormat,
 };
 
 use crate::camera::OrbitCamera;
@@ -73,6 +73,10 @@ impl SphereGrid {
                     ))
                     .with_binding_layout(camera_binding_layout)
                     .with_vertex_layout(vertex_layout)
+                    .with_color_format(TextureFormat::Rgba8UnormSrgb)
+                    .with_color_format(TextureFormat::Rgba16Float)
+                    .with_color_format(TextureFormat::Rgba16Float)
+                    .with_depth_format(TextureFormat::Depth32Float)
                     .with_label("gbuffer_material"),
             )
             .expect("Failed to create G-buffer material");

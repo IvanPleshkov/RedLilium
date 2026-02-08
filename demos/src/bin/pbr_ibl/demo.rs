@@ -112,8 +112,14 @@ impl AppHandler for PbrIblDemo {
         let ibl = IblTextures::create(device);
         let mut gbuffer = GBuffer::create(device, ctx.width(), ctx.height());
         let spheres = SphereGrid::create(device);
-        let skybox = SkyboxPass::create(device, &ibl);
-        let resolve = ResolvePass::create(device, &gbuffer, &ibl, self.hdr_active);
+        let skybox = SkyboxPass::create(device, &ibl, ctx.surface_format());
+        let resolve = ResolvePass::create(
+            device,
+            &gbuffer,
+            &ibl,
+            ctx.surface_format(),
+            self.hdr_active,
+        );
 
         // Initialize per-frame ring buffer
         ctx.pipeline_mut()
@@ -136,6 +142,7 @@ impl AppHandler for PbrIblDemo {
             ctx.width(),
             ctx.height(),
             ctx.scale_factor(),
+            ctx.surface_format(),
         );
 
         // Register G-buffer textures with egui for UI preview
@@ -180,6 +187,7 @@ impl AppHandler for PbrIblDemo {
                 ctx.device(),
                 &gbuffer,
                 ibl,
+                ctx.surface_format(),
                 self.hdr_active,
             ));
         }

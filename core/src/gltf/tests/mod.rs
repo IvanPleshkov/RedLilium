@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::gltf::GltfMaterial;
 use crate::material::{CpuMaterial, CpuMaterialInstance, MaterialValue};
+use crate::mesh::VertexLayout;
 
 mod load_test;
 mod roundtrip_test;
@@ -12,6 +13,7 @@ mod roundtrip_test;
 /// replicating the old built-in loader behavior.
 fn default_pbr_material(mat: &GltfMaterial) -> Arc<CpuMaterialInstance> {
     let declaration = CpuMaterial::pbr_metallic_roughness(
+        Arc::new(VertexLayout::new()),
         mat.alpha_mode,
         mat.double_sided,
         mat.base_color_texture.is_some(),

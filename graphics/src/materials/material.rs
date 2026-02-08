@@ -8,8 +8,11 @@
 
 use std::sync::Arc;
 
+use crate::backend::GpuPipeline;
 use crate::device::GraphicsDevice;
 use crate::mesh::VertexLayout;
+use crate::types::TextureFormat;
+use redlilium_core::mesh::PrimitiveTopology;
 
 use super::bindings::BindingLayout;
 
@@ -200,7 +203,7 @@ impl BlendState {
 }
 
 /// Descriptor for creating a material.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct MaterialDescriptor {
     /// Shaders used by this material.
     pub shaders: Vec<ShaderSource>,
@@ -210,15 +213,39 @@ pub struct MaterialDescriptor {
     pub binding_layouts: Vec<Arc<BindingLayout>>,
 
     /// Expected vertex layout for this material.
-    /// Used to verify mesh compatibility at draw time (debug builds).
-    /// Wrapped in `Arc` to enable sharing and efficient pointer comparison.
-    pub vertex_layout: Option<Arc<VertexLayout>>,
+    /// Used for pipeline creation and mesh compatibility checking.
+    /// Wrapped in `Arc` — same `Arc` pointer means same pipeline variant.
+    pub vertex_layout: Arc<VertexLayout>,
 
     /// Blend state for color blending. If None, blending is disabled.
     pub blend_state: Option<BlendState>,
 
+    /// Primitive topology (how vertices are assembled into primitives).
+    pub topology: PrimitiveTopology,
+
+    /// Color attachment formats for the render pass.
+    pub color_formats: Vec<TextureFormat>,
+
+    /// Depth attachment format, if any.
+    pub depth_format: Option<TextureFormat>,
+
     /// Optional label for debugging.
     pub label: Option<String>,
+}
+
+impl Default for MaterialDescriptor {
+    fn default() -> Self {
+        Self {
+            shaders: Vec::new(),
+            binding_layouts: Vec::new(),
+            vertex_layout: Arc::new(VertexLayout::new()),
+            blend_state: None,
+            topology: PrimitiveTopology::TriangleList,
+            color_formats: Vec::new(),
+            depth_format: None,
+            label: None,
+        }
+    }
 }
 
 impl MaterialDescriptor {
@@ -239,15 +266,33 @@ impl MaterialDescriptor {
         self
     }
 
-    /// Set the expected vertex layout for mesh compatibility checking.
+    /// Set the expected vertex layout for pipeline creation and mesh compatibility checking.
     pub fn with_vertex_layout(mut self, layout: Arc<VertexLayout>) -> Self {
-        self.vertex_layout = Some(layout);
+        self.vertex_layout = layout;
         self
     }
 
     /// Set the blend state for color blending.
     pub fn with_blend_state(mut self, blend_state: BlendState) -> Self {
         self.blend_state = Some(blend_state);
+        self
+    }
+
+    /// Set the primitive topology.
+    pub fn with_topology(mut self, topology: PrimitiveTopology) -> Self {
+        self.topology = topology;
+        self
+    }
+
+    /// Add a color attachment format.
+    pub fn with_color_format(mut self, format: TextureFormat) -> Self {
+        self.color_formats.push(format);
+        self
+    }
+
+    /// Set the depth attachment format.
+    pub fn with_depth_format(mut self, format: TextureFormat) -> Self {
+        self.depth_format = Some(format);
         self
     }
 
@@ -279,12 +324,26 @@ impl MaterialDescriptor {
 pub struct Material {
     device: Arc<GraphicsDevice>,
     descriptor: MaterialDescriptor,
+    gpu_handle: GpuPipeline,
 }
 
 impl Material {
     /// Create a new material (called by GraphicsDevice).
-    pub(crate) fn new(device: Arc<GraphicsDevice>, descriptor: MaterialDescriptor) -> Self {
-        Self { device, descriptor }
+    pub(crate) fn new(
+        device: Arc<GraphicsDevice>,
+        descriptor: MaterialDescriptor,
+        gpu_handle: GpuPipeline,
+    ) -> Self {
+        Self {
+            device,
+            descriptor,
+            gpu_handle,
+        }
+    }
+
+    /// Get the GPU pipeline handle.
+    pub fn gpu_handle(&self) -> &GpuPipeline {
+        &self.gpu_handle
     }
 
     /// Get the parent device.
@@ -308,8 +367,8 @@ impl Material {
     }
 
     /// Get the expected vertex layout.
-    pub fn vertex_layout(&self) -> Option<&Arc<VertexLayout>> {
-        self.descriptor.vertex_layout.as_ref()
+    pub fn vertex_layout(&self) -> &Arc<VertexLayout> {
+        &self.descriptor.vertex_layout
     }
 
     /// Get the shaders.
@@ -320,6 +379,21 @@ impl Material {
     /// Get the blend state.
     pub fn blend_state(&self) -> Option<&BlendState> {
         self.descriptor.blend_state.as_ref()
+    }
+
+    /// Get the primitive topology.
+    pub fn topology(&self) -> PrimitiveTopology {
+        self.descriptor.topology
+    }
+
+    /// Get the color attachment formats.
+    pub fn color_formats(&self) -> &[TextureFormat] {
+        &self.descriptor.color_formats
+    }
+
+    /// Get the depth attachment format.
+    pub fn depth_format(&self) -> Option<TextureFormat> {
+        self.descriptor.depth_format
     }
 }
 
@@ -367,7 +441,7 @@ mod tests {
             .with_shader(ShaderSource::vertex(b"vs".to_vec(), "main"))
             .with_label("test");
 
-        let material = Material::new(device, desc);
+        let material = Material::new(device, desc, GpuPipeline::Dummy);
         assert_eq!(material.label(), Some("test"));
         assert_eq!(material.shaders().len(), 1);
     }
@@ -397,8 +471,8 @@ mod tests {
             .with_shader(ShaderSource::vertex(b"vs".to_vec(), "main"))
             .with_binding_layout(shared_layout.clone());
 
-        let material1 = Material::new(device.clone(), desc1);
-        let material2 = Material::new(device, desc2);
+        let material1 = Material::new(device.clone(), desc1, GpuPipeline::Dummy);
+        let material2 = Material::new(device, desc2, GpuPipeline::Dummy);
 
         // Both materials share the same layout
         assert!(Arc::ptr_eq(

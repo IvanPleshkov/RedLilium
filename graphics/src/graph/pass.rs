@@ -185,21 +185,15 @@ impl DrawCommand {
     /// In debug builds, this is called automatically by `new()`.
     /// Returns `true` if compatible, `false` otherwise.
     pub fn is_compatible(mesh: &Mesh, material: &MaterialInstance) -> bool {
-        if let Some(expected_layout) = material.material().vertex_layout() {
-            // The material expects a specific layout - check if mesh provides it
-            expected_layout.is_compatible_with(mesh.layout())
-        } else {
-            // No expected layout specified - assume compatible
-            true
-        }
+        let expected_layout = material.material().vertex_layout();
+        expected_layout.is_compatible_with(mesh.layout())
     }
 
     /// Check compatibility and panic with detailed message if incompatible.
     #[cfg(debug_assertions)]
     fn check_compatibility(mesh: &Mesh, material: &MaterialInstance) {
-        if let Some(expected_layout) = material.material().vertex_layout()
-            && !expected_layout.is_compatible_with(mesh.layout())
-        {
+        let expected_layout = material.material().vertex_layout();
+        if !expected_layout.is_compatible_with(mesh.layout()) {
             let mesh_semantics: Vec<_> = mesh
                 .layout()
                 .attributes

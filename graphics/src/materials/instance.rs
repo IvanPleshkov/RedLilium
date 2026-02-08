@@ -243,7 +243,11 @@ mod tests {
         let desc = MaterialDescriptor::new()
             .with_shader(ShaderSource::vertex(b"vs".to_vec(), "main"))
             .with_label("test_material");
-        Arc::new(Material::new(device, desc))
+        Arc::new(Material::new(
+            device,
+            desc,
+            crate::backend::GpuPipeline::Dummy,
+        ))
     }
 
     fn create_test_buffer() -> Arc<Buffer> {

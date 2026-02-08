@@ -27,8 +27,9 @@
 //!
 //! let data = std::fs::read("model.glb").unwrap();
 //! let doc = load_gltf(&data, &[], &[], |mat: &GltfMaterial| {
+//!     let layout = Arc::new(VertexLayout::new());
 //!     let decl = CpuMaterial::pbr_metallic_roughness(
-//!         mat.alpha_mode, mat.double_sided,
+//!         layout, mat.alpha_mode, mat.double_sided,
 //!         mat.base_color_texture.is_some(),
 //!         mat.metallic_roughness_texture.is_some(),
 //!         mat.normal_texture.is_some(),

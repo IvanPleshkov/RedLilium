@@ -165,6 +165,59 @@ impl std::fmt::Debug for GpuSampler {
     }
 }
 
+/// Handle to a GPU pipeline (graphics or compute).
+///
+/// Material owns its pipeline directly — one Material, one pipeline.
+/// Created at `GraphicsDevice::create_material()` time.
+#[allow(clippy::large_enum_variant)]
+pub enum GpuPipeline {
+    /// Dummy backend (no GPU pipeline)
+    Dummy,
+    /// wgpu backend graphics pipeline
+    #[cfg(feature = "wgpu-backend")]
+    WgpuGraphics {
+        pipeline: wgpu::RenderPipeline,
+        bind_group_layouts: Vec<wgpu::BindGroupLayout>,
+    },
+    /// wgpu backend compute pipeline
+    #[cfg(feature = "wgpu-backend")]
+    WgpuCompute {
+        pipeline: wgpu::ComputePipeline,
+        bind_group_layouts: Vec<wgpu::BindGroupLayout>,
+    },
+    /// Vulkan backend pipeline (graphics or compute)
+    #[cfg(feature = "vulkan-backend")]
+    Vulkan {
+        device: ash::Device,
+        pipeline: vk::Pipeline,
+        pipeline_layout: vk::PipelineLayout,
+        descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
+        /// Deferred destructor for safe cleanup.
+        deferred: Arc<DeferredDestructor>,
+    },
+}
+
+impl std::fmt::Debug for GpuPipeline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dummy => write!(f, "GpuPipeline::Dummy"),
+            #[cfg(feature = "wgpu-backend")]
+            Self::WgpuGraphics { .. } => f
+                .debug_struct("GpuPipeline::WgpuGraphics")
+                .finish_non_exhaustive(),
+            #[cfg(feature = "wgpu-backend")]
+            Self::WgpuCompute { .. } => f
+                .debug_struct("GpuPipeline::WgpuCompute")
+                .finish_non_exhaustive(),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan { pipeline, .. } => f
+                .debug_struct("GpuPipeline::Vulkan")
+                .field("pipeline", pipeline)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
 /// Handle to a GPU fence for CPU-GPU synchronization.
 ///
 /// # Backend Differences
@@ -653,6 +706,27 @@ impl Drop for GpuSemaphore {
     }
 }
 
+#[cfg(feature = "vulkan-backend")]
+impl Drop for GpuPipeline {
+    fn drop(&mut self) {
+        if let GpuPipeline::Vulkan {
+            device,
+            pipeline,
+            pipeline_layout,
+            descriptor_set_layouts,
+            deferred,
+        } = self
+        {
+            deferred.queue(vulkan::DeferredResource::Pipeline {
+                device: device.clone(),
+                pipeline: *pipeline,
+                pipeline_layout: *pipeline_layout,
+                descriptor_set_layouts: std::mem::take(descriptor_set_layouts),
+            });
+        }
+    }
+}
+
 // ============================================================================
 // GPU Backend Enum
 // ============================================================================
@@ -737,6 +811,20 @@ impl GpuBackend {
             Self::Wgpu(backend) => backend.create_sampler(descriptor),
             #[cfg(feature = "vulkan-backend")]
             Self::Vulkan(backend) => backend.create_sampler(descriptor),
+        }
+    }
+
+    /// Create a pipeline (graphics or compute) from a material descriptor.
+    pub fn create_pipeline(
+        &self,
+        descriptor: &crate::materials::MaterialDescriptor,
+    ) -> Result<GpuPipeline, GraphicsError> {
+        match self {
+            Self::Dummy(_) => Ok(GpuPipeline::Dummy),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(backend) => backend.create_pipeline(descriptor),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => backend.create_pipeline(descriptor),
         }
     }
 

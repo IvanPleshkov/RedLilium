@@ -7,8 +7,8 @@ use redlilium_core::profiling::profile_scope;
 use redlilium_graphics::{
     BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferDescriptor, BufferUsage,
     CpuSampler, GraphicsDevice, MaterialDescriptor, MaterialInstance, MeshDescriptor,
-    ShaderComposer, ShaderDef, ShaderSource, ShaderStage, ShaderStageFlags, VertexBufferLayout,
-    VertexLayout,
+    ShaderComposer, ShaderDef, ShaderSource, ShaderStage, ShaderStageFlags, TextureFormat,
+    VertexBufferLayout, VertexLayout,
 };
 
 use crate::gbuffer::GBuffer;
@@ -30,6 +30,7 @@ impl ResolvePass {
         device: &Arc<GraphicsDevice>,
         gbuffer: &GBuffer,
         ibl: &IblTextures,
+        surface_format: TextureFormat,
         hdr_active: bool,
     ) -> Self {
         profile_scope!("ResolvePass::create");
@@ -133,6 +134,7 @@ impl ResolvePass {
                     .with_binding_layout(resolve_uniform_layout)
                     .with_binding_layout(gbuffer_layout)
                     .with_binding_layout(ibl_layout)
+                    .with_color_format(surface_format)
                     .with_label("resolve_material"),
             )
             .expect("Failed to create resolve material");

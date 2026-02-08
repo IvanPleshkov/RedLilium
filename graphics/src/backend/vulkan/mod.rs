@@ -40,7 +40,6 @@ use self::layout::TextureId;
 /// between draws but retain their capacity across frames.
 #[derive(Default)]
 struct VulkanEncoderScratch {
-    color_formats: Vec<crate::types::TextureFormat>,
     descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
     descriptor_sets: Vec<vk::DescriptorSet>,
     buffer_infos: Vec<vk::DescriptorBufferInfo>,
@@ -755,6 +754,159 @@ impl VulkanBackend {
         Ok(GpuSampler::Vulkan {
             device: self.device.clone(),
             sampler,
+            deferred: Arc::clone(&self.deferred_destructor),
+        })
+    }
+
+    /// Create a GPU pipeline from a material descriptor.
+    ///
+    /// Compiles shaders, creates descriptor set layouts, pipeline layout,
+    /// and the graphics or compute pipeline.
+    pub fn create_pipeline(
+        &self,
+        descriptor: &crate::materials::MaterialDescriptor,
+    ) -> Result<super::GpuPipeline, GraphicsError> {
+        use crate::materials::ShaderStage;
+
+        let is_compute = descriptor
+            .shaders
+            .iter()
+            .any(|s| s.stage == ShaderStage::Compute);
+
+        if is_compute {
+            self.create_compute_pipeline_from_descriptor(descriptor)
+        } else {
+            self.create_graphics_pipeline_from_descriptor(descriptor)
+        }
+    }
+
+    fn create_graphics_pipeline_from_descriptor(
+        &self,
+        descriptor: &crate::materials::MaterialDescriptor,
+    ) -> Result<super::GpuPipeline, GraphicsError> {
+        use crate::materials::ShaderStage;
+
+        let mut vertex_module = None;
+        let mut fragment_module = None;
+        let mut vertex_entry: &str = "vs_main";
+        let mut fragment_entry: &str = "fs_main";
+
+        for shader in &descriptor.shaders {
+            let module = self.pipeline_manager.compile_shader(
+                &shader.source,
+                shader.stage,
+                &shader.entry_point,
+            )?;
+            match shader.stage {
+                ShaderStage::Vertex => {
+                    vertex_module = Some(module);
+                    vertex_entry = &shader.entry_point;
+                }
+                ShaderStage::Fragment => {
+                    fragment_module = Some(module);
+                    fragment_entry = &shader.entry_point;
+                }
+                ShaderStage::Compute => {}
+            }
+        }
+
+        let vertex_module = vertex_module.ok_or_else(|| {
+            GraphicsError::ShaderCompilationFailed("No vertex shader provided".into())
+        })?;
+
+        // Descriptor set layouts
+        let descriptor_set_layouts: Vec<vk::DescriptorSetLayout> = descriptor
+            .binding_layouts
+            .iter()
+            .map(|layout| self.pipeline_manager.create_descriptor_set_layout(layout))
+            .collect::<Result<_, _>>()?;
+
+        let pipeline_layout = self
+            .pipeline_manager
+            .create_pipeline_layout(&descriptor_set_layouts)?;
+
+        let pipeline = self.pipeline_manager.create_graphics_pipeline(
+            vertex_module,
+            fragment_module,
+            vertex_entry,
+            fragment_entry,
+            &descriptor.vertex_layout,
+            descriptor.topology,
+            pipeline_layout,
+            &descriptor.color_formats,
+            descriptor.depth_format,
+            descriptor.blend_state.as_ref(),
+            &self.dynamic_rendering,
+        )?;
+
+        // Shader modules are baked into the pipeline; destroy them now.
+        unsafe {
+            self.device.destroy_shader_module(vertex_module, None);
+            if let Some(frag) = fragment_module {
+                self.device.destroy_shader_module(frag, None);
+            }
+        }
+
+        Ok(super::GpuPipeline::Vulkan {
+            device: self.device.clone(),
+            pipeline,
+            pipeline_layout,
+            descriptor_set_layouts,
+            deferred: Arc::clone(&self.deferred_destructor),
+        })
+    }
+
+    fn create_compute_pipeline_from_descriptor(
+        &self,
+        descriptor: &crate::materials::MaterialDescriptor,
+    ) -> Result<super::GpuPipeline, GraphicsError> {
+        use crate::materials::ShaderStage;
+
+        let mut compute_module = None;
+        let mut compute_entry: &str = "main";
+
+        for shader in &descriptor.shaders {
+            if shader.stage == ShaderStage::Compute {
+                let module = self.pipeline_manager.compile_shader(
+                    &shader.source,
+                    shader.stage,
+                    &shader.entry_point,
+                )?;
+                compute_module = Some(module);
+                compute_entry = &shader.entry_point;
+            }
+        }
+
+        let compute_module = compute_module.ok_or_else(|| {
+            GraphicsError::ShaderCompilationFailed("No compute shader provided".into())
+        })?;
+
+        let descriptor_set_layouts: Vec<vk::DescriptorSetLayout> = descriptor
+            .binding_layouts
+            .iter()
+            .map(|layout| self.pipeline_manager.create_descriptor_set_layout(layout))
+            .collect::<Result<_, _>>()?;
+
+        let pipeline_layout = self
+            .pipeline_manager
+            .create_pipeline_layout(&descriptor_set_layouts)?;
+
+        let pipeline = self.pipeline_manager.create_compute_pipeline(
+            compute_module,
+            compute_entry,
+            pipeline_layout,
+        )?;
+
+        // Shader module is baked into the pipeline; destroy it now.
+        unsafe {
+            self.device.destroy_shader_module(compute_module, None);
+        }
+
+        Ok(super::GpuPipeline::Vulkan {
+            device: self.device.clone(),
+            pipeline,
+            pipeline_layout,
+            descriptor_set_layouts,
             deferred: Arc::clone(&self.deferred_destructor),
         })
     }
@@ -1717,61 +1869,34 @@ impl VulkanBackend {
         let material_arc = draw_cmd.material.material();
         let mesh = &draw_cmd.mesh;
 
+        // -- Pipeline: owned by Material, created at create_material() time --
+        let super::GpuPipeline::Vulkan {
+            pipeline,
+            pipeline_layout,
+            descriptor_set_layouts,
+            ..
+        } = material_arc.gpu_handle()
+        else {
+            log::warn!("Material has no Vulkan pipeline");
+            return Ok(());
+        };
+
+        let pipeline = *pipeline;
+        let pipeline_layout = *pipeline_layout;
+
         // Take scratch buffers — reuses capacity from previous draws.
         // Destructure to allow independent field borrows.
         let scratch = &mut *self.encoder_scratch.lock();
         let VulkanEncoderScratch {
-            color_formats: scratch_color_formats,
             descriptor_set_layouts: scratch_ds_layouts,
             descriptor_sets: scratch_ds_sets,
             buffer_infos: scratch_buffer_infos,
             image_infos: scratch_image_infos,
+            ..
         } = scratch;
 
-        // Get color target formats
-        scratch_color_formats.clear();
-        scratch_color_formats.extend(
-            render_targets
-                .color_attachments
-                .iter()
-                .map(|a| a.target.format()),
-        );
-
-        // Get depth format if present
-        let depth_format = render_targets
-            .depth_stencil_attachment
-            .as_ref()
-            .map(|a| a.target.format());
-
-        // Pipeline cache key (same strategy as wgpu backend):
-        // Material Arc pointer captures shaders, blend state, binding layouts.
-        // VertexLayout Arc pointer captures buffer strides, step modes, attributes.
-        // Topology + render target formats complete the pipeline configuration.
-        let cache_key = {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            (std::sync::Arc::as_ptr(material_arc) as usize).hash(&mut h);
-            (std::sync::Arc::as_ptr(mesh.layout()) as usize).hash(&mut h);
-            mesh.topology().hash(&mut h);
-            scratch_color_formats.hash(&mut h);
-            depth_format.hash(&mut h);
-            h.finish()
-        };
-
-        let result = self.pipeline_manager.get_or_create_pipeline(
-            cache_key,
-            material_arc,
-            mesh,
-            scratch_color_formats,
-            depth_format,
-            &self.dynamic_rendering,
-        )?;
-
-        let pipeline = result.pipeline;
-        let pipeline_layout = result.pipeline_layout;
-
         scratch_ds_layouts.clear();
-        scratch_ds_layouts.extend_from_slice(&result.descriptor_set_layouts);
+        scratch_ds_layouts.extend_from_slice(descriptor_set_layouts);
 
         // Create and bind descriptor sets
         let material_instance = &draw_cmd.material;
@@ -2349,20 +2474,20 @@ impl VulkanBackend {
         for dispatch_cmd in pass.dispatch_commands() {
             let material_arc = dispatch_cmd.material.material();
 
-            // Cache key: material Arc pointer only (no mesh/topology/render targets for compute)
-            let cache_key = {
-                use std::hash::{Hash, Hasher};
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                (std::sync::Arc::as_ptr(material_arc) as usize).hash(&mut h);
-                h.finish()
+            // -- Pipeline: owned by Material, created at create_material() time --
+            let super::GpuPipeline::Vulkan {
+                pipeline,
+                pipeline_layout,
+                descriptor_set_layouts,
+                ..
+            } = material_arc.gpu_handle()
+            else {
+                log::warn!("Material has no Vulkan pipeline");
+                continue;
             };
 
-            let result = self
-                .pipeline_manager
-                .get_or_create_compute_pipeline(cache_key, material_arc)?;
-
-            let pipeline = result.pipeline;
-            let pipeline_layout = result.pipeline_layout;
+            let pipeline = *pipeline;
+            let pipeline_layout = *pipeline_layout;
 
             let scratch = &mut *self.encoder_scratch.lock();
             let VulkanEncoderScratch {
@@ -2374,7 +2499,7 @@ impl VulkanBackend {
             } = scratch;
 
             scratch_ds_layouts.clear();
-            scratch_ds_layouts.extend_from_slice(&result.descriptor_set_layouts);
+            scratch_ds_layouts.extend_from_slice(descriptor_set_layouts);
 
             // Create and bind descriptor sets
             let material_instance = &dispatch_cmd.material;

@@ -17,8 +17,9 @@
 
 use std::sync::Arc;
 
+use crate::mesh::{PrimitiveTopology, VertexLayout};
 use crate::sampler::CpuSampler;
-use crate::texture::CpuTexture;
+use crate::texture::{CpuTexture, TextureFormat};
 
 /// Type of value expected in a material binding slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -126,7 +127,9 @@ pub enum AlphaMode {
 /// ```ignore
 /// use redlilium_core::material::*;
 ///
+/// let layout = Arc::new(VertexLayout::new());
 /// let mat = CpuMaterial::pbr_metallic_roughness(
+///     layout,
 ///     AlphaMode::Opaque,
 ///     false,
 ///     true,  // has base color texture
@@ -144,19 +147,60 @@ pub struct CpuMaterial {
     pub alpha_mode: AlphaMode,
     /// Whether the material is double-sided.
     pub double_sided: bool,
+    /// Expected vertex layout for meshes rendered with this material.
+    /// Shared via `Arc` for pointer-based batching.
+    pub vertex_layout: Arc<VertexLayout>,
+    /// Primitive topology (how vertices are assembled).
+    pub topology: PrimitiveTopology,
+    /// Color attachment formats for the render pass this material targets.
+    pub color_formats: Vec<TextureFormat>,
+    /// Depth attachment format, if any.
+    pub depth_format: Option<TextureFormat>,
     /// Binding slot definitions — ordered list of expected properties.
     pub bindings: Vec<MaterialBindingDef>,
 }
 
 impl CpuMaterial {
-    /// Creates a new empty material (opaque, single-sided, no bindings).
+    /// Creates a new empty material (opaque, single-sided, empty layout, no bindings).
     pub fn new() -> Self {
         Self {
             name: None,
             alpha_mode: AlphaMode::Opaque,
             double_sided: false,
+            vertex_layout: Arc::new(VertexLayout::new()),
+            topology: PrimitiveTopology::TriangleList,
+            color_formats: Vec::new(),
+            depth_format: None,
             bindings: Vec::new(),
         }
+    }
+
+    /// Set the expected vertex layout.
+    #[must_use]
+    pub fn with_vertex_layout(mut self, layout: Arc<VertexLayout>) -> Self {
+        self.vertex_layout = layout;
+        self
+    }
+
+    /// Set the primitive topology.
+    #[must_use]
+    pub fn with_topology(mut self, topology: PrimitiveTopology) -> Self {
+        self.topology = topology;
+        self
+    }
+
+    /// Add a color attachment format.
+    #[must_use]
+    pub fn with_color_format(mut self, format: TextureFormat) -> Self {
+        self.color_formats.push(format);
+        self
+    }
+
+    /// Set the depth attachment format.
+    #[must_use]
+    pub fn with_depth_format(mut self, format: TextureFormat) -> Self {
+        self.depth_format = Some(format);
+        self
     }
 
     /// Creates a PBR metallic-roughness material definition for glTF.
@@ -176,7 +220,9 @@ impl CpuMaterial {
     /// | 4 | `normal_scale` | Float | 0 |
     /// | 5 | `occlusion_strength` | Float | 0 |
     /// | 6+ | texture slots | Texture | 1+ |
+    #[allow(clippy::too_many_arguments)]
     pub fn pbr_metallic_roughness(
+        vertex_layout: Arc<VertexLayout>,
         alpha_mode: AlphaMode,
         double_sided: bool,
         has_base_color_tex: bool,
@@ -242,6 +288,10 @@ impl CpuMaterial {
             name: None,
             alpha_mode,
             double_sided,
+            vertex_layout,
+            topology: PrimitiveTopology::TriangleList,
+            color_formats: Vec::new(),
+            depth_format: None,
             bindings,
         }
     }
@@ -273,8 +323,9 @@ impl Default for CpuMaterial {
 /// use redlilium_core::material::*;
 /// use std::sync::Arc;
 ///
+/// let layout = Arc::new(VertexLayout::new());
 /// let mat = Arc::new(CpuMaterial::pbr_metallic_roughness(
-///     AlphaMode::Opaque, false,
+///     layout, AlphaMode::Opaque, false,
 ///     false, false, false, false, false,
 /// ));
 /// let instance = CpuMaterialInstance::new(Arc::clone(&mat))
@@ -383,6 +434,11 @@ impl CpuMaterialInstance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mesh::VertexLayout;
+
+    fn test_layout() -> Arc<VertexLayout> {
+        Arc::new(VertexLayout::new())
+    }
 
     #[test]
     fn cpu_material_default() {
@@ -396,6 +452,7 @@ mod tests {
     #[test]
     fn pbr_no_textures() {
         let mat = CpuMaterial::pbr_metallic_roughness(
+            test_layout(),
             AlphaMode::Opaque,
             false,
             false,
@@ -417,6 +474,7 @@ mod tests {
     #[test]
     fn pbr_all_textures() {
         let mat = CpuMaterial::pbr_metallic_roughness(
+            test_layout(),
             AlphaMode::Blend,
             true,
             true,
@@ -441,6 +499,7 @@ mod tests {
     #[test]
     fn alpha_mode_mask_cutoff() {
         let mat = CpuMaterial::pbr_metallic_roughness(
+            test_layout(),
             AlphaMode::Mask { cutoff: 0.5 },
             false,
             false,
@@ -455,6 +514,7 @@ mod tests {
     #[test]
     fn cpu_material_instance_getters() {
         let mat = Arc::new(CpuMaterial::pbr_metallic_roughness(
+            test_layout(),
             AlphaMode::Opaque,
             false,
             true,
@@ -482,6 +542,7 @@ mod tests {
     #[test]
     fn cpu_material_instance_textures() {
         let mat = Arc::new(CpuMaterial::pbr_metallic_roughness(
+            test_layout(),
             AlphaMode::Opaque,
             false,
             true,

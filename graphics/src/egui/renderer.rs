@@ -110,7 +110,7 @@ pub struct EguiRenderer {
 
 impl EguiRenderer {
     /// Create a new egui renderer.
-    pub fn new(device: Arc<GraphicsDevice>) -> Self {
+    pub fn new(device: Arc<GraphicsDevice>, surface_format: TextureFormat) -> Self {
         // Create vertex layout for egui vertices
         let vertex_layout = Arc::new(
             VertexLayout::new()
@@ -186,6 +186,7 @@ impl EguiRenderer {
                     .with_binding_layout(texture_binding_layout.clone())
                     .with_vertex_layout(vertex_layout.clone())
                     .with_blend_state(crate::materials::BlendState::premultiplied_alpha())
+                    .with_color_format(surface_format)
                     .with_label("egui_material"),
             )
             .expect("Failed to create egui material");

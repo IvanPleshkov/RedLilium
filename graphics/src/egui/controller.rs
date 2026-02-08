@@ -69,10 +69,11 @@ impl EguiController {
         width: u32,
         height: u32,
         scale_factor: f64,
+        surface_format: crate::types::TextureFormat,
     ) -> Self {
         let ctx = Context::default();
         let input_state = EguiInputState::new(width, height, scale_factor as f32);
-        let renderer = EguiRenderer::new(device);
+        let renderer = EguiRenderer::new(device, surface_format);
 
         Self {
             ctx,

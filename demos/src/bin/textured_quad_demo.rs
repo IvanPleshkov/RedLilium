@@ -251,6 +251,8 @@ impl TexturedQuadDemo {
                     ))
                     .with_binding_layout(binding_layout)
                     .with_vertex_layout(vertex_layout.clone())
+                    .with_color_format(ctx.surface_format())
+                    .with_depth_format(TextureFormat::Depth32Float)
                     .with_label("quad_material"),
             )
             .expect("Failed to create material");

@@ -105,6 +105,267 @@ impl WgpuBackend {
         Ok(GpuSampler::Wgpu(sampler))
     }
 
+    /// Create a GPU pipeline from a material descriptor.
+    pub fn create_pipeline(
+        &self,
+        descriptor: &crate::materials::MaterialDescriptor,
+    ) -> Result<super::super::GpuPipeline, GraphicsError> {
+        use super::conversion::{
+            convert_binding_type, convert_blend_state, convert_shader_stages, convert_step_mode,
+            convert_topology, convert_vertex_format,
+        };
+        use crate::materials::ShaderStage;
+
+        let is_compute = descriptor
+            .shaders
+            .iter()
+            .any(|s| s.stage == ShaderStage::Compute);
+
+        if is_compute {
+            return self.create_compute_pipeline_from_descriptor(descriptor);
+        }
+
+        // Compile shader modules
+        let mut vertex_module = None;
+        let mut fragment_module = None;
+        let mut vertex_entry: &str = "vs_main";
+        let mut fragment_entry: &str = "fs_main";
+
+        for shader in &descriptor.shaders {
+            let source = std::str::from_utf8(&shader.source).map_err(|e| {
+                GraphicsError::ShaderCompilationFailed(format!("Invalid UTF-8 in shader: {e}"))
+            })?;
+            let module = self
+                .device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: descriptor.label.as_deref(),
+                    source: wgpu::ShaderSource::Wgsl(source.into()),
+                });
+            match shader.stage {
+                ShaderStage::Vertex => {
+                    vertex_module = Some(module);
+                    vertex_entry = &shader.entry_point;
+                }
+                ShaderStage::Fragment => {
+                    fragment_module = Some(module);
+                    fragment_entry = &shader.entry_point;
+                }
+                ShaderStage::Compute => {}
+            }
+        }
+
+        let Some(vertex_module) = vertex_module else {
+            return Err(GraphicsError::ShaderCompilationFailed(
+                "No vertex shader provided".into(),
+            ));
+        };
+
+        let layout = &descriptor.vertex_layout;
+
+        // Vertex attributes per buffer
+        let buffer_count = layout.buffers.len();
+        let mut vertex_attrs: Vec<Vec<wgpu::VertexAttribute>> = vec![Vec::new(); buffer_count];
+        for attr in &layout.attributes {
+            let idx = attr.buffer_index as usize;
+            if idx < buffer_count {
+                vertex_attrs[idx].push(wgpu::VertexAttribute {
+                    format: convert_vertex_format(attr.format),
+                    offset: attr.offset as u64,
+                    shader_location: attr.semantic.index(),
+                });
+            }
+        }
+
+        // Bind group layouts
+        let mut bind_group_layouts = Vec::new();
+        for bg_layout in &descriptor.binding_layouts {
+            let entries: Vec<wgpu::BindGroupLayoutEntry> = bg_layout
+                .entries
+                .iter()
+                .map(|entry| wgpu::BindGroupLayoutEntry {
+                    binding: entry.binding,
+                    visibility: convert_shader_stages(entry.visibility),
+                    ty: convert_binding_type(entry.binding_type),
+                    count: None,
+                })
+                .collect();
+            bind_group_layouts.push(self.device.create_bind_group_layout(
+                &wgpu::BindGroupLayoutDescriptor {
+                    label: bg_layout.label.as_deref(),
+                    entries: &entries,
+                },
+            ));
+        }
+
+        // Pipeline layout
+        let pipeline_layout = {
+            let refs: Vec<&wgpu::BindGroupLayout> = bind_group_layouts.iter().collect();
+            self.device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("Material Pipeline Layout"),
+                    bind_group_layouts: &refs,
+                    immediate_size: 0,
+                })
+        };
+
+        // Color targets
+        let wgpu_blend_state = descriptor
+            .blend_state
+            .as_ref()
+            .map(convert_blend_state)
+            .unwrap_or(wgpu::BlendState::REPLACE);
+
+        let color_targets: Vec<Option<wgpu::ColorTargetState>> = descriptor
+            .color_formats
+            .iter()
+            .map(|format| {
+                Some(wgpu::ColorTargetState {
+                    format: convert_texture_format(*format),
+                    blend: Some(wgpu_blend_state),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })
+            })
+            .collect();
+
+        let depth_format = descriptor.depth_format.map(convert_texture_format);
+
+        // Build vertex buffer layouts
+        let vertex_buffer_layouts: Vec<wgpu::VertexBufferLayout> = layout
+            .buffers
+            .iter()
+            .enumerate()
+            .map(|(i, buffer)| wgpu::VertexBufferLayout {
+                array_stride: buffer.stride as u64,
+                step_mode: convert_step_mode(buffer.step_mode),
+                attributes: &vertex_attrs[i],
+            })
+            .collect();
+
+        // Create render pipeline
+        let pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: descriptor.label.as_deref(),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &vertex_module,
+                    entry_point: Some(vertex_entry),
+                    buffers: &vertex_buffer_layouts,
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: fragment_module.as_ref().map(|module| wgpu::FragmentState {
+                    module,
+                    entry_point: Some(fragment_entry),
+                    targets: &color_targets,
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: convert_topology(descriptor.topology),
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: depth_format.map(|format| wgpu::DepthStencilState {
+                    format,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+
+        Ok(super::super::GpuPipeline::WgpuGraphics {
+            pipeline,
+            bind_group_layouts,
+        })
+    }
+
+    fn create_compute_pipeline_from_descriptor(
+        &self,
+        descriptor: &crate::materials::MaterialDescriptor,
+    ) -> Result<super::super::GpuPipeline, GraphicsError> {
+        use super::conversion::{convert_binding_type, convert_shader_stages};
+        use crate::materials::ShaderStage;
+
+        let mut compute_module = None;
+        let mut compute_entry: &str = "main";
+
+        for shader in &descriptor.shaders {
+            if shader.stage == ShaderStage::Compute {
+                let source = std::str::from_utf8(&shader.source).map_err(|e| {
+                    GraphicsError::ShaderCompilationFailed(format!("Invalid UTF-8 in shader: {e}"))
+                })?;
+                let module = self
+                    .device
+                    .create_shader_module(wgpu::ShaderModuleDescriptor {
+                        label: descriptor.label.as_deref(),
+                        source: wgpu::ShaderSource::Wgsl(source.into()),
+                    });
+                compute_module = Some(module);
+                compute_entry = &shader.entry_point;
+            }
+        }
+
+        let Some(compute_module) = compute_module else {
+            return Err(GraphicsError::ShaderCompilationFailed(
+                "No compute shader provided".into(),
+            ));
+        };
+
+        // Bind group layouts
+        let mut bind_group_layouts = Vec::new();
+        for bg_layout in &descriptor.binding_layouts {
+            let entries: Vec<wgpu::BindGroupLayoutEntry> = bg_layout
+                .entries
+                .iter()
+                .map(|entry| wgpu::BindGroupLayoutEntry {
+                    binding: entry.binding,
+                    visibility: convert_shader_stages(entry.visibility),
+                    ty: convert_binding_type(entry.binding_type),
+                    count: None,
+                })
+                .collect();
+            bind_group_layouts.push(self.device.create_bind_group_layout(
+                &wgpu::BindGroupLayoutDescriptor {
+                    label: bg_layout.label.as_deref(),
+                    entries: &entries,
+                },
+            ));
+        }
+
+        let pipeline_layout = {
+            let refs: Vec<&wgpu::BindGroupLayout> = bind_group_layouts.iter().collect();
+            self.device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("Compute Pipeline Layout"),
+                    bind_group_layouts: &refs,
+                    immediate_size: 0,
+                })
+        };
+
+        let pipeline = self
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: descriptor.label.as_deref(),
+                layout: Some(&pipeline_layout),
+                module: &compute_module,
+                entry_point: Some(compute_entry),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
+
+        Ok(super::super::GpuPipeline::WgpuCompute {
+            pipeline,
+            bind_group_layouts,
+        })
+    }
+
     /// Create a fence for CPU-GPU synchronization.
     ///
     /// Note: wgpu fences work differently from Vulkan fences. Instead of a binary

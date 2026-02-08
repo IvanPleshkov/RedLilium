@@ -301,19 +301,29 @@ impl GraphicsDevice {
         self.create_sampler(&descriptor)
     }
 
-    /// Create a material.
+    /// Create a material with its GPU pipeline.
+    ///
+    /// The pipeline is compiled eagerly from the descriptor's shaders,
+    /// vertex layout, topology, color/depth formats, and blend state.
     ///
     /// # Errors
     ///
-    /// Returns an error if material creation fails.
+    /// Returns an error if shader compilation or pipeline creation fails.
     pub fn create_material(
         self: &Arc<Self>,
         descriptor: &MaterialDescriptor,
     ) -> Result<Arc<Material>, GraphicsError> {
         profile_scope!("create_material");
 
+        // Create the GPU pipeline via backend
+        let gpu_handle = self.instance.backend().create_pipeline(descriptor)?;
+
         // Create the material
-        let material = Arc::new(Material::new(Arc::clone(self), descriptor.clone()));
+        let material = Arc::new(Material::new(
+            Arc::clone(self),
+            descriptor.clone(),
+            gpu_handle,
+        ));
 
         // Track it
         if let Ok(mut materials) = self.materials.write() {
@@ -774,11 +784,24 @@ mod tests {
 
     #[test]
     fn test_create_material() {
+        use crate::types::TextureFormat;
+
+        // Minimal valid WGSL shader for pipeline creation
+        let shader_src = b"\
+@vertex fn vs_main(@builtin(vertex_index) idx: u32) -> @builtin(position) vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+@fragment fn fs_main() -> @location(0) vec4<f32> {
+    return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+}
+";
         let device = create_test_device();
         let material = device
             .create_material(
                 &MaterialDescriptor::new()
-                    .with_shader(ShaderSource::vertex(b"vs".to_vec(), "main"))
+                    .with_shader(ShaderSource::vertex(shader_src.to_vec(), "vs_main"))
+                    .with_shader(ShaderSource::fragment(shader_src.to_vec(), "fs_main"))
+                    .with_color_format(TextureFormat::Bgra8Unorm)
                     .with_label("test_material"),
             )
             .unwrap();

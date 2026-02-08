@@ -81,6 +81,13 @@ pub enum DeferredResource {
         command_pool: vk::CommandPool,
         buffers: Vec<vk::CommandBuffer>,
     },
+    /// A pipeline (graphics or compute) with its layout and descriptor set layouts.
+    Pipeline {
+        device: ash::Device,
+        pipeline: vk::Pipeline,
+        pipeline_layout: vk::PipelineLayout,
+        descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
+    },
 }
 
 // SAFETY: DeferredResource only contains Vulkan handles which are thread-safe.
@@ -142,6 +149,18 @@ impl DeferredResource {
             } => {
                 unsafe { device.free_command_buffers(command_pool, &buffers) };
             }
+            DeferredResource::Pipeline {
+                device,
+                pipeline,
+                pipeline_layout,
+                descriptor_set_layouts,
+            } => unsafe {
+                device.destroy_pipeline(pipeline, None);
+                device.destroy_pipeline_layout(pipeline_layout, None);
+                for layout in descriptor_set_layouts {
+                    device.destroy_descriptor_set_layout(layout, None);
+                }
+            },
         }
     }
 
@@ -191,6 +210,18 @@ impl DeferredResource {
             } => {
                 unsafe { device.free_command_buffers(command_pool, &buffers) };
             }
+            DeferredResource::Pipeline {
+                device,
+                pipeline,
+                pipeline_layout,
+                descriptor_set_layouts,
+            } => unsafe {
+                device.destroy_pipeline(pipeline, None);
+                device.destroy_pipeline_layout(pipeline_layout, None);
+                for layout in descriptor_set_layouts {
+                    device.destroy_descriptor_set_layout(layout, None);
+                }
+            },
         }
     }
 }

@@ -6,7 +6,7 @@ use redlilium_core::profiling::profile_scope;
 use redlilium_graphics::{
     BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferDescriptor, BufferUsage,
     GraphicsDevice, MaterialDescriptor, MaterialInstance, MeshDescriptor, ShaderComposer,
-    ShaderSource, ShaderStage, ShaderStageFlags, VertexBufferLayout, VertexLayout,
+    ShaderSource, ShaderStage, ShaderStageFlags, TextureFormat, VertexBufferLayout, VertexLayout,
 };
 
 use crate::camera::OrbitCamera;
@@ -25,7 +25,11 @@ pub struct SkyboxPass {
 
 impl SkyboxPass {
     /// Create skybox material, fullscreen triangle mesh, and uniform buffer.
-    pub fn create(device: &Arc<GraphicsDevice>, ibl: &IblTextures) -> Self {
+    pub fn create(
+        device: &Arc<GraphicsDevice>,
+        ibl: &IblTextures,
+        surface_format: TextureFormat,
+    ) -> Self {
         profile_scope!("SkyboxPass::create");
 
         // Create skybox binding layout
@@ -69,6 +73,7 @@ impl SkyboxPass {
                         "fs_main",
                     ))
                     .with_binding_layout(skybox_binding_layout)
+                    .with_color_format(surface_format)
                     .with_label("skybox_material"),
             )
             .expect("Failed to create skybox material");
