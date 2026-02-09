@@ -1,7 +1,7 @@
 /// Debug name for an entity.
 ///
 /// Useful for editor display, logging, and debugging.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, redlilium_ecs::Component)]
 pub struct Name(pub String);
 
 impl Name {

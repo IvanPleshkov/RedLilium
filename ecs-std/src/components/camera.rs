@@ -6,7 +6,7 @@ use redlilium_core::scene::CameraProjection;
 /// The projection configuration reuses core's [`CameraProjection`].
 /// The view and projection matrices are computed by the
 /// [`update_camera_matrices`](crate::systems::update_camera_matrices) system.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, redlilium_ecs::Component)]
 pub struct Camera {
     /// Projection type and parameters (perspective or orthographic).
     pub projection: CameraProjection,

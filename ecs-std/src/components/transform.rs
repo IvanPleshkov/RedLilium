@@ -5,7 +5,7 @@ use redlilium_core::scene::NodeTransform;
 ///
 /// Stores translation, rotation, and scale. Convertible to/from
 /// core's [`NodeTransform`] which uses plain `[f32; N]` arrays.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, redlilium_ecs::Component)]
 pub struct Transform {
     /// Translation in world units.
     pub translation: Vec3,
@@ -85,7 +85,7 @@ impl From<Transform> for NodeTransform {
 /// Computed by the [`update_global_transforms`](crate::systems::update_global_transforms)
 /// system. Without hierarchy, this equals the local [`Transform`]'s matrix.
 /// With hierarchy (future), it will incorporate the parent chain.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, redlilium_ecs::Component)]
 pub struct GlobalTransform(pub Mat4);
 
 impl GlobalTransform {

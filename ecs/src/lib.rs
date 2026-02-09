@@ -27,6 +27,7 @@
 //! See `DESIGN.md` in this crate for architecture decisions and goals.
 
 mod access;
+pub mod component;
 mod compute;
 mod entity;
 mod priority;
@@ -40,7 +41,9 @@ mod world;
 mod yield_now;
 
 pub use access::Access;
+pub use component::{Component, FieldInfo};
 pub use compute::{ComputePool, TaskHandle};
+pub use ecs_macro::Component;
 pub use entity::Entity;
 pub use priority::Priority;
 pub use query::{ContainsChecker, Read, With, Without, Write};

@@ -7,6 +7,7 @@ use redlilium_core::mesh::CpuMesh;
 ///
 /// Stores Arc-wrapped references to CPU-side mesh and material data.
 /// The rendering system reads these to create or update GPU resources.
+#[derive(redlilium_ecs::Component)]
 pub struct MeshRenderer {
     /// The mesh data (shared via Arc to avoid expensive clones).
     pub mesh: Arc<CpuMesh>,

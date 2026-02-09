@@ -2,7 +2,7 @@
 ///
 /// When attached to an entity with a [`MeshRenderer`](crate::MeshRenderer),
 /// controls whether it is included in render submission.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, redlilium_ecs::Component)]
 pub struct Visibility(pub bool);
 
 impl Visibility {

@@ -683,6 +683,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ecs-macro"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "ecs-std"
 version = "0.1.0"
 dependencies = [
@@ -2296,6 +2305,7 @@ dependencies = [
 name = "redlilium-ecs"
 version = "0.1.0"
 dependencies = [
+ "ecs-macro",
  "log",
  "redlilium-core",
 ]
