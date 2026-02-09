@@ -1,3 +1,6 @@
+use std::future::Future;
+use std::pin::Pin;
+
 /// Double-buffered event queue for typed inter-system communication.
 ///
 /// Events are sent during one frame and can be read during the same frame
@@ -53,7 +56,7 @@ impl<T: Send + Sync + 'static> Events<T> {
     /// Advances the double buffer: clears previous, swaps current → previous.
     ///
     /// Call this at the start of each frame (typically via
-    /// [`event_update_system`]).
+    /// [`EventUpdateSystem`]).
     pub fn update(&mut self) {
         self.previous.clear();
         std::mem::swap(&mut self.current, &mut self.previous);
@@ -114,9 +117,16 @@ impl<T: Send + Sync + 'static> Default for EventUpdateSystem<T> {
 }
 
 impl<T: Send + Sync + 'static> crate::system::System for EventUpdateSystem<T> {
-    fn run(&self, ctx: &crate::system::SystemContext) {
-        let mut events = ctx.world().resource_mut::<Events<T>>();
-        events.update();
+    fn run<'a>(
+        &'a self,
+        access: crate::query_access::QueryAccess<'a>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            access.scope(|world| {
+                let mut events = world.resource_mut::<Events<T>>();
+                events.update();
+            });
+        })
     }
 
     fn access(&self) -> crate::access::Access {
@@ -223,11 +233,9 @@ mod tests {
         // Run update system
         use crate::compute::ComputePool;
         use crate::system::System;
-        use crate::system::SystemContext;
         let update = EventUpdateSystem::<TestEvent>::new();
         let compute = ComputePool::new();
-        let ctx = SystemContext::new(&world, &compute);
-        update.run(&ctx);
+        update.run_blocking(&world, &compute);
 
         // Event should be in previous now
         let events = world.resource::<Events<TestEvent>>();

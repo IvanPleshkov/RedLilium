@@ -1,70 +1,42 @@
 use std::any::TypeId;
+use std::future::Future;
+use std::pin::Pin;
 
 use crate::access::Access;
 use crate::compute::ComputePool;
+use crate::query_access::QueryAccess;
 use crate::world::World;
-
-/// Context passed to systems during execution.
-///
-/// Provides access to the [`World`] for entity/component queries
-/// and to the [`ComputePool`] for spawning async background tasks.
-///
-/// # Example
-///
-/// ```ignore
-/// fn run(&self, ctx: &SystemContext) {
-///     let positions = ctx.world().read::<Position>();
-///     let handle = ctx.compute().spawn(Priority::Low, async { heavy_work() });
-/// }
-/// ```
-#[derive(Clone, Copy)]
-pub struct SystemContext<'a> {
-    world: &'a World,
-    compute: &'a ComputePool,
-}
-
-impl<'a> SystemContext<'a> {
-    /// Creates a new system context.
-    pub fn new(world: &'a World, compute: &'a ComputePool) -> Self {
-        Self { world, compute }
-    }
-
-    /// Returns a reference to the world.
-    pub fn world(&self) -> &World {
-        self.world
-    }
-
-    /// Returns a reference to the compute pool for spawning async tasks.
-    pub fn compute(&self) -> &ComputePool {
-        self.compute
-    }
-}
 
 /// A system that processes entities and components in the world.
 ///
-/// Systems are structs implementing this trait. The struct's `TypeId` serves
-/// as the unique identifier for ordering constraints and duplicate detection.
+/// All systems are async. Systems that don't need `.await` simply fetch once
+/// inside a [`scope()`](QueryAccess::scope) call and return. The `Box::pin`
+/// overhead is negligible compared to actual system work.
 ///
-/// # Parallel safety
+/// # Compile-time safety
 ///
-/// `run` takes `&self` to allow parallel execution within a schedule stage.
-/// Systems that need mutable internal state should use interior mutability
-/// (`AtomicU64`, `Mutex`, etc.).
+/// Systems receive a [`QueryAccess`] token instead of direct `&World` access.
+/// Component borrows are confined to `scope()` closures, ensuring guards
+/// cannot be held across `.await` points at compile time.
 ///
-/// # Example
+/// # Example — simple system
 ///
 /// ```ignore
 /// struct MovementSystem;
 ///
 /// impl System for MovementSystem {
-///     fn run(&self, ctx: &SystemContext) {
-///         let mut positions = ctx.world().write::<Position>();
-///         let velocities = ctx.world().read::<Velocity>();
-///         for (idx, pos) in positions.iter_mut() {
-///             if let Some(vel) = velocities.get(idx) {
-///                 pos.x += vel.x;
-///             }
-///         }
+///     fn run(&self, access: QueryAccess<'_>) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+///         Box::pin(async move {
+///             access.scope(|world| {
+///                 let mut positions = world.write::<Position>();
+///                 let velocities = world.read::<Velocity>();
+///                 for (idx, pos) in positions.iter_mut() {
+///                     if let Some(vel) = velocities.get(idx) {
+///                         pos.x += vel.x;
+///                     }
+///                 }
+///             });
+///         })
 ///     }
 ///
 ///     fn access(&self) -> Access {
@@ -75,15 +47,75 @@ impl<'a> SystemContext<'a> {
 ///     }
 /// }
 /// ```
+///
+/// # Example — two-phase async system
+///
+/// ```ignore
+/// struct PathfindSystem;
+///
+/// impl System for PathfindSystem {
+///     fn run(&self, access: QueryAccess<'_>) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+///         Box::pin(async move {
+///             // Phase 1: extract data (guards scoped)
+///             let graph = access.scope(|world| {
+///                 let nav = world.read::<NavMesh>();
+///                 nav.iter().next().map(|(_, n)| n.clone())
+///             });
+///
+///             // Safe to .await — no guards held
+///             let mut handle = access.compute().spawn(Priority::Low, async move {
+///                 compute_paths(graph)
+///             });
+///             let paths = (&mut handle).await;
+///
+///             // Phase 2: apply results
+///             if let Some(paths) = paths {
+///                 access.scope(|world| {
+///                     let mut agents = world.write::<Agent>();
+///                     for (idx, agent) in agents.iter_mut() {
+///                         if let Some(path) = paths.get(&idx) {
+///                             agent.path = path.clone();
+///                         }
+///                     }
+///                 });
+///             }
+///         })
+///     }
+///
+///     fn access(&self) -> Access {
+///         let mut a = Access::new();
+///         a.add_read::<NavMesh>();
+///         a.add_write::<Agent>();
+///         a
+///     }
+/// }
+/// ```
 pub trait System: Send + Sync + 'static {
-    /// Execute the system with access to the world and compute pool.
-    fn run(&self, ctx: &SystemContext);
+    /// Execute the system with scoped access to the world.
+    ///
+    /// Use [`QueryAccess::scope`] to borrow components. Guards are
+    /// automatically dropped when the scope closure returns, making it
+    /// safe to `.await` between scopes.
+    fn run<'a>(&'a self, access: QueryAccess<'a>) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
     /// Returns the access descriptor for this system.
     ///
-    /// Called once during [`Schedule::add`](crate::Schedule::add) and cached
-    /// internally. The scheduler uses this to detect conflicts between systems.
+    /// Called once during [`Schedule::add`](crate::Schedule::add) and cached.
+    /// The scheduler uses this to detect conflicts between systems.
     fn access(&self) -> Access;
+
+    /// Convenience: run the system synchronously to completion.
+    ///
+    /// Creates a [`QueryAccess`], calls [`run`](System::run), and polls
+    /// the returned future to completion. Drives the [`ComputePool`]
+    /// between polls so spawned compute tasks make progress.
+    ///
+    /// Useful for tests and one-off system invocations outside a schedule.
+    fn run_blocking(&self, world: &World, compute: &ComputePool) {
+        let access = QueryAccess::new(world, compute);
+        let future = self.run(access);
+        QueryAccess::poll_future_to_completion(future, compute);
+    }
 }
 
 /// Internal wrapper holding a registered system plus scheduler metadata.
@@ -100,13 +132,6 @@ pub(crate) struct StoredSystem {
     pub after: Vec<TypeId>,
     /// TypeIds of systems that must run after this one.
     pub before: Vec<TypeId>,
-}
-
-impl StoredSystem {
-    /// Executes the system function.
-    pub fn run(&self, ctx: &SystemContext) {
-        self.system.run(ctx);
-    }
 }
 
 /// A reference returned by [`Schedule::add`](crate::Schedule::add) to
@@ -128,13 +153,19 @@ impl<'a> SystemRef<'a> {
     }
 
     /// Declares that this system must run after `S`.
-    pub fn after<S: System>(self) -> Self {
+    ///
+    /// `S` can be any registered system type.
+    /// Panics at [`Schedule::build`](crate::Schedule::build) if `S` is not registered.
+    pub fn after<S: 'static>(self) -> Self {
         self.stored.after.push(TypeId::of::<S>());
         self
     }
 
     /// Declares that this system must run before `S`.
-    pub fn before<S: System>(self) -> Self {
+    ///
+    /// `S` can be any registered system type.
+    /// Panics at [`Schedule::build`](crate::Schedule::build) if `S` is not registered.
+    pub fn before<S: 'static>(self) -> Self {
         self.stored.before.push(TypeId::of::<S>());
         self
     }
@@ -149,7 +180,12 @@ mod tests {
 
     struct EmptySystem;
     impl System for EmptySystem {
-        fn run(&self, _ctx: &SystemContext) {}
+        fn run<'a>(
+            &'a self,
+            _access: QueryAccess<'a>,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+            Box::pin(async {})
+        }
         fn access(&self) -> Access {
             Access::new()
         }
@@ -157,7 +193,12 @@ mod tests {
 
     struct ReadSystem;
     impl System for ReadSystem {
-        fn run(&self, _ctx: &SystemContext) {}
+        fn run<'a>(
+            &'a self,
+            _access: QueryAccess<'a>,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+            Box::pin(async {})
+        }
         fn access(&self) -> Access {
             let mut a = Access::new();
             a.add_read::<CompA>();
@@ -169,13 +210,14 @@ mod tests {
     #[test]
     fn stored_system_captures_type_info() {
         let sys = EmptySystem;
+        let access = sys.access();
         let stored = StoredSystem {
+            system: Box::new(sys),
             type_id: TypeId::of::<EmptySystem>(),
             type_name: std::any::type_name::<EmptySystem>(),
-            access: sys.access(),
+            access,
             after: Vec::new(),
             before: Vec::new(),
-            system: Box::new(sys),
         };
         assert_eq!(stored.type_id, TypeId::of::<EmptySystem>());
         assert!(stored.type_name.contains("EmptySystem"));
@@ -184,13 +226,14 @@ mod tests {
     #[test]
     fn system_ref_collects_ordering() {
         let sys = EmptySystem;
+        let access = sys.access();
         let mut stored = StoredSystem {
+            system: Box::new(sys),
             type_id: TypeId::of::<EmptySystem>(),
             type_name: std::any::type_name::<EmptySystem>(),
-            access: sys.access(),
+            access,
             after: Vec::new(),
             before: Vec::new(),
-            system: Box::new(sys),
         };
         SystemRef::new(&mut stored).after::<ReadSystem>();
         assert_eq!(stored.after.len(), 1);
@@ -204,13 +247,18 @@ mod tests {
     }
 
     #[test]
-    fn system_runs() {
+    fn system_runs_blocking() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         struct FlagSystem(std::sync::Arc<AtomicBool>);
         impl System for FlagSystem {
-            fn run(&self, _ctx: &SystemContext) {
-                self.0.store(true, Ordering::Relaxed);
+            fn run<'a>(
+                &'a self,
+                _access: QueryAccess<'a>,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+                Box::pin(async move {
+                    self.0.store(true, Ordering::Relaxed);
+                })
             }
             fn access(&self) -> Access {
                 Access::new()
@@ -221,8 +269,37 @@ mod tests {
         let sys = FlagSystem(flag.clone());
         let world = World::new();
         let compute = ComputePool::new();
-        let ctx = SystemContext::new(&world, &compute);
-        sys.run(&ctx);
+        sys.run_blocking(&world, &compute);
         assert!(flag.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn run_blocking_drives_compute() {
+        use crate::Priority;
+
+        struct ComputeSystem(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
+        impl System for ComputeSystem {
+            fn run<'a>(
+                &'a self,
+                access: QueryAccess<'a>,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+                let slot = self.0.clone();
+                Box::pin(async move {
+                    let mut handle = access.compute().spawn(Priority::Low, async { 99u32 });
+                    let result = (&mut handle).await;
+                    *slot.lock().unwrap() = result;
+                })
+            }
+            fn access(&self) -> Access {
+                Access::new()
+            }
+        }
+
+        let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let sys = ComputeSystem(result.clone());
+        let world = World::new();
+        let compute = ComputePool::new();
+        sys.run_blocking(&world, &compute);
+        assert_eq!(*result.lock().unwrap(), Some(99));
     }
 }

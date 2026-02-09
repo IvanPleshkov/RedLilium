@@ -10,12 +10,13 @@
 //! - [`Read`] / [`Write`] — Type aliases for query access
 //! - [`ContainsChecker`] — Filter for `With<T>` / `Without<T>` queries
 //!
-//! ## Scheduling
+//! ## Systems & Scheduling
 //!
+//! - [`System`] — Async system trait with compile-time borrow safety
+//! - [`QueryAccess`] — Token for scoped component access within systems
 //! - [`Schedule`] — System registration, dependency resolution, and execution
 //! - [`ThreadPool`] — Scoped thread pool for parallel system execution
 //! - [`Access`] — Component/resource access descriptors for conflict detection
-//! - [`System`] — Trait for system functions
 //!
 //! ## Async Compute
 //!
@@ -34,6 +35,7 @@ mod entity;
 mod events;
 mod priority;
 mod query;
+pub mod query_access;
 mod resource;
 mod schedule;
 mod sparse_set;
@@ -52,11 +54,12 @@ pub use entity::Entity;
 pub use events::{EventUpdateSystem, Events};
 pub use priority::Priority;
 pub use query::{AddedFilter, ChangedFilter, ContainsChecker, Read, With, Without, Write};
+pub use query_access::QueryAccess;
 pub use resource::{ResourceRef, ResourceRefMut};
 pub use schedule::Schedule;
 pub use sparse_set::{Ref, RefMut, SparseSetInner};
 pub use string_table::{StringId, StringTable};
-pub use system::{System, SystemContext, SystemRef};
+pub use system::{System, SystemRef};
 pub use thread_pool::ThreadPool;
 pub use world::World;
 pub use yield_now::yield_now;

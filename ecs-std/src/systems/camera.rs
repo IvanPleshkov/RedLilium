@@ -1,4 +1,7 @@
-use redlilium_ecs::{Access, System, SystemContext, World};
+use std::future::Future;
+use std::pin::Pin;
+
+use redlilium_ecs::{Access, QueryAccess, System, World};
 
 use crate::components::{Camera, GlobalTransform};
 
@@ -14,8 +17,12 @@ use crate::components::{Camera, GlobalTransform};
 pub struct UpdateCameraMatrices;
 
 impl System for UpdateCameraMatrices {
-    fn run(&self, ctx: &SystemContext) {
-        update_camera_matrices(ctx.world());
+    fn run<'a>(&'a self, access: QueryAccess<'a>) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            access.scope(|world| {
+                update_camera_matrices(world);
+            });
+        })
     }
 
     fn access(&self) -> Access {

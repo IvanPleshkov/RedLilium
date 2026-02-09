@@ -1,6 +1,6 @@
 use glam::{Mat4, Quat, Vec3};
 use redlilium_core::scene::{CameraProjection, NodeTransform, Scene, SceneCamera, SceneNode};
-use redlilium_ecs::{ComputePool, Schedule, StringTable, System, SystemContext, ThreadPool, World};
+use redlilium_ecs::{ComputePool, Schedule, StringTable, System, ThreadPool, World};
 
 use ecs_std::components::*;
 use ecs_std::systems::*;
@@ -220,10 +220,9 @@ fn visibility_filtering_with_systems() {
         entities.push(e);
     }
 
-    // Run transform system
+    // Run transform system via run_blocking
     let compute = ComputePool::new();
-    let ctx = SystemContext::new(&world, &compute);
-    UpdateGlobalTransforms.run(&ctx);
+    UpdateGlobalTransforms.run_blocking(&world, &compute);
 
     // Query visible entities (the rendering pattern)
     let globals = world.read::<GlobalTransform>();
@@ -319,10 +318,9 @@ fn light_direction_from_transform() {
         world.insert(e, Name::new(strings.intern(&format!("PointLight_{i}"))));
     }
 
-    // Run transform system
+    // Run transform system via run_blocking
     let compute = ComputePool::new();
-    let ctx = SystemContext::new(&world, &compute);
-    UpdateGlobalTransforms.run(&ctx);
+    UpdateGlobalTransforms.run_blocking(&world, &compute);
 
     // Query directional light direction from its global transform
     let globals = world.read::<GlobalTransform>();

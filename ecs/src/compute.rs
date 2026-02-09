@@ -103,6 +103,32 @@ impl<T> TaskHandle<T> {
     }
 }
 
+impl<T> Future for TaskHandle<T> {
+    type Output = Option<T>;
+
+    /// Polls the task for completion.
+    ///
+    /// Returns `Poll::Ready(Some(T))` if the task has completed,
+    /// `Poll::Ready(None)` if the task was cancelled or the sender dropped,
+    /// `Poll::Pending` if the task is still running.
+    ///
+    /// Designed for manual polling with a noop waker — the scheduler
+    /// drives progress via [`ComputePool::tick_all`] between polls.
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<T>> {
+        match self.receiver.try_recv() {
+            Ok(val) => Poll::Ready(Some(val)),
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                if self.state.cancelled.load(Ordering::Acquire) {
+                    Poll::Ready(None)
+                } else {
+                    Poll::Pending
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Poll::Ready(None),
+        }
+    }
+}
+
 /// A pending async compute task stored in the pool.
 struct PendingTask {
     priority: Priority,
@@ -270,7 +296,7 @@ impl Default for ComputePool {
 }
 
 /// Creates a no-op waker for manual polling.
-fn noop_waker() -> Waker {
+pub(crate) fn noop_waker() -> Waker {
     fn noop(_: *const ()) {}
     fn clone(p: *const ()) -> RawWaker {
         RawWaker::new(p, &VTABLE)
@@ -440,5 +466,70 @@ mod tests {
         // Cancelling after completion is fine
         handle.cancel();
         assert_eq!(handle.try_recv(), Some(10));
+    }
+
+    #[test]
+    fn task_handle_future_pending_then_ready() {
+        let pool = ComputePool::new();
+        let mut handle = pool.spawn(Priority::Low, async { 42u32 });
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Before ticking: should be Pending
+        assert!(Pin::new(&mut handle).poll(&mut cx).is_pending());
+
+        // Tick the compute pool
+        pool.tick();
+
+        // After ticking: should be Ready
+        match Pin::new(&mut handle).poll(&mut cx) {
+            Poll::Ready(Some(42)) => {}
+            other => panic!("Expected Ready(Some(42)), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn task_handle_future_cancelled() {
+        let pool = ComputePool::new();
+        let mut handle = pool.spawn(Priority::Low, async {
+            yield_now().await;
+            42u32
+        });
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        pool.tick(); // first poll: yields
+        handle.cancel();
+
+        // Next poll should return Ready(None) due to cancellation
+        match Pin::new(&mut handle).poll(&mut cx) {
+            Poll::Ready(None) => {}
+            other => panic!("Expected Ready(None), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn task_handle_future_with_yield() {
+        let pool = ComputePool::new();
+        let mut handle = pool.spawn(Priority::Low, async {
+            yield_now().await;
+            99u32
+        });
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // First tick: task yields
+        pool.tick();
+        assert!(Pin::new(&mut handle).poll(&mut cx).is_pending());
+
+        // Second tick: task completes
+        pool.tick();
+        match Pin::new(&mut handle).poll(&mut cx) {
+            Poll::Ready(Some(99)) => {}
+            other => panic!("Expected Ready(Some(99)), got {other:?}"),
+        }
     }
 }
