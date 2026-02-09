@@ -1,8 +1,4 @@
-use std::future::Future;
-use std::pin::Pin;
-use std::task::Poll;
-
-use crate::compute::{ComputePool, noop_waker};
+use crate::compute::ComputePool;
 use crate::world::World;
 
 /// A token granting scoped access to the [`World`] for borrowing components.
@@ -21,7 +17,7 @@ use crate::world::World;
 /// # Example
 ///
 /// ```ignore
-/// Box::pin(async move {
+/// SystemFuture::new(async move {
 ///     // Phase 1: read data (guards scoped)
 ///     let sum = access.scope(|world| {
 ///         let positions = world.read::<Position>();
@@ -74,27 +70,6 @@ impl<'a> QueryAccess<'a> {
     /// Returns the current world tick for change detection.
     pub fn current_tick(&self) -> u64 {
         self.world.current_tick()
-    }
-
-    /// Runs an async system future to completion by polling with a noop waker.
-    ///
-    /// Drives the [`ComputePool`] between polls so that spawned compute tasks
-    /// make progress. Used by [`System::run_blocking`](crate::System::run_blocking).
-    pub(crate) fn poll_future_to_completion(
-        mut future: Pin<Box<dyn Future<Output = ()> + Send + '_>>,
-        compute: &ComputePool,
-    ) {
-        let waker = noop_waker();
-        let mut cx = std::task::Context::from_waker(&waker);
-        loop {
-            match future.as_mut().poll(&mut cx) {
-                Poll::Ready(()) => break,
-                Poll::Pending => {
-                    compute.tick_all();
-                    std::thread::yield_now();
-                }
-            }
-        }
     }
 }
 

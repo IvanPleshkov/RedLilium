@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{Data, DeriveInput, Fields, Type, parse_macro_input};
+use syn::{Data, DeriveInput, Fields, ImplItem, ItemImpl, ReturnType, Type, parse_macro_input};
 
 /// Derive the `Component` trait for a Pod struct, providing runtime reflection.
 ///
@@ -195,5 +195,163 @@ fn extract_last_segment(ty: &Type) -> String {
             }
         }
         _ => String::new(),
+    }
+}
+
+/// Generates an `impl System for ...` block from a simplified async impl.
+///
+/// # Usage
+///
+/// ```ignore
+/// #[system]
+/// impl UpdateGlobalTransforms {
+///     async fn run(&self, access: QueryAccess<'_>) {
+///         access.scope(|world| update_global_transforms(world));
+///     }
+///
+///     fn access(&self) -> Access {
+///         let mut access = Access::new();
+///         access.add_read::<Transform>();
+///         access.add_write::<GlobalTransform>();
+///         access
+///     }
+/// }
+/// ```
+///
+/// # With return value
+///
+/// When `run` returns a non-`()` type, the result is automatically stored as
+/// a [`SystemResult<Self, T>`](redlilium_ecs::SystemResult) resource in the World.
+///
+/// ```ignore
+/// #[system]
+/// impl PhysicsSystem {
+///     async fn run(&self, access: QueryAccess<'_>) -> PhysicsResult {
+///         // ... compute ...
+///         PhysicsResult { collision_count: 42 }
+///     }
+///     fn access(&self) -> Access { ... }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn system(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as ItemImpl);
+
+    // Extract the struct type name
+    let self_ty = &input.self_ty;
+
+    // Find the `run` and `access` methods
+    let mut run_method = None;
+    let mut access_method = None;
+    let mut other_items = Vec::new();
+
+    for item in &input.items {
+        match item {
+            ImplItem::Fn(method) => {
+                let name = method.sig.ident.to_string();
+                if name == "run" {
+                    run_method = Some(method);
+                } else if name == "access" {
+                    access_method = Some(method);
+                } else {
+                    other_items.push(item);
+                }
+            }
+            other => other_items.push(other),
+        }
+    }
+
+    let run = match run_method {
+        Some(m) => m,
+        None => {
+            return syn::Error::new_spanned(
+                self_ty,
+                "#[system] impl must contain an `async fn run`",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+
+    let access = match access_method {
+        Some(m) => m,
+        None => {
+            return syn::Error::new_spanned(self_ty, "#[system] impl must contain an `fn access`")
+                .to_compile_error()
+                .into();
+        }
+    };
+
+    // Extract the run body
+    let run_body = &run.block;
+
+    // Check return type: () or some T
+    let has_return_type = matches!(&run.sig.output, ReturnType::Type(_, ty) if !is_unit_type(ty));
+
+    let (run_impl, access_extra) = if has_return_type {
+        let ret_ty = match &run.sig.output {
+            ReturnType::Type(_, ty) => ty,
+            _ => unreachable!(),
+        };
+        // Wrap body to store result as SystemResult resource
+        (
+            quote! {
+                fn run<'a>(&'a self, access: redlilium_ecs::QueryAccess<'a>) -> redlilium_ecs::SystemFuture<'a> {
+                    redlilium_ecs::SystemFuture::new(async move {
+                        let __system_result: #ret_ty = async #run_body.await;
+                        access.scope(|world| {
+                            world.insert_resource(
+                                redlilium_ecs::SystemResult::<#self_ty, #ret_ty>::new(__system_result)
+                            );
+                        });
+                    })
+                }
+            },
+            quote! {
+                __access.add_resource_write::<redlilium_ecs::SystemResult<#self_ty, #ret_ty>>();
+            },
+        )
+    } else {
+        (
+            quote! {
+                fn run<'a>(&'a self, access: redlilium_ecs::QueryAccess<'a>) -> redlilium_ecs::SystemFuture<'a> {
+                    redlilium_ecs::SystemFuture::new(async move #run_body)
+                }
+            },
+            quote! {},
+        )
+    };
+
+    // Extract the access body, injecting extra resource access if needed
+    let access_body = &access.block;
+    let access_impl = if has_return_type {
+        quote! {
+            fn access(&self) -> redlilium_ecs::Access {
+                let mut __access: redlilium_ecs::Access = (|| #access_body)();
+                #access_extra
+                __access
+            }
+        }
+    } else {
+        quote! {
+            fn access(&self) -> redlilium_ecs::Access #access_body
+        }
+    };
+
+    let expanded = quote! {
+        impl redlilium_ecs::System for #self_ty {
+            #run_impl
+            #access_impl
+        }
+    };
+
+    expanded.into()
+}
+
+/// Returns true if the type is `()`.
+fn is_unit_type(ty: &Type) -> bool {
+    match ty {
+        Type::Tuple(tuple) => tuple.elems.is_empty(),
+        _ => false,
     }
 }

@@ -1,17 +1,18 @@
 use std::any::TypeId;
-use std::future::Future;
+use std::marker::PhantomData;
 use std::pin::Pin;
 
 use crate::access::Access;
-use crate::compute::ComputePool;
+use crate::compute::{ComputePool, noop_waker};
 use crate::query_access::QueryAccess;
+use crate::system_future::SystemFuture;
+
 use crate::world::World;
 
 /// A system that processes entities and components in the world.
 ///
 /// All systems are async. Systems that don't need `.await` simply fetch once
-/// inside a [`scope()`](QueryAccess::scope) call and return. The `Box::pin`
-/// overhead is negligible compared to actual system work.
+/// inside a [`scope()`](QueryAccess::scope) call and return.
 ///
 /// # Compile-time safety
 ///
@@ -25,8 +26,8 @@ use crate::world::World;
 /// struct MovementSystem;
 ///
 /// impl System for MovementSystem {
-///     fn run(&self, access: QueryAccess<'_>) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-///         Box::pin(async move {
+///     fn run(&self, access: QueryAccess<'_>) -> SystemFuture<'_> {
+///         SystemFuture::new(async move {
 ///             access.scope(|world| {
 ///                 let mut positions = world.write::<Position>();
 ///                 let velocities = world.read::<Velocity>();
@@ -54,8 +55,8 @@ use crate::world::World;
 /// struct PathfindSystem;
 ///
 /// impl System for PathfindSystem {
-///     fn run(&self, access: QueryAccess<'_>) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-///         Box::pin(async move {
+///     fn run(&self, access: QueryAccess<'_>) -> SystemFuture<'_> {
+///         SystemFuture::new(async move {
 ///             // Phase 1: extract data (guards scoped)
 ///             let graph = access.scope(|world| {
 ///                 let nav = world.read::<NavMesh>();
@@ -96,25 +97,80 @@ pub trait System: Send + Sync + 'static {
     /// Use [`QueryAccess::scope`] to borrow components. Guards are
     /// automatically dropped when the scope closure returns, making it
     /// safe to `.await` between scopes.
-    fn run<'a>(&'a self, access: QueryAccess<'a>) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+    fn run<'a>(&'a self, access: QueryAccess<'a>) -> SystemFuture<'a>;
 
     /// Returns the access descriptor for this system.
     ///
     /// Called once during [`Schedule::add`](crate::Schedule::add) and cached.
     /// The scheduler uses this to detect conflicts between systems.
     fn access(&self) -> Access;
+}
 
-    /// Convenience: run the system synchronously to completion.
-    ///
-    /// Creates a [`QueryAccess`], calls [`run`](System::run), and polls
-    /// the returned future to completion. Drives the [`ComputePool`]
-    /// between polls so spawned compute tasks make progress.
-    ///
-    /// Useful for tests and one-off system invocations outside a schedule.
-    fn run_blocking(&self, world: &World, compute: &ComputePool) {
-        let access = QueryAccess::new(world, compute);
-        let future = self.run(access);
-        QueryAccess::poll_future_to_completion(future, compute);
+/// Runs a system synchronously to completion.
+///
+/// Creates a [`QueryAccess`], calls [`System::run`], and polls
+/// the returned future to completion. Drives the [`ComputePool`]
+/// between polls so spawned compute tasks make progress.
+///
+/// Useful for tests and one-off system invocations outside a schedule.
+pub fn run_system_blocking(system: &dyn System, world: &World, compute: &ComputePool) {
+    let access = QueryAccess::new(world, compute);
+    let future = system.run(access);
+    poll_system_future_to_completion(future, compute);
+}
+
+/// Polls a system future to completion, driving compute tasks between polls.
+pub(crate) fn poll_system_future_to_completion(future: SystemFuture<'_>, compute: &ComputePool) {
+    let mut future = future;
+    // Safety: future is on the stack and won't be moved after this point.
+    let mut future = unsafe { Pin::new_unchecked(&mut future) };
+    let waker = noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+    loop {
+        match future.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(()) => break,
+            std::task::Poll::Pending => {
+                compute.tick_all();
+                std::thread::yield_now();
+            }
+        }
+    }
+}
+
+/// Typed wrapper for system output, stored as a World resource.
+///
+/// Keyed by the system type `S` for uniqueness — multiple systems can
+/// produce different `T` values without collision.
+///
+/// # Example
+///
+/// ```ignore
+/// // Producer system returns PhysicsResult:
+/// #[system]
+/// impl PhysicsSystem {
+///     async fn run(&self, access: QueryAccess<'_>) -> PhysicsResult { ... }
+///     fn access(&self) -> Access { ... }
+/// }
+///
+/// // Consumer system reads the result:
+/// access.scope(|world| {
+///     let result = world.resource::<SystemResult<PhysicsSystem, PhysicsResult>>();
+///     // use result.value
+/// });
+/// ```
+pub struct SystemResult<S: 'static, T: Send + Sync + 'static> {
+    /// The system's output value.
+    pub value: T,
+    _marker: PhantomData<fn() -> S>,
+}
+
+impl<S: 'static, T: Send + Sync + 'static> SystemResult<S, T> {
+    /// Creates a new system result.
+    pub fn new(value: T) -> Self {
+        Self {
+            value,
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -180,11 +236,8 @@ mod tests {
 
     struct EmptySystem;
     impl System for EmptySystem {
-        fn run<'a>(
-            &'a self,
-            _access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async {})
+        fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+            SystemFuture::new(async {})
         }
         fn access(&self) -> Access {
             Access::new()
@@ -193,11 +246,8 @@ mod tests {
 
     struct ReadSystem;
     impl System for ReadSystem {
-        fn run<'a>(
-            &'a self,
-            _access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async {})
+        fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+            SystemFuture::new(async {})
         }
         fn access(&self) -> Access {
             let mut a = Access::new();
@@ -252,11 +302,8 @@ mod tests {
 
         struct FlagSystem(std::sync::Arc<AtomicBool>);
         impl System for FlagSystem {
-            fn run<'a>(
-                &'a self,
-                _access: QueryAccess<'a>,
-            ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-                Box::pin(async move {
+            fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+                SystemFuture::new(async move {
                     self.0.store(true, Ordering::Relaxed);
                 })
             }
@@ -269,7 +316,7 @@ mod tests {
         let sys = FlagSystem(flag.clone());
         let world = World::new();
         let compute = ComputePool::new();
-        sys.run_blocking(&world, &compute);
+        run_system_blocking(&sys, &world, &compute);
         assert!(flag.load(Ordering::Relaxed));
     }
 
@@ -279,12 +326,9 @@ mod tests {
 
         struct ComputeSystem(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
         impl System for ComputeSystem {
-            fn run<'a>(
-                &'a self,
-                access: QueryAccess<'a>,
-            ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+            fn run<'a>(&'a self, access: QueryAccess<'a>) -> SystemFuture<'a> {
                 let slot = self.0.clone();
-                Box::pin(async move {
+                SystemFuture::new(async move {
                     let mut handle = access.compute().spawn(Priority::Low, async { 99u32 });
                     let result = (&mut handle).await;
                     *slot.lock().unwrap() = result;
@@ -299,7 +343,7 @@ mod tests {
         let sys = ComputeSystem(result.clone());
         let world = World::new();
         let compute = ComputePool::new();
-        sys.run_blocking(&world, &compute);
+        run_system_blocking(&sys, &world, &compute);
         assert_eq!(*result.lock().unwrap(), Some(99));
     }
 }

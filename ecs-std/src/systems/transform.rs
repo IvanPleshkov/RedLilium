@@ -1,8 +1,5 @@
-use std::future::Future;
-use std::pin::Pin;
-
 use glam::Mat4;
-use redlilium_ecs::{Access, QueryAccess, System, World};
+use redlilium_ecs::{Access, World};
 
 use crate::components::{Children, GlobalTransform, Parent, Transform};
 
@@ -18,13 +15,12 @@ use crate::components::{Children, GlobalTransform, Parent, Transform};
 /// - Writes: `GlobalTransform`
 pub struct UpdateGlobalTransforms;
 
-impl System for UpdateGlobalTransforms {
-    fn run<'a>(&'a self, access: QueryAccess<'a>) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        Box::pin(async move {
-            access.scope(|world| {
-                update_global_transforms(world);
-            });
-        })
+#[redlilium_ecs::system]
+impl UpdateGlobalTransforms {
+    async fn run(&self, access: QueryAccess<'_>) {
+        access.scope(|world| {
+            update_global_transforms(world);
+        });
     }
 
     fn access(&self) -> Access {

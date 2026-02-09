@@ -1,5 +1,4 @@
-use std::future::Future;
-use std::pin::Pin;
+use crate::system_future::SystemFuture;
 
 /// Double-buffered event queue for typed inter-system communication.
 ///
@@ -117,11 +116,8 @@ impl<T: Send + Sync + 'static> Default for EventUpdateSystem<T> {
 }
 
 impl<T: Send + Sync + 'static> crate::system::System for EventUpdateSystem<T> {
-    fn run<'a>(
-        &'a self,
-        access: crate::query_access::QueryAccess<'a>,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        Box::pin(async move {
+    fn run<'a>(&'a self, access: crate::query_access::QueryAccess<'a>) -> SystemFuture<'a> {
+        SystemFuture::new(async move {
             access.scope(|world| {
                 let mut events = world.resource_mut::<Events<T>>();
                 events.update();
@@ -232,10 +228,10 @@ mod tests {
 
         // Run update system
         use crate::compute::ComputePool;
-        use crate::system::System;
+        use crate::system::run_system_blocking;
         let update = EventUpdateSystem::<TestEvent>::new();
         let compute = ComputePool::new();
-        update.run_blocking(&world, &compute);
+        run_system_blocking(&update, &world, &compute);
 
         // Event should be in previous now
         let events = world.resource::<Events<TestEvent>>();

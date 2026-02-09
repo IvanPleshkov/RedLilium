@@ -1,11 +1,10 @@
 use std::any::TypeId;
 use std::collections::VecDeque;
-use std::future::Future;
-use std::pin::Pin;
 
-use crate::compute::{ComputePool, noop_waker};
+use crate::compute::ComputePool;
 use crate::query_access::QueryAccess;
-use crate::system::{StoredSystem, System, SystemRef};
+use crate::system::{StoredSystem, System, SystemRef, poll_system_future_to_completion};
+use crate::system_future::SystemFuture;
 use crate::world::World;
 
 /// A collection of systems with dependency resolution and execution ordering.
@@ -218,14 +217,11 @@ impl Schedule {
     pub fn run(&self, world: &World, compute: &ComputePool) {
         assert!(self.built, "Schedule::build() must be called before run()");
         for stage in &self.execution_order {
-            let mut futures: Vec<Pin<Box<dyn Future<Output = ()> + Send + '_>>> = stage
-                .iter()
-                .map(|&idx| {
-                    let access = QueryAccess::new(world, compute);
-                    self.systems[idx].system.run(access)
-                })
-                .collect();
-            poll_async_futures(&mut futures, compute);
+            for &idx in stage {
+                let access = QueryAccess::new(world, compute);
+                let future = self.systems[idx].system.run(access);
+                poll_system_future_to_completion(future, compute);
+            }
         }
     }
 
@@ -249,7 +245,7 @@ impl Schedule {
             "Schedule::build() must be called before run_parallel()"
         );
         for stage in &self.execution_order {
-            let futures: Vec<Pin<Box<dyn Future<Output = ()> + Send + '_>>> = stage
+            let futures: Vec<SystemFuture<'_>> = stage
                 .iter()
                 .map(|&idx| {
                     let access = QueryAccess::new(world, compute);
@@ -258,26 +254,17 @@ impl Schedule {
                 .collect();
 
             if futures.len() <= 1 {
-                let mut futures = futures;
-                poll_async_futures(&mut futures, compute);
+                for future in futures {
+                    poll_system_future_to_completion(future, compute);
+                }
             } else {
                 // Move each future to its own thread for parallel execution.
                 // Futures are Send, and pool.scope() guarantees all threads
                 // join before returning (satisfying the borrow lifetimes).
                 pool.scope(|s| {
-                    for mut future in futures {
+                    for future in futures {
                         s.spawn(move || {
-                            let waker = noop_waker();
-                            let mut cx = std::task::Context::from_waker(&waker);
-                            loop {
-                                match future.as_mut().poll(&mut cx) {
-                                    std::task::Poll::Ready(()) => break,
-                                    std::task::Poll::Pending => {
-                                        compute.tick_all();
-                                        std::thread::yield_now();
-                                    }
-                                }
-                            }
+                            poll_system_future_to_completion(future, compute);
                         });
                     }
                 });
@@ -319,38 +306,6 @@ impl Default for Schedule {
     }
 }
 
-/// Polls async system futures to completion, driving compute tasks between polls.
-fn poll_async_futures(
-    futures: &mut Vec<Pin<Box<dyn Future<Output = ()> + Send + '_>>>,
-    compute: &ComputePool,
-) {
-    let waker = noop_waker();
-    let mut cx = std::task::Context::from_waker(&waker);
-
-    let mut remaining = futures.len();
-    let mut done = vec![false; futures.len()];
-
-    while remaining > 0 {
-        compute.tick_all();
-
-        let mut made_progress = false;
-        for (i, future) in futures.iter_mut().enumerate() {
-            if done[i] {
-                continue;
-            }
-            if future.as_mut().poll(&mut cx).is_ready() {
-                done[i] = true;
-                remaining -= 1;
-                made_progress = true;
-            }
-        }
-
-        if remaining > 0 && !made_progress {
-            std::thread::yield_now();
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,11 +327,8 @@ mod tests {
 
     struct CounterSystem(Arc<AtomicU32>);
     impl System for CounterSystem {
-        fn run<'a>(
-            &'a self,
-            _access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async move {
+        fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+            SystemFuture::new(async move {
                 self.0.fetch_add(1, Ordering::Relaxed);
             })
         }
@@ -388,11 +340,8 @@ mod tests {
     // Systems for ordering tests
     struct FirstSystem(Arc<Mutex<Vec<&'static str>>>);
     impl System for FirstSystem {
-        fn run<'a>(
-            &'a self,
-            _access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async move {
+        fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+            SystemFuture::new(async move {
                 self.0.lock().unwrap().push("first");
             })
         }
@@ -403,11 +352,8 @@ mod tests {
 
     struct SecondSystem(Arc<Mutex<Vec<&'static str>>>);
     impl System for SecondSystem {
-        fn run<'a>(
-            &'a self,
-            _access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async move {
+        fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+            SystemFuture::new(async move {
                 self.0.lock().unwrap().push("second");
             })
         }
@@ -419,11 +365,8 @@ mod tests {
     // Systems for conflict detection
     struct WritePosA;
     impl System for WritePosA {
-        fn run<'a>(
-            &'a self,
-            _access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async {})
+        fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+            SystemFuture::new(async {})
         }
         fn access(&self) -> Access {
             let mut a = Access::new();
@@ -434,11 +377,8 @@ mod tests {
 
     struct WritePosB;
     impl System for WritePosB {
-        fn run<'a>(
-            &'a self,
-            _access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async {})
+        fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+            SystemFuture::new(async {})
         }
         fn access(&self) -> Access {
             let mut a = Access::new();
@@ -449,11 +389,8 @@ mod tests {
 
     struct WriteVelA;
     impl System for WriteVelA {
-        fn run<'a>(
-            &'a self,
-            _access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async {})
+        fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+            SystemFuture::new(async {})
         }
         fn access(&self) -> Access {
             let mut a = Access::new();
@@ -464,11 +401,8 @@ mod tests {
 
     struct ReadPosA;
     impl System for ReadPosA {
-        fn run<'a>(
-            &'a self,
-            _access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async {})
+        fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+            SystemFuture::new(async {})
         }
         fn access(&self) -> Access {
             let mut a = Access::new();
@@ -479,11 +413,8 @@ mod tests {
 
     struct ReadPosB;
     impl System for ReadPosB {
-        fn run<'a>(
-            &'a self,
-            _access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async {})
+        fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+            SystemFuture::new(async {})
         }
         fn access(&self) -> Access {
             let mut a = Access::new();
@@ -495,11 +426,8 @@ mod tests {
     // Systems for registration order tiebreaker
     struct TiebreakFirst(Arc<Mutex<Vec<&'static str>>>);
     impl System for TiebreakFirst {
-        fn run<'a>(
-            &'a self,
-            _access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async move {
+        fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+            SystemFuture::new(async move {
                 self.0.lock().unwrap().push("first_registered");
             })
         }
@@ -512,11 +440,8 @@ mod tests {
 
     struct TiebreakSecond(Arc<Mutex<Vec<&'static str>>>);
     impl System for TiebreakSecond {
-        fn run<'a>(
-            &'a self,
-            _access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async move {
+        fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+            SystemFuture::new(async move {
                 self.0.lock().unwrap().push("second_registered");
             })
         }
@@ -530,11 +455,8 @@ mod tests {
     // Systems for cycle/missing tests
     struct CycleA;
     impl System for CycleA {
-        fn run<'a>(
-            &'a self,
-            _access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async {})
+        fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+            SystemFuture::new(async {})
         }
         fn access(&self) -> Access {
             Access::new()
@@ -543,11 +465,8 @@ mod tests {
 
     struct CycleB;
     impl System for CycleB {
-        fn run<'a>(
-            &'a self,
-            _access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async {})
+        fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+            SystemFuture::new(async {})
         }
         fn access(&self) -> Access {
             Access::new()
@@ -556,11 +475,8 @@ mod tests {
 
     struct MissingDepSystem;
     impl System for MissingDepSystem {
-        fn run<'a>(
-            &'a self,
-            _access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async {})
+        fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+            SystemFuture::new(async {})
         }
         fn access(&self) -> Access {
             Access::new()
@@ -569,11 +485,8 @@ mod tests {
 
     struct NonexistentSystem;
     impl System for NonexistentSystem {
-        fn run<'a>(
-            &'a self,
-            _access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async {})
+        fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+            SystemFuture::new(async {})
         }
         fn access(&self) -> Access {
             Access::new()
@@ -583,11 +496,8 @@ mod tests {
     // Systems for diamond dependency
     struct DiamondA(Arc<Mutex<Vec<&'static str>>>);
     impl System for DiamondA {
-        fn run<'a>(
-            &'a self,
-            _access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async move {
+        fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+            SystemFuture::new(async move {
                 self.0.lock().unwrap().push("A");
             })
         }
@@ -598,11 +508,8 @@ mod tests {
 
     struct DiamondB(Arc<Mutex<Vec<&'static str>>>);
     impl System for DiamondB {
-        fn run<'a>(
-            &'a self,
-            _access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async move {
+        fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+            SystemFuture::new(async move {
                 self.0.lock().unwrap().push("B");
             })
         }
@@ -613,11 +520,8 @@ mod tests {
 
     struct DiamondC(Arc<Mutex<Vec<&'static str>>>);
     impl System for DiamondC {
-        fn run<'a>(
-            &'a self,
-            _access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async move {
+        fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+            SystemFuture::new(async move {
                 self.0.lock().unwrap().push("C");
             })
         }
@@ -628,11 +532,8 @@ mod tests {
 
     struct DiamondD(Arc<Mutex<Vec<&'static str>>>);
     impl System for DiamondD {
-        fn run<'a>(
-            &'a self,
-            _access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async move {
+        fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+            SystemFuture::new(async move {
                 self.0.lock().unwrap().push("D");
             })
         }
@@ -644,11 +545,8 @@ mod tests {
     // System for world modification test
     struct MovementSystem;
     impl System for MovementSystem {
-        fn run<'a>(
-            &'a self,
-            access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async move {
+        fn run<'a>(&'a self, access: QueryAccess<'a>) -> SystemFuture<'a> {
+            SystemFuture::new(async move {
                 access.scope(|world| {
                     let mut positions = world.write::<Position>();
                     let velocities = world.read::<Velocity>();
@@ -671,11 +569,8 @@ mod tests {
     // Systems for execution_stages test
     struct PhysicsSystem;
     impl System for PhysicsSystem {
-        fn run<'a>(
-            &'a self,
-            _access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async {})
+        fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+            SystemFuture::new(async {})
         }
         fn access(&self) -> Access {
             let mut a = Access::new();
@@ -686,11 +581,8 @@ mod tests {
 
     struct AiSystem;
     impl System for AiSystem {
-        fn run<'a>(
-            &'a self,
-            _access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async {})
+        fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+            SystemFuture::new(async {})
         }
         fn access(&self) -> Access {
             let mut a = Access::new();
@@ -701,11 +593,8 @@ mod tests {
 
     struct RenderSystem;
     impl System for RenderSystem {
-        fn run<'a>(
-            &'a self,
-            _access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async {})
+        fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+            SystemFuture::new(async {})
         }
         fn access(&self) -> Access {
             let mut a = Access::new();
@@ -931,11 +820,8 @@ mod tests {
 
     struct FlagAsyncSystem(Arc<AtomicBool>);
     impl System for FlagAsyncSystem {
-        fn run<'a>(
-            &'a self,
-            _access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async move {
+        fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+            SystemFuture::new(async move {
                 self.0.store(true, Ordering::Relaxed);
             })
         }
@@ -961,12 +847,9 @@ mod tests {
 
     struct ComputeAsyncSystem(Arc<Mutex<Option<u32>>>);
     impl System for ComputeAsyncSystem {
-        fn run<'a>(
-            &'a self,
-            access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        fn run<'a>(&'a self, access: QueryAccess<'a>) -> SystemFuture<'a> {
             let result_slot = self.0.clone();
-            Box::pin(async move {
+            SystemFuture::new(async move {
                 let mut handle = access.compute().spawn(Priority::Low, async { 42u32 });
                 let result = (&mut handle).await;
                 *result_slot.lock().unwrap() = result;
@@ -994,11 +877,8 @@ mod tests {
 
     struct TwoPhaseSystem;
     impl System for TwoPhaseSystem {
-        fn run<'a>(
-            &'a self,
-            access: QueryAccess<'a>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async move {
+        fn run<'a>(&'a self, access: QueryAccess<'a>) -> SystemFuture<'a> {
+            SystemFuture::new(async move {
                 // Phase 1: read component data
                 let sum = access.scope(|world| {
                     let positions = world.read::<Position>();
@@ -1052,11 +932,8 @@ mod tests {
 
         struct SyncFirst(Arc<Mutex<Vec<&'static str>>>);
         impl System for SyncFirst {
-            fn run<'a>(
-                &'a self,
-                _access: QueryAccess<'a>,
-            ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-                Box::pin(async move {
+            fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+                SystemFuture::new(async move {
                     self.0.lock().unwrap().push("first");
                 })
             }
@@ -1067,11 +944,8 @@ mod tests {
 
         struct AsyncSecond(Arc<Mutex<Vec<&'static str>>>);
         impl System for AsyncSecond {
-            fn run<'a>(
-                &'a self,
-                _access: QueryAccess<'a>,
-            ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-                Box::pin(async move {
+            fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+                SystemFuture::new(async move {
                     self.0.lock().unwrap().push("second");
                 })
             }
@@ -1099,11 +973,8 @@ mod tests {
     fn conflict_detection_separates_stages_async() {
         struct AsyncWritePosA;
         impl System for AsyncWritePosA {
-            fn run<'a>(
-                &'a self,
-                _access: QueryAccess<'a>,
-            ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-                Box::pin(async {})
+            fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+                SystemFuture::new(async {})
             }
             fn access(&self) -> Access {
                 let mut a = Access::new();
@@ -1114,11 +985,8 @@ mod tests {
 
         struct AsyncWritePosB;
         impl System for AsyncWritePosB {
-            fn run<'a>(
-                &'a self,
-                _access: QueryAccess<'a>,
-            ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-                Box::pin(async {})
+            fn run<'a>(&'a self, _access: QueryAccess<'a>) -> SystemFuture<'a> {
+                SystemFuture::new(async {})
             }
             fn access(&self) -> Access {
                 let mut a = Access::new();
