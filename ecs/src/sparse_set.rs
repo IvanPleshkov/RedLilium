@@ -8,6 +8,14 @@ use std::sync::atomic::{AtomicI32, Ordering};
 /// Uses a sparse array (entity index → dense index) and a dense array
 /// (contiguous component data + entity mapping) for O(1) insert/remove/get
 /// and cache-friendly iteration.
+///
+/// ## Change Detection
+///
+/// Each component tracks the tick when it was added and last changed.
+/// Use [`insert_with_tick`](SparseSetInner::insert_with_tick) and
+/// [`get_mut_tracked`](SparseSetInner::get_mut_tracked) to enable tracking.
+/// Query with [`changed_since`](SparseSetInner::changed_since) and
+/// [`added_since`](SparseSetInner::added_since).
 pub struct SparseSetInner<T: 'static> {
     /// Sparse array: `entity_index -> dense_index`. `None` means the entity
     /// does not have this component.
@@ -16,6 +24,10 @@ pub struct SparseSetInner<T: 'static> {
     dense: Vec<T>,
     /// Entity indices corresponding to each dense element.
     entities: Vec<u32>,
+    /// Tick when each component was added (parallel to dense).
+    ticks_added: Vec<u64>,
+    /// Tick when each component was last changed (parallel to dense).
+    ticks_changed: Vec<u64>,
 }
 
 impl<T: 'static> SparseSetInner<T> {
@@ -25,12 +37,24 @@ impl<T: 'static> SparseSetInner<T> {
             sparse: Vec::new(),
             dense: Vec::new(),
             entities: Vec::new(),
+            ticks_added: Vec::new(),
+            ticks_changed: Vec::new(),
         }
     }
 
     /// Inserts a component for the given entity index.
     /// If the entity already has this component, the value is replaced.
+    /// Uses tick 0 for change tracking (untracked).
     pub fn insert(&mut self, entity_index: u32, value: T) {
+        self.insert_with_tick(entity_index, value, 0);
+    }
+
+    /// Inserts a component with change tracking at the given tick.
+    ///
+    /// If the entity already has this component, the value is replaced
+    /// and `ticks_changed` is updated. If it's a new insertion,
+    /// both `ticks_added` and `ticks_changed` are set to `tick`.
+    pub fn insert_with_tick(&mut self, entity_index: u32, value: T, tick: u64) {
         let idx = entity_index as usize;
 
         // Grow sparse array if needed
@@ -40,13 +64,17 @@ impl<T: 'static> SparseSetInner<T> {
 
         if let Some(dense_idx) = self.sparse[idx] {
             // Replace existing value
-            self.dense[dense_idx as usize] = value;
+            let di = dense_idx as usize;
+            self.dense[di] = value;
+            self.ticks_changed[di] = tick;
         } else {
             // Insert new value
             let dense_idx = self.dense.len() as u32;
             self.sparse[idx] = Some(dense_idx);
             self.dense.push(value);
             self.entities.push(entity_index);
+            self.ticks_added.push(tick);
+            self.ticks_changed.push(tick);
         }
     }
 
@@ -69,9 +97,13 @@ impl<T: 'static> SparseSetInner<T> {
             let swapped_entity = self.entities[last_dense];
             self.sparse[swapped_entity as usize] = Some(dense_idx as u32);
             self.entities[dense_idx] = swapped_entity;
+            self.ticks_added[dense_idx] = self.ticks_added[last_dense];
+            self.ticks_changed[dense_idx] = self.ticks_changed[last_dense];
         }
 
         self.entities.pop();
+        self.ticks_added.pop();
+        self.ticks_changed.pop();
         Some(self.dense.swap_remove(dense_idx))
     }
 
@@ -119,6 +151,45 @@ impl<T: 'static> SparseSetInner<T> {
     pub fn entities(&self) -> &[u32] {
         &self.entities
     }
+
+    // ---- Change detection ----
+
+    /// Returns a mutable reference and marks the component as changed at `tick`.
+    pub fn get_mut_tracked(&mut self, entity_index: u32, tick: u64) -> Option<&mut T> {
+        let idx = entity_index as usize;
+        let dense_idx = *self.sparse.get(idx)?.as_ref()? as usize;
+        self.ticks_changed[dense_idx] = tick;
+        Some(&mut self.dense[dense_idx])
+    }
+
+    /// Iterates with mutation, marking all accessed components as changed at `tick`.
+    pub fn iter_mut_tracked(&mut self, tick: u64) -> impl Iterator<Item = (u32, &mut T)> {
+        // Mark all as changed
+        for tc in self.ticks_changed.iter_mut() {
+            *tc = tick;
+        }
+        self.entities.iter().copied().zip(self.dense.iter_mut())
+    }
+
+    /// Returns true if the component was changed since (strictly after) `since_tick`.
+    pub fn changed_since(&self, entity_index: u32, since_tick: u64) -> bool {
+        let idx = entity_index as usize;
+        if let Some(Some(dense_idx)) = self.sparse.get(idx) {
+            self.ticks_changed[*dense_idx as usize] > since_tick
+        } else {
+            false
+        }
+    }
+
+    /// Returns true if the component was added since (strictly after) `since_tick`.
+    pub fn added_since(&self, entity_index: u32, since_tick: u64) -> bool {
+        let idx = entity_index as usize;
+        if let Some(Some(dense_idx)) = self.sparse.get(idx) {
+            self.ticks_added[*dense_idx as usize] > since_tick
+        } else {
+            false
+        }
+    }
 }
 
 impl<T: 'static> Default for SparseSetInner<T> {
@@ -130,6 +201,8 @@ impl<T: 'static> Default for SparseSetInner<T> {
 // Type-erased operation function signatures
 type RemoveFn = fn(&mut dyn Any, u32) -> bool;
 type ContainsFn = fn(&dyn Any, u32) -> bool;
+type ChangedSinceFn = fn(&dyn Any, u32, u64) -> bool;
+type AddedSinceFn = fn(&dyn Any, u32, u64) -> bool;
 
 /// A type-erased sparse set that stores components of a single type.
 ///
@@ -146,6 +219,10 @@ pub(crate) struct ComponentStorage {
     remove_fn: RemoveFn,
     /// Type-erased contains check.
     contains_fn: ContainsFn,
+    /// Type-erased changed_since check.
+    changed_since_fn: ChangedSinceFn,
+    /// Type-erased added_since check.
+    added_since_fn: AddedSinceFn,
 }
 
 // SAFETY: ComponentStorage uses AtomicI32 for borrow tracking and
@@ -168,6 +245,14 @@ impl ComponentStorage {
             contains_fn: |any, entity_index| {
                 let set = any.downcast_ref::<SparseSetInner<T>>().unwrap();
                 set.contains(entity_index)
+            },
+            changed_since_fn: |any, entity_index, since_tick| {
+                let set = any.downcast_ref::<SparseSetInner<T>>().unwrap();
+                set.changed_since(entity_index, since_tick)
+            },
+            added_since_fn: |any, entity_index, since_tick| {
+                let set = any.downcast_ref::<SparseSetInner<T>>().unwrap();
+                set.added_since(entity_index, since_tick)
             },
         }
     }
@@ -241,6 +326,16 @@ impl ComponentStorage {
     /// Checks if the entity has this component (type-erased).
     pub fn contains_untyped(&self, entity_index: u32) -> bool {
         (self.contains_fn)(self.inner.as_ref(), entity_index)
+    }
+
+    /// Checks if the component was changed since `since_tick` (type-erased).
+    pub fn changed_since_untyped(&self, entity_index: u32, since_tick: u64) -> bool {
+        (self.changed_since_fn)(self.inner.as_ref(), entity_index, since_tick)
+    }
+
+    /// Checks if the component was added since `since_tick` (type-erased).
+    pub fn added_since_untyped(&self, entity_index: u32, since_tick: u64) -> bool {
+        (self.added_since_fn)(self.inner.as_ref(), entity_index, since_tick)
     }
 }
 
@@ -475,5 +570,114 @@ mod tests {
         assert!(storage.contains_untyped(5));
         assert!(storage.remove_untyped(5));
         assert!(!storage.contains_untyped(5));
+    }
+
+    // ---- Change detection tests ----
+
+    #[test]
+    fn insert_with_tick_tracks_added() {
+        let mut set = SparseSetInner::<u32>::new();
+        set.insert_with_tick(5, 42, 10);
+        assert!(set.added_since(5, 0));
+        assert!(set.added_since(5, 9));
+        assert!(!set.added_since(5, 10)); // not strictly after
+        assert!(!set.added_since(5, 11));
+    }
+
+    #[test]
+    fn insert_with_tick_tracks_changed() {
+        let mut set = SparseSetInner::<u32>::new();
+        set.insert_with_tick(5, 42, 10);
+        assert!(set.changed_since(5, 0));
+        assert!(set.changed_since(5, 9));
+        assert!(!set.changed_since(5, 10));
+    }
+
+    #[test]
+    fn replace_updates_changed_tick() {
+        let mut set = SparseSetInner::<u32>::new();
+        set.insert_with_tick(5, 42, 10);
+        set.insert_with_tick(5, 99, 20); // replace
+
+        // Added tick stays at 10
+        assert!(set.added_since(5, 9));
+        assert!(!set.added_since(5, 10));
+
+        // Changed tick is now 20
+        assert!(set.changed_since(5, 19));
+        assert!(!set.changed_since(5, 20));
+    }
+
+    #[test]
+    fn get_mut_tracked_marks_changed() {
+        let mut set = SparseSetInner::<u32>::new();
+        set.insert_with_tick(5, 42, 10);
+
+        *set.get_mut_tracked(5, 25).unwrap() = 99;
+        assert_eq!(set.get(5), Some(&99));
+        assert!(set.changed_since(5, 24));
+        assert!(!set.changed_since(5, 25));
+    }
+
+    #[test]
+    fn iter_mut_tracked_marks_all_changed() {
+        let mut set = SparseSetInner::<u32>::new();
+        set.insert_with_tick(0, 10, 1);
+        set.insert_with_tick(1, 20, 2);
+        set.insert_with_tick(2, 30, 3);
+
+        for (_, val) in set.iter_mut_tracked(50) {
+            *val += 1;
+        }
+
+        assert!(set.changed_since(0, 49));
+        assert!(set.changed_since(1, 49));
+        assert!(set.changed_since(2, 49));
+        assert!(!set.changed_since(0, 50));
+    }
+
+    #[test]
+    fn untracked_insert_uses_tick_zero() {
+        let mut set = SparseSetInner::<u32>::new();
+        set.insert(5, 42); // tick = 0
+        assert!(!set.added_since(5, 0));
+        assert!(!set.changed_since(5, 0));
+    }
+
+    #[test]
+    fn remove_maintains_tick_arrays() {
+        let mut set = SparseSetInner::<u32>::new();
+        set.insert_with_tick(0, 10, 1);
+        set.insert_with_tick(1, 20, 5);
+        set.insert_with_tick(2, 30, 10);
+
+        // Remove entity 0 — entity 2 swaps into its slot
+        set.remove(0);
+
+        // Entity 2 should retain its ticks
+        assert!(set.added_since(2, 9));
+        assert!(!set.added_since(2, 10));
+
+        // Entity 1 should retain its ticks
+        assert!(set.added_since(1, 4));
+        assert!(!set.added_since(1, 5));
+    }
+
+    #[test]
+    fn changed_since_nonexistent_entity() {
+        let set = SparseSetInner::<u32>::new();
+        assert!(!set.changed_since(999, 0));
+        assert!(!set.added_since(999, 0));
+    }
+
+    #[test]
+    fn storage_changed_since_untyped() {
+        let mut storage = ComponentStorage::new::<u32>();
+        storage.typed_mut::<u32>().insert_with_tick(5, 42, 10);
+
+        assert!(storage.changed_since_untyped(5, 9));
+        assert!(!storage.changed_since_untyped(5, 10));
+        assert!(storage.added_since_untyped(5, 9));
+        assert!(!storage.added_since_untyped(5, 10));
     }
 }

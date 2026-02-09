@@ -27,29 +27,35 @@
 //! See `DESIGN.md` in this crate for architecture decisions and goals.
 
 mod access;
+mod commands;
 pub mod component;
 mod compute;
 mod entity;
+mod events;
 mod priority;
 mod query;
 mod resource;
 mod schedule;
 mod sparse_set;
+pub mod string_table;
 mod system;
 pub mod thread_pool;
 mod world;
 mod yield_now;
 
 pub use access::Access;
-pub use component::{Component, FieldInfo};
+pub use commands::CommandBuffer;
+pub use component::{Component, FieldInfo, FieldKind};
 pub use compute::{ComputePool, TaskHandle};
 pub use ecs_macro::Component;
 pub use entity::Entity;
+pub use events::{Events, event_update_system};
 pub use priority::Priority;
-pub use query::{ContainsChecker, Read, With, Without, Write};
+pub use query::{AddedFilter, ChangedFilter, ContainsChecker, Read, With, Without, Write};
 pub use resource::{ResourceRef, ResourceRefMut};
 pub use schedule::Schedule;
 pub use sparse_set::{Ref, RefMut, SparseSetInner};
+pub use string_table::{StringId, StringTable};
 pub use system::System;
 pub use thread_pool::ThreadPool;
 pub use world::World;

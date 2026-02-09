@@ -4,7 +4,10 @@ use glam::Vec3;
 ///
 /// Direction comes from the entity's [`GlobalTransform`](crate::GlobalTransform)
 /// forward vector.
-#[derive(Debug, Clone, Copy, PartialEq, redlilium_ecs::Component)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable, redlilium_ecs::Component,
+)]
+#[repr(C)]
 pub struct DirectionalLight {
     /// Light color (linear RGB).
     pub color: Vec3,
@@ -32,7 +35,10 @@ impl Default for DirectionalLight {
 ///
 /// Position comes from the entity's [`GlobalTransform`](crate::GlobalTransform)
 /// translation.
-#[derive(Debug, Clone, Copy, PartialEq, redlilium_ecs::Component)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable, redlilium_ecs::Component,
+)]
+#[repr(C)]
 pub struct PointLight {
     /// Light color (linear RGB).
     pub color: Vec3,
@@ -75,7 +81,10 @@ impl Default for PointLight {
 ///
 /// Position and direction come from the entity's
 /// [`GlobalTransform`](crate::GlobalTransform).
-#[derive(Debug, Clone, Copy, PartialEq, redlilium_ecs::Component)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable, redlilium_ecs::Component,
+)]
+#[repr(C)]
 pub struct SpotLight {
     /// Light color (linear RGB).
     pub color: Vec3,

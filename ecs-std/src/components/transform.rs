@@ -5,30 +5,42 @@ use redlilium_core::scene::NodeTransform;
 ///
 /// Stores translation, rotation, and scale. Convertible to/from
 /// core's [`NodeTransform`] which uses plain `[f32; N]` arrays.
-#[derive(Debug, Clone, Copy, PartialEq, redlilium_ecs::Component)]
+///
+/// Padding fields (`_pad*`) are required for `bytemuck::Pod` because
+/// Quat has 16-byte SIMD alignment on x86_64.
+#[derive(
+    Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable, redlilium_ecs::Component,
+)]
+#[repr(C)]
 pub struct Transform {
     /// Translation in world units.
     pub translation: Vec3,
+    _pad0: f32,
     /// Rotation as a unit quaternion.
     pub rotation: Quat,
     /// Non-uniform scale.
     pub scale: Vec3,
+    _pad1: f32,
 }
 
 impl Transform {
     /// Identity transform: origin position, no rotation, unit scale.
     pub const IDENTITY: Self = Self {
         translation: Vec3::ZERO,
+        _pad0: 0.0,
         rotation: Quat::IDENTITY,
         scale: Vec3::ONE,
+        _pad1: 0.0,
     };
 
     /// Create from translation, rotation, and scale.
     pub fn new(translation: Vec3, rotation: Quat, scale: Vec3) -> Self {
         Self {
             translation,
+            _pad0: 0.0,
             rotation,
             scale,
+            _pad1: 0.0,
         }
     }
 
@@ -62,11 +74,11 @@ impl Default for Transform {
 
 impl From<NodeTransform> for Transform {
     fn from(t: NodeTransform) -> Self {
-        Self {
-            translation: Vec3::from(t.translation),
-            rotation: Quat::from_array(t.rotation),
-            scale: Vec3::from(t.scale),
-        }
+        Self::new(
+            Vec3::from(t.translation),
+            Quat::from_array(t.rotation),
+            Vec3::from(t.scale),
+        )
     }
 }
 
@@ -85,7 +97,10 @@ impl From<Transform> for NodeTransform {
 /// Computed by the [`update_global_transforms`](crate::systems::update_global_transforms)
 /// system. Without hierarchy, this equals the local [`Transform`]'s matrix.
 /// With hierarchy (future), it will incorporate the parent chain.
-#[derive(Debug, Clone, Copy, PartialEq, redlilium_ecs::Component)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable, redlilium_ecs::Component,
+)]
+#[repr(C)]
 pub struct GlobalTransform(pub Mat4);
 
 impl GlobalTransform {

@@ -12,4 +12,5 @@ profiling = ["redlilium-core/profiling"]
 [dependencies]
 redlilium-core = { path = "../core" }
 ecs-macro = { path = "../ecs-macro" }
+bytemuck = { workspace = true }
 log.workspace = true

@@ -40,7 +40,8 @@
       "Bash(cargo metadata:*)",
       "WebFetch(domain:gfx-rs.github.io)",
       "WebFetch(domain:wgpu.rs)",
-      "WebFetch(domain:deepwiki.com)"
+      "WebFetch(domain:deepwiki.com)",
+      "Bash(cargo tree:*)"
     ],
     "deny": [
       "Read(target/**)"

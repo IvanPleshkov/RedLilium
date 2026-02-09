@@ -1,8 +1,5 @@
-use std::any::TypeId;
-use std::sync::Arc;
-
 use glam::{Mat4, Quat, Vec3};
-use redlilium_ecs::Component;
+use redlilium_ecs::{Component, FieldKind, StringId};
 
 use ecs_std::components::*;
 
@@ -23,13 +20,13 @@ fn transform_field_infos() {
     assert_eq!(infos.len(), 3);
 
     assert_eq!(infos[0].name, "translation");
-    assert_eq!(infos[0].type_id, TypeId::of::<Vec3>());
+    assert_eq!(infos[0].kind, FieldKind::Vec3);
 
     assert_eq!(infos[1].name, "rotation");
-    assert_eq!(infos[1].type_id, TypeId::of::<Quat>());
+    assert_eq!(infos[1].kind, FieldKind::Quat);
 
     assert_eq!(infos[2].name, "scale");
-    assert_eq!(infos[2].type_id, TypeId::of::<Vec3>());
+    assert_eq!(infos[2].kind, FieldKind::Vec3);
 }
 
 #[test]
@@ -77,7 +74,7 @@ fn global_transform_tuple_field() {
     let infos = gt.field_infos();
     assert_eq!(infos.len(), 1);
     assert_eq!(infos[0].name, "0");
-    assert_eq!(infos[0].type_id, TypeId::of::<Mat4>());
+    assert_eq!(infos[0].kind, FieldKind::Mat4);
 
     let mat = gt.field("0").unwrap().downcast_ref::<Mat4>().unwrap();
     assert_eq!(mat.w_axis.x, 5.0);
@@ -92,40 +89,44 @@ fn global_transform_field_write() {
 }
 
 // ---------------------------------------------------------------------------
-// Camera reflection
+// Camera reflection (Pod: 2 Mat4 fields)
 // ---------------------------------------------------------------------------
 
 #[test]
 fn camera_field_infos() {
     let cam = Camera::perspective(1.0, 16.0 / 9.0, 0.1, 100.0);
     let infos = cam.field_infos();
-    assert_eq!(infos.len(), 4);
-    assert_eq!(infos[0].name, "projection");
-    assert_eq!(infos[1].name, "active");
-    assert_eq!(infos[1].type_id, TypeId::of::<bool>());
-    assert_eq!(infos[2].name, "view_matrix");
-    assert_eq!(infos[3].name, "projection_matrix");
+    assert_eq!(infos.len(), 2);
+    assert_eq!(infos[0].name, "view_matrix");
+    assert_eq!(infos[0].kind, FieldKind::Mat4);
+    assert_eq!(infos[1].name, "projection_matrix");
+    assert_eq!(infos[1].kind, FieldKind::Mat4);
 }
 
 #[test]
-fn camera_read_active() {
+fn camera_read_view_matrix() {
     let cam = Camera::perspective(1.0, 16.0 / 9.0, 0.1, 100.0);
-    let active = cam.field("active").unwrap().downcast_ref::<bool>().unwrap();
-    assert!(*active);
+    let view = cam
+        .field("view_matrix")
+        .unwrap()
+        .downcast_ref::<Mat4>()
+        .unwrap();
+    assert_eq!(*view, Mat4::IDENTITY);
 }
 
 #[test]
-fn camera_write_active() {
+fn camera_write_view_matrix() {
     let mut cam = Camera::perspective(1.0, 16.0 / 9.0, 0.1, 100.0);
-    *cam.field_mut("active")
+    let new_view = Mat4::from_translation(Vec3::new(1.0, 2.0, 3.0));
+    *cam.field_mut("view_matrix")
         .unwrap()
-        .downcast_mut::<bool>()
-        .unwrap() = false;
-    assert!(!cam.active);
+        .downcast_mut::<Mat4>()
+        .unwrap() = new_view;
+    assert_eq!(cam.view_matrix, new_view);
 }
 
 // ---------------------------------------------------------------------------
-// Visibility (tuple struct with bool)
+// Visibility (tuple struct with u8)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -136,61 +137,38 @@ fn visibility_reflection() {
     let infos = v.field_infos();
     assert_eq!(infos.len(), 1);
     assert_eq!(infos[0].name, "0");
-    assert_eq!(infos[0].type_id, TypeId::of::<bool>());
+    assert_eq!(infos[0].kind, FieldKind::U8);
 
-    let val = v.field("0").unwrap().downcast_ref::<bool>().unwrap();
-    assert!(*val);
+    let val = v.field("0").unwrap().downcast_ref::<u8>().unwrap();
+    assert_eq!(*val, 1);
 }
 
 // ---------------------------------------------------------------------------
-// Name (tuple struct with String)
+// Name (tuple struct with StringId)
 // ---------------------------------------------------------------------------
 
 #[test]
 fn name_reflection() {
-    let n = Name::new("TestEntity");
+    let n = Name::new(StringId(42));
     assert_eq!(n.component_name(), "Name");
 
-    let val = n.field("0").unwrap().downcast_ref::<String>().unwrap();
-    assert_eq!(val.as_str(), "TestEntity");
+    let infos = n.field_infos();
+    assert_eq!(infos.len(), 1);
+    assert_eq!(infos[0].name, "0");
+    assert_eq!(infos[0].kind, FieldKind::StringId);
+
+    let val = n.field("0").unwrap().downcast_ref::<StringId>().unwrap();
+    assert_eq!(*val, StringId(42));
 }
 
 #[test]
 fn name_field_write() {
-    let mut n = Name::new("Old");
-    *n.field_mut("0").unwrap().downcast_mut::<String>().unwrap() = "New".into();
-    assert_eq!(n.as_str(), "New");
-}
-
-// ---------------------------------------------------------------------------
-// MeshRenderer (Arc fields)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn mesh_renderer_field_infos() {
-    use redlilium_core::material::{AlphaMode, CpuMaterial, CpuMaterialInstance};
-    use redlilium_core::mesh::{CpuMesh, VertexLayout};
-
-    let layout = VertexLayout::position_only();
-    let mesh = Arc::new(CpuMesh::new(layout.clone()));
-    let decl = Arc::new(CpuMaterial::pbr_metallic_roughness(
-        layout,
-        AlphaMode::Opaque,
-        false,
-        false,
-        false,
-        false,
-        false,
-        false,
-    ));
-    let material = Arc::new(CpuMaterialInstance::new(decl));
-    let mr = MeshRenderer::new(mesh, material);
-
-    assert_eq!(mr.component_name(), "MeshRenderer");
-    let infos = mr.field_infos();
-    assert_eq!(infos.len(), 2);
-    assert_eq!(infos[0].name, "mesh");
-    assert_eq!(infos[1].name, "material");
+    let mut n = Name::new(StringId(1));
+    *n.field_mut("0")
+        .unwrap()
+        .downcast_mut::<StringId>()
+        .unwrap() = StringId(99);
+    assert_eq!(n.id(), StringId(99));
 }
 
 // ---------------------------------------------------------------------------
@@ -205,8 +183,9 @@ fn directional_light_reflection() {
     let infos = light.field_infos();
     assert_eq!(infos.len(), 2);
     assert_eq!(infos[0].name, "color");
+    assert_eq!(infos[0].kind, FieldKind::Vec3);
     assert_eq!(infos[1].name, "intensity");
-    assert_eq!(infos[1].type_id, TypeId::of::<f32>());
+    assert_eq!(infos[1].kind, FieldKind::F32);
 
     let intensity = light
         .field("intensity")
@@ -273,39 +252,88 @@ fn enumerate_all_fields_dynamically() {
     assert_eq!(infos.len(), 3);
 
     for info in infos {
-        let field_ref = t.field(info.name).expect("field should exist");
-        // Verify the type_id matches what Any reports
-        assert_eq!(field_ref.type_id(), info.type_id);
+        let _field_ref = t.field(info.name).expect("field should exist");
+        // With FieldKind, the editor knows the type without TypeId
+        assert!(
+            matches!(info.kind, FieldKind::Vec3 | FieldKind::Quat),
+            "Transform fields should be Vec3 or Quat"
+        );
     }
 }
 
+// ---------------------------------------------------------------------------
+// Pod byte serialization
+// ---------------------------------------------------------------------------
+
 #[test]
-fn trait_object_dispatch() {
-    let components: Vec<Box<dyn Component>> = vec![
-        Box::new(Transform::IDENTITY),
-        Box::new(GlobalTransform::IDENTITY),
-        Box::new(Visibility::VISIBLE),
-        Box::new(Name::new("test")),
-        Box::new(DirectionalLight::default()),
-        Box::new(PointLight::default()),
-        Box::new(SpotLight::default()),
-    ];
+fn all_components_are_pod() {
+    // Verify all 8 component types can be serialized to/from bytes
+    let transform = Transform::IDENTITY;
+    let bytes = bytemuck::bytes_of(&transform);
+    assert_eq!(bytes.len(), std::mem::size_of::<Transform>());
 
-    let names: Vec<&str> = components.iter().map(|c| c.component_name()).collect();
-    assert_eq!(
-        names,
-        vec![
-            "Transform",
-            "GlobalTransform",
-            "Visibility",
-            "Name",
-            "DirectionalLight",
-            "PointLight",
-            "SpotLight",
-        ]
+    let gt = GlobalTransform::IDENTITY;
+    let bytes = bytemuck::bytes_of(&gt);
+    assert_eq!(bytes.len(), std::mem::size_of::<GlobalTransform>());
+
+    let cam = Camera::perspective(1.0, 1.0, 0.1, 100.0);
+    let bytes = bytemuck::bytes_of(&cam);
+    assert_eq!(bytes.len(), std::mem::size_of::<Camera>());
+
+    let vis = Visibility::VISIBLE;
+    let bytes = bytemuck::bytes_of(&vis);
+    assert_eq!(bytes.len(), 1);
+
+    let name = Name::new(StringId(42));
+    let bytes = bytemuck::bytes_of(&name);
+    assert_eq!(bytes.len(), 4);
+
+    let dl = DirectionalLight::default();
+    let bytes = bytemuck::bytes_of(&dl);
+    assert_eq!(bytes.len(), std::mem::size_of::<DirectionalLight>());
+
+    let pl = PointLight::default();
+    let bytes = bytemuck::bytes_of(&pl);
+    assert_eq!(bytes.len(), std::mem::size_of::<PointLight>());
+
+    let sl = SpotLight::default();
+    let bytes = bytemuck::bytes_of(&sl);
+    assert_eq!(bytes.len(), std::mem::size_of::<SpotLight>());
+}
+
+#[test]
+fn transform_pod_roundtrip() {
+    let original = Transform::new(
+        Vec3::new(1.0, 2.0, 3.0),
+        Quat::from_rotation_y(0.5),
+        Vec3::splat(2.0),
     );
+    let bytes = bytemuck::bytes_of(&original);
+    let restored: &Transform = bytemuck::from_bytes(bytes);
+    assert_eq!(*restored, original);
+}
 
-    // Total field count across all components
-    let total_fields: usize = components.iter().map(|c| c.field_infos().len()).sum();
-    assert_eq!(total_fields, 3 + 1 + 1 + 1 + 2 + 3 + 5); // = 16
+// ---------------------------------------------------------------------------
+// All component names
+// ---------------------------------------------------------------------------
+
+#[test]
+fn all_component_names() {
+    assert_eq!(Transform::IDENTITY.component_name(), "Transform");
+    assert_eq!(
+        GlobalTransform::IDENTITY.component_name(),
+        "GlobalTransform"
+    );
+    assert_eq!(
+        Camera::perspective(1.0, 1.0, 0.1, 100.0).component_name(),
+        "Camera"
+    );
+    assert_eq!(Visibility::VISIBLE.component_name(), "Visibility");
+    assert_eq!(Name::default().component_name(), "Name");
+    assert_eq!(
+        DirectionalLight::default().component_name(),
+        "DirectionalLight"
+    );
+    assert_eq!(PointLight::default().component_name(), "PointLight");
+    assert_eq!(SpotLight::default().component_name(), "SpotLight");
 }

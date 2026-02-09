@@ -1,13 +1,17 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{Data, DeriveInput, Fields, parse_macro_input};
+use syn::{Data, DeriveInput, Fields, Type, parse_macro_input};
 
-/// Derive the `Component` trait for a struct, providing runtime reflection.
+/// Derive the `Component` trait for a Pod struct, providing runtime reflection.
+///
+/// The struct must also derive `bytemuck::Pod`, `bytemuck::Zeroable`, `Copy`,
+/// `Clone`, and have `#[repr(C)]`.
 ///
 /// # Named structs
 ///
 /// ```ignore
-/// #[derive(Component)]
+/// #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Component)]
+/// #[repr(C)]
 /// struct Transform {
 ///     translation: Vec3,
 ///     rotation: Quat,
@@ -15,20 +19,13 @@ use syn::{Data, DeriveInput, Fields, parse_macro_input};
 /// }
 /// ```
 ///
-/// Field names become `"translation"`, `"rotation"`, `"scale"`.
-///
 /// # Tuple structs
 ///
 /// ```ignore
-/// #[derive(Component)]
+/// #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Component)]
+/// #[repr(C)]
 /// struct GlobalTransform(pub Mat4);
 /// ```
-///
-/// Field names become `"0"`.
-///
-/// # Unit structs
-///
-/// Supported but have no fields.
 #[proc_macro_derive(Component)]
 pub fn derive_component(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -39,20 +36,32 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
     let (field_infos, field_match, field_mut_match) = match &input.data {
         Data::Struct(data) => match &data.fields {
             Fields::Named(fields) => {
-                let infos = fields.named.iter().map(|f| {
+                // Skip fields starting with `_` (padding fields for Pod alignment)
+                let visible_fields: Vec<_> = fields
+                    .named
+                    .iter()
+                    .filter(|f| {
+                        !f.ident
+                            .as_ref()
+                            .is_some_and(|id| id.to_string().starts_with('_'))
+                    })
+                    .collect();
+
+                let infos = visible_fields.iter().map(|f| {
                     let fname = f.ident.as_ref().unwrap();
                     let fname_str = fname.to_string();
                     let ftype = &f.ty;
+                    let kind = infer_field_kind(ftype);
                     quote! {
                         redlilium_ecs::FieldInfo {
                             name: #fname_str,
                             type_name: ::core::any::type_name::<#ftype>(),
-                            type_id: ::core::any::TypeId::of::<#ftype>(),
+                            kind: #kind,
                         }
                     }
                 });
 
-                let field_arms = fields.named.iter().map(|f| {
+                let field_arms = visible_fields.iter().map(|f| {
                     let fname = f.ident.as_ref().unwrap();
                     let fname_str = fname.to_string();
                     quote! {
@@ -60,7 +69,7 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                     }
                 });
 
-                let field_mut_arms = fields.named.iter().map(|f| {
+                let field_mut_arms = visible_fields.iter().map(|f| {
                     let fname = f.ident.as_ref().unwrap();
                     let fname_str = fname.to_string();
                     quote! {
@@ -78,11 +87,12 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                 let infos = fields.unnamed.iter().enumerate().map(|(i, f)| {
                     let idx_str = i.to_string();
                     let ftype = &f.ty;
+                    let kind = infer_field_kind(ftype);
                     quote! {
                         redlilium_ecs::FieldInfo {
                             name: #idx_str,
                             type_name: ::core::any::type_name::<#ftype>(),
-                            type_id: ::core::any::TypeId::of::<#ftype>(),
+                            kind: #kind,
                         }
                     }
                 });
@@ -148,4 +158,42 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
     };
 
     expanded.into()
+}
+
+/// Infer `FieldKind` from a type by matching the last path segment.
+fn infer_field_kind(ty: &Type) -> proc_macro2::TokenStream {
+    let type_name = extract_last_segment(ty);
+    match type_name.as_str() {
+        "f32" => quote! { redlilium_ecs::FieldKind::F32 },
+        "u8" => quote! { redlilium_ecs::FieldKind::U8 },
+        "u32" => quote! { redlilium_ecs::FieldKind::U32 },
+        "i32" => quote! { redlilium_ecs::FieldKind::I32 },
+        "Vec2" => quote! { redlilium_ecs::FieldKind::Vec2 },
+        "Vec3" | "Vec3A" => quote! { redlilium_ecs::FieldKind::Vec3 },
+        "Vec4" => quote! { redlilium_ecs::FieldKind::Vec4 },
+        "Quat" => quote! { redlilium_ecs::FieldKind::Quat },
+        "Mat4" => quote! { redlilium_ecs::FieldKind::Mat4 },
+        "StringId" => quote! { redlilium_ecs::FieldKind::StringId },
+        _ => {
+            let msg = format!(
+                "Component derive: unknown field type `{}`. Expected one of: f32, u8, u32, i32, Vec2, Vec3, Vec4, Quat, Mat4, StringId.",
+                type_name
+            );
+            quote! { compile_error!(#msg) }
+        }
+    }
+}
+
+/// Extract the last segment name from a type path (e.g. `glam::Vec3` → `"Vec3"`).
+fn extract_last_segment(ty: &Type) -> String {
+    match ty {
+        Type::Path(type_path) => {
+            if let Some(segment) = type_path.path.segments.last() {
+                segment.ident.to_string()
+            } else {
+                String::new()
+            }
+        }
+        _ => String::new(),
+    }
 }

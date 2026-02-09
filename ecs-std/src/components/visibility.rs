@@ -1,19 +1,22 @@
 /// Whether an entity should be rendered.
 ///
-/// When attached to an entity with a [`MeshRenderer`](crate::MeshRenderer),
-/// controls whether it is included in render submission.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, redlilium_ecs::Component)]
-pub struct Visibility(pub bool);
+/// Uses `u8` instead of `bool` for Pod compatibility.
+/// `0` = hidden, non-zero = visible.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable, redlilium_ecs::Component,
+)]
+#[repr(C)]
+pub struct Visibility(pub u8);
 
 impl Visibility {
     /// Entity is visible (rendered).
-    pub const VISIBLE: Self = Self(true);
+    pub const VISIBLE: Self = Self(1);
     /// Entity is hidden (not rendered).
-    pub const HIDDEN: Self = Self(false);
+    pub const HIDDEN: Self = Self(0);
 
     /// Returns whether the entity is visible.
     pub fn is_visible(self) -> bool {
-        self.0
+        self.0 != 0
     }
 }
 
@@ -35,5 +38,13 @@ mod tests {
     #[test]
     fn hidden_is_not_visible() {
         assert!(!Visibility::HIDDEN.is_visible());
+    }
+
+    #[test]
+    fn is_pod() {
+        let v = Visibility::VISIBLE;
+        let bytes = bytemuck::bytes_of(&v);
+        assert_eq!(bytes.len(), 1);
+        assert_eq!(bytes[0], 1);
     }
 }

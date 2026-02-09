@@ -13,4 +13,5 @@ profiling = ["redlilium-core/profiling", "redlilium-ecs/profiling"]
 redlilium-core = { path = "../core" }
 redlilium-ecs = { path = "../ecs" }
 glam = { workspace = true }
+bytemuck = { workspace = true }
 log.workspace = true

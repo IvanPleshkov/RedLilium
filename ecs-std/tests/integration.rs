@@ -1,38 +1,10 @@
-use std::sync::Arc;
-
 use glam::{Mat4, Quat, Vec3};
-use redlilium_core::material::{AlphaMode, CpuMaterial, CpuMaterialInstance};
-use redlilium_core::mesh::{CpuMesh, VertexLayout};
 use redlilium_core::scene::{CameraProjection, NodeTransform, Scene, SceneCamera, SceneNode};
-use redlilium_ecs::{Schedule, ThreadPool, World};
+use redlilium_ecs::{Schedule, StringTable, ThreadPool, World};
 
 use ecs_std::components::*;
 use ecs_std::systems::*;
 use ecs_std::{register_std_components, spawn_scene};
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn make_dummy_mesh(material_idx: usize) -> CpuMesh {
-    let layout = VertexLayout::position_only();
-    CpuMesh::new(layout).with_material(material_idx)
-}
-
-fn make_dummy_material() -> Arc<CpuMaterialInstance> {
-    let layout = VertexLayout::position_only();
-    let decl = Arc::new(CpuMaterial::pbr_metallic_roughness(
-        layout,
-        AlphaMode::Opaque,
-        false,
-        false,
-        false,
-        false,
-        false,
-        false,
-    ));
-    Arc::new(CpuMaterialInstance::new(decl))
-}
 
 // ---------------------------------------------------------------------------
 // Full pipeline: spawn → systems → query
@@ -164,17 +136,11 @@ fn parallel_schedule_execution() {
 
 #[test]
 fn spawn_scene_and_run_systems() {
-    // Build a scene with nested structure:
-    //   root (translated +5 X)
-    //     ├── camera_node (translated +10 Y, has camera)
-    //     └── mesh_node (rotated 45° Y, has mesh)
-    let material = make_dummy_material();
-    let mesh = make_dummy_mesh(0);
+    let mut world = World::new();
+    let mut strings = StringTable::new();
 
     let scene = Scene::new()
         .with_name("TestScene")
-        .with_materials(vec![material])
-        .with_meshes(vec![mesh])
         .with_cameras(vec![SceneCamera {
             name: Some("MainCam".to_string()),
             projection: CameraProjection::Perspective {
@@ -193,17 +159,13 @@ fn spawn_scene_and_run_systems() {
                         .with_name("camera_node")
                         .with_transform(NodeTransform::IDENTITY.with_translation([0.0, 10.0, 0.0]))
                         .with_camera(0),
-                    SceneNode::new()
-                        .with_name("mesh_node")
-                        .with_transform(
-                            NodeTransform::IDENTITY.with_rotation([0.0, 0.383, 0.0, 0.924]), // ~45° Y
-                        )
-                        .with_meshes(vec![0]),
+                    SceneNode::new().with_name("mesh_node").with_transform(
+                        NodeTransform::IDENTITY.with_rotation([0.0, 0.383, 0.0, 0.924]),
+                    ),
                 ]),
         ]);
 
-    let mut world = World::new();
-    let roots = spawn_scene(&mut world, &scene);
+    let roots = spawn_scene(&mut world, &scene, &mut strings);
 
     assert_eq!(roots.len(), 1);
     // root + camera_node + mesh_node = 3 entities
@@ -229,7 +191,8 @@ fn spawn_scene_and_run_systems() {
     let root = roots[0];
     let gt = world.get::<GlobalTransform>(root).unwrap();
     assert!((gt.translation() - Vec3::new(5.0, 0.0, 0.0)).length() < 1e-5);
-    assert_eq!(world.get::<Name>(root).unwrap().as_str(), "root");
+    let name = world.get::<Name>(root).unwrap();
+    assert_eq!(strings.get(name.id()), "root");
 
     // Find the camera entity by querying Camera component
     let cameras_storage = world.read::<Camera>();
@@ -241,51 +204,6 @@ fn spawn_scene_and_run_systems() {
         assert_ne!(cam.view_matrix, Mat4::IDENTITY);
     }
     assert_eq!(cam_count, 1);
-    drop(cameras_storage);
-
-    // Find mesh renderer entity
-    let meshes_storage = world.read::<MeshRenderer>();
-    let mut mesh_count = 0;
-    for (_, _renderer) in meshes_storage.iter() {
-        mesh_count += 1;
-    }
-    assert_eq!(mesh_count, 1);
-}
-
-// ---------------------------------------------------------------------------
-// Multi-mesh node spawning
-// ---------------------------------------------------------------------------
-
-#[test]
-fn multi_mesh_node_creates_extra_entities() {
-    let material = make_dummy_material();
-    let mesh_a = make_dummy_mesh(0);
-    let mesh_b = make_dummy_mesh(0);
-    let mesh_c = make_dummy_mesh(0);
-
-    let scene = Scene::new()
-        .with_materials(vec![material])
-        .with_meshes(vec![mesh_a, mesh_b, mesh_c])
-        .with_nodes(vec![
-            SceneNode::new()
-                .with_name("multi_mesh")
-                .with_meshes(vec![0, 1, 2]),
-        ]);
-
-    let mut world = World::new();
-    let roots = spawn_scene(&mut world, &scene);
-
-    // 1 root entity + 2 extra entities for meshes 1 and 2
-    assert_eq!(roots.len(), 1);
-    assert_eq!(world.entity_count(), 3);
-
-    // All 3 entities should have MeshRenderer
-    let meshes_storage = world.read::<MeshRenderer>();
-    assert_eq!(meshes_storage.len(), 3);
-
-    // Root entity should have the Name "multi_mesh"
-    let root = roots[0];
-    assert_eq!(world.get::<Name>(root).unwrap().as_str(), "multi_mesh");
 }
 
 // ---------------------------------------------------------------------------
@@ -387,6 +305,7 @@ fn multiple_frame_simulation() {
 #[test]
 fn light_direction_from_transform() {
     let mut world = World::new();
+    let mut strings = StringTable::new();
     register_std_components(&mut world);
 
     // Create a directional light pointing down (-Y rotation)
@@ -398,7 +317,7 @@ fn light_direction_from_transform() {
         sun,
         DirectionalLight::new(Vec3::new(1.0, 0.98, 0.9), 100000.0),
     );
-    world.insert(sun, Name::new("Sun"));
+    world.insert(sun, Name::new(strings.intern("Sun")));
 
     // Create point lights at various positions
     let light_positions = [
@@ -412,7 +331,7 @@ fn light_direction_from_transform() {
         world.insert(e, Transform::from_translation(*pos));
         world.insert(e, GlobalTransform::IDENTITY);
         world.insert(e, PointLight::new(Vec3::ONE, 100.0).with_range(20.0));
-        world.insert(e, Name::new(format!("PointLight_{i}")));
+        world.insert(e, Name::new(strings.intern(&format!("PointLight_{i}"))));
     }
 
     // Run transform system

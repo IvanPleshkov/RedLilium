@@ -1,8 +1,10 @@
 use std::any::TypeId;
 use std::collections::HashMap;
 
+use crate::commands::CommandBuffer;
 use crate::entity::{Entity, EntityAllocator};
-use crate::query::ContainsChecker;
+use crate::events::Events;
+use crate::query::{AddedFilter, ChangedFilter, ContainsChecker};
 use crate::resource::{ResourceRef, ResourceRefMut, Resources};
 use crate::sparse_set::{ComponentStorage, Ref, RefMut};
 
@@ -38,6 +40,8 @@ pub struct World {
     entities: EntityAllocator,
     components: HashMap<TypeId, ComponentStorage>,
     resources: Resources,
+    /// Global tick counter for change detection.
+    tick: u64,
 }
 
 impl World {
@@ -47,6 +51,7 @@ impl World {
             entities: EntityAllocator::new(),
             components: HashMap::new(),
             resources: Resources::new(),
+            tick: 0,
         }
     }
 
@@ -103,6 +108,8 @@ impl World {
     /// Inserts a component on an entity. Creates the storage for T if needed.
     ///
     /// If the entity already has this component, the value is replaced.
+    /// Uses tick 0 (untracked). For change-tracked insertion, use
+    /// [`insert_tracked`](World::insert_tracked).
     ///
     /// # Panics
     ///
@@ -119,6 +126,31 @@ impl World {
             .or_insert_with(ComponentStorage::new::<T>);
 
         storage.typed_mut::<T>().insert(entity.index(), component);
+    }
+
+    /// Inserts a component with change tracking at the current world tick.
+    ///
+    /// Like [`insert`](World::insert) but records the current tick for
+    /// change detection queries.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the entity is not alive.
+    pub fn insert_tracked<T: Send + Sync + 'static>(&mut self, entity: Entity, component: T) {
+        assert!(
+            self.entities.is_alive(entity),
+            "Cannot insert component on dead entity {entity}"
+        );
+
+        let tick = self.tick;
+        let storage = self
+            .components
+            .entry(TypeId::of::<T>())
+            .or_insert_with(ComponentStorage::new::<T>);
+
+        storage
+            .typed_mut::<T>()
+            .insert_with_tick(entity.index(), component, tick);
     }
 
     /// Removes a component from an entity.
@@ -207,6 +239,26 @@ impl World {
         ContainsChecker::without(storage)
     }
 
+    /// Creates a filter matching entities whose component T was changed
+    /// since (strictly after) `since_tick`.
+    ///
+    /// Does not borrow component data. If T has never been registered,
+    /// the filter matches nothing.
+    pub fn changed<T: 'static>(&self, since_tick: u64) -> ChangedFilter<'_> {
+        let storage = self.components.get(&TypeId::of::<T>());
+        ChangedFilter::new(storage, since_tick)
+    }
+
+    /// Creates a filter matching entities whose component T was added
+    /// since (strictly after) `since_tick`.
+    ///
+    /// Does not borrow component data. If T has never been registered,
+    /// the filter matches nothing.
+    pub fn added<T: 'static>(&self, since_tick: u64) -> AddedFilter<'_> {
+        let storage = self.components.get(&TypeId::of::<T>());
+        AddedFilter::new(storage, since_tick)
+    }
+
     // ---- Resource management ----
 
     /// Inserts or replaces a resource.
@@ -240,6 +292,66 @@ impl World {
     /// Panics if the resource does not exist or any borrow is active.
     pub fn resource_mut<T: 'static>(&self) -> ResourceRefMut<'_, T> {
         self.resources.borrow_mut::<T>()
+    }
+
+    // ---- Change detection ----
+
+    /// Returns the current world tick.
+    ///
+    /// The tick advances each frame via [`advance_tick`](World::advance_tick)
+    /// and is used for change detection.
+    pub fn current_tick(&self) -> u64 {
+        self.tick
+    }
+
+    /// Advances the world tick by one.
+    ///
+    /// Call this at the start of each frame, before running systems.
+    pub fn advance_tick(&mut self) {
+        self.tick += 1;
+    }
+
+    // ---- Commands ----
+
+    /// Initializes a [`CommandBuffer`] resource if not already present.
+    ///
+    /// Call this before running systems that use commands.
+    pub fn init_commands(&mut self) {
+        if !self.has_resource::<CommandBuffer>() {
+            self.insert_resource(CommandBuffer::new());
+        }
+    }
+
+    /// Drains and applies all queued commands from the [`CommandBuffer`] resource.
+    ///
+    /// Each command receives `&mut World` and can perform structural changes
+    /// (spawn, despawn, insert, remove). Commands execute in the order they
+    /// were queued.
+    ///
+    /// Call this after `schedule.run()` or between schedule stages.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `CommandBuffer` resource does not exist.
+    /// Call [`init_commands`](World::init_commands) first.
+    pub fn apply_commands(&mut self) {
+        let cmds = {
+            let buffer = self.resources.borrow::<CommandBuffer>();
+            buffer.drain()
+        };
+        for cmd in cmds {
+            cmd(self);
+        }
+    }
+
+    // ---- Events ----
+
+    /// Registers an event type by inserting an empty [`Events<T>`] resource.
+    ///
+    /// Call this during setup, before running systems that send or receive
+    /// events of type T.
+    pub fn add_event<T: Send + Sync + 'static>(&mut self) {
+        self.insert_resource(Events::<T>::new());
     }
 }
 

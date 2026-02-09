@@ -73,6 +73,68 @@ impl<'a> ContainsChecker<'a> {
     }
 }
 
+/// Filter for entities whose component was changed since a given tick.
+///
+/// Created by [`World::changed`](crate::World::changed). Works like
+/// [`ContainsChecker`] — use in iteration with `matches()`.
+///
+/// # Example
+///
+/// ```ignore
+/// let transforms = world.read::<Transform>();
+/// let changed = world.changed::<Transform>(last_tick);
+/// for (idx, t) in transforms.iter() {
+///     if changed.matches(idx) {
+///         // transform was modified since last_tick
+///     }
+/// }
+/// ```
+pub struct ChangedFilter<'a> {
+    storage: Option<&'a ComponentStorage>,
+    since_tick: u64,
+}
+
+impl<'a> ChangedFilter<'a> {
+    /// Creates a new changed filter.
+    pub(crate) fn new(storage: Option<&'a ComponentStorage>, since_tick: u64) -> Self {
+        Self {
+            storage,
+            since_tick,
+        }
+    }
+
+    /// Returns true if the entity's component was changed since `since_tick`.
+    pub fn matches(&self, entity_index: u32) -> bool {
+        self.storage
+            .is_some_and(|s| s.changed_since_untyped(entity_index, self.since_tick))
+    }
+}
+
+/// Filter for entities whose component was added since a given tick.
+///
+/// Created by [`World::added`](crate::World::added). Works like
+/// [`ContainsChecker`] — use in iteration with `matches()`.
+pub struct AddedFilter<'a> {
+    storage: Option<&'a ComponentStorage>,
+    since_tick: u64,
+}
+
+impl<'a> AddedFilter<'a> {
+    /// Creates a new added filter.
+    pub(crate) fn new(storage: Option<&'a ComponentStorage>, since_tick: u64) -> Self {
+        Self {
+            storage,
+            since_tick,
+        }
+    }
+
+    /// Returns true if the entity's component was added since `since_tick`.
+    pub fn matches(&self, entity_index: u32) -> bool {
+        self.storage
+            .is_some_and(|s| s.added_since_untyped(entity_index, self.since_tick))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
