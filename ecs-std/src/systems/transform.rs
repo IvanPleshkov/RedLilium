@@ -1,23 +1,36 @@
 use glam::Mat4;
-use redlilium_ecs::World;
+use redlilium_ecs::{Access, System, SystemContext, World};
 
 use crate::components::{Children, GlobalTransform, Parent, Transform};
 
-/// Updates all [`GlobalTransform`] components from their local [`Transform`],
+/// System that updates all [`GlobalTransform`] components from local [`Transform`],
 /// respecting the parent-child hierarchy.
 ///
-/// Root entities (those without a [`Parent`]) get their `GlobalTransform` set
-/// directly from their local `Transform`. Child entities have their parent's
-/// world matrix multiplied with their local matrix.
-///
-/// Traversal is depth-first from roots, guaranteeing parents are processed
-/// before children.
+/// Root entities get `GlobalTransform` directly from `Transform`. Children
+/// have their parent's world matrix multiplied with their local matrix.
 ///
 /// # Access
 ///
 /// - Reads: `Transform`, `Parent`, `Children`
 /// - Writes: `GlobalTransform`
-pub fn update_global_transforms(world: &World) {
+pub struct UpdateGlobalTransforms;
+
+impl System for UpdateGlobalTransforms {
+    fn run(&self, ctx: &SystemContext) {
+        update_global_transforms(ctx.world());
+    }
+
+    fn access(&self) -> Access {
+        let mut access = Access::new();
+        access.add_read::<Transform>();
+        access.add_read::<Parent>();
+        access.add_read::<Children>();
+        access.add_write::<GlobalTransform>();
+        access
+    }
+}
+
+fn update_global_transforms(world: &World) {
     redlilium_core::profile_scope!("update_global_transforms");
 
     let transforms = world.read::<Transform>();

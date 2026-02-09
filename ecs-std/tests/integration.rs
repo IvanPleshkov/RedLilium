@@ -1,6 +1,6 @@
 use glam::{Mat4, Quat, Vec3};
 use redlilium_core::scene::{CameraProjection, NodeTransform, Scene, SceneCamera, SceneNode};
-use redlilium_ecs::{Schedule, StringTable, ThreadPool, World};
+use redlilium_ecs::{ComputePool, Schedule, StringTable, System, SystemContext, ThreadPool, World};
 
 use ecs_std::components::*;
 use ecs_std::systems::*;
@@ -44,21 +44,15 @@ fn full_frame_pipeline() {
 
     // Build and run schedule
     let mut schedule = Schedule::new();
+    schedule.add(UpdateGlobalTransforms);
     schedule
-        .add_system("update_global_transforms")
-        .reads::<Transform>()
-        .writes::<GlobalTransform>()
-        .run(update_global_transforms);
-    schedule
-        .add_system("update_camera_matrices")
-        .reads::<GlobalTransform>()
-        .writes::<Camera>()
-        .after("update_global_transforms")
-        .run(update_camera_matrices);
+        .add(UpdateCameraMatrices)
+        .after::<UpdateGlobalTransforms>();
     schedule.build();
 
     // Run the schedule
-    schedule.run(&world);
+    let compute = ComputePool::new();
+    schedule.run(&world, &compute);
 
     // Verify camera matrices were computed
     let cameras = world.read::<Camera>();
@@ -107,15 +101,12 @@ fn parallel_schedule_execution() {
     }
 
     let mut schedule = Schedule::new();
-    schedule
-        .add_system("update_global_transforms")
-        .reads::<Transform>()
-        .writes::<GlobalTransform>()
-        .run(update_global_transforms);
+    schedule.add(UpdateGlobalTransforms);
     schedule.build();
 
     let pool = ThreadPool::new(4);
-    schedule.run_parallel(&world, &pool);
+    let compute = ComputePool::new();
+    schedule.run_parallel(&world, &pool, &compute);
 
     // Verify all global transforms were updated
     let transforms = world.read::<Transform>();
@@ -173,19 +164,13 @@ fn spawn_scene_and_run_systems() {
 
     // Run systems
     let mut schedule = Schedule::new();
+    schedule.add(UpdateGlobalTransforms);
     schedule
-        .add_system("update_global_transforms")
-        .reads::<Transform>()
-        .writes::<GlobalTransform>()
-        .run(update_global_transforms);
-    schedule
-        .add_system("update_camera_matrices")
-        .reads::<GlobalTransform>()
-        .writes::<Camera>()
-        .after("update_global_transforms")
-        .run(update_camera_matrices);
+        .add(UpdateCameraMatrices)
+        .after::<UpdateGlobalTransforms>();
     schedule.build();
-    schedule.run(&world);
+    let compute = ComputePool::new();
+    schedule.run(&world, &compute);
 
     // Verify root entity
     let root = roots[0];
@@ -236,7 +221,9 @@ fn visibility_filtering_with_systems() {
     }
 
     // Run transform system
-    update_global_transforms(&world);
+    let compute = ComputePool::new();
+    let ctx = SystemContext::new(&world, &compute);
+    UpdateGlobalTransforms.run(&ctx);
 
     // Query visible entities (the rendering pattern)
     let globals = world.read::<GlobalTransform>();
@@ -268,12 +255,10 @@ fn multiple_frame_simulation() {
     world.insert(entity, GlobalTransform::IDENTITY);
 
     let mut schedule = Schedule::new();
-    schedule
-        .add_system("update_global_transforms")
-        .reads::<Transform>()
-        .writes::<GlobalTransform>()
-        .run(update_global_transforms);
+    schedule.add(UpdateGlobalTransforms);
     schedule.build();
+
+    let compute = ComputePool::new();
 
     // Simulate 10 frames of movement
     for frame in 0..10 {
@@ -284,7 +269,7 @@ fn multiple_frame_simulation() {
             t.translation = Vec3::new(frame as f32, 0.0, 0.0);
         }
 
-        schedule.run(&world);
+        schedule.run(&world, &compute);
 
         // Verify global transform tracks the local transform
         let globals = world.read::<GlobalTransform>();
@@ -335,7 +320,9 @@ fn light_direction_from_transform() {
     }
 
     // Run transform system
-    update_global_transforms(&world);
+    let compute = ComputePool::new();
+    let ctx = SystemContext::new(&world, &compute);
+    UpdateGlobalTransforms.run(&ctx);
 
     // Query directional light direction from its global transform
     let globals = world.read::<GlobalTransform>();
@@ -377,19 +364,13 @@ fn register_prevents_empty_world_panic() {
 
     // This would panic without registration since no entities have these components
     let mut schedule = Schedule::new();
+    schedule.add(UpdateGlobalTransforms);
     schedule
-        .add_system("update_global_transforms")
-        .reads::<Transform>()
-        .writes::<GlobalTransform>()
-        .run(update_global_transforms);
-    schedule
-        .add_system("update_camera_matrices")
-        .reads::<GlobalTransform>()
-        .writes::<Camera>()
-        .after("update_global_transforms")
-        .run(update_camera_matrices);
+        .add(UpdateCameraMatrices)
+        .after::<UpdateGlobalTransforms>();
     schedule.build();
 
     // Should not panic even with zero entities
-    schedule.run(&world);
+    let compute = ComputePool::new();
+    schedule.run(&world, &compute);
 }

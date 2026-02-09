@@ -1,133 +1,142 @@
+use std::any::TypeId;
+
 use crate::access::Access;
+use crate::compute::ComputePool;
 use crate::world::World;
 
-/// A system function that operates on the world.
+/// Context passed to systems during execution.
 ///
-/// Systems are the primary way to process entities and components.
-/// Each system declares its component access and runs once per
-/// schedule execution.
-pub trait System: 'static {
-    /// Execute the system with access to the world.
-    fn run(&self, world: &World);
-
-    /// Returns a human-readable name for this system.
-    fn name(&self) -> &str;
-
-    /// Returns the access descriptor for this system.
-    fn access(&self) -> &Access;
-}
-
-/// A system built from a closure or function pointer.
-pub(crate) struct FnSystem {
-    pub name: String,
-    pub access: Access,
-    pub after: Vec<String>,
-    pub before: Vec<String>,
-    func: Box<dyn Fn(&World) + Send + Sync>,
-}
-
-impl FnSystem {
-    /// Executes the system function.
-    pub fn run(&self, world: &World) {
-        (self.func)(world);
-    }
-}
-
-impl System for FnSystem {
-    fn run(&self, world: &World) {
-        self.run(world);
-    }
-
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn access(&self) -> &Access {
-        &self.access
-    }
-}
-
-/// Builder for constructing and registering systems with access declarations.
-///
-/// Created by [`Schedule::add_system`](crate::Schedule::add_system).
+/// Provides access to the [`World`] for entity/component queries
+/// and to the [`ComputePool`] for spawning async background tasks.
 ///
 /// # Example
 ///
 /// ```ignore
-/// schedule.add_system("physics")
-///     .writes::<Transform>()
-///     .reads::<RigidBody>()
-///     .after("input")
-///     .run(physics_system);
+/// fn run(&self, ctx: &SystemContext) {
+///     let positions = ctx.world().read::<Position>();
+///     let handle = ctx.compute().spawn(Priority::Low, async { heavy_work() });
+/// }
 /// ```
-pub struct SystemBuilder<'a> {
-    systems: &'a mut Vec<FnSystem>,
-    name: String,
-    access: Access,
-    after: Vec<String>,
-    before: Vec<String>,
+#[derive(Clone, Copy)]
+pub struct SystemContext<'a> {
+    world: &'a World,
+    compute: &'a ComputePool,
 }
 
-impl<'a> SystemBuilder<'a> {
-    /// Creates a new system builder that will push into the given systems vec.
-    pub(crate) fn new(systems: &'a mut Vec<FnSystem>, name: String) -> Self {
-        Self {
-            systems,
-            name,
-            access: Access::new(),
-            after: Vec::new(),
-            before: Vec::new(),
-        }
+impl<'a> SystemContext<'a> {
+    /// Creates a new system context.
+    pub fn new(world: &'a World, compute: &'a ComputePool) -> Self {
+        Self { world, compute }
     }
 
-    /// Declares that this system reads component type T.
-    pub fn reads<T: 'static>(mut self) -> Self {
-        self.access.add_read::<T>();
-        self
+    /// Returns a reference to the world.
+    pub fn world(&self) -> &World {
+        self.world
     }
 
-    /// Declares that this system writes component type T.
-    pub fn writes<T: 'static>(mut self) -> Self {
-        self.access.add_write::<T>();
-        self
+    /// Returns a reference to the compute pool for spawning async tasks.
+    pub fn compute(&self) -> &ComputePool {
+        self.compute
     }
+}
 
-    /// Declares that this system reads resource type T.
-    pub fn reads_resource<T: 'static>(mut self) -> Self {
-        self.access.add_resource_read::<T>();
-        self
-    }
+/// A system that processes entities and components in the world.
+///
+/// Systems are structs implementing this trait. The struct's `TypeId` serves
+/// as the unique identifier for ordering constraints and duplicate detection.
+///
+/// # Parallel safety
+///
+/// `run` takes `&self` to allow parallel execution within a schedule stage.
+/// Systems that need mutable internal state should use interior mutability
+/// (`AtomicU64`, `Mutex`, etc.).
+///
+/// # Example
+///
+/// ```ignore
+/// struct MovementSystem;
+///
+/// impl System for MovementSystem {
+///     fn run(&self, ctx: &SystemContext) {
+///         let mut positions = ctx.world().write::<Position>();
+///         let velocities = ctx.world().read::<Velocity>();
+///         for (idx, pos) in positions.iter_mut() {
+///             if let Some(vel) = velocities.get(idx) {
+///                 pos.x += vel.x;
+///             }
+///         }
+///     }
+///
+///     fn access(&self) -> Access {
+///         let mut access = Access::new();
+///         access.add_write::<Position>();
+///         access.add_read::<Velocity>();
+///         access
+///     }
+/// }
+/// ```
+pub trait System: Send + Sync + 'static {
+    /// Execute the system with access to the world and compute pool.
+    fn run(&self, ctx: &SystemContext);
 
-    /// Declares that this system writes resource type T.
-    pub fn writes_resource<T: 'static>(mut self) -> Self {
-        self.access.add_resource_write::<T>();
-        self
-    }
-
-    /// Declares that this system must run after the named system.
-    pub fn after(mut self, name: &str) -> Self {
-        self.after.push(name.to_string());
-        self
-    }
-
-    /// Declares that this system must run before the named system.
-    pub fn before(mut self, name: &str) -> Self {
-        self.before.push(name.to_string());
-        self
-    }
-
-    /// Completes registration with the given system function.
+    /// Returns the access descriptor for this system.
     ///
-    /// The function receives `&World` and accesses components through
-    /// runtime-borrow-checked queries.
-    pub fn run(self, func: impl Fn(&World) + Send + Sync + 'static) {
-        self.systems.push(FnSystem {
-            name: self.name,
-            access: self.access,
-            after: self.after,
-            before: self.before,
-            func: Box::new(func),
-        });
+    /// Called once during [`Schedule::add`](crate::Schedule::add) and cached
+    /// internally. The scheduler uses this to detect conflicts between systems.
+    fn access(&self) -> Access;
+}
+
+/// Internal wrapper holding a registered system plus scheduler metadata.
+pub(crate) struct StoredSystem {
+    /// The system instance, type-erased.
+    pub system: Box<dyn System>,
+    /// TypeId of the concrete system struct.
+    pub type_id: TypeId,
+    /// Human-readable type name for debug/error messages.
+    pub type_name: &'static str,
+    /// Cached access descriptor (populated at add time).
+    pub access: Access,
+    /// TypeIds of systems that must run before this one.
+    pub after: Vec<TypeId>,
+    /// TypeIds of systems that must run after this one.
+    pub before: Vec<TypeId>,
+}
+
+impl StoredSystem {
+    /// Executes the system function.
+    pub fn run(&self, ctx: &SystemContext) {
+        self.system.run(ctx);
+    }
+}
+
+/// A reference returned by [`Schedule::add`](crate::Schedule::add) to
+/// configure ordering constraints.
+///
+/// # Example
+///
+/// ```ignore
+/// schedule.add(UpdateCameraMatrices)
+///     .after::<UpdateGlobalTransforms>();
+/// ```
+pub struct SystemRef<'a> {
+    stored: &'a mut StoredSystem,
+}
+
+impl<'a> SystemRef<'a> {
+    pub(crate) fn new(stored: &'a mut StoredSystem) -> Self {
+        Self { stored }
+    }
+
+    /// Declares that this system must run after `S`.
+    pub fn after<S: System>(self) -> Self {
+        self.stored.after.push(TypeId::of::<S>());
+        self
+    }
+
+    /// Declares that this system must run before `S`.
+    pub fn before<S: System>(self) -> Self {
+        self.stored.before.push(TypeId::of::<S>());
+        self
     }
 }
 
@@ -135,50 +144,85 @@ impl<'a> SystemBuilder<'a> {
 mod tests {
     use super::*;
 
-    struct Position;
-    struct Velocity;
+    struct CompA;
+    struct CompB;
+
+    struct EmptySystem;
+    impl System for EmptySystem {
+        fn run(&self, _ctx: &SystemContext) {}
+        fn access(&self) -> Access {
+            Access::new()
+        }
+    }
+
+    struct ReadSystem;
+    impl System for ReadSystem {
+        fn run(&self, _ctx: &SystemContext) {}
+        fn access(&self) -> Access {
+            let mut a = Access::new();
+            a.add_read::<CompA>();
+            a.add_read::<CompB>();
+            a
+        }
+    }
 
     #[test]
-    fn builder_builds_system() {
-        let mut systems = Vec::new();
+    fn stored_system_captures_type_info() {
+        let sys = EmptySystem;
+        let stored = StoredSystem {
+            type_id: TypeId::of::<EmptySystem>(),
+            type_name: std::any::type_name::<EmptySystem>(),
+            access: sys.access(),
+            after: Vec::new(),
+            before: Vec::new(),
+            system: Box::new(sys),
+        };
+        assert_eq!(stored.type_id, TypeId::of::<EmptySystem>());
+        assert!(stored.type_name.contains("EmptySystem"));
+    }
 
-        SystemBuilder::new(&mut systems, "test".to_string())
-            .reads::<Position>()
-            .writes::<Velocity>()
-            .after("other")
-            .run(|_world| {});
+    #[test]
+    fn system_ref_collects_ordering() {
+        let sys = EmptySystem;
+        let mut stored = StoredSystem {
+            type_id: TypeId::of::<EmptySystem>(),
+            type_name: std::any::type_name::<EmptySystem>(),
+            access: sys.access(),
+            after: Vec::new(),
+            before: Vec::new(),
+            system: Box::new(sys),
+        };
+        SystemRef::new(&mut stored).after::<ReadSystem>();
+        assert_eq!(stored.after.len(), 1);
+        assert_eq!(stored.after[0], TypeId::of::<ReadSystem>());
+    }
 
-        assert_eq!(systems.len(), 1);
-        assert_eq!(systems[0].name, "test");
-        assert_eq!(systems[0].after, vec!["other"]);
-        assert!(!systems[0].access.is_read_only());
+    #[test]
+    fn read_only_access() {
+        let sys = ReadSystem;
+        assert!(sys.access().is_read_only());
     }
 
     #[test]
     fn system_runs() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        let ran = std::sync::Arc::new(AtomicBool::new(false));
-        let ran_clone = ran.clone();
+        struct FlagSystem(std::sync::Arc<AtomicBool>);
+        impl System for FlagSystem {
+            fn run(&self, _ctx: &SystemContext) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+            fn access(&self) -> Access {
+                Access::new()
+            }
+        }
 
-        let mut systems = Vec::new();
-        SystemBuilder::new(&mut systems, "test".to_string()).run(move |_world| {
-            ran_clone.store(true, Ordering::Relaxed);
-        });
-
+        let flag = std::sync::Arc::new(AtomicBool::new(false));
+        let sys = FlagSystem(flag.clone());
         let world = World::new();
-        systems[0].run(&world);
-        assert!(ran.load(Ordering::Relaxed));
-    }
-
-    #[test]
-    fn read_only_access() {
-        let mut systems = Vec::new();
-        SystemBuilder::new(&mut systems, "reader".to_string())
-            .reads::<Position>()
-            .reads::<Velocity>()
-            .run(|_| {});
-
-        assert!(systems[0].access.is_read_only());
+        let compute = ComputePool::new();
+        let ctx = SystemContext::new(&world, &compute);
+        sys.run(&ctx);
+        assert!(flag.load(Ordering::Relaxed));
     }
 }

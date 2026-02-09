@@ -1,61 +1,105 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use std::time::Duration;
 
 use crate::priority::Priority;
 
+/// Shared state between a [`TaskHandle`] and the pool's internal future wrapper.
+///
+/// Tracks completion and cancellation flags atomically so the handle can
+/// query status without consuming the result value.
+struct TaskState {
+    completed: AtomicBool,
+    cancelled: AtomicBool,
+}
+
+impl TaskState {
+    fn new() -> Self {
+        Self {
+            completed: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
+        }
+    }
+}
+
 /// Handle to a spawned async compute task.
 ///
-/// Allows checking completion status and retrieving the result.
+/// Allows checking completion status, retrieving the result, cancelling,
+/// and waiting with a timeout.
 ///
 /// # Example
 ///
 /// ```ignore
 /// let handle = pool.spawn(Priority::Low, async { 42 });
 ///
-/// // Later, check if done:
-/// if let Some(result) = handle.try_recv() {
-///     println!("Got: {}", result);
+/// // Non-destructive completion check:
+/// if handle.is_done() {
+///     let result = handle.try_recv();
 /// }
+///
+/// // Or wait with timeout:
+/// if let Some(val) = handle.recv_timeout(Duration::from_millis(100)) {
+///     println!("Got: {}", val);
+/// }
+///
+/// // Cancel a long-running task:
+/// handle.cancel();
 /// ```
 pub struct TaskHandle<T> {
     receiver: std::sync::mpsc::Receiver<T>,
+    state: Arc<TaskState>,
 }
 
 impl<T> TaskHandle<T> {
     /// Attempts to retrieve the result without blocking.
     ///
     /// Returns `Some(T)` if the task has completed, `None` otherwise.
+    /// This consumes the value — subsequent calls return `None`.
     pub fn try_recv(&self) -> Option<T> {
         self.receiver.try_recv().ok()
     }
 
-    /// Returns whether the task has completed.
+    /// Returns whether the task has completed (non-destructive).
     ///
-    /// Note: Even if this returns `true`, `try_recv` should be used
-    /// to actually retrieve the value.
-    pub fn is_complete(&self) -> bool {
-        // Peek without consuming — if try_recv succeeds the value is consumed,
-        // so we use a non-destructive check instead.
-        // Unfortunately mpsc::Receiver doesn't have peek, so we check if
-        // the sender is disconnected (task completed and sent).
-        // A more reliable approach: just try_recv.
-        matches!(
-            self.receiver.try_recv(),
-            Ok(_) | Err(std::sync::mpsc::TryRecvError::Disconnected)
-        )
+    /// Does not consume the result value. Use `try_recv()` or `recv()`
+    /// to actually retrieve it.
+    pub fn is_done(&self) -> bool {
+        self.state.completed.load(Ordering::Acquire)
+    }
+
+    /// Returns whether the task has been cancelled.
+    pub fn is_cancelled(&self) -> bool {
+        self.state.cancelled.load(Ordering::Acquire)
+    }
+
+    /// Requests cancellation of the task.
+    ///
+    /// The pool will drop the task's future on its next tick instead of
+    /// polling it. If the task has already completed, this has no effect.
+    pub fn cancel(&self) {
+        self.state.cancelled.store(true, Ordering::Release);
     }
 
     /// Blocks until the task completes and returns the result.
     ///
+    /// Returns `None` if the task was cancelled or the sender was dropped.
+    ///
     /// # Warning
     ///
     /// This blocks the calling thread. Prefer `try_recv()` in frame loops.
-    pub fn recv(self) -> T {
-        self.receiver
-            .recv()
-            .expect("Compute task dropped without sending result")
+    pub fn recv(self) -> Option<T> {
+        self.receiver.recv().ok()
+    }
+
+    /// Waits up to `timeout` for the task to complete.
+    ///
+    /// Returns `Some(T)` if the result arrives within the deadline,
+    /// `None` if the timeout expires or the task was cancelled.
+    pub fn recv_timeout(&self, timeout: Duration) -> Option<T> {
+        self.receiver.recv_timeout(timeout).ok()
     }
 }
 
@@ -65,6 +109,8 @@ struct PendingTask {
     future: Pin<Box<dyn Future<Output = ()> + Send>>,
     /// Insertion order for stable sorting within the same priority.
     id: u64,
+    /// Shared state for completion/cancellation tracking.
+    state: Arc<TaskState>,
 }
 
 /// Pool for spawning async compute tasks.
@@ -111,10 +157,13 @@ impl ComputePool {
         F: Future<Output = T> + Send + 'static,
     {
         let (sender, receiver) = std::sync::mpsc::channel();
+        let state = Arc::new(TaskState::new());
+        let task_state = state.clone();
 
         let wrapped = async move {
             let result = future.await;
             let _ = sender.send(result);
+            task_state.completed.store(true, Ordering::Release);
         };
 
         let id = {
@@ -128,19 +177,24 @@ impl ComputePool {
             priority,
             future: Box::pin(wrapped),
             id,
+            state: state.clone(),
         };
 
         self.tasks.lock().unwrap().push(task);
 
-        TaskHandle { receiver }
+        TaskHandle { receiver, state }
     }
 
     /// Polls the highest-priority pending task once.
     ///
     /// Returns the number of tasks that were polled (0 or 1).
-    /// Completed tasks are automatically removed from the pool.
+    /// Completed and cancelled tasks are automatically removed from the pool.
     pub fn tick(&self) -> usize {
         let mut tasks = self.tasks.lock().unwrap();
+
+        // Remove cancelled tasks first
+        tasks.retain(|t| !t.state.cancelled.load(Ordering::Acquire));
+
         if tasks.is_empty() {
             return 0;
         }
@@ -171,9 +225,13 @@ impl ComputePool {
     /// Polls all pending tasks once each.
     ///
     /// Returns the number of tasks that were polled.
-    /// Completed tasks are automatically removed.
+    /// Completed and cancelled tasks are automatically removed.
     pub fn tick_all(&self) -> usize {
         let mut tasks = self.tasks.lock().unwrap();
+
+        // Remove cancelled tasks first
+        tasks.retain(|t| !t.state.cancelled.load(Ordering::Acquire));
+
         let count = tasks.len();
         if count == 0 {
             return 0;
@@ -279,10 +337,12 @@ mod tests {
         pool.tick();
         assert_eq!(pool.pending_count(), 1);
         assert!(handle.try_recv().is_none());
+        assert!(!handle.is_done());
 
         // Second tick: future completes
         pool.tick();
         assert_eq!(pool.pending_count(), 0);
+        assert!(handle.is_done());
         assert_eq!(handle.try_recv(), Some(42));
     }
 
@@ -307,7 +367,7 @@ mod tests {
         let handle = pool.spawn(Priority::High, async { "hello" });
 
         pool.tick();
-        assert_eq!(handle.recv(), "hello");
+        assert_eq!(handle.recv(), Some("hello"));
     }
 
     #[test]
@@ -316,5 +376,69 @@ mod tests {
         assert_eq!(pool.tick(), 0);
         assert_eq!(pool.tick_all(), 0);
         assert_eq!(pool.pending_count(), 0);
+    }
+
+    #[test]
+    fn is_done_non_destructive() {
+        let pool = ComputePool::new();
+        let handle = pool.spawn(Priority::Low, async { 99u32 });
+
+        assert!(!handle.is_done());
+        pool.tick();
+        assert!(handle.is_done());
+        // Value is still available after checking is_done
+        assert_eq!(handle.try_recv(), Some(99));
+    }
+
+    #[test]
+    fn cancel_prevents_execution() {
+        let pool = ComputePool::new();
+        let handle = pool.spawn(Priority::Low, async {
+            yield_now().await;
+            42u32
+        });
+
+        // First tick: task yields
+        pool.tick();
+        assert!(!handle.is_done());
+
+        // Cancel before it can complete
+        handle.cancel();
+        assert!(handle.is_cancelled());
+
+        // Next tick should drop the cancelled task
+        pool.tick();
+        assert_eq!(pool.pending_count(), 0);
+        assert!(!handle.is_done());
+    }
+
+    #[test]
+    fn recv_timeout_returns_none_on_timeout() {
+        let pool = ComputePool::new();
+        let handle = pool.spawn(Priority::Low, async {
+            yield_now().await;
+            42u32
+        });
+
+        // Task hasn't been ticked yet
+        assert_eq!(handle.recv_timeout(Duration::from_millis(1)), None);
+
+        // Complete the task and retrieve
+        pool.tick();
+        pool.tick();
+        assert_eq!(handle.recv_timeout(Duration::from_millis(100)), Some(42));
+    }
+
+    #[test]
+    fn cancel_already_completed_is_harmless() {
+        let pool = ComputePool::new();
+        let handle = pool.spawn(Priority::Low, async { 10u32 });
+
+        pool.tick();
+        assert!(handle.is_done());
+
+        // Cancelling after completion is fine
+        handle.cancel();
+        assert_eq!(handle.try_recv(), Some(10));
     }
 }

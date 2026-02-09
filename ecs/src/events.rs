@@ -1,5 +1,3 @@
-use crate::world::World;
-
 /// Double-buffered event queue for typed inter-system communication.
 ///
 /// Events are sent during one frame and can be read during the same frame
@@ -84,29 +82,54 @@ impl<T: Send + Sync + 'static> Default for Events<T> {
     }
 }
 
-/// Creates a system function that advances the [`Events<T>`] double buffer.
+/// A system that advances the [`Events<T>`] double buffer.
 ///
-/// Register this system at the start of your schedule so events from the
-/// previous frame are cleared and the current buffer becomes readable
-/// as "previous" for systems that run later.
+/// Register at the start of your schedule so events from the previous
+/// frame are cleared and the current buffer becomes readable as
+/// "previous" for systems that run later.
 ///
 /// # Example
 ///
 /// ```ignore
-/// schedule.add_system("update_collision_events")
-///     .writes_resource::<Events<CollisionEvent>>()
-///     .run(event_update_system::<CollisionEvent>());
+/// schedule.add(EventUpdateSystem::<CollisionEvent>::new())
+///     .before::<PhysicsSystem>();
 /// ```
-pub fn event_update_system<T: Send + Sync + 'static>() -> impl Fn(&World) + Send + Sync {
-    move |world: &World| {
-        let mut events = world.resource_mut::<Events<T>>();
+pub struct EventUpdateSystem<T: Send + Sync + 'static> {
+    _marker: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T: Send + Sync + 'static> EventUpdateSystem<T> {
+    /// Creates a new event update system for event type `T`.
+    pub fn new() -> Self {
+        Self {
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T: Send + Sync + 'static> Default for EventUpdateSystem<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: Send + Sync + 'static> crate::system::System for EventUpdateSystem<T> {
+    fn run(&self, ctx: &crate::system::SystemContext) {
+        let mut events = ctx.world().resource_mut::<Events<T>>();
         events.update();
+    }
+
+    fn access(&self) -> crate::access::Access {
+        let mut access = crate::access::Access::new();
+        access.add_resource_write::<Events<T>>();
+        access
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::world::World;
 
     #[derive(Debug, PartialEq, Clone)]
     struct TestEvent {
@@ -198,8 +221,13 @@ mod tests {
         }
 
         // Run update system
-        let update = event_update_system::<TestEvent>();
-        update(&world);
+        use crate::compute::ComputePool;
+        use crate::system::System;
+        use crate::system::SystemContext;
+        let update = EventUpdateSystem::<TestEvent>::new();
+        let compute = ComputePool::new();
+        let ctx = SystemContext::new(&world, &compute);
+        update.run(&ctx);
 
         // Event should be in previous now
         let events = world.resource::<Events<TestEvent>>();

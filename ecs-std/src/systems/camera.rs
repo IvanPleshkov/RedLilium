@@ -1,20 +1,32 @@
-use redlilium_ecs::World;
+use redlilium_ecs::{Access, System, SystemContext, World};
 
 use crate::components::{Camera, GlobalTransform};
 
-/// Updates view matrices for all [`Camera`] components.
+/// System that updates view matrices for all [`Camera`] components.
 ///
-/// Reads [`GlobalTransform`] to compute the view matrix (inverse of the
-/// camera's world transform). Projection matrices are set at construction
-/// and not modified by this system.
-///
-/// Must run after [`update_global_transforms`](crate::systems::update_global_transforms).
+/// Reads [`GlobalTransform`] to compute the inverse world transform.
+/// Must run after [`UpdateGlobalTransforms`](super::UpdateGlobalTransforms).
 ///
 /// # Access
 ///
 /// - Reads: `GlobalTransform`
 /// - Writes: `Camera`
-pub fn update_camera_matrices(world: &World) {
+pub struct UpdateCameraMatrices;
+
+impl System for UpdateCameraMatrices {
+    fn run(&self, ctx: &SystemContext) {
+        update_camera_matrices(ctx.world());
+    }
+
+    fn access(&self) -> Access {
+        let mut access = Access::new();
+        access.add_read::<GlobalTransform>();
+        access.add_write::<Camera>();
+        access
+    }
+}
+
+fn update_camera_matrices(world: &World) {
     redlilium_core::profile_scope!("update_camera_matrices");
 
     let globals = world.read::<GlobalTransform>();

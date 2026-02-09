@@ -14,8 +14,8 @@
 //!
 //! ## Systems
 //!
-//! - [`update_global_transforms`] — Computes world matrices (hierarchy-aware)
-//! - [`update_camera_matrices`] — Computes view matrices for cameras
+//! - [`UpdateGlobalTransforms`] — Computes world matrices (hierarchy-aware)
+//! - [`UpdateCameraMatrices`] — Computes view matrices for cameras
 //!
 //! ## Hierarchy
 //!
@@ -33,7 +33,7 @@ pub mod systems;
 pub use components::*;
 pub use hierarchy::{HierarchyCommands, despawn_recursive, remove_parent, set_parent};
 pub use spawn::spawn_scene;
-pub use systems::{update_camera_matrices, update_global_transforms};
+pub use systems::{UpdateCameraMatrices, UpdateGlobalTransforms};
 
 /// Register all standard component types with the world.
 ///

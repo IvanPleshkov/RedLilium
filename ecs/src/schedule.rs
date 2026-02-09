@@ -1,12 +1,14 @@
+use std::any::TypeId;
 use std::collections::VecDeque;
 
-use crate::system::{FnSystem, SystemBuilder};
+use crate::compute::ComputePool;
+use crate::system::{StoredSystem, System, SystemContext, SystemRef};
 use crate::world::World;
 
 /// A collection of systems with dependency resolution and execution ordering.
 ///
 /// The schedule determines the order in which systems run based on:
-/// 1. Explicit ordering constraints (`after` / `before`)
+/// 1. Explicit ordering constraints ([`after`](SystemRef::after) / [`before`](SystemRef::before))
 /// 2. Automatic conflict detection (systems accessing the same component types)
 ///
 /// Systems that do not conflict and have no ordering constraints between them
@@ -17,23 +19,16 @@ use crate::world::World;
 /// ```ignore
 /// let mut schedule = Schedule::new();
 ///
-/// schedule.add_system("movement")
-///     .writes::<Position>()
-///     .reads::<Velocity>()
-///     .run(movement_system);
-///
-/// schedule.add_system("collision")
-///     .reads::<Position>()
-///     .reads::<Collider>()
-///     .after("movement")
-///     .run(collision_system);
+/// schedule.add(MovementSystem);
+/// schedule.add(CollisionSystem)
+///     .after::<MovementSystem>();
 ///
 /// schedule.build();
 /// schedule.run(&world);
 /// ```
 pub struct Schedule {
     /// Registered systems, in registration order.
-    systems: Vec<FnSystem>,
+    systems: Vec<StoredSystem>,
     /// Computed execution order: each inner Vec is a stage of system indices
     /// that can run concurrently.
     execution_order: Vec<Vec<usize>>,
@@ -51,16 +46,38 @@ impl Schedule {
         }
     }
 
-    /// Begins registering a system with the given name.
+    /// Registers a system instance.
     ///
-    /// Returns a [`SystemBuilder`] for declaring access and ordering constraints.
+    /// Returns a [`SystemRef`] for declaring ordering constraints.
     ///
     /// # Panics
     ///
-    /// Panics if the schedule has already been built.
-    pub fn add_system(&mut self, name: &str) -> SystemBuilder<'_> {
+    /// Panics if the schedule has already been built, or if a system
+    /// with the same type has already been registered.
+    pub fn add<S: System>(&mut self, system: S) -> SystemRef<'_> {
         assert!(!self.built, "Cannot add systems after build()");
-        SystemBuilder::new(&mut self.systems, name.to_string())
+
+        let type_id = TypeId::of::<S>();
+
+        if self.systems.iter().any(|s| s.type_id == type_id) {
+            panic!(
+                "Duplicate system type: {} is already registered",
+                std::any::type_name::<S>()
+            );
+        }
+
+        let access = system.access();
+        self.systems.push(StoredSystem {
+            system: Box::new(system),
+            type_id,
+            type_name: std::any::type_name::<S>(),
+            access,
+            after: Vec::new(),
+            before: Vec::new(),
+        });
+
+        let stored = self.systems.last_mut().unwrap();
+        SystemRef::new(stored)
     }
 
     /// Resolves dependencies and computes the execution order.
@@ -71,7 +88,7 @@ impl Schedule {
     /// # Panics
     ///
     /// Panics if a dependency cycle is detected, or if an `after`/`before`
-    /// constraint references a non-existent system.
+    /// constraint references a system type that is not registered.
     pub fn build(&mut self) {
         let n = self.systems.len();
         if n == 0 {
@@ -79,12 +96,12 @@ impl Schedule {
             return;
         }
 
-        // Build name→index lookup
-        let name_to_idx: std::collections::HashMap<&str, usize> = self
+        // Build TypeId → index lookup
+        let id_to_idx: std::collections::HashMap<TypeId, usize> = self
             .systems
             .iter()
             .enumerate()
-            .map(|(i, s)| (s.name.as_str(), i))
+            .map(|(i, s)| (s.type_id, i))
             .collect();
 
         // Build adjacency list: edges[i] contains systems that must run after system i
@@ -93,22 +110,22 @@ impl Schedule {
 
         // Explicit ordering constraints
         for (i, system) in self.systems.iter().enumerate() {
-            for dep_name in &system.after {
-                let &dep_idx = name_to_idx.get(dep_name.as_str()).unwrap_or_else(|| {
+            for &dep_id in &system.after {
+                let &dep_idx = id_to_idx.get(&dep_id).unwrap_or_else(|| {
                     panic!(
-                        "System '{}' declares after('{}'), but no system named '{}' exists",
-                        system.name, dep_name, dep_name
+                        "System '{}' declares after a system type that is not registered (TypeId: {:?})",
+                        system.type_name, dep_id
                     )
                 });
                 // dep_idx must run before i → edge from dep_idx to i
                 edges[dep_idx].push(i);
                 in_degree[i] += 1;
             }
-            for dep_name in &system.before {
-                let &dep_idx = name_to_idx.get(dep_name.as_str()).unwrap_or_else(|| {
+            for &dep_id in &system.before {
+                let &dep_idx = id_to_idx.get(&dep_id).unwrap_or_else(|| {
                     panic!(
-                        "System '{}' declares before('{}'), but no system named '{}' exists",
-                        system.name, dep_name, dep_name
+                        "System '{}' declares before a system type that is not registered (TypeId: {:?})",
+                        system.type_name, dep_id
                     )
                 });
                 // i must run before dep_idx → edge from i to dep_idx
@@ -172,7 +189,7 @@ impl Schedule {
                 .iter()
                 .enumerate()
                 .filter(|(_, deg)| **deg > 0)
-                .map(|(i, _)| self.systems[i].name.as_str())
+                .map(|(i, _)| self.systems[i].type_name)
                 .collect();
             panic!(
                 "Dependency cycle detected among systems: [{}]",
@@ -192,11 +209,12 @@ impl Schedule {
     /// # Panics
     ///
     /// Panics if [`build`](Schedule::build) has not been called.
-    pub fn run(&self, world: &World) {
+    pub fn run(&self, world: &World, compute: &ComputePool) {
         assert!(self.built, "Schedule::build() must be called before run()");
+        let ctx = SystemContext::new(world, compute);
         for stage in &self.execution_order {
             for &system_idx in stage {
-                self.systems[system_idx].run(world);
+                self.systems[system_idx].run(&ctx);
             }
         }
     }
@@ -210,20 +228,26 @@ impl Schedule {
     /// # Panics
     ///
     /// Panics if [`build`](Schedule::build) has not been called.
-    pub fn run_parallel(&self, world: &World, pool: &crate::thread_pool::ThreadPool) {
+    pub fn run_parallel(
+        &self,
+        world: &World,
+        pool: &crate::thread_pool::ThreadPool,
+        compute: &ComputePool,
+    ) {
         assert!(
             self.built,
             "Schedule::build() must be called before run_parallel()"
         );
+        let ctx = SystemContext::new(world, compute);
         for stage in &self.execution_order {
             if stage.len() == 1 {
-                self.systems[stage[0]].run(world);
+                self.systems[stage[0]].run(&ctx);
             } else {
                 pool.scope(|s| {
                     for &system_idx in stage {
                         let system = &self.systems[system_idx];
                         s.spawn(move || {
-                            system.run(world);
+                            system.run(&ctx);
                         });
                     }
                 });
@@ -243,7 +267,7 @@ impl Schedule {
         self.execution_order.len()
     }
 
-    /// Returns the system names in execution order, grouped by stage.
+    /// Returns the system type names in execution order, grouped by stage.
     ///
     /// Useful for debugging and visualization.
     pub fn execution_stages(&self) -> Vec<Vec<&str>> {
@@ -252,7 +276,7 @@ impl Schedule {
             .map(|stage| {
                 stage
                     .iter()
-                    .map(|&idx| self.systems[idx].name.as_str())
+                    .map(|&idx| self.systems[idx].type_name)
                     .collect()
             })
             .collect()
@@ -268,7 +292,12 @@ impl Default for Schedule {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::access::Access;
+    use crate::system::SystemContext;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    // ---- Component marker types for access declarations ----
 
     struct Position {
         x: f32,
@@ -278,40 +307,271 @@ mod tests {
     }
     struct Health;
 
+    // ---- Test systems ----
+
+    struct CounterSystem(Arc<AtomicU32>);
+    impl System for CounterSystem {
+        fn run(&self, _ctx: &SystemContext) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+        fn access(&self) -> Access {
+            Access::new()
+        }
+    }
+
+    // Systems for ordering tests
+    struct FirstSystem(Arc<Mutex<Vec<&'static str>>>);
+    impl System for FirstSystem {
+        fn run(&self, _ctx: &SystemContext) {
+            self.0.lock().unwrap().push("first");
+        }
+        fn access(&self) -> Access {
+            Access::new()
+        }
+    }
+
+    struct SecondSystem(Arc<Mutex<Vec<&'static str>>>);
+    impl System for SecondSystem {
+        fn run(&self, _ctx: &SystemContext) {
+            self.0.lock().unwrap().push("second");
+        }
+        fn access(&self) -> Access {
+            Access::new()
+        }
+    }
+
+    // Systems for conflict detection
+    struct WritePosA;
+    impl System for WritePosA {
+        fn run(&self, _ctx: &SystemContext) {}
+        fn access(&self) -> Access {
+            let mut a = Access::new();
+            a.add_write::<Position>();
+            a
+        }
+    }
+
+    struct WritePosB;
+    impl System for WritePosB {
+        fn run(&self, _ctx: &SystemContext) {}
+        fn access(&self) -> Access {
+            let mut a = Access::new();
+            a.add_write::<Position>();
+            a
+        }
+    }
+
+    struct WriteVelA;
+    impl System for WriteVelA {
+        fn run(&self, _ctx: &SystemContext) {}
+        fn access(&self) -> Access {
+            let mut a = Access::new();
+            a.add_write::<Velocity>();
+            a
+        }
+    }
+
+    struct ReadPosA;
+    impl System for ReadPosA {
+        fn run(&self, _ctx: &SystemContext) {}
+        fn access(&self) -> Access {
+            let mut a = Access::new();
+            a.add_read::<Position>();
+            a
+        }
+    }
+
+    struct ReadPosB;
+    impl System for ReadPosB {
+        fn run(&self, _ctx: &SystemContext) {}
+        fn access(&self) -> Access {
+            let mut a = Access::new();
+            a.add_read::<Position>();
+            a
+        }
+    }
+
+    // Systems for registration order tiebreaker
+    struct TiebreakFirst(Arc<Mutex<Vec<&'static str>>>);
+    impl System for TiebreakFirst {
+        fn run(&self, _ctx: &SystemContext) {
+            self.0.lock().unwrap().push("first_registered");
+        }
+        fn access(&self) -> Access {
+            let mut a = Access::new();
+            a.add_write::<Position>();
+            a
+        }
+    }
+
+    struct TiebreakSecond(Arc<Mutex<Vec<&'static str>>>);
+    impl System for TiebreakSecond {
+        fn run(&self, _ctx: &SystemContext) {
+            self.0.lock().unwrap().push("second_registered");
+        }
+        fn access(&self) -> Access {
+            let mut a = Access::new();
+            a.add_write::<Position>();
+            a
+        }
+    }
+
+    // Systems for cycle/missing tests
+    struct CycleA;
+    impl System for CycleA {
+        fn run(&self, _ctx: &SystemContext) {}
+        fn access(&self) -> Access {
+            Access::new()
+        }
+    }
+
+    struct CycleB;
+    impl System for CycleB {
+        fn run(&self, _ctx: &SystemContext) {}
+        fn access(&self) -> Access {
+            Access::new()
+        }
+    }
+
+    struct MissingDepSystem;
+    impl System for MissingDepSystem {
+        fn run(&self, _ctx: &SystemContext) {}
+        fn access(&self) -> Access {
+            Access::new()
+        }
+    }
+
+    struct NonexistentSystem;
+    impl System for NonexistentSystem {
+        fn run(&self, _ctx: &SystemContext) {}
+        fn access(&self) -> Access {
+            Access::new()
+        }
+    }
+
+    // Systems for diamond dependency
+    struct DiamondA(Arc<Mutex<Vec<&'static str>>>);
+    impl System for DiamondA {
+        fn run(&self, _ctx: &SystemContext) {
+            self.0.lock().unwrap().push("A");
+        }
+        fn access(&self) -> Access {
+            Access::new()
+        }
+    }
+
+    struct DiamondB(Arc<Mutex<Vec<&'static str>>>);
+    impl System for DiamondB {
+        fn run(&self, _ctx: &SystemContext) {
+            self.0.lock().unwrap().push("B");
+        }
+        fn access(&self) -> Access {
+            Access::new()
+        }
+    }
+
+    struct DiamondC(Arc<Mutex<Vec<&'static str>>>);
+    impl System for DiamondC {
+        fn run(&self, _ctx: &SystemContext) {
+            self.0.lock().unwrap().push("C");
+        }
+        fn access(&self) -> Access {
+            Access::new()
+        }
+    }
+
+    struct DiamondD(Arc<Mutex<Vec<&'static str>>>);
+    impl System for DiamondD {
+        fn run(&self, _ctx: &SystemContext) {
+            self.0.lock().unwrap().push("D");
+        }
+        fn access(&self) -> Access {
+            Access::new()
+        }
+    }
+
+    // System for world modification test
+    struct MovementSystem;
+    impl System for MovementSystem {
+        fn run(&self, ctx: &SystemContext) {
+            let world = ctx.world();
+            let mut positions = world.write::<Position>();
+            let velocities = world.read::<Velocity>();
+            for (idx, pos) in positions.iter_mut() {
+                if let Some(vel) = velocities.get(idx) {
+                    pos.x += vel.x;
+                }
+            }
+        }
+        fn access(&self) -> Access {
+            let mut a = Access::new();
+            a.add_write::<Position>();
+            a.add_read::<Velocity>();
+            a
+        }
+    }
+
+    // Systems for execution_stages test
+    struct PhysicsSystem;
+    impl System for PhysicsSystem {
+        fn run(&self, _ctx: &SystemContext) {}
+        fn access(&self) -> Access {
+            let mut a = Access::new();
+            a.add_write::<Position>();
+            a
+        }
+    }
+
+    struct AiSystem;
+    impl System for AiSystem {
+        fn run(&self, _ctx: &SystemContext) {}
+        fn access(&self) -> Access {
+            let mut a = Access::new();
+            a.add_write::<Health>();
+            a
+        }
+    }
+
+    struct RenderSystem;
+    impl System for RenderSystem {
+        fn run(&self, _ctx: &SystemContext) {}
+        fn access(&self) -> Access {
+            let mut a = Access::new();
+            a.add_read::<Position>();
+            a
+        }
+    }
+
+    // ---- Tests ----
+
     #[test]
     fn single_system_runs() {
-        let counter = std::sync::Arc::new(AtomicU32::new(0));
-        let counter_clone = counter.clone();
+        let counter = Arc::new(AtomicU32::new(0));
 
         let mut schedule = Schedule::new();
-        schedule.add_system("test").run(move |_| {
-            counter_clone.fetch_add(1, Ordering::Relaxed);
-        });
+        schedule.add(CounterSystem(counter.clone()));
         schedule.build();
 
         let world = World::new();
-        schedule.run(&world);
+        let compute = ComputePool::new();
+        schedule.run(&world, &compute);
         assert_eq!(counter.load(Ordering::Relaxed), 1);
     }
 
     #[test]
     fn sequential_ordering_after() {
-        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-
-        let o1 = order.clone();
-        let o2 = order.clone();
+        let order = Arc::new(Mutex::new(Vec::new()));
 
         let mut schedule = Schedule::new();
-        schedule.add_system("first").run(move |_| {
-            o1.lock().unwrap().push("first");
-        });
-        schedule.add_system("second").after("first").run(move |_| {
-            o2.lock().unwrap().push("second");
-        });
+        schedule.add(FirstSystem(order.clone()));
+        schedule
+            .add(SecondSystem(order.clone()))
+            .after::<FirstSystem>();
         schedule.build();
 
         let world = World::new();
-        schedule.run(&world);
+        let compute = ComputePool::new();
+        schedule.run(&world, &compute);
 
         let result = order.lock().unwrap();
         assert_eq!(*result, vec!["first", "second"]);
@@ -319,22 +579,18 @@ mod tests {
 
     #[test]
     fn sequential_ordering_before() {
-        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-
-        let o1 = order.clone();
-        let o2 = order.clone();
+        let order = Arc::new(Mutex::new(Vec::new()));
 
         let mut schedule = Schedule::new();
-        schedule.add_system("second").run(move |_| {
-            o2.lock().unwrap().push("second");
-        });
-        schedule.add_system("first").before("second").run(move |_| {
-            o1.lock().unwrap().push("first");
-        });
+        schedule.add(SecondSystem(order.clone()));
+        schedule
+            .add(FirstSystem(order.clone()))
+            .before::<SecondSystem>();
         schedule.build();
 
         let world = World::new();
-        schedule.run(&world);
+        let compute = ComputePool::new();
+        schedule.run(&world, &compute);
 
         let result = order.lock().unwrap();
         assert_eq!(*result, vec!["first", "second"]);
@@ -344,8 +600,8 @@ mod tests {
     fn conflict_detection_separates_stages() {
         let mut schedule = Schedule::new();
         // Both write Position → must be in different stages
-        schedule.add_system("a").writes::<Position>().run(|_| {});
-        schedule.add_system("b").writes::<Position>().run(|_| {});
+        schedule.add(WritePosA);
+        schedule.add(WritePosB);
         schedule.build();
 
         assert_eq!(schedule.stage_count(), 2);
@@ -355,8 +611,8 @@ mod tests {
     fn no_conflict_same_stage() {
         let mut schedule = Schedule::new();
         // Different types → can run in same stage
-        schedule.add_system("a").writes::<Position>().run(|_| {});
-        schedule.add_system("b").writes::<Velocity>().run(|_| {});
+        schedule.add(WritePosA);
+        schedule.add(WriteVelA);
         schedule.build();
 
         assert_eq!(schedule.stage_count(), 1);
@@ -366,8 +622,8 @@ mod tests {
     #[test]
     fn same_reads_same_stage() {
         let mut schedule = Schedule::new();
-        schedule.add_system("a").reads::<Position>().run(|_| {});
-        schedule.add_system("b").reads::<Position>().run(|_| {});
+        schedule.add(ReadPosA);
+        schedule.add(ReadPosB);
         schedule.build();
 
         assert_eq!(schedule.stage_count(), 1);
@@ -375,27 +631,16 @@ mod tests {
 
     #[test]
     fn registration_order_tiebreaker() {
-        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let o1 = order.clone();
-        let o2 = order.clone();
+        let order = Arc::new(Mutex::new(Vec::new()));
 
         let mut schedule = Schedule::new();
-        schedule
-            .add_system("first_registered")
-            .writes::<Position>()
-            .run(move |_| {
-                o1.lock().unwrap().push("first_registered");
-            });
-        schedule
-            .add_system("second_registered")
-            .writes::<Position>()
-            .run(move |_| {
-                o2.lock().unwrap().push("second_registered");
-            });
+        schedule.add(TiebreakFirst(order.clone()));
+        schedule.add(TiebreakSecond(order.clone()));
         schedule.build();
 
         let world = World::new();
-        schedule.run(&world);
+        let compute = ComputePool::new();
+        schedule.run(&world, &compute);
 
         let result = order.lock().unwrap();
         assert_eq!(*result, vec!["first_registered", "second_registered"]);
@@ -405,46 +650,37 @@ mod tests {
     #[should_panic(expected = "Dependency cycle detected")]
     fn cycle_detection_panics() {
         let mut schedule = Schedule::new();
-        schedule.add_system("a").after("b").run(|_| {});
-        schedule.add_system("b").after("a").run(|_| {});
+        schedule.add(CycleA).after::<CycleB>();
+        schedule.add(CycleB).after::<CycleA>();
         schedule.build();
     }
 
     #[test]
-    #[should_panic(expected = "no system named 'nonexistent' exists")]
+    #[should_panic(expected = "not registered")]
     fn missing_dependency_panics() {
         let mut schedule = Schedule::new();
-        schedule.add_system("a").after("nonexistent").run(|_| {});
+        schedule.add(MissingDepSystem).after::<NonexistentSystem>();
         schedule.build();
     }
 
     #[test]
     fn complex_diamond_dependency() {
         // A -> B, A -> C, B -> D, C -> D
-        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let (o1, o2, o3, o4) = (order.clone(), order.clone(), order.clone(), order.clone());
+        let order = Arc::new(Mutex::new(Vec::new()));
 
         let mut schedule = Schedule::new();
-        schedule.add_system("A").run(move |_| {
-            o1.lock().unwrap().push("A");
-        });
-        schedule.add_system("B").after("A").run(move |_| {
-            o2.lock().unwrap().push("B");
-        });
-        schedule.add_system("C").after("A").run(move |_| {
-            o3.lock().unwrap().push("C");
-        });
+        schedule.add(DiamondA(order.clone()));
+        schedule.add(DiamondB(order.clone())).after::<DiamondA>();
+        schedule.add(DiamondC(order.clone())).after::<DiamondA>();
         schedule
-            .add_system("D")
-            .after("B")
-            .after("C")
-            .run(move |_| {
-                o4.lock().unwrap().push("D");
-            });
+            .add(DiamondD(order.clone()))
+            .after::<DiamondB>()
+            .after::<DiamondC>();
         schedule.build();
 
         let world = World::new();
-        schedule.run(&world);
+        let compute = ComputePool::new();
+        schedule.run(&world, &compute);
 
         let result = order.lock().unwrap();
         assert_eq!(result[0], "A");
@@ -462,25 +698,14 @@ mod tests {
         world.insert(e, Velocity { x: 5.0 });
 
         let mut schedule = Schedule::new();
-        schedule
-            .add_system("movement")
-            .writes::<Position>()
-            .reads::<Velocity>()
-            .run(|world| {
-                let mut positions = world.write::<Position>();
-                let velocities = world.read::<Velocity>();
-                for (idx, pos) in positions.iter_mut() {
-                    if let Some(vel) = velocities.get(idx) {
-                        pos.x += vel.x;
-                    }
-                }
-            });
+        schedule.add(MovementSystem);
         schedule.build();
 
-        schedule.run(&world);
+        let compute = ComputePool::new();
+        schedule.run(&world, &compute);
         assert_eq!(world.get::<Position>(e).unwrap().x, 5.0);
 
-        schedule.run(&world);
+        schedule.run(&world, &compute);
         assert_eq!(world.get::<Position>(e).unwrap().x, 10.0);
     }
 
@@ -489,31 +714,40 @@ mod tests {
         let mut schedule = Schedule::new();
         schedule.build();
         let world = World::new();
-        schedule.run(&world); // Should not panic
+        let compute = ComputePool::new();
+        schedule.run(&world, &compute); // Should not panic
         assert_eq!(schedule.system_count(), 0);
         assert_eq!(schedule.stage_count(), 0);
     }
 
     #[test]
-    fn execution_stages_returns_names() {
+    fn execution_stages_returns_type_names() {
         let mut schedule = Schedule::new();
-        schedule
-            .add_system("physics")
-            .writes::<Position>()
-            .run(|_| {});
-        schedule.add_system("ai").writes::<Health>().run(|_| {});
-        schedule
-            .add_system("render")
-            .reads::<Position>()
-            .after("physics")
-            .run(|_| {});
+        schedule.add(PhysicsSystem);
+        schedule.add(AiSystem);
+        schedule.add(RenderSystem).after::<PhysicsSystem>();
         schedule.build();
 
         let stages = schedule.execution_stages();
         // physics and ai can be in same stage (different types)
-        assert!(stages[0].contains(&"physics"));
-        assert!(stages[0].contains(&"ai"));
+        let first_stage_has_physics = stages[0].iter().any(|name| name.contains("PhysicsSystem"));
+        let first_stage_has_ai = stages[0].iter().any(|name| name.contains("AiSystem"));
+        assert!(first_stage_has_physics);
+        assert!(first_stage_has_ai);
         // render must be after physics
-        assert!(stages.last().unwrap().contains(&"render"));
+        let last_stage_has_render = stages
+            .last()
+            .unwrap()
+            .iter()
+            .any(|name| name.contains("RenderSystem"));
+        assert!(last_stage_has_render);
+    }
+
+    #[test]
+    #[should_panic(expected = "Duplicate system type")]
+    fn duplicate_type_panics() {
+        let mut schedule = Schedule::new();
+        schedule.add(WritePosA);
+        schedule.add(WritePosA);
     }
 }
