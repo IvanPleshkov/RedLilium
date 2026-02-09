@@ -197,6 +197,15 @@ impl World {
         Ref::new(storage)
     }
 
+    /// Gets shared read access to all components of type T, returning `None`
+    /// if the type has never been registered.
+    ///
+    /// Non-panicking variant of [`read`](World::read). Used by `OptionalRead<T>`.
+    pub fn try_read<T: 'static>(&self) -> Option<Ref<'_, T>> {
+        let storage = self.components.get(&TypeId::of::<T>())?;
+        Some(Ref::new(storage))
+    }
+
     /// Gets exclusive write access to all components of type T.
     ///
     /// Returns a guard that dereferences to [`SparseSetInner<T>`](crate::SparseSetInner),
@@ -217,6 +226,27 @@ impl World {
                 )
             });
         RefMut::new(storage)
+    }
+
+    /// Gets exclusive write access to all components of type T, returning `None`
+    /// if the type has never been registered.
+    ///
+    /// Non-panicking variant of [`write`](World::write). Used by `OptionalWrite<T>`.
+    pub fn try_write<T: 'static>(&self) -> Option<RefMut<'_, T>> {
+        let storage = self.components.get(&TypeId::of::<T>())?;
+        Some(RefMut::new(storage))
+    }
+
+    /// Returns the TypeIds of all registered component types.
+    ///
+    /// Used by [`WorldLocks`](crate::world_locks) to create per-component locks.
+    pub fn component_type_ids(&self) -> impl Iterator<Item = TypeId> + '_ {
+        self.components.keys().copied()
+    }
+
+    /// Returns the TypeIds of all registered resource types.
+    pub fn resource_type_ids(&self) -> impl Iterator<Item = TypeId> + '_ {
+        self.resources.type_ids()
     }
 
     // ---- Filters ----

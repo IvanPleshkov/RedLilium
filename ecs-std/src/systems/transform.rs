@@ -1,5 +1,5 @@
 use glam::Mat4;
-use redlilium_ecs::{Access, World};
+use redlilium_ecs::{Ref, RefMut, SystemContext, SystemFuture};
 
 use crate::components::{Children, GlobalTransform, Parent, Transform};
 
@@ -15,47 +15,40 @@ use crate::components::{Children, GlobalTransform, Parent, Transform};
 /// - Writes: `GlobalTransform`
 pub struct UpdateGlobalTransforms;
 
-#[redlilium_ecs::system]
-impl UpdateGlobalTransforms {
-    async fn run(&self, access: QueryAccess<'_>) {
-        access.scope(|world| {
-            update_global_transforms(world);
-        });
-    }
-
-    fn access(&self) -> Access {
-        let mut access = Access::new();
-        access.add_read::<Transform>();
-        access.add_read::<Parent>();
-        access.add_read::<Children>();
-        access.add_write::<GlobalTransform>();
-        access
+impl redlilium_ecs::System for UpdateGlobalTransforms {
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
+        Box::pin(async move {
+            ctx.lock::<(
+                redlilium_ecs::Read<Transform>,
+                redlilium_ecs::Write<GlobalTransform>,
+                redlilium_ecs::Read<Children>,
+                redlilium_ecs::Read<Parent>,
+            )>()
+            .execute(|(transforms, mut globals, children_storage, parents)| {
+                update_global_transforms(&transforms, &mut globals, &children_storage, &parents);
+            })
+            .await;
+        })
     }
 }
 
-fn update_global_transforms(world: &World) {
+fn update_global_transforms(
+    transforms: &Ref<Transform>,
+    globals: &mut RefMut<GlobalTransform>,
+    children_storage: &Ref<Children>,
+    parents: &Ref<Parent>,
+) {
     redlilium_core::profile_scope!("update_global_transforms");
-
-    let transforms = world.read::<Transform>();
-    let mut globals = world.write::<GlobalTransform>();
-    let children_storage = world.read::<Children>();
-    let has_parent = world.with::<Parent>();
 
     // Process root entities (no Parent component)
     for (idx, transform) in transforms.iter() {
-        if !has_parent.matches(idx) {
+        if parents.get(idx).is_none() {
             let local_matrix = transform.to_matrix();
             if let Some(gt) = globals.get_mut(idx) {
                 gt.0 = local_matrix;
             }
             // Recursively propagate to children
-            propagate_children(
-                idx,
-                local_matrix,
-                &transforms,
-                &mut globals,
-                &children_storage,
-            );
+            propagate_children(idx, local_matrix, transforms, globals, children_storage);
         }
     }
 }
@@ -64,9 +57,9 @@ fn update_global_transforms(world: &World) {
 fn propagate_children(
     parent_idx: u32,
     parent_world: Mat4,
-    transforms: &redlilium_ecs::Ref<Transform>,
-    globals: &mut redlilium_ecs::RefMut<GlobalTransform>,
-    children_storage: &redlilium_ecs::Ref<Children>,
+    transforms: &Ref<Transform>,
+    globals: &mut RefMut<GlobalTransform>,
+    children_storage: &Ref<Children>,
 ) {
     let Some(children) = children_storage.get(parent_idx) else {
         return;
@@ -96,11 +89,21 @@ mod tests {
     use super::*;
     use crate::hierarchy::set_parent;
     use glam::{Quat, Vec3};
+    use redlilium_ecs::World;
 
     /// Helper: register hierarchy components so tests don't panic.
     fn register_hierarchy(world: &mut World) {
         world.register_component::<Parent>();
         world.register_component::<Children>();
+    }
+
+    /// Helper: get component borrows and run update.
+    fn run_update(world: &World) {
+        let transforms = world.read::<Transform>();
+        let mut globals = world.write::<GlobalTransform>();
+        let children_storage = world.read::<Children>();
+        let parents = world.read::<Parent>();
+        update_global_transforms(&transforms, &mut globals, &children_storage, &parents);
     }
 
     #[test]
@@ -113,7 +116,7 @@ mod tests {
         world.insert(e, t);
         world.insert(e, GlobalTransform::IDENTITY);
 
-        update_global_transforms(&world);
+        run_update(&world);
 
         let globals = world.read::<GlobalTransform>();
         let global = globals.get(e.index()).unwrap();
@@ -130,11 +133,10 @@ mod tests {
         world.insert(e, t);
         world.insert(e, GlobalTransform::IDENTITY);
 
-        update_global_transforms(&world);
+        run_update(&world);
 
         let globals = world.read::<GlobalTransform>();
         let global = globals.get(e.index()).unwrap();
-        // After 90-degree Y rotation, forward (-Z) rotates to -X
         let forward = global.forward();
         assert!((forward - Vec3::NEG_X).length() < 1e-5);
     }
@@ -144,12 +146,11 @@ mod tests {
         let mut world = World::new();
         register_hierarchy(&mut world);
 
-        // Entity with Transform but no GlobalTransform — should not panic
         let e = world.spawn();
         world.insert(e, Transform::IDENTITY);
         world.register_component::<GlobalTransform>();
 
-        update_global_transforms(&world);
+        run_update(&world);
     }
 
     #[test]
@@ -169,11 +170,10 @@ mod tests {
         world.insert(child, GlobalTransform::IDENTITY);
 
         set_parent(&mut world, child, parent);
-        update_global_transforms(&world);
+        run_update(&world);
 
         let globals = world.read::<GlobalTransform>();
         let child_global = globals.get(child.index()).unwrap();
-        // Child at (0,5,0) relative to parent at (10,0,0) → world (10,5,0)
         assert!((child_global.translation() - Vec3::new(10.0, 5.0, 0.0)).length() < 1e-6);
     }
 
@@ -196,11 +196,10 @@ mod tests {
 
         set_parent(&mut world, mid, root);
         set_parent(&mut world, leaf, mid);
-        update_global_transforms(&world);
+        run_update(&world);
 
         let globals = world.read::<GlobalTransform>();
         let leaf_global = globals.get(leaf.index()).unwrap();
-        // root(1,0,0) + mid(0,2,0) + leaf(0,0,3) = (1,2,3)
         assert!((leaf_global.translation() - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-6);
     }
 
@@ -209,7 +208,6 @@ mod tests {
         let mut world = World::new();
         register_hierarchy(&mut world);
 
-        // Parent rotated 90° around Y
         let parent = world.spawn();
         world.insert(
             parent,
@@ -217,17 +215,15 @@ mod tests {
         );
         world.insert(parent, GlobalTransform::IDENTITY);
 
-        // Child offset along +Z
         let child = world.spawn();
         world.insert(child, Transform::from_translation(Vec3::new(0.0, 0.0, 1.0)));
         world.insert(child, GlobalTransform::IDENTITY);
 
         set_parent(&mut world, child, parent);
-        update_global_transforms(&world);
+        run_update(&world);
 
         let globals = world.read::<GlobalTransform>();
         let child_global = globals.get(child.index()).unwrap();
-        // Parent 90° Y rotation turns child's +Z into +X
         assert!((child_global.translation() - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-5);
     }
 }

@@ -41,7 +41,8 @@
       "WebFetch(domain:gfx-rs.github.io)",
       "WebFetch(domain:wgpu.rs)",
       "WebFetch(domain:deepwiki.com)",
-      "Bash(cargo tree:*)"
+      "Bash(cargo tree:*)",
+      "Bash(del:*)"
     ],
     "deny": [
       "Read(target/**)"

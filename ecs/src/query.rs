@@ -1,18 +1,6 @@
 use std::marker::PhantomData;
 
-use crate::sparse_set::{ComponentStorage, Ref, RefMut};
-
-/// Shared read access to all components of type T.
-///
-/// This is a type alias for [`Ref<T>`], returned by [`World::read`](crate::World::read).
-/// Dereferences to [`SparseSetInner<T>`](crate::SparseSetInner) for iteration and lookup.
-pub type Read<'a, T> = Ref<'a, T>;
-
-/// Exclusive write access to all components of type T.
-///
-/// This is a type alias for [`RefMut<T>`], returned by [`World::write`](crate::World::write).
-/// Dereferences to [`SparseSetInner<T>`](crate::SparseSetInner) for iteration, lookup, and mutation.
-pub type Write<'a, T> = RefMut<'a, T>;
+use crate::sparse_set::ComponentStorage;
 
 /// Marker type for filtering entities that have component T,
 /// without borrowing the component data.

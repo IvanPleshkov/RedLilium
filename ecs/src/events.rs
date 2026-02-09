@@ -1,5 +1,3 @@
-use crate::system_future::SystemFuture;
-
 /// Double-buffered event queue for typed inter-system communication.
 ///
 /// Events are sent during one frame and can be read during the same frame
@@ -116,19 +114,17 @@ impl<T: Send + Sync + 'static> Default for EventUpdateSystem<T> {
 }
 
 impl<T: Send + Sync + 'static> crate::system::System for EventUpdateSystem<T> {
-    fn run<'a>(&'a self, access: crate::query_access::QueryAccess<'a>) -> SystemFuture<'a> {
-        SystemFuture::new(async move {
-            access.scope(|world| {
-                let mut events = world.resource_mut::<Events<T>>();
-                events.update();
-            });
+    fn run<'a>(
+        &'a self,
+        ctx: &'a crate::system_context::SystemContext<'a>,
+    ) -> crate::system_future::SystemFuture<'a> {
+        Box::pin(async move {
+            ctx.lock::<(crate::access_set::ResMut<Events<T>>,)>()
+                .execute(|(mut events,)| {
+                    events.update();
+                })
+                .await;
         })
-    }
-
-    fn access(&self) -> crate::access::Access {
-        let mut access = crate::access::Access::new();
-        access.add_resource_write::<Events<T>>();
-        access
     }
 }
 

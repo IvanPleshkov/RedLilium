@@ -53,6 +53,11 @@ impl Resources {
         self.entries.contains_key(&TypeId::of::<T>())
     }
 
+    /// Returns the TypeIds of all registered resource types.
+    pub fn type_ids(&self) -> impl Iterator<Item = TypeId> + '_ {
+        self.entries.keys().copied()
+    }
+
     /// Borrows a resource of type T immutably.
     ///
     /// Panics if the resource does not exist or is exclusively borrowed.

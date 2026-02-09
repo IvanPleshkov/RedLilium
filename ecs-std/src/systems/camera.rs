@@ -1,4 +1,4 @@
-use redlilium_ecs::{Access, World};
+use redlilium_ecs::{Ref, RefMut, SystemContext, SystemFuture};
 
 use crate::components::{Camera, GlobalTransform};
 
@@ -13,27 +13,23 @@ use crate::components::{Camera, GlobalTransform};
 /// - Writes: `Camera`
 pub struct UpdateCameraMatrices;
 
-#[redlilium_ecs::system]
-impl UpdateCameraMatrices {
-    async fn run(&self, access: QueryAccess<'_>) {
-        access.scope(|world| {
-            update_camera_matrices(world);
-        });
-    }
-
-    fn access(&self) -> Access {
-        let mut access = Access::new();
-        access.add_read::<GlobalTransform>();
-        access.add_write::<Camera>();
-        access
+impl redlilium_ecs::System for UpdateCameraMatrices {
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
+        Box::pin(async move {
+            ctx.lock::<(
+                redlilium_ecs::Read<GlobalTransform>,
+                redlilium_ecs::Write<Camera>,
+            )>()
+            .execute(|(globals, mut cameras)| {
+                update_camera_matrices(&globals, &mut cameras);
+            })
+            .await;
+        })
     }
 }
 
-fn update_camera_matrices(world: &World) {
+fn update_camera_matrices(globals: &Ref<GlobalTransform>, cameras: &mut RefMut<Camera>) {
     redlilium_core::profile_scope!("update_camera_matrices");
-
-    let globals = world.read::<GlobalTransform>();
-    let mut cameras = world.write::<Camera>();
 
     for (idx, camera) in cameras.iter_mut() {
         if let Some(global) = globals.get(idx) {
@@ -47,6 +43,7 @@ mod tests {
     use super::*;
     use crate::components::Transform;
     use glam::{Mat4, Vec3};
+    use redlilium_ecs::World;
 
     #[test]
     fn updates_view_matrix() {
@@ -57,16 +54,17 @@ mod tests {
         world.insert(e, GlobalTransform(t.to_matrix()));
         world.insert(e, Camera::perspective(1.0, 1.0, 0.1, 100.0));
 
-        update_camera_matrices(&world);
+        let globals = world.read::<GlobalTransform>();
+        let mut cameras = world.write::<Camera>();
+        update_camera_matrices(&globals, &mut cameras);
+        drop(cameras);
+        drop(globals);
 
         let cameras = world.read::<Camera>();
         let cam = cameras.get(e.index()).unwrap();
 
-        // View matrix should be the inverse of the global transform
         let expected_view = t.to_matrix().inverse();
         assert!((cam.view_matrix - expected_view).abs_diff_eq(Mat4::ZERO, 1e-5));
-
-        // Projection should still be what was set at construction (not identity)
         assert_ne!(cam.projection_matrix, Mat4::IDENTITY);
     }
 
@@ -78,9 +76,12 @@ mod tests {
         world.insert(e, Camera::perspective(1.0, 1.0, 0.1, 100.0));
         world.register_component::<GlobalTransform>();
 
-        update_camera_matrices(&world);
+        let globals = world.read::<GlobalTransform>();
+        let mut cameras = world.write::<Camera>();
+        update_camera_matrices(&globals, &mut cameras);
+        drop(cameras);
+        drop(globals);
 
-        // Camera view matrix should remain identity (not updated)
         let cameras = world.read::<Camera>();
         let cam = cameras.get(e.index()).unwrap();
         assert_eq!(cam.view_matrix, Mat4::IDENTITY);
@@ -99,11 +100,14 @@ mod tests {
         );
         world.insert(e, cam_original);
 
-        update_camera_matrices(&world);
+        let globals = world.read::<GlobalTransform>();
+        let mut cameras = world.write::<Camera>();
+        update_camera_matrices(&globals, &mut cameras);
+        drop(cameras);
+        drop(globals);
 
         let cameras = world.read::<Camera>();
         let cam = cameras.get(e.index()).unwrap();
-        // Projection matrix unchanged by system
         assert_eq!(cam.projection_matrix, proj_before);
     }
 }

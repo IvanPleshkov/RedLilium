@@ -1,6 +1,10 @@
+use std::time::Duration;
+
 use glam::{Mat4, Quat, Vec3};
 use redlilium_core::scene::{CameraProjection, NodeTransform, Scene, SceneCamera, SceneNode};
-use redlilium_ecs::{ComputePool, Schedule, StringTable, ThreadPool, World, run_system_blocking};
+use redlilium_ecs::{
+    ComputePool, EcsRunner, StringTable, SystemsContainer, World, run_system_blocking,
+};
 
 use ecs_std::components::*;
 use ecs_std::systems::*;
@@ -42,17 +46,17 @@ fn full_frame_pipeline() {
         objects.push(e);
     }
 
-    // Build and run schedule
-    let mut schedule = Schedule::new();
-    schedule.add(UpdateGlobalTransforms);
-    schedule
-        .add(UpdateCameraMatrices)
-        .after::<UpdateGlobalTransforms>();
-    schedule.build();
+    // Build systems container with dependencies
+    let mut container = SystemsContainer::new();
+    container.add(UpdateGlobalTransforms);
+    container.add(UpdateCameraMatrices);
+    container
+        .add_edge::<UpdateGlobalTransforms, UpdateCameraMatrices>()
+        .unwrap();
 
-    // Run the schedule
-    let compute = ComputePool::new();
-    schedule.run(&world, &compute);
+    // Run with single-threaded runner
+    let runner = EcsRunner::single_thread();
+    runner.run(&mut world, &container, Duration::from_secs(1));
 
     // Verify camera matrices were computed
     let cameras = world.read::<Camera>();
@@ -77,11 +81,12 @@ fn full_frame_pipeline() {
 }
 
 // ---------------------------------------------------------------------------
-// Parallel schedule execution
+// Multi-threaded execution
 // ---------------------------------------------------------------------------
 
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn parallel_schedule_execution() {
+fn multi_thread_execution() {
     let mut world = World::new();
     register_std_components(&mut world);
 
@@ -100,13 +105,11 @@ fn parallel_schedule_execution() {
         world.insert(e, GlobalTransform::IDENTITY);
     }
 
-    let mut schedule = Schedule::new();
-    schedule.add(UpdateGlobalTransforms);
-    schedule.build();
+    let mut container = SystemsContainer::new();
+    container.add(UpdateGlobalTransforms);
 
-    let pool = ThreadPool::new(4);
-    let compute = ComputePool::new();
-    schedule.run_parallel(&world, &pool, &compute);
+    let runner = EcsRunner::multi_thread(4);
+    runner.run(&mut world, &container, Duration::from_secs(1));
 
     // Verify all global transforms were updated
     let transforms = world.read::<Transform>();
@@ -163,14 +166,15 @@ fn spawn_scene_and_run_systems() {
     assert_eq!(world.entity_count(), 3);
 
     // Run systems
-    let mut schedule = Schedule::new();
-    schedule.add(UpdateGlobalTransforms);
-    schedule
-        .add(UpdateCameraMatrices)
-        .after::<UpdateGlobalTransforms>();
-    schedule.build();
-    let compute = ComputePool::new();
-    schedule.run(&world, &compute);
+    let mut container = SystemsContainer::new();
+    container.add(UpdateGlobalTransforms);
+    container.add(UpdateCameraMatrices);
+    container
+        .add_edge::<UpdateGlobalTransforms, UpdateCameraMatrices>()
+        .unwrap();
+
+    let runner = EcsRunner::single_thread();
+    runner.run(&mut world, &container, Duration::from_secs(1));
 
     // Verify root entity
     let root = roots[0];
@@ -253,11 +257,10 @@ fn multiple_frame_simulation() {
     world.insert(entity, Transform::from_translation(Vec3::ZERO));
     world.insert(entity, GlobalTransform::IDENTITY);
 
-    let mut schedule = Schedule::new();
-    schedule.add(UpdateGlobalTransforms);
-    schedule.build();
+    let mut container = SystemsContainer::new();
+    container.add(UpdateGlobalTransforms);
 
-    let compute = ComputePool::new();
+    let runner = EcsRunner::single_thread();
 
     // Simulate 10 frames of movement
     for frame in 0..10 {
@@ -268,7 +271,7 @@ fn multiple_frame_simulation() {
             t.translation = Vec3::new(frame as f32, 0.0, 0.0);
         }
 
-        schedule.run(&world, &compute);
+        runner.run(&mut world, &container, Duration::from_secs(1));
 
         // Verify global transform tracks the local transform
         let globals = world.read::<GlobalTransform>();
@@ -360,15 +363,14 @@ fn register_prevents_empty_world_panic() {
     let mut world = World::new();
     register_std_components(&mut world);
 
-    // This would panic without registration since no entities have these components
-    let mut schedule = Schedule::new();
-    schedule.add(UpdateGlobalTransforms);
-    schedule
-        .add(UpdateCameraMatrices)
-        .after::<UpdateGlobalTransforms>();
-    schedule.build();
+    let mut container = SystemsContainer::new();
+    container.add(UpdateGlobalTransforms);
+    container.add(UpdateCameraMatrices);
+    container
+        .add_edge::<UpdateGlobalTransforms, UpdateCameraMatrices>()
+        .unwrap();
 
     // Should not panic even with zero entities
-    let compute = ComputePool::new();
-    schedule.run(&world, &compute);
+    let runner = EcsRunner::single_thread();
+    runner.run(&mut world, &container, Duration::from_secs(1));
 }
