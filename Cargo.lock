@@ -683,6 +683,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ecs-std"
+version = "0.1.0"
+dependencies = [
+ "glam 0.30.10",
+ "log",
+ "redlilium-core",
+ "redlilium-ecs",
+]
+
+[[package]]
 name = "egui"
 version = "0.33.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
