@@ -97,7 +97,6 @@ mod tests {
     use crate::access_set::{Read, Write};
     use crate::system::System;
     use crate::system_context::SystemContext;
-    use crate::system_future::SystemFuture;
 
     struct Position {
         x: f32,
@@ -108,18 +107,16 @@ mod tests {
 
     struct MovementSystem;
     impl System for MovementSystem {
-        fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
-            Box::pin(async move {
-                ctx.lock::<(Write<Position>, Read<Velocity>)>()
-                    .execute(|(mut positions, velocities)| {
-                        for (idx, pos) in positions.iter_mut() {
-                            if let Some(vel) = velocities.get(idx) {
-                                pos.x += vel.x;
-                            }
+        async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+            ctx.lock::<(Write<Position>, Read<Velocity>)>()
+                .execute(|(mut positions, velocities)| {
+                    for (idx, pos) in positions.iter_mut() {
+                        if let Some(vel) = velocities.get(idx) {
+                            pos.x += vel.x;
                         }
-                    })
-                    .await;
-            })
+                    }
+                })
+                .await;
         }
     }
 

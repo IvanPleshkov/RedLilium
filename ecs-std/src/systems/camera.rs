@@ -1,4 +1,4 @@
-use redlilium_ecs::{Ref, RefMut, SystemContext, SystemFuture};
+use redlilium_ecs::{Ref, RefMut, SystemContext};
 
 use crate::components::{Camera, GlobalTransform};
 
@@ -14,17 +14,15 @@ use crate::components::{Camera, GlobalTransform};
 pub struct UpdateCameraMatrices;
 
 impl redlilium_ecs::System for UpdateCameraMatrices {
-    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
-        Box::pin(async move {
-            ctx.lock::<(
-                redlilium_ecs::Read<GlobalTransform>,
-                redlilium_ecs::Write<Camera>,
-            )>()
-            .execute(|(globals, mut cameras)| {
-                update_camera_matrices(&globals, &mut cameras);
-            })
-            .await;
+    async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+        ctx.lock::<(
+            redlilium_ecs::Read<GlobalTransform>,
+            redlilium_ecs::Write<Camera>,
+        )>()
+        .execute(|(globals, mut cameras)| {
+            update_camera_matrices(&globals, &mut cameras);
         })
+        .await;
     }
 }
 

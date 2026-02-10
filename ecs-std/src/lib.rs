@@ -1,3 +1,5 @@
+#![allow(refining_impl_trait)]
+
 //! # ECS Standard Components and Systems
 //!
 //! Standard game engine components and systems that bridge the generic ECS

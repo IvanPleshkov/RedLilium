@@ -78,7 +78,7 @@ impl EcsRunnerSingleThread {
                     for i in 0..n {
                         if remaining_deps[i] == 0 && !completed[i] && futures[i].is_none() {
                             let system = systems.get_system(i);
-                            futures[i] = Some(system.run(&ctx));
+                            futures[i] = Some(system.run_boxed(&ctx));
                             made_progress = true;
                         }
                     }
@@ -186,7 +186,6 @@ mod tests {
     use super::*;
     use crate::access_set::{Read, Write};
     use crate::system::System;
-    use crate::system_future::SystemFuture;
 
     struct Position {
         x: f32,
@@ -197,18 +196,16 @@ mod tests {
 
     struct MovementSystem;
     impl System for MovementSystem {
-        fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
-            Box::pin(async move {
-                ctx.lock::<(Write<Position>, Read<Velocity>)>()
-                    .execute(|(mut positions, velocities)| {
-                        for (idx, pos) in positions.iter_mut() {
-                            if let Some(vel) = velocities.get(idx) {
-                                pos.x += vel.x;
-                            }
+        async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+            ctx.lock::<(Write<Position>, Read<Velocity>)>()
+                .execute(|(mut positions, velocities)| {
+                    for (idx, pos) in positions.iter_mut() {
+                        if let Some(vel) = velocities.get(idx) {
+                            pos.x += vel.x;
                         }
-                    })
-                    .await;
-            })
+                    }
+                })
+                .await;
         }
     }
 
@@ -245,21 +242,17 @@ mod tests {
 
         struct FirstSystem(Arc<AtomicU32>);
         impl System for FirstSystem {
-            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
-                Box::pin(async move {
-                    self.0.store(1, Ordering::SeqCst);
-                })
+            async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+                self.0.store(1, Ordering::SeqCst);
             }
         }
 
         struct SecondSystem(Arc<AtomicU32>);
         impl System for SecondSystem {
-            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
-                Box::pin(async move {
-                    // Should only run after FirstSystem set value to 1
-                    assert_eq!(self.0.load(Ordering::SeqCst), 1);
-                    self.0.store(2, Ordering::SeqCst);
-                })
+            async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+                // Should only run after FirstSystem set value to 1
+                assert_eq!(self.0.load(Ordering::SeqCst), 1);
+                self.0.store(2, Ordering::SeqCst);
             }
         }
 
@@ -279,12 +272,10 @@ mod tests {
     fn deferred_commands_applied() {
         struct SpawnSystem;
         impl System for SpawnSystem {
-            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
-                Box::pin(async move {
-                    ctx.commands(|world| {
-                        world.insert_resource(42u32);
-                    });
-                })
+            async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+                ctx.commands(|world| {
+                    world.insert_resource(42u32);
+                });
             }
         }
 

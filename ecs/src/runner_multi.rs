@@ -111,7 +111,7 @@ mod inner {
                             let idx = $i;
                             scope.spawn(move || {
                                 let system = systems.get_system(idx);
-                                let future = system.run(ctx_ref);
+                                let future = system.run_boxed(ctx_ref);
                                 poll_future_to_completion_with_compute(future, compute_ref);
                                 let _ = tx.send(idx);
                             });
@@ -219,7 +219,6 @@ mod inner {
         use super::*;
         use crate::access_set::{Read, Write};
         use crate::system::System;
-        use crate::system_future::SystemFuture;
 
         struct Position {
             x: f32,
@@ -230,18 +229,16 @@ mod inner {
 
         struct MovementSystem;
         impl System for MovementSystem {
-            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
-                Box::pin(async move {
-                    ctx.lock::<(Write<Position>, Read<Velocity>)>()
-                        .execute(|(mut positions, velocities)| {
-                            for (idx, pos) in positions.iter_mut() {
-                                if let Some(vel) = velocities.get(idx) {
-                                    pos.x += vel.x;
-                                }
+            async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+                ctx.lock::<(Write<Position>, Read<Velocity>)>()
+                    .execute(|(mut positions, velocities)| {
+                        for (idx, pos) in positions.iter_mut() {
+                            if let Some(vel) = velocities.get(idx) {
+                                pos.x += vel.x;
                             }
-                        })
-                        .await;
-                })
+                        }
+                    })
+                    .await;
             }
         }
 
@@ -270,20 +267,16 @@ mod inner {
 
             struct FirstSystem(Arc<AtomicU32>);
             impl System for FirstSystem {
-                fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
-                    Box::pin(async move {
-                        self.0.store(1, Ordering::SeqCst);
-                    })
+                async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+                    self.0.store(1, Ordering::SeqCst);
                 }
             }
 
             struct SecondSystem(Arc<AtomicU32>);
             impl System for SecondSystem {
-                fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
-                    Box::pin(async move {
-                        assert_eq!(self.0.load(Ordering::SeqCst), 1);
-                        self.0.store(2, Ordering::SeqCst);
-                    })
+                async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+                    assert_eq!(self.0.load(Ordering::SeqCst), 1);
+                    self.0.store(2, Ordering::SeqCst);
                 }
             }
 
@@ -303,12 +296,10 @@ mod inner {
         fn deferred_commands_applied_multi_thread() {
             struct SpawnSystem;
             impl System for SpawnSystem {
-                fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
-                    Box::pin(async move {
-                        ctx.commands(|world| {
-                            world.insert_resource(42u32);
-                        });
-                    })
+                async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+                    ctx.commands(|world| {
+                        world.insert_resource(42u32);
+                    });
                 }
             }
 
@@ -331,19 +322,15 @@ mod inner {
 
             struct IncrementA(Arc<AtomicU32>);
             impl System for IncrementA {
-                fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
-                    Box::pin(async move {
-                        self.0.fetch_add(1, Ordering::SeqCst);
-                    })
+                async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+                    self.0.fetch_add(1, Ordering::SeqCst);
                 }
             }
 
             struct IncrementB(Arc<AtomicU32>);
             impl System for IncrementB {
-                fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
-                    Box::pin(async move {
-                        self.0.fetch_add(1, Ordering::SeqCst);
-                    })
+                async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+                    self.0.fetch_add(1, Ordering::SeqCst);
                 }
             }
 

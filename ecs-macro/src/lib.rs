@@ -198,7 +198,7 @@ fn extract_last_segment(ty: &Type) -> String {
     }
 }
 
-/// Generates an `impl System for ...` block from a simplified async impl.
+/// Generates an `impl System for ...` block from an async impl.
 ///
 /// # Usage
 ///
@@ -279,22 +279,18 @@ pub fn system(_attr: TokenStream, item: TokenStream) -> TokenStream {
         };
         // Wrap body to store result as SystemResult resource via deferred command
         quote! {
-            fn run<'a>(&'a self, ctx: &'a redlilium_ecs::SystemContext<'a>) -> redlilium_ecs::SystemFuture<'a> {
-                Box::pin(async move {
-                    let __system_result: #ret_ty = async #run_body.await;
-                    ctx.commands(move |world| {
-                        world.insert_resource(
-                            redlilium_ecs::SystemResult::<#self_ty, #ret_ty>::new(__system_result)
-                        );
-                    });
-                })
+            async fn run<'a>(&'a self, ctx: &'a redlilium_ecs::SystemContext<'a>) {
+                let __system_result: #ret_ty = async #run_body.await;
+                ctx.commands(move |world| {
+                    world.insert_resource(
+                        redlilium_ecs::SystemResult::<#self_ty, #ret_ty>::new(__system_result)
+                    );
+                });
             }
         }
     } else {
         quote! {
-            fn run<'a>(&'a self, ctx: &'a redlilium_ecs::SystemContext<'a>) -> redlilium_ecs::SystemFuture<'a> {
-                Box::pin(async move #run_body)
-            }
+            async fn run<'a>(&'a self, ctx: &'a redlilium_ecs::SystemContext<'a>) #run_body
         }
     };
 

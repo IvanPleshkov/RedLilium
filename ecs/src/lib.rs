@@ -1,3 +1,5 @@
+#![allow(refining_impl_trait)]
+
 //! # RedLilium ECS
 //!
 //! Custom Entity-Component-System with integrated async compute support.
@@ -79,7 +81,6 @@ pub use runner::EcsRunner;
 pub use runner_single::{EcsRunnerSingleThread, ShutdownError};
 pub use system::{System, SystemResult, run_system_blocking};
 pub use system_context::SystemContext;
-pub use system_future::SystemFuture;
 pub use systems_container::{CycleError, Edge, SystemsContainer};
 
 #[cfg(not(target_arch = "wasm32"))]

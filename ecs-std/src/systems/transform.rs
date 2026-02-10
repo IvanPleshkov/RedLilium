@@ -1,5 +1,5 @@
 use glam::Mat4;
-use redlilium_ecs::{Ref, RefMut, SystemContext, SystemFuture};
+use redlilium_ecs::{Ref, RefMut, SystemContext};
 
 use crate::components::{Children, GlobalTransform, Parent, Transform};
 
@@ -16,19 +16,17 @@ use crate::components::{Children, GlobalTransform, Parent, Transform};
 pub struct UpdateGlobalTransforms;
 
 impl redlilium_ecs::System for UpdateGlobalTransforms {
-    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
-        Box::pin(async move {
-            ctx.lock::<(
-                redlilium_ecs::Read<Transform>,
-                redlilium_ecs::Write<GlobalTransform>,
-                redlilium_ecs::Read<Children>,
-                redlilium_ecs::Read<Parent>,
-            )>()
-            .execute(|(transforms, mut globals, children_storage, parents)| {
-                update_global_transforms(&transforms, &mut globals, &children_storage, &parents);
-            })
-            .await;
+    async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+        ctx.lock::<(
+            redlilium_ecs::Read<Transform>,
+            redlilium_ecs::Write<GlobalTransform>,
+            redlilium_ecs::Read<Children>,
+            redlilium_ecs::Read<Parent>,
+        )>()
+        .execute(|(transforms, mut globals, children_storage, parents)| {
+            update_global_transforms(&transforms, &mut globals, &children_storage, &parents);
         })
+        .await;
     }
 }
 

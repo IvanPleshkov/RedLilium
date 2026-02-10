@@ -2,12 +2,12 @@ use std::any::TypeId;
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::system::System;
+use crate::system::{DynSystem, System};
 
 /// A registered system with its metadata.
 pub(crate) struct StoredSystem {
     /// The system instance, type-erased.
-    pub system: Box<dyn System>,
+    pub system: Box<dyn DynSystem>,
     /// Human-readable type name for debug/error messages.
     pub type_name: &'static str,
 }
@@ -186,7 +186,7 @@ impl SystemsContainer {
     }
 
     /// Returns a reference to the system at the given index.
-    pub fn get_system(&self, idx: usize) -> &dyn System {
+    pub(crate) fn get_system(&self, idx: usize) -> &dyn DynSystem {
         &*self.systems[idx].system
     }
 
@@ -271,27 +271,20 @@ fn find_cycle(edges: &[Vec<usize>], in_degrees: &[usize]) -> Option<Vec<usize>> 
 mod tests {
     use super::*;
     use crate::system_context::SystemContext;
-    use crate::system_future::SystemFuture;
 
     struct SystemA;
     impl System for SystemA {
-        fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
-            Box::pin(async {})
-        }
+        async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {}
     }
 
     struct SystemB;
     impl System for SystemB {
-        fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
-            Box::pin(async {})
-        }
+        async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {}
     }
 
     struct SystemC;
     impl System for SystemC {
-        fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
-            Box::pin(async {})
-        }
+        async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {}
     }
 
     #[test]

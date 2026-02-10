@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 
@@ -25,17 +26,15 @@ use crate::world::World;
 /// struct MovementSystem;
 ///
 /// impl System for MovementSystem {
-///     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
-///         Box::pin(async move {
-///             ctx.lock::<(Write<Position>, Read<Velocity>)>()
-///                 .execute(|(mut positions, velocities)| {
-///                     for (idx, pos) in positions.iter_mut() {
-///                         if let Some(vel) = velocities.get(idx) {
-///                             pos.x += vel.x;
-///                         }
+///     async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+///         ctx.lock::<(Write<Position>, Read<Velocity>)>()
+///             .execute(|(mut positions, velocities)| {
+///                 for (idx, pos) in positions.iter_mut() {
+///                     if let Some(vel) = velocities.get(idx) {
+///                         pos.x += vel.x;
 ///                     }
-///                 }).await;
-///         })
+///                 }
+///             }).await;
 ///     }
 /// }
 /// ```
@@ -46,27 +45,25 @@ use crate::world::World;
 /// struct PathfindSystem;
 ///
 /// impl System for PathfindSystem {
-///     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
-///         Box::pin(async move {
-///             // Phase 1: extract data (lock released after execute)
-///             let graph = ctx.lock::<(Read<NavMesh>,)>()
-///                 .execute(|(nav,)| {
-///                     nav.iter().next().map(|(_, n)| n.clone())
-///                 }).await;
+///     async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+///         // Phase 1: extract data (lock released after execute)
+///         let graph = ctx.lock::<(Read<NavMesh>,)>()
+///             .execute(|(nav,)| {
+///                 nav.iter().next().map(|(_, n)| n.clone())
+///             }).await;
 ///
-///             // Safe to .await — no locks held
-///             let mut handle = ctx.compute().spawn(Priority::Low, async move {
-///                 compute_paths(graph)
+///         // Safe to .await — no locks held
+///         let mut handle = ctx.compute().spawn(Priority::Low, async move {
+///             compute_paths(graph)
+///         });
+///         let paths = (&mut handle).await;
+///
+///         // Phase 2: apply results via deferred command
+///         if let Some(paths) = paths {
+///             ctx.commands(move |world| {
+///                 // apply paths to agents
 ///             });
-///             let paths = (&mut handle).await;
-///
-///             // Phase 2: apply results via deferred command
-///             if let Some(paths) = paths {
-///                 ctx.commands(move |world| {
-///                     // apply paths to agents
-///                 });
-///             }
-///         })
+///         }
 ///     }
 /// }
 /// ```
@@ -76,7 +73,21 @@ pub trait System: Send + Sync + 'static {
     /// Use [`SystemContext::lock()`] to borrow components.
     /// Locks are automatically released when the execute closure returns,
     /// making it safe to `.await` between lock-execute calls.
-    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> SystemFuture<'a>;
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> impl Future<Output = ()> + Send + 'a;
+}
+
+/// Object-safe version of [`System`] used internally for type erasure.
+///
+/// A blanket implementation converts any `System` into a `DynSystem`
+/// by wrapping the future in `Box::pin`.
+pub(crate) trait DynSystem: Send + Sync {
+    fn run_boxed<'a>(&'a self, ctx: &'a SystemContext<'a>) -> SystemFuture<'a>;
+}
+
+impl<S: System> DynSystem for S {
+    fn run_boxed<'a>(&'a self, ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
+        Box::pin(self.run(ctx))
+    }
 }
 
 /// Runs a system synchronously to completion.
@@ -86,10 +97,10 @@ pub trait System: Send + Sync + 'static {
 /// between polls so spawned compute tasks make progress.
 ///
 /// Useful for tests and one-off system invocations outside a runner.
-pub fn run_system_blocking(system: &dyn System, world: &World, compute: &ComputePool) {
+pub fn run_system_blocking(system: &impl System, world: &World, compute: &ComputePool) {
     let commands = CommandCollector::new();
     let ctx = SystemContext::new_single_thread(world, compute, &commands);
-    let future = system.run(&ctx);
+    let future = Box::pin(system.run(&ctx));
     poll_system_future_to_completion(future, compute);
 
     // Apply deferred commands
@@ -166,25 +177,21 @@ mod tests {
 
     struct EmptySystem;
     impl System for EmptySystem {
-        fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
-            Box::pin(async {})
-        }
+        async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {}
     }
 
     struct MovementSystem;
     impl System for MovementSystem {
-        fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
-            Box::pin(async move {
-                ctx.lock::<(Write<Position>, Read<Velocity>)>()
-                    .execute(|(mut positions, velocities)| {
-                        for (idx, pos) in positions.iter_mut() {
-                            if let Some(vel) = velocities.get(idx) {
-                                pos.x += vel.x;
-                            }
+        async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+            ctx.lock::<(Write<Position>, Read<Velocity>)>()
+                .execute(|(mut positions, velocities)| {
+                    for (idx, pos) in positions.iter_mut() {
+                        if let Some(vel) = velocities.get(idx) {
+                            pos.x += vel.x;
                         }
-                    })
-                    .await;
-            })
+                    }
+                })
+                .await;
         }
     }
 
@@ -201,10 +208,8 @@ mod tests {
 
         struct FlagSystem(std::sync::Arc<AtomicBool>);
         impl System for FlagSystem {
-            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
-                Box::pin(async move {
-                    self.0.store(true, Ordering::Relaxed);
-                })
+            async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+                self.0.store(true, Ordering::Relaxed);
             }
         }
 
@@ -235,13 +240,11 @@ mod tests {
 
         struct ComputeSystem(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
         impl System for ComputeSystem {
-            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
+            async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
                 let slot = self.0.clone();
-                Box::pin(async move {
-                    let mut handle = ctx.compute().spawn(Priority::Low, async { 99u32 });
-                    let result = (&mut handle).await;
-                    *slot.lock().unwrap() = result;
-                })
+                let mut handle = ctx.compute().spawn(Priority::Low, async { 99u32 });
+                let result = (&mut handle).await;
+                *slot.lock().unwrap() = result;
             }
         }
 
