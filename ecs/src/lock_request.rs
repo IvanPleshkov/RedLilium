@@ -99,8 +99,9 @@ mod tests {
     #[test]
     fn execute_reads_components() {
         let mut world = World::new();
+        world.register_component::<Position>();
         let e = world.spawn();
-        world.insert(e, Position { x: 42.0 });
+        world.insert(e, Position { x: 42.0 }).unwrap();
 
         let compute = ComputePool::new();
         let commands = CommandCollector::new();
@@ -115,8 +116,9 @@ mod tests {
     #[test]
     fn execute_writes_components() {
         let mut world = World::new();
+        world.register_component::<Position>();
         let e = world.spawn();
-        world.insert(e, Position { x: 0.0 });
+        world.insert(e, Position { x: 0.0 }).unwrap();
 
         let compute = ComputePool::new();
         let commands = CommandCollector::new();
@@ -135,9 +137,11 @@ mod tests {
     #[test]
     fn execute_multiple_accesses() {
         let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Velocity>();
         let e = world.spawn();
-        world.insert(e, Position { x: 10.0 });
-        world.insert(e, Velocity { x: 5.0 });
+        world.insert(e, Position { x: 10.0 }).unwrap();
+        world.insert(e, Velocity { x: 5.0 }).unwrap();
 
         let compute = ComputePool::new();
         let commands = CommandCollector::new();
@@ -158,8 +162,9 @@ mod tests {
     #[test]
     fn execute_returns_value() {
         let mut world = World::new();
+        world.register_component::<Position>();
         let e = world.spawn();
-        world.insert(e, Position { x: 42.0 });
+        world.insert(e, Position { x: 42.0 }).unwrap();
 
         let compute = ComputePool::new();
         let commands = CommandCollector::new();

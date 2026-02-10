@@ -9,7 +9,8 @@ use redlilium_graphics::{
     ShaderSource, ShaderStage, ShaderStageFlags, TextureFormat, VertexBufferLayout, VertexLayout,
 };
 
-use crate::camera::OrbitCamera;
+use glam::{Mat4, Vec3};
+
 use crate::ibl_textures::IblTextures;
 use crate::uniforms::SkyboxUniforms;
 
@@ -132,22 +133,21 @@ impl SkyboxPass {
         }
     }
 
-    /// Update skybox uniform buffer with current camera state.
+    /// Update skybox uniform buffer from pre-computed camera matrices.
     pub fn update_uniforms(
         &self,
         device: &Arc<GraphicsDevice>,
-        camera: &OrbitCamera,
-        aspect_ratio: f32,
+        view: Mat4,
+        proj: Mat4,
+        camera_pos: Vec3,
     ) {
         profile_scope!("SkyboxPass::update_uniforms");
-        let view = camera.view_matrix();
-        let proj = camera.projection_matrix(aspect_ratio);
         let view_proj = proj * view;
         let inv_view_proj = view_proj.inverse();
 
         let uniforms = SkyboxUniforms {
             inv_view_proj: inv_view_proj.to_cols_array_2d(),
-            camera_pos: camera.position().extend(1.0).to_array(),
+            camera_pos: camera_pos.extend(1.0).to_array(),
             mip_level: self.mip_level,
             _pad0: [0.0; 3],
             _pad1: [0.0; 4],

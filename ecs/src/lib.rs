@@ -70,7 +70,7 @@ pub use query::{AddedFilter, ChangedFilter, ContainsChecker, With, Without};
 pub use resource::{ResourceRef, ResourceRefMut};
 pub use sparse_set::{Ref, RefMut, SparseSetInner};
 pub use string_table::{StringId, StringTable};
-pub use world::World;
+pub use world::{ComponentNotRegistered, World};
 pub use yield_now::yield_now;
 
 // System & scheduling (new API)

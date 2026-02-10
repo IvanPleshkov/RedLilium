@@ -89,18 +89,20 @@ mod tests {
     use glam::{Quat, Vec3};
     use redlilium_ecs::World;
 
-    /// Helper: register hierarchy components so tests don't panic.
+    /// Helper: register hierarchy + transform components so tests don't panic.
     fn register_hierarchy(world: &mut World) {
+        world.register_component::<Transform>();
+        world.register_component::<GlobalTransform>();
         world.register_component::<Parent>();
         world.register_component::<Children>();
     }
 
     /// Helper: get component borrows and run update.
     fn run_update(world: &World) {
-        let transforms = world.read::<Transform>();
-        let mut globals = world.write::<GlobalTransform>();
-        let children_storage = world.read::<Children>();
-        let parents = world.read::<Parent>();
+        let transforms = world.read::<Transform>().unwrap();
+        let mut globals = world.write::<GlobalTransform>().unwrap();
+        let children_storage = world.read::<Children>().unwrap();
+        let parents = world.read::<Parent>().unwrap();
         update_global_transforms(&transforms, &mut globals, &children_storage, &parents);
     }
 
@@ -111,12 +113,12 @@ mod tests {
 
         let e = world.spawn();
         let t = Transform::from_translation(Vec3::new(1.0, 2.0, 3.0));
-        world.insert(e, t);
-        world.insert(e, GlobalTransform::IDENTITY);
+        world.insert(e, t).unwrap();
+        world.insert(e, GlobalTransform::IDENTITY).unwrap();
 
         run_update(&world);
 
-        let globals = world.read::<GlobalTransform>();
+        let globals = world.read::<GlobalTransform>().unwrap();
         let global = globals.get(e.index()).unwrap();
         assert!((global.translation() - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-6);
     }
@@ -128,12 +130,12 @@ mod tests {
 
         let e = world.spawn();
         let t = Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
-        world.insert(e, t);
-        world.insert(e, GlobalTransform::IDENTITY);
+        world.insert(e, t).unwrap();
+        world.insert(e, GlobalTransform::IDENTITY).unwrap();
 
         run_update(&world);
 
-        let globals = world.read::<GlobalTransform>();
+        let globals = world.read::<GlobalTransform>().unwrap();
         let global = globals.get(e.index()).unwrap();
         let forward = global.forward();
         assert!((forward - Vec3::NEG_X).length() < 1e-5);
@@ -145,7 +147,7 @@ mod tests {
         register_hierarchy(&mut world);
 
         let e = world.spawn();
-        world.insert(e, Transform::IDENTITY);
+        world.insert(e, Transform::IDENTITY).unwrap();
         world.register_component::<GlobalTransform>();
 
         run_update(&world);
@@ -157,20 +159,24 @@ mod tests {
         register_hierarchy(&mut world);
 
         let parent = world.spawn();
-        world.insert(
-            parent,
-            Transform::from_translation(Vec3::new(10.0, 0.0, 0.0)),
-        );
-        world.insert(parent, GlobalTransform::IDENTITY);
+        world
+            .insert(
+                parent,
+                Transform::from_translation(Vec3::new(10.0, 0.0, 0.0)),
+            )
+            .unwrap();
+        world.insert(parent, GlobalTransform::IDENTITY).unwrap();
 
         let child = world.spawn();
-        world.insert(child, Transform::from_translation(Vec3::new(0.0, 5.0, 0.0)));
-        world.insert(child, GlobalTransform::IDENTITY);
+        world
+            .insert(child, Transform::from_translation(Vec3::new(0.0, 5.0, 0.0)))
+            .unwrap();
+        world.insert(child, GlobalTransform::IDENTITY).unwrap();
 
         set_parent(&mut world, child, parent);
         run_update(&world);
 
-        let globals = world.read::<GlobalTransform>();
+        let globals = world.read::<GlobalTransform>().unwrap();
         let child_global = globals.get(child.index()).unwrap();
         assert!((child_global.translation() - Vec3::new(10.0, 5.0, 0.0)).length() < 1e-6);
     }
@@ -181,22 +187,28 @@ mod tests {
         register_hierarchy(&mut world);
 
         let root = world.spawn();
-        world.insert(root, Transform::from_translation(Vec3::new(1.0, 0.0, 0.0)));
-        world.insert(root, GlobalTransform::IDENTITY);
+        world
+            .insert(root, Transform::from_translation(Vec3::new(1.0, 0.0, 0.0)))
+            .unwrap();
+        world.insert(root, GlobalTransform::IDENTITY).unwrap();
 
         let mid = world.spawn();
-        world.insert(mid, Transform::from_translation(Vec3::new(0.0, 2.0, 0.0)));
-        world.insert(mid, GlobalTransform::IDENTITY);
+        world
+            .insert(mid, Transform::from_translation(Vec3::new(0.0, 2.0, 0.0)))
+            .unwrap();
+        world.insert(mid, GlobalTransform::IDENTITY).unwrap();
 
         let leaf = world.spawn();
-        world.insert(leaf, Transform::from_translation(Vec3::new(0.0, 0.0, 3.0)));
-        world.insert(leaf, GlobalTransform::IDENTITY);
+        world
+            .insert(leaf, Transform::from_translation(Vec3::new(0.0, 0.0, 3.0)))
+            .unwrap();
+        world.insert(leaf, GlobalTransform::IDENTITY).unwrap();
 
         set_parent(&mut world, mid, root);
         set_parent(&mut world, leaf, mid);
         run_update(&world);
 
-        let globals = world.read::<GlobalTransform>();
+        let globals = world.read::<GlobalTransform>().unwrap();
         let leaf_global = globals.get(leaf.index()).unwrap();
         assert!((leaf_global.translation() - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-6);
     }
@@ -207,20 +219,24 @@ mod tests {
         register_hierarchy(&mut world);
 
         let parent = world.spawn();
-        world.insert(
-            parent,
-            Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
-        );
-        world.insert(parent, GlobalTransform::IDENTITY);
+        world
+            .insert(
+                parent,
+                Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
+            )
+            .unwrap();
+        world.insert(parent, GlobalTransform::IDENTITY).unwrap();
 
         let child = world.spawn();
-        world.insert(child, Transform::from_translation(Vec3::new(0.0, 0.0, 1.0)));
-        world.insert(child, GlobalTransform::IDENTITY);
+        world
+            .insert(child, Transform::from_translation(Vec3::new(0.0, 0.0, 1.0)))
+            .unwrap();
+        world.insert(child, GlobalTransform::IDENTITY).unwrap();
 
         set_parent(&mut world, child, parent);
         run_update(&world);
 
-        let globals = world.read::<GlobalTransform>();
+        let globals = world.read::<GlobalTransform>().unwrap();
         let child_global = globals.get(child.index()).unwrap();
         assert!((child_global.translation() - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-5);
     }

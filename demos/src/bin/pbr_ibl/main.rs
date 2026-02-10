@@ -15,6 +15,7 @@
 
 mod camera;
 mod demo;
+mod ecs_scene;
 mod gbuffer;
 mod ibl;
 mod ibl_textures;

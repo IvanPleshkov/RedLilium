@@ -105,7 +105,9 @@ impl<T: 'static> AccessElement for Read<T> {
     }
 
     fn fetch(world: &World) -> Self::Item<'_> {
-        world.read::<T>()
+        world
+            .read::<T>()
+            .expect("Component not registered for Read<T> access")
     }
 }
 
@@ -120,7 +122,9 @@ impl<T: 'static> AccessElement for Write<T> {
     }
 
     fn fetch(world: &World) -> Self::Item<'_> {
-        world.write::<T>()
+        world
+            .write::<T>()
+            .expect("Component not registered for Write<T> access")
     }
 }
 
@@ -266,9 +270,11 @@ mod tests {
     #[test]
     fn fetch_reads_from_world() {
         let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Velocity>();
         let e = world.spawn();
-        world.insert(e, Position { x: 42.0 });
-        world.insert(e, Velocity { _x: 5.0 });
+        world.insert(e, Position { x: 42.0 }).unwrap();
+        world.insert(e, Velocity { _x: 5.0 }).unwrap();
 
         let (positions, velocities) = <(Read<Position>, Read<Velocity>)>::fetch(&world);
         assert_eq!(positions.len(), 1);
@@ -278,8 +284,9 @@ mod tests {
     #[test]
     fn fetch_write_from_world() {
         let mut world = World::new();
+        world.register_component::<Position>();
         let e = world.spawn();
-        world.insert(e, Position { x: 0.0 });
+        world.insert(e, Position { x: 0.0 }).unwrap();
 
         let (mut positions,) = <(Write<Position>,)>::fetch(&world);
         for (_, pos) in positions.iter_mut() {
@@ -300,8 +307,9 @@ mod tests {
     #[test]
     fn optional_read_returns_some_for_registered() {
         let mut world = World::new();
+        world.register_component::<Position>();
         let e = world.spawn();
-        world.insert(e, Position { x: 1.0 });
+        world.insert(e, Position { x: 1.0 }).unwrap();
 
         let (opt,) = <(OptionalRead<Position>,)>::fetch(&world);
         assert!(opt.is_some());

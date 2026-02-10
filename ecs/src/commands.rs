@@ -59,9 +59,15 @@ impl CommandBuffer {
     }
 
     /// Queues a component insertion on an entity.
+    ///
+    /// # Panics
+    ///
+    /// Panics when applied if the component type has not been registered.
     pub fn insert<T: Send + Sync + 'static>(&self, entity: crate::entity::Entity, component: T) {
         self.push(move |world| {
-            world.insert(entity, component);
+            world
+                .insert(entity, component)
+                .expect("Component not registered");
         });
     }
 
@@ -129,9 +135,15 @@ pub struct SpawnBuilder<'a> {
 
 impl<'a> SpawnBuilder<'a> {
     /// Adds a component to the entity being built.
+    ///
+    /// # Panics
+    ///
+    /// Panics when applied if the component type has not been registered.
     pub fn with<T: Send + Sync + 'static>(mut self, component: T) -> Self {
         self.inserts.push(Box::new(move |world, entity| {
-            world.insert(entity, component);
+            world
+                .insert(entity, component)
+                .expect("Component not registered");
         }));
         self
     }
@@ -196,8 +208,9 @@ mod tests {
     #[test]
     fn despawn_command() {
         let mut world = World::new();
+        world.register_component::<Position>();
         let entity = world.spawn();
-        world.insert(entity, Position { x: 1.0, y: 2.0 });
+        world.insert(entity, Position { x: 1.0, y: 2.0 }).unwrap();
 
         let buffer = CommandBuffer::new();
         buffer.despawn(entity);
@@ -213,6 +226,7 @@ mod tests {
     #[test]
     fn insert_command() {
         let mut world = World::new();
+        world.register_component::<Position>();
         let entity = world.spawn();
 
         let buffer = CommandBuffer::new();
@@ -232,8 +246,9 @@ mod tests {
     #[test]
     fn remove_command() {
         let mut world = World::new();
+        world.register_component::<Health>();
         let entity = world.spawn();
-        world.insert(entity, Health(100));
+        world.insert(entity, Health(100)).unwrap();
 
         let buffer = CommandBuffer::new();
         buffer.remove::<Health>(entity);
@@ -249,6 +264,8 @@ mod tests {
     #[test]
     fn spawn_entity_builder() {
         let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Velocity>();
         let buffer = CommandBuffer::new();
 
         buffer
@@ -277,6 +294,7 @@ mod tests {
     #[test]
     fn multiple_spawn_commands() {
         let mut world = World::new();
+        world.register_component::<Position>();
         let buffer = CommandBuffer::new();
 
         for i in 0..5 {
@@ -300,6 +318,7 @@ mod tests {
     #[test]
     fn commands_execute_in_order() {
         let mut world = World::new();
+        world.register_component::<Health>();
         let entity = world.spawn();
 
         let buffer = CommandBuffer::new();
@@ -320,15 +339,16 @@ mod tests {
     #[test]
     fn custom_command_spawns_with_reference() {
         let mut world = World::new();
+        world.register_component::<Position>();
 
         let buffer = CommandBuffer::new();
         // Demonstrate the pattern for when you need the spawned Entity
         buffer.push(|world| {
             let parent = world.spawn();
-            world.insert(parent, Position { x: 0.0, y: 0.0 });
+            world.insert(parent, Position { x: 0.0, y: 0.0 }).unwrap();
 
             let child = world.spawn();
-            world.insert(child, Position { x: 1.0, y: 1.0 });
+            world.insert(child, Position { x: 1.0, y: 1.0 }).unwrap();
             // Could set parent-child relationship here
         });
 

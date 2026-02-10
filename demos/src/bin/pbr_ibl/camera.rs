@@ -1,18 +1,20 @@
-//! Orbit camera implementation for the PBR demo.
+//! Orbit camera input controller for the PBR demo.
+//!
+//! Handles rotate/zoom input and computes the camera position in world space.
+//! View and projection matrices are computed by the ECS camera system.
 
 use std::f32::consts::PI;
 
-use glam::{Mat4, Vec3};
+use glam::Vec3;
 
-/// A simple orbit camera that rotates around a target point.
+/// Orbit camera controller that tracks azimuth, elevation, and distance
+/// around a target point. The resulting position is fed into the ECS
+/// camera entity's Transform each frame.
 pub struct OrbitCamera {
     pub target: Vec3,
     pub distance: f32,
     pub azimuth: f32,
     pub elevation: f32,
-    pub fov: f32,
-    pub near: f32,
-    pub far: f32,
 }
 
 impl OrbitCamera {
@@ -22,9 +24,6 @@ impl OrbitCamera {
             distance: 8.0,
             azimuth: 0.5,
             elevation: 0.4,
-            fov: PI / 4.0,
-            near: 0.1,
-            far: 100.0,
         }
     }
 
@@ -42,14 +41,6 @@ impl OrbitCamera {
         let y = self.distance * self.elevation.sin();
         let z = self.distance * self.elevation.cos() * self.azimuth.cos();
         self.target + Vec3::new(x, y, z)
-    }
-
-    pub fn view_matrix(&self) -> Mat4 {
-        Mat4::look_at_rh(self.position(), self.target, Vec3::Y)
-    }
-
-    pub fn projection_matrix(&self, aspect_ratio: f32) -> Mat4 {
-        Mat4::perspective_rh(self.fov, aspect_ratio, self.near, self.far)
     }
 }
 

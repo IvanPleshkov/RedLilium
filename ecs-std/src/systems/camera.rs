@@ -46,19 +46,23 @@ mod tests {
     #[test]
     fn updates_view_matrix() {
         let mut world = World::new();
+        world.register_component::<GlobalTransform>();
+        world.register_component::<Camera>();
 
         let e = world.spawn();
         let t = Transform::from_translation(Vec3::new(0.0, 5.0, 10.0));
-        world.insert(e, GlobalTransform(t.to_matrix()));
-        world.insert(e, Camera::perspective(1.0, 1.0, 0.1, 100.0));
+        world.insert(e, GlobalTransform(t.to_matrix())).unwrap();
+        world
+            .insert(e, Camera::perspective(1.0, 1.0, 0.1, 100.0))
+            .unwrap();
 
-        let globals = world.read::<GlobalTransform>();
-        let mut cameras = world.write::<Camera>();
+        let globals = world.read::<GlobalTransform>().unwrap();
+        let mut cameras = world.write::<Camera>().unwrap();
         update_camera_matrices(&globals, &mut cameras);
         drop(cameras);
         drop(globals);
 
-        let cameras = world.read::<Camera>();
+        let cameras = world.read::<Camera>().unwrap();
         let cam = cameras.get(e.index()).unwrap();
 
         let expected_view = t.to_matrix().inverse();
@@ -69,18 +73,21 @@ mod tests {
     #[test]
     fn skips_cameras_without_global() {
         let mut world = World::new();
-
-        let e = world.spawn();
-        world.insert(e, Camera::perspective(1.0, 1.0, 0.1, 100.0));
+        world.register_component::<Camera>();
         world.register_component::<GlobalTransform>();
 
-        let globals = world.read::<GlobalTransform>();
-        let mut cameras = world.write::<Camera>();
+        let e = world.spawn();
+        world
+            .insert(e, Camera::perspective(1.0, 1.0, 0.1, 100.0))
+            .unwrap();
+
+        let globals = world.read::<GlobalTransform>().unwrap();
+        let mut cameras = world.write::<Camera>().unwrap();
         update_camera_matrices(&globals, &mut cameras);
         drop(cameras);
         drop(globals);
 
-        let cameras = world.read::<Camera>();
+        let cameras = world.read::<Camera>().unwrap();
         let cam = cameras.get(e.index()).unwrap();
         assert_eq!(cam.view_matrix, Mat4::IDENTITY);
     }
@@ -88,23 +95,27 @@ mod tests {
     #[test]
     fn projection_preserved() {
         let mut world = World::new();
+        world.register_component::<GlobalTransform>();
+        world.register_component::<Camera>();
 
         let e = world.spawn();
         let cam_original = Camera::perspective(1.0, 1.0, 0.1, 100.0);
         let proj_before = cam_original.projection_matrix;
-        world.insert(
-            e,
-            GlobalTransform(Mat4::from_translation(Vec3::new(1.0, 2.0, 3.0))),
-        );
-        world.insert(e, cam_original);
+        world
+            .insert(
+                e,
+                GlobalTransform(Mat4::from_translation(Vec3::new(1.0, 2.0, 3.0))),
+            )
+            .unwrap();
+        world.insert(e, cam_original).unwrap();
 
-        let globals = world.read::<GlobalTransform>();
-        let mut cameras = world.write::<Camera>();
+        let globals = world.read::<GlobalTransform>().unwrap();
+        let mut cameras = world.write::<Camera>().unwrap();
         update_camera_matrices(&globals, &mut cameras);
         drop(cameras);
         drop(globals);
 
-        let cameras = world.read::<Camera>();
+        let cameras = world.read::<Camera>().unwrap();
         let cam = cameras.get(e.index()).unwrap();
         assert_eq!(cam.projection_matrix, proj_before);
     }

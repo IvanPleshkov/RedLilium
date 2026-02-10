@@ -224,9 +224,11 @@ mod tests {
     #[test]
     fn movement_system_updates_positions() {
         let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Velocity>();
         let e = world.spawn();
-        world.insert(e, Position { x: 10.0 });
-        world.insert(e, Velocity { x: 5.0 });
+        world.insert(e, Position { x: 10.0 }).unwrap();
+        world.insert(e, Velocity { x: 5.0 }).unwrap();
 
         let compute = ComputePool::new();
         run_system_blocking(&MovementSystem, &world, &compute);

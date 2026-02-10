@@ -8,6 +8,28 @@ use crate::query::{AddedFilter, ChangedFilter, ContainsChecker};
 use crate::resource::{ResourceRef, ResourceRefMut, Resources};
 use crate::sparse_set::{ComponentStorage, Ref, RefMut};
 
+/// Error returned when a component type has not been registered in the [`World`].
+///
+/// This happens when calling [`World::insert`], [`World::read`], or [`World::write`]
+/// on a type that was never passed to [`World::register_component`] or inserted.
+#[derive(Debug)]
+pub struct ComponentNotRegistered {
+    /// The name of the unregistered component type.
+    pub type_name: &'static str,
+}
+
+impl std::fmt::Display for ComponentNotRegistered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Component type `{}` has never been registered. Call register_component() first.",
+            self.type_name
+        )
+    }
+}
+
+impl std::error::Error for ComponentNotRegistered {}
+
 /// An independent ECS world containing entities, components, and resources.
 ///
 /// Each World is fully self-contained. Multiple worlds can coexist
@@ -22,14 +44,16 @@ use crate::sparse_set::{ComponentStorage, Ref, RefMut};
 /// struct Velocity { x: f32, y: f32 }
 ///
 /// let mut world = World::new();
+/// world.register_component::<Position>();
+/// world.register_component::<Velocity>();
 ///
 /// let entity = world.spawn();
-/// world.insert(entity, Position { x: 0.0, y: 0.0 });
-/// world.insert(entity, Velocity { x: 1.0, y: 0.0 });
+/// world.insert(entity, Position { x: 0.0, y: 0.0 }).unwrap();
+/// world.insert(entity, Velocity { x: 1.0, y: 0.0 }).unwrap();
 ///
 /// // Query components
-/// let positions = world.read::<Position>();
-/// let velocities = world.read::<Velocity>();
+/// let positions = world.read::<Position>().unwrap();
+/// let velocities = world.read::<Velocity>().unwrap();
 /// for (idx, pos) in positions.iter() {
 ///     if let Some(vel) = velocities.get(idx) {
 ///         println!("pos ({}, {}) vel ({}, {})", pos.x, pos.y, vel.x, vel.y);
@@ -105,27 +129,39 @@ impl World {
             .or_insert_with(ComponentStorage::new::<T>);
     }
 
-    /// Inserts a component on an entity. Creates the storage for T if needed.
+    /// Inserts a component on an entity.
     ///
     /// If the entity already has this component, the value is replaced.
     /// Uses tick 0 (untracked). For change-tracked insertion, use
     /// [`insert_tracked`](World::insert_tracked).
     ///
+    /// # Errors
+    ///
+    /// Returns [`ComponentNotRegistered`] if `T` has never been registered
+    /// via [`register_component`](World::register_component).
+    ///
     /// # Panics
     ///
     /// Panics if the entity is not alive.
-    pub fn insert<T: Send + Sync + 'static>(&mut self, entity: Entity, component: T) {
+    pub fn insert<T: Send + Sync + 'static>(
+        &mut self,
+        entity: Entity,
+        component: T,
+    ) -> Result<(), ComponentNotRegistered> {
         assert!(
             self.entities.is_alive(entity),
             "Cannot insert component on dead entity {entity}"
         );
 
-        let storage = self
-            .components
-            .entry(TypeId::of::<T>())
-            .or_insert_with(ComponentStorage::new::<T>);
+        let storage =
+            self.components
+                .get_mut(&TypeId::of::<T>())
+                .ok_or(ComponentNotRegistered {
+                    type_name: std::any::type_name::<T>(),
+                })?;
 
         storage.typed_mut::<T>().insert(entity.index(), component);
+        Ok(())
     }
 
     /// Inserts a component with change tracking at the current world tick.
@@ -133,24 +169,35 @@ impl World {
     /// Like [`insert`](World::insert) but records the current tick for
     /// change detection queries.
     ///
+    /// # Errors
+    ///
+    /// Returns [`ComponentNotRegistered`] if `T` has never been registered.
+    ///
     /// # Panics
     ///
     /// Panics if the entity is not alive.
-    pub fn insert_tracked<T: Send + Sync + 'static>(&mut self, entity: Entity, component: T) {
+    pub fn insert_tracked<T: Send + Sync + 'static>(
+        &mut self,
+        entity: Entity,
+        component: T,
+    ) -> Result<(), ComponentNotRegistered> {
         assert!(
             self.entities.is_alive(entity),
             "Cannot insert component on dead entity {entity}"
         );
 
         let tick = self.tick;
-        let storage = self
-            .components
-            .entry(TypeId::of::<T>())
-            .or_insert_with(ComponentStorage::new::<T>);
+        let storage =
+            self.components
+                .get_mut(&TypeId::of::<T>())
+                .ok_or(ComponentNotRegistered {
+                    type_name: std::any::type_name::<T>(),
+                })?;
 
         storage
             .typed_mut::<T>()
             .insert_with_tick(entity.index(), component, tick);
+        Ok(())
     }
 
     /// Removes a component from an entity.
@@ -180,21 +227,21 @@ impl World {
     /// Returns a guard that dereferences to [`SparseSetInner<T>`](crate::SparseSetInner),
     /// allowing iteration and lookup.
     ///
+    /// # Errors
+    ///
+    /// Returns [`ComponentNotRegistered`] if `T` has never been registered or inserted.
+    ///
     /// # Panics
     ///
-    /// Panics if T is exclusively borrowed by a [`write`](World::write) call,
-    /// or if T has never been registered or inserted.
-    pub fn read<T: 'static>(&self) -> Ref<'_, T> {
+    /// Panics if T is exclusively borrowed by a [`write`](World::write) call.
+    pub fn read<T: 'static>(&self) -> Result<Ref<'_, T>, ComponentNotRegistered> {
         let storage = self
             .components
             .get(&TypeId::of::<T>())
-            .unwrap_or_else(|| {
-                panic!(
-                    "Component type `{}` has never been registered. Call insert() or register_component() first.",
-                    std::any::type_name::<T>()
-                )
-            });
-        Ref::new(storage)
+            .ok_or(ComponentNotRegistered {
+                type_name: std::any::type_name::<T>(),
+            })?;
+        Ok(Ref::new(storage))
     }
 
     /// Gets shared read access to all components of type T, returning `None`
@@ -211,21 +258,21 @@ impl World {
     /// Returns a guard that dereferences to [`SparseSetInner<T>`](crate::SparseSetInner),
     /// allowing iteration, lookup, and mutation.
     ///
+    /// # Errors
+    ///
+    /// Returns [`ComponentNotRegistered`] if `T` has never been registered or inserted.
+    ///
     /// # Panics
     ///
-    /// Panics if T is borrowed by any [`read`](World::read) or [`write`](World::write) call,
-    /// or if T has never been registered or inserted.
-    pub fn write<T: 'static>(&self) -> RefMut<'_, T> {
+    /// Panics if T is borrowed by any [`read`](World::read) or [`write`](World::write) call.
+    pub fn write<T: 'static>(&self) -> Result<RefMut<'_, T>, ComponentNotRegistered> {
         let storage = self
             .components
             .get(&TypeId::of::<T>())
-            .unwrap_or_else(|| {
-                panic!(
-                    "Component type `{}` has never been registered. Call insert() or register_component() first.",
-                    std::any::type_name::<T>()
-                )
-            });
-        RefMut::new(storage)
+            .ok_or(ComponentNotRegistered {
+                type_name: std::any::type_name::<T>(),
+            })?;
+        Ok(RefMut::new(storage))
     }
 
     /// Gets exclusive write access to all components of type T, returning `None`
@@ -440,8 +487,9 @@ mod tests {
     #[test]
     fn insert_and_get_component() {
         let mut world = World::new();
+        world.register_component::<Position>();
         let entity = world.spawn();
-        world.insert(entity, Position { x: 1.0, y: 2.0 });
+        world.insert(entity, Position { x: 1.0, y: 2.0 }).unwrap();
 
         assert_eq!(
             world.get::<Position>(entity),
@@ -450,19 +498,42 @@ mod tests {
     }
 
     #[test]
+    fn insert_unregistered_returns_err() {
+        let mut world = World::new();
+        let entity = world.spawn();
+        let result = world.insert(entity, Position { x: 0.0, y: 0.0 });
+        assert!(result.is_err());
+        assert!(result.unwrap_err().type_name.contains("Position"));
+    }
+
+    #[test]
+    fn read_unregistered_returns_err() {
+        let world = World::new();
+        assert!(world.read::<Position>().is_err());
+    }
+
+    #[test]
+    fn write_unregistered_returns_err() {
+        let world = World::new();
+        assert!(world.write::<Position>().is_err());
+    }
+
+    #[test]
     #[should_panic(expected = "Cannot insert component on dead entity")]
     fn insert_on_dead_entity_panics() {
         let mut world = World::new();
+        world.register_component::<Position>();
         let entity = world.spawn();
         world.despawn(entity);
-        world.insert(entity, Position { x: 0.0, y: 0.0 });
+        let _ = world.insert(entity, Position { x: 0.0, y: 0.0 });
     }
 
     #[test]
     fn remove_component() {
         let mut world = World::new();
+        world.register_component::<Health>();
         let entity = world.spawn();
-        world.insert(entity, Health(100));
+        world.insert(entity, Health(100)).unwrap();
 
         assert_eq!(world.remove::<Health>(entity), Some(Health(100)));
         assert!(world.get::<Health>(entity).is_none());
@@ -471,9 +542,11 @@ mod tests {
     #[test]
     fn despawn_removes_all_components() {
         let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Health>();
         let entity = world.spawn();
-        world.insert(entity, Position { x: 0.0, y: 0.0 });
-        world.insert(entity, Health(100));
+        world.insert(entity, Position { x: 0.0, y: 0.0 }).unwrap();
+        world.insert(entity, Health(100)).unwrap();
 
         world.despawn(entity);
 
@@ -489,18 +562,21 @@ mod tests {
     #[test]
     fn read_query_iterates_all() {
         let mut world = World::new();
+        world.register_component::<Position>();
         for i in 0..3 {
             let e = world.spawn();
-            world.insert(
-                e,
-                Position {
-                    x: i as f32,
-                    y: 0.0,
-                },
-            );
+            world
+                .insert(
+                    e,
+                    Position {
+                        x: i as f32,
+                        y: 0.0,
+                    },
+                )
+                .unwrap();
         }
 
-        let positions = world.read::<Position>();
+        let positions = world.read::<Position>().unwrap();
         assert_eq!(positions.len(), 3);
 
         let xs: Vec<f32> = positions.iter().map(|(_, p)| p.x).collect();
@@ -512,11 +588,12 @@ mod tests {
     #[test]
     fn write_query_allows_mutation() {
         let mut world = World::new();
+        world.register_component::<Position>();
         let e = world.spawn();
-        world.insert(e, Position { x: 1.0, y: 2.0 });
+        world.insert(e, Position { x: 1.0, y: 2.0 }).unwrap();
 
         {
-            let mut positions = world.write::<Position>();
+            let mut positions = world.write::<Position>().unwrap();
             for (_, pos) in positions.iter_mut() {
                 pos.x += 10.0;
             }
@@ -531,22 +608,24 @@ mod tests {
     #[test]
     fn double_read_succeeds() {
         let mut world = World::new();
+        world.register_component::<Position>();
         let e = world.spawn();
-        world.insert(e, Position { x: 0.0, y: 0.0 });
+        world.insert(e, Position { x: 0.0, y: 0.0 }).unwrap();
 
-        let _a = world.read::<Position>();
-        let _b = world.read::<Position>();
+        let _a = world.read::<Position>().unwrap();
+        let _b = world.read::<Position>().unwrap();
     }
 
     #[test]
     #[should_panic(expected = "already borrowed")]
     fn read_write_conflict_panics() {
         let mut world = World::new();
+        world.register_component::<Position>();
         let e = world.spawn();
-        world.insert(e, Position { x: 0.0, y: 0.0 });
+        world.insert(e, Position { x: 0.0, y: 0.0 }).unwrap();
 
-        let _r = world.read::<Position>();
-        let _w = world.write::<Position>();
+        let _r = world.read::<Position>().unwrap();
+        let _w = world.write::<Position>().unwrap();
     }
 
     #[test]
@@ -575,8 +654,9 @@ mod tests {
     #[test]
     fn entity_recycling_invalidates_components() {
         let mut world = World::new();
+        world.register_component::<Position>();
         let old = world.spawn();
-        world.insert(old, Position { x: 1.0, y: 2.0 });
+        world.insert(old, Position { x: 1.0, y: 2.0 }).unwrap();
 
         world.despawn(old);
         let new = world.spawn();
@@ -592,15 +672,17 @@ mod tests {
     #[test]
     fn with_filter_in_query() {
         let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Health>();
 
         let e1 = world.spawn();
-        world.insert(e1, Position { x: 1.0, y: 0.0 });
-        world.insert(e1, Health(100));
+        world.insert(e1, Position { x: 1.0, y: 0.0 }).unwrap();
+        world.insert(e1, Health(100)).unwrap();
 
         let e2 = world.spawn();
-        world.insert(e2, Position { x: 2.0, y: 0.0 });
+        world.insert(e2, Position { x: 2.0, y: 0.0 }).unwrap();
 
-        let positions = world.read::<Position>();
+        let positions = world.read::<Position>().unwrap();
         let has_health = world.with::<Health>();
 
         let healthy_positions: Vec<f32> = positions
@@ -615,15 +697,17 @@ mod tests {
     #[test]
     fn without_filter_in_query() {
         let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Frozen>();
 
         let e1 = world.spawn();
-        world.insert(e1, Position { x: 1.0, y: 0.0 });
-        world.insert(e1, Frozen);
+        world.insert(e1, Position { x: 1.0, y: 0.0 }).unwrap();
+        world.insert(e1, Frozen).unwrap();
 
         let e2 = world.spawn();
-        world.insert(e2, Position { x: 2.0, y: 0.0 });
+        world.insert(e2, Position { x: 2.0, y: 0.0 }).unwrap();
 
-        let positions = world.read::<Position>();
+        let positions = world.read::<Position>().unwrap();
         let not_frozen = world.without::<Frozen>();
 
         let unfrozen_positions: Vec<f32> = positions
@@ -638,17 +722,19 @@ mod tests {
     #[test]
     fn combined_read_iteration() {
         let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Velocity>();
 
         let e1 = world.spawn();
-        world.insert(e1, Position { x: 0.0, y: 0.0 });
-        world.insert(e1, Velocity { x: 1.0, y: 0.0 });
+        world.insert(e1, Position { x: 0.0, y: 0.0 }).unwrap();
+        world.insert(e1, Velocity { x: 1.0, y: 0.0 }).unwrap();
 
         let e2 = world.spawn();
-        world.insert(e2, Position { x: 5.0, y: 5.0 });
+        world.insert(e2, Position { x: 5.0, y: 5.0 }).unwrap();
         // e2 has no Velocity
 
-        let positions = world.read::<Position>();
-        let velocities = world.read::<Velocity>();
+        let positions = world.read::<Position>().unwrap();
+        let velocities = world.read::<Velocity>().unwrap();
 
         let mut count = 0;
         for (idx, _pos) in positions.iter() {

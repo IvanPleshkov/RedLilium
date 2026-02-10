@@ -42,13 +42,21 @@ fn spawn_node(
     let entity = world.spawn();
 
     let transform = Transform::from(node.transform);
-    world.insert(entity, transform);
-    world.insert(entity, GlobalTransform(transform.to_matrix()));
-    world.insert(entity, Visibility::VISIBLE);
+    world
+        .insert(entity, transform)
+        .expect("Transform not registered");
+    world
+        .insert(entity, GlobalTransform(transform.to_matrix()))
+        .expect("GlobalTransform not registered");
+    world
+        .insert(entity, Visibility::VISIBLE)
+        .expect("Visibility not registered");
 
     if let Some(name) = &node.name {
         let id = string_table.intern(name);
-        world.insert(entity, Name::new(id));
+        world
+            .insert(entity, Name::new(id))
+            .expect("Name not registered");
     }
 
     if let Some(camera_idx) = node.camera
@@ -72,7 +80,7 @@ fn spawn_node(
                 zfar,
             } => Camera::orthographic(xmag, ymag, znear, zfar),
         };
-        world.insert(entity, camera);
+        world.insert(entity, camera).expect("Camera not registered");
     }
 
     if let Some(parent) = parent_entity {
@@ -104,6 +112,7 @@ mod tests {
     #[test]
     fn spawn_single_node_with_name() {
         let mut world = World::new();
+        crate::register_std_components(&mut world);
         let mut strings = StringTable::new();
         let scene = Scene::new().with_nodes(vec![
             SceneNode::new()
@@ -137,6 +146,7 @@ mod tests {
     #[test]
     fn spawn_node_with_camera() {
         let mut world = World::new();
+        crate::register_std_components(&mut world);
         let mut strings = StringTable::new();
         let scene = Scene::new()
             .with_cameras(vec![SceneCamera {
@@ -161,6 +171,7 @@ mod tests {
     #[test]
     fn spawn_nested_nodes() {
         let mut world = World::new();
+        crate::register_std_components(&mut world);
         let mut strings = StringTable::new();
         let scene =
             Scene::new().with_nodes(vec![SceneNode::new().with_name("parent").with_children(
@@ -190,6 +201,7 @@ mod tests {
     #[test]
     fn spawn_deep_hierarchy() {
         let mut world = World::new();
+        crate::register_std_components(&mut world);
         let mut strings = StringTable::new();
         let scene =
             Scene::new().with_nodes(vec![SceneNode::new().with_name("root").with_children(

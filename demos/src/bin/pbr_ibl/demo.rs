@@ -14,6 +14,7 @@ use winit::event::KeyEvent;
 use winit::keyboard::{KeyCode, PhysicalKey};
 
 use crate::camera::OrbitCamera;
+use crate::ecs_scene::EcsScene;
 use crate::gbuffer::GBuffer;
 use crate::ibl_textures::IblTextures;
 use crate::resolve_pass::ResolvePass;
@@ -43,6 +44,9 @@ pub struct PbrIblDemo {
     hdr_active: bool,
     frame_allocations: FrameUniformAllocations,
 
+    // ECS scene
+    ecs_scene: Option<EcsScene>,
+
     // Subsystems (populated in on_init)
     gbuffer: Option<GBuffer>,
     ibl: Option<IblTextures>,
@@ -66,6 +70,7 @@ impl PbrIblDemo {
             needs_instance_update: false,
             hdr_active: false,
             frame_allocations: FrameUniformAllocations::default(),
+            ecs_scene: None,
             gbuffer: None,
             ibl: None,
             spheres: None,
@@ -107,6 +112,10 @@ impl AppHandler for PbrIblDemo {
 
         self.hdr_active = ctx.hdr_active();
         let device = ctx.device();
+
+        // Create ECS scene
+        let ecs_scene = EcsScene::new(ctx.aspect_ratio());
+        self.ecs_scene = Some(ecs_scene);
 
         // Create subsystems
         let ibl = IblTextures::create(device);
@@ -193,6 +202,11 @@ impl AppHandler for PbrIblDemo {
         }
 
         self.gbuffer = Some(gbuffer);
+
+        // Update camera projection for new aspect ratio
+        if let Some(scene) = &mut self.ecs_scene {
+            scene.update_camera_projection(ctx.aspect_ratio());
+        }
     }
 
     fn on_update(&mut self, ctx: &mut AppContext) -> bool {
@@ -220,28 +234,49 @@ impl AppHandler for PbrIblDemo {
             }
         }
 
-        // Update instances if needed
-        if self.needs_instance_update {
-            if let (Some(spheres), Ok(ui)) = (&self.spheres, self.egui_ui.read()) {
-                spheres.update_instances(ctx.device(), &ui);
+        // Update ECS scene from orbit camera and run systems
+        if let Some(scene) = &mut self.ecs_scene {
+            // Sync orbit camera → ECS camera entity transform
+            scene.update_camera_transform(self.camera.position(), self.camera.target);
+
+            // Update sphere properties if UI changed
+            if self.needs_instance_update
+                && let Ok(ui) = self.egui_ui.read()
+            {
+                let state = ui.state();
+                let base_color = [
+                    state.base_color[0],
+                    state.base_color[1],
+                    state.base_color[2],
+                    1.0,
+                ];
+                scene.update_spheres(base_color, state.sphere_spacing);
             }
-            self.needs_instance_update = false;
+
+            // Run ECS systems (UpdateGlobalTransforms → UpdateCameraMatrices)
+            scene.run_systems();
+
+            // Extract camera data from ECS
+            let (view, proj) = scene.camera_matrices();
+            let camera_pos = scene.camera_position();
+
+            // Write GPU buffers from ECS data
+            if let Some(spheres) = &self.spheres {
+                spheres.write_camera_uniforms(ctx.device(), view, proj, camera_pos);
+
+                // Build instance data from ECS entities
+                let instances = scene.build_sphere_instances();
+                spheres.write_instances(ctx.device(), &instances);
+            }
+            if let Some(skybox) = &self.skybox {
+                skybox.update_uniforms(ctx.device(), view, proj, camera_pos);
+            }
+            if let Some(resolve) = &self.resolve {
+                resolve.update_uniforms(ctx.device(), camera_pos, ctx.width(), ctx.height());
+            }
         }
 
-        if let Some(spheres) = &self.spheres {
-            spheres.update_camera_buffer(ctx.device(), &self.camera, ctx.aspect_ratio());
-        }
-        if let Some(skybox) = &self.skybox {
-            skybox.update_uniforms(ctx.device(), &self.camera, ctx.aspect_ratio());
-        }
-        if let Some(resolve) = &self.resolve {
-            resolve.update_uniforms(
-                ctx.device(),
-                self.camera.position(),
-                ctx.width(),
-                ctx.height(),
-            );
-        }
+        self.needs_instance_update = false;
 
         true
     }

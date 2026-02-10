@@ -21,15 +21,19 @@ fn full_frame_pipeline() {
 
     // Spawn a camera at (0, 5, 10) looking toward origin
     let cam_entity = world.spawn();
-    world.insert(
-        cam_entity,
-        Transform::from_translation(Vec3::new(0.0, 5.0, 10.0)),
-    );
-    world.insert(cam_entity, GlobalTransform::IDENTITY);
-    world.insert(
-        cam_entity,
-        Camera::perspective(std::f32::consts::FRAC_PI_4, 16.0 / 9.0, 0.1, 1000.0),
-    );
+    world
+        .insert(
+            cam_entity,
+            Transform::from_translation(Vec3::new(0.0, 5.0, 10.0)),
+        )
+        .unwrap();
+    world.insert(cam_entity, GlobalTransform::IDENTITY).unwrap();
+    world
+        .insert(
+            cam_entity,
+            Camera::perspective(std::f32::consts::FRAC_PI_4, 16.0 / 9.0, 0.1, 1000.0),
+        )
+        .unwrap();
 
     // Spawn a few objects at different positions
     let positions = [
@@ -40,9 +44,9 @@ fn full_frame_pipeline() {
     let mut objects = Vec::new();
     for pos in &positions {
         let e = world.spawn();
-        world.insert(e, Transform::from_translation(*pos));
-        world.insert(e, GlobalTransform::IDENTITY);
-        world.insert(e, Visibility::VISIBLE);
+        world.insert(e, Transform::from_translation(*pos)).unwrap();
+        world.insert(e, GlobalTransform::IDENTITY).unwrap();
+        world.insert(e, Visibility::VISIBLE).unwrap();
         objects.push(e);
     }
 
@@ -59,7 +63,7 @@ fn full_frame_pipeline() {
     runner.run(&mut world, &container, Duration::from_secs(1));
 
     // Verify camera matrices were computed
-    let cameras = world.read::<Camera>();
+    let cameras = world.read::<Camera>().unwrap();
     let cam = cameras.get(cam_entity.index()).unwrap();
     assert_ne!(cam.view_matrix, Mat4::IDENTITY);
     assert_ne!(cam.projection_matrix, Mat4::IDENTITY);
@@ -70,7 +74,7 @@ fn full_frame_pipeline() {
 
     // Verify object global transforms match their local transforms
     drop(cameras);
-    let globals = world.read::<GlobalTransform>();
+    let globals = world.read::<GlobalTransform>().unwrap();
     for (i, &obj) in objects.iter().enumerate() {
         let gt = globals.get(obj.index()).unwrap();
         assert!(
@@ -94,15 +98,17 @@ fn multi_thread_execution() {
     for i in 0..100 {
         let e = world.spawn();
         let angle = (i as f32) * 0.1;
-        world.insert(
-            e,
-            Transform::new(
-                Vec3::new(i as f32, 0.0, 0.0),
-                Quat::from_rotation_y(angle),
-                Vec3::ONE,
-            ),
-        );
-        world.insert(e, GlobalTransform::IDENTITY);
+        world
+            .insert(
+                e,
+                Transform::new(
+                    Vec3::new(i as f32, 0.0, 0.0),
+                    Quat::from_rotation_y(angle),
+                    Vec3::ONE,
+                ),
+            )
+            .unwrap();
+        world.insert(e, GlobalTransform::IDENTITY).unwrap();
     }
 
     let mut container = SystemsContainer::new();
@@ -112,8 +118,8 @@ fn multi_thread_execution() {
     runner.run(&mut world, &container, Duration::from_secs(1));
 
     // Verify all global transforms were updated
-    let transforms = world.read::<Transform>();
-    let globals = world.read::<GlobalTransform>();
+    let transforms = world.read::<Transform>().unwrap();
+    let globals = world.read::<GlobalTransform>().unwrap();
     for (idx, transform) in transforms.iter() {
         let global = globals.get(idx).unwrap();
         let expected = transform.to_matrix();
@@ -131,6 +137,7 @@ fn multi_thread_execution() {
 #[test]
 fn spawn_scene_and_run_systems() {
     let mut world = World::new();
+    ecs_std::register_std_components(&mut world);
     let mut strings = StringTable::new();
 
     let scene = Scene::new()
@@ -184,7 +191,7 @@ fn spawn_scene_and_run_systems() {
     assert_eq!(strings.get(name.id()), "root");
 
     // Find the camera entity by querying Camera component
-    let cameras_storage = world.read::<Camera>();
+    let cameras_storage = world.read::<Camera>().unwrap();
     let mut cam_count = 0;
     for (_, cam) in cameras_storage.iter() {
         cam_count += 1;
@@ -208,19 +215,23 @@ fn visibility_filtering_with_systems() {
     let mut entities = Vec::new();
     for i in 0..5 {
         let e = world.spawn();
-        world.insert(
-            e,
-            Transform::from_translation(Vec3::new(i as f32, 0.0, 0.0)),
-        );
-        world.insert(e, GlobalTransform::IDENTITY);
-        world.insert(
-            e,
-            if i % 2 == 0 {
-                Visibility::VISIBLE
-            } else {
-                Visibility::HIDDEN
-            },
-        );
+        world
+            .insert(
+                e,
+                Transform::from_translation(Vec3::new(i as f32, 0.0, 0.0)),
+            )
+            .unwrap();
+        world.insert(e, GlobalTransform::IDENTITY).unwrap();
+        world
+            .insert(
+                e,
+                if i % 2 == 0 {
+                    Visibility::VISIBLE
+                } else {
+                    Visibility::HIDDEN
+                },
+            )
+            .unwrap();
         entities.push(e);
     }
 
@@ -229,8 +240,8 @@ fn visibility_filtering_with_systems() {
     run_system_blocking(&UpdateGlobalTransforms, &world, &compute);
 
     // Query visible entities (the rendering pattern)
-    let globals = world.read::<GlobalTransform>();
-    let visibility = world.read::<Visibility>();
+    let globals = world.read::<GlobalTransform>().unwrap();
+    let visibility = world.read::<Visibility>().unwrap();
 
     let visible_positions: Vec<Vec3> = globals
         .iter()
@@ -254,8 +265,10 @@ fn multiple_frame_simulation() {
     register_std_components(&mut world);
 
     let entity = world.spawn();
-    world.insert(entity, Transform::from_translation(Vec3::ZERO));
-    world.insert(entity, GlobalTransform::IDENTITY);
+    world
+        .insert(entity, Transform::from_translation(Vec3::ZERO))
+        .unwrap();
+    world.insert(entity, GlobalTransform::IDENTITY).unwrap();
 
     let mut container = SystemsContainer::new();
     container.add(UpdateGlobalTransforms);
@@ -266,7 +279,7 @@ fn multiple_frame_simulation() {
     for frame in 0..10 {
         // "Move" the entity each frame
         {
-            let mut transforms = world.write::<Transform>();
+            let mut transforms = world.write::<Transform>().unwrap();
             let t = transforms.get_mut(entity.index()).unwrap();
             t.translation = Vec3::new(frame as f32, 0.0, 0.0);
         }
@@ -274,7 +287,7 @@ fn multiple_frame_simulation() {
         runner.run(&mut world, &container, Duration::from_secs(1));
 
         // Verify global transform tracks the local transform
-        let globals = world.read::<GlobalTransform>();
+        let globals = world.read::<GlobalTransform>().unwrap();
         let gt = globals.get(entity.index()).unwrap();
         assert!(
             (gt.translation().x - frame as f32).abs() < 1e-6,
@@ -298,13 +311,17 @@ fn light_direction_from_transform() {
     // Create a directional light pointing down (-Y rotation)
     let sun = world.spawn();
     let rotation = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_4); // 45° downward
-    world.insert(sun, Transform::from_rotation(rotation));
-    world.insert(sun, GlobalTransform::IDENTITY);
-    world.insert(
-        sun,
-        DirectionalLight::new(Vec3::new(1.0, 0.98, 0.9), 100000.0),
-    );
-    world.insert(sun, Name::new(strings.intern("Sun")));
+    world
+        .insert(sun, Transform::from_rotation(rotation))
+        .unwrap();
+    world.insert(sun, GlobalTransform::IDENTITY).unwrap();
+    world
+        .insert(
+            sun,
+            DirectionalLight::new(Vec3::new(1.0, 0.98, 0.9), 100000.0),
+        )
+        .unwrap();
+    world.insert(sun, Name::new(strings.intern("Sun"))).unwrap();
 
     // Create point lights at various positions
     let light_positions = [
@@ -315,10 +332,14 @@ fn light_direction_from_transform() {
     ];
     for (i, pos) in light_positions.iter().enumerate() {
         let e = world.spawn();
-        world.insert(e, Transform::from_translation(*pos));
-        world.insert(e, GlobalTransform::IDENTITY);
-        world.insert(e, PointLight::new(Vec3::ONE, 100.0).with_range(20.0));
-        world.insert(e, Name::new(strings.intern(&format!("PointLight_{i}"))));
+        world.insert(e, Transform::from_translation(*pos)).unwrap();
+        world.insert(e, GlobalTransform::IDENTITY).unwrap();
+        world
+            .insert(e, PointLight::new(Vec3::ONE, 100.0).with_range(20.0))
+            .unwrap();
+        world
+            .insert(e, Name::new(strings.intern(&format!("PointLight_{i}"))))
+            .unwrap();
     }
 
     // Run transform system via run_blocking
@@ -326,8 +347,8 @@ fn light_direction_from_transform() {
     run_system_blocking(&UpdateGlobalTransforms, &world, &compute);
 
     // Query directional light direction from its global transform
-    let globals = world.read::<GlobalTransform>();
-    let dir_lights = world.read::<DirectionalLight>();
+    let globals = world.read::<GlobalTransform>().unwrap();
+    let dir_lights = world.read::<DirectionalLight>().unwrap();
 
     for (idx, _light) in dir_lights.iter() {
         let gt = globals.get(idx).unwrap();
@@ -340,8 +361,8 @@ fn light_direction_from_transform() {
     drop(dir_lights);
 
     // Query point light positions from their global transforms
-    let globals = world.read::<GlobalTransform>();
-    let point_lights = world.read::<PointLight>();
+    let globals = world.read::<GlobalTransform>().unwrap();
+    let point_lights = world.read::<PointLight>().unwrap();
 
     let mut light_count = 0;
     for (idx, light) in point_lights.iter() {

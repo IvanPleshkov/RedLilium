@@ -49,7 +49,9 @@ pub fn set_parent(world: &mut World, entity: Entity, parent: Entity) {
     }
 
     // Set Parent component on entity
-    world.insert(entity, Parent(parent));
+    world
+        .insert(entity, Parent(parent))
+        .expect("Parent not registered");
 
     // Add to new parent's Children
     if let Some(children) = world.get_mut::<Children>(parent) {
@@ -57,7 +59,9 @@ pub fn set_parent(world: &mut World, entity: Entity, parent: Entity) {
             children.0.push(entity);
         }
     } else {
-        world.insert(parent, Children(vec![entity]));
+        world
+            .insert(parent, Children(vec![entity]))
+            .expect("Children not registered");
     }
 }
 
@@ -147,9 +151,15 @@ impl HierarchyCommands for CommandBuffer {
 mod tests {
     use super::*;
 
+    fn register_hierarchy(world: &mut World) {
+        world.register_component::<Parent>();
+        world.register_component::<Children>();
+    }
+
     #[test]
     fn set_parent_creates_relationship() {
         let mut world = World::new();
+        register_hierarchy(&mut world);
         let parent = world.spawn();
         let child = world.spawn();
 
@@ -163,6 +173,7 @@ mod tests {
     #[test]
     fn set_parent_multiple_children() {
         let mut world = World::new();
+        register_hierarchy(&mut world);
         let parent = world.spawn();
         let child_a = world.spawn();
         let child_b = world.spawn();
@@ -179,6 +190,7 @@ mod tests {
     #[test]
     fn set_parent_idempotent() {
         let mut world = World::new();
+        register_hierarchy(&mut world);
         let parent = world.spawn();
         let child = world.spawn();
 
@@ -192,6 +204,7 @@ mod tests {
     #[test]
     fn set_parent_reparents() {
         let mut world = World::new();
+        register_hierarchy(&mut world);
         let parent_a = world.spawn();
         let parent_b = world.spawn();
         let child = world.spawn();
@@ -214,6 +227,7 @@ mod tests {
     #[should_panic(expected = "Cannot set entity as its own parent")]
     fn set_parent_self_panics() {
         let mut world = World::new();
+        register_hierarchy(&mut world);
         let entity = world.spawn();
         set_parent(&mut world, entity, entity);
     }
@@ -221,6 +235,7 @@ mod tests {
     #[test]
     fn remove_parent_clears_relationship() {
         let mut world = World::new();
+        register_hierarchy(&mut world);
         let parent = world.spawn();
         let child = world.spawn();
 
@@ -242,6 +257,7 @@ mod tests {
     #[test]
     fn despawn_recursive_removes_subtree() {
         let mut world = World::new();
+        register_hierarchy(&mut world);
         let root = world.spawn();
         let child_a = world.spawn();
         let child_b = world.spawn();
@@ -265,6 +281,7 @@ mod tests {
     #[test]
     fn despawn_recursive_removes_from_parent() {
         let mut world = World::new();
+        register_hierarchy(&mut world);
         let parent = world.spawn();
         let child = world.spawn();
         let grandchild = world.spawn();
@@ -296,6 +313,7 @@ mod tests {
     #[test]
     fn command_set_parent() {
         let mut world = World::new();
+        register_hierarchy(&mut world);
         world.init_commands();
 
         let parent = world.spawn();
@@ -314,6 +332,7 @@ mod tests {
     #[test]
     fn command_despawn_recursive() {
         let mut world = World::new();
+        register_hierarchy(&mut world);
         world.init_commands();
 
         let parent = world.spawn();

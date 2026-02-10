@@ -220,9 +220,11 @@ mod tests {
     #[test]
     fn run_single_system() {
         let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Velocity>();
         let e = world.spawn();
-        world.insert(e, Position { x: 10.0 });
-        world.insert(e, Velocity { x: 5.0 });
+        world.insert(e, Position { x: 10.0 }).unwrap();
+        world.insert(e, Velocity { x: 5.0 }).unwrap();
 
         let mut container = SystemsContainer::new();
         container.add(MovementSystem);

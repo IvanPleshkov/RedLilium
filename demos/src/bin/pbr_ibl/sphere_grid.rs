@@ -11,10 +11,8 @@ use redlilium_graphics::{
     ShaderSource, ShaderStage, ShaderStageFlags, TextureFormat,
 };
 
-use crate::camera::OrbitCamera;
-use crate::ui::PbrUi;
+use crate::GRID_SIZE;
 use crate::uniforms::{CameraUniforms, SphereInstance};
-use crate::{GRID_SIZE, SPHERE_SPACING};
 
 const GBUFFER_SHADER_WGSL: &str = include_str!("../../../shaders/deferred_gbuffer.wgsl");
 
@@ -141,46 +139,31 @@ impl SphereGrid {
         }
     }
 
-    /// Build sphere instance data from UI state.
-    pub fn create_instances(ui: &PbrUi) -> Vec<SphereInstance> {
-        let state = ui.state();
-        let base_color = [
-            state.base_color[0],
-            state.base_color[1],
-            state.base_color[2],
-            1.0,
-        ];
-        let spacing = state.sphere_spacing;
-        Self::build_instances(base_color, spacing)
-    }
-
-    /// Update the instance buffer from UI state.
-    pub fn update_instances(&self, device: &Arc<GraphicsDevice>, ui: &PbrUi) {
-        profile_scope!("SphereGrid::update_instances");
-        let instances = Self::create_instances(ui);
-        let instance_data = bytemuck::cast_slice(&instances);
+    /// Write sphere instance data to the GPU buffer.
+    pub fn write_instances(&self, device: &Arc<GraphicsDevice>, instances: &[SphereInstance]) {
+        profile_scope!("SphereGrid::write_instances");
+        let instance_data = bytemuck::cast_slice(instances);
         device
             .write_buffer(&self.instance_buffer, 0, instance_data)
             .expect("Failed to write instance buffer");
     }
 
-    /// Update camera uniform buffer.
-    pub fn update_camera_buffer(
+    /// Update camera uniform buffer from pre-computed matrices.
+    pub fn write_camera_uniforms(
         &self,
         device: &Arc<GraphicsDevice>,
-        camera: &OrbitCamera,
-        aspect_ratio: f32,
+        view: Mat4,
+        proj: Mat4,
+        camera_pos: Vec3,
     ) {
-        profile_scope!("SphereGrid::update_camera_buffer");
-        let view = camera.view_matrix();
-        let proj = camera.projection_matrix(aspect_ratio);
+        profile_scope!("SphereGrid::write_camera_uniforms");
         let view_proj = proj * view;
 
         let uniforms = CameraUniforms {
             view_proj: view_proj.to_cols_array_2d(),
             view: view.to_cols_array_2d(),
             proj: proj.to_cols_array_2d(),
-            camera_pos: camera.position().extend(1.0).to_array(),
+            camera_pos: camera_pos.extend(1.0).to_array(),
         };
 
         device
@@ -189,10 +172,11 @@ impl SphereGrid {
     }
 
     fn create_instances_default() -> Vec<SphereInstance> {
-        Self::build_instances([0.9, 0.1, 0.1, 1.0], SPHERE_SPACING)
+        Self::build_instances_default([0.9, 0.1, 0.1, 1.0])
     }
 
-    fn build_instances(base_color: [f32; 4], spacing: f32) -> Vec<SphereInstance> {
+    fn build_instances_default(base_color: [f32; 4]) -> Vec<SphereInstance> {
+        let spacing = crate::SPHERE_SPACING;
         let mut instances = Vec::with_capacity(GRID_SIZE * GRID_SIZE);
         let offset = (GRID_SIZE as f32 - 1.0) * spacing / 2.0;
 
