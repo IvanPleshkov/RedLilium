@@ -420,6 +420,38 @@ macro_rules! profile_frame_mark_named {
     ($name:expr) => {};
 }
 
+/// Create a profiling span with a runtime-determined name.
+///
+/// Unlike [`profile_scope!`] which requires a string literal, this macro
+/// accepts any `&str` expression. It uses `tracy_client::Client::span_alloc`
+/// which heap-allocates the span name. Prefer [`profile_scope!`] for static
+/// names.
+///
+/// # Example
+///
+/// ```ignore
+/// let system_name = "MovementSystem";
+/// profile_scope_dynamic!(system_name);
+/// // ... profiled work ...
+/// ```
+#[macro_export]
+#[cfg(feature = "profiling")]
+macro_rules! profile_scope_dynamic {
+    ($name:expr) => {
+        let _profile_span = $crate::profiling::Client::running()
+            .map(|c| c.span_alloc(Some($name), "", file!(), line!(), 0));
+    };
+}
+
+/// Create a profiling span with a dynamic name (no-op when profiling disabled).
+#[macro_export]
+#[cfg(not(feature = "profiling"))]
+macro_rules! profile_scope_dynamic {
+    ($name:expr) => {
+        let _ = $name;
+    };
+}
+
 // Re-export macros at module level
 pub use create_profiled_allocator;
 pub use frame_mark;
@@ -429,6 +461,7 @@ pub use profile_memory_stats;
 pub use profile_message;
 pub use profile_plot;
 pub use profile_scope;
+pub use profile_scope_dynamic;
 pub use set_thread_name;
 
 #[cfg(test)]
@@ -438,6 +471,7 @@ mod tests {
         // These should compile regardless of profiling feature
         frame_mark!();
         profile_scope!("test_scope");
+        profile_scope_dynamic!("dynamic_scope");
         profile_function!();
         profile_plot!("test_value", 42.0);
         set_thread_name!("test_thread");

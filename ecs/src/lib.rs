@@ -62,7 +62,6 @@ pub use commands::CommandBuffer;
 pub use component::{Component, FieldInfo, FieldKind};
 pub use compute::{ComputePool, TaskHandle};
 pub use ecs_macro::Component;
-pub use ecs_macro::system;
 pub use entity::Entity;
 pub use events::{EventUpdateSystem, Events};
 pub use priority::Priority;

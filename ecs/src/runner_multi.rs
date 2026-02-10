@@ -69,6 +69,8 @@ mod inner {
         /// If the time budget is exceeded, no new systems are started.
         /// Already-running systems complete on their threads.
         pub fn run(&self, world: &mut World, systems: &SystemsContainer, time_budget: Duration) {
+            redlilium_core::profile_scope!("ecs: run (multi-thread)");
+
             let start = Instant::now();
             let n = systems.system_count();
             if n == 0 {
@@ -109,7 +111,10 @@ mod inner {
                             let ctx_ref = &ctx;
                             let compute_ref = &self.compute;
                             let idx = $i;
+                            let system_name = systems.get_type_name(idx);
                             scope.spawn(move || {
+                                redlilium_core::set_thread_name!("ecs: worker");
+                                redlilium_core::profile_scope_dynamic!(system_name);
                                 let system = systems.get_system(idx);
                                 let future = system.run_boxed(ctx_ref);
                                 poll_future_to_completion_with_compute(future, compute_ref);
@@ -168,8 +173,11 @@ mod inner {
             }
 
             // Apply deferred commands (ctx and futures dropped, world is free)
-            for cmd in commands.drain() {
-                cmd(world);
+            {
+                redlilium_core::profile_scope!("ecs: apply commands");
+                for cmd in commands.drain() {
+                    cmd(world);
+                }
             }
         }
 

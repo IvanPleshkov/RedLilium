@@ -43,6 +43,8 @@ impl EcsRunnerSingleThread {
     /// Already-running systems are polled to completion, and remaining
     /// compute tasks are ticked until budget + tolerance.
     pub fn run(&self, world: &mut World, systems: &SystemsContainer, time_budget: Duration) {
+        redlilium_core::profile_scope!("ecs: run (single-thread)");
+
         let start = Instant::now();
         let n = systems.system_count();
         if n == 0 {
@@ -130,8 +132,11 @@ impl EcsRunnerSingleThread {
         }
 
         // Apply deferred commands (ctx and futures dropped, world is free)
-        for cmd in commands.drain() {
-            cmd(world);
+        {
+            redlilium_core::profile_scope!("ecs: apply commands");
+            for cmd in commands.drain() {
+                cmd(world);
+            }
         }
     }
 

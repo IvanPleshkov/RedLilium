@@ -58,10 +58,12 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
         F: FnOnce(A::Item<'_>) -> R,
     {
         // Acquire RwLocks if in multi-threaded mode
-        let _guards = self
-            .ctx
-            .world_locks()
-            .map(|locks| locks.acquire_sorted(&A::access_infos()));
+        let _guards = {
+            redlilium_core::profile_scope!("ecs: lock acquire");
+            self.ctx
+                .world_locks()
+                .map(|locks| locks.acquire_sorted(&A::access_infos()))
+        };
 
         // Fetch typed data from World
         let items = A::fetch(self.ctx.world());

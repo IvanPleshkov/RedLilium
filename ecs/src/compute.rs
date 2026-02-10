@@ -216,6 +216,7 @@ impl ComputePool {
     /// Returns the number of tasks that were polled (0 or 1).
     /// Completed and cancelled tasks are automatically removed from the pool.
     pub fn tick(&self) -> usize {
+        redlilium_core::profile_scope!("ecs: compute tick");
         let mut tasks = self.tasks.lock().unwrap();
 
         // Remove cancelled tasks first
@@ -253,6 +254,7 @@ impl ComputePool {
     /// Returns the number of tasks that were polled.
     /// Completed and cancelled tasks are automatically removed.
     pub fn tick_all(&self) -> usize {
+        redlilium_core::profile_scope!("ecs: compute tick_all");
         let mut tasks = self.tasks.lock().unwrap();
 
         // Remove cancelled tasks first
@@ -279,6 +281,8 @@ impl ComputePool {
                 }
             }
         }
+
+        redlilium_core::profile_plot!("ecs: compute pending", tasks.len() as f64);
 
         count
     }
