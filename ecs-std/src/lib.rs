@@ -29,6 +29,13 @@
 
 pub mod components;
 pub mod hierarchy;
+#[cfg(any(
+    feature = "physics-3d",
+    feature = "physics-3d-f32",
+    feature = "physics-2d",
+    feature = "physics-2d-f32"
+))]
+pub mod physics;
 mod spawn;
 pub mod systems;
 

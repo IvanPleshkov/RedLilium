@@ -17,7 +17,7 @@ redlilium-core = { path = "../core" }
 redlilium-graphics = { path = "../graphics" }
 redlilium-app = { path = "../app" }
 redlilium-ecs = { path = "../ecs" }
-ecs-std = { path = "../ecs-std" }
+ecs-std = { path = "../ecs-std", features = ["physics"] }
 winit.workspace = true
 log.workspace = true
 bytemuck = { workspace = true }
@@ -48,6 +48,10 @@ path = "src/bin/pbr_ibl/main.rs"
 [[bin]]
 name = "textured_quad_demo"
 path = "src/bin/textured_quad_demo.rs"
+
+[[bin]]
+name = "physics_demo"
+path = "src/bin/physics_demo/main.rs"
 
 [[example]]
 name = "window_test"

@@ -9,6 +9,8 @@ description = "Core crate for RedLilium Engine"
 default = ["gltf"]
 profiling = ["dep:tracy-client"]
 gltf = ["dep:gltf-dep", "dep:image"]
+physics-math = ["dep:nalgebra"]
+physics-f32 = []
 
 [dependencies]
 log.workspace = true
@@ -17,6 +19,9 @@ bytemuck = { workspace = true }
 # glTF loading (optional, enabled by default)
 gltf-dep = { workspace = true, optional = true }
 image = { workspace = true, optional = true }
+
+# Physics math (optional)
+nalgebra = { workspace = true, optional = true }
 
 # Profiling (optional)
 tracy-client = { workspace = true, optional = true }
