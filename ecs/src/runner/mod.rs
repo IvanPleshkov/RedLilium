@@ -1,12 +1,43 @@
+pub(crate) mod single;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod multi;
+
+pub use single::EcsRunnerSingleThread;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use multi::EcsRunnerMultiThread;
+
 use std::time::Duration;
 
 use crate::compute::ComputePool;
-use crate::runner_single::{EcsRunnerSingleThread, ShutdownError};
 use crate::systems_container::SystemsContainer;
 use crate::world::World;
 
-#[cfg(not(target_arch = "wasm32"))]
-use crate::runner_multi::EcsRunnerMultiThread;
+/// Error returned when graceful shutdown exceeds the time budget.
+#[derive(Debug)]
+pub enum ShutdownError {
+    /// Shutdown timed out with tasks still pending.
+    Timeout {
+        /// Number of compute tasks still running.
+        remaining_tasks: usize,
+    },
+}
+
+impl std::fmt::Display for ShutdownError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ShutdownError::Timeout { remaining_tasks } => {
+                write!(
+                    f,
+                    "Shutdown timed out with {remaining_tasks} tasks remaining"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ShutdownError {}
 
 /// ECS system executor.
 ///
@@ -21,7 +52,7 @@ use crate::runner_multi::EcsRunnerMultiThread;
 ///
 /// ```ignore
 /// let mut runner = EcsRunner::single_thread();
-/// runner.run(&mut world, &container, Duration::from_millis(16));
+/// runner.run(&mut world, &container);
 /// ```
 pub enum EcsRunner {
     /// Cooperative single-threaded executor.
@@ -54,18 +85,13 @@ impl EcsRunner {
     /// Systems with no dependencies start immediately. As each system
     /// completes, its dependents become eligible to start.
     ///
-    /// Deferred commands are applied after all systems complete.
-    ///
-    /// # Time budget
-    ///
-    /// The runner attempts to complete all systems within the time budget.
-    /// If exceeded, no new systems are started. Already-running systems
-    /// complete normally.
-    pub fn run(&self, world: &mut World, systems: &SystemsContainer, time_budget: Duration) {
+    /// All systems always run to completion. Deferred commands are applied
+    /// after every system has finished.
+    pub fn run(&self, world: &mut World, systems: &SystemsContainer) {
         match self {
-            Self::SingleThread(runner) => runner.run(world, systems, time_budget),
+            Self::SingleThread(runner) => runner.run(world, systems),
             #[cfg(not(target_arch = "wasm32"))]
-            Self::MultiThread(runner) => runner.run(world, systems, time_budget),
+            Self::MultiThread(runner) => runner.run(world, systems),
         }
     }
 
@@ -133,7 +159,7 @@ mod tests {
         container.add(MovementSystem);
 
         let runner = EcsRunner::single_thread();
-        runner.run(&mut world, &container, Duration::from_secs(1));
+        runner.run(&mut world, &container);
 
         assert_eq!(world.get::<Position>(e).unwrap().x, 15.0);
     }
@@ -152,7 +178,7 @@ mod tests {
         container.add(MovementSystem);
 
         let runner = EcsRunner::multi_thread(2);
-        runner.run(&mut world, &container, Duration::from_secs(1));
+        runner.run(&mut world, &container);
 
         assert_eq!(world.get::<Position>(e).unwrap().x, 15.0);
     }

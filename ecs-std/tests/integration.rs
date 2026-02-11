@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use redlilium_core::math::{Mat4, Vec3, quat_from_rotation_x, quat_from_rotation_y};
 use redlilium_core::scene::{CameraProjection, NodeTransform, Scene, SceneCamera, SceneNode};
 use redlilium_ecs::{ComputePool, EcsRunner, SystemsContainer, World, run_system_blocking};
@@ -58,7 +56,7 @@ fn full_frame_pipeline() {
 
     // Run with single-threaded runner
     let runner = EcsRunner::single_thread();
-    runner.run(&mut world, &container, Duration::from_secs(1));
+    runner.run(&mut world, &container);
 
     // Verify camera matrices were computed
     let cameras = world.read::<Camera>().unwrap();
@@ -114,7 +112,7 @@ fn multi_thread_execution() {
     container.add(UpdateGlobalTransforms);
 
     let runner = EcsRunner::multi_thread(4);
-    runner.run(&mut world, &container, Duration::from_secs(1));
+    runner.run(&mut world, &container);
 
     // Verify all global transforms were updated
     let transforms = world.read::<Transform>().unwrap();
@@ -179,7 +177,7 @@ fn spawn_scene_and_run_systems() {
         .unwrap();
 
     let runner = EcsRunner::single_thread();
-    runner.run(&mut world, &container, Duration::from_secs(1));
+    runner.run(&mut world, &container);
 
     // Verify root entity
     let root = roots[0];
@@ -282,7 +280,7 @@ fn multiple_frame_simulation() {
             t.translation = Vec3::new(frame as f32, 0.0, 0.0);
         }
 
-        runner.run(&mut world, &container, Duration::from_secs(1));
+        runner.run(&mut world, &container);
 
         // Verify global transform tracks the local transform
         let globals = world.read::<GlobalTransform>().unwrap();
@@ -393,5 +391,5 @@ fn register_prevents_empty_world_panic() {
 
     // Should not panic even with zero entities
     let runner = EcsRunner::single_thread();
-    runner.run(&mut world, &container, Duration::from_secs(1));
+    runner.run(&mut world, &container);
 }

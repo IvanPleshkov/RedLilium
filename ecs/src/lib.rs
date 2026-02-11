@@ -46,13 +46,9 @@ mod priority;
 mod query;
 mod resource;
 mod runner;
-mod runner_multi;
-mod runner_single;
 mod sparse_set;
-pub mod string_table;
 mod system;
 pub mod system_context;
-pub mod system_future;
 mod systems_container;
 mod world;
 mod yield_now;
@@ -69,7 +65,6 @@ pub use priority::Priority;
 pub use query::{AddedFilter, ChangedFilter, ContainsChecker, With, Without};
 pub use resource::{ResourceRef, ResourceRefMut};
 pub use sparse_set::{Ref, RefMut, SparseSetInner};
-pub use string_table::{StringId, StringTable};
 pub use world::{ComponentNotRegistered, World};
 pub use yield_now::yield_now;
 
@@ -77,11 +72,10 @@ pub use yield_now::yield_now;
 pub use access_set::{AccessSet, OptionalRead, OptionalWrite, Read, Res, ResMut, Write};
 pub use command_collector::CommandCollector;
 pub use lock_request::LockRequest;
-pub use runner::EcsRunner;
-pub use runner_single::{EcsRunnerSingleThread, ShutdownError};
+pub use runner::{EcsRunner, EcsRunnerSingleThread, ShutdownError};
 pub use system::{System, SystemResult, run_system_blocking};
 pub use system_context::SystemContext;
 pub use systems_container::{CycleError, Edge, SystemsContainer};
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use runner_multi::EcsRunnerMultiThread;
+pub use runner::EcsRunnerMultiThread;

@@ -4,14 +4,6 @@ use std::fmt;
 
 use crate::system::{DynSystem, System};
 
-/// A registered system with its metadata.
-pub(crate) struct StoredSystem {
-    /// The system instance, type-erased.
-    pub system: Box<dyn DynSystem>,
-    /// Human-readable type name for debug/error messages.
-    pub type_name: &'static str,
-}
-
 /// An explicit ordering edge between two systems.
 ///
 /// `from` must complete before `to` can start.
@@ -71,13 +63,15 @@ impl std::error::Error for CycleError {}
 /// ```
 pub struct SystemsContainer {
     /// Registered systems in insertion order.
-    systems: Vec<StoredSystem>,
+    systems: Vec<Box<dyn DynSystem>>,
     /// Forward adjacency list: edges[i] = indices of systems that depend on i.
     edges: Vec<Vec<usize>>,
     /// Cached in-degree per system (number of dependencies).
     in_degrees: Vec<usize>,
     /// Map from TypeId to index in `systems`.
     id_to_idx: HashMap<TypeId, usize>,
+    /// Pre-computed topological order for single-threaded execution.
+    single_thread_order: Vec<usize>,
 }
 
 impl SystemsContainer {
@@ -88,6 +82,7 @@ impl SystemsContainer {
             edges: Vec::new(),
             in_degrees: Vec::new(),
             id_to_idx: HashMap::new(),
+            single_thread_order: Vec::new(),
         }
     }
 
@@ -98,21 +93,19 @@ impl SystemsContainer {
     /// Panics if a system of the same type is already registered.
     pub fn add<S: System>(&mut self, system: S) {
         let type_id = TypeId::of::<S>();
-        let type_name = std::any::type_name::<S>();
 
         assert!(
             !self.id_to_idx.contains_key(&type_id),
-            "System `{type_name}` is already registered"
+            "System `{}` is already registered",
+            std::any::type_name::<S>()
         );
 
         let idx = self.systems.len();
         self.id_to_idx.insert(type_id, idx);
-        self.systems.push(StoredSystem {
-            system: Box::new(system),
-            type_name,
-        });
+        self.systems.push(Box::new(system));
         self.edges.push(Vec::new());
         self.in_degrees.push(0);
+        self.rebuild_order();
     }
 
     /// Adds a single ordering edge: `Before` must complete before `After` starts.
@@ -166,18 +159,21 @@ impl SystemsContainer {
         }
 
         // Validate with Kahn's topological sort
-        if let Some(cycle_indices) = find_cycle(&test_edges, &test_in_degrees) {
-            let involved = cycle_indices
-                .iter()
-                .map(|&idx| self.systems[idx].type_name.to_string())
-                .collect();
-            return Err(CycleError { involved });
+        match topological_sort(&test_edges, &test_in_degrees) {
+            Ok(order) => {
+                self.edges = test_edges;
+                self.in_degrees = test_in_degrees;
+                self.single_thread_order = order;
+                Ok(())
+            }
+            Err(cycle_indices) => {
+                let involved = cycle_indices
+                    .iter()
+                    .map(|&idx| self.systems[idx].name().to_string())
+                    .collect();
+                Err(CycleError { involved })
+            }
         }
-
-        // Commit changes
-        self.edges = test_edges;
-        self.in_degrees = test_in_degrees;
-        Ok(())
     }
 
     /// Returns the number of registered systems.
@@ -187,12 +183,12 @@ impl SystemsContainer {
 
     /// Returns a reference to the system at the given index.
     pub(crate) fn get_system(&self, idx: usize) -> &dyn DynSystem {
-        &*self.systems[idx].system
+        &*self.systems[idx]
     }
 
     /// Returns the type name of the system at the given index.
     pub fn get_type_name(&self, idx: usize) -> &'static str {
-        self.systems[idx].type_name
+        self.systems[idx].name()
     }
 
     /// Returns the indices of systems with no dependencies (in-degree 0).
@@ -221,6 +217,21 @@ impl SystemsContainer {
     pub fn in_degrees(&self) -> &[usize] {
         &self.in_degrees
     }
+
+    /// Returns a pre-computed topological order for single-threaded execution.
+    ///
+    /// Iterating this slice and running each system sequentially guarantees
+    /// all dependency constraints are satisfied.
+    pub fn single_thread_order(&self) -> &[usize] {
+        &self.single_thread_order
+    }
+
+    /// Rebuilds `single_thread_order` from the current graph.
+    fn rebuild_order(&mut self) {
+        // Graph is always acyclic (validated by add_edges), so unwrap is safe.
+        self.single_thread_order =
+            topological_sort(&self.edges, &self.in_degrees).expect("graph should be acyclic");
+    }
 }
 
 impl Default for SystemsContainer {
@@ -229,13 +240,13 @@ impl Default for SystemsContainer {
     }
 }
 
-/// Runs Kahn's topological sort. Returns `Some(cycle_members)` if a cycle exists,
-/// or `None` if the graph is acyclic.
-fn find_cycle(edges: &[Vec<usize>], in_degrees: &[usize]) -> Option<Vec<usize>> {
+/// Runs Kahn's topological sort. Returns the sorted order, or the cycle
+/// members if a cycle exists.
+fn topological_sort(edges: &[Vec<usize>], in_degrees: &[usize]) -> Result<Vec<usize>, Vec<usize>> {
     let n = in_degrees.len();
     let mut remaining = in_degrees.to_vec();
     let mut queue = std::collections::VecDeque::new();
-    let mut visited_count = 0;
+    let mut order = Vec::with_capacity(n);
 
     for (i, &deg) in remaining.iter().enumerate() {
         if deg == 0 {
@@ -244,7 +255,7 @@ fn find_cycle(edges: &[Vec<usize>], in_degrees: &[usize]) -> Option<Vec<usize>> 
     }
 
     while let Some(node) = queue.pop_front() {
-        visited_count += 1;
+        order.push(node);
         for &dependent in &edges[node] {
             remaining[dependent] -= 1;
             if remaining[dependent] == 0 {
@@ -253,17 +264,16 @@ fn find_cycle(edges: &[Vec<usize>], in_degrees: &[usize]) -> Option<Vec<usize>> 
         }
     }
 
-    if visited_count == n {
-        None
+    if order.len() == n {
+        Ok(order)
     } else {
-        // Nodes with remaining > 0 are in cycles
-        let cycle_members: Vec<usize> = remaining
+        let cycle_members = remaining
             .iter()
             .enumerate()
             .filter(|&(_, &r)| r > 0)
             .map(|(i, _)| i)
             .collect();
-        Some(cycle_members)
+        Err(cycle_members)
     }
 }
 

@@ -25,8 +25,6 @@
 
 use redlilium_core::math::{Mat4, Quat, Vec2, Vec3, Vec4};
 
-use crate::StringId;
-
 /// Wrapper that enables compile-time field inspector dispatch.
 ///
 /// Inherent `show()` methods for known types take priority over the
@@ -156,15 +154,6 @@ impl Inspect<'_, String> {
         ui.horizontal(|ui| {
             ui.label(name);
             ui.text_edit_singleline(self.0);
-        });
-    }
-}
-
-impl Inspect<'_, StringId> {
-    pub fn show(&mut self, name: &str, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label(name);
-            ui.label(format!("StringId({})", self.0.0));
         });
     }
 }

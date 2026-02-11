@@ -5,8 +5,14 @@ use std::pin::Pin;
 use crate::command_collector::CommandCollector;
 use crate::compute::{ComputePool, noop_waker};
 use crate::system_context::SystemContext;
-use crate::system_future::SystemFuture;
 use crate::world::World;
+
+/// A type-erased system future.
+///
+/// This is a boxed future returned by [`System::run`](crate::System::run).
+/// Each system invocation produces a `SystemFuture` that the runner polls
+/// to completion.
+pub(crate) type SystemFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
 /// A system that processes entities and components in the world.
 ///
@@ -81,10 +87,15 @@ pub trait System: Send + Sync + 'static {
 /// A blanket implementation converts any `System` into a `DynSystem`
 /// by wrapping the future in `Box::pin`.
 pub(crate) trait DynSystem: Send + Sync {
+    fn name(&self) -> &'static str;
     fn run_boxed<'a>(&'a self, ctx: &'a SystemContext<'a>) -> SystemFuture<'a>;
 }
 
 impl<S: System> DynSystem for S {
+    fn name(&self) -> &'static str {
+        std::any::type_name::<S>()
+    }
+
     fn run_boxed<'a>(&'a self, ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
         Box::pin(self.run(ctx))
     }
@@ -122,6 +133,7 @@ pub(crate) fn poll_system_future_to_completion(future: SystemFuture<'_>, compute
             std::task::Poll::Ready(()) => break,
             std::task::Poll::Pending => {
                 compute.tick_all();
+                #[cfg(not(target_arch = "wasm32"))]
                 std::thread::yield_now();
             }
         }

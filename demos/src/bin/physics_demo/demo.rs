@@ -1,7 +1,6 @@
 //! Physics demo application — AppHandler implementation.
 
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 
 use redlilium_app::{AppContext, AppHandler, DrawContext};
 use redlilium_core::math::{Vec3, look_at_rh, perspective_rh};
@@ -260,7 +259,7 @@ impl AppHandler for PhysicsDemoApp {
             && let (Some(world), Some(systems), Some(runner)) =
                 (&mut self.world, &self.systems, &self.runner)
         {
-            runner.run(world, systems, Duration::from_millis(16));
+            runner.run(world, systems);
         }
 
         // Update renderer with current physics state

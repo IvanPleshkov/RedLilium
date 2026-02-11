@@ -4,7 +4,6 @@
 //! each with PBR material properties.
 
 use std::f32::consts::PI;
-use std::time::Duration;
 
 use ecs_std::{
     Camera, GlobalTransform, Transform, UpdateCameraMatrices, UpdateGlobalTransforms, Visibility,
@@ -143,8 +142,7 @@ impl EcsScene {
 
     /// Runs the ECS systems (transform propagation + camera matrix update).
     pub fn run_systems(&mut self) {
-        self.runner
-            .run(&mut self.world, &self.systems, Duration::from_millis(16));
+        self.runner.run(&mut self.world, &self.systems);
     }
 
     /// Reads the camera's computed view and projection matrices.
