@@ -21,6 +21,7 @@ pub struct PhysicsUi {
     pub time_scale: f32,
     pub body_count: usize,
     pub collider_count: usize,
+    pub show_inspector: bool,
 
     // Signals consumed by the app each frame
     scene_changed: bool,
@@ -40,6 +41,7 @@ impl PhysicsUi {
             time_scale: 1.0,
             body_count: 0,
             collider_count: 0,
+            show_inspector: false,
             scene_changed: false,
             reset_requested: false,
         }
@@ -148,6 +150,9 @@ impl EguiApp for PhysicsUi {
                 // ---- Stats ----
                 ui.label(format!("Bodies: {}", self.body_count));
                 ui.label(format!("Colliders: {}", self.collider_count));
+
+                ui.separator();
+                ui.checkbox(&mut self.show_inspector, "World Inspector");
 
                 ui.separator();
                 ui.small("LMB: Orbit | Scroll: Zoom | H: Toggle UI | Space: Pause");

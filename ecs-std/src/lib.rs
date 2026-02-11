@@ -38,6 +38,8 @@ pub mod hierarchy;
 pub mod physics;
 mod spawn;
 pub mod systems;
+#[cfg(feature = "inspector")]
+pub mod ui;
 
 pub use components::*;
 pub use hierarchy::{HierarchyCommands, despawn_recursive, remove_parent, set_parent};

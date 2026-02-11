@@ -711,6 +711,7 @@ name = "ecs-std"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "egui",
  "log",
  "rapier2d",
  "rapier2d-f64",

@@ -13,7 +13,7 @@ use redlilium_graphics::{
 use winit::event::KeyEvent;
 use winit::keyboard::{KeyCode, PhysicalKey};
 
-use redlilium_ecs::{EcsRunner, SystemsContainer, World};
+use redlilium_ecs::{EcsRunner, StringTable, SystemsContainer, World};
 
 use crate::renderer::PhysicsRenderer;
 use crate::scenes_2d::{self, PhysicsScene2D};
@@ -71,6 +71,7 @@ pub struct PhysicsDemoApp {
     world: Option<World>,
     systems: Option<SystemsContainer>,
     runner: Option<EcsRunner>,
+    string_table: StringTable,
 
     // Rendering
     renderer: Option<PhysicsRenderer>,
@@ -79,6 +80,10 @@ pub struct PhysicsDemoApp {
     // UI
     egui_controller: Option<EguiController>,
     ui: Arc<RwLock<PhysicsUi>>,
+
+    // Inspector
+    inspector_state: ecs_std::ui::InspectorState,
+    component_registry: ecs_std::ui::ComponentRegistry,
 
     // Input state
     mouse_pressed: bool,
@@ -99,16 +104,30 @@ impl PhysicsDemoApp {
             ui.scene_names_2d = scenes_2d.iter().map(|s| s.name().to_string()).collect();
         }
 
+        // Build component registry for inspector
+        let mut component_registry = ecs_std::ui::ComponentRegistry::new();
+        component_registry.register::<ecs_std::Transform>("Transform");
+        component_registry.register::<ecs_std::GlobalTransform>("GlobalTransform");
+        component_registry.register::<ecs_std::Visibility>("Visibility");
+        component_registry.register::<ecs_std::Name>("Name");
+        component_registry.register_readonly::<ecs_std::Camera>("Camera");
+        component_registry.register::<ecs_std::DirectionalLight>("DirectionalLight");
+        component_registry.register::<ecs_std::PointLight>("PointLight");
+        component_registry.register::<ecs_std::SpotLight>("SpotLight");
+
         Self {
             scenes_3d,
             scenes_2d,
             world: None,
             systems: None,
             runner: None,
+            string_table: StringTable::new(),
             renderer: None,
             camera: OrbitCamera::new(),
             egui_controller: None,
             ui,
+            inspector_state: ecs_std::ui::InspectorState::new(),
+            component_registry,
             mouse_pressed: false,
             last_mouse_x: 0.0,
             last_mouse_y: 0.0,
@@ -162,6 +181,9 @@ impl PhysicsDemoApp {
 
         // Update UI stats
         self.update_ui_stats(&world, dim);
+
+        // Reset inspector selection since entities changed
+        self.inspector_state.selected = None;
 
         self.world = Some(world);
         self.systems = Some(systems);
@@ -328,6 +350,30 @@ impl AppHandler for PhysicsDemoApp {
             let render_target = RenderTarget::from_surface(ctx.swapchain_texture());
 
             egui.begin_frame(elapsed);
+
+            // Draw inspector UI between begin_frame and end_frame
+            let show_inspector = self.ui.read().map(|ui| ui.show_inspector).unwrap_or(false);
+            if show_inspector {
+                let egui_ctx = egui.context().clone();
+                if let Some(world) = &self.world {
+                    ecs_std::ui::show_world_inspector(
+                        &egui_ctx,
+                        world,
+                        Some(&self.string_table),
+                        &mut self.inspector_state,
+                    );
+                }
+                if let Some(world) = &mut self.world {
+                    ecs_std::ui::show_component_inspector(
+                        &egui_ctx,
+                        world,
+                        Some(&self.string_table),
+                        &mut self.inspector_state,
+                        &self.component_registry,
+                    );
+                }
+            }
+
             if let Some(egui_pass) = egui.end_frame(&render_target, width, height) {
                 let egui_handle = graph.add_graphics_pass(egui_pass);
                 graph.add_dependency(egui_handle, shape_handle);
