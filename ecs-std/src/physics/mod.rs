@@ -15,8 +15,14 @@ pub mod conversions;
 #[cfg(any(feature = "physics-3d", feature = "physics-3d-f32"))]
 pub mod physics3d;
 
+#[cfg(any(feature = "physics-3d", feature = "physics-3d-f32"))]
+pub mod components3d;
+
 #[cfg(any(feature = "physics-2d", feature = "physics-2d-f32"))]
 pub mod physics2d;
+
+#[cfg(any(feature = "physics-2d", feature = "physics-2d-f32"))]
+pub mod components2d;
 
 // Re-export the active rapier crate under a unified name.
 

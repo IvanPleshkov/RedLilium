@@ -22,8 +22,8 @@
 //! registry.register::<Visibility>("Visibility");
 //!
 //! // During frame, inside egui update:
-//! show_world_inspector(ctx, &world, &string_table, &mut state);
-//! show_component_inspector(ctx, &mut world, &string_table, &mut state, &registry);
+//! show_world_inspector(ctx, &world, &mut state);
+//! show_component_inspector(ctx, &mut world, &mut state, &registry);
 //! ```
 
 mod component_inspector;

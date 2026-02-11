@@ -1,9 +1,11 @@
-//! 2D physics scene definitions.
+//! 2D physics scene definitions using the component approach.
 //!
-//! Each scene populates an ECS world with a [`PhysicsWorld2D`] resource
-//! and entities carrying rigid-body handle + transform components.
+//! Each scene spawns entities with [`RigidBody2D`] + [`Collider2D`] + [`Transform`]
+//! descriptor components, then calls [`build_physics_world_2d`] to materialize
+//! them into rapier physics objects.
 
 use ecs_std::Transform;
+use ecs_std::physics::components2d::{Collider2D, RigidBody2D, build_physics_world_2d};
 use ecs_std::physics::physics2d::{PhysicsWorld2D, RigidBody2DHandle};
 use ecs_std::physics::rapier2d::prelude::*;
 use redlilium_core::math;
@@ -17,29 +19,19 @@ pub trait PhysicsScene2D: Send + Sync {
     fn update(&self, _world: &mut World) {}
 }
 
-/// Helper: spawn a 2D physics entity.
-fn spawn_physics_entity(
+/// Helper: spawn a 2D physics entity with descriptor components.
+fn spawn_entity(
     world: &mut World,
-    physics: &mut PhysicsWorld2D,
-    body: RigidBody,
-    collider: Collider,
-) {
-    let body_handle = physics.add_body(body);
-    physics.add_collider(collider, body_handle);
-
-    let pos = physics.bodies[body_handle].position();
-    let t = pos.translation;
-    let angle = pos.rotation.angle() as f32;
-    let transform = Transform::new(
-        math::Vec3::new(t.x as f32, t.y as f32, 0.0),
-        math::quat_from_rotation_z(angle),
-        math::Vec3::new(1.0, 1.0, 1.0),
-    );
-
+    body: RigidBody2D,
+    collider: Collider2D,
+    transform: Transform,
+) -> redlilium_ecs::Entity {
     let entity = world.spawn();
-    let _ = world.insert(entity, RigidBody2DHandle(body_handle));
+    let _ = world.insert(entity, body);
+    let _ = world.insert(entity, collider);
     let _ = world.insert(entity, transform);
     let _ = world.insert(entity, ecs_std::GlobalTransform::IDENTITY);
+    entity
 }
 
 // ---------------------------------------------------------------------------
@@ -54,25 +46,27 @@ impl PhysicsScene2D for BallsScene2D {
     }
 
     fn setup(&self, world: &mut World) {
-        let mut physics = PhysicsWorld2D::default();
-
         // Ground
-        let ground = RigidBodyBuilder::fixed().build();
-        let ground_col = ColliderBuilder::cuboid(20.0, 0.1).restitution(0.3).build();
-        spawn_physics_entity(world, &mut physics, ground, ground_col);
+        spawn_entity(
+            world,
+            RigidBody2D::fixed(),
+            Collider2D::cuboid(20.0, 0.1).with_restitution(0.3),
+            Transform::IDENTITY,
+        );
 
         // Falling circles
         for i in 0..40 {
-            let x = (i % 8) as f64 * 1.2 - 4.0;
-            let y = 5.0 + (i / 8) as f64 * 1.5;
-            let body = RigidBodyBuilder::dynamic()
-                .translation(Vector::new(x, y))
-                .build();
-            let collider = ColliderBuilder::ball(0.4).restitution(0.7).build();
-            spawn_physics_entity(world, &mut physics, body, collider);
+            let x = (i % 8) as f32 * 1.2 - 4.0;
+            let y = 5.0 + (i / 8) as f32 * 1.5;
+            spawn_entity(
+                world,
+                RigidBody2D::dynamic(),
+                Collider2D::ball(0.4).with_restitution(0.7),
+                Transform::from_translation(math::Vec3::new(x, y, 0.0)),
+            );
         }
 
-        world.insert_resource(physics);
+        build_physics_world_2d(world);
     }
 }
 
@@ -88,32 +82,34 @@ impl PhysicsScene2D for StackingScene2D {
     }
 
     fn setup(&self, world: &mut World) {
-        let mut physics = PhysicsWorld2D::default();
-
         // Ground
-        let ground = RigidBodyBuilder::fixed().build();
-        let ground_col = ColliderBuilder::cuboid(20.0, 0.1).build();
-        spawn_physics_entity(world, &mut physics, ground, ground_col);
+        spawn_entity(
+            world,
+            RigidBody2D::fixed(),
+            Collider2D::cuboid(20.0, 0.1),
+            Transform::IDENTITY,
+        );
 
         // Pyramid
         let layers = 10;
-        let half = 0.5;
+        let half = 0.5f32;
         let step = half * 2.0 + 0.05;
         for layer in 0..layers {
             let count = layers - layer;
-            let offset = count as f64 * step / 2.0 - step / 2.0;
-            let y = half + layer as f64 * step + 0.1;
+            let offset = count as f32 * step / 2.0 - step / 2.0;
+            let y = half + layer as f32 * step + 0.1;
             for i in 0..count {
-                let x = i as f64 * step - offset;
-                let body = RigidBodyBuilder::dynamic()
-                    .translation(Vector::new(x, y))
-                    .build();
-                let collider = ColliderBuilder::cuboid(half, half).build();
-                spawn_physics_entity(world, &mut physics, body, collider);
+                let x = i as f32 * step - offset;
+                spawn_entity(
+                    world,
+                    RigidBody2D::dynamic(),
+                    Collider2D::cuboid(half, half),
+                    Transform::from_translation(math::Vec3::new(x, y, 0.0)),
+                );
             }
         }
 
-        world.insert_resource(physics);
+        build_physics_world_2d(world);
     }
 }
 
@@ -129,46 +125,44 @@ impl PhysicsScene2D for JointsScene2D {
     }
 
     fn setup(&self, world: &mut World) {
-        let mut physics = PhysicsWorld2D::default();
-
         let count = 12;
-        let spacing = 1.0;
-        let mut prev_handle = None;
+        let spacing = 1.0f32;
+        let mut entities = Vec::new();
 
         for i in 0..count {
-            let x = i as f64 * spacing - (count as f64 * spacing / 2.0);
-            let y = 10.0;
+            let x = i as f32 * spacing - (count as f32 * spacing / 2.0);
+            let y = 10.0f32;
             let is_anchor = i == 0 || i == count - 1;
 
-            let builder = if is_anchor {
-                RigidBodyBuilder::fixed()
+            let body = if is_anchor {
+                RigidBody2D::fixed()
             } else {
-                RigidBodyBuilder::dynamic()
+                RigidBody2D::dynamic()
             };
-            let body = builder.translation(Vector::new(x, y)).build();
-            let body_handle = physics.add_body(body);
-            physics.add_collider(ColliderBuilder::ball(0.3).build(), body_handle);
 
-            let pos = physics.bodies[body_handle].position();
-            let t = pos.translation;
-            let entity = world.spawn();
-            let _ = world.insert(entity, RigidBody2DHandle(body_handle));
-            let _ = world.insert(
-                entity,
-                Transform::from_translation(math::Vec3::new(t.x as f32, t.y as f32, 0.0)),
+            let entity = spawn_entity(
+                world,
+                body,
+                Collider2D::ball(0.3),
+                Transform::from_translation(math::Vec3::new(x, y, 0.0)),
             );
-            let _ = world.insert(entity, ecs_std::GlobalTransform::IDENTITY);
-
-            if let Some(prev) = prev_handle {
-                let joint = RevoluteJointBuilder::new()
-                    .local_anchor1(Vector::new(spacing / 2.0, 0.0))
-                    .local_anchor2(Vector::new(-spacing / 2.0, 0.0));
-                physics.add_impulse_joint(prev, body_handle, joint);
-            }
-            prev_handle = Some(body_handle);
+            entities.push(entity);
         }
 
-        world.insert_resource(physics);
+        // Build physics from descriptors
+        build_physics_world_2d(world);
+
+        // Connect with revolute joints
+        let half_spacing = spacing as f64 / 2.0;
+        for i in 0..count - 1 {
+            let h1 = world.get::<RigidBody2DHandle>(entities[i]).unwrap().0;
+            let h2 = world.get::<RigidBody2DHandle>(entities[i + 1]).unwrap().0;
+            let joint = RevoluteJointBuilder::new()
+                .local_anchor1(Vector::new(half_spacing, 0.0))
+                .local_anchor2(Vector::new(-half_spacing, 0.0));
+            let mut physics = world.resource_mut::<PhysicsWorld2D>();
+            physics.add_impulse_joint(h1, h2, joint);
+        }
     }
 }
 
@@ -184,9 +178,27 @@ impl PhysicsScene2D for TrimeshScene2D {
     }
 
     fn setup(&self, world: &mut World) {
-        let mut physics = PhysicsWorld2D::default();
+        // Spawn falling shapes with descriptors
+        for i in 0..25 {
+            let x = (i % 5) as f32 * 2.0 - 4.0;
+            let y = 8.0 + (i / 5) as f32 * 1.5;
+            let collider = if i % 2 == 0 {
+                Collider2D::ball(0.4).with_restitution(0.5)
+            } else {
+                Collider2D::cuboid(0.35, 0.35).with_restitution(0.3)
+            };
+            spawn_entity(
+                world,
+                RigidBody2D::dynamic(),
+                collider,
+                Transform::from_translation(math::Vec3::new(x, y, 0.0)),
+            );
+        }
 
-        // Create polyline ground
+        // Build physics from descriptors
+        build_physics_world_2d(world);
+
+        // Create polyline ground directly via rapier
         let vertices: Vec<_> = (0..40)
             .map(|i| {
                 let x = i as f64 - 20.0;
@@ -196,32 +208,18 @@ impl PhysicsScene2D for TrimeshScene2D {
             .collect();
         let indices: Vec<_> = (0..vertices.len() as u32 - 1).map(|i| [i, i + 1]).collect();
 
-        let ground = RigidBodyBuilder::fixed().build();
-        let ground_handle = physics.add_body(ground);
-        let polyline = ColliderBuilder::polyline(vertices, Some(indices)).build();
-        physics.add_collider(polyline, ground_handle);
+        let ground_handle = {
+            let mut physics = world.resource_mut::<PhysicsWorld2D>();
+            let ground_handle = physics.add_body(RigidBodyBuilder::fixed().build());
+            let polyline = ColliderBuilder::polyline(vertices, Some(indices)).build();
+            physics.add_collider(polyline, ground_handle);
+            ground_handle
+        };
 
-        let entity = world.spawn();
-        let _ = world.insert(entity, RigidBody2DHandle(ground_handle));
-        let _ = world.insert(entity, Transform::IDENTITY);
-        let _ = world.insert(entity, ecs_std::GlobalTransform::IDENTITY);
-
-        // Falling shapes
-        for i in 0..25 {
-            let x = (i % 5) as f64 * 2.0 - 4.0;
-            let y = 8.0 + (i / 5) as f64 * 1.5;
-            let body = RigidBodyBuilder::dynamic()
-                .translation(Vector::new(x, y))
-                .build();
-            let collider = if i % 2 == 0 {
-                ColliderBuilder::ball(0.4).restitution(0.5).build()
-            } else {
-                ColliderBuilder::cuboid(0.35, 0.35).restitution(0.3).build()
-            };
-            spawn_physics_entity(world, &mut physics, body, collider);
-        }
-
-        world.insert_resource(physics);
+        let ground_entity = world.spawn();
+        let _ = world.insert(ground_entity, RigidBody2DHandle(ground_handle));
+        let _ = world.insert(ground_entity, Transform::IDENTITY);
+        let _ = world.insert(ground_entity, ecs_std::GlobalTransform::IDENTITY);
     }
 }
 
@@ -237,30 +235,37 @@ impl PhysicsScene2D for CharacterScene2D {
     }
 
     fn setup(&self, world: &mut World) {
-        let mut physics = PhysicsWorld2D::default();
-
         // Ground
-        let ground = RigidBodyBuilder::fixed().build();
-        let ground_col = ColliderBuilder::cuboid(20.0, 0.1).build();
-        spawn_physics_entity(world, &mut physics, ground, ground_col);
+        spawn_entity(
+            world,
+            RigidBody2D::fixed(),
+            Collider2D::cuboid(20.0, 0.1),
+            Transform::IDENTITY,
+        );
 
         // Platforms
         for i in 0..5 {
-            let platform = RigidBodyBuilder::fixed()
-                .translation(Vector::new(-4.0 + i as f64 * 2.5, 1.0 + i as f64 * 1.5))
-                .build();
-            let col = ColliderBuilder::cuboid(1.0, 0.1).build();
-            spawn_physics_entity(world, &mut physics, platform, col);
+            spawn_entity(
+                world,
+                RigidBody2D::fixed(),
+                Collider2D::cuboid(1.0, 0.1),
+                Transform::from_translation(math::Vec3::new(
+                    -4.0 + i as f32 * 2.5,
+                    1.0 + i as f32 * 1.5,
+                    0.0,
+                )),
+            );
         }
 
         // Character capsule
-        let character = RigidBodyBuilder::kinematic_position_based()
-            .translation(Vector::new(0.0, 3.0))
-            .build();
-        let char_col = ColliderBuilder::capsule_y(0.4, 0.25).build();
-        spawn_physics_entity(world, &mut physics, character, char_col);
+        spawn_entity(
+            world,
+            RigidBody2D::kinematic_position(),
+            Collider2D::capsule_y(0.4, 0.25),
+            Transform::from_translation(math::Vec3::new(0.0, 3.0, 0.0)),
+        );
 
-        world.insert_resource(physics);
+        build_physics_world_2d(world);
     }
 }
 
@@ -276,79 +281,85 @@ impl PhysicsScene2D for RagdollScene2D {
     }
 
     fn setup(&self, world: &mut World) {
-        let mut physics = PhysicsWorld2D::default();
-
         // Ground
-        let ground = RigidBodyBuilder::fixed().build();
-        let ground_col = ColliderBuilder::cuboid(20.0, 0.1).build();
-        spawn_physics_entity(world, &mut physics, ground, ground_col);
+        spawn_entity(
+            world,
+            RigidBody2D::fixed(),
+            Collider2D::cuboid(20.0, 0.1),
+            Transform::IDENTITY,
+        );
 
-        // Torso
-        let torso = RigidBodyBuilder::dynamic()
-            .translation(Vector::new(0.0, 6.0))
-            .build();
-        let torso_handle = physics.add_body(torso);
-        physics.add_collider(ColliderBuilder::cuboid(0.3, 0.5).build(), torso_handle);
+        // Ragdoll parts
+        let torso = spawn_entity(
+            world,
+            RigidBody2D::dynamic(),
+            Collider2D::cuboid(0.3, 0.5),
+            Transform::from_translation(math::Vec3::new(0.0, 6.0, 0.0)),
+        );
 
-        // Head
-        let head = RigidBodyBuilder::dynamic()
-            .translation(Vector::new(0.0, 7.0))
-            .build();
-        let head_handle = physics.add_body(head);
-        physics.add_collider(ColliderBuilder::ball(0.25).build(), head_handle);
+        let head = spawn_entity(
+            world,
+            RigidBody2D::dynamic(),
+            Collider2D::ball(0.25),
+            Transform::from_translation(math::Vec3::new(0.0, 7.0, 0.0)),
+        );
 
-        let neck = RevoluteJointBuilder::new()
-            .local_anchor1(Vector::new(0.0, 0.5))
-            .local_anchor2(Vector::new(0.0, -0.25));
-        physics.add_impulse_joint(torso_handle, head_handle, neck);
+        let mut arm_entities = Vec::new();
+        for side in [-1.0f32, 1.0] {
+            let arm = spawn_entity(
+                world,
+                RigidBody2D::dynamic(),
+                Collider2D::capsule_y(0.3, 0.08),
+                Transform::from_translation(math::Vec3::new(side * 0.7, 5.8, 0.0)),
+            );
+            arm_entities.push((side, arm));
+        }
 
-        // Arms
-        for side in [-1.0, 1.0] {
-            let arm = RigidBodyBuilder::dynamic()
-                .translation(Vector::new(side * 0.7, 5.8))
-                .build();
-            let arm_handle = physics.add_body(arm);
-            physics.add_collider(ColliderBuilder::capsule_y(0.3, 0.08).build(), arm_handle);
+        let mut leg_entities = Vec::new();
+        for side in [-1.0f32, 1.0] {
+            let leg = spawn_entity(
+                world,
+                RigidBody2D::dynamic(),
+                Collider2D::capsule_y(0.35, 0.1),
+                Transform::from_translation(math::Vec3::new(side * 0.2, 5.0, 0.0)),
+            );
+            leg_entities.push((side, leg));
+        }
 
+        // Build physics
+        build_physics_world_2d(world);
+
+        // Create joints
+        let torso_h = world.get::<RigidBody2DHandle>(torso).unwrap().0;
+        let head_h = world.get::<RigidBody2DHandle>(head).unwrap().0;
+
+        {
+            let neck = RevoluteJointBuilder::new()
+                .local_anchor1(Vector::new(0.0, 0.5))
+                .local_anchor2(Vector::new(0.0, -0.25));
+            let mut physics = world.resource_mut::<PhysicsWorld2D>();
+            physics.add_impulse_joint(torso_h, head_h, neck);
+        }
+
+        for (side, arm) in &arm_entities {
+            let side = *side as f64;
+            let arm_h = world.get::<RigidBody2DHandle>(*arm).unwrap().0;
             let shoulder = RevoluteJointBuilder::new()
                 .local_anchor1(Vector::new(side * 0.35, 0.4))
                 .local_anchor2(Vector::new(0.0, 0.3));
-            physics.add_impulse_joint(torso_handle, arm_handle, shoulder);
+            let mut physics = world.resource_mut::<PhysicsWorld2D>();
+            physics.add_impulse_joint(torso_h, arm_h, shoulder);
         }
 
-        // Legs
-        for side in [-1.0, 1.0] {
-            let leg = RigidBodyBuilder::dynamic()
-                .translation(Vector::new(side * 0.2, 5.0))
-                .build();
-            let leg_handle = physics.add_body(leg);
-            physics.add_collider(ColliderBuilder::capsule_y(0.35, 0.1).build(), leg_handle);
-
+        for (side, leg) in &leg_entities {
+            let side = *side as f64;
+            let leg_h = world.get::<RigidBody2DHandle>(*leg).unwrap().0;
             let hip = RevoluteJointBuilder::new()
                 .local_anchor1(Vector::new(side * 0.2, -0.5))
                 .local_anchor2(Vector::new(0.0, 0.35));
-            physics.add_impulse_joint(torso_handle, leg_handle, hip);
+            let mut physics = world.resource_mut::<PhysicsWorld2D>();
+            physics.add_impulse_joint(torso_h, leg_h, hip);
         }
-
-        // Spawn ECS entities for all bodies
-        for (handle, body) in physics.bodies.iter() {
-            let pos = body.position();
-            let t = pos.translation;
-            let angle = pos.rotation.angle() as f32;
-            let entity = world.spawn();
-            let _ = world.insert(entity, RigidBody2DHandle(handle));
-            let _ = world.insert(
-                entity,
-                Transform::new(
-                    math::Vec3::new(t.x as f32, t.y as f32, 0.0),
-                    math::quat_from_rotation_z(angle),
-                    math::Vec3::new(1.0, 1.0, 1.0),
-                ),
-            );
-            let _ = world.insert(entity, ecs_std::GlobalTransform::IDENTITY);
-        }
-
-        world.insert_resource(physics);
     }
 }
 
@@ -364,62 +375,51 @@ impl PhysicsScene2D for VehicleScene2D {
     }
 
     fn setup(&self, world: &mut World) {
-        let mut physics = PhysicsWorld2D::default();
-
         // Ground
-        let ground = RigidBodyBuilder::fixed().build();
-        let ground_col = ColliderBuilder::cuboid(40.0, 0.1).friction(1.0).build();
-        spawn_physics_entity(world, &mut physics, ground, ground_col);
+        spawn_entity(
+            world,
+            RigidBody2D::fixed(),
+            Collider2D::cuboid(40.0, 0.1).with_friction(1.0),
+            Transform::IDENTITY,
+        );
 
         // Chassis
-        let chassis = RigidBodyBuilder::dynamic()
-            .translation(Vector::new(0.0, 2.0))
-            .build();
-        let chassis_handle = physics.add_body(chassis);
-        physics.add_collider(
-            ColliderBuilder::cuboid(1.2, 0.3).density(2.0).build(),
-            chassis_handle,
+        let chassis_pos = math::Vec3::new(0.0, 2.0, 0.0);
+        let chassis = spawn_entity(
+            world,
+            RigidBody2D::dynamic(),
+            Collider2D::cuboid(1.2, 0.3).with_density(2.0),
+            Transform::from_translation(chassis_pos),
         );
 
         // Wheels
-        let wheel_offsets = [Vector::new(-0.8, -0.4), Vector::new(0.8, -0.4)];
+        let wheel_offsets = [math::Vec2::new(-0.8, -0.4), math::Vec2::new(0.8, -0.4)];
+        let mut wheel_entities = Vec::new();
         for offset in &wheel_offsets {
-            let wheel_pos = physics.bodies[chassis_handle].position().translation + *offset;
-            let wheel = RigidBodyBuilder::dynamic().translation(wheel_pos).build();
-            let wheel_handle = physics.add_body(wheel);
-            physics.add_collider(
-                ColliderBuilder::ball(0.3)
-                    .friction(1.5)
-                    .density(0.5)
-                    .build(),
-                wheel_handle,
+            let wheel_pos =
+                math::Vec3::new(chassis_pos.x + offset.x, chassis_pos.y + offset.y, 0.0);
+            let wheel = spawn_entity(
+                world,
+                RigidBody2D::dynamic(),
+                Collider2D::ball(0.3).with_friction(1.5).with_density(0.5),
+                Transform::from_translation(wheel_pos),
             );
+            wheel_entities.push((*offset, wheel));
+        }
 
+        // Build physics
+        build_physics_world_2d(world);
+
+        // Create wheel joints
+        let chassis_h = world.get::<RigidBody2DHandle>(chassis).unwrap().0;
+        for (offset, wheel_entity) in &wheel_entities {
+            let wheel_h = world.get::<RigidBody2DHandle>(*wheel_entity).unwrap().0;
             let axle = RevoluteJointBuilder::new()
-                .local_anchor1(*offset)
+                .local_anchor1(Vector::new(offset.x as f64, offset.y as f64))
                 .local_anchor2(Vector::ZERO);
-            physics.add_impulse_joint(chassis_handle, wheel_handle, axle);
+            let mut physics = world.resource_mut::<PhysicsWorld2D>();
+            physics.add_impulse_joint(chassis_h, wheel_h, axle);
         }
-
-        // Spawn ECS entities
-        for (handle, body) in physics.bodies.iter() {
-            let pos = body.position();
-            let t = pos.translation;
-            let angle = pos.rotation.angle() as f32;
-            let entity = world.spawn();
-            let _ = world.insert(entity, RigidBody2DHandle(handle));
-            let _ = world.insert(
-                entity,
-                Transform::new(
-                    math::Vec3::new(t.x as f32, t.y as f32, 0.0),
-                    math::quat_from_rotation_z(angle),
-                    math::Vec3::new(1.0, 1.0, 1.0),
-                ),
-            );
-            let _ = world.insert(entity, ecs_std::GlobalTransform::IDENTITY);
-        }
-
-        world.insert_resource(physics);
     }
 }
 

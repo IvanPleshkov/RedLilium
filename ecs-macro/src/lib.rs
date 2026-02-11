@@ -2,12 +2,12 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Data, DeriveInput, Fields, Type, parse_macro_input};
 
-/// Derive the `Component` trait for a Pod struct, providing runtime reflection.
+/// Derive the `Component` trait, providing runtime reflection.
 ///
-/// The struct must also derive `bytemuck::Pod`, `bytemuck::Zeroable`, `Copy`,
-/// `Clone`, and have `#[repr(C)]`.
+/// Works with both Pod and non-Pod structs. Pod types get full field-level
+/// reflection; non-Pod types get [`FieldKind::Opaque`] for unrecognized field types.
 ///
-/// # Named structs
+/// # Pod component (full reflection + byte serialization)
 ///
 /// ```ignore
 /// #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Component)]
@@ -19,12 +19,14 @@ use syn::{Data, DeriveInput, Fields, Type, parse_macro_input};
 /// }
 /// ```
 ///
-/// # Tuple structs
+/// # Non-Pod component (reflection with opaque fields)
 ///
 /// ```ignore
-/// #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Component)]
-/// #[repr(C)]
-/// struct GlobalTransform(pub Mat4);
+/// #[derive(Component)]
+/// struct MeshRenderer {
+///     pub visible: bool,
+///     pub mesh: Arc<CpuMesh>,  // reflected as Opaque
+/// }
 /// ```
 #[proc_macro_derive(Component)]
 pub fn derive_component(input: TokenStream) -> TokenStream {
@@ -161,26 +163,28 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
 }
 
 /// Infer `FieldKind` from a type by matching the last path segment.
+///
+/// Recognized types get specific `FieldKind` variants for full inspector support.
+/// Unrecognized types get `FieldKind::Opaque` (displayed but not editable).
 fn infer_field_kind(ty: &Type) -> proc_macro2::TokenStream {
     let type_name = extract_last_segment(ty);
     match type_name.as_str() {
         "f32" => quote! { redlilium_ecs::FieldKind::F32 },
+        "f64" => quote! { redlilium_ecs::FieldKind::F64 },
         "u8" => quote! { redlilium_ecs::FieldKind::U8 },
         "u32" => quote! { redlilium_ecs::FieldKind::U32 },
+        "u64" => quote! { redlilium_ecs::FieldKind::U64 },
+        "usize" => quote! { redlilium_ecs::FieldKind::Usize },
         "i32" => quote! { redlilium_ecs::FieldKind::I32 },
+        "bool" => quote! { redlilium_ecs::FieldKind::Bool },
+        "String" => quote! { redlilium_ecs::FieldKind::String },
         "Vec2" | "Vector2" => quote! { redlilium_ecs::FieldKind::Vec2 },
         "Vec3" | "Vec3A" | "Vector3" => quote! { redlilium_ecs::FieldKind::Vec3 },
         "Vec4" | "Vector4" => quote! { redlilium_ecs::FieldKind::Vec4 },
         "Quat" | "Quaternion" => quote! { redlilium_ecs::FieldKind::Quat },
         "Mat4" | "Matrix4" => quote! { redlilium_ecs::FieldKind::Mat4 },
         "StringId" => quote! { redlilium_ecs::FieldKind::StringId },
-        _ => {
-            let msg = format!(
-                "Component derive: unknown field type `{}`. Expected one of: f32, u8, u32, i32, Vec2, Vec3, Vec4, Quat, Mat4, StringId.",
-                type_name
-            );
-            quote! { compile_error!(#msg) }
-        }
+        _ => quote! { redlilium_ecs::FieldKind::Opaque },
     }
 }
 

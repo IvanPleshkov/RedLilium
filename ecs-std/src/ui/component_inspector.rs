@@ -1,6 +1,6 @@
 //! Component inspector panel for a selected entity.
 
-use redlilium_ecs::{StringTable, World};
+use redlilium_ecs::World;
 
 use super::InspectorState;
 use super::registry::ComponentRegistry;
@@ -14,7 +14,6 @@ use super::registry::ComponentRegistry;
 pub fn show_component_inspector(
     ctx: &egui::Context,
     world: &mut World,
-    string_table: Option<&StringTable>,
     state: &mut InspectorState,
     registry: &ComponentRegistry,
 ) {
@@ -70,8 +69,7 @@ pub fn show_component_inspector(
                     }
 
                     for comp_name in &present {
-                        let remove =
-                            registry.inspect_by_name(world, selected, comp_name, ui, string_table);
+                        let remove = registry.inspect_by_name(world, selected, comp_name, ui);
                         if remove {
                             to_remove.push(comp_name);
                         }

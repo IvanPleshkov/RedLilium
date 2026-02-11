@@ -10,7 +10,7 @@
 //! - [`Transform`] / [`GlobalTransform`] — Entity positioning (local TRS + world matrix)
 //! - [`Camera`] — Camera with computed view and projection matrices
 //! - [`Visibility`] — Render visibility toggle
-//! - [`Name`] — Debug entity name (via [`StringId`](redlilium_ecs::StringId))
+//! - [`Name`] — Debug entity name (owned String)
 //! - [`DirectionalLight`] / [`PointLight`] / [`SpotLight`] — Light types
 //! - [`Parent`] / [`Children`] — Entity hierarchy
 //!
@@ -61,4 +61,18 @@ pub fn register_std_components(world: &mut redlilium_ecs::World) {
     world.register_component::<SpotLight>();
     world.register_component::<Parent>();
     world.register_component::<Children>();
+
+    // Physics descriptor + handle components (feature-gated)
+    #[cfg(any(feature = "physics-3d", feature = "physics-3d-f32"))]
+    {
+        world.register_component::<physics::components3d::RigidBody3D>();
+        world.register_component::<physics::components3d::Collider3D>();
+        world.register_component::<physics::physics3d::RigidBody3DHandle>();
+    }
+    #[cfg(any(feature = "physics-2d", feature = "physics-2d-f32"))]
+    {
+        world.register_component::<physics::components2d::RigidBody2D>();
+        world.register_component::<physics::components2d::Collider2D>();
+        world.register_component::<physics::physics2d::RigidBody2DHandle>();
+    }
 }

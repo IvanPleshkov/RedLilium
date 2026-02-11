@@ -17,7 +17,7 @@ struct ComponentEntry {
     /// Insert a default instance of this component on an entity (None if no Default).
     insert_default: Option<fn(&mut World, Entity)>,
     /// Show this component's fields in egui. Returns true if a remove was requested.
-    inspect: fn(&mut World, Entity, &mut egui::Ui, Option<&redlilium_ecs::StringTable>) -> bool,
+    inspect: fn(&mut World, Entity, &mut egui::Ui) -> bool,
 }
 
 /// Registry of inspectable component types.
@@ -55,9 +55,7 @@ impl ComponentRegistry {
             insert_default: Some(|world: &mut World, entity: Entity| {
                 let _ = world.insert(entity, T::default());
             }),
-            inspect: |world, entity, ui, string_table| {
-                inspect_component::<T>(world, entity, ui, string_table)
-            },
+            inspect: |world, entity, ui| inspect_component::<T>(world, entity, ui),
         };
         self.type_to_name.insert(TypeId::of::<T>(), name);
         self.entries.insert(name, entry);
@@ -74,9 +72,7 @@ impl ComponentRegistry {
             has: |world, entity| world.get::<T>(entity).is_some(),
             remove: |world, entity| world.remove::<T>(entity).is_some(),
             insert_default: None,
-            inspect: |world, entity, ui, string_table| {
-                inspect_component::<T>(world, entity, ui, string_table)
-            },
+            inspect: |world, entity, ui| inspect_component::<T>(world, entity, ui),
         };
         self.type_to_name.insert(TypeId::of::<T>(), name);
         self.entries.insert(name, entry);
@@ -135,10 +131,9 @@ impl ComponentRegistry {
         entity: Entity,
         name: &str,
         ui: &mut egui::Ui,
-        string_table: Option<&redlilium_ecs::StringTable>,
     ) -> bool {
         if let Some(e) = self.entries.get(name) {
-            (e.inspect)(world, entity, ui, string_table)
+            (e.inspect)(world, entity, ui)
         } else {
             false
         }
@@ -152,12 +147,7 @@ impl Default for ComponentRegistry {
 }
 
 /// Inspect a single component on an entity. Returns true if removal was requested.
-fn inspect_component<T>(
-    world: &mut World,
-    entity: Entity,
-    ui: &mut egui::Ui,
-    string_table: Option<&redlilium_ecs::StringTable>,
-) -> bool
+fn inspect_component<T>(world: &mut World, entity: Entity, ui: &mut egui::Ui) -> bool
 where
     T: redlilium_ecs::Component + 'static,
 {
@@ -179,7 +169,7 @@ where
             let Some(comp) = world.get_mut::<T>(entity) else {
                 return;
             };
-            show_field(comp, info, ui, string_table);
+            show_field(comp, info, ui);
         }
     });
 
@@ -199,7 +189,6 @@ fn show_field<T: redlilium_ecs::Component>(
     comp: &mut T,
     info: &redlilium_ecs::FieldInfo,
     ui: &mut egui::Ui,
-    string_table: Option<&redlilium_ecs::StringTable>,
 ) {
     use redlilium_ecs::FieldKind;
 
@@ -284,12 +273,85 @@ fn show_field<T: redlilium_ecs::Component>(
                 .field(info.name)
                 .and_then(|f| f.downcast_ref::<redlilium_ecs::StringId>())
             {
-                let resolved = string_table.and_then(|t| t.try_get(*val)).unwrap_or("?");
                 ui.horizontal(|ui| {
                     ui.label(info.name);
-                    ui.label(resolved);
+                    ui.label(format!("StringId({})", val.0));
                 });
             }
+        }
+        FieldKind::Bool => {
+            if let Some(val) = comp
+                .field_mut(info.name)
+                .and_then(|f| f.downcast_mut::<bool>())
+            {
+                ui.horizontal(|ui| {
+                    ui.label(info.name);
+                    ui.checkbox(val, "");
+                });
+            }
+        }
+        FieldKind::F64 => {
+            if let Some(val) = comp
+                .field_mut(info.name)
+                .and_then(|f| f.downcast_mut::<f64>())
+            {
+                ui.horizontal(|ui| {
+                    ui.label(info.name);
+                    ui.add(egui::DragValue::new(val).speed(0.01));
+                });
+            }
+        }
+        FieldKind::U64 => {
+            if let Some(val) = comp
+                .field_mut(info.name)
+                .and_then(|f| f.downcast_mut::<u64>())
+            {
+                // Display as read-only for values > i64::MAX, editable otherwise
+                let mut v = *val as i64;
+                ui.horizontal(|ui| {
+                    ui.label(info.name);
+                    if ui
+                        .add(egui::DragValue::new(&mut v).range(0..=i64::MAX))
+                        .changed()
+                    {
+                        *val = v as u64;
+                    }
+                });
+            }
+        }
+        FieldKind::Usize => {
+            if let Some(val) = comp
+                .field_mut(info.name)
+                .and_then(|f| f.downcast_mut::<usize>())
+            {
+                let mut v = *val as i64;
+                ui.horizontal(|ui| {
+                    ui.label(info.name);
+                    if ui
+                        .add(egui::DragValue::new(&mut v).range(0..=i64::MAX))
+                        .changed()
+                    {
+                        *val = v as usize;
+                    }
+                });
+            }
+        }
+        FieldKind::String => {
+            if let Some(val) = comp
+                .field_mut(info.name)
+                .and_then(|f| f.downcast_mut::<String>())
+            {
+                ui.horizontal(|ui| {
+                    ui.label(info.name);
+                    ui.text_edit_singleline(val);
+                });
+            }
+        }
+        FieldKind::Opaque => {
+            ui.horizontal(|ui| {
+                ui.label(info.name);
+                ui.weak(format!("({})", info.type_name));
+            });
         }
     }
 }

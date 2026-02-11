@@ -3,12 +3,14 @@
 //! The [`Component`] trait provides field-level introspection, enabling editors
 //! and WASM plugins to enumerate, read, and write component fields at runtime.
 //!
-//! All `Component` types must be [`bytemuck::Pod`] (plain old data), ensuring
-//! they can be trivially serialized to bytes for cross-boundary communication.
+//! Components can be any `Send + Sync + 'static` type. Types that also implement
+//! [`bytemuck::Pod`] additionally support byte-level serialization, GPU upload,
+//! and snapshot/rollback.
 //!
 //! Use `#[derive(Component)]` from [`ecs_macro`] to auto-implement the trait.
 
 use std::any::Any;
+use std::mem::size_of;
 
 /// Portable type descriptor for a component field.
 ///
@@ -28,10 +30,17 @@ pub enum FieldKind {
     Quat = 7,
     Mat4 = 8,
     StringId = 9,
+    /// Opaque type — inspector displays type name but cannot edit the value.
+    Opaque = 10,
+    Bool = 11,
+    F64 = 12,
+    U64 = 13,
+    Usize = 14,
+    String = 15,
 }
 
 impl FieldKind {
-    /// Fixed byte size of a value of this kind.
+    /// Fixed byte size of a value of this kind, or 0 for variable-size types.
     pub const fn byte_size(&self) -> usize {
         match self {
             Self::F32 => 4,
@@ -44,6 +53,11 @@ impl FieldKind {
             Self::Quat => 16,
             Self::Mat4 => 64,
             Self::StringId => 4,
+            Self::Bool => 1,
+            Self::F64 => 8,
+            Self::U64 => 8,
+            Self::Usize => size_of::<usize>(),
+            Self::String | Self::Opaque => 0,
         }
     }
 }
@@ -59,16 +73,14 @@ pub struct FieldInfo {
     pub kind: FieldKind,
 }
 
-/// Trait for reflected Pod ECS components.
+/// Trait for reflected ECS components.
 ///
-/// All implementors must be [`bytemuck::Pod`], enabling whole-component
-/// byte serialization via `bytemuck::bytes_of()` / `from_bytes()`.
+/// Components can be any `Send + Sync + 'static` type. Types that also derive
+/// [`bytemuck::Pod`] additionally support byte-level serialization.
 ///
-/// # Derive
+/// # Pod component (full reflection + byte serialization)
 ///
 /// ```ignore
-/// use redlilium_ecs::Component;
-///
 /// #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Component)]
 /// #[repr(C)]
 /// struct Health {
@@ -76,7 +88,17 @@ pub struct FieldInfo {
 ///     max: f32,
 /// }
 /// ```
-pub trait Component: bytemuck::Pod + Send + Sync {
+///
+/// # Non-Pod component (reflection with opaque fields for unknown types)
+///
+/// ```ignore
+/// #[derive(Component)]
+/// struct MeshRenderer {
+///     pub visible: bool,
+///     pub mesh: Arc<CpuMesh>,  // inspected as Opaque
+/// }
+/// ```
+pub trait Component: Send + Sync + 'static {
     /// Returns the struct name (e.g. `"Transform"`).
     fn component_name(&self) -> &'static str;
 
@@ -210,5 +232,89 @@ mod tests {
         assert_eq!(FieldKind::Quat.byte_size(), 16);
         assert_eq!(FieldKind::Mat4.byte_size(), 64);
         assert_eq!(FieldKind::StringId.byte_size(), 4);
+        assert_eq!(FieldKind::Bool.byte_size(), 1);
+        assert_eq!(FieldKind::F64.byte_size(), 8);
+        assert_eq!(FieldKind::U64.byte_size(), 8);
+        assert_eq!(FieldKind::String.byte_size(), 0);
+        assert_eq!(FieldKind::Opaque.byte_size(), 0);
+    }
+
+    // --- Non-Pod component test ---
+
+    use std::sync::Arc;
+
+    struct RichComponent {
+        label: String,
+        data: Arc<Vec<u8>>,
+    }
+
+    impl Component for RichComponent {
+        fn component_name(&self) -> &'static str {
+            "RichComponent"
+        }
+
+        fn field_infos(&self) -> &'static [FieldInfo] {
+            static INFOS: std::sync::LazyLock<Vec<FieldInfo>> = std::sync::LazyLock::new(|| {
+                vec![
+                    FieldInfo {
+                        name: "label",
+                        type_name: std::any::type_name::<String>(),
+                        kind: FieldKind::String,
+                    },
+                    FieldInfo {
+                        name: "data",
+                        type_name: "Arc<Vec<u8>>",
+                        kind: FieldKind::Opaque,
+                    },
+                ]
+            });
+            &INFOS
+        }
+
+        fn field(&self, name: &str) -> Option<&dyn Any> {
+            match name {
+                "label" => Some(&self.label),
+                "data" => Some(&self.data),
+                _ => None,
+            }
+        }
+
+        fn field_mut(&mut self, name: &str) -> Option<&mut dyn Any> {
+            match name {
+                "label" => Some(&mut self.label),
+                "data" => Some(&mut self.data),
+                _ => None,
+            }
+        }
+    }
+
+    #[test]
+    fn non_pod_component_reflection() {
+        let c = RichComponent {
+            label: "hello".to_string(),
+            data: Arc::new(vec![1, 2, 3]),
+        };
+        assert_eq!(c.component_name(), "RichComponent");
+
+        let infos = c.field_infos();
+        assert_eq!(infos.len(), 2);
+        assert_eq!(infos[0].kind, FieldKind::String);
+        assert_eq!(infos[1].kind, FieldKind::Opaque);
+
+        let label = c.field("label").unwrap().downcast_ref::<String>().unwrap();
+        assert_eq!(label, "hello");
+    }
+
+    #[test]
+    fn non_pod_component_field_write() {
+        let mut c = RichComponent {
+            label: "old".to_string(),
+            data: Arc::new(vec![]),
+        };
+        *c.field_mut("label")
+            .unwrap()
+            .downcast_mut::<String>()
+            .unwrap() = "new".to_string();
+        assert_eq!(c.label, "new");
     }
 }

@@ -13,7 +13,7 @@ use redlilium_graphics::{
 use winit::event::KeyEvent;
 use winit::keyboard::{KeyCode, PhysicalKey};
 
-use redlilium_ecs::{EcsRunner, StringTable, SystemsContainer, World};
+use redlilium_ecs::{EcsRunner, SystemsContainer, World};
 
 use crate::renderer::PhysicsRenderer;
 use crate::scenes_2d::{self, PhysicsScene2D};
@@ -71,8 +71,6 @@ pub struct PhysicsDemoApp {
     world: Option<World>,
     systems: Option<SystemsContainer>,
     runner: Option<EcsRunner>,
-    string_table: StringTable,
-
     // Rendering
     renderer: Option<PhysicsRenderer>,
     camera: OrbitCamera,
@@ -114,6 +112,10 @@ impl PhysicsDemoApp {
         component_registry.register::<ecs_std::DirectionalLight>("DirectionalLight");
         component_registry.register::<ecs_std::PointLight>("PointLight");
         component_registry.register::<ecs_std::SpotLight>("SpotLight");
+        component_registry.register::<ecs_std::physics::components3d::RigidBody3D>("RigidBody3D");
+        component_registry.register::<ecs_std::physics::components3d::Collider3D>("Collider3D");
+        component_registry.register::<ecs_std::physics::components2d::RigidBody2D>("RigidBody2D");
+        component_registry.register::<ecs_std::physics::components2d::Collider2D>("Collider2D");
 
         Self {
             scenes_3d,
@@ -121,7 +123,6 @@ impl PhysicsDemoApp {
             world: None,
             systems: None,
             runner: None,
-            string_table: StringTable::new(),
             renderer: None,
             camera: OrbitCamera::new(),
             egui_controller: None,
@@ -144,10 +145,6 @@ impl PhysicsDemoApp {
 
         let mut world = World::new();
         ecs_std::register_std_components(&mut world);
-
-        // Register physics handle components
-        world.register_component::<ecs_std::physics::physics3d::RigidBody3DHandle>();
-        world.register_component::<ecs_std::physics::physics2d::RigidBody2DHandle>();
 
         // Build systems container for the appropriate dimension
         let mut systems = SystemsContainer::new();
@@ -356,18 +353,12 @@ impl AppHandler for PhysicsDemoApp {
             if show_inspector {
                 let egui_ctx = egui.context().clone();
                 if let Some(world) = &self.world {
-                    ecs_std::ui::show_world_inspector(
-                        &egui_ctx,
-                        world,
-                        Some(&self.string_table),
-                        &mut self.inspector_state,
-                    );
+                    ecs_std::ui::show_world_inspector(&egui_ctx, world, &mut self.inspector_state);
                 }
                 if let Some(world) = &mut self.world {
                     ecs_std::ui::show_component_inspector(
                         &egui_ctx,
                         world,
-                        Some(&self.string_table),
                         &mut self.inspector_state,
                         &self.component_registry,
                     );

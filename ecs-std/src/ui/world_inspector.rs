@@ -1,6 +1,6 @@
 //! Entity hierarchy tree view.
 
-use redlilium_ecs::{Entity, StringTable, World};
+use redlilium_ecs::{Entity, World};
 
 use crate::components::{Children, Name, Parent};
 
@@ -12,12 +12,7 @@ use super::InspectorState;
 /// Children appear nested under their parent, expandable via a toggle.
 ///
 /// Entities with a [`Name`] component display their name; others show `Entity(index:gen)`.
-pub fn show_world_inspector(
-    ctx: &egui::Context,
-    world: &World,
-    string_table: Option<&StringTable>,
-    state: &mut InspectorState,
-) {
+pub fn show_world_inspector(ctx: &egui::Context, world: &World, state: &mut InspectorState) {
     if !state.world_inspector_open {
         return;
     }
@@ -47,7 +42,7 @@ pub fn show_world_inspector(
                     let roots = collect_roots(world);
 
                     for entity in &roots {
-                        show_entity_node(ui, world, string_table, *entity, state);
+                        show_entity_node(ui, world, *entity, state);
                     }
                 });
         });
@@ -66,21 +61,15 @@ fn collect_roots(world: &World) -> Vec<Entity> {
 }
 
 /// Render a single entity node in the tree (recursive for children).
-fn show_entity_node(
-    ui: &mut egui::Ui,
-    world: &World,
-    string_table: Option<&StringTable>,
-    entity: Entity,
-    state: &mut InspectorState,
-) {
-    let label = entity_label(world, string_table, entity);
+fn show_entity_node(ui: &mut egui::Ui, world: &World, entity: Entity, state: &mut InspectorState) {
+    let label = entity_label(world, entity);
 
     // Apply filter
     if !state.filter.is_empty() && !label.to_lowercase().contains(&state.filter.to_lowercase()) {
         // If this entity doesn't match, still check children
         if let Some(children) = world.get::<Children>(entity) {
             for &child in children.0.iter() {
-                show_entity_node(ui, world, string_table, child, state);
+                show_entity_node(ui, world, child, state);
             }
         }
         return;
@@ -109,7 +98,7 @@ fn show_entity_node(
                 if let Some(children) = world.get::<Children>(entity) {
                     let child_list: Vec<Entity> = children.0.clone();
                     for child in child_list {
-                        show_entity_node(ui, world, string_table, child, state);
+                        show_entity_node(ui, world, child, state);
                     }
                 }
             });
@@ -127,11 +116,9 @@ fn show_entity_node(
 }
 
 /// Generate a display label for an entity.
-fn entity_label(world: &World, string_table: Option<&StringTable>, entity: Entity) -> String {
-    if let Some(name) = world.get::<Name>(entity)
-        && let Some(table) = string_table
-    {
-        let s = table.get(name.id());
+fn entity_label(world: &World, entity: Entity) -> String {
+    if let Some(name) = world.get::<Name>(entity) {
+        let s = name.as_str();
         if !s.is_empty() {
             return format!("{} [{}:{}]", s, entity.index(), entity.generation());
         }

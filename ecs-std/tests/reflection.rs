@@ -1,5 +1,5 @@
 use redlilium_core::math::{Mat4, Quat, Vec3, mat4_from_translation, quat_from_rotation_y};
-use redlilium_ecs::{Component, FieldKind, StringId};
+use redlilium_ecs::{Component, FieldKind};
 
 use ecs_std::components::*;
 
@@ -130,7 +130,7 @@ fn camera_write_view_matrix() {
 }
 
 // ---------------------------------------------------------------------------
-// Visibility (tuple struct with u8)
+// Visibility (tuple struct with bool)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -141,38 +141,35 @@ fn visibility_reflection() {
     let infos = v.field_infos();
     assert_eq!(infos.len(), 1);
     assert_eq!(infos[0].name, "0");
-    assert_eq!(infos[0].kind, FieldKind::U8);
+    assert_eq!(infos[0].kind, FieldKind::Bool);
 
-    let val = v.field("0").unwrap().downcast_ref::<u8>().unwrap();
-    assert_eq!(*val, 1);
+    let val = v.field("0").unwrap().downcast_ref::<bool>().unwrap();
+    assert!(*val);
 }
 
 // ---------------------------------------------------------------------------
-// Name (tuple struct with StringId)
+// Name (tuple struct with String)
 // ---------------------------------------------------------------------------
 
 #[test]
 fn name_reflection() {
-    let n = Name::new(StringId(42));
+    let n = Name::new("TestEntity");
     assert_eq!(n.component_name(), "Name");
 
     let infos = n.field_infos();
     assert_eq!(infos.len(), 1);
     assert_eq!(infos[0].name, "0");
-    assert_eq!(infos[0].kind, FieldKind::StringId);
+    assert_eq!(infos[0].kind, FieldKind::String);
 
-    let val = n.field("0").unwrap().downcast_ref::<StringId>().unwrap();
-    assert_eq!(*val, StringId(42));
+    let val = n.field("0").unwrap().downcast_ref::<String>().unwrap();
+    assert_eq!(val, "TestEntity");
 }
 
 #[test]
 fn name_field_write() {
-    let mut n = Name::new(StringId(1));
-    *n.field_mut("0")
-        .unwrap()
-        .downcast_mut::<StringId>()
-        .unwrap() = StringId(99);
-    assert_eq!(n.id(), StringId(99));
+    let mut n = Name::new("old");
+    *n.field_mut("0").unwrap().downcast_mut::<String>().unwrap() = "new".to_string();
+    assert_eq!(n.as_str(), "new");
 }
 
 // ---------------------------------------------------------------------------
@@ -266,12 +263,12 @@ fn enumerate_all_fields_dynamically() {
 }
 
 // ---------------------------------------------------------------------------
-// Pod byte serialization
+// Pod byte serialization (only for types that remain Pod)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn all_components_are_pod() {
-    // Verify all 8 component types can be serialized to/from bytes
+fn pod_components_serialization() {
+    // Verify Pod component types can still be serialized to/from bytes
     let transform = Transform::IDENTITY;
     let bytes = bytemuck::bytes_of(&transform);
     assert_eq!(bytes.len(), std::mem::size_of::<Transform>());
@@ -283,14 +280,6 @@ fn all_components_are_pod() {
     let cam = Camera::perspective(1.0, 1.0, 0.1, 100.0);
     let bytes = bytemuck::bytes_of(&cam);
     assert_eq!(bytes.len(), std::mem::size_of::<Camera>());
-
-    let vis = Visibility::VISIBLE;
-    let bytes = bytemuck::bytes_of(&vis);
-    assert_eq!(bytes.len(), 1);
-
-    let name = Name::new(StringId(42));
-    let bytes = bytemuck::bytes_of(&name);
-    assert_eq!(bytes.len(), 4);
 
     let dl = DirectionalLight::default();
     let bytes = bytemuck::bytes_of(&dl);
@@ -315,6 +304,33 @@ fn transform_pod_roundtrip() {
     let bytes = bytemuck::bytes_of(&original);
     let restored: &Transform = bytemuck::from_bytes(bytes);
     assert_eq!(*restored, original);
+}
+
+// ---------------------------------------------------------------------------
+// Non-Pod component verification
+// ---------------------------------------------------------------------------
+
+#[test]
+fn non_pod_components_have_reflection() {
+    // Visibility (now bool-based, non-Pod)
+    let v = Visibility::VISIBLE;
+    assert_eq!(v.component_name(), "Visibility");
+
+    // Name (now String-based, non-Pod)
+    let n = Name::new("test");
+    assert_eq!(n.component_name(), "Name");
+
+    // Parent (new: has Component derive)
+    // Entity creation requires World::spawn(), so test via world
+    let mut world = redlilium_ecs::World::new();
+    ecs_std::register_std_components(&mut world);
+    let entity = world.spawn();
+    let p = Parent(entity);
+    assert_eq!(p.component_name(), "Parent");
+
+    // Children (new: has Component derive)
+    let c = Children::default();
+    assert_eq!(c.component_name(), "Children");
 }
 
 // ---------------------------------------------------------------------------

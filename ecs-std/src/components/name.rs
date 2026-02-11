@@ -1,45 +1,25 @@
-use redlilium_ecs::StringId;
-
 /// Debug name for an entity.
 ///
-/// Stores a [`StringId`] referencing an interned string in the world's
-/// [`StringTable`](redlilium_ecs::StringTable). Use the table to resolve
-/// the ID back to a string slice.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    bytemuck::Pod,
-    bytemuck::Zeroable,
-    redlilium_ecs::Component,
-)]
-#[repr(C)]
-pub struct Name(pub StringId);
+/// Stores an owned string. Use this to give entities meaningful labels
+/// for debugging and editor display.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, redlilium_ecs::Component)]
+pub struct Name(pub String);
 
 impl Name {
-    /// Create a new name from a [`StringId`].
-    pub fn new(id: StringId) -> Self {
-        Self(id)
+    /// Create a new name from a string.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
     }
 
-    /// Get the [`StringId`].
-    pub fn id(&self) -> StringId {
-        self.0
-    }
-}
-
-impl Default for Name {
-    fn default() -> Self {
-        Self(StringId::EMPTY)
+    /// Get the name as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
 impl std::fmt::Display for Name {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Name({})", self.0)
+        write!(f, "{}", self.0)
     }
 }
 
@@ -50,19 +30,24 @@ mod tests {
     #[test]
     fn default_is_empty() {
         let name = Name::default();
-        assert_eq!(name.id(), StringId::EMPTY);
+        assert!(name.as_str().is_empty());
     }
 
     #[test]
     fn display() {
-        let name = Name::new(StringId(42));
-        assert_eq!(format!("{name}"), "Name(StringId(42))");
+        let name = Name::new("TestEntity");
+        assert_eq!(format!("{name}"), "TestEntity");
     }
 
     #[test]
-    fn is_pod() {
-        let name = Name::new(StringId(7));
-        let bytes = bytemuck::bytes_of(&name);
-        assert_eq!(bytes.len(), 4);
+    fn from_str() {
+        let name = Name::new("hello");
+        assert_eq!(name.as_str(), "hello");
+    }
+
+    #[test]
+    fn from_string() {
+        let name = Name::new("world".to_string());
+        assert_eq!(name.as_str(), "world");
     }
 }

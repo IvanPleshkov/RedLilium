@@ -2,9 +2,7 @@ use std::time::Duration;
 
 use redlilium_core::math::{Mat4, Vec3, quat_from_rotation_x, quat_from_rotation_y};
 use redlilium_core::scene::{CameraProjection, NodeTransform, Scene, SceneCamera, SceneNode};
-use redlilium_ecs::{
-    ComputePool, EcsRunner, StringTable, SystemsContainer, World, run_system_blocking,
-};
+use redlilium_ecs::{ComputePool, EcsRunner, SystemsContainer, World, run_system_blocking};
 
 use ecs_std::components::*;
 use ecs_std::systems::*;
@@ -139,7 +137,6 @@ fn multi_thread_execution() {
 fn spawn_scene_and_run_systems() {
     let mut world = World::new();
     ecs_std::register_std_components(&mut world);
-    let mut strings = StringTable::new();
 
     let scene = Scene::new()
         .with_name("TestScene")
@@ -167,7 +164,7 @@ fn spawn_scene_and_run_systems() {
                 ]),
         ]);
 
-    let roots = spawn_scene(&mut world, &scene, &mut strings);
+    let roots = spawn_scene(&mut world, &scene);
 
     assert_eq!(roots.len(), 1);
     // root + camera_node + mesh_node = 3 entities
@@ -189,7 +186,7 @@ fn spawn_scene_and_run_systems() {
     let gt = world.get::<GlobalTransform>(root).unwrap();
     assert!((gt.translation() - Vec3::new(5.0, 0.0, 0.0)).norm() < 1e-5);
     let name = world.get::<Name>(root).unwrap();
-    assert_eq!(strings.get(name.id()), "root");
+    assert_eq!(name.as_str(), "root");
 
     // Find the camera entity by querying Camera component
     let cameras_storage = world.read::<Camera>().unwrap();
@@ -306,7 +303,6 @@ fn multiple_frame_simulation() {
 #[test]
 fn light_direction_from_transform() {
     let mut world = World::new();
-    let mut strings = StringTable::new();
     register_std_components(&mut world);
 
     // Create a directional light pointing down (-Y rotation)
@@ -322,7 +318,7 @@ fn light_direction_from_transform() {
             DirectionalLight::new(Vec3::new(1.0, 0.98, 0.9), 100000.0),
         )
         .unwrap();
-    world.insert(sun, Name::new(strings.intern("Sun"))).unwrap();
+    world.insert(sun, Name::new("Sun")).unwrap();
 
     // Create point lights at various positions
     let light_positions = [
@@ -342,7 +338,7 @@ fn light_direction_from_transform() {
             )
             .unwrap();
         world
-            .insert(e, Name::new(strings.intern(&format!("PointLight_{i}"))))
+            .insert(e, Name::new(format!("PointLight_{i}")))
             .unwrap();
     }
 

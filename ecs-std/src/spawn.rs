@@ -1,5 +1,5 @@
 use redlilium_core::scene::{CameraProjection, Scene, SceneNode};
-use redlilium_ecs::{Entity, StringTable, World};
+use redlilium_ecs::{Entity, World};
 
 use crate::components::{Camera, GlobalTransform, Name, Transform, Visibility};
 use crate::hierarchy::set_parent;
@@ -16,19 +16,15 @@ use crate::hierarchy::set_parent;
 /// # Components assigned per node
 ///
 /// - **Transform** + **GlobalTransform** — always (from NodeTransform)
-/// - **Name** — if the node has a name (interned via `string_table`)
+/// - **Name** — if the node has a name
 /// - **Visibility** — always (default: visible)
 /// - **Camera** — if the node has a camera reference
 /// - **Parent** / **Children** — for nested nodes
-pub fn spawn_scene(
-    world: &mut World,
-    scene: &Scene,
-    string_table: &mut StringTable,
-) -> Vec<Entity> {
+pub fn spawn_scene(world: &mut World, scene: &Scene) -> Vec<Entity> {
     scene
         .nodes
         .iter()
-        .map(|node| spawn_node(world, node, scene, string_table, None))
+        .map(|node| spawn_node(world, node, scene, None))
         .collect()
 }
 
@@ -36,7 +32,6 @@ fn spawn_node(
     world: &mut World,
     node: &SceneNode,
     scene: &Scene,
-    string_table: &mut StringTable,
     parent_entity: Option<Entity>,
 ) -> Entity {
     let entity = world.spawn();
@@ -53,9 +48,8 @@ fn spawn_node(
         .expect("Visibility not registered");
 
     if let Some(name) = &node.name {
-        let id = string_table.intern(name);
         world
-            .insert(entity, Name::new(id))
+            .insert(entity, Name::new(name.as_str()))
             .expect("Name not registered");
     }
 
@@ -88,7 +82,7 @@ fn spawn_node(
     }
 
     for child_node in &node.children {
-        spawn_node(world, child_node, scene, string_table, Some(entity));
+        spawn_node(world, child_node, scene, Some(entity));
     }
 
     entity
@@ -102,9 +96,8 @@ mod tests {
     #[test]
     fn spawn_empty_scene() {
         let mut world = World::new();
-        let mut strings = StringTable::new();
         let scene = Scene::new();
-        let roots = spawn_scene(&mut world, &scene, &mut strings);
+        let roots = spawn_scene(&mut world, &scene);
         assert!(roots.is_empty());
         assert_eq!(world.entity_count(), 0);
     }
@@ -113,14 +106,13 @@ mod tests {
     fn spawn_single_node_with_name() {
         let mut world = World::new();
         crate::register_std_components(&mut world);
-        let mut strings = StringTable::new();
         let scene = Scene::new().with_nodes(vec![
             SceneNode::new()
                 .with_name("TestNode")
                 .with_transform(NodeTransform::IDENTITY.with_translation([1.0, 2.0, 3.0])),
         ]);
 
-        let roots = spawn_scene(&mut world, &scene, &mut strings);
+        let roots = spawn_scene(&mut world, &scene);
         assert_eq!(roots.len(), 1);
         assert_eq!(world.entity_count(), 1);
 
@@ -138,16 +130,15 @@ mod tests {
         let v = world.get::<Visibility>(e).unwrap();
         assert!(v.is_visible());
 
-        // Check Name resolves via StringTable
+        // Check Name
         let n = world.get::<Name>(e).unwrap();
-        assert_eq!(strings.get(n.id()), "TestNode");
+        assert_eq!(n.as_str(), "TestNode");
     }
 
     #[test]
     fn spawn_node_with_camera() {
         let mut world = World::new();
         crate::register_std_components(&mut world);
-        let mut strings = StringTable::new();
         let scene = Scene::new()
             .with_cameras(vec![SceneCamera {
                 name: Some("MainCam".to_string()),
@@ -160,7 +151,7 @@ mod tests {
             }])
             .with_nodes(vec![SceneNode::new().with_camera(0)]);
 
-        let roots = spawn_scene(&mut world, &scene, &mut strings);
+        let roots = spawn_scene(&mut world, &scene);
         let e = roots[0];
 
         let cam = world.get::<Camera>(e).unwrap();
@@ -175,7 +166,6 @@ mod tests {
     fn spawn_nested_nodes() {
         let mut world = World::new();
         crate::register_std_components(&mut world);
-        let mut strings = StringTable::new();
         let scene =
             Scene::new().with_nodes(vec![SceneNode::new().with_name("parent").with_children(
                 vec![
@@ -184,7 +174,7 @@ mod tests {
                 ],
             )]);
 
-        let roots = spawn_scene(&mut world, &scene, &mut strings);
+        let roots = spawn_scene(&mut world, &scene);
         assert_eq!(roots.len(), 1);
         // Parent + 2 children = 3 entities
         assert_eq!(world.entity_count(), 3);
@@ -205,7 +195,6 @@ mod tests {
     fn spawn_deep_hierarchy() {
         let mut world = World::new();
         crate::register_std_components(&mut world);
-        let mut strings = StringTable::new();
         let scene =
             Scene::new().with_nodes(vec![SceneNode::new().with_name("root").with_children(
                 vec![SceneNode::new()
@@ -213,7 +202,7 @@ mod tests {
                 .with_children(vec![SceneNode::new().with_name("leaf")])],
             )]);
 
-        let roots = spawn_scene(&mut world, &scene, &mut strings);
+        let roots = spawn_scene(&mut world, &scene);
         assert_eq!(roots.len(), 1);
         assert_eq!(world.entity_count(), 3);
 

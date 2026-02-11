@@ -1,22 +1,16 @@
 /// Whether an entity should be rendered.
-///
-/// Uses `u8` instead of `bool` for Pod compatibility.
-/// `0` = hidden, non-zero = visible.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable, redlilium_ecs::Component,
-)]
-#[repr(C)]
-pub struct Visibility(pub u8);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, redlilium_ecs::Component)]
+pub struct Visibility(pub bool);
 
 impl Visibility {
     /// Entity is visible (rendered).
-    pub const VISIBLE: Self = Self(1);
+    pub const VISIBLE: Self = Self(true);
     /// Entity is hidden (not rendered).
-    pub const HIDDEN: Self = Self(0);
+    pub const HIDDEN: Self = Self(false);
 
     /// Returns whether the entity is visible.
     pub fn is_visible(self) -> bool {
-        self.0 != 0
+        self.0
     }
 }
 
@@ -41,10 +35,10 @@ mod tests {
     }
 
     #[test]
-    fn is_pod() {
+    fn visible_value() {
         let v = Visibility::VISIBLE;
-        let bytes = bytemuck::bytes_of(&v);
-        assert_eq!(bytes.len(), 1);
-        assert_eq!(bytes[0], 1);
+        assert!(v.0);
+        let h = Visibility::HIDDEN;
+        assert!(!h.0);
     }
 }
