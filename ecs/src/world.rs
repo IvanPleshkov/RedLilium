@@ -1,7 +1,8 @@
 use std::any::TypeId;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::commands::CommandBuffer;
+use crate::component::Component;
 use crate::entity::{Entity, EntityAllocator};
 use crate::events::Events;
 use crate::query::{AddedFilter, ChangedFilter, ContainsChecker};
@@ -29,6 +30,22 @@ impl std::fmt::Display for ComponentNotRegistered {
 }
 
 impl std::error::Error for ComponentNotRegistered {}
+
+// ---------------------------------------------------------------------------
+// Inspector metadata (stored in World, separate from component storages)
+// ---------------------------------------------------------------------------
+
+/// Type-erased inspector operations for a single component type.
+struct InspectorEntry {
+    /// Check if an entity has this component.
+    has_fn: fn(&World, Entity) -> bool,
+    /// Render the component's inspector UI. Returns true if entity had it.
+    inspect_fn: fn(&mut World, Entity, &mut egui::Ui) -> bool,
+    /// Remove this component from an entity. Returns true if removed.
+    remove_fn: fn(&mut World, Entity) -> bool,
+    /// Insert a default instance on an entity (None if T doesn't impl Default).
+    insert_default_fn: Option<fn(&mut World, Entity)>,
+}
 
 /// An independent ECS world containing entities, components, and resources.
 ///
@@ -66,6 +83,8 @@ pub struct World {
     resources: Resources,
     /// Global tick counter for change detection.
     tick: u64,
+    /// Inspector metadata for registered component types, keyed by name.
+    inspector_entries: BTreeMap<&'static str, InspectorEntry>,
 }
 
 impl World {
@@ -76,6 +95,7 @@ impl World {
             components: HashMap::new(),
             resources: Resources::new(),
             tick: 0,
+            inspector_entries: BTreeMap::new(),
         }
     }
 
@@ -123,10 +143,64 @@ impl World {
     ///
     /// This is only needed if you want to query a component type
     /// before any entity has been given that component.
+    /// Does not register inspector metadata — use [`register_inspector`](World::register_inspector)
+    /// or [`register_inspector_default`](World::register_inspector_default) for that.
     pub fn register_component<T: Send + Sync + 'static>(&mut self) {
         self.components
             .entry(TypeId::of::<T>())
             .or_insert_with(ComponentStorage::new::<T>);
+    }
+
+    /// Registers a component type with inspector support.
+    ///
+    /// Creates storage and stores type-erased inspector metadata so the
+    /// component can be enumerated, inspected, and removed via the UI.
+    ///
+    /// The component will be visible in the inspector but cannot be added
+    /// via the "Add Component" button. Use [`register_inspector_default`](World::register_inspector_default)
+    /// for that.
+    pub fn register_inspector<T: Component>(&mut self) {
+        self.register_component::<T>();
+        self.inspector_entries.insert(
+            T::NAME,
+            InspectorEntry {
+                has_fn: |world, entity| world.get::<T>(entity).is_some(),
+                inspect_fn: |world, entity, ui| {
+                    let Some(comp) = world.get_mut::<T>(entity) else {
+                        return false;
+                    };
+                    comp.inspect_ui(ui);
+                    true
+                },
+                remove_fn: |world, entity| world.remove::<T>(entity).is_some(),
+                insert_default_fn: None,
+            },
+        );
+    }
+
+    /// Registers a component type with full inspector support including "Add Component".
+    ///
+    /// Like [`register_inspector`](World::register_inspector) but also enables
+    /// inserting a default instance via the inspector "Add Component" button.
+    pub fn register_inspector_default<T: Component + Default>(&mut self) {
+        self.register_component::<T>();
+        self.inspector_entries.insert(
+            T::NAME,
+            InspectorEntry {
+                has_fn: |world, entity| world.get::<T>(entity).is_some(),
+                inspect_fn: |world, entity, ui| {
+                    let Some(comp) = world.get_mut::<T>(entity) else {
+                        return false;
+                    };
+                    comp.inspect_ui(ui);
+                    true
+                },
+                remove_fn: |world, entity| world.remove::<T>(entity).is_some(),
+                insert_default_fn: Some(|world, entity| {
+                    let _ = world.insert(entity, T::default());
+                }),
+            },
+        );
     }
 
     /// Inserts a component on an entity.
@@ -334,6 +408,68 @@ impl World {
     pub fn added<T: 'static>(&self, since_tick: u64) -> AddedFilter<'_> {
         let storage = self.components.get(&TypeId::of::<T>());
         AddedFilter::new(storage, since_tick)
+    }
+
+    // ---- Inspector ----
+
+    /// Returns the names of all inspector-registered components that an entity has.
+    ///
+    /// Only includes components registered via [`register_inspector`](World::register_inspector)
+    /// or [`register_inspector_default`](World::register_inspector_default).
+    pub fn inspectable_components_of(&self, entity: Entity) -> Vec<&'static str> {
+        self.inspector_entries
+            .iter()
+            .filter(|(_, e)| (e.has_fn)(self, entity))
+            .map(|(name, _)| *name)
+            .collect()
+    }
+
+    /// Returns component names that the entity does NOT have and that support Default insertion.
+    pub fn addable_components_of(&self, entity: Entity) -> Vec<&'static str> {
+        self.inspector_entries
+            .iter()
+            .filter(|(_, e)| e.insert_default_fn.is_some() && !(e.has_fn)(self, entity))
+            .map(|(name, _)| *name)
+            .collect()
+    }
+
+    /// Renders the inspector UI for a component by name.
+    ///
+    /// Returns `true` if the entity had the component and it was rendered.
+    pub fn inspect_by_name(&mut self, entity: Entity, name: &str, ui: &mut egui::Ui) -> bool {
+        // Copy fn pointer out to release the immutable borrow on self
+        let inspect_fn = self.inspector_entries.get(name).map(|e| e.inspect_fn);
+        if let Some(f) = inspect_fn {
+            f(self, entity, ui)
+        } else {
+            false
+        }
+    }
+
+    /// Removes a component by name from an entity.
+    ///
+    /// Returns `true` if the component was removed.
+    pub fn remove_by_name(&mut self, entity: Entity, name: &str) -> bool {
+        let remove_fn = self.inspector_entries.get(name).map(|e| e.remove_fn);
+        if let Some(f) = remove_fn {
+            f(self, entity)
+        } else {
+            false
+        }
+    }
+
+    /// Inserts a default instance of a component by name on an entity.
+    ///
+    /// Does nothing if the component was not registered with Default support
+    /// or the name is unknown.
+    pub fn insert_default_by_name(&mut self, entity: Entity, name: &str) {
+        let insert_fn = self
+            .inspector_entries
+            .get(name)
+            .and_then(|e| e.insert_default_fn);
+        if let Some(f) = insert_fn {
+            f(self, entity);
+        }
     }
 
     // ---- Resource management ----

@@ -3,19 +3,18 @@
 use redlilium_ecs::World;
 
 use super::InspectorState;
-use super::registry::ComponentRegistry;
 
 /// Show the component inspector window for the currently selected entity.
 ///
-/// Lists all registered components attached to the entity, with editable
-/// fields via the `Component` reflection trait. Each component header has a
-/// right-click context menu to remove it. An "Add Component" button at the
-/// bottom opens a popup listing components the entity doesn't have yet.
+/// Lists all inspector-registered components attached to the entity, with
+/// editable fields via the `Component` trait's `inspect_ui`. Each component
+/// header has a right-click context menu to remove it. An "Add Component"
+/// button at the bottom opens a popup listing components the entity doesn't
+/// have yet.
 pub fn show_component_inspector(
     ctx: &egui::Context,
     world: &mut World,
     state: &mut InspectorState,
-    registry: &ComponentRegistry,
 ) {
     if !state.component_inspector_open {
         return;
@@ -56,7 +55,7 @@ pub fn show_component_inspector(
             ui.separator();
 
             // Collect components this entity has
-            let present = registry.components_of(world, selected);
+            let present = world.inspectable_components_of(selected);
 
             // Track which components to remove after iteration
             let mut to_remove: Vec<&str> = Vec::new();
@@ -69,10 +68,21 @@ pub fn show_component_inspector(
                     }
 
                     for comp_name in &present {
-                        let remove = registry.inspect_by_name(world, selected, comp_name, ui);
-                        if remove {
-                            to_remove.push(comp_name);
-                        }
+                        let header =
+                            egui::CollapsingHeader::new(egui::RichText::new(*comp_name).strong())
+                                .default_open(true);
+
+                        let header_resp = header.show(ui, |ui| {
+                            world.inspect_by_name(selected, comp_name, ui);
+                        });
+
+                        header_resp.header_response.context_menu(|ui| {
+                            if ui.button("Remove Component").clicked() {
+                                to_remove.push(comp_name);
+                                ui.close();
+                            }
+                        });
+
                         ui.separator();
                     }
 
@@ -84,7 +94,7 @@ pub fn show_component_inspector(
                     });
 
                     if add_component_open {
-                        let missing = registry.missing_components_of(world, selected);
+                        let missing = world.addable_components_of(selected);
                         if missing.is_empty() {
                             ui.label("All components already attached.");
                         } else {
@@ -95,7 +105,7 @@ pub fn show_component_inspector(
                                 .show(ui, |ui| {
                                     for name in &missing {
                                         if ui.button(*name).clicked() {
-                                            registry.insert_default_by_name(world, selected, name);
+                                            world.insert_default_by_name(selected, name);
                                             add_component_open = false;
                                         }
                                     }
@@ -106,7 +116,7 @@ pub fn show_component_inspector(
 
             // Apply deferred removals
             for name in to_remove {
-                registry.remove_by_name(world, selected, name);
+                world.remove_by_name(selected, name);
             }
         });
 

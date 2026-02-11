@@ -14,3 +14,4 @@ redlilium-core = { path = "../core" }
 ecs-macro = { path = "../ecs-macro" }
 bytemuck = { workspace = true }
 log.workspace = true
+egui.workspace = true

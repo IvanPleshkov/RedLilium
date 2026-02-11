@@ -81,7 +81,6 @@ pub struct PhysicsDemoApp {
 
     // Inspector
     inspector_state: ecs_std::ui::InspectorState,
-    component_registry: ecs_std::ui::ComponentRegistry,
 
     // Input state
     mouse_pressed: bool,
@@ -102,21 +101,6 @@ impl PhysicsDemoApp {
             ui.scene_names_2d = scenes_2d.iter().map(|s| s.name().to_string()).collect();
         }
 
-        // Build component registry for inspector
-        let mut component_registry = ecs_std::ui::ComponentRegistry::new();
-        component_registry.register::<ecs_std::Transform>("Transform");
-        component_registry.register::<ecs_std::GlobalTransform>("GlobalTransform");
-        component_registry.register::<ecs_std::Visibility>("Visibility");
-        component_registry.register::<ecs_std::Name>("Name");
-        component_registry.register_readonly::<ecs_std::Camera>("Camera");
-        component_registry.register::<ecs_std::DirectionalLight>("DirectionalLight");
-        component_registry.register::<ecs_std::PointLight>("PointLight");
-        component_registry.register::<ecs_std::SpotLight>("SpotLight");
-        component_registry.register::<ecs_std::physics::components3d::RigidBody3D>("RigidBody3D");
-        component_registry.register::<ecs_std::physics::components3d::Collider3D>("Collider3D");
-        component_registry.register::<ecs_std::physics::components2d::RigidBody2D>("RigidBody2D");
-        component_registry.register::<ecs_std::physics::components2d::Collider2D>("Collider2D");
-
         Self {
             scenes_3d,
             scenes_2d,
@@ -128,7 +112,6 @@ impl PhysicsDemoApp {
             egui_controller: None,
             ui,
             inspector_state: ecs_std::ui::InspectorState::new(),
-            component_registry,
             mouse_pressed: false,
             last_mouse_x: 0.0,
             last_mouse_y: 0.0,
@@ -360,7 +343,6 @@ impl AppHandler for PhysicsDemoApp {
                         &egui_ctx,
                         world,
                         &mut self.inspector_state,
-                        &self.component_registry,
                     );
                 }
             }

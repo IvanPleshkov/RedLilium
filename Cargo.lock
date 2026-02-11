@@ -2830,6 +2830,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "ecs-macro",
+ "egui",
  "log",
  "redlilium-core",
 ]

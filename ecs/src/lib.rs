@@ -40,6 +40,7 @@ pub mod component;
 mod compute;
 mod entity;
 mod events;
+pub mod inspect;
 mod lock_request;
 mod priority;
 mod query;
@@ -59,9 +60,10 @@ mod yield_now;
 
 // Core types
 pub use commands::CommandBuffer;
-pub use component::{Component, FieldInfo, FieldKind};
+pub use component::Component;
 pub use compute::{ComputePool, TaskHandle};
 pub use ecs_macro::Component;
+pub use egui;
 pub use entity::Entity;
 pub use events::{EventUpdateSystem, Events};
 pub use priority::Priority;

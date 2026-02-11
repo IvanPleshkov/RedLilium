@@ -48,31 +48,36 @@ pub use systems::{UpdateCameraMatrices, UpdateGlobalTransforms};
 
 /// Register all standard component types with the world.
 ///
-/// Call this before running systems that query these types,
-/// especially if no entities with these components have been spawned yet.
+/// Registers storage, inspector metadata, and (where applicable) default
+/// insertion support. Call this before running systems or using the inspector.
 pub fn register_std_components(world: &mut redlilium_ecs::World) {
-    world.register_component::<Transform>();
-    world.register_component::<GlobalTransform>();
-    world.register_component::<Camera>();
-    world.register_component::<Visibility>();
-    world.register_component::<Name>();
-    world.register_component::<DirectionalLight>();
-    world.register_component::<PointLight>();
-    world.register_component::<SpotLight>();
+    // Inspector-enabled components (support "Add Component" via Default)
+    world.register_inspector_default::<Transform>();
+    world.register_inspector_default::<GlobalTransform>();
+    world.register_inspector_default::<Visibility>();
+    world.register_inspector_default::<Name>();
+    world.register_inspector_default::<DirectionalLight>();
+    world.register_inspector_default::<PointLight>();
+    world.register_inspector_default::<SpotLight>();
+
+    // Inspector-enabled, readonly (no Default — constructed with parameters)
+    world.register_inspector::<Camera>();
+
+    // Hierarchy components (storage only — managed by hierarchy functions)
     world.register_component::<Parent>();
     world.register_component::<Children>();
 
     // Physics descriptor + handle components (feature-gated)
     #[cfg(any(feature = "physics-3d", feature = "physics-3d-f32"))]
     {
-        world.register_component::<physics::components3d::RigidBody3D>();
-        world.register_component::<physics::components3d::Collider3D>();
+        world.register_inspector_default::<physics::components3d::RigidBody3D>();
+        world.register_inspector_default::<physics::components3d::Collider3D>();
         world.register_component::<physics::physics3d::RigidBody3DHandle>();
     }
     #[cfg(any(feature = "physics-2d", feature = "physics-2d-f32"))]
     {
-        world.register_component::<physics::components2d::RigidBody2D>();
-        world.register_component::<physics::components2d::Collider2D>();
+        world.register_inspector_default::<physics::components2d::RigidBody2D>();
+        world.register_inspector_default::<physics::components2d::Collider2D>();
         world.register_component::<physics::physics2d::RigidBody2DHandle>();
     }
 }

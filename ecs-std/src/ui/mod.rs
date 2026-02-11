@@ -8,30 +8,28 @@
 //!
 //! - **Component Inspector** ([`show_component_inspector`]) — for a selected entity,
 //!   lists all attached components with reflected fields that can be edited inline.
-//!   Supports removing existing components and adding new ones from the
-//!   [`ComponentRegistry`].
+//!   Supports removing existing and adding new components. Inspector metadata is
+//!   stored directly in the [`World`](redlilium_ecs::World) via
+//!   [`register_inspector`](redlilium_ecs::World::register_inspector) /
+//!   [`register_inspector_default`](redlilium_ecs::World::register_inspector_default).
 //!
 //! # Usage
 //!
 //! ```ignore
-//! use ecs_std::ui::{InspectorState, ComponentRegistry, show_world_inspector, show_component_inspector};
+//! use ecs_std::ui::{InspectorState, show_world_inspector, show_component_inspector};
 //!
-//! // During setup: register inspectable component types
-//! let mut registry = ComponentRegistry::new();
-//! registry.register::<Transform>("Transform");
-//! registry.register::<Visibility>("Visibility");
+//! // During setup — register_std_components stores inspector metadata in the World
+//! ecs_std::register_std_components(&mut world);
 //!
 //! // During frame, inside egui update:
 //! show_world_inspector(ctx, &world, &mut state);
-//! show_component_inspector(ctx, &mut world, &mut state, &registry);
+//! show_component_inspector(ctx, &mut world, &mut state);
 //! ```
 
 mod component_inspector;
-mod registry;
 mod world_inspector;
 
 pub use component_inspector::show_component_inspector;
-pub use registry::ComponentRegistry;
 pub use world_inspector::show_world_inspector;
 
 use redlilium_ecs::Entity;

@@ -50,6 +50,9 @@ naga_oil = "0.17"
 # Math and data
 bytemuck = { version = "1.21", features = ["derive"] }
 
+# UI
+egui = "0.33.3"
+
 # glTF loading
 gltf-dep = { package = "gltf", version = "1.4.1" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
