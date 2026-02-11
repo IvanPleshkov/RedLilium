@@ -148,10 +148,12 @@ impl redlilium_ecs::System for StepPhysics3D {
                 {
                     let pos = body.position();
                     let t = pos.translation;
-                    transform.translation = glam::Vec3::new(t.x as f32, t.y as f32, t.z as f32);
+                    transform.translation =
+                        redlilium_core::math::Vec3::new(t.x as f32, t.y as f32, t.z as f32);
                     let r = pos.rotation;
-                    transform.rotation =
-                        glam::Quat::from_xyzw(r.x as f32, r.y as f32, r.z as f32, r.w as f32);
+                    transform.rotation = redlilium_core::math::quat_from_xyzw(
+                        r.x as f32, r.y as f32, r.z as f32, r.w as f32,
+                    );
                 }
             }
         })

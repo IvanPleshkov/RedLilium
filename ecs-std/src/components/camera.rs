@@ -1,4 +1,4 @@
-use glam::Mat4;
+use redlilium_core::math::{Mat4, orthographic_rh, perspective_rh};
 
 /// Camera component storing computed view and projection matrices.
 ///
@@ -20,16 +20,16 @@ impl Camera {
     /// Create a new perspective camera.
     pub fn perspective(yfov: f32, aspect: f32, znear: f32, zfar: f32) -> Self {
         Self {
-            view_matrix: Mat4::IDENTITY,
-            projection_matrix: Mat4::perspective_rh(yfov, aspect, znear, zfar),
+            view_matrix: Mat4::identity(),
+            projection_matrix: perspective_rh(yfov, aspect, znear, zfar),
         }
     }
 
     /// Create a new orthographic camera.
     pub fn orthographic(xmag: f32, ymag: f32, znear: f32, zfar: f32) -> Self {
         Self {
-            view_matrix: Mat4::IDENTITY,
-            projection_matrix: Mat4::orthographic_rh(-xmag, xmag, -ymag, ymag, znear, zfar),
+            view_matrix: Mat4::identity(),
+            projection_matrix: orthographic_rh(-xmag, xmag, -ymag, ymag, znear, zfar),
         }
     }
 
@@ -46,15 +46,15 @@ mod tests {
     #[test]
     fn perspective_constructor() {
         let cam = Camera::perspective(1.0, 16.0 / 9.0, 0.1, 100.0);
-        assert_ne!(cam.projection_matrix, Mat4::IDENTITY);
-        assert_eq!(cam.view_matrix, Mat4::IDENTITY);
+        assert_ne!(cam.projection_matrix, Mat4::identity());
+        assert_eq!(cam.view_matrix, Mat4::identity());
     }
 
     #[test]
     fn orthographic_constructor() {
         let cam = Camera::orthographic(10.0, 10.0, 0.1, 100.0);
-        assert_ne!(cam.projection_matrix, Mat4::IDENTITY);
-        assert_eq!(cam.view_matrix, Mat4::IDENTITY);
+        assert_ne!(cam.projection_matrix, Mat4::identity());
+        assert_eq!(cam.view_matrix, Mat4::identity());
     }
 
     #[test]

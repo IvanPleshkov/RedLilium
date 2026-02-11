@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use glam::{Mat4, Vec3};
+use redlilium_core::math::{Mat4, Vec3, mat4_from_translation, mat4_to_cols_array_2d};
 use redlilium_core::mesh::generators;
 use redlilium_core::profiling::{profile_function, profile_scope};
 use redlilium_graphics::{
@@ -160,10 +160,10 @@ impl SphereGrid {
         let view_proj = proj * view;
 
         let uniforms = CameraUniforms {
-            view_proj: view_proj.to_cols_array_2d(),
-            view: view.to_cols_array_2d(),
-            proj: proj.to_cols_array_2d(),
-            camera_pos: camera_pos.extend(1.0).to_array(),
+            view_proj: mat4_to_cols_array_2d(&view_proj),
+            view: mat4_to_cols_array_2d(&view),
+            proj: mat4_to_cols_array_2d(&proj),
+            camera_pos: [camera_pos.x, camera_pos.y, camera_pos.z, 1.0],
         };
 
         device
@@ -185,12 +185,12 @@ impl SphereGrid {
                 let x = col as f32 * spacing - offset;
                 let z = row as f32 * spacing - offset;
 
-                let model = Mat4::from_translation(Vec3::new(x, 0.0, z));
+                let model = mat4_from_translation(Vec3::new(x, 0.0, z));
                 let metallic = col as f32 / (GRID_SIZE - 1) as f32;
                 let roughness = (row as f32 / (GRID_SIZE - 1) as f32).max(0.05);
 
                 instances.push(SphereInstance {
-                    model: model.to_cols_array_2d(),
+                    model: mat4_to_cols_array_2d(&model),
                     base_color,
                     metallic_roughness: [metallic, roughness, 0.0, 0.0],
                 });

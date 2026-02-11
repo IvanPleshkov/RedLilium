@@ -17,8 +17,9 @@ use crate::mesh::CpuMesh;
 
 /// Node transform decomposed into translation, rotation, and scale.
 ///
-/// Uses plain arrays for portability. Convert to `glam` types as needed:
-/// `Vec3::from(t.translation)`, `Quat::from_array(t.rotation)`.
+/// Uses plain arrays for portability. Convert to math types as needed:
+/// `Vec3::new(t.translation[0], t.translation[1], t.translation[2])`,
+/// `quat_from_array(t.rotation)`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NodeTransform {
     /// Translation [x, y, z].

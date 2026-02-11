@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use ecs_std::physics::physics2d::PhysicsWorld2D;
 use ecs_std::physics::physics3d::PhysicsWorld3D;
+use redlilium_core::math::{self, Mat4, Vec3, mat4_to_cols_array_2d};
 use redlilium_graphics::{
     BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, Buffer, BufferDescriptor,
     BufferUsage, GraphicsDevice, GraphicsPass, Material, MaterialDescriptor, MaterialInstance,
@@ -343,14 +344,9 @@ impl PhysicsRenderer {
     }
 
     /// Update camera uniforms.
-    fn write_camera(
-        &self,
-        device: &Arc<GraphicsDevice>,
-        view_proj: glam::Mat4,
-        camera_pos: glam::Vec3,
-    ) {
+    fn write_camera(&self, device: &Arc<GraphicsDevice>, view_proj: Mat4, camera_pos: Vec3) {
         let uniforms = CameraUniforms {
-            view_proj: view_proj.to_cols_array_2d(),
+            view_proj: mat4_to_cols_array_2d(&view_proj),
             camera_pos: [camera_pos.x, camera_pos.y, camera_pos.z, 0.0],
             light_dir: [0.4, 0.8, 0.5, 0.0], // Directional light
         };
@@ -362,8 +358,8 @@ impl PhysicsRenderer {
         &mut self,
         device: &Arc<GraphicsDevice>,
         physics: &PhysicsWorld3D,
-        view_proj: glam::Mat4,
-        camera_pos: glam::Vec3,
+        view_proj: Mat4,
+        camera_pos: Vec3,
     ) {
         use ecs_std::physics::rapier3d::prelude::*;
 
@@ -395,31 +391,31 @@ impl PhysicsRenderer {
             let pos = collider.position();
             let t = pos.translation;
             let r = pos.rotation;
-            let translation = glam::Vec3::new(t.x as f32, t.y as f32, t.z as f32);
-            let rotation = glam::Quat::from_xyzw(r.x as f32, r.y as f32, r.z as f32, r.w as f32);
+            let translation = math::Vec3::new(t.x as f32, t.y as f32, t.z as f32);
+            let rotation = math::quat_from_xyzw(r.x as f32, r.y as f32, r.z as f32, r.w as f32);
 
             let typed = collider.shape().as_typed_shape();
             match typed {
                 TypedShape::Ball(ball) => {
                     let r = ball.radius as f32;
-                    let model = glam::Mat4::from_scale_rotation_translation(
-                        glam::Vec3::splat(r),
+                    let model = math::mat4_from_scale_rotation_translation(
+                        math::Vec3::new(r, r, r),
                         rotation,
                         translation,
                     );
                     sphere_instances.push(ShapeInstance {
-                        model: model.to_cols_array_2d(),
+                        model: mat4_to_cols_array_2d(&model),
                         color,
                     });
                 }
                 TypedShape::Cuboid(cuboid) => {
                     let he = cuboid.half_extents;
                     let scale =
-                        glam::Vec3::new(he.x as f32 * 2.0, he.y as f32 * 2.0, he.z as f32 * 2.0);
+                        math::Vec3::new(he.x as f32 * 2.0, he.y as f32 * 2.0, he.z as f32 * 2.0);
                     let model =
-                        glam::Mat4::from_scale_rotation_translation(scale, rotation, translation);
+                        math::mat4_from_scale_rotation_translation(scale, rotation, translation);
                     box_instances.push(ShapeInstance {
-                        model: model.to_cols_array_2d(),
+                        model: mat4_to_cols_array_2d(&model),
                         color,
                     });
                 }
@@ -427,11 +423,11 @@ impl PhysicsRenderer {
                     // Approximate capsule as a stretched sphere
                     let r = capsule.radius as f32;
                     let half_h = capsule.segment.a.distance(capsule.segment.b) as f32 / 2.0;
-                    let scale = glam::Vec3::new(r, half_h + r, r);
+                    let scale = math::Vec3::new(r, half_h + r, r);
                     let model =
-                        glam::Mat4::from_scale_rotation_translation(scale, rotation, translation);
+                        math::mat4_from_scale_rotation_translation(scale, rotation, translation);
                     sphere_instances.push(ShapeInstance {
-                        model: model.to_cols_array_2d(),
+                        model: mat4_to_cols_array_2d(&model),
                         color,
                     });
                 }
@@ -441,14 +437,14 @@ impl PhysicsRenderer {
                     let center = aabb.center();
                     let he = aabb.half_extents();
                     let local_center =
-                        glam::Vec3::new(center.x as f32, center.y as f32, center.z as f32);
+                        math::Vec3::new(center.x as f32, center.y as f32, center.z as f32);
                     let scale =
-                        glam::Vec3::new(he.x as f32 * 2.0, he.y as f32 * 2.0, he.z as f32 * 2.0);
-                    let world_center = translation + rotation * local_center;
+                        math::Vec3::new(he.x as f32 * 2.0, he.y as f32 * 2.0, he.z as f32 * 2.0);
+                    let world_center = translation + math::quat_rotate_vec3(rotation, local_center);
                     let model =
-                        glam::Mat4::from_scale_rotation_translation(scale, rotation, world_center);
+                        math::mat4_from_scale_rotation_translation(scale, rotation, world_center);
                     box_instances.push(ShapeInstance {
-                        model: model.to_cols_array_2d(),
+                        model: mat4_to_cols_array_2d(&model),
                         color,
                     });
                 }
@@ -474,8 +470,8 @@ impl PhysicsRenderer {
         &mut self,
         device: &Arc<GraphicsDevice>,
         physics: &PhysicsWorld2D,
-        view_proj: glam::Mat4,
-        camera_pos: glam::Vec3,
+        view_proj: Mat4,
+        camera_pos: Vec3,
     ) {
         use ecs_std::physics::rapier2d::prelude::*;
 
@@ -506,39 +502,39 @@ impl PhysicsRenderer {
             let pos = collider.position();
             let t = pos.translation;
             let angle = pos.rotation.angle() as f32;
-            let translation = glam::Vec3::new(t.x as f32, t.y as f32, 0.0);
-            let rotation = glam::Quat::from_rotation_z(angle);
+            let translation = math::Vec3::new(t.x as f32, t.y as f32, 0.0);
+            let rotation = math::quat_from_rotation_z(angle);
 
             let typed = collider.shape().as_typed_shape();
             match typed {
                 TypedShape::Ball(ball) => {
                     let r = ball.radius as f32;
-                    let scale = glam::Vec3::new(r, r, z_depth);
+                    let scale = math::Vec3::new(r, r, z_depth);
                     let model =
-                        glam::Mat4::from_scale_rotation_translation(scale, rotation, translation);
+                        math::mat4_from_scale_rotation_translation(scale, rotation, translation);
                     sphere_instances.push(ShapeInstance {
-                        model: model.to_cols_array_2d(),
+                        model: mat4_to_cols_array_2d(&model),
                         color,
                     });
                 }
                 TypedShape::Cuboid(cuboid) => {
                     let he = cuboid.half_extents;
-                    let scale = glam::Vec3::new(he.x as f32 * 2.0, he.y as f32 * 2.0, z_depth);
+                    let scale = math::Vec3::new(he.x as f32 * 2.0, he.y as f32 * 2.0, z_depth);
                     let model =
-                        glam::Mat4::from_scale_rotation_translation(scale, rotation, translation);
+                        math::mat4_from_scale_rotation_translation(scale, rotation, translation);
                     box_instances.push(ShapeInstance {
-                        model: model.to_cols_array_2d(),
+                        model: mat4_to_cols_array_2d(&model),
                         color,
                     });
                 }
                 TypedShape::Capsule(capsule) => {
                     let r = capsule.radius as f32;
                     let half_h = capsule.segment.a.distance(capsule.segment.b) as f32 / 2.0;
-                    let scale = glam::Vec3::new(r, half_h + r, z_depth);
+                    let scale = math::Vec3::new(r, half_h + r, z_depth);
                     let model =
-                        glam::Mat4::from_scale_rotation_translation(scale, rotation, translation);
+                        math::mat4_from_scale_rotation_translation(scale, rotation, translation);
                     sphere_instances.push(ShapeInstance {
-                        model: model.to_cols_array_2d(),
+                        model: mat4_to_cols_array_2d(&model),
                         color,
                     });
                 }
@@ -546,13 +542,13 @@ impl PhysicsRenderer {
                     let aabb = collider.shape().compute_local_aabb();
                     let center = aabb.center();
                     let he = aabb.half_extents();
-                    let local_center = glam::Vec3::new(center.x as f32, center.y as f32, 0.0);
-                    let scale = glam::Vec3::new(he.x as f32 * 2.0, he.y as f32 * 2.0, z_depth);
-                    let world_center = translation + rotation * local_center;
+                    let local_center = math::Vec3::new(center.x as f32, center.y as f32, 0.0);
+                    let scale = math::Vec3::new(he.x as f32 * 2.0, he.y as f32 * 2.0, z_depth);
+                    let world_center = translation + math::quat_rotate_vec3(rotation, local_center);
                     let model =
-                        glam::Mat4::from_scale_rotation_translation(scale, rotation, world_center);
+                        math::mat4_from_scale_rotation_translation(scale, rotation, world_center);
                     box_instances.push(ShapeInstance {
-                        model: model.to_cols_array_2d(),
+                        model: mat4_to_cols_array_2d(&model),
                         color,
                     });
                 }

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use glam::{Mat4, Quat, Vec3};
+use redlilium_core::math::{Mat4, Vec3, quat_from_rotation_x, quat_from_rotation_y};
 use redlilium_core::scene::{CameraProjection, NodeTransform, Scene, SceneCamera, SceneNode};
 use redlilium_ecs::{
     ComputePool, EcsRunner, StringTable, SystemsContainer, World, run_system_blocking,
@@ -65,12 +65,13 @@ fn full_frame_pipeline() {
     // Verify camera matrices were computed
     let cameras = world.read::<Camera>().unwrap();
     let cam = cameras.get(cam_entity.index()).unwrap();
-    assert_ne!(cam.view_matrix, Mat4::IDENTITY);
-    assert_ne!(cam.projection_matrix, Mat4::IDENTITY);
+    assert_ne!(cam.view_matrix, Mat4::identity());
+    assert_ne!(cam.projection_matrix, Mat4::identity());
 
     // Verify the view matrix places the camera at (0, 5, 10)
-    let cam_pos = cam.view_matrix.inverse().w_axis.truncate();
-    assert!((cam_pos - Vec3::new(0.0, 5.0, 10.0)).length() < 1e-4);
+    let inv = cam.view_matrix.try_inverse().unwrap();
+    let cam_pos = Vec3::new(inv[(0, 3)], inv[(1, 3)], inv[(2, 3)]);
+    assert!((cam_pos - Vec3::new(0.0, 5.0, 10.0)).norm() < 1e-4);
 
     // Verify object global transforms match their local transforms
     drop(cameras);
@@ -78,7 +79,7 @@ fn full_frame_pipeline() {
     for (i, &obj) in objects.iter().enumerate() {
         let gt = globals.get(obj.index()).unwrap();
         assert!(
-            (gt.translation() - positions[i]).length() < 1e-6,
+            (gt.translation() - positions[i]).norm() < 1e-6,
             "Object {i} global transform mismatch"
         );
     }
@@ -103,8 +104,8 @@ fn multi_thread_execution() {
                 e,
                 Transform::new(
                     Vec3::new(i as f32, 0.0, 0.0),
-                    Quat::from_rotation_y(angle),
-                    Vec3::ONE,
+                    quat_from_rotation_y(angle),
+                    Vec3::new(1.0, 1.0, 1.0),
                 ),
             )
             .unwrap();
@@ -124,7 +125,7 @@ fn multi_thread_execution() {
         let global = globals.get(idx).unwrap();
         let expected = transform.to_matrix();
         assert!(
-            (global.0 - expected).abs_diff_eq(Mat4::ZERO, 1e-6),
+            (global.0 - expected).norm() < 1e-6,
             "Entity at index {idx} has incorrect global transform"
         );
     }
@@ -186,7 +187,7 @@ fn spawn_scene_and_run_systems() {
     // Verify root entity
     let root = roots[0];
     let gt = world.get::<GlobalTransform>(root).unwrap();
-    assert!((gt.translation() - Vec3::new(5.0, 0.0, 0.0)).length() < 1e-5);
+    assert!((gt.translation() - Vec3::new(5.0, 0.0, 0.0)).norm() < 1e-5);
     let name = world.get::<Name>(root).unwrap();
     assert_eq!(strings.get(name.id()), "root");
 
@@ -196,8 +197,8 @@ fn spawn_scene_and_run_systems() {
     for (_, cam) in cameras_storage.iter() {
         cam_count += 1;
         // Camera matrices should be computed
-        assert_ne!(cam.projection_matrix, Mat4::IDENTITY);
-        assert_ne!(cam.view_matrix, Mat4::IDENTITY);
+        assert_ne!(cam.projection_matrix, Mat4::identity());
+        assert_ne!(cam.view_matrix, Mat4::identity());
     }
     assert_eq!(cam_count, 1);
 }
@@ -266,7 +267,7 @@ fn multiple_frame_simulation() {
 
     let entity = world.spawn();
     world
-        .insert(entity, Transform::from_translation(Vec3::ZERO))
+        .insert(entity, Transform::from_translation(Vec3::zeros()))
         .unwrap();
     world.insert(entity, GlobalTransform::IDENTITY).unwrap();
 
@@ -310,7 +311,7 @@ fn light_direction_from_transform() {
 
     // Create a directional light pointing down (-Y rotation)
     let sun = world.spawn();
-    let rotation = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_4); // 45° downward
+    let rotation = quat_from_rotation_x(-std::f32::consts::FRAC_PI_4); // 45° downward
     world
         .insert(sun, Transform::from_rotation(rotation))
         .unwrap();
@@ -335,7 +336,10 @@ fn light_direction_from_transform() {
         world.insert(e, Transform::from_translation(*pos)).unwrap();
         world.insert(e, GlobalTransform::IDENTITY).unwrap();
         world
-            .insert(e, PointLight::new(Vec3::ONE, 100.0).with_range(20.0))
+            .insert(
+                e,
+                PointLight::new(Vec3::new(1.0, 1.0, 1.0), 100.0).with_range(20.0),
+            )
             .unwrap();
         world
             .insert(e, Name::new(strings.intern(&format!("PointLight_{i}"))))

@@ -7,7 +7,7 @@
 
 use std::f32::consts::PI;
 
-use glam::Vec3;
+use redlilium_core::math::{Vec2, Vec3};
 
 use crate::{IRRADIANCE_SIZE, PREFILTER_SIZE};
 
@@ -21,11 +21,12 @@ pub fn compute_ibl_cpu(
 ) -> (Vec<u16>, Vec<Vec<u16>>) {
     // Sample direction from equirectangular map
     let sample_equirect = |dir: Vec3| -> Vec3 {
-        let inv_atan = glam::vec2(
+        let inv_atan = Vec2::new(
             0.5 * std::f32::consts::FRAC_1_PI,
             std::f32::consts::FRAC_1_PI,
         );
-        let uv = glam::vec2(dir.z.atan2(dir.x), dir.y.asin()) * inv_atan + 0.5;
+        let uv = Vec2::new(dir.z.atan2(dir.x), dir.y.asin()).component_mul(&inv_atan)
+            + Vec2::new(0.5, 0.5);
 
         let x = ((uv.x * hdr_width as f32) as u32).min(hdr_width - 1);
         let y = (((1.0 - uv.y) * hdr_height as f32) as u32).min(hdr_height - 1);
@@ -126,15 +127,15 @@ fn cubemap_dir(face: u32, x: u32, y: u32, size: u32) -> Vec3 {
 
 /// Compute irradiance for a given normal direction.
 fn compute_irradiance<F: Fn(Vec3) -> Vec3>(normal: Vec3, sample_env: &F) -> Vec3 {
-    let mut irradiance = Vec3::ZERO;
+    let mut irradiance = Vec3::zeros();
 
     let up = if normal.y.abs() < 0.999 {
-        Vec3::Y
+        Vec3::new(0.0, 1.0, 0.0)
     } else {
-        Vec3::X
+        Vec3::new(1.0, 0.0, 0.0)
     };
-    let right = normal.cross(up).normalize();
-    let up = normal.cross(right);
+    let right = normal.cross(&up).normalize();
+    let up = normal.cross(&right);
 
     let sample_delta = 0.05;
     let mut nr_samples = 0.0;
@@ -168,15 +169,15 @@ fn compute_prefiltered<F: Fn(Vec3) -> Vec3>(normal: Vec3, roughness: f32, sample
     let v = r;
 
     let sample_count = 128u32;
-    let mut prefiltered = Vec3::ZERO;
+    let mut prefiltered = Vec3::zeros();
     let mut total_weight = 0.0;
 
     for i in 0..sample_count {
         let xi = hammersley(i, sample_count);
         let h = importance_sample_ggx(xi, normal, roughness);
-        let l = (2.0 * v.dot(h) * h - v).normalize();
+        let l = (2.0 * v.dot(&h) * h - v).normalize();
 
-        let n_dot_l = normal.dot(l).max(0.0);
+        let n_dot_l = normal.dot(&l).max(0.0);
         if n_dot_l > 0.0 {
             prefiltered += sample_env(l) * n_dot_l;
             total_weight += n_dot_l;
@@ -187,8 +188,8 @@ fn compute_prefiltered<F: Fn(Vec3) -> Vec3>(normal: Vec3, roughness: f32, sample
 }
 
 /// Hammersley sequence for low-discrepancy sampling.
-fn hammersley(i: u32, n: u32) -> glam::Vec2 {
-    glam::vec2(i as f32 / n as f32, radical_inverse_vdc(i))
+fn hammersley(i: u32, n: u32) -> Vec2 {
+    Vec2::new(i as f32 / n as f32, radical_inverse_vdc(i))
 }
 
 fn radical_inverse_vdc(mut bits: u32) -> f32 {
@@ -201,7 +202,7 @@ fn radical_inverse_vdc(mut bits: u32) -> f32 {
 }
 
 /// GGX importance sampling.
-fn importance_sample_ggx(xi: glam::Vec2, n: Vec3, roughness: f32) -> Vec3 {
+fn importance_sample_ggx(xi: Vec2, n: Vec3, roughness: f32) -> Vec3 {
     let a = roughness * roughness;
 
     let phi = 2.0 * PI * xi.x;
@@ -210,9 +211,13 @@ fn importance_sample_ggx(xi: glam::Vec2, n: Vec3, roughness: f32) -> Vec3 {
 
     let h = Vec3::new(phi.cos() * sin_theta, phi.sin() * sin_theta, cos_theta);
 
-    let up = if n.z.abs() < 0.999 { Vec3::Z } else { Vec3::X };
-    let tangent = n.cross(up).normalize();
-    let bitangent = n.cross(tangent);
+    let up = if n.z.abs() < 0.999 {
+        Vec3::new(0.0, 0.0, 1.0)
+    } else {
+        Vec3::new(1.0, 0.0, 0.0)
+    };
+    let tangent = n.cross(&up).normalize();
+    let bitangent = n.cross(&tangent);
 
     (tangent * h.x + bitangent * h.y + n * h.z).normalize()
 }

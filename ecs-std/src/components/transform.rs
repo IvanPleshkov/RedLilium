@@ -1,13 +1,14 @@
-use glam::{Mat4, Quat, Vec3};
+#[cfg(test)]
+use redlilium_core::math::quat_from_rotation_y;
+use redlilium_core::math::{
+    Mat4, Quat, Vec3, mat4_from_scale_rotation_translation, quat_from_array, quat_to_array,
+};
 use redlilium_core::scene::NodeTransform;
 
-/// Local transform of an entity using glam types for runtime math.
+/// Local transform of an entity.
 ///
 /// Stores translation, rotation, and scale. Convertible to/from
 /// core's [`NodeTransform`] which uses plain `[f32; N]` arrays.
-///
-/// Padding fields (`_pad*`) are required for `bytemuck::Pod` because
-/// Quat has 16-byte SIMD alignment on x86_64.
 #[derive(
     Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable, redlilium_ecs::Component,
 )]
@@ -15,32 +16,26 @@ use redlilium_core::scene::NodeTransform;
 pub struct Transform {
     /// Translation in world units.
     pub translation: Vec3,
-    _pad0: f32,
-    /// Rotation as a unit quaternion.
+    /// Rotation as a quaternion.
     pub rotation: Quat,
     /// Non-uniform scale.
     pub scale: Vec3,
-    _pad1: f32,
 }
 
 impl Transform {
     /// Identity transform: origin position, no rotation, unit scale.
     pub const IDENTITY: Self = Self {
-        translation: Vec3::ZERO,
-        _pad0: 0.0,
-        rotation: Quat::IDENTITY,
-        scale: Vec3::ONE,
-        _pad1: 0.0,
+        translation: Vec3::new(0.0, 0.0, 0.0),
+        rotation: Quat::new(1.0, 0.0, 0.0, 0.0),
+        scale: Vec3::new(1.0, 1.0, 1.0),
     };
 
     /// Create from translation, rotation, and scale.
     pub fn new(translation: Vec3, rotation: Quat, scale: Vec3) -> Self {
         Self {
             translation,
-            _pad0: 0.0,
             rotation,
             scale,
-            _pad1: 0.0,
         }
     }
 
@@ -62,7 +57,7 @@ impl Transform {
 
     /// Compute the local 4x4 transform matrix (T * R * S).
     pub fn to_matrix(&self) -> Mat4 {
-        Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.translation)
+        mat4_from_scale_rotation_translation(self.scale, self.rotation, self.translation)
     }
 }
 
@@ -75,9 +70,9 @@ impl Default for Transform {
 impl From<NodeTransform> for Transform {
     fn from(t: NodeTransform) -> Self {
         Self::new(
-            Vec3::from(t.translation),
-            Quat::from_array(t.rotation),
-            Vec3::from(t.scale),
+            Vec3::new(t.translation[0], t.translation[1], t.translation[2]),
+            quat_from_array(t.rotation),
+            Vec3::new(t.scale[0], t.scale[1], t.scale[2]),
         )
     }
 }
@@ -85,9 +80,9 @@ impl From<NodeTransform> for Transform {
 impl From<Transform> for NodeTransform {
     fn from(t: Transform) -> Self {
         Self {
-            translation: t.translation.into(),
-            rotation: t.rotation.to_array(),
-            scale: t.scale.into(),
+            translation: [t.translation.x, t.translation.y, t.translation.z],
+            rotation: quat_to_array(t.rotation),
+            scale: [t.scale.x, t.scale.y, t.scale.z],
         }
     }
 }
@@ -105,26 +100,33 @@ pub struct GlobalTransform(pub Mat4);
 
 impl GlobalTransform {
     /// Identity global transform.
-    pub const IDENTITY: Self = Self(Mat4::IDENTITY);
+    #[rustfmt::skip]
+    pub const IDENTITY: Self = Self(Mat4::new(
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ));
 
     /// Extract the world-space translation.
     pub fn translation(&self) -> Vec3 {
-        self.0.w_axis.truncate()
+        Vec3::new(self.0[(0, 3)], self.0[(1, 3)], self.0[(2, 3)])
     }
 
     /// Get the forward direction vector (-Z in right-handed coordinates).
     pub fn forward(&self) -> Vec3 {
-        -self.0.z_axis.truncate().normalize()
+        let z = Vec3::new(self.0[(0, 2)], self.0[(1, 2)], self.0[(2, 2)]);
+        (-z).normalize()
     }
 
     /// Get the right direction vector (+X).
     pub fn right(&self) -> Vec3 {
-        self.0.x_axis.truncate().normalize()
+        Vec3::new(self.0[(0, 0)], self.0[(1, 0)], self.0[(2, 0)]).normalize()
     }
 
     /// Get the up direction vector (+Y).
     pub fn up(&self) -> Vec3 {
-        self.0.y_axis.truncate().normalize()
+        Vec3::new(self.0[(0, 1)], self.0[(1, 1)], self.0[(2, 1)]).normalize()
     }
 }
 
@@ -142,38 +144,38 @@ mod tests {
     #[test]
     fn identity_transform() {
         let t = Transform::IDENTITY;
-        assert_eq!(t.translation, Vec3::ZERO);
-        assert_eq!(t.rotation, Quat::IDENTITY);
-        assert_eq!(t.scale, Vec3::ONE);
+        assert_eq!(t.translation, Vec3::zeros());
+        assert_eq!(t.rotation, Quat::identity());
+        assert_eq!(t.scale, Vec3::new(1.0, 1.0, 1.0));
     }
 
     #[test]
     fn identity_matrix() {
         let t = Transform::IDENTITY;
-        assert_eq!(t.to_matrix(), Mat4::IDENTITY);
+        assert!((t.to_matrix() - Mat4::identity()).norm() < 1e-6);
     }
 
     #[test]
     fn from_translation() {
         let t = Transform::from_translation(Vec3::new(1.0, 2.0, 3.0));
         assert_eq!(t.translation, Vec3::new(1.0, 2.0, 3.0));
-        assert_eq!(t.rotation, Quat::IDENTITY);
-        assert_eq!(t.scale, Vec3::ONE);
+        assert_eq!(t.rotation, Quat::identity());
+        assert_eq!(t.scale, Vec3::new(1.0, 1.0, 1.0));
     }
 
     #[test]
     fn roundtrip_node_transform() {
         let original = Transform::new(
             Vec3::new(1.0, 2.0, 3.0),
-            Quat::from_rotation_y(FRAC_PI_2),
+            quat_from_rotation_y(FRAC_PI_2),
             Vec3::new(2.0, 2.0, 2.0),
         );
         let node: NodeTransform = original.into();
         let restored: Transform = node.into();
 
-        assert!((original.translation - restored.translation).length() < 1e-6);
-        assert!((original.rotation - restored.rotation).length() < 1e-6);
-        assert!((original.scale - restored.scale).length() < 1e-6);
+        assert!((original.translation - restored.translation).norm() < 1e-6);
+        assert!((original.rotation.coords - restored.rotation.coords).norm() < 1e-6);
+        assert!((original.scale - restored.scale).norm() < 1e-6);
     }
 
     #[test]
@@ -181,14 +183,14 @@ mod tests {
         let t = Transform::from_translation(Vec3::new(5.0, 10.0, 15.0));
         let mat = t.to_matrix();
         let gt = GlobalTransform(mat);
-        assert!((gt.translation() - Vec3::new(5.0, 10.0, 15.0)).length() < 1e-6);
+        assert!((gt.translation() - Vec3::new(5.0, 10.0, 15.0)).norm() < 1e-6);
     }
 
     #[test]
     fn global_transform_directions() {
         let gt = GlobalTransform::IDENTITY;
-        assert!((gt.forward() - Vec3::NEG_Z).length() < 1e-6);
-        assert!((gt.right() - Vec3::X).length() < 1e-6);
-        assert!((gt.up() - Vec3::Y).length() < 1e-6);
+        assert!((gt.forward() - Vec3::new(0.0, 0.0, -1.0)).norm() < 1e-6);
+        assert!((gt.right() - Vec3::new(1.0, 0.0, 0.0)).norm() < 1e-6);
+        assert!((gt.up() - Vec3::new(0.0, 1.0, 0.0)).norm() < 1e-6);
     }
 }

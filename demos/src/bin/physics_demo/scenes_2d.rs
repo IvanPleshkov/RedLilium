@@ -6,7 +6,7 @@
 use ecs_std::Transform;
 use ecs_std::physics::physics2d::{PhysicsWorld2D, RigidBody2DHandle};
 use ecs_std::physics::rapier2d::prelude::*;
-use glam::Vec3;
+use redlilium_core::math;
 use redlilium_ecs::World;
 
 /// Trait for a 2D physics demo scene.
@@ -31,9 +31,9 @@ fn spawn_physics_entity(
     let t = pos.translation;
     let angle = pos.rotation.angle() as f32;
     let transform = Transform::new(
-        Vec3::new(t.x as f32, t.y as f32, 0.0),
-        glam::Quat::from_rotation_z(angle),
-        Vec3::ONE,
+        math::Vec3::new(t.x as f32, t.y as f32, 0.0),
+        math::quat_from_rotation_z(angle),
+        math::Vec3::new(1.0, 1.0, 1.0),
     );
 
     let entity = world.spawn();
@@ -155,7 +155,7 @@ impl PhysicsScene2D for JointsScene2D {
             let _ = world.insert(entity, RigidBody2DHandle(body_handle));
             let _ = world.insert(
                 entity,
-                Transform::from_translation(Vec3::new(t.x as f32, t.y as f32, 0.0)),
+                Transform::from_translation(math::Vec3::new(t.x as f32, t.y as f32, 0.0)),
             );
             let _ = world.insert(entity, ecs_std::GlobalTransform::IDENTITY);
 
@@ -340,9 +340,9 @@ impl PhysicsScene2D for RagdollScene2D {
             let _ = world.insert(
                 entity,
                 Transform::new(
-                    Vec3::new(t.x as f32, t.y as f32, 0.0),
-                    glam::Quat::from_rotation_z(angle),
-                    Vec3::ONE,
+                    math::Vec3::new(t.x as f32, t.y as f32, 0.0),
+                    math::quat_from_rotation_z(angle),
+                    math::Vec3::new(1.0, 1.0, 1.0),
                 ),
             );
             let _ = world.insert(entity, ecs_std::GlobalTransform::IDENTITY);
@@ -411,9 +411,9 @@ impl PhysicsScene2D for VehicleScene2D {
             let _ = world.insert(
                 entity,
                 Transform::new(
-                    Vec3::new(t.x as f32, t.y as f32, 0.0),
-                    glam::Quat::from_rotation_z(angle),
-                    Vec3::ONE,
+                    math::Vec3::new(t.x as f32, t.y as f32, 0.0),
+                    math::quat_from_rotation_z(angle),
+                    math::Vec3::new(1.0, 1.0, 1.0),
                 ),
             );
             let _ = world.insert(entity, ecs_std::GlobalTransform::IDENTITY);

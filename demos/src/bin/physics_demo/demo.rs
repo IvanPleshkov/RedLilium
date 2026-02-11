@@ -4,6 +4,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use redlilium_app::{AppContext, AppHandler, DrawContext};
+use redlilium_core::math::{Vec3, look_at_rh, perspective_rh};
 use redlilium_core::profiling::{profile_function, profile_scope};
 use redlilium_graphics::{
     ColorAttachment, DepthStencilAttachment, FrameSchedule, GraphicsPass, RenderTarget,
@@ -24,7 +25,7 @@ use crate::ui::{Dimension, PhysicsUi};
 // ---------------------------------------------------------------------------
 
 struct OrbitCamera {
-    target: glam::Vec3,
+    target: Vec3,
     distance: f32,
     azimuth: f32,
     elevation: f32,
@@ -33,7 +34,7 @@ struct OrbitCamera {
 impl OrbitCamera {
     fn new() -> Self {
         Self {
-            target: glam::Vec3::new(0.0, 3.0, 0.0),
+            target: Vec3::new(0.0, 3.0, 0.0),
             distance: 20.0,
             azimuth: 0.5,
             elevation: 0.4,
@@ -49,11 +50,11 @@ impl OrbitCamera {
         self.distance = (self.distance - delta).clamp(2.0, 60.0);
     }
 
-    fn position(&self) -> glam::Vec3 {
+    fn position(&self) -> Vec3 {
         let x = self.distance * self.elevation.cos() * self.azimuth.sin();
         let y = self.distance * self.elevation.sin();
         let z = self.distance * self.elevation.cos() * self.azimuth.cos();
-        self.target + glam::Vec3::new(x, y, z)
+        self.target + Vec3::new(x, y, z)
     }
 }
 
@@ -268,8 +269,9 @@ impl AppHandler for PhysicsDemoApp {
             .unwrap_or(Dimension::ThreeD);
         let camera_pos = self.camera.position();
         let aspect = ctx.width() as f32 / ctx.height().max(1) as f32;
-        let view = glam::Mat4::look_at_rh(camera_pos, self.camera.target, glam::Vec3::Y);
-        let proj = glam::Mat4::perspective_rh(std::f32::consts::FRAC_PI_4, aspect, 0.1, 200.0);
+        let up = Vec3::new(0.0, 1.0, 0.0);
+        let view = look_at_rh(&camera_pos, &self.camera.target, &up);
+        let proj = perspective_rh(std::f32::consts::FRAC_PI_4, aspect, 0.1, 200.0);
         let view_proj = proj * view;
 
         if let (Some(renderer), Some(world)) = (&mut self.renderer, &self.world) {

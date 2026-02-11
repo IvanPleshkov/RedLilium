@@ -9,7 +9,10 @@ use std::time::Duration;
 use ecs_std::{
     Camera, GlobalTransform, Transform, UpdateCameraMatrices, UpdateGlobalTransforms, Visibility,
 };
-use glam::{Mat4, Quat, Vec3};
+use redlilium_core::math::{
+    Mat4, Quat, Vec3, look_at_rh, mat4_from_translation, mat4_to_cols_array_2d, perspective_rh,
+    to_scale_rotation_translation,
+};
 use redlilium_ecs::{EcsRunner, Entity, SystemsContainer, World};
 
 use crate::uniforms::SphereInstance;
@@ -50,8 +53,8 @@ impl EcsScene {
                 8.0 * 0.4_f32.sin(),
                 8.0 * 0.4_f32.cos() * 0.5_f32.cos(),
             ),
-            Quat::IDENTITY,
-            Vec3::ONE,
+            Quat::identity(),
+            Vec3::new(1.0, 1.0, 1.0),
         );
         world
             .insert(camera_entity, camera_transform)
@@ -121,9 +124,9 @@ impl EcsScene {
 
     /// Updates the camera entity's transform from orbit camera parameters.
     pub fn update_camera_transform(&mut self, position: Vec3, target: Vec3) {
-        let view_matrix = Mat4::look_at_rh(position, target, Vec3::Y);
-        let camera_matrix = view_matrix.inverse();
-        let (_, rotation, translation) = camera_matrix.to_scale_rotation_translation();
+        let view_matrix = look_at_rh(&position, &target, &Vec3::new(0.0, 1.0, 0.0));
+        let camera_matrix = view_matrix.try_inverse().unwrap();
+        let (_, rotation, translation) = to_scale_rotation_translation(&camera_matrix);
 
         if let Some(transform) = self.world.get_mut::<Transform>(self.camera_entity) {
             transform.translation = translation;
@@ -134,7 +137,7 @@ impl EcsScene {
     /// Updates the camera's projection matrix (e.g., on resize).
     pub fn update_camera_projection(&mut self, aspect_ratio: f32) {
         if let Some(camera) = self.world.get_mut::<Camera>(self.camera_entity) {
-            camera.projection_matrix = Mat4::perspective_rh(PI / 4.0, aspect_ratio, 0.1, 100.0);
+            camera.projection_matrix = perspective_rh(PI / 4.0, aspect_ratio, 0.1, 100.0);
         }
     }
 
@@ -174,7 +177,7 @@ impl EcsScene {
         for (idx, sphere) in spheres.iter() {
             if let Some(global) = globals.get(idx) {
                 instances.push(SphereInstance {
-                    model: global.0.to_cols_array_2d(),
+                    model: mat4_to_cols_array_2d(&global.0),
                     base_color: sphere.base_color,
                     metallic_roughness: [sphere.metallic, sphere.roughness, 0.0, 0.0],
                 });
@@ -211,7 +214,7 @@ impl EcsScene {
                 transform.translation = Vec3::new(x, 0.0, z);
             }
             if let Some(global) = globals.get_mut(idx) {
-                global.0 = Mat4::from_translation(Vec3::new(x, 0.0, z));
+                global.0 = mat4_from_translation(Vec3::new(x, 0.0, z));
             }
         }
     }

@@ -6,7 +6,7 @@
 use ecs_std::Transform;
 use ecs_std::physics::physics3d::{PhysicsWorld3D, RigidBody3DHandle};
 use ecs_std::physics::rapier3d::prelude::*;
-use glam::Vec3;
+use redlilium_core::math;
 use redlilium_ecs::World;
 
 /// Trait for a 3D physics demo scene.
@@ -36,9 +36,9 @@ fn spawn_physics_entity(
     let t = pos.translation;
     let r = pos.rotation;
     let transform = Transform::new(
-        Vec3::new(t.x as f32, t.y as f32, t.z as f32),
-        glam::Quat::from_xyzw(r.x as f32, r.y as f32, r.z as f32, r.w as f32),
-        Vec3::ONE,
+        math::Vec3::new(t.x as f32, t.y as f32, t.z as f32),
+        math::quat_from_xyzw(r.x as f32, r.y as f32, r.z as f32, r.w as f32),
+        math::Vec3::new(1.0, 1.0, 1.0),
     );
 
     let entity = world.spawn();
@@ -174,7 +174,9 @@ impl PhysicsScene3D for JointsScene {
                 let _ = world.insert(entity, RigidBody3DHandle(body_handle));
                 let _ = world.insert(
                     entity,
-                    Transform::from_translation(Vec3::new(t.x as f32, t.y as f32, t.z as f32)),
+                    Transform::from_translation(math::Vec3::new(
+                        t.x as f32, t.y as f32, t.z as f32,
+                    )),
                 );
                 let _ = world.insert(entity, ecs_std::GlobalTransform::IDENTITY);
 
@@ -428,9 +430,9 @@ impl PhysicsScene3D for RagdollScene {
             let _ = world.insert(
                 entity,
                 Transform::new(
-                    Vec3::new(t.x as f32, t.y as f32, t.z as f32),
-                    glam::Quat::from_xyzw(r.x as f32, r.y as f32, r.z as f32, r.w as f32),
-                    Vec3::ONE,
+                    math::Vec3::new(t.x as f32, t.y as f32, t.z as f32),
+                    math::quat_from_xyzw(r.x as f32, r.y as f32, r.z as f32, r.w as f32),
+                    math::Vec3::new(1.0, 1.0, 1.0),
                 ),
             );
             let _ = world.insert(entity, ecs_std::GlobalTransform::IDENTITY);
@@ -508,9 +510,9 @@ impl PhysicsScene3D for VehicleScene {
             let _ = world.insert(
                 entity,
                 Transform::new(
-                    Vec3::new(t.x as f32, t.y as f32, t.z as f32),
-                    glam::Quat::from_xyzw(r.x as f32, r.y as f32, r.z as f32, r.w as f32),
-                    Vec3::ONE,
+                    math::Vec3::new(t.x as f32, t.y as f32, t.z as f32),
+                    math::quat_from_xyzw(r.x as f32, r.y as f32, r.z as f32, r.w as f32),
+                    math::Vec3::new(1.0, 1.0, 1.0),
                 ),
             );
             let _ = world.insert(entity, ecs_std::GlobalTransform::IDENTITY);

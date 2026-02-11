@@ -9,7 +9,7 @@ use redlilium_graphics::{
     ShaderSource, ShaderStage, ShaderStageFlags, TextureFormat, VertexBufferLayout, VertexLayout,
 };
 
-use glam::{Mat4, Vec3};
+use redlilium_core::math::{Mat4, Vec3, mat4_to_cols_array_2d};
 
 use crate::ibl_textures::IblTextures;
 use crate::uniforms::SkyboxUniforms;
@@ -143,11 +143,11 @@ impl SkyboxPass {
     ) {
         profile_scope!("SkyboxPass::update_uniforms");
         let view_proj = proj * view;
-        let inv_view_proj = view_proj.inverse();
+        let inv_view_proj = view_proj.try_inverse().unwrap();
 
         let uniforms = SkyboxUniforms {
-            inv_view_proj: inv_view_proj.to_cols_array_2d(),
-            camera_pos: camera_pos.extend(1.0).to_array(),
+            inv_view_proj: mat4_to_cols_array_2d(&inv_view_proj),
+            camera_pos: [camera_pos.x, camera_pos.y, camera_pos.z, 1.0],
             mip_level: self.mip_level,
             _pad0: [0.0; 3],
             _pad1: [0.0; 4],

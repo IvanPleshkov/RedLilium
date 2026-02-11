@@ -18,8 +18,8 @@
 /// - **Origin**: Top-left corner
 ///
 /// This means projection matrices should be built for `[0, 1]` depth range.
-/// When using libraries like `glam` or `nalgebra`, use the "right-handed Z-up
-/// with depth 0 to 1" projection functions.
+/// When using `nalgebra`, use the "right-handed Z-up with depth 0 to 1"
+/// projection functions.
 ///
 /// # Example
 ///
@@ -37,10 +37,10 @@
 /// When building projection matrices, use functions designed for `[0, 1]` depth:
 ///
 /// ```ignore
-/// // glam example:
-/// let proj = glam::Mat4::perspective_rh(fov_y, aspect, near, far);
+/// // nalgebra example:
+/// let proj = redlilium_core::math::perspective_rh(fov_y, aspect, near, far);
 ///
-/// // Note: glam's perspective_rh uses [0, 1] depth range by default
+/// // Note: this uses [0, 1] depth range (wgpu/Vulkan convention)
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Viewport {

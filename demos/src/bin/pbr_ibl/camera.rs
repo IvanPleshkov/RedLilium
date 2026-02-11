@@ -5,7 +5,7 @@
 
 use std::f32::consts::PI;
 
-use glam::Vec3;
+use redlilium_core::math::Vec3;
 
 /// Orbit camera controller that tracks azimuth, elevation, and distance
 /// around a target point. The resulting position is fed into the ECS
@@ -20,7 +20,7 @@ pub struct OrbitCamera {
 impl OrbitCamera {
     pub fn new() -> Self {
         Self {
-            target: Vec3::ZERO,
+            target: Vec3::zeros(),
             distance: 8.0,
             azimuth: 0.5,
             elevation: 0.4,

@@ -1,57 +1,60 @@
-//! Conversion helpers between `glam` types and `nalgebra` types.
+//! Conversion helpers between f32 rendering types and physics-precision types.
 //!
 //! Also includes utilities for extracting physics collider data from [`CpuMesh`].
 
-use redlilium_core::math::Real;
+use redlilium_core::math::{Quat, Real, Vec2, Vec3, quat_from_xyzw, quat_to_array};
 
-/// Converts a `glam::Vec3` to a `nalgebra::Vector3<Real>`.
-pub fn vec3_to_na(v: glam::Vec3) -> redlilium_core::math::Vector3 {
+/// Converts a rendering `Vec3` (f32) to a physics `Vector3<Real>`.
+pub fn vec3_to_na(v: Vec3) -> redlilium_core::math::Vector3 {
     redlilium_core::math::Vector3::new(v.x as Real, v.y as Real, v.z as Real)
 }
 
-/// Converts a `nalgebra::Vector3<Real>` to a `glam::Vec3`.
-pub fn vec3_from_na(v: &redlilium_core::math::Vector3) -> glam::Vec3 {
-    glam::Vec3::new(v.x as f32, v.y as f32, v.z as f32)
+/// Converts a physics `Vector3<Real>` to a rendering `Vec3` (f32).
+pub fn vec3_from_na(v: &redlilium_core::math::Vector3) -> Vec3 {
+    Vec3::new(v.x as f32, v.y as f32, v.z as f32)
 }
 
-/// Converts a `glam::Vec3` to a `nalgebra::Point3<Real>`.
-pub fn point3_to_na(v: glam::Vec3) -> redlilium_core::math::Point3 {
+/// Converts a rendering `Vec3` (f32) to a physics `Point3<Real>`.
+pub fn point3_to_na(v: Vec3) -> redlilium_core::math::Point3 {
     redlilium_core::math::Point3::new(v.x as Real, v.y as Real, v.z as Real)
 }
 
-/// Converts a `nalgebra::Point3<Real>` to a `glam::Vec3`.
-pub fn point3_from_na(p: &redlilium_core::math::Point3) -> glam::Vec3 {
-    glam::Vec3::new(p.x as f32, p.y as f32, p.z as f32)
+/// Converts a physics `Point3<Real>` to a rendering `Vec3` (f32).
+pub fn point3_from_na(p: &redlilium_core::math::Point3) -> Vec3 {
+    Vec3::new(p.x as f32, p.y as f32, p.z as f32)
 }
 
-/// Converts a `glam::Vec2` to a `nalgebra::Vector2<Real>`.
-pub fn vec2_to_na(v: glam::Vec2) -> redlilium_core::math::Vector2 {
+/// Converts a rendering `Vec2` (f32) to a physics `Vector2<Real>`.
+pub fn vec2_to_na(v: Vec2) -> redlilium_core::math::Vector2 {
     redlilium_core::math::Vector2::new(v.x as Real, v.y as Real)
 }
 
-/// Converts a `nalgebra::Vector2<Real>` to a `glam::Vec2`.
-pub fn vec2_from_na(v: &redlilium_core::math::Vector2) -> glam::Vec2 {
-    glam::Vec2::new(v.x as f32, v.y as f32)
+/// Converts a physics `Vector2<Real>` to a rendering `Vec2` (f32).
+pub fn vec2_from_na(v: &redlilium_core::math::Vector2) -> Vec2 {
+    Vec2::new(v.x as f32, v.y as f32)
 }
 
-/// Converts a `glam::Quat` to a `nalgebra::UnitQuaternion<Real>`.
-pub fn quat_to_na(q: glam::Quat) -> redlilium_core::math::UnitQuaternion {
+/// Converts a rendering `Quat` (f32) to a physics `UnitQuaternion<Real>`.
+pub fn quat_to_na(q: Quat) -> redlilium_core::math::UnitQuaternion {
     use redlilium_core::math::nalgebra;
-    let quat = nalgebra::Quaternion::new(q.w as Real, q.x as Real, q.y as Real, q.z as Real);
+    let arr = quat_to_array(q);
+    let quat = nalgebra::Quaternion::new(
+        arr[3] as Real,
+        arr[0] as Real,
+        arr[1] as Real,
+        arr[2] as Real,
+    );
     redlilium_core::math::UnitQuaternion::new_unchecked(quat)
 }
 
-/// Converts a `nalgebra::UnitQuaternion<Real>` to a `glam::Quat`.
-pub fn quat_from_na(q: &redlilium_core::math::UnitQuaternion) -> glam::Quat {
+/// Converts a physics `UnitQuaternion<Real>` to a rendering `Quat` (f32).
+pub fn quat_from_na(q: &redlilium_core::math::UnitQuaternion) -> Quat {
     let q = q.quaternion();
-    glam::Quat::from_xyzw(q.i as f32, q.j as f32, q.k as f32, q.w as f32)
+    quat_from_xyzw(q.i as f32, q.j as f32, q.k as f32, q.w as f32)
 }
 
-/// Converts a `glam::Vec3` translation and `glam::Quat` rotation to a `nalgebra::Isometry3<Real>`.
-pub fn isometry3_to_na(
-    translation: glam::Vec3,
-    rotation: glam::Quat,
-) -> redlilium_core::math::Isometry3 {
+/// Converts a rendering `Vec3` + `Quat` to a physics `Isometry3<Real>`.
+pub fn isometry3_to_na(translation: Vec3, rotation: Quat) -> redlilium_core::math::Isometry3 {
     redlilium_core::math::Isometry3::from_parts(
         redlilium_core::math::Translation3::new(
             translation.x as Real,
@@ -62,26 +65,26 @@ pub fn isometry3_to_na(
     )
 }
 
-/// Extracts position and rotation from a `nalgebra::Isometry3<Real>` as `(glam::Vec3, glam::Quat)`.
-pub fn isometry3_from_na(iso: &redlilium_core::math::Isometry3) -> (glam::Vec3, glam::Quat) {
+/// Extracts position and rotation from a physics `Isometry3<Real>` as `(Vec3, Quat)`.
+pub fn isometry3_from_na(iso: &redlilium_core::math::Isometry3) -> (Vec3, Quat) {
     let t = &iso.translation;
-    let pos = glam::Vec3::new(t.x as f32, t.y as f32, t.z as f32);
+    let pos = Vec3::new(t.x as f32, t.y as f32, t.z as f32);
     let rot = quat_from_na(&iso.rotation);
     (pos, rot)
 }
 
-/// Converts a `glam::Vec2` translation and angle to a `nalgebra::Isometry2<Real>`.
-pub fn isometry2_to_na(translation: glam::Vec2, angle: f32) -> redlilium_core::math::Isometry2 {
+/// Converts a rendering `Vec2` + angle to a physics `Isometry2<Real>`.
+pub fn isometry2_to_na(translation: Vec2, angle: f32) -> redlilium_core::math::Isometry2 {
     redlilium_core::math::Isometry2::new(
         redlilium_core::math::Vector2::new(translation.x as Real, translation.y as Real),
         angle as Real,
     )
 }
 
-/// Extracts position and angle from a `nalgebra::Isometry2<Real>` as `(glam::Vec2, f32)`.
-pub fn isometry2_from_na(iso: &redlilium_core::math::Isometry2) -> (glam::Vec2, f32) {
+/// Extracts position and angle from a physics `Isometry2<Real>` as `(Vec2, f32)`.
+pub fn isometry2_from_na(iso: &redlilium_core::math::Isometry2) -> (Vec2, f32) {
     let t = &iso.translation;
-    let pos = glam::Vec2::new(t.x as f32, t.y as f32);
+    let pos = Vec2::new(t.x as f32, t.y as f32);
     let angle = iso.rotation.angle() as f32;
     (pos, angle)
 }
@@ -90,13 +93,9 @@ pub fn isometry2_from_na(iso: &redlilium_core::math::Isometry2) -> (glam::Vec2, 
 /// suitable for creating a trimesh collider.
 ///
 /// Returns `None` if the mesh has no position data or no index buffer.
-///
-/// Positions are extracted from the first vertex buffer using the mesh layout's
-/// position attribute offset and stride. Returned as `glam::Vec3` — convert to
-/// the rapier `Vector` type as needed.
 pub fn extract_trimesh_data(
     mesh: &redlilium_core::mesh::CpuMesh,
-) -> Option<(Vec<glam::Vec3>, Vec<[u32; 3]>)> {
+) -> Option<(Vec<Vec3>, Vec<[u32; 3]>)> {
     use redlilium_core::mesh::{IndexFormat, VertexAttributeSemantic};
 
     let layout = mesh.layout();
@@ -142,7 +141,7 @@ pub fn extract_trimesh_data(
             vertex_data[base + 10],
             vertex_data[base + 11],
         ]);
-        vertices.push(glam::Vec3::new(x, y, z));
+        vertices.push(Vec3::new(x, y, z));
     }
 
     // Extract triangle indices
@@ -186,40 +185,41 @@ pub fn extract_trimesh_data(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use redlilium_core::math::quat_from_rotation_y;
 
     #[test]
     fn vec3_roundtrip() {
-        let v = glam::Vec3::new(1.0, 2.0, 3.0);
+        let v = Vec3::new(1.0, 2.0, 3.0);
         let na = vec3_to_na(v);
         let back = vec3_from_na(&na);
-        assert!((v - back).length() < 1e-6);
+        assert!((v - back).norm() < 1e-6);
     }
 
     #[test]
     fn quat_roundtrip() {
-        let q = glam::Quat::from_rotation_y(1.0);
+        let q = quat_from_rotation_y(1.0);
         let na = quat_to_na(q);
         let back = quat_from_na(&na);
-        assert!((q - back).length() < 1e-5);
+        assert!((q.coords - back.coords).norm() < 1e-5);
     }
 
     #[test]
     fn isometry3_roundtrip() {
-        let pos = glam::Vec3::new(1.0, 2.0, 3.0);
-        let rot = glam::Quat::from_rotation_z(0.5);
+        let pos = Vec3::new(1.0, 2.0, 3.0);
+        let rot = redlilium_core::math::quat_from_rotation_z(0.5);
         let iso = isometry3_to_na(pos, rot);
         let (pos2, rot2) = isometry3_from_na(&iso);
-        assert!((pos - pos2).length() < 1e-5);
-        assert!((rot - rot2).length() < 1e-5);
+        assert!((pos - pos2).norm() < 1e-5);
+        assert!((rot.coords - rot2.coords).norm() < 1e-5);
     }
 
     #[test]
     fn isometry2_roundtrip() {
-        let pos = glam::Vec2::new(1.0, 2.0);
+        let pos = Vec2::new(1.0, 2.0);
         let angle = 0.7f32;
         let iso = isometry2_to_na(pos, angle);
         let (pos2, angle2) = isometry2_from_na(&iso);
-        assert!((pos - pos2).length() < 1e-5);
+        assert!((pos - pos2).norm() < 1e-5);
         assert!((angle - angle2).abs() < 1e-5);
     }
 }

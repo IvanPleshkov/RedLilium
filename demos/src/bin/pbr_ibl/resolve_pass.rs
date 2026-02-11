@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use glam::Vec3;
+use redlilium_core::math::Vec3;
 use redlilium_core::profiling::profile_scope;
 use redlilium_graphics::{
     BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferDescriptor, BufferUsage,
@@ -209,7 +209,7 @@ impl ResolvePass {
         height: u32,
     ) {
         let uniforms = ResolveUniforms {
-            camera_pos: camera_pos.extend(1.0).to_array(),
+            camera_pos: [camera_pos.x, camera_pos.y, camera_pos.z, 1.0],
             screen_size: [
                 width as f32,
                 height as f32,

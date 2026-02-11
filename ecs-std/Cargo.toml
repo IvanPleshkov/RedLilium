@@ -17,7 +17,6 @@ physics = ["physics-3d", "physics-2d"]
 [dependencies]
 redlilium-core = { path = "../core" }
 redlilium-ecs = { path = "../ecs" }
-glam = { workspace = true }
 bytemuck = { workspace = true }
 log.workspace = true
 

@@ -711,7 +711,6 @@ name = "ecs-std"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "glam 0.30.10",
  "log",
  "rapier2d",
  "rapier2d-f64",
@@ -1119,15 +1118,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19fc433e8437a212d1b6f1e68c7824af3aed907da60afa994e7f542d18d12aa9"
 dependencies = [
  "approx",
- "bytemuck",
  "libm",
 ]
-
-[[package]]
-name = "glam"
-version = "0.31.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74a4d85559e2637d3d839438b5b3d75c31e655276f9544d72475c36b92fabbed"
 
 [[package]]
 name = "glamx"
@@ -1791,6 +1783,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "26aecdf64b707efd1310e3544d709c5c0ac61c13756046aaaba41be5c4f66a3b"
 dependencies = [
  "approx",
+ "bytemuck",
  "matrixmultiply",
  "nalgebra-macros 0.2.2",
  "num-complex",
@@ -1915,6 +1908,7 @@ version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73f88a1307638156682bada9d7604135552957b7818057dcef22705b4d509495"
 dependencies = [
+ "bytemuck",
  "num-traits",
 ]
 
@@ -2815,7 +2809,6 @@ dependencies = [
  "console_log",
  "ecs-std",
  "env_logger",
- "glam 0.30.10",
  "half",
  "image",
  "log",
@@ -2851,7 +2844,6 @@ dependencies = [
  "bytemuck",
  "egui",
  "env_logger",
- "glam 0.31.0",
  "gpu-allocator",
  "log",
  "naga 24.0.0",

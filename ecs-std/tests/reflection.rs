@@ -1,4 +1,4 @@
-use glam::{Mat4, Quat, Vec3};
+use redlilium_core::math::{Mat4, Quat, Vec3, mat4_from_translation, quat_from_rotation_y};
 use redlilium_ecs::{Component, FieldKind, StringId};
 
 use ecs_std::components::*;
@@ -31,7 +31,11 @@ fn transform_field_infos() {
 
 #[test]
 fn transform_field_read() {
-    let t = Transform::new(Vec3::new(1.0, 2.0, 3.0), Quat::IDENTITY, Vec3::ONE);
+    let t = Transform::new(
+        Vec3::new(1.0, 2.0, 3.0),
+        Quat::identity(),
+        Vec3::new(1.0, 1.0, 1.0),
+    );
 
     let translation = t
         .field("translation")
@@ -41,7 +45,7 @@ fn transform_field_read() {
     assert_eq!(*translation, Vec3::new(1.0, 2.0, 3.0));
 
     let scale = t.field("scale").unwrap().downcast_ref::<Vec3>().unwrap();
-    assert_eq!(*scale, Vec3::ONE);
+    assert_eq!(*scale, Vec3::new(1.0, 1.0, 1.0));
 
     assert!(t.field("nonexistent").is_none());
 }
@@ -70,21 +74,21 @@ fn global_transform_component_name() {
 
 #[test]
 fn global_transform_tuple_field() {
-    let gt = GlobalTransform(Mat4::from_translation(Vec3::new(5.0, 0.0, 0.0)));
+    let gt = GlobalTransform(mat4_from_translation(Vec3::new(5.0, 0.0, 0.0)));
     let infos = gt.field_infos();
     assert_eq!(infos.len(), 1);
     assert_eq!(infos[0].name, "0");
     assert_eq!(infos[0].kind, FieldKind::Mat4);
 
     let mat = gt.field("0").unwrap().downcast_ref::<Mat4>().unwrap();
-    assert_eq!(mat.w_axis.x, 5.0);
+    assert_eq!(mat[(0, 3)], 5.0);
 }
 
 #[test]
 fn global_transform_field_write() {
     let mut gt = GlobalTransform::IDENTITY;
     *gt.field_mut("0").unwrap().downcast_mut::<Mat4>().unwrap() =
-        Mat4::from_translation(Vec3::new(42.0, 0.0, 0.0));
+        mat4_from_translation(Vec3::new(42.0, 0.0, 0.0));
     assert_eq!(gt.translation(), Vec3::new(42.0, 0.0, 0.0));
 }
 
@@ -111,13 +115,13 @@ fn camera_read_view_matrix() {
         .unwrap()
         .downcast_ref::<Mat4>()
         .unwrap();
-    assert_eq!(*view, Mat4::IDENTITY);
+    assert_eq!(*view, Mat4::identity());
 }
 
 #[test]
 fn camera_write_view_matrix() {
     let mut cam = Camera::perspective(1.0, 16.0 / 9.0, 0.1, 100.0);
-    let new_view = Mat4::from_translation(Vec3::new(1.0, 2.0, 3.0));
+    let new_view = mat4_from_translation(Vec3::new(1.0, 2.0, 3.0));
     *cam.field_mut("view_matrix")
         .unwrap()
         .downcast_mut::<Mat4>()
@@ -197,7 +201,7 @@ fn directional_light_reflection() {
 
 #[test]
 fn point_light_reflection() {
-    let light = PointLight::new(Vec3::ONE, 50.0).with_range(25.0);
+    let light = PointLight::new(Vec3::new(1.0, 1.0, 1.0), 50.0).with_range(25.0);
     assert_eq!(light.component_name(), "PointLight");
 
     let infos = light.field_infos();
@@ -243,8 +247,8 @@ fn spot_light_field_write() {
 fn enumerate_all_fields_dynamically() {
     let t = Transform::new(
         Vec3::new(1.0, 2.0, 3.0),
-        Quat::from_rotation_y(0.5),
-        Vec3::splat(2.0),
+        quat_from_rotation_y(0.5),
+        Vec3::new(2.0, 2.0, 2.0),
     );
 
     // An editor would do this to build a property panel
@@ -305,8 +309,8 @@ fn all_components_are_pod() {
 fn transform_pod_roundtrip() {
     let original = Transform::new(
         Vec3::new(1.0, 2.0, 3.0),
-        Quat::from_rotation_y(0.5),
-        Vec3::splat(2.0),
+        quat_from_rotation_y(0.5),
+        Vec3::new(2.0, 2.0, 2.0),
     );
     let bytes = bytemuck::bytes_of(&original);
     let restored: &Transform = bytemuck::from_bytes(bytes);

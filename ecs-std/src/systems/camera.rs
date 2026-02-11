@@ -31,7 +31,10 @@ fn update_camera_matrices(globals: &Ref<GlobalTransform>, cameras: &mut RefMut<C
 
     for (idx, camera) in cameras.iter_mut() {
         if let Some(global) = globals.get(idx) {
-            camera.view_matrix = global.0.inverse();
+            camera.view_matrix = global
+                .0
+                .try_inverse()
+                .unwrap_or(redlilium_core::math::Mat4::identity());
         }
     }
 }
@@ -40,7 +43,7 @@ fn update_camera_matrices(globals: &Ref<GlobalTransform>, cameras: &mut RefMut<C
 mod tests {
     use super::*;
     use crate::components::Transform;
-    use glam::{Mat4, Vec3};
+    use redlilium_core::math::{Mat4, Vec3, mat4_from_translation};
     use redlilium_ecs::World;
 
     #[test]
@@ -65,9 +68,9 @@ mod tests {
         let cameras = world.read::<Camera>().unwrap();
         let cam = cameras.get(e.index()).unwrap();
 
-        let expected_view = t.to_matrix().inverse();
-        assert!((cam.view_matrix - expected_view).abs_diff_eq(Mat4::ZERO, 1e-5));
-        assert_ne!(cam.projection_matrix, Mat4::IDENTITY);
+        let expected_view = t.to_matrix().try_inverse().unwrap();
+        assert!((cam.view_matrix - expected_view).norm() < 1e-5);
+        assert_ne!(cam.projection_matrix, Mat4::identity());
     }
 
     #[test]
@@ -89,7 +92,7 @@ mod tests {
 
         let cameras = world.read::<Camera>().unwrap();
         let cam = cameras.get(e.index()).unwrap();
-        assert_eq!(cam.view_matrix, Mat4::IDENTITY);
+        assert_eq!(cam.view_matrix, Mat4::identity());
     }
 
     #[test]
@@ -104,7 +107,7 @@ mod tests {
         world
             .insert(
                 e,
-                GlobalTransform(Mat4::from_translation(Vec3::new(1.0, 2.0, 3.0))),
+                GlobalTransform(mat4_from_translation(Vec3::new(1.0, 2.0, 3.0))),
             )
             .unwrap();
         world.insert(e, cam_original).unwrap();

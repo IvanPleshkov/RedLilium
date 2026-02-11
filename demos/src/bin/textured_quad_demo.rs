@@ -12,8 +12,8 @@
 
 use std::sync::Arc;
 
-use glam::{Mat4, Vec3};
 use redlilium_app::{App, AppArgs, AppContext, AppHandler, DefaultAppArgs, DrawContext};
+use redlilium_core::math::{Mat4, Vec3, look_at_rh, mat4_to_cols_array_2d, orthographic_rh};
 use redlilium_core::mesh::generators;
 use redlilium_graphics::{
     AddressMode, BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferDescriptor,
@@ -320,18 +320,21 @@ impl TexturedQuadDemo {
 
         let proj = if aspect > 1.0 {
             // Wider than tall
-            Mat4::orthographic_rh(-scale * aspect, scale * aspect, -scale, scale, -1.0, 1.0)
+            orthographic_rh(-scale * aspect, scale * aspect, -scale, scale, -1.0, 1.0)
         } else {
             // Taller than wide
-            Mat4::orthographic_rh(-scale, scale, -scale / aspect, scale / aspect, -1.0, 1.0)
+            orthographic_rh(-scale, scale, -scale / aspect, scale / aspect, -1.0, 1.0)
         };
 
-        let view = Mat4::look_at_rh(Vec3::new(0.0, 0.0, 1.0), Vec3::ZERO, Vec3::Y);
-        let model = Mat4::IDENTITY;
+        let eye = Vec3::new(0.0, 0.0, 1.0);
+        let target = Vec3::zeros();
+        let up = Vec3::new(0.0, 1.0, 0.0);
+        let view = look_at_rh(&eye, &target, &up);
+        let model = Mat4::identity();
         let mvp = proj * view * model;
 
         let uniforms = Uniforms {
-            mvp: mvp.to_cols_array_2d(),
+            mvp: mat4_to_cols_array_2d(&mvp),
         };
 
         if let Some(buffer) = &self.uniform_buffer {

@@ -1,4 +1,4 @@
-use glam::Mat4;
+use redlilium_core::math::Mat4;
 use redlilium_ecs::{Ref, RefMut, SystemContext};
 
 use crate::components::{Children, GlobalTransform, Parent, Transform};
@@ -86,7 +86,7 @@ fn propagate_children(
 mod tests {
     use super::*;
     use crate::hierarchy::set_parent;
-    use glam::{Quat, Vec3};
+    use redlilium_core::math::{Vec3, quat_from_rotation_y};
     use redlilium_ecs::World;
 
     /// Helper: register hierarchy + transform components so tests don't panic.
@@ -120,7 +120,7 @@ mod tests {
 
         let globals = world.read::<GlobalTransform>().unwrap();
         let global = globals.get(e.index()).unwrap();
-        assert!((global.translation() - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-6);
+        assert!((global.translation() - Vec3::new(1.0, 2.0, 3.0)).norm() < 1e-6);
     }
 
     #[test]
@@ -129,7 +129,7 @@ mod tests {
         register_hierarchy(&mut world);
 
         let e = world.spawn();
-        let t = Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
+        let t = Transform::from_rotation(quat_from_rotation_y(std::f32::consts::FRAC_PI_2));
         world.insert(e, t).unwrap();
         world.insert(e, GlobalTransform::IDENTITY).unwrap();
 
@@ -138,7 +138,7 @@ mod tests {
         let globals = world.read::<GlobalTransform>().unwrap();
         let global = globals.get(e.index()).unwrap();
         let forward = global.forward();
-        assert!((forward - Vec3::NEG_X).length() < 1e-5);
+        assert!((forward - Vec3::new(-1.0, 0.0, 0.0)).norm() < 1e-5);
     }
 
     #[test]
@@ -178,7 +178,7 @@ mod tests {
 
         let globals = world.read::<GlobalTransform>().unwrap();
         let child_global = globals.get(child.index()).unwrap();
-        assert!((child_global.translation() - Vec3::new(10.0, 5.0, 0.0)).length() < 1e-6);
+        assert!((child_global.translation() - Vec3::new(10.0, 5.0, 0.0)).norm() < 1e-6);
     }
 
     #[test]
@@ -210,7 +210,7 @@ mod tests {
 
         let globals = world.read::<GlobalTransform>().unwrap();
         let leaf_global = globals.get(leaf.index()).unwrap();
-        assert!((leaf_global.translation() - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-6);
+        assert!((leaf_global.translation() - Vec3::new(1.0, 2.0, 3.0)).norm() < 1e-6);
     }
 
     #[test]
@@ -222,7 +222,7 @@ mod tests {
         world
             .insert(
                 parent,
-                Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2)),
+                Transform::from_rotation(quat_from_rotation_y(std::f32::consts::FRAC_PI_2)),
             )
             .unwrap();
         world.insert(parent, GlobalTransform::IDENTITY).unwrap();
@@ -238,6 +238,6 @@ mod tests {
 
         let globals = world.read::<GlobalTransform>().unwrap();
         let child_global = globals.get(child.index()).unwrap();
-        assert!((child_global.translation() - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-5);
+        assert!((child_global.translation() - Vec3::new(1.0, 0.0, 0.0)).norm() < 1e-5);
     }
 }

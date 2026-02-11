@@ -21,7 +21,6 @@ ecs-std = { path = "../ecs-std", features = ["physics"] }
 winit.workspace = true
 log.workspace = true
 bytemuck = { workspace = true }
-glam = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 env_logger.workspace = true

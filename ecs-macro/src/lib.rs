@@ -168,11 +168,11 @@ fn infer_field_kind(ty: &Type) -> proc_macro2::TokenStream {
         "u8" => quote! { redlilium_ecs::FieldKind::U8 },
         "u32" => quote! { redlilium_ecs::FieldKind::U32 },
         "i32" => quote! { redlilium_ecs::FieldKind::I32 },
-        "Vec2" => quote! { redlilium_ecs::FieldKind::Vec2 },
-        "Vec3" | "Vec3A" => quote! { redlilium_ecs::FieldKind::Vec3 },
-        "Vec4" => quote! { redlilium_ecs::FieldKind::Vec4 },
-        "Quat" => quote! { redlilium_ecs::FieldKind::Quat },
-        "Mat4" => quote! { redlilium_ecs::FieldKind::Mat4 },
+        "Vec2" | "Vector2" => quote! { redlilium_ecs::FieldKind::Vec2 },
+        "Vec3" | "Vec3A" | "Vector3" => quote! { redlilium_ecs::FieldKind::Vec3 },
+        "Vec4" | "Vector4" => quote! { redlilium_ecs::FieldKind::Vec4 },
+        "Quat" | "Quaternion" => quote! { redlilium_ecs::FieldKind::Quat },
+        "Mat4" | "Matrix4" => quote! { redlilium_ecs::FieldKind::Mat4 },
         "StringId" => quote! { redlilium_ecs::FieldKind::StringId },
         _ => {
             let msg = format!(
@@ -184,7 +184,7 @@ fn infer_field_kind(ty: &Type) -> proc_macro2::TokenStream {
     }
 }
 
-/// Extract the last segment name from a type path (e.g. `glam::Vec3` → `"Vec3"`).
+/// Extract the last segment name from a type path (e.g. `nalgebra::Vector3` → `"Vector3"`).
 fn extract_last_segment(ty: &Type) -> String {
     match ty {
         Type::Path(type_path) => {

@@ -1,4 +1,4 @@
-use glam::Vec3;
+use redlilium_core::math::Vec3;
 
 /// A directional light (e.g., sunlight).
 ///
@@ -25,7 +25,7 @@ impl DirectionalLight {
 impl Default for DirectionalLight {
     fn default() -> Self {
         Self {
-            color: Vec3::ONE,
+            color: Vec3::new(1.0, 1.0, 1.0),
             intensity: 1.0,
         }
     }
@@ -70,7 +70,7 @@ impl PointLight {
 impl Default for PointLight {
     fn default() -> Self {
         Self {
-            color: Vec3::ONE,
+            color: Vec3::new(1.0, 1.0, 1.0),
             intensity: 1.0,
             range: 0.0,
         }
@@ -121,7 +121,7 @@ impl SpotLight {
 impl Default for SpotLight {
     fn default() -> Self {
         Self {
-            color: Vec3::ONE,
+            color: Vec3::new(1.0, 1.0, 1.0),
             intensity: 1.0,
             range: 0.0,
             inner_cone_angle: std::f32::consts::FRAC_PI_8,
@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn directional_default() {
         let light = DirectionalLight::default();
-        assert_eq!(light.color, Vec3::ONE);
+        assert_eq!(light.color, Vec3::new(1.0, 1.0, 1.0));
         assert_eq!(light.intensity, 1.0);
     }
 

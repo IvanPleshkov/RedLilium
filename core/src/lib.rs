@@ -5,7 +5,6 @@
 #[cfg(feature = "gltf")]
 pub mod gltf;
 pub mod material;
-#[cfg(feature = "physics-math")]
 pub mod math;
 pub mod mesh;
 pub mod pool;

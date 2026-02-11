@@ -128,11 +128,11 @@ mod tests {
 
         // Check Transform
         let t = world.get::<Transform>(e).unwrap();
-        assert!((t.translation - glam::Vec3::new(1.0, 2.0, 3.0)).length() < 1e-6);
+        assert!((t.translation - redlilium_core::math::Vec3::new(1.0, 2.0, 3.0)).norm() < 1e-6);
 
         // Check GlobalTransform
         let gt = world.get::<GlobalTransform>(e).unwrap();
-        assert!((gt.translation() - glam::Vec3::new(1.0, 2.0, 3.0)).length() < 1e-6);
+        assert!((gt.translation() - redlilium_core::math::Vec3::new(1.0, 2.0, 3.0)).norm() < 1e-6);
 
         // Check Visibility
         let v = world.get::<Visibility>(e).unwrap();
@@ -165,7 +165,10 @@ mod tests {
 
         let cam = world.get::<Camera>(e).unwrap();
         // Projection should be computed eagerly (not identity)
-        assert_ne!(cam.projection_matrix, glam::Mat4::IDENTITY);
+        assert_ne!(
+            cam.projection_matrix,
+            redlilium_core::math::Mat4::identity()
+        );
     }
 
     #[test]
