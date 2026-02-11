@@ -1,7 +1,7 @@
 use std::any::Any;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// Typed sparse set storing components of type T.
 ///
@@ -204,15 +204,23 @@ type ContainsFn = fn(&dyn Any, u32) -> bool;
 type ChangedSinceFn = fn(&dyn Any, u32, u64) -> bool;
 type AddedSinceFn = fn(&dyn Any, u32, u64) -> bool;
 
+/// A lock guard for either a read or write lock on a storage.
+///
+/// The guard is held purely for its RAII drop behavior (releasing the lock).
+#[allow(dead_code)]
+pub(crate) enum LockGuard<'a> {
+    Read(RwLockReadGuard<'a, ()>),
+    Write(RwLockWriteGuard<'a, ()>),
+}
+
 /// A type-erased sparse set that stores components of a single type.
 ///
-/// Provides runtime borrow checking to prevent simultaneous shared and
-/// exclusive access. Thread-safe via atomic borrow tracking.
+/// Provides per-storage RwLock synchronization for thread-safe access.
 /// Used internally by [`World`](crate::World).
 pub(crate) struct ComponentStorage {
     inner: Box<dyn Any + Send + Sync>,
-    /// Borrow state: 0 = free, positive = N shared readers, -1 = exclusive writer.
-    borrow_state: AtomicI32,
+    /// Per-storage lock for thread-safe borrow management.
+    lock: RwLock<()>,
     /// Human-readable type name for error messages.
     type_name: &'static str,
     /// Type-erased remove operation for despawn.
@@ -225,18 +233,12 @@ pub(crate) struct ComponentStorage {
     added_since_fn: AddedSinceFn,
 }
 
-// SAFETY: ComponentStorage uses AtomicI32 for borrow tracking and
-// Box<dyn Any + Send + Sync> for the inner data. All access is
-// protected by the atomic borrow protocol.
-unsafe impl Send for ComponentStorage {}
-unsafe impl Sync for ComponentStorage {}
-
 impl ComponentStorage {
     /// Creates a new component storage for type `T`.
     pub fn new<T: Send + Sync + 'static>() -> Self {
         Self {
             inner: Box::new(SparseSetInner::<T>::new()),
-            borrow_state: AtomicI32::new(0),
+            lock: RwLock::new(()),
             type_name: std::any::type_name::<T>(),
             remove_fn: |any, entity_index| {
                 let set = any.downcast_mut::<SparseSetInner<T>>().unwrap();
@@ -267,55 +269,37 @@ impl ComponentStorage {
         self.inner.downcast_mut::<SparseSetInner<T>>().unwrap()
     }
 
-    /// Acquires a shared borrow. Panics if exclusively borrowed.
-    pub fn borrow(&self) {
-        let prev = self.borrow_state.fetch_add(1, Ordering::Acquire);
-        if prev < 0 {
-            // Undo the increment before panicking
-            self.borrow_state.fetch_sub(1, Ordering::Release);
+    /// Acquires a shared read lock. Panics immediately if a write lock is held.
+    ///
+    /// Uses `try_read` for instant conflict detection (panic, not deadlock).
+    /// Used by the direct World API (`world.read()`).
+    pub(crate) fn lock_read(&self) -> RwLockReadGuard<'_, ()> {
+        self.lock.try_read().unwrap_or_else(|_| {
             panic!(
                 "Cannot borrow `{}` immutably: already borrowed mutably",
                 self.type_name
-            );
-        }
+            )
+        })
     }
 
-    /// Releases a shared borrow.
-    pub fn release_borrow(&self) {
-        let prev = self.borrow_state.fetch_sub(1, Ordering::Release);
-        debug_assert!(prev > 0, "release_borrow called without matching borrow");
+    /// Acquires an exclusive write lock. Panics immediately if any lock is held.
+    ///
+    /// Uses `try_write` for instant conflict detection (panic, not deadlock).
+    /// Used by the direct World API (`world.write()`).
+    pub(crate) fn lock_write(&self) -> RwLockWriteGuard<'_, ()> {
+        self.lock.try_write().unwrap_or_else(|_| {
+            panic!(
+                "Cannot borrow `{}` mutably: already borrowed",
+                self.type_name
+            )
+        })
     }
 
-    /// Acquires an exclusive borrow. Panics if any borrow is active.
-    pub fn borrow_mut(&self) {
-        match self
-            .borrow_state
-            .compare_exchange(0, -1, Ordering::Acquire, Ordering::Relaxed)
-        {
-            Ok(_) => {}
-            Err(state) => {
-                if state > 0 {
-                    panic!(
-                        "Cannot borrow `{}` mutably: already borrowed immutably ({} readers)",
-                        self.type_name, state
-                    );
-                } else {
-                    panic!(
-                        "Cannot borrow `{}` mutably: already borrowed mutably",
-                        self.type_name
-                    );
-                }
-            }
-        }
-    }
-
-    /// Releases an exclusive borrow.
-    pub fn release_borrow_mut(&self) {
-        let prev = self.borrow_state.swap(0, Ordering::Release);
-        debug_assert_eq!(
-            prev, -1,
-            "release_borrow_mut called without matching borrow_mut"
-        );
+    /// Returns a reference to the underlying RwLock.
+    ///
+    /// Used by `acquire_sorted` for blocking lock acquisition in system execution.
+    pub(crate) fn rw_lock(&self) -> &RwLock<()> {
+        &self.lock
     }
 
     /// Removes a component by entity index (type-erased). Returns true if removed.
@@ -341,20 +325,31 @@ impl ComponentStorage {
 
 /// Shared read access to a component storage.
 ///
-/// Automatically releases the shared borrow when dropped.
+/// Automatically releases the lock when dropped.
 /// Dereferences to [`SparseSetInner<T>`] for accessing component data.
 pub struct Ref<'a, T: 'static> {
     inner: &'a SparseSetInner<T>,
-    storage: &'a ComponentStorage,
+    _guard: Option<RwLockReadGuard<'a, ()>>,
 }
 
 impl<'a, T: 'static> Ref<'a, T> {
-    /// Creates a new shared borrow guard.
+    /// Creates a new shared borrow guard, acquiring the storage's read lock.
     pub(crate) fn new(storage: &'a ComponentStorage) -> Self {
-        storage.borrow();
+        let guard = storage.lock_read();
         Self {
             inner: storage.typed::<T>(),
-            storage,
+            _guard: Some(guard),
+        }
+    }
+
+    /// Creates a shared borrow without acquiring a lock.
+    ///
+    /// The caller must ensure the lock is already held externally
+    /// (e.g. via `acquire_sorted`).
+    pub(crate) fn new_unlocked(storage: &'a ComponentStorage) -> Self {
+        Self {
+            inner: storage.typed::<T>(),
+            _guard: None,
         }
     }
 }
@@ -367,44 +362,49 @@ impl<T: 'static> Deref for Ref<'_, T> {
     }
 }
 
-impl<T: 'static> Drop for Ref<'_, T> {
-    fn drop(&mut self) {
-        self.storage.release_borrow();
-    }
-}
+// Ref holds either an RwLockReadGuard (auto-released on drop) or nothing.
+// No manual Drop needed — the Option<RwLockReadGuard> handles it.
 
 // SAFETY: Ref only provides shared (&) access to the inner data.
-// The atomic borrow tracking ensures no exclusive access exists.
+// The RwLock guarantees no exclusive access exists when the guard is held.
+// When unlocked, the caller guarantees external lock management.
 unsafe impl<T: Send + Sync + 'static> Send for Ref<'_, T> {}
 unsafe impl<T: Send + Sync + 'static> Sync for Ref<'_, T> {}
 
 /// Exclusive write access to a component storage.
 ///
-/// Automatically releases the exclusive borrow when dropped.
+/// Automatically releases the lock when dropped.
 /// Dereferences to [`SparseSetInner<T>`] for accessing and modifying component data.
 pub struct RefMut<'a, T: 'static> {
     inner: *mut SparseSetInner<T>,
-    storage: &'a ComponentStorage,
+    _guard: Option<RwLockWriteGuard<'a, ()>>,
     _marker: PhantomData<&'a mut SparseSetInner<T>>,
 }
 
 impl<'a, T: 'static> RefMut<'a, T> {
-    /// Creates a new exclusive borrow guard.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that `storage` contains a `SparseSetInner<T>`
-    /// and that no other references to the inner data exist. This is enforced
-    /// by the runtime borrow checking in `ComponentStorage::borrow_mut()`.
+    /// Creates a new exclusive borrow guard, acquiring the storage's write lock.
     pub(crate) fn new(storage: &'a ComponentStorage) -> Self {
-        storage.borrow_mut();
-        // SAFETY: borrow_mut() guarantees exclusive access. We cast away
+        let guard = storage.lock_write();
+        // SAFETY: lock_write() guarantees exclusive access. We cast away
         // the shared reference to get a mutable pointer, which is safe because
-        // the borrow tracking ensures no other references exist.
+        // the write lock ensures no other references exist.
         let inner = storage.typed::<T>() as *const SparseSetInner<T> as *mut SparseSetInner<T>;
         Self {
             inner,
-            storage,
+            _guard: Some(guard),
+            _marker: PhantomData,
+        }
+    }
+
+    /// Creates an exclusive borrow without acquiring a lock.
+    ///
+    /// The caller must ensure the write lock is already held externally
+    /// (e.g. via `acquire_sorted`).
+    pub(crate) fn new_unlocked(storage: &'a ComponentStorage) -> Self {
+        let inner = storage.typed::<T>() as *const SparseSetInner<T> as *mut SparseSetInner<T>;
+        Self {
+            inner,
+            _guard: None,
             _marker: PhantomData,
         }
     }
@@ -414,26 +414,23 @@ impl<T: 'static> Deref for RefMut<'_, T> {
     type Target = SparseSetInner<T>;
 
     fn deref(&self) -> &Self::Target {
-        // SAFETY: We have exclusive access guaranteed by borrow tracking.
+        // SAFETY: We have exclusive access guaranteed by the write lock.
         unsafe { &*self.inner }
     }
 }
 
 impl<T: 'static> DerefMut for RefMut<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        // SAFETY: We have exclusive access guaranteed by borrow tracking.
+        // SAFETY: We have exclusive access guaranteed by the write lock.
         unsafe { &mut *self.inner }
     }
 }
 
-impl<T: 'static> Drop for RefMut<'_, T> {
-    fn drop(&mut self) {
-        self.storage.release_borrow_mut();
-    }
-}
+// RefMut holds either an RwLockWriteGuard (auto-released on drop) or nothing.
+// No manual Drop needed — the Option<RwLockWriteGuard> handles it.
 
 // SAFETY: RefMut has exclusive access to the inner data.
-// The atomic borrow tracking ensures no other access exists.
+// The RwLock ensures no other access exists when the guard is held.
 unsafe impl<T: Send + Sync + 'static> Send for RefMut<'_, T> {}
 unsafe impl<T: Send + Sync + 'static> Sync for RefMut<'_, T> {}
 
@@ -510,45 +507,42 @@ mod tests {
     }
 
     #[test]
-    fn borrow_shared_multiple() {
+    fn lock_shared_multiple() {
         let storage = ComponentStorage::new::<u32>();
-        storage.borrow();
-        storage.borrow();
-        // Both borrows succeed
-        storage.release_borrow();
-        storage.release_borrow();
+        let _a = storage.lock_read();
+        let _b = storage.lock_read();
+        // Both locks succeed
     }
 
     #[test]
-    fn borrow_exclusive_alone() {
+    fn lock_exclusive_alone() {
         let storage = ComponentStorage::new::<u32>();
-        storage.borrow_mut();
-        storage.release_borrow_mut();
+        let _guard = storage.lock_write();
     }
 
     #[test]
-    #[should_panic(expected = "Cannot borrow `u32` mutably: already borrowed immutably")]
-    fn borrow_exclusive_conflicts_shared() {
+    #[should_panic(expected = "Cannot borrow `u32` mutably: already borrowed")]
+    fn lock_exclusive_conflicts_shared() {
         let storage = ComponentStorage::new::<u32>();
-        storage.borrow();
-        storage.borrow_mut(); // Should panic
+        let _r = storage.lock_read();
+        let _w = storage.lock_write(); // Should panic
     }
 
     #[test]
     #[should_panic(expected = "Cannot borrow `u32` immutably: already borrowed mutably")]
-    fn borrow_shared_conflicts_exclusive() {
+    fn lock_shared_conflicts_exclusive() {
         let storage = ComponentStorage::new::<u32>();
-        storage.borrow_mut();
-        storage.borrow(); // Should panic
+        let _w = storage.lock_write();
+        let _r = storage.lock_read(); // Should panic
     }
 
     #[test]
-    fn borrow_released_on_drop() {
+    fn lock_released_on_drop() {
         let storage = ComponentStorage::new::<u32>();
         {
             let _guard = Ref::<u32>::new(&storage);
         }
-        // After Ref is dropped, exclusive borrow should succeed
+        // After Ref is dropped, exclusive lock should succeed
         let _guard = RefMut::<u32>::new(&storage);
     }
 

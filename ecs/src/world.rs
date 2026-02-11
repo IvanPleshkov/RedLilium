@@ -1,13 +1,14 @@
 use std::any::TypeId;
 use std::collections::{BTreeMap, HashMap};
 
+use crate::access_set::AccessInfo;
 use crate::commands::CommandBuffer;
 use crate::component::Component;
 use crate::entity::{Entity, EntityAllocator};
 use crate::events::Events;
 use crate::query::{AddedFilter, ChangedFilter, ContainsChecker};
 use crate::resource::{ResourceRef, ResourceRefMut, Resources};
-use crate::sparse_set::{ComponentStorage, Ref, RefMut};
+use crate::sparse_set::{ComponentStorage, LockGuard, Ref, RefMut};
 
 /// Error returned when a component type has not been registered in the [`World`].
 ///
@@ -358,9 +359,93 @@ impl World {
         Some(RefMut::new(storage))
     }
 
-    /// Returns the TypeIds of all registered component types.
+    // ---- Unlocked access (for use when locks are held externally) ----
+
+    /// Gets shared read access without acquiring a lock.
     ///
-    /// Used by [`WorldLocks`](crate::world_locks) to create per-component locks.
+    /// The caller must ensure the read lock is already held externally.
+    pub(crate) fn read_unlocked<T: 'static>(&self) -> Result<Ref<'_, T>, ComponentNotRegistered> {
+        let storage = self
+            .components
+            .get(&TypeId::of::<T>())
+            .ok_or(ComponentNotRegistered {
+                type_name: std::any::type_name::<T>(),
+            })?;
+        Ok(Ref::new_unlocked(storage))
+    }
+
+    /// Gets exclusive write access without acquiring a lock.
+    ///
+    /// The caller must ensure the write lock is already held externally.
+    pub(crate) fn write_unlocked<T: 'static>(
+        &self,
+    ) -> Result<RefMut<'_, T>, ComponentNotRegistered> {
+        let storage = self
+            .components
+            .get(&TypeId::of::<T>())
+            .ok_or(ComponentNotRegistered {
+                type_name: std::any::type_name::<T>(),
+            })?;
+        Ok(RefMut::new_unlocked(storage))
+    }
+
+    /// Gets optional shared read access without acquiring a lock.
+    pub(crate) fn try_read_unlocked<T: 'static>(&self) -> Option<Ref<'_, T>> {
+        let storage = self.components.get(&TypeId::of::<T>())?;
+        Some(Ref::new_unlocked(storage))
+    }
+
+    /// Gets optional exclusive write access without acquiring a lock.
+    pub(crate) fn try_write_unlocked<T: 'static>(&self) -> Option<RefMut<'_, T>> {
+        let storage = self.components.get(&TypeId::of::<T>())?;
+        Some(RefMut::new_unlocked(storage))
+    }
+
+    /// Borrows a resource immutably without acquiring a lock.
+    pub(crate) fn resource_unlocked<T: 'static>(&self) -> ResourceRef<'_, T> {
+        self.resources.borrow_unlocked::<T>()
+    }
+
+    /// Borrows a resource mutably without acquiring a lock.
+    pub(crate) fn resource_mut_unlocked<T: 'static>(&self) -> ResourceRefMut<'_, T> {
+        self.resources.borrow_mut_unlocked::<T>()
+    }
+
+    /// Acquires component/resource locks in TypeId-sorted order.
+    ///
+    /// Used by `LockRequest` during system execution. Sorted acquisition
+    /// prevents deadlocks when multiple systems run concurrently.
+    pub(crate) fn acquire_sorted(&self, infos: &[AccessInfo]) -> Vec<LockGuard<'_>> {
+        let mut sorted = infos.to_vec();
+        sorted.sort_by_key(|info| info.type_id);
+        sorted.dedup_by(|a, b| {
+            if a.type_id == b.type_id {
+                b.is_write = b.is_write || a.is_write;
+                true
+            } else {
+                false
+            }
+        });
+
+        sorted
+            .iter()
+            .filter_map(|info| {
+                // Try component storage first
+                if let Some(storage) = self.components.get(&info.type_id) {
+                    let lock = storage.rw_lock();
+                    return Some(if info.is_write {
+                        LockGuard::Write(lock.write().unwrap())
+                    } else {
+                        LockGuard::Read(lock.read().unwrap())
+                    });
+                }
+                // Then try resource storage
+                self.resources.acquire_lock(info.type_id, info.is_write)
+            })
+            .collect()
+    }
+
+    /// Returns the TypeIds of all registered component types.
     pub fn component_type_ids(&self) -> impl Iterator<Item = TypeId> + '_ {
         self.components.keys().copied()
     }

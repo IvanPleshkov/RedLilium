@@ -28,7 +28,7 @@ use crate::system_context::SystemContext;
 ///
 /// # Lock ordering
 ///
-/// In multi-threaded mode, locks are acquired in TypeId-sorted order
+/// Locks are acquired in TypeId-sorted order via `World::acquire_sorted`
 /// to prevent deadlocks. The closure is synchronous (`FnOnce`), preventing
 /// locks from being held across await points.
 pub struct LockRequest<'a, A: AccessSet> {
@@ -39,9 +39,9 @@ pub struct LockRequest<'a, A: AccessSet> {
 impl<'a, A: AccessSet> LockRequest<'a, A> {
     /// Executes a closure with the locked component/resource data.
     ///
-    /// In single-threaded mode: directly fetches data and calls the closure.
-    /// In multi-threaded mode: acquires RwLocks in TypeId-sorted order,
-    /// fetches data, calls the closure, then releases all locks.
+    /// Acquires per-storage RwLocks in TypeId-sorted order to prevent
+    /// deadlocks, fetches data without per-fetch locking, then calls
+    /// the closure. All locks are released when the closure returns.
     ///
     /// The closure is synchronous (`FnOnce`) to prevent holding locks
     /// across await points.
@@ -52,33 +52,20 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
         self.execute_inner(f)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     fn execute_inner<R, F>(&self, f: F) -> R
     where
         F: FnOnce(A::Item<'_>) -> R,
     {
-        // Acquire RwLocks if in multi-threaded mode
+        // Acquire per-storage RwLocks in TypeId-sorted order (deadlock prevention)
         let _guards = {
             redlilium_core::profile_scope!("ecs: lock acquire");
-            self.ctx
-                .world_locks()
-                .map(|locks| locks.acquire_sorted(&A::access_infos()))
+            self.ctx.world().acquire_sorted(&A::access_infos())
         };
 
-        // Fetch typed data from World
-        let items = A::fetch(self.ctx.world());
+        // Fetch typed data without per-fetch locking (locks already held)
+        let items = A::fetch_unlocked(self.ctx.world());
 
         // Run closure (guards drop after closure returns)
-        f(items)
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn execute_inner<R, F>(&self, f: F) -> R
-    where
-        F: FnOnce(A::Item<'_>) -> R,
-    {
-        // Single-threaded only on wasm32 — no locking
-        let items = A::fetch(self.ctx.world());
         f(items)
     }
 }
@@ -107,7 +94,7 @@ mod tests {
 
         let compute = ComputePool::new();
         let commands = CommandCollector::new();
-        let ctx = SystemContext::new_single_thread(&world, &compute, &commands);
+        let ctx = SystemContext::new(&world, &compute, &commands);
 
         // Use pollster-style blocking since execute is async
         let request = ctx.lock::<(Read<Position>,)>();
@@ -124,7 +111,7 @@ mod tests {
 
         let compute = ComputePool::new();
         let commands = CommandCollector::new();
-        let ctx = SystemContext::new_single_thread(&world, &compute, &commands);
+        let ctx = SystemContext::new(&world, &compute, &commands);
 
         let request = ctx.lock::<(Write<Position>,)>();
         request.execute_inner(|(mut positions,)| {
@@ -147,7 +134,7 @@ mod tests {
 
         let compute = ComputePool::new();
         let commands = CommandCollector::new();
-        let ctx = SystemContext::new_single_thread(&world, &compute, &commands);
+        let ctx = SystemContext::new(&world, &compute, &commands);
 
         let request = ctx.lock::<(Write<Position>, Read<Velocity>)>();
         request.execute_inner(|(mut positions, velocities)| {
@@ -170,7 +157,7 @@ mod tests {
 
         let compute = ComputePool::new();
         let commands = CommandCollector::new();
-        let ctx = SystemContext::new_single_thread(&world, &compute, &commands);
+        let ctx = SystemContext::new(&world, &compute, &commands);
 
         let request = ctx.lock::<(Read<Position>,)>();
         let sum =

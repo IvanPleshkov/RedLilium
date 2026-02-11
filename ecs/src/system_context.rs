@@ -6,9 +6,6 @@ use crate::compute::ComputePool;
 use crate::lock_request::LockRequest;
 use crate::world::World;
 
-#[cfg(not(target_arch = "wasm32"))]
-use crate::world_locks::WorldLocks;
-
 /// Context passed to systems during execution.
 ///
 /// Provides access to component locking, compute tasks, and deferred commands.
@@ -40,13 +37,11 @@ pub struct SystemContext<'a> {
     world: &'a World,
     compute: &'a ComputePool,
     commands: &'a CommandCollector,
-    #[cfg(not(target_arch = "wasm32"))]
-    world_locks: Option<&'a WorldLocks>,
 }
 
 impl<'a> SystemContext<'a> {
-    /// Creates a new system context for single-threaded execution (no locking).
-    pub(crate) fn new_single_thread(
+    /// Creates a new system context.
+    pub(crate) fn new(
         world: &'a World,
         compute: &'a ComputePool,
         commands: &'a CommandCollector,
@@ -55,24 +50,6 @@ impl<'a> SystemContext<'a> {
             world,
             compute,
             commands,
-            #[cfg(not(target_arch = "wasm32"))]
-            world_locks: None,
-        }
-    }
-
-    /// Creates a new system context for multi-threaded execution (with locking).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn new_multi_thread(
-        world: &'a World,
-        compute: &'a ComputePool,
-        commands: &'a CommandCollector,
-        world_locks: &'a WorldLocks,
-    ) -> Self {
-        Self {
-            world,
-            compute,
-            commands,
-            world_locks: Some(world_locks),
         }
     }
 
@@ -112,15 +89,9 @@ impl<'a> SystemContext<'a> {
         self.commands.push(cmd);
     }
 
-    /// Returns a reference to the world (for use inside lock_request).
+    /// Returns a reference to the world.
     pub(crate) fn world(&self) -> &'a World {
         self.world
-    }
-
-    /// Returns the world locks, if multi-threaded execution is active.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn world_locks(&self) -> Option<&'a WorldLocks> {
-        self.world_locks
     }
 }
 
@@ -129,11 +100,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn single_thread_context_provides_compute() {
+    fn context_provides_compute() {
         let world = World::new();
         let compute = ComputePool::new();
         let commands = CommandCollector::new();
-        let ctx = SystemContext::new_single_thread(&world, &compute, &commands);
+        let ctx = SystemContext::new(&world, &compute, &commands);
         assert_eq!(ctx.compute().pending_count(), 0);
     }
 
@@ -142,7 +113,7 @@ mod tests {
         let world = World::new();
         let compute = ComputePool::new();
         let commands = CommandCollector::new();
-        let ctx = SystemContext::new_single_thread(&world, &compute, &commands);
+        let ctx = SystemContext::new(&world, &compute, &commands);
 
         ctx.commands(|world| {
             world.insert_resource(42u32);

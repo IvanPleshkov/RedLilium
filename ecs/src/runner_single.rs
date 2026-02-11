@@ -56,7 +56,7 @@ impl EcsRunnerSingleThread {
         // Scope the system execution so ctx and futures are dropped
         // before we need &mut world for command application.
         {
-            let ctx = SystemContext::new_single_thread(world, &self.compute, &commands);
+            let ctx = SystemContext::new(world, &self.compute, &commands);
 
             // Track dependency completion
             let mut remaining_deps: Vec<usize> = systems.in_degrees().to_vec();

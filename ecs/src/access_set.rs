@@ -23,8 +23,14 @@ pub trait AccessElement {
     /// Returns the access metadata for this element.
     fn access_info() -> AccessInfo;
 
-    /// Fetches this element's data from the world.
+    /// Fetches this element's data from the world, acquiring per-storage locks.
     fn fetch(world: &World) -> Self::Item<'_>;
+
+    /// Fetches this element's data without acquiring locks.
+    ///
+    /// The caller must ensure that the appropriate locks are already held
+    /// externally (e.g. via `World::acquire_sorted`).
+    fn fetch_unlocked(world: &World) -> Self::Item<'_>;
 }
 
 /// Trait for a set of access elements (tuples of Read/Write/Res/etc.).
@@ -38,8 +44,13 @@ pub trait AccessSet {
     /// Returns access metadata for all elements.
     fn access_infos() -> Vec<AccessInfo>;
 
-    /// Fetches all elements from the world.
+    /// Fetches all elements from the world, acquiring per-storage locks.
     fn fetch(world: &World) -> Self::Item<'_>;
+
+    /// Fetches all elements without acquiring locks.
+    ///
+    /// The caller must ensure locks are already held externally.
+    fn fetch_unlocked(world: &World) -> Self::Item<'_>;
 }
 
 // ---- Marker types ----
@@ -109,6 +120,12 @@ impl<T: 'static> AccessElement for Read<T> {
             .read::<T>()
             .expect("Component not registered for Read<T> access")
     }
+
+    fn fetch_unlocked(world: &World) -> Self::Item<'_> {
+        world
+            .read_unlocked::<T>()
+            .expect("Component not registered for Read<T> access")
+    }
 }
 
 impl<T: 'static> AccessElement for Write<T> {
@@ -126,6 +143,12 @@ impl<T: 'static> AccessElement for Write<T> {
             .write::<T>()
             .expect("Component not registered for Write<T> access")
     }
+
+    fn fetch_unlocked(world: &World) -> Self::Item<'_> {
+        world
+            .write_unlocked::<T>()
+            .expect("Component not registered for Write<T> access")
+    }
 }
 
 impl<T: 'static> AccessElement for OptionalRead<T> {
@@ -140,6 +163,10 @@ impl<T: 'static> AccessElement for OptionalRead<T> {
 
     fn fetch(world: &World) -> Self::Item<'_> {
         world.try_read::<T>()
+    }
+
+    fn fetch_unlocked(world: &World) -> Self::Item<'_> {
+        world.try_read_unlocked::<T>()
     }
 }
 
@@ -156,6 +183,10 @@ impl<T: 'static> AccessElement for OptionalWrite<T> {
     fn fetch(world: &World) -> Self::Item<'_> {
         world.try_write::<T>()
     }
+
+    fn fetch_unlocked(world: &World) -> Self::Item<'_> {
+        world.try_write_unlocked::<T>()
+    }
 }
 
 impl<T: Send + Sync + 'static> AccessElement for Res<T> {
@@ -170,6 +201,10 @@ impl<T: Send + Sync + 'static> AccessElement for Res<T> {
 
     fn fetch(world: &World) -> Self::Item<'_> {
         world.resource::<T>()
+    }
+
+    fn fetch_unlocked(world: &World) -> Self::Item<'_> {
+        world.resource_unlocked::<T>()
     }
 }
 
@@ -186,6 +221,10 @@ impl<T: Send + Sync + 'static> AccessElement for ResMut<T> {
     fn fetch(world: &World) -> Self::Item<'_> {
         world.resource_mut::<T>()
     }
+
+    fn fetch_unlocked(world: &World) -> Self::Item<'_> {
+        world.resource_mut_unlocked::<T>()
+    }
 }
 
 // ---- Tuple AccessSet implementations ----
@@ -199,6 +238,8 @@ impl AccessSet for () {
     }
 
     fn fetch(_world: &World) -> Self::Item<'_> {}
+
+    fn fetch_unlocked(_world: &World) -> Self::Item<'_> {}
 }
 
 macro_rules! impl_access_set {
@@ -212,6 +253,10 @@ macro_rules! impl_access_set {
 
             fn fetch(world: &World) -> Self::Item<'_> {
                 ($($T::fetch(world),)+)
+            }
+
+            fn fetch_unlocked(world: &World) -> Self::Item<'_> {
+                ($($T::fetch_unlocked(world),)+)
             }
         }
     };

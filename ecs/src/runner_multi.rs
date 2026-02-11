@@ -19,7 +19,6 @@ mod inner {
     use crate::system_context::SystemContext;
     use crate::systems_container::SystemsContainer;
     use crate::world::World;
-    use crate::world_locks::WorldLocks;
 
     /// Multi-threaded executor that runs independent systems in parallel.
     ///
@@ -82,12 +81,7 @@ mod inner {
             // Scope the system execution so ctx and futures are dropped
             // before we need &mut world for command application.
             {
-                // Create per-component locks from all registered types
-                let type_ids = world.component_type_ids().chain(world.resource_type_ids());
-                let world_locks = WorldLocks::new(type_ids);
-
-                let ctx =
-                    SystemContext::new_multi_thread(world, &self.compute, &commands, &world_locks);
+                let ctx = SystemContext::new(world, &self.compute, &commands);
 
                 // Atomic dependency counters
                 let remaining_deps: Vec<AtomicUsize> = systems

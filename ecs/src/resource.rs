@@ -2,22 +2,23 @@ use std::any::{Any, TypeId, type_name};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-/// A single type-erased resource with runtime borrow checking.
+use crate::sparse_set::LockGuard;
+
+/// A single type-erased resource with per-resource RwLock synchronization.
 struct ResourceEntry {
     value: Box<dyn Any + Send + Sync>,
-    /// Borrow state: 0 = free, positive = N shared readers, -1 = exclusive writer.
-    borrow_state: AtomicI32,
+    /// Per-resource lock for thread-safe borrow management.
+    lock: RwLock<()>,
     type_name: &'static str,
 }
 
 /// Container for typed singleton resources.
 ///
-/// Resources are global values stored once per World. They use the same
-/// runtime borrow checking as component storages: multiple shared borrows
-/// are allowed, but exclusive borrows require no other active borrows.
-/// Thread-safe via atomic borrow tracking.
+/// Resources are global values stored once per World. They use per-resource
+/// RwLock synchronization: multiple shared borrows are allowed, but exclusive
+/// borrows require no other active borrows. Thread-safe via RwLock.
 pub(crate) struct Resources {
     entries: HashMap<TypeId, ResourceEntry>,
 }
@@ -36,7 +37,7 @@ impl Resources {
             TypeId::of::<T>(),
             ResourceEntry {
                 value: Box::new(value),
-                borrow_state: AtomicI32::new(0),
+                lock: RwLock::new(()),
                 type_name: type_name::<T>(),
             },
         );
@@ -67,18 +68,16 @@ impl Resources {
             .get(&TypeId::of::<T>())
             .unwrap_or_else(|| panic!("Resource `{}` does not exist", type_name::<T>()));
 
-        let prev = entry.borrow_state.fetch_add(1, Ordering::Acquire);
-        if prev < 0 {
-            entry.borrow_state.fetch_sub(1, Ordering::Release);
+        let guard = entry.lock.try_read().unwrap_or_else(|_| {
             panic!(
                 "Cannot borrow resource `{}` immutably: already borrowed mutably",
                 entry.type_name
-            );
-        }
+            )
+        });
 
         ResourceRef {
             value: entry.value.downcast_ref::<T>().unwrap(),
-            entry,
+            _guard: Some(guard),
         }
     }
 
@@ -91,33 +90,65 @@ impl Resources {
             .get(&TypeId::of::<T>())
             .unwrap_or_else(|| panic!("Resource `{}` does not exist", type_name::<T>()));
 
-        match entry
-            .borrow_state
-            .compare_exchange(0, -1, Ordering::Acquire, Ordering::Relaxed)
-        {
-            Ok(_) => {}
-            Err(state) => {
-                if state > 0 {
-                    panic!(
-                        "Cannot borrow resource `{}` mutably: already borrowed immutably ({} readers)",
-                        entry.type_name, state
-                    );
-                } else {
-                    panic!(
-                        "Cannot borrow resource `{}` mutably: already borrowed mutably",
-                        entry.type_name
-                    );
-                }
-            }
-        }
+        let guard = entry.lock.try_write().unwrap_or_else(|_| {
+            panic!(
+                "Cannot borrow resource `{}` mutably: already borrowed",
+                entry.type_name
+            )
+        });
 
-        // SAFETY: borrow_state tracking guarantees exclusive access.
+        // SAFETY: write lock guarantees exclusive access.
         let value = entry.value.downcast_ref::<T>().unwrap() as *const T as *mut T;
 
         ResourceRefMut {
             value,
-            entry,
+            _guard: Some(guard),
             _marker: PhantomData,
+        }
+    }
+
+    /// Borrows a resource immutably without acquiring a lock.
+    ///
+    /// The caller must ensure the lock is already held externally.
+    pub(crate) fn borrow_unlocked<T: 'static>(&self) -> ResourceRef<'_, T> {
+        let entry = self
+            .entries
+            .get(&TypeId::of::<T>())
+            .unwrap_or_else(|| panic!("Resource `{}` does not exist", type_name::<T>()));
+
+        ResourceRef {
+            value: entry.value.downcast_ref::<T>().unwrap(),
+            _guard: None,
+        }
+    }
+
+    /// Borrows a resource mutably without acquiring a lock.
+    ///
+    /// The caller must ensure the write lock is already held externally.
+    pub(crate) fn borrow_mut_unlocked<T: 'static>(&self) -> ResourceRefMut<'_, T> {
+        let entry = self
+            .entries
+            .get(&TypeId::of::<T>())
+            .unwrap_or_else(|| panic!("Resource `{}` does not exist", type_name::<T>()));
+
+        let value = entry.value.downcast_ref::<T>().unwrap() as *const T as *mut T;
+
+        ResourceRefMut {
+            value,
+            _guard: None,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Acquires a lock on a resource by TypeId for sorted lock acquisition.
+    ///
+    /// Returns `None` if the TypeId does not correspond to any resource.
+    pub(crate) fn acquire_lock(&self, type_id: TypeId, is_write: bool) -> Option<LockGuard<'_>> {
+        let entry = self.entries.get(&type_id)?;
+        if is_write {
+            Some(LockGuard::Write(entry.lock.write().unwrap()))
+        } else {
+            Some(LockGuard::Read(entry.lock.read().unwrap()))
         }
     }
 }
@@ -130,10 +161,10 @@ impl Default for Resources {
 
 /// Shared borrow of a resource.
 ///
-/// Automatically releases the shared borrow when dropped.
+/// Automatically releases the lock when dropped.
 pub struct ResourceRef<'a, T: 'static> {
     value: &'a T,
-    entry: &'a ResourceEntry,
+    _guard: Option<RwLockReadGuard<'a, ()>>,
 }
 
 impl<T: 'static> Deref for ResourceRef<'_, T> {
@@ -144,24 +175,20 @@ impl<T: 'static> Deref for ResourceRef<'_, T> {
     }
 }
 
-impl<T: 'static> Drop for ResourceRef<'_, T> {
-    fn drop(&mut self) {
-        let prev = self.entry.borrow_state.fetch_sub(1, Ordering::Release);
-        debug_assert!(prev > 0);
-    }
-}
+// ResourceRef holds either an RwLockReadGuard (auto-released on drop) or nothing.
+// No manual Drop needed.
 
-// SAFETY: ResourceRef only provides shared access. Atomic borrow tracking
-// ensures no exclusive access exists.
+// SAFETY: ResourceRef only provides shared access. The RwLock ensures
+// no exclusive access exists when the guard is held.
 unsafe impl<T: Send + Sync + 'static> Send for ResourceRef<'_, T> {}
 unsafe impl<T: Send + Sync + 'static> Sync for ResourceRef<'_, T> {}
 
 /// Exclusive borrow of a resource.
 ///
-/// Automatically releases the exclusive borrow when dropped.
+/// Automatically releases the lock when dropped.
 pub struct ResourceRefMut<'a, T: 'static> {
     value: *mut T,
-    entry: &'a ResourceEntry,
+    _guard: Option<RwLockWriteGuard<'a, ()>>,
     _marker: PhantomData<&'a mut T>,
 }
 
@@ -169,27 +196,23 @@ impl<T: 'static> Deref for ResourceRefMut<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        // SAFETY: Exclusive access guaranteed by borrow tracking.
+        // SAFETY: Exclusive access guaranteed by the write lock.
         unsafe { &*self.value }
     }
 }
 
 impl<T: 'static> DerefMut for ResourceRefMut<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        // SAFETY: Exclusive access guaranteed by borrow tracking.
+        // SAFETY: Exclusive access guaranteed by the write lock.
         unsafe { &mut *self.value }
     }
 }
 
-impl<T: 'static> Drop for ResourceRefMut<'_, T> {
-    fn drop(&mut self) {
-        let prev = self.entry.borrow_state.swap(0, Ordering::Release);
-        debug_assert_eq!(prev, -1);
-    }
-}
+// ResourceRefMut holds either an RwLockWriteGuard (auto-released on drop) or nothing.
+// No manual Drop needed.
 
-// SAFETY: ResourceRefMut has exclusive access. Atomic borrow tracking
-// ensures no other access exists.
+// SAFETY: ResourceRefMut has exclusive access. The RwLock ensures
+// no other access exists when the guard is held.
 unsafe impl<T: Send + Sync + 'static> Send for ResourceRefMut<'_, T> {}
 unsafe impl<T: Send + Sync + 'static> Sync for ResourceRefMut<'_, T> {}
 
@@ -244,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Cannot borrow resource `u32` mutably: already borrowed immutably")]
+    #[should_panic(expected = "Cannot borrow resource `u32` mutably: already borrowed")]
     fn exclusive_conflicts_shared() {
         let mut resources = Resources::new();
         resources.insert(42u32);

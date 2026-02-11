@@ -55,7 +55,6 @@ pub mod system_context;
 pub mod system_future;
 mod systems_container;
 mod world;
-mod world_locks;
 mod yield_now;
 
 // Core types

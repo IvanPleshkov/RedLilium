@@ -99,7 +99,7 @@ impl<S: System> DynSystem for S {
 /// Useful for tests and one-off system invocations outside a runner.
 pub fn run_system_blocking(system: &impl System, world: &World, compute: &ComputePool) {
     let commands = CommandCollector::new();
-    let ctx = SystemContext::new_single_thread(world, compute, &commands);
+    let ctx = SystemContext::new(world, compute, &commands);
     let future = Box::pin(system.run(&ctx));
     poll_system_future_to_completion(future, compute);
 
