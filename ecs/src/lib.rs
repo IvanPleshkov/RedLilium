@@ -39,6 +39,7 @@
 extern crate self as redlilium_ecs;
 
 mod access_set;
+mod bundle;
 mod command_collector;
 mod commands;
 pub mod component;
@@ -75,7 +76,7 @@ mod world;
 pub use commands::CommandBuffer;
 pub use component::Component;
 pub use compute::{ComputePool, TaskHandle};
-pub use ecs_macro::Component;
+pub use ecs_macro::{Bundle, Component};
 pub use egui;
 pub use entity::Entity;
 pub use events::{EventUpdateSystem, Events};
@@ -93,6 +94,7 @@ pub use compute_context::EcsComputeContext;
 
 // System & scheduling (new API)
 pub use access_set::{AccessSet, OptionalRead, OptionalWrite, Read, Res, ResMut, Write};
+pub use bundle::Bundle;
 pub use command_collector::{CommandCollector, SpawnBuilder};
 pub use lock_request::LockRequest;
 pub use runner::{EcsRunner, EcsRunnerSingleThread, ShutdownError};

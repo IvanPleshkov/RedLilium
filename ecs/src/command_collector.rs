@@ -1,5 +1,6 @@
 use std::sync::Mutex;
 
+use crate::bundle::Bundle;
 use crate::entity::Entity;
 use crate::world::World;
 
@@ -79,6 +80,30 @@ impl CommandCollector {
         }
     }
 
+    /// Queues a bundle of components to be inserted on an entity.
+    ///
+    /// # Panics
+    ///
+    /// Panics when applied if any component type has not been registered.
+    pub fn insert_bundle(&self, entity: Entity, bundle: impl Bundle) {
+        self.push(move |world| {
+            bundle
+                .insert_into(world, entity)
+                .expect("Component in bundle not registered");
+        });
+    }
+
+    /// Queues spawning a new entity with a bundle of components.
+    ///
+    /// # Panics
+    ///
+    /// Panics when applied if any component type has not been registered.
+    pub fn spawn_with(&self, bundle: impl Bundle) {
+        self.push(move |world| {
+            world.spawn_with(bundle);
+        });
+    }
+
     /// Drains all collected commands, returning them in push order.
     pub fn drain(&self) -> Vec<Command> {
         let mut commands = self.commands.lock().unwrap();
@@ -107,6 +132,20 @@ impl<'a> SpawnBuilder<'a> {
             world
                 .insert(entity, component)
                 .expect("Component not registered");
+        }));
+        self
+    }
+
+    /// Adds a bundle of components to the entity being built.
+    ///
+    /// # Panics
+    ///
+    /// Panics when applied if any component type in the bundle has not been registered.
+    pub fn with_bundle(mut self, bundle: impl Bundle) -> Self {
+        self.inserts.push(Box::new(move |world, entity| {
+            bundle
+                .insert_into(world, entity)
+                .expect("Component in bundle not registered");
         }));
         self
     }

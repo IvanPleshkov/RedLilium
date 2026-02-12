@@ -83,3 +83,92 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
 
     expanded.into()
 }
+
+/// Derive the `Bundle` trait for a struct, allowing it to be inserted as a
+/// group of components on an entity.
+///
+/// Each field is inserted as an individual component via `world.insert()`.
+/// Fields annotated with `#[bundle]` are treated as nested bundles and
+/// inserted via `Bundle::insert_into()` instead.
+///
+/// Only named-field structs are supported.
+///
+/// # Example
+///
+/// ```ignore
+/// #[derive(Bundle)]
+/// struct PlayerBundle {
+///     transform: Transform,
+///     global_transform: GlobalTransform,
+///     visibility: Visibility,
+///     name: Name,
+/// }
+///
+/// // Nested bundles
+/// #[derive(Bundle)]
+/// struct EnemyBundle {
+///     health: Health,
+///     #[bundle]
+///     spatial: SpatialBundle,
+/// }
+/// ```
+#[proc_macro_derive(Bundle, attributes(bundle))]
+pub fn derive_bundle(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    let fields = match &input.data {
+        Data::Struct(data) => match &data.fields {
+            Fields::Named(fields) => &fields.named,
+            _ => {
+                return syn::Error::new_spanned(
+                    &input.ident,
+                    "Bundle can only be derived for structs with named fields",
+                )
+                .to_compile_error()
+                .into();
+            }
+        },
+        _ => {
+            return syn::Error::new_spanned(&input.ident, "Bundle can only be derived for structs")
+                .to_compile_error()
+                .into();
+        }
+    };
+
+    let field_names: Vec<_> = fields.iter().map(|f| f.ident.as_ref().unwrap()).collect();
+
+    let insert_stmts: Vec<_> = fields
+        .iter()
+        .map(|f| {
+            let fname = f.ident.as_ref().unwrap();
+            let is_bundle = f.attrs.iter().any(|a| a.path().is_ident("bundle"));
+            if is_bundle {
+                quote! {
+                    redlilium_ecs::Bundle::insert_into(#fname, world, entity)?;
+                }
+            } else {
+                quote! {
+                    world.insert(entity, #fname)?;
+                }
+            }
+        })
+        .collect();
+
+    let expanded = quote! {
+        impl #impl_generics redlilium_ecs::Bundle for #name #ty_generics #where_clause {
+            fn insert_into(
+                self,
+                world: &mut redlilium_ecs::World,
+                entity: redlilium_ecs::Entity,
+            ) -> Result<(), redlilium_ecs::ComponentNotRegistered> {
+                let Self { #(#field_names,)* } = self;
+                #(#insert_stmts)*
+                Ok(())
+            }
+        }
+    };
+
+    expanded.into()
+}

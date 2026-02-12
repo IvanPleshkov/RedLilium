@@ -1,6 +1,7 @@
 use std::marker::PhantomData;
 
 use crate::access_set::AccessSet;
+use crate::bundle::Bundle;
 use crate::command_collector::{CommandCollector, SpawnBuilder};
 use crate::compute::ComputePool;
 use crate::entity::Entity;
@@ -142,6 +143,24 @@ impl<'a> SystemContext<'a> {
     /// ```
     pub fn spawn_entity(&self) -> SpawnBuilder<'_> {
         self.commands.spawn_entity()
+    }
+
+    /// Queues a bundle of components to be inserted on an entity.
+    ///
+    /// # Panics
+    ///
+    /// Panics when applied if any component type has not been registered.
+    pub fn insert_bundle(&self, entity: Entity, bundle: impl Bundle) {
+        self.commands.insert_bundle(entity, bundle);
+    }
+
+    /// Queues spawning a new entity with a bundle of components.
+    ///
+    /// # Panics
+    ///
+    /// Panics when applied if any component type has not been registered.
+    pub fn spawn_with(&self, bundle: impl Bundle) {
+        self.commands.spawn_with(bundle);
     }
 
     /// Returns a reference to the world.

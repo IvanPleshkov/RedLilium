@@ -2,6 +2,7 @@ use std::any::TypeId;
 use std::collections::{BTreeMap, HashMap};
 
 use crate::access_set::AccessInfo;
+use crate::bundle::Bundle;
 use crate::commands::CommandBuffer;
 use crate::component::Component;
 use crate::entity::{Entity, EntityAllocator};
@@ -273,6 +274,46 @@ impl World {
             .typed_mut::<T>()
             .insert_with_tick(entity.index(), component, tick);
         Ok(())
+    }
+
+    /// Inserts a bundle of components on an entity.
+    ///
+    /// A bundle is a tuple of components, e.g. `(Position, Velocity, Health)`.
+    /// All components are inserted at once.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ComponentNotRegistered`] if any component type has never
+    /// been registered.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the entity is not alive.
+    pub fn insert_bundle(
+        &mut self,
+        entity: Entity,
+        bundle: impl Bundle,
+    ) -> Result<(), ComponentNotRegistered> {
+        assert!(
+            self.entities.is_alive(entity),
+            "Cannot insert bundle on dead entity {entity}"
+        );
+        bundle.insert_into(self, entity)
+    }
+
+    /// Spawns a new entity with a bundle of components.
+    ///
+    /// Convenience for `spawn()` + `insert_bundle()`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any component type has not been registered.
+    pub fn spawn_with(&mut self, bundle: impl Bundle) -> Entity {
+        let entity = self.spawn();
+        bundle
+            .insert_into(self, entity)
+            .expect("Component in bundle not registered");
+        entity
     }
 
     /// Removes a component from an entity.
