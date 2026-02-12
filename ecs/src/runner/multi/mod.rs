@@ -148,6 +148,24 @@ impl EcsRunnerMultiThread {
                 cmd(world);
             }
         }
+
+        // Drain remaining compute tasks across all threads
+        let pending = self.compute.pending_count();
+        if pending > 0 {
+            redlilium_core::profile_scope!("ecs: compute drain");
+            let budget = AtomicUsize::new(0);
+            std::thread::scope(|scope| {
+                for _ in 0..self.num_threads {
+                    scope.spawn(|| {
+                        while budget.fetch_add(1, Ordering::Relaxed) < pending {
+                            if self.compute.tick_extract() == 0 {
+                                break;
+                            }
+                        }
+                    });
+                }
+            });
+        }
     }
 
     /// Cancels all pending compute tasks and ticks until drained or timeout.

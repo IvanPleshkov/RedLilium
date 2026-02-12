@@ -62,6 +62,7 @@ If wasm-pack is not installed, skip web build:
 ### Code Style
 
 - Use Rust 2024 edition conventions
+- **IMPORTANT:** After making any changes to Rust code, always run `cargo fmt --all` to format the code before running tests or committing
 - Run `cargo clippy` before committing
 - All warnings should be fixed (clippy runs with `-D warnings`)
 

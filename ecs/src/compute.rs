@@ -287,6 +287,54 @@ impl ComputePool {
         count
     }
 
+    /// Extracts one task, polls it outside the lock, and returns it if pending.
+    ///
+    /// Unlike [`tick`], this method does not hold the mutex while polling,
+    /// making it safe to call from multiple threads concurrently for
+    /// parallel compute draining.
+    ///
+    /// Returns 1 if a task was polled, 0 if the pool was empty.
+    pub fn tick_extract(&self) -> usize {
+        redlilium_core::profile_scope!("ecs: compute tick_extract");
+
+        let mut task = {
+            let mut tasks = self.tasks.lock().unwrap();
+
+            // Remove cancelled tasks first
+            tasks.retain(|t| !t.state.cancelled.load(Ordering::Acquire));
+
+            if tasks.is_empty() {
+                return 0;
+            }
+
+            // Find highest priority task
+            let best_idx = tasks
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.priority.cmp(&b.priority).then(b.id.cmp(&a.id)))
+                .map(|(i, _)| i)
+                .unwrap();
+
+            tasks.swap_remove(best_idx)
+            // Lock released here
+        };
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        match task.future.as_mut().poll(&mut cx) {
+            Poll::Ready(()) => {
+                // Task completed, don't return it to the pool
+            }
+            Poll::Pending => {
+                // Put the task back
+                self.tasks.lock().unwrap().push(task);
+            }
+        }
+
+        1
+    }
+
     /// Returns the number of pending (incomplete) tasks.
     pub fn pending_count(&self) -> usize {
         self.tasks.lock().unwrap().len()

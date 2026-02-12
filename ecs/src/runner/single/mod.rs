@@ -64,6 +64,12 @@ impl EcsRunnerSingleThread {
                 cmd(world);
             }
         }
+
+        // Drain remaining compute tasks (one poll per task)
+        if self.compute.pending_count() > 0 {
+            redlilium_core::profile_scope!("ecs: compute drain");
+            self.compute.tick_all();
+        }
     }
 
     /// Cancels all pending compute tasks and ticks until drained or timeout.
