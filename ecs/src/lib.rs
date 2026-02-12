@@ -93,7 +93,7 @@ pub use compute_context::EcsComputeContext;
 
 // System & scheduling (new API)
 pub use access_set::{AccessSet, OptionalRead, OptionalWrite, Read, Res, ResMut, Write};
-pub use command_collector::CommandCollector;
+pub use command_collector::{CommandCollector, SpawnBuilder};
 pub use lock_request::LockRequest;
 pub use runner::{EcsRunner, EcsRunnerSingleThread, ShutdownError};
 pub use system::{System, SystemResult, run_system_blocking};

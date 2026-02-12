@@ -18,7 +18,7 @@
 //! commands.despawn_recursive(entity);
 //! ```
 
-use crate::{CommandBuffer, Entity, World};
+use crate::{CommandBuffer, CommandCollector, Entity, World};
 
 use crate::components::{Children, Parent};
 
@@ -128,6 +128,26 @@ pub trait HierarchyCommands {
 }
 
 impl HierarchyCommands for CommandBuffer {
+    fn cmd_set_parent(&self, entity: Entity, parent: Entity) {
+        self.push(move |world| {
+            set_parent(world, entity, parent);
+        });
+    }
+
+    fn cmd_remove_parent(&self, entity: Entity) {
+        self.push(move |world| {
+            remove_parent(world, entity);
+        });
+    }
+
+    fn cmd_despawn_recursive(&self, entity: Entity) {
+        self.push(move |world| {
+            despawn_recursive(world, entity);
+        });
+    }
+}
+
+impl HierarchyCommands for CommandCollector {
     fn cmd_set_parent(&self, entity: Entity, parent: Entity) {
         self.push(move |world| {
             set_parent(world, entity, parent);
