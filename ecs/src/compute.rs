@@ -6,6 +6,7 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::time::Duration;
 
 use crate::priority::Priority;
+use crate::yield_now::reset_yield_timer;
 
 /// Shared state between a [`TaskHandle`] and the pool's internal future wrapper.
 ///
@@ -167,7 +168,11 @@ pub struct ComputePool {
 
 impl ComputePool {
     /// Creates a new compute pool.
+    ///
+    /// Resets the per-thread yield timer so the first [`yield_now`](crate::yield_now)
+    /// in any task spawned on this pool will always suspend.
     pub fn new() -> Self {
+        reset_yield_timer();
         Self {
             tasks: Mutex::new(Vec::new()),
             next_id: Mutex::new(0),

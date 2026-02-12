@@ -66,7 +66,7 @@ pub use query::{AddedFilter, ChangedFilter, ContainsChecker, With, Without};
 pub use resource::{ResourceRef, ResourceRefMut};
 pub use sparse_set::{Ref, RefMut, SparseSetInner};
 pub use world::{ComponentNotRegistered, World};
-pub use yield_now::yield_now;
+pub use yield_now::{reset_yield_timer, set_yield_interval, yield_now};
 
 // System & scheduling (new API)
 pub use access_set::{AccessSet, OptionalRead, OptionalWrite, Read, Res, ResMut, Write};

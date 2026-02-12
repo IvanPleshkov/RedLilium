@@ -44,7 +44,8 @@
       "Bash(cargo tree:*)",
       "Bash(del:*)",
       "Bash(xargs:*)",
-      "Bash(git stash:*)"
+      "Bash(git stash:*)",
+      "Bash(cargo fmt:*)"
     ],
     "deny": [
       "Read(target/**)"
