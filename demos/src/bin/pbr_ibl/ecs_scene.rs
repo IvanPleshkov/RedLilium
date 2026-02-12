@@ -5,14 +5,14 @@
 
 use std::f32::consts::PI;
 
-use ecs_std::{
-    Camera, GlobalTransform, Transform, UpdateCameraMatrices, UpdateGlobalTransforms, Visibility,
-};
 use redlilium_core::math::{
     Mat4, Quat, Vec3, look_at_rh, mat4_from_translation, mat4_to_cols_array_2d, perspective_rh,
     to_scale_rotation_translation,
 };
-use redlilium_ecs::{EcsRunner, Entity, SystemsContainer, World};
+use redlilium_ecs::{
+    Camera, EcsRunner, Entity, GlobalTransform, SystemsContainer, Transform, UpdateCameraMatrices,
+    UpdateGlobalTransforms, Visibility, World,
+};
 
 use crate::uniforms::SphereInstance;
 use crate::{GRID_SIZE, SPHERE_SPACING};
@@ -41,7 +41,7 @@ impl EcsScene {
         let mut world = World::new();
 
         // Register all standard components + our custom one
-        ecs_std::register_std_components(&mut world);
+        redlilium_ecs::register_std_components(&mut world);
         world.register_component::<PbrSphere>();
 
         // Spawn camera entity

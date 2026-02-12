@@ -2,7 +2,7 @@
 ///
 /// Stores an owned string. Use this to give entities meaningful labels
 /// for debugging and editor display.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, redlilium_ecs::Component)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, crate::Component)]
 pub struct Name(pub String);
 
 impl Name {

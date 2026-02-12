@@ -18,7 +18,7 @@
 //! commands.despawn_recursive(entity);
 //! ```
 
-use redlilium_ecs::{CommandBuffer, Entity, World};
+use crate::{CommandBuffer, Entity, World};
 
 use crate::components::{Children, Parent};
 

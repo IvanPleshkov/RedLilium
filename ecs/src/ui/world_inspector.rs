@@ -1,6 +1,6 @@
 //! Entity hierarchy tree view.
 
-use redlilium_ecs::{Entity, World};
+use crate::{Entity, World};
 
 use crate::components::{Children, Name, Parent};
 

@@ -38,7 +38,7 @@ pub enum RigidBodyType {
 /// Attach this component to an entity along with [`Collider3D`] and
 /// [`Transform`](crate::Transform), then call [`build_physics_world_3d`]
 /// to create the corresponding rapier physics objects.
-#[derive(Debug, Clone, PartialEq, redlilium_ecs::Component)]
+#[derive(Debug, Clone, PartialEq, crate::Component)]
 pub struct RigidBody3D {
     /// Body type.
     pub body_type: RigidBodyType,
@@ -107,7 +107,7 @@ impl Default for RigidBody3D {
 }
 
 /// Describes a 3D collider's shape and material properties.
-#[derive(Debug, Clone, PartialEq, redlilium_ecs::Component)]
+#[derive(Debug, Clone, PartialEq, crate::Component)]
 pub struct Collider3D {
     /// Collider shape.
     pub shape: ColliderShape3D,
@@ -291,7 +291,7 @@ impl Collider3D {
 /// build_physics_world_3d(world);
 /// // Now the entity has a RigidBody3DHandle and a PhysicsWorld3D resource exists.
 /// ```
-pub fn build_physics_world_3d(world: &mut redlilium_ecs::World) {
+pub fn build_physics_world_3d(world: &mut crate::World) {
     // Phase 1: collect entity data (clone non-Copy components, copy the rest)
     let entities: Vec<_> = world
         .iter_entities()
@@ -393,7 +393,7 @@ mod tests {
 
     #[test]
     fn build_physics_world() {
-        let mut world = redlilium_ecs::World::new();
+        let mut world = crate::World::new();
         world.register_component::<RigidBody3D>();
         world.register_component::<Collider3D>();
         world.register_component::<crate::Transform>();

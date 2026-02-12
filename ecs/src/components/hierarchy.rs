@@ -1,4 +1,4 @@
-use redlilium_ecs::Entity;
+use crate::Entity;
 
 /// Marks an entity as a child of another entity.
 ///
@@ -7,7 +7,7 @@ use redlilium_ecs::Entity;
 ///
 /// Use [`set_parent`](crate::hierarchy::set_parent) to set up parent-child
 /// relationships (it updates both `Parent` and [`Children`] components).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, redlilium_ecs::Component)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, crate::Component)]
 pub struct Parent(pub Entity);
 
 /// Stores the ordered list of child entities.
@@ -15,7 +15,7 @@ pub struct Parent(pub Entity);
 /// Automatically managed by [`set_parent`](crate::hierarchy::set_parent)
 /// and [`remove_parent`](crate::hierarchy::remove_parent).
 /// Do not modify directly — use the hierarchy functions instead.
-#[derive(Debug, Clone, Default, redlilium_ecs::Component)]
+#[derive(Debug, Clone, Default, crate::Component)]
 pub struct Children(pub Vec<Entity>);
 
 impl Children {

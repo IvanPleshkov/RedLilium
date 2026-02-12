@@ -120,12 +120,12 @@ impl PhysicsWorld2D {
 /// and the rapier rotation angle maps to a Z-axis rotation quaternion.
 pub struct StepPhysics2D;
 
-impl redlilium_ecs::System for StepPhysics2D {
-    async fn run<'a>(&'a self, ctx: &'a redlilium_ecs::SystemContext<'a>) {
+impl crate::System for StepPhysics2D {
+    async fn run<'a>(&'a self, ctx: &'a crate::SystemContext<'a>) {
         ctx.lock::<(
-            redlilium_ecs::ResMut<PhysicsWorld2D>,
-            redlilium_ecs::Read<RigidBody2DHandle>,
-            redlilium_ecs::Write<crate::Transform>,
+            crate::ResMut<PhysicsWorld2D>,
+            crate::Read<RigidBody2DHandle>,
+            crate::Write<crate::Transform>,
         )>()
         .execute(|(mut physics, handles, mut transforms)| {
             redlilium_core::profile_scope!("ecs: step_physics_2d");

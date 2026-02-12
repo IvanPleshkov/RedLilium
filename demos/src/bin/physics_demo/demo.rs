@@ -79,7 +79,7 @@ pub struct PhysicsDemoApp {
     ui: Arc<RwLock<PhysicsUi>>,
 
     // Inspector
-    inspector_state: ecs_std::ui::InspectorState,
+    inspector_state: redlilium_ecs::ui::InspectorState,
 
     // Input state
     mouse_pressed: bool,
@@ -110,7 +110,7 @@ impl PhysicsDemoApp {
             camera: OrbitCamera::new(),
             egui_controller: None,
             ui,
-            inspector_state: ecs_std::ui::InspectorState::new(),
+            inspector_state: redlilium_ecs::ui::InspectorState::new(),
             mouse_pressed: false,
             last_mouse_x: 0.0,
             last_mouse_y: 0.0,
@@ -126,18 +126,18 @@ impl PhysicsDemoApp {
         };
 
         let mut world = World::new();
-        ecs_std::register_std_components(&mut world);
+        redlilium_ecs::register_std_components(&mut world);
 
         // Build systems container for the appropriate dimension
         let mut systems = SystemsContainer::new();
 
         match dim {
             Dimension::ThreeD => {
-                systems.add(ecs_std::physics::physics3d::StepPhysics3D);
-                systems.add(ecs_std::UpdateGlobalTransforms);
+                systems.add(redlilium_ecs::physics::physics3d::StepPhysics3D);
+                systems.add(redlilium_ecs::UpdateGlobalTransforms);
                 let _ = systems.add_edge::<
-                    ecs_std::physics::physics3d::StepPhysics3D,
-                    ecs_std::UpdateGlobalTransforms,
+                    redlilium_ecs::physics::physics3d::StepPhysics3D,
+                    redlilium_ecs::UpdateGlobalTransforms,
                 >();
 
                 if let Some(scene) = self.scenes_3d.get(index) {
@@ -145,11 +145,11 @@ impl PhysicsDemoApp {
                 }
             }
             Dimension::TwoD => {
-                systems.add(ecs_std::physics::physics2d::StepPhysics2D);
-                systems.add(ecs_std::UpdateGlobalTransforms);
+                systems.add(redlilium_ecs::physics::physics2d::StepPhysics2D);
+                systems.add(redlilium_ecs::UpdateGlobalTransforms);
                 let _ = systems.add_edge::<
-                    ecs_std::physics::physics2d::StepPhysics2D,
-                    ecs_std::UpdateGlobalTransforms,
+                    redlilium_ecs::physics::physics2d::StepPhysics2D,
+                    redlilium_ecs::UpdateGlobalTransforms,
                 >();
 
                 if let Some(scene) = self.scenes_2d.get(index) {
@@ -172,17 +172,17 @@ impl PhysicsDemoApp {
         if let Ok(mut ui) = self.ui.write() {
             match dim {
                 Dimension::ThreeD => {
-                    if world.has_resource::<ecs_std::physics::physics3d::PhysicsWorld3D>() {
+                    if world.has_resource::<redlilium_ecs::physics::physics3d::PhysicsWorld3D>() {
                         let physics =
-                            world.resource::<ecs_std::physics::physics3d::PhysicsWorld3D>();
+                            world.resource::<redlilium_ecs::physics::physics3d::PhysicsWorld3D>();
                         ui.body_count = physics.bodies.len();
                         ui.collider_count = physics.colliders.len();
                     }
                 }
                 Dimension::TwoD => {
-                    if world.has_resource::<ecs_std::physics::physics2d::PhysicsWorld2D>() {
+                    if world.has_resource::<redlilium_ecs::physics::physics2d::PhysicsWorld2D>() {
                         let physics =
-                            world.resource::<ecs_std::physics::physics2d::PhysicsWorld2D>();
+                            world.resource::<redlilium_ecs::physics::physics2d::PhysicsWorld2D>();
                         ui.body_count = physics.bodies.len();
                         ui.collider_count = physics.colliders.len();
                     }
@@ -279,16 +279,16 @@ impl AppHandler for PhysicsDemoApp {
             let device = ctx.device();
             match dim {
                 Dimension::ThreeD => {
-                    if world.has_resource::<ecs_std::physics::physics3d::PhysicsWorld3D>() {
+                    if world.has_resource::<redlilium_ecs::physics::physics3d::PhysicsWorld3D>() {
                         let physics =
-                            world.resource::<ecs_std::physics::physics3d::PhysicsWorld3D>();
+                            world.resource::<redlilium_ecs::physics::physics3d::PhysicsWorld3D>();
                         renderer.update_3d(device, &physics, view_proj, camera_pos);
                     }
                 }
                 Dimension::TwoD => {
-                    if world.has_resource::<ecs_std::physics::physics2d::PhysicsWorld2D>() {
+                    if world.has_resource::<redlilium_ecs::physics::physics2d::PhysicsWorld2D>() {
                         let physics =
-                            world.resource::<ecs_std::physics::physics2d::PhysicsWorld2D>();
+                            world.resource::<redlilium_ecs::physics::physics2d::PhysicsWorld2D>();
                         renderer.update_2d(device, &physics, view_proj, camera_pos);
                     }
                 }
@@ -335,10 +335,14 @@ impl AppHandler for PhysicsDemoApp {
             if show_inspector {
                 let egui_ctx = egui.context().clone();
                 if let Some(world) = &self.world {
-                    ecs_std::ui::show_world_inspector(&egui_ctx, world, &mut self.inspector_state);
+                    redlilium_ecs::ui::show_world_inspector(
+                        &egui_ctx,
+                        world,
+                        &mut self.inspector_state,
+                    );
                 }
                 if let Some(world) = &mut self.world {
-                    ecs_std::ui::show_component_inspector(
+                    redlilium_ecs::ui::show_component_inspector(
                         &egui_ctx,
                         world,
                         &mut self.inspector_state,

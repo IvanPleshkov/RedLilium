@@ -4,12 +4,12 @@
 //! descriptor components, then calls [`build_physics_world_2d`] to materialize
 //! them into rapier physics objects.
 
-use ecs_std::Transform;
-use ecs_std::physics::components2d::{Collider2D, RigidBody2D, build_physics_world_2d};
-use ecs_std::physics::physics2d::{PhysicsWorld2D, RigidBody2DHandle};
-use ecs_std::physics::rapier2d::prelude::*;
 use redlilium_core::math;
+use redlilium_ecs::Transform;
 use redlilium_ecs::World;
+use redlilium_ecs::physics::components2d::{Collider2D, RigidBody2D, build_physics_world_2d};
+use redlilium_ecs::physics::physics2d::{PhysicsWorld2D, RigidBody2DHandle};
+use redlilium_ecs::physics::rapier2d::prelude::*;
 
 /// Trait for a 2D physics demo scene.
 #[allow(dead_code)]
@@ -30,7 +30,7 @@ fn spawn_entity(
     let _ = world.insert(entity, body);
     let _ = world.insert(entity, collider);
     let _ = world.insert(entity, transform);
-    let _ = world.insert(entity, ecs_std::GlobalTransform::IDENTITY);
+    let _ = world.insert(entity, redlilium_ecs::GlobalTransform::IDENTITY);
     entity
 }
 
@@ -219,7 +219,7 @@ impl PhysicsScene2D for TrimeshScene2D {
         let ground_entity = world.spawn();
         let _ = world.insert(ground_entity, RigidBody2DHandle(ground_handle));
         let _ = world.insert(ground_entity, Transform::IDENTITY);
-        let _ = world.insert(ground_entity, ecs_std::GlobalTransform::IDENTITY);
+        let _ = world.insert(ground_entity, redlilium_ecs::GlobalTransform::IDENTITY);
     }
 }
 

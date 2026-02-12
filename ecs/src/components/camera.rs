@@ -5,9 +5,7 @@ use redlilium_core::math::{Mat4, orthographic_rh, perspective_rh};
 /// Projection is computed eagerly in constructors. The
 /// [`update_camera_matrices`](crate::systems::update_camera_matrices) system
 /// updates only the view matrix from the entity's world transform.
-#[derive(
-    Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable, redlilium_ecs::Component,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable, crate::Component)]
 #[repr(C)]
 pub struct Camera {
     /// Computed view matrix (world-to-camera). Updated by system.

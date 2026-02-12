@@ -1,5 +1,5 @@
+use crate::{Entity, World};
 use redlilium_core::scene::{CameraProjection, Scene, SceneNode};
-use redlilium_ecs::{Entity, World};
 
 use crate::components::{Camera, GlobalTransform, Name, Transform, Visibility};
 use crate::hierarchy::set_parent;

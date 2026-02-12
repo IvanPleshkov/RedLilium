@@ -36,7 +36,7 @@ pub enum RigidBodyType2D {
 /// Attach this component to an entity along with [`Collider2D`] and
 /// [`Transform`](crate::Transform), then call [`build_physics_world_2d`]
 /// to create the corresponding rapier physics objects.
-#[derive(Debug, Clone, PartialEq, redlilium_ecs::Component)]
+#[derive(Debug, Clone, PartialEq, crate::Component)]
 pub struct RigidBody2D {
     /// Body type.
     pub body_type: RigidBodyType2D,
@@ -105,7 +105,7 @@ impl Default for RigidBody2D {
 }
 
 /// Describes a 2D collider's shape and material properties.
-#[derive(Debug, Clone, PartialEq, redlilium_ecs::Component)]
+#[derive(Debug, Clone, PartialEq, crate::Component)]
 pub struct Collider2D {
     /// Collider shape.
     pub shape: ColliderShape2D,
@@ -243,7 +243,7 @@ impl Collider2D {
 /// [`RigidBody2DHandle`] component on the entity.
 ///
 /// Call this once after spawning all physics entities in a scene.
-pub fn build_physics_world_2d(world: &mut redlilium_ecs::World) {
+pub fn build_physics_world_2d(world: &mut crate::World) {
     // Phase 1: collect entity data (clone non-Copy components, copy the rest)
     let entities: Vec<_> = world
         .iter_entities()
@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn build_physics_world_2d_test() {
-        let mut world = redlilium_ecs::World::new();
+        let mut world = crate::World::new();
         world.register_component::<RigidBody2D>();
         world.register_component::<Collider2D>();
         world.register_component::<crate::Transform>();

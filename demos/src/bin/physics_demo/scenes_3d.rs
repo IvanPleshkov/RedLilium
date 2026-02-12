@@ -4,12 +4,12 @@
 //! descriptor components, then calls [`build_physics_world_3d`] to materialize
 //! them into rapier physics objects.
 
-use ecs_std::Transform;
-use ecs_std::physics::components3d::{Collider3D, RigidBody3D, build_physics_world_3d};
-use ecs_std::physics::physics3d::{PhysicsWorld3D, RigidBody3DHandle};
-use ecs_std::physics::rapier3d::prelude::*;
 use redlilium_core::math;
+use redlilium_ecs::Transform;
 use redlilium_ecs::World;
+use redlilium_ecs::physics::components3d::{Collider3D, RigidBody3D, build_physics_world_3d};
+use redlilium_ecs::physics::physics3d::{PhysicsWorld3D, RigidBody3DHandle};
+use redlilium_ecs::physics::rapier3d::prelude::*;
 
 /// Trait for a 3D physics demo scene.
 #[allow(dead_code)]
@@ -35,7 +35,7 @@ fn spawn_entity(
     let _ = world.insert(entity, body);
     let _ = world.insert(entity, collider);
     let _ = world.insert(entity, transform);
-    let _ = world.insert(entity, ecs_std::GlobalTransform::IDENTITY);
+    let _ = world.insert(entity, redlilium_ecs::GlobalTransform::IDENTITY);
     entity
 }
 
@@ -280,7 +280,7 @@ impl PhysicsScene3D for TrimeshScene {
         let ground_entity = world.spawn();
         let _ = world.insert(ground_entity, RigidBody3DHandle(ground_handle));
         let _ = world.insert(ground_entity, Transform::IDENTITY);
-        let _ = world.insert(ground_entity, ecs_std::GlobalTransform::IDENTITY);
+        let _ = world.insert(ground_entity, redlilium_ecs::GlobalTransform::IDENTITY);
     }
 }
 

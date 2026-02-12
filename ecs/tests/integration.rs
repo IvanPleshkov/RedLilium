@@ -2,9 +2,9 @@ use redlilium_core::math::{Mat4, Vec3, quat_from_rotation_x, quat_from_rotation_
 use redlilium_core::scene::{CameraProjection, NodeTransform, Scene, SceneCamera, SceneNode};
 use redlilium_ecs::{ComputePool, EcsRunner, SystemsContainer, World, run_system_blocking};
 
-use ecs_std::components::*;
-use ecs_std::systems::*;
-use ecs_std::{register_std_components, spawn_scene};
+use redlilium_ecs::components::*;
+use redlilium_ecs::systems::*;
+use redlilium_ecs::{register_std_components, spawn_scene};
 
 // ---------------------------------------------------------------------------
 // Full pipeline: spawn → systems → query
@@ -134,7 +134,7 @@ fn multi_thread_execution() {
 #[test]
 fn spawn_scene_and_run_systems() {
     let mut world = World::new();
-    ecs_std::register_std_components(&mut world);
+    redlilium_ecs::register_std_components(&mut world);
 
     let scene = Scene::new()
         .with_name("TestScene")

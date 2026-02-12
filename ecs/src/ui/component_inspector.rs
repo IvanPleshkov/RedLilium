@@ -1,6 +1,6 @@
 //! Component inspector panel for a selected entity.
 
-use redlilium_ecs::World;
+use crate::World;
 
 use super::InspectorState;
 

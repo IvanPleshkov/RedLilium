@@ -1,5 +1,5 @@
+use crate::{Ref, RefMut, SystemContext};
 use redlilium_core::math::Mat4;
-use redlilium_ecs::{Ref, RefMut, SystemContext};
 
 use crate::components::{Children, GlobalTransform, Parent, Transform};
 
@@ -15,13 +15,13 @@ use crate::components::{Children, GlobalTransform, Parent, Transform};
 /// - Writes: `GlobalTransform`
 pub struct UpdateGlobalTransforms;
 
-impl redlilium_ecs::System for UpdateGlobalTransforms {
+impl crate::System for UpdateGlobalTransforms {
     async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
         ctx.lock::<(
-            redlilium_ecs::Read<Transform>,
-            redlilium_ecs::Write<GlobalTransform>,
-            redlilium_ecs::Read<Children>,
-            redlilium_ecs::Read<Parent>,
+            crate::Read<Transform>,
+            crate::Write<GlobalTransform>,
+            crate::Read<Children>,
+            crate::Read<Parent>,
         )>()
         .execute(|(transforms, mut globals, children_storage, parents)| {
             update_global_transforms(&transforms, &mut globals, &children_storage, &parents);
@@ -85,9 +85,9 @@ fn propagate_children(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::World;
     use crate::hierarchy::set_parent;
     use redlilium_core::math::{Vec3, quat_from_rotation_y};
-    use redlilium_ecs::World;
 
     /// Helper: register hierarchy + transform components so tests don't panic.
     fn register_hierarchy(world: &mut World) {

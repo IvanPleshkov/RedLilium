@@ -707,21 +707,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ecs-std"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "egui",
- "log",
- "rapier2d",
- "rapier2d-f64",
- "rapier3d",
- "rapier3d-f64",
- "redlilium-core",
- "redlilium-ecs",
-]
-
-[[package]]
 name = "egui"
 version = "0.33.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2808,7 +2793,6 @@ dependencies = [
  "bytemuck",
  "console_error_panic_hook",
  "console_log",
- "ecs-std",
  "env_logger",
  "half",
  "image",
@@ -2832,6 +2816,10 @@ dependencies = [
  "ecs-macro",
  "egui",
  "log",
+ "rapier2d",
+ "rapier2d-f64",
+ "rapier3d",
+ "rapier3d-f64",
  "redlilium-core",
 ]
 

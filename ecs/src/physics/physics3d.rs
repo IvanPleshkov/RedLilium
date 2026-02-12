@@ -127,12 +127,12 @@ impl PhysicsWorld3D {
 /// [`RigidBody3DHandle`] + [`Transform`](crate::Transform) components.
 pub struct StepPhysics3D;
 
-impl redlilium_ecs::System for StepPhysics3D {
-    async fn run<'a>(&'a self, ctx: &'a redlilium_ecs::SystemContext<'a>) {
+impl crate::System for StepPhysics3D {
+    async fn run<'a>(&'a self, ctx: &'a crate::SystemContext<'a>) {
         ctx.lock::<(
-            redlilium_ecs::ResMut<PhysicsWorld3D>,
-            redlilium_ecs::Read<RigidBody3DHandle>,
-            redlilium_ecs::Write<crate::Transform>,
+            crate::ResMut<PhysicsWorld3D>,
+            crate::Read<RigidBody3DHandle>,
+            crate::Write<crate::Transform>,
         )>()
         .execute(|(mut physics, handles, mut transforms)| {
             redlilium_core::profile_scope!("ecs: step_physics_3d");

@@ -8,6 +8,12 @@ description = "Custom ECS with async compute support for RedLilium Engine"
 [features]
 default = []
 profiling = ["redlilium-core/profiling"]
+physics-3d = ["dep:rapier3d-f64", "redlilium-core/physics-math"]
+physics-3d-f32 = ["dep:rapier3d", "redlilium-core/physics-math", "redlilium-core/physics-f32"]
+physics-2d = ["dep:rapier2d-f64", "redlilium-core/physics-math"]
+physics-2d-f32 = ["dep:rapier2d", "redlilium-core/physics-math", "redlilium-core/physics-f32"]
+physics = ["physics-3d", "physics-2d"]
+inspector = []
 
 [dependencies]
 redlilium-core = { path = "../core" }
@@ -15,3 +21,7 @@ ecs-macro = { path = "../ecs-macro" }
 bytemuck = { workspace = true }
 log.workspace = true
 egui.workspace = true
+rapier3d-f64 = { workspace = true, optional = true }
+rapier3d = { workspace = true, optional = true }
+rapier2d-f64 = { workspace = true, optional = true }
+rapier2d = { workspace = true, optional = true }

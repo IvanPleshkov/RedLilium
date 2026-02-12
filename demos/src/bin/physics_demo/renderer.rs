@@ -6,9 +6,9 @@
 
 use std::sync::Arc;
 
-use ecs_std::physics::physics2d::PhysicsWorld2D;
-use ecs_std::physics::physics3d::PhysicsWorld3D;
 use redlilium_core::math::{self, Mat4, Vec3, mat4_to_cols_array_2d};
+use redlilium_ecs::physics::physics2d::PhysicsWorld2D;
+use redlilium_ecs::physics::physics3d::PhysicsWorld3D;
 use redlilium_graphics::{
     BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, Buffer, BufferDescriptor,
     BufferUsage, GraphicsDevice, GraphicsPass, Material, MaterialDescriptor, MaterialInstance,
@@ -361,7 +361,7 @@ impl PhysicsRenderer {
         view_proj: Mat4,
         camera_pos: Vec3,
     ) {
-        use ecs_std::physics::rapier3d::prelude::*;
+        use redlilium_ecs::physics::rapier3d::prelude::*;
 
         self.write_camera(device, view_proj, camera_pos);
 
@@ -473,7 +473,7 @@ impl PhysicsRenderer {
         view_proj: Mat4,
         camera_pos: Vec3,
     ) {
-        use ecs_std::physics::rapier2d::prelude::*;
+        use redlilium_ecs::physics::rapier2d::prelude::*;
 
         self.write_camera(device, view_proj, camera_pos);
 

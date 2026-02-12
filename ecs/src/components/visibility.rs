@@ -1,5 +1,5 @@
 /// Whether an entity should be rendered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, redlilium_ecs::Component)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, crate::Component)]
 pub struct Visibility(pub bool);
 
 impl Visibility {

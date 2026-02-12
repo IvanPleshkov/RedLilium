@@ -1,7 +1,7 @@
 use redlilium_core::math::{Vec3, quat_from_rotation_y};
 use redlilium_ecs::Component;
 
-use ecs_std::components::*;
+use redlilium_ecs::components::*;
 
 // ---------------------------------------------------------------------------
 // Component names
@@ -84,7 +84,7 @@ fn non_pod_components_have_reflection() {
     assert_eq!(n.component_name(), "Name");
 
     let mut world = redlilium_ecs::World::new();
-    ecs_std::register_std_components(&mut world);
+    redlilium_ecs::register_std_components(&mut world);
     let entity = world.spawn();
     let p = Parent(entity);
     assert_eq!(p.component_name(), "Parent");
