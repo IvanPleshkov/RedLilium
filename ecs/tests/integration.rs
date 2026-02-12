@@ -1,6 +1,8 @@
 use redlilium_core::math::{Mat4, Vec3, quat_from_rotation_x, quat_from_rotation_y};
 use redlilium_core::scene::{CameraProjection, NodeTransform, Scene, SceneCamera, SceneNode};
-use redlilium_ecs::{ComputePool, EcsRunner, SystemsContainer, World, run_system_blocking};
+use redlilium_ecs::{
+    ComputePool, EcsRunner, IoRuntime, SystemsContainer, World, run_system_blocking,
+};
 
 use redlilium_ecs::components::*;
 use redlilium_ecs::systems::*;
@@ -233,7 +235,8 @@ fn visibility_filtering_with_systems() {
 
     // Run transform system via run_blocking
     let compute = ComputePool::new();
-    run_system_blocking(&UpdateGlobalTransforms, &world, &compute);
+    let io = IoRuntime::new();
+    run_system_blocking(&UpdateGlobalTransforms, &world, &compute, &io);
 
     // Query visible entities (the rendering pattern)
     let globals = world.read::<GlobalTransform>().unwrap();
@@ -342,7 +345,8 @@ fn light_direction_from_transform() {
 
     // Run transform system via run_blocking
     let compute = ComputePool::new();
-    run_system_blocking(&UpdateGlobalTransforms, &world, &compute);
+    let io = IoRuntime::new();
+    run_system_blocking(&UpdateGlobalTransforms, &world, &compute, &io);
 
     // Query directional light direction from its global transform
     let globals = world.read::<GlobalTransform>().unwrap();

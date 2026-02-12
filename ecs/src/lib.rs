@@ -48,6 +48,8 @@ mod entity;
 mod events;
 pub mod hierarchy;
 pub mod inspect;
+mod io_handle;
+mod io_runtime;
 mod lock_request;
 #[cfg(any(
     feature = "physics-3d",
@@ -79,6 +81,8 @@ pub use ecs_macro::Component;
 pub use egui;
 pub use entity::Entity;
 pub use events::{EventUpdateSystem, Events};
+pub use io_handle::IoHandle;
+pub use io_runtime::IoRuntime;
 pub use priority::Priority;
 pub use query::{AddedFilter, ChangedFilter, ContainsChecker, With, Without};
 pub use resource::{ResourceRef, ResourceRefMut};

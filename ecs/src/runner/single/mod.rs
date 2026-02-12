@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use crate::command_collector::CommandCollector;
 use crate::compute::ComputePool;
+use crate::io_runtime::IoRuntime;
 use crate::system::poll_system_future_to_completion;
 use crate::system_context::SystemContext;
 use crate::systems_container::SystemsContainer;
@@ -17,6 +18,7 @@ use super::ShutdownError;
 /// Suitable for WASM targets and simple applications.
 pub struct EcsRunnerSingleThread {
     compute: ComputePool,
+    io: IoRuntime,
 }
 
 impl EcsRunnerSingleThread {
@@ -24,12 +26,18 @@ impl EcsRunnerSingleThread {
     pub fn new() -> Self {
         Self {
             compute: ComputePool::new(),
+            io: IoRuntime::new(),
         }
     }
 
     /// Returns a reference to the compute pool.
     pub fn compute(&self) -> &ComputePool {
         &self.compute
+    }
+
+    /// Returns a reference to the IO runtime.
+    pub fn io(&self) -> &IoRuntime {
+        &self.io
     }
 
     /// Runs all systems in topological order, one at a time.
@@ -48,7 +56,7 @@ impl EcsRunnerSingleThread {
         let commands = CommandCollector::new();
 
         {
-            let ctx = SystemContext::new(world, &self.compute, &commands);
+            let ctx = SystemContext::new(world, &self.compute, &self.io, &commands);
 
             for &idx in order {
                 let system = systems.get_system(idx);

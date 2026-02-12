@@ -108,9 +108,14 @@ impl<S: System> DynSystem for S {
 /// between polls so spawned compute tasks make progress.
 ///
 /// Useful for tests and one-off system invocations outside a runner.
-pub fn run_system_blocking(system: &impl System, world: &World, compute: &ComputePool) {
+pub fn run_system_blocking(
+    system: &impl System,
+    world: &World,
+    compute: &ComputePool,
+    io: &crate::io_runtime::IoRuntime,
+) {
     let commands = CommandCollector::new();
-    let ctx = SystemContext::new(world, compute, &commands);
+    let ctx = SystemContext::new(world, compute, io, &commands);
     let future = Box::pin(system.run(&ctx));
     poll_system_future_to_completion(future, compute);
 
@@ -179,6 +184,7 @@ impl<S: 'static, T: Send + Sync + 'static> SystemResult<S, T> {
 mod tests {
     use super::*;
     use crate::access_set::{Read, Write};
+    use crate::io_runtime::IoRuntime;
 
     struct Position {
         x: f32,
@@ -211,7 +217,8 @@ mod tests {
     fn empty_system_runs() {
         let world = World::new();
         let compute = ComputePool::new();
-        run_system_blocking(&EmptySystem, &world, &compute);
+        let io = IoRuntime::new();
+        run_system_blocking(&EmptySystem, &world, &compute, &io);
     }
 
     #[test]
@@ -229,7 +236,8 @@ mod tests {
         let sys = FlagSystem(flag.clone());
         let world = World::new();
         let compute = ComputePool::new();
-        run_system_blocking(&sys, &world, &compute);
+        let io = IoRuntime::new();
+        run_system_blocking(&sys, &world, &compute, &io);
         assert!(flag.load(Ordering::Relaxed));
     }
 
@@ -243,7 +251,8 @@ mod tests {
         world.insert(e, Velocity { x: 5.0 }).unwrap();
 
         let compute = ComputePool::new();
-        run_system_blocking(&MovementSystem, &world, &compute);
+        let io = IoRuntime::new();
+        run_system_blocking(&MovementSystem, &world, &compute, &io);
 
         assert_eq!(world.get::<Position>(e).unwrap().x, 15.0);
     }
@@ -266,7 +275,8 @@ mod tests {
         let sys = ComputeSystem(result.clone());
         let world = World::new();
         let compute = ComputePool::new();
-        run_system_blocking(&sys, &world, &compute);
+        let io = IoRuntime::new();
+        run_system_blocking(&sys, &world, &compute, &io);
         assert_eq!(*result.lock().unwrap(), Some(99));
     }
 }

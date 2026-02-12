@@ -219,10 +219,12 @@ mod tests {
 
         // Run update system
         use crate::compute::ComputePool;
+        use crate::io_runtime::IoRuntime;
         use crate::system::run_system_blocking;
         let update = EventUpdateSystem::<TestEvent>::new();
         let compute = ComputePool::new();
-        run_system_blocking(&update, &world, &compute);
+        let io = IoRuntime::new();
+        run_system_blocking(&update, &world, &compute, &io);
 
         // Event should be in previous now
         let events = world.resource::<Events<TestEvent>>();

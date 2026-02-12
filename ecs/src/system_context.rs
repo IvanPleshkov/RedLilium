@@ -3,6 +3,7 @@ use std::marker::PhantomData;
 use crate::access_set::AccessSet;
 use crate::command_collector::CommandCollector;
 use crate::compute::ComputePool;
+use crate::io_runtime::IoRuntime;
 use crate::lock_request::LockRequest;
 use crate::world::World;
 
@@ -36,6 +37,7 @@ use crate::world::World;
 pub struct SystemContext<'a> {
     world: &'a World,
     compute: &'a ComputePool,
+    io: &'a IoRuntime,
     commands: &'a CommandCollector,
 }
 
@@ -44,11 +46,13 @@ impl<'a> SystemContext<'a> {
     pub(crate) fn new(
         world: &'a World,
         compute: &'a ComputePool,
+        io: &'a IoRuntime,
         commands: &'a CommandCollector,
     ) -> Self {
         Self {
             world,
             compute,
+            io,
             commands,
         }
     }
@@ -81,6 +85,20 @@ impl<'a> SystemContext<'a> {
         self.compute
     }
 
+    /// Returns a reference to the IO runtime for spawning async IO tasks.
+    ///
+    /// Clone the runtime to capture it in compute tasks:
+    /// ```ignore
+    /// let io = ctx.io().clone();
+    /// ctx.compute().spawn(Priority::Low, async move {
+    ///     let data = io.run(async { fetch().await }).await;
+    ///     process(data)
+    /// });
+    /// ```
+    pub fn io(&self) -> &IoRuntime {
+        self.io
+    }
+
     /// Pushes a deferred command to be applied after all systems complete.
     ///
     /// Commands receive `&mut World` and can perform structural changes
@@ -98,13 +116,15 @@ impl<'a> SystemContext<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::io_runtime::IoRuntime;
 
     #[test]
     fn context_provides_compute() {
         let world = World::new();
         let compute = ComputePool::new();
+        let io = IoRuntime::new();
         let commands = CommandCollector::new();
-        let ctx = SystemContext::new(&world, &compute, &commands);
+        let ctx = SystemContext::new(&world, &compute, &io, &commands);
         assert_eq!(ctx.compute().pending_count(), 0);
     }
 
@@ -112,8 +132,9 @@ mod tests {
     fn commands_are_collected() {
         let world = World::new();
         let compute = ComputePool::new();
+        let io = IoRuntime::new();
         let commands = CommandCollector::new();
-        let ctx = SystemContext::new(&world, &compute, &commands);
+        let ctx = SystemContext::new(&world, &compute, &io, &commands);
 
         ctx.commands(|world| {
             world.insert_resource(42u32);

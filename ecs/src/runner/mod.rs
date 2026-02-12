@@ -11,6 +11,7 @@ pub use multi::EcsRunnerMultiThread;
 use std::time::Duration;
 
 use crate::compute::ComputePool;
+use crate::io_runtime::IoRuntime;
 use crate::systems_container::SystemsContainer;
 use crate::world::World;
 
@@ -101,6 +102,15 @@ impl EcsRunner {
             Self::SingleThread(runner) => runner.compute(),
             #[cfg(not(target_arch = "wasm32"))]
             Self::MultiThread(runner) => runner.compute(),
+        }
+    }
+
+    /// Returns a reference to the IO runtime owned by this runner.
+    pub fn io(&self) -> &IoRuntime {
+        match self {
+            Self::SingleThread(runner) => runner.io(),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::MultiThread(runner) => runner.io(),
         }
     }
 

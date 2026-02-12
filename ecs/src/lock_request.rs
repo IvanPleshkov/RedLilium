@@ -93,8 +93,9 @@ mod tests {
         world.insert(e, Position { x: 42.0 }).unwrap();
 
         let compute = ComputePool::new();
+        let io = crate::io_runtime::IoRuntime::new();
         let commands = CommandCollector::new();
-        let ctx = SystemContext::new(&world, &compute, &commands);
+        let ctx = SystemContext::new(&world, &compute, &io, &commands);
 
         // Use pollster-style blocking since execute is async
         let request = ctx.lock::<(Read<Position>,)>();
@@ -110,8 +111,9 @@ mod tests {
         world.insert(e, Position { x: 0.0 }).unwrap();
 
         let compute = ComputePool::new();
+        let io = crate::io_runtime::IoRuntime::new();
         let commands = CommandCollector::new();
-        let ctx = SystemContext::new(&world, &compute, &commands);
+        let ctx = SystemContext::new(&world, &compute, &io, &commands);
 
         let request = ctx.lock::<(Write<Position>,)>();
         request.execute_inner(|(mut positions,)| {
@@ -133,8 +135,9 @@ mod tests {
         world.insert(e, Velocity { x: 5.0 }).unwrap();
 
         let compute = ComputePool::new();
+        let io = crate::io_runtime::IoRuntime::new();
         let commands = CommandCollector::new();
-        let ctx = SystemContext::new(&world, &compute, &commands);
+        let ctx = SystemContext::new(&world, &compute, &io, &commands);
 
         let request = ctx.lock::<(Write<Position>, Read<Velocity>)>();
         request.execute_inner(|(mut positions, velocities)| {
@@ -156,8 +159,9 @@ mod tests {
         world.insert(e, Position { x: 42.0 }).unwrap();
 
         let compute = ComputePool::new();
+        let io = crate::io_runtime::IoRuntime::new();
         let commands = CommandCollector::new();
-        let ctx = SystemContext::new(&world, &compute, &commands);
+        let ctx = SystemContext::new(&world, &compute, &io, &commands);
 
         let request = ctx.lock::<(Read<Position>,)>();
         let sum =

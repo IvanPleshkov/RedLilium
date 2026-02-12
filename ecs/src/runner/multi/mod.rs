@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::command_collector::CommandCollector;
 use crate::compute::{ComputePool, noop_waker};
+use crate::io_runtime::IoRuntime;
 use crate::system_context::SystemContext;
 use crate::systems_container::SystemsContainer;
 use crate::world::World;
@@ -19,6 +20,7 @@ use super::ShutdownError;
 /// in sorted order to prevent deadlocks.
 pub struct EcsRunnerMultiThread {
     compute: ComputePool,
+    io: IoRuntime,
     num_threads: usize,
 }
 
@@ -27,6 +29,7 @@ impl EcsRunnerMultiThread {
     pub fn new(num_threads: usize) -> Self {
         Self {
             compute: ComputePool::new(),
+            io: IoRuntime::new(),
             num_threads: num_threads.max(1),
         }
     }
@@ -47,6 +50,11 @@ impl EcsRunnerMultiThread {
     /// Returns a reference to the compute pool.
     pub fn compute(&self) -> &ComputePool {
         &self.compute
+    }
+
+    /// Returns a reference to the IO runtime.
+    pub fn io(&self) -> &IoRuntime {
+        &self.io
     }
 
     /// Runs all systems respecting dependency ordering, with parallel execution.
@@ -70,7 +78,7 @@ impl EcsRunnerMultiThread {
         // Scope the system execution so ctx and futures are dropped
         // before we need &mut world for command application.
         {
-            let ctx = SystemContext::new(world, &self.compute, &commands);
+            let ctx = SystemContext::new(world, &self.compute, &self.io, &commands);
 
             // Atomic dependency counters
             let remaining_deps: Vec<AtomicUsize> = systems
