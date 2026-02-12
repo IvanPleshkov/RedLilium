@@ -27,9 +27,10 @@ pub struct EcsRunnerMultiThread {
 impl EcsRunnerMultiThread {
     /// Creates a new multi-threaded runner with the specified thread count.
     pub fn new(num_threads: usize) -> Self {
+        let io = IoRuntime::new();
         Self {
-            compute: ComputePool::new(),
-            io: IoRuntime::new(),
+            compute: ComputePool::new(io.clone()),
+            io,
             num_threads: num_threads.max(1),
         }
     }

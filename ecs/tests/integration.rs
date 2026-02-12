@@ -234,7 +234,7 @@ fn visibility_filtering_with_systems() {
     }
 
     // Run transform system via run_blocking
-    let compute = ComputePool::new();
+    let compute = ComputePool::new(IoRuntime::new());
     let io = IoRuntime::new();
     run_system_blocking(&UpdateGlobalTransforms, &world, &compute, &io);
 
@@ -344,7 +344,7 @@ fn light_direction_from_transform() {
     }
 
     // Run transform system via run_blocking
-    let compute = ComputePool::new();
+    let compute = ComputePool::new(IoRuntime::new());
     let io = IoRuntime::new();
     run_system_blocking(&UpdateGlobalTransforms, &world, &compute, &io);
 

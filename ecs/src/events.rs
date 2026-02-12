@@ -222,7 +222,7 @@ mod tests {
         use crate::io_runtime::IoRuntime;
         use crate::system::run_system_blocking;
         let update = EventUpdateSystem::<TestEvent>::new();
-        let compute = ComputePool::new();
+        let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
         run_system_blocking(&update, &world, &compute, &io);
 

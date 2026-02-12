@@ -2,6 +2,7 @@
 //!
 //! Core crate for RedLilium Engine basic utilities.
 
+pub mod compute;
 #[cfg(feature = "gltf")]
 pub mod gltf;
 pub mod material;

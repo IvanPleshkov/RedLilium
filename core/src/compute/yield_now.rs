@@ -32,8 +32,6 @@ pub fn set_yield_interval(interval: Duration) {
 ///
 /// The next [`yield_now`] on this thread will always suspend,
 /// regardless of the configured interval.
-///
-/// Called automatically by [`ComputePool::new()`](crate::ComputePool::new).
 pub fn reset_yield_timer() {
     LAST_YIELD.set(None);
 }
@@ -48,10 +46,10 @@ pub fn reset_yield_timer() {
 /// # Example
 ///
 /// ```ignore
-/// pool.spawn(Priority::Low, async move {
+/// pool.spawn(Priority::Low, |ctx| async move {
 ///     for chunk in data.chunks(256) {
 ///         process(chunk);
-///         yield_now().await;
+///         ctx.yield_now().await;
 ///     }
 /// });
 /// ```

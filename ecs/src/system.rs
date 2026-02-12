@@ -59,7 +59,7 @@ pub(crate) type SystemFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>
 ///             }).await;
 ///
 ///         // Safe to .await — no locks held
-///         let mut handle = ctx.compute().spawn(Priority::Low, async move {
+///         let mut handle = ctx.compute().spawn(Priority::Low, |_cctx| async move {
 ///             compute_paths(graph)
 ///         });
 ///         let paths = (&mut handle).await;
@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn empty_system_runs() {
         let world = World::new();
-        let compute = ComputePool::new();
+        let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
         run_system_blocking(&EmptySystem, &world, &compute, &io);
     }
@@ -235,7 +235,7 @@ mod tests {
         let flag = std::sync::Arc::new(AtomicBool::new(false));
         let sys = FlagSystem(flag.clone());
         let world = World::new();
-        let compute = ComputePool::new();
+        let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
         run_system_blocking(&sys, &world, &compute, &io);
         assert!(flag.load(Ordering::Relaxed));
@@ -250,7 +250,7 @@ mod tests {
         world.insert(e, Position { x: 10.0 }).unwrap();
         world.insert(e, Velocity { x: 5.0 }).unwrap();
 
-        let compute = ComputePool::new();
+        let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
         run_system_blocking(&MovementSystem, &world, &compute, &io);
 
@@ -265,7 +265,7 @@ mod tests {
         impl System for ComputeSystem {
             async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
                 let slot = self.0.clone();
-                let mut handle = ctx.compute().spawn(Priority::Low, async { 99u32 });
+                let mut handle = ctx.compute().spawn(Priority::Low, |_ctx| async { 99u32 });
                 let result = (&mut handle).await;
                 *slot.lock().unwrap() = result;
             }
@@ -274,7 +274,7 @@ mod tests {
         let result = std::sync::Arc::new(std::sync::Mutex::new(None));
         let sys = ComputeSystem(result.clone());
         let world = World::new();
-        let compute = ComputePool::new();
+        let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
         run_system_blocking(&sys, &world, &compute, &io);
         assert_eq!(*result.lock().unwrap(), Some(99));

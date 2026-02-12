@@ -24,9 +24,10 @@ pub struct EcsRunnerSingleThread {
 impl EcsRunnerSingleThread {
     /// Creates a new single-threaded runner.
     pub fn new() -> Self {
+        let io = IoRuntime::new();
         Self {
-            compute: ComputePool::new(),
-            io: IoRuntime::new(),
+            compute: ComputePool::new(io.clone()),
+            io,
         }
     }
 

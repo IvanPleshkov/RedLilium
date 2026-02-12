@@ -44,11 +44,11 @@ mod commands;
 pub mod component;
 pub mod components;
 mod compute;
+mod compute_context;
 mod entity;
 mod events;
 pub mod hierarchy;
 pub mod inspect;
-mod io_handle;
 mod io_runtime;
 mod lock_request;
 #[cfg(any(
@@ -58,7 +58,6 @@ mod lock_request;
     feature = "physics-2d-f32"
 ))]
 pub mod physics;
-mod priority;
 mod query;
 mod resource;
 mod runner;
@@ -71,7 +70,6 @@ mod systems_container;
 #[cfg(feature = "inspector")]
 pub mod ui;
 mod world;
-mod yield_now;
 
 // Core types
 pub use commands::CommandBuffer;
@@ -81,14 +79,17 @@ pub use ecs_macro::Component;
 pub use egui;
 pub use entity::Entity;
 pub use events::{EventUpdateSystem, Events};
-pub use io_handle::IoHandle;
 pub use io_runtime::IoRuntime;
-pub use priority::Priority;
 pub use query::{AddedFilter, ChangedFilter, ContainsChecker, With, Without};
+pub use redlilium_core::compute::{
+    ComputeContext, IoHandle, IoRunner, Priority, YieldNow, reset_yield_timer, set_yield_interval,
+    yield_now,
+};
 pub use resource::{ResourceRef, ResourceRefMut};
 pub use sparse_set::{Ref, RefMut, SparseSetInner};
 pub use world::{ComponentNotRegistered, World};
-pub use yield_now::{reset_yield_timer, set_yield_interval, yield_now};
+
+pub use compute_context::EcsComputeContext;
 
 // System & scheduling (new API)
 pub use access_set::{AccessSet, OptionalRead, OptionalWrite, Read, Res, ResMut, Write};

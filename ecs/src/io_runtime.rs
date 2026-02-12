@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use crate::io_handle::IoHandle;
+use redlilium_core::compute::{IoHandle, IoRunner};
 
 /// Runtime for spawning real async IO operations.
 ///
@@ -13,6 +13,9 @@ use crate::io_handle::IoHandle;
 /// Owned by the ECS runner, accessible via [`SystemContext::io()`](crate::SystemContext::io).
 /// Clone is cheap (Arc-wrapped) — capture in compute tasks to do IO from background work.
 ///
+/// Implements [`IoRunner`] from `redlilium-core` so standalone libraries
+/// can be generic over `C: ComputeContext<Io = impl IoRunner>`.
+///
 /// # Example
 ///
 /// ```ignore
@@ -22,10 +25,9 @@ use crate::io_handle::IoHandle;
 /// });
 /// let config = handle.await;
 ///
-/// // From a compute task (clone the runtime):
-/// let io = ctx.io().clone();
-/// ctx.compute().spawn(Priority::Low, async move {
-///     let data = io.run(async { fetch_data().await }).await;
+/// // From a compute task (context provides IO automatically):
+/// ctx.compute().spawn(Priority::Low, |cctx| async move {
+///     let data = cctx.io().run(async { fetch_data().await }).await;
 ///     process(data)
 /// });
 /// ```
@@ -68,21 +70,18 @@ impl IoRuntime {
             inner: Arc::new(IoRuntimeInner {}),
         }
     }
+}
 
-    /// Spawns an async IO future on the real runtime.
+#[cfg(not(target_arch = "wasm32"))]
+impl IoRunner for IoRuntime {
+    /// Spawns an async IO future on tokio's worker thread.
     ///
     /// Returns an [`IoHandle`] that can be `.await`ed or polled via
     /// `try_recv()`. The handle works with the ECS noop waker — it
     /// checks a channel internally.
     ///
-    /// # Platform behavior
-    ///
-    /// - **Native**: Future runs on tokio's worker thread with real wakers
-    ///   and IO reactor. Results are available within the same frame.
-    /// - **WASM**: Future runs via `spawn_local` on the browser event loop.
-    ///   Results arrive after control returns to the browser (next frame).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn run<T, F>(&self, future: F) -> IoHandle<T>
+    /// Results are available within the same frame.
+    fn run<T, F>(&self, future: F) -> IoHandle<T>
     where
         T: Send + 'static,
         F: Future<Output = T> + Send + 'static,
@@ -96,10 +95,14 @@ impl IoRuntime {
 
         IoHandle::new(receiver)
     }
+}
 
-    /// Spawns an async IO future on the browser event loop (WASM variant).
-    #[cfg(target_arch = "wasm32")]
-    pub fn run<T, F>(&self, future: F) -> IoHandle<T>
+#[cfg(target_arch = "wasm32")]
+impl IoRunner for IoRuntime {
+    /// Spawns an async IO future on the browser event loop.
+    ///
+    /// Results arrive after control returns to the browser (next frame).
+    fn run<T, F>(&self, future: F) -> IoHandle<T>
     where
         T: Send + 'static,
         F: Future<Output = T> + Send + 'static,

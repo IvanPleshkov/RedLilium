@@ -5,8 +5,10 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::time::Duration;
 
-use crate::priority::Priority;
-use crate::yield_now::reset_yield_timer;
+use redlilium_core::compute::{Priority, reset_yield_timer};
+
+use crate::compute_context::EcsComputeContext;
+use crate::io_runtime::IoRuntime;
 
 /// Shared state between a [`TaskHandle`] and the pool's internal future wrapper.
 ///
@@ -34,7 +36,7 @@ impl TaskState {
 /// # Example
 ///
 /// ```ignore
-/// let handle = pool.spawn(Priority::Low, async { 42 });
+/// let handle = pool.spawn(Priority::Low, |_ctx| async { 42 });
 ///
 /// // Non-destructive completion check:
 /// if handle.is_done() {
@@ -147,12 +149,13 @@ struct PendingTask {
 ///
 /// # Example
 ///
-/// ```
-/// use redlilium_ecs::{ComputePool, Priority};
+/// ```ignore
+/// use redlilium_ecs::{ComputePool, Priority, IoRuntime};
 ///
-/// let pool = ComputePool::new();
+/// let io = IoRuntime::new();
+/// let pool = ComputePool::new(io);
 ///
-/// let handle = pool.spawn(Priority::Low, async { 42u32 });
+/// let handle = pool.spawn(Priority::Low, |_ctx| async { 42u32 });
 ///
 /// // Tick until the task completes
 /// while pool.pending_count() > 0 {
@@ -164,32 +167,41 @@ struct PendingTask {
 pub struct ComputePool {
     tasks: Mutex<Vec<PendingTask>>,
     next_id: Mutex<u64>,
+    io: IoRuntime,
 }
 
 impl ComputePool {
-    /// Creates a new compute pool.
+    /// Creates a new compute pool with the given IO runtime.
     ///
     /// Resets the per-thread yield timer so the first [`yield_now`](crate::yield_now)
     /// in any task spawned on this pool will always suspend.
-    pub fn new() -> Self {
+    pub fn new(io: IoRuntime) -> Self {
         reset_yield_timer();
         Self {
             tasks: Mutex::new(Vec::new()),
             next_id: Mutex::new(0),
+            io,
         }
     }
 
     /// Spawns an async compute task with the given priority.
     ///
+    /// The closure receives an [`EcsComputeContext`] that provides
+    /// cooperative yielding and IO access.
+    ///
     /// Returns a handle for retrieving the result.
-    pub fn spawn<T, F>(&self, priority: Priority, future: F) -> TaskHandle<T>
+    pub fn spawn<T, F, Fut>(&self, priority: Priority, f: F) -> TaskHandle<T>
     where
         T: Send + 'static,
-        F: Future<Output = T> + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        F: FnOnce(EcsComputeContext) -> Fut + Send + 'static,
     {
         let (sender, receiver) = std::sync::mpsc::channel();
         let state = Arc::new(TaskState::new());
         let task_state = state.clone();
+
+        let ctx = EcsComputeContext::new(self.io.clone());
+        let future = f(ctx);
 
         let wrapped = async move {
             let result = future.await;
@@ -346,12 +358,6 @@ impl ComputePool {
     }
 }
 
-impl Default for ComputePool {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Creates a no-op waker for manual polling.
 pub(crate) fn noop_waker() -> Waker {
     fn noop(_: *const ()) {}
@@ -365,12 +371,16 @@ pub(crate) fn noop_waker() -> Waker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::yield_now::yield_now;
+    use redlilium_core::compute::yield_now;
+
+    fn test_pool() -> ComputePool {
+        ComputePool::new(IoRuntime::new())
+    }
 
     #[test]
     fn spawn_and_recv() {
-        let pool = ComputePool::new();
-        let handle = pool.spawn(Priority::Low, async { 42u32 });
+        let pool = test_pool();
+        let handle = pool.spawn(Priority::Low, |_ctx| async { 42u32 });
 
         while pool.pending_count() > 0 {
             pool.tick();
@@ -381,21 +391,21 @@ mod tests {
 
     #[test]
     fn priority_ordering() {
-        let pool = ComputePool::new();
+        let pool = test_pool();
         let results = std::sync::Arc::new(Mutex::new(Vec::new()));
 
         let r1 = results.clone();
-        pool.spawn(Priority::Low, async move {
+        pool.spawn(Priority::Low, |_ctx| async move {
             r1.lock().unwrap().push("low");
         });
 
         let r2 = results.clone();
-        pool.spawn(Priority::High, async move {
+        pool.spawn(Priority::High, |_ctx| async move {
             r2.lock().unwrap().push("high");
         });
 
         let r3 = results.clone();
-        pool.spawn(Priority::Critical, async move {
+        pool.spawn(Priority::Critical, |_ctx| async move {
             r3.lock().unwrap().push("critical");
         });
 
@@ -410,8 +420,8 @@ mod tests {
 
     #[test]
     fn yield_now_suspends() {
-        let pool = ComputePool::new();
-        let handle = pool.spawn(Priority::Low, async {
+        let pool = test_pool();
+        let handle = pool.spawn(Priority::Low, |_ctx| async {
             yield_now().await;
             42u32
         });
@@ -431,10 +441,10 @@ mod tests {
 
     #[test]
     fn multiple_tasks_progress() {
-        let pool = ComputePool::new();
-        let h1 = pool.spawn(Priority::Low, async { 1u32 });
-        let h2 = pool.spawn(Priority::Low, async { 2u32 });
-        let h3 = pool.spawn(Priority::Low, async { 3u32 });
+        let pool = test_pool();
+        let h1 = pool.spawn(Priority::Low, |_ctx| async { 1u32 });
+        let h2 = pool.spawn(Priority::Low, |_ctx| async { 2u32 });
+        let h3 = pool.spawn(Priority::Low, |_ctx| async { 3u32 });
 
         pool.tick_all();
 
@@ -446,8 +456,8 @@ mod tests {
 
     #[test]
     fn task_handle_recv_blocks() {
-        let pool = ComputePool::new();
-        let handle = pool.spawn(Priority::High, async { "hello" });
+        let pool = test_pool();
+        let handle = pool.spawn(Priority::High, |_ctx| async { "hello" });
 
         pool.tick();
         assert_eq!(handle.recv(), Some("hello"));
@@ -455,7 +465,7 @@ mod tests {
 
     #[test]
     fn empty_pool_tick() {
-        let pool = ComputePool::new();
+        let pool = test_pool();
         assert_eq!(pool.tick(), 0);
         assert_eq!(pool.tick_all(), 0);
         assert_eq!(pool.pending_count(), 0);
@@ -463,8 +473,8 @@ mod tests {
 
     #[test]
     fn is_done_non_destructive() {
-        let pool = ComputePool::new();
-        let handle = pool.spawn(Priority::Low, async { 99u32 });
+        let pool = test_pool();
+        let handle = pool.spawn(Priority::Low, |_ctx| async { 99u32 });
 
         assert!(!handle.is_done());
         pool.tick();
@@ -475,8 +485,8 @@ mod tests {
 
     #[test]
     fn cancel_prevents_execution() {
-        let pool = ComputePool::new();
-        let handle = pool.spawn(Priority::Low, async {
+        let pool = test_pool();
+        let handle = pool.spawn(Priority::Low, |_ctx| async {
             yield_now().await;
             42u32
         });
@@ -497,8 +507,8 @@ mod tests {
 
     #[test]
     fn recv_timeout_returns_none_on_timeout() {
-        let pool = ComputePool::new();
-        let handle = pool.spawn(Priority::Low, async {
+        let pool = test_pool();
+        let handle = pool.spawn(Priority::Low, |_ctx| async {
             yield_now().await;
             42u32
         });
@@ -514,8 +524,8 @@ mod tests {
 
     #[test]
     fn cancel_already_completed_is_harmless() {
-        let pool = ComputePool::new();
-        let handle = pool.spawn(Priority::Low, async { 10u32 });
+        let pool = test_pool();
+        let handle = pool.spawn(Priority::Low, |_ctx| async { 10u32 });
 
         pool.tick();
         assert!(handle.is_done());
@@ -527,8 +537,8 @@ mod tests {
 
     #[test]
     fn task_handle_future_pending_then_ready() {
-        let pool = ComputePool::new();
-        let mut handle = pool.spawn(Priority::Low, async { 42u32 });
+        let pool = test_pool();
+        let mut handle = pool.spawn(Priority::Low, |_ctx| async { 42u32 });
 
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
@@ -548,8 +558,8 @@ mod tests {
 
     #[test]
     fn task_handle_future_cancelled() {
-        let pool = ComputePool::new();
-        let mut handle = pool.spawn(Priority::Low, async {
+        let pool = test_pool();
+        let mut handle = pool.spawn(Priority::Low, |_ctx| async {
             yield_now().await;
             42u32
         });
@@ -569,8 +579,8 @@ mod tests {
 
     #[test]
     fn task_handle_future_with_yield() {
-        let pool = ComputePool::new();
-        let mut handle = pool.spawn(Priority::Low, async {
+        let pool = test_pool();
+        let mut handle = pool.spawn(Priority::Low, |_ctx| async {
             yield_now().await;
             99u32
         });

@@ -5,9 +5,9 @@ use std::task::{Context, Poll};
 
 /// Handle to an async IO task running on a real async runtime.
 ///
-/// Works with the ECS custom executor's noop waker via channel-based
-/// polling. The actual IO runs on tokio (native) or browser APIs (WASM)
-/// with real wakers — only the result delivery uses the channel.
+/// Works with cooperative executors using noop wakers via channel-based
+/// polling. The actual IO runs on a real runtime (e.g. tokio) with real
+/// wakers — only the result delivery uses the channel.
 ///
 /// # Example
 ///
@@ -16,7 +16,7 @@ use std::task::{Context, Poll};
 ///     reqwest::get("https://api.example.com/data").await?.text().await
 /// });
 ///
-/// // Await in a system (polls channel each tick)
+/// // Await in a compute task (polls channel each tick)
 /// let result = handle.await;
 /// ```
 pub struct IoHandle<T> {
@@ -24,7 +24,8 @@ pub struct IoHandle<T> {
 }
 
 impl<T> IoHandle<T> {
-    pub(crate) fn new(receiver: mpsc::Receiver<T>) -> Self {
+    /// Creates a new IO handle wrapping the given receiver.
+    pub fn new(receiver: mpsc::Receiver<T>) -> Self {
         Self { receiver }
     }
 

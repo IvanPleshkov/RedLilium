@@ -57,7 +57,7 @@ The key architectural decision: **ECS systems are async and can spawn/await comp
 │      data = world.read::<NavMesh>().clone();             │
 │  });                         ← borrows dropped           │
 │                                                          │
-│  let handle = compute.spawn(Priority::High, async {     │
+│  let handle = compute.spawn(Priority::High, |ctx| async {│
 │      heavy_pathfinding(data)  ← runs on pool thread     │
 │  });                                                     │
 │  let result = (&mut handle).await;  ← system suspends   │
@@ -73,7 +73,7 @@ The key architectural decision: **ECS systems are async and can spawn/await comp
 │  access.scope(|world| {                                  │
 │      let geometry = extract_geometry(world);             │
 │  });                                                     │
-│  compute.spawn(Priority::Low, async move {              │
+│  compute.spawn(Priority::Low, |ctx| async move {        │
 │      rebuild_navmesh(geometry)  ← runs across frames    │
 │  });                                                     │
 │  // system returns, task continues in background         │
@@ -227,7 +227,7 @@ impl System for PathfindSystem {
             });
 
             // Phase 2: heavy compute (no borrows held, safe to .await)
-            let mut handle = access.compute().spawn(Priority::High, async move {
+            let mut handle = access.compute().spawn(Priority::High, |_ctx| async move {
                 compute_paths(graph)
             });
             let paths = (&mut handle).await;
@@ -259,11 +259,11 @@ Fire-and-forget tasks for background work that spans multiple frames:
 
 ```rust
 // Spawn from a system — task continues after the system returns
-let handle = compute.spawn(Priority::Low, async move {
+let handle = compute.spawn(Priority::Low, |ctx| async move {
     let mut mesh = NavMesh::new();
     for chunk in geometry.chunks(256) {
         mesh.process(chunk);
-        yield_now().await;  // cooperative yielding
+        ctx.yield_now().await;  // cooperative yielding
     }
     mesh
 });

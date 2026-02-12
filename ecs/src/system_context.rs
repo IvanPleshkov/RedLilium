@@ -87,11 +87,11 @@ impl<'a> SystemContext<'a> {
 
     /// Returns a reference to the IO runtime for spawning async IO tasks.
     ///
-    /// Clone the runtime to capture it in compute tasks:
+    /// Compute tasks receive an [`EcsComputeContext`](crate::EcsComputeContext)
+    /// that provides IO access automatically:
     /// ```ignore
-    /// let io = ctx.io().clone();
-    /// ctx.compute().spawn(Priority::Low, async move {
-    ///     let data = io.run(async { fetch().await }).await;
+    /// ctx.compute().spawn(Priority::Low, |cctx| async move {
+    ///     let data = cctx.io().run(async { fetch().await }).await;
     ///     process(data)
     /// });
     /// ```
@@ -121,7 +121,7 @@ mod tests {
     #[test]
     fn context_provides_compute() {
         let world = World::new();
-        let compute = ComputePool::new();
+        let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
         let commands = CommandCollector::new();
         let ctx = SystemContext::new(&world, &compute, &io, &commands);
@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn commands_are_collected() {
         let world = World::new();
-        let compute = ComputePool::new();
+        let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
         let commands = CommandCollector::new();
         let ctx = SystemContext::new(&world, &compute, &io, &commands);

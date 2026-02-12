@@ -75,6 +75,7 @@ mod tests {
     use crate::access_set::{Read, Write};
     use crate::command_collector::CommandCollector;
     use crate::compute::ComputePool;
+    use crate::io_runtime::IoRuntime;
     use crate::system_context::SystemContext;
     use crate::world::World;
 
@@ -92,7 +93,7 @@ mod tests {
         let e = world.spawn();
         world.insert(e, Position { x: 42.0 }).unwrap();
 
-        let compute = ComputePool::new();
+        let compute = ComputePool::new(IoRuntime::new());
         let io = crate::io_runtime::IoRuntime::new();
         let commands = CommandCollector::new();
         let ctx = SystemContext::new(&world, &compute, &io, &commands);
@@ -110,7 +111,7 @@ mod tests {
         let e = world.spawn();
         world.insert(e, Position { x: 0.0 }).unwrap();
 
-        let compute = ComputePool::new();
+        let compute = ComputePool::new(IoRuntime::new());
         let io = crate::io_runtime::IoRuntime::new();
         let commands = CommandCollector::new();
         let ctx = SystemContext::new(&world, &compute, &io, &commands);
@@ -134,7 +135,7 @@ mod tests {
         world.insert(e, Position { x: 10.0 }).unwrap();
         world.insert(e, Velocity { x: 5.0 }).unwrap();
 
-        let compute = ComputePool::new();
+        let compute = ComputePool::new(IoRuntime::new());
         let io = crate::io_runtime::IoRuntime::new();
         let commands = CommandCollector::new();
         let ctx = SystemContext::new(&world, &compute, &io, &commands);
@@ -158,7 +159,7 @@ mod tests {
         let e = world.spawn();
         world.insert(e, Position { x: 42.0 }).unwrap();
 
-        let compute = ComputePool::new();
+        let compute = ComputePool::new(IoRuntime::new());
         let io = crate::io_runtime::IoRuntime::new();
         let commands = CommandCollector::new();
         let ctx = SystemContext::new(&world, &compute, &io, &commands);
