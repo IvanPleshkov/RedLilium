@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
+use crate::function_system::IntoSystem;
 use crate::system::{DynSystem, System};
 
 /// An explicit ordering edge between two systems.
@@ -122,6 +123,27 @@ impl SystemsContainer {
         self.in_degrees.push(0);
         self.rebuild_order();
         arc
+    }
+
+    /// Registers a plain function as a system.
+    ///
+    /// Converts the function via [`IntoSystem`] and registers the resulting
+    /// [`FunctionSystem`](crate::FunctionSystem). Returns the typed `Arc` handle.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// fn gravity((mut velocities,): (RefMut<Velocity>,)) {
+    ///     for (_, vel) in velocities.iter_mut() {
+    ///         vel.y -= 9.81;
+    ///     }
+    /// }
+    ///
+    /// let mut container = SystemsContainer::new();
+    /// container.add_fn::<(Write<Velocity>,), _>(gravity);
+    /// ```
+    pub fn add_fn<Marker, F: IntoSystem<Marker>>(&mut self, func: F) -> Arc<RwLock<F::System>> {
+        self.add(func.into_system())
     }
 
     /// Adds a single ordering edge: `Before` must complete before `After` starts.
