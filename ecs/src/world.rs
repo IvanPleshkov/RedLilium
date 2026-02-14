@@ -528,6 +528,11 @@ impl World {
         Some(guards)
     }
 
+    /// Returns whether a component type has been registered.
+    pub fn is_component_registered<T: 'static>(&self) -> bool {
+        self.components.contains_key(&TypeId::of::<T>())
+    }
+
     /// Returns the TypeIds of all registered component types.
     pub fn component_type_ids(&self) -> impl Iterator<Item = TypeId> + '_ {
         self.components.keys().copied()

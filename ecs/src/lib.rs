@@ -99,8 +99,8 @@ pub use compute_context::EcsComputeContext;
 
 // System & scheduling (new API)
 pub use access_set::{
-    AccessSet, MainThreadRes, MainThreadResMut, OptionalRead, OptionalWrite, Read, Res, ResMut,
-    Write,
+    AccessSet, Added, MainThreadRes, MainThreadResMut, MaybeAdded, MaybeRemoved, OptionalRead,
+    OptionalWrite, Read, Removed, Res, ResMut, Write,
 };
 pub use bundle::Bundle;
 pub use command_collector::{CommandCollector, SpawnBuilder};

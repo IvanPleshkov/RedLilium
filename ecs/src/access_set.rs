@@ -1,6 +1,7 @@
 use std::any::TypeId;
 use std::marker::PhantomData;
 
+use crate::query::{AddedFilter, RemovedFilter};
 use crate::resource::{ResourceRef, ResourceRefMut};
 use crate::sparse_set::{Ref, RefMut};
 use crate::world::World;
@@ -142,6 +143,40 @@ pub struct MainThreadRes<T: 'static>(PhantomData<T>);
 ///
 /// Panics if the main-thread resource does not exist.
 pub struct MainThreadResMut<T: 'static>(PhantomData<T>);
+
+/// Filter for entities whose component `T` was added this tick.
+///
+/// In the execute closure, yields [`AddedFilter`](crate::AddedFilter).
+/// Use `filter.matches(entity_index)` to check individual entities.
+///
+/// # Panics
+///
+/// Panics if `T` has never been registered. Use [`MaybeAdded`] for
+/// a non-panicking variant.
+pub struct Added<T: 'static>(PhantomData<T>);
+
+/// Filter for entities whose component `T` was removed this tick.
+///
+/// In the execute closure, yields [`RemovedFilter`](crate::RemovedFilter).
+/// Use `filter.matches(entity_index)` or `filter.iter()` to query.
+///
+/// # Panics
+///
+/// Panics if `T` has never been registered. Use [`MaybeRemoved`] for
+/// a non-panicking variant.
+pub struct Removed<T: 'static>(PhantomData<T>);
+
+/// Optional filter for entities whose component `T` was added this tick.
+///
+/// In the execute closure, yields [`AddedFilter`](crate::AddedFilter).
+/// If `T` has never been registered, the filter matches nothing (no panic).
+pub struct MaybeAdded<T: 'static>(PhantomData<T>);
+
+/// Optional filter for entities whose component `T` was removed this tick.
+///
+/// In the execute closure, yields [`RemovedFilter`](crate::RemovedFilter).
+/// If `T` has never been registered, the filter matches nothing (no panic).
+pub struct MaybeRemoved<T: 'static>(PhantomData<T>);
 
 // ---- AccessElement implementations ----
 
@@ -321,6 +356,99 @@ impl<T: 'static> AccessElement for MainThreadResMut<T> {
     }
 }
 
+impl<T: 'static> AccessElement for Added<T> {
+    type Item<'w> = AddedFilter<'w>;
+
+    fn access_info() -> AccessInfo {
+        // Use the marker type's own TypeId so it doesn't collide with
+        // component storage and no lock is acquired.
+        AccessInfo {
+            type_id: TypeId::of::<Added<T>>(),
+            is_write: false,
+        }
+    }
+
+    fn fetch(world: &World) -> Self::Item<'_> {
+        assert!(
+            world.is_component_registered::<T>(),
+            "Component `{}` not registered for Added<T> filter",
+            std::any::type_name::<T>()
+        );
+        let since_tick = world.current_tick().saturating_sub(1);
+        world.added::<T>(since_tick)
+    }
+
+    fn fetch_unlocked(world: &World) -> Self::Item<'_> {
+        // Filters don't hold locks — same as fetch
+        Self::fetch(world)
+    }
+}
+
+impl<T: 'static> AccessElement for Removed<T> {
+    type Item<'w> = RemovedFilter<'w>;
+
+    fn access_info() -> AccessInfo {
+        AccessInfo {
+            type_id: TypeId::of::<Removed<T>>(),
+            is_write: false,
+        }
+    }
+
+    fn fetch(world: &World) -> Self::Item<'_> {
+        assert!(
+            world.is_component_registered::<T>(),
+            "Component `{}` not registered for Removed<T> filter",
+            std::any::type_name::<T>()
+        );
+        let since_tick = world.current_tick().saturating_sub(1);
+        world.removed::<T>(since_tick)
+    }
+
+    fn fetch_unlocked(world: &World) -> Self::Item<'_> {
+        Self::fetch(world)
+    }
+}
+
+impl<T: 'static> AccessElement for MaybeAdded<T> {
+    type Item<'w> = AddedFilter<'w>;
+
+    fn access_info() -> AccessInfo {
+        AccessInfo {
+            type_id: TypeId::of::<MaybeAdded<T>>(),
+            is_write: false,
+        }
+    }
+
+    fn fetch(world: &World) -> Self::Item<'_> {
+        let since_tick = world.current_tick().saturating_sub(1);
+        world.added::<T>(since_tick)
+    }
+
+    fn fetch_unlocked(world: &World) -> Self::Item<'_> {
+        Self::fetch(world)
+    }
+}
+
+impl<T: 'static> AccessElement for MaybeRemoved<T> {
+    type Item<'w> = RemovedFilter<'w>;
+
+    fn access_info() -> AccessInfo {
+        AccessInfo {
+            type_id: TypeId::of::<MaybeRemoved<T>>(),
+            is_write: false,
+        }
+    }
+
+    fn fetch(world: &World) -> Self::Item<'_> {
+        let since_tick = world.current_tick().saturating_sub(1);
+        world.removed::<T>(since_tick)
+    }
+
+    fn fetch_unlocked(world: &World) -> Self::Item<'_> {
+        Self::fetch(world)
+    }
+}
+
 // ---- Tuple AccessSet implementations ----
 
 // Empty tuple (no access)
@@ -470,5 +598,152 @@ mod tests {
 
         let (dt,) = <(Res<f64>,)>::fetch(&world);
         assert_eq!(*dt, 1.5);
+    }
+
+    // ---- Added/Removed filter tests ----
+
+    #[derive(Debug, PartialEq)]
+    struct Health(u32);
+
+    #[test]
+    fn added_filter_access_info_uses_marker_type() {
+        let info = <Added<Position>>::access_info();
+        // TypeId should be Added<Position>, not Position itself
+        assert_ne!(info.type_id, TypeId::of::<Position>());
+        assert_eq!(info.type_id, TypeId::of::<Added<Position>>());
+        assert!(!info.is_write);
+    }
+
+    #[test]
+    fn removed_filter_access_info_uses_marker_type() {
+        let info = <Removed<Position>>::access_info();
+        assert_ne!(info.type_id, TypeId::of::<Position>());
+        assert_eq!(info.type_id, TypeId::of::<Removed<Position>>());
+        assert!(!info.is_write);
+    }
+
+    #[test]
+    fn added_filter_detects_addition() {
+        let mut world = World::new();
+        world.register_component::<Health>();
+
+        world.advance_tick(); // tick = 1
+        let e = world.spawn();
+        world.insert_tracked(e, Health(100)).unwrap();
+
+        let (filter,) = <(Added<Health>,)>::fetch(&world);
+        assert!(filter.matches(e.index()));
+    }
+
+    #[test]
+    fn added_filter_does_not_match_old() {
+        let mut world = World::new();
+        world.register_component::<Health>();
+
+        let e = world.spawn();
+        world.insert_tracked(e, Health(100)).unwrap(); // tick 0
+
+        world.advance_tick(); // tick = 1
+        world.advance_tick(); // tick = 2
+
+        // since_tick = 2 - 1 = 1, component was added at tick 0, so 0 > 1 is false
+        let (filter,) = <(Added<Health>,)>::fetch(&world);
+        assert!(!filter.matches(e.index()));
+    }
+
+    #[test]
+    fn removed_filter_detects_removal() {
+        let mut world = World::new();
+        world.register_component::<Health>();
+
+        let e = world.spawn();
+        world.insert(e, Health(100)).unwrap();
+
+        world.advance_tick(); // tick = 1
+        world.remove::<Health>(e); // removed at tick 1
+
+        let (filter,) = <(Removed<Health>,)>::fetch(&world);
+        assert!(filter.matches(e.index()));
+    }
+
+    #[test]
+    fn removed_filter_iter_in_tuple() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Health>();
+
+        let e1 = world.spawn();
+        let e2 = world.spawn();
+        world.insert(e1, Position { x: 1.0 }).unwrap();
+        world.insert(e1, Health(100)).unwrap();
+        world.insert(e2, Position { x: 2.0 }).unwrap();
+        world.insert(e2, Health(200)).unwrap();
+
+        world.advance_tick(); // tick = 1
+        world.remove::<Health>(e1); // removed at tick 1
+
+        let (positions, removed) = <(Read<Position>, Removed<Health>)>::fetch(&world);
+        let affected: Vec<f32> = positions
+            .iter()
+            .filter(|(idx, _)| removed.matches(*idx))
+            .map(|(_, p)| p.x)
+            .collect();
+        assert_eq!(affected, vec![1.0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "not registered for Added")]
+    fn added_panics_for_unregistered() {
+        let world = World::new();
+        let _ = <(Added<Health>,)>::fetch(&world);
+    }
+
+    #[test]
+    #[should_panic(expected = "not registered for Removed")]
+    fn removed_panics_for_unregistered() {
+        let world = World::new();
+        let _ = <(Removed<Health>,)>::fetch(&world);
+    }
+
+    #[test]
+    fn maybe_added_no_panic_for_unregistered() {
+        let world = World::new();
+        let (filter,) = <(MaybeAdded<Health>,)>::fetch(&world);
+        assert!(!filter.matches(0));
+    }
+
+    #[test]
+    fn maybe_removed_no_panic_for_unregistered() {
+        let world = World::new();
+        let (filter,) = <(MaybeRemoved<Health>,)>::fetch(&world);
+        assert!(!filter.matches(0));
+    }
+
+    #[test]
+    fn maybe_added_works_when_registered() {
+        let mut world = World::new();
+        world.register_component::<Health>();
+
+        world.advance_tick(); // tick = 1
+        let e = world.spawn();
+        world.insert_tracked(e, Health(50)).unwrap();
+
+        let (filter,) = <(MaybeAdded<Health>,)>::fetch(&world);
+        assert!(filter.matches(e.index()));
+    }
+
+    #[test]
+    fn maybe_removed_works_when_registered() {
+        let mut world = World::new();
+        world.register_component::<Health>();
+
+        let e = world.spawn();
+        world.insert(e, Health(50)).unwrap();
+
+        world.advance_tick(); // tick = 1
+        world.remove::<Health>(e);
+
+        let (filter,) = <(MaybeRemoved<Health>,)>::fetch(&world);
+        assert!(filter.matches(e.index()));
     }
 }
