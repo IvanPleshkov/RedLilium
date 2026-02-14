@@ -1,7 +1,7 @@
 use std::any::TypeId;
 use std::marker::PhantomData;
 
-use crate::query::{AddedFilter, RemovedFilter};
+use crate::query::{AddedFilter, ContainsChecker, RemovedFilter, With, Without};
 use crate::resource::{ResourceRef, ResourceRefMut};
 use crate::sparse_set::{Ref, RefMut};
 use crate::world::World;
@@ -465,6 +465,46 @@ impl<T: 'static> AccessElement for MaybeRemoved<T> {
     }
 }
 
+impl<T: 'static> AccessElement for With<T> {
+    type Item<'w> = ContainsChecker<'w>;
+
+    fn access_info() -> AccessInfo {
+        AccessInfo {
+            type_id: TypeId::of::<With<T>>(),
+            is_write: false,
+        }
+    }
+
+    fn fetch(world: &World) -> Self::Item<'_> {
+        world.with::<T>()
+    }
+
+    fn fetch_unlocked(world: &World) -> Self::Item<'_> {
+        // Filters don't hold locks — same as fetch
+        world.with::<T>()
+    }
+}
+
+impl<T: 'static> AccessElement for Without<T> {
+    type Item<'w> = ContainsChecker<'w>;
+
+    fn access_info() -> AccessInfo {
+        AccessInfo {
+            type_id: TypeId::of::<Without<T>>(),
+            is_write: false,
+        }
+    }
+
+    fn fetch(world: &World) -> Self::Item<'_> {
+        world.without::<T>()
+    }
+
+    fn fetch_unlocked(world: &World) -> Self::Item<'_> {
+        // Filters don't hold locks — same as fetch
+        world.without::<T>()
+    }
+}
+
 // ---- Tuple AccessSet implementations ----
 
 // Empty tuple (no access)
@@ -761,5 +801,102 @@ mod tests {
 
         let (filter,) = <(MaybeRemoved<Health>,)>::fetch(&world);
         assert!(filter.matches(e.index()));
+    }
+
+    // ---- With/Without filter tests ----
+
+    #[derive(Debug, PartialEq)]
+    struct Frozen;
+
+    #[test]
+    fn with_access_info_uses_marker_type() {
+        let info = <With<Position>>::access_info();
+        assert_ne!(info.type_id, TypeId::of::<Position>());
+        assert_eq!(info.type_id, TypeId::of::<With<Position>>());
+        assert!(!info.is_write);
+    }
+
+    #[test]
+    fn without_access_info_uses_marker_type() {
+        let info = <Without<Position>>::access_info();
+        assert_ne!(info.type_id, TypeId::of::<Position>());
+        assert_eq!(info.type_id, TypeId::of::<Without<Position>>());
+        assert!(!info.is_write);
+    }
+
+    #[test]
+    fn with_filter_in_tuple() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Frozen>();
+
+        let e1 = world.spawn();
+        let e2 = world.spawn();
+        world.insert(e1, Position { x: 1.0 }).unwrap();
+        world.insert(e1, Frozen).unwrap();
+        world.insert(e2, Position { x: 2.0 }).unwrap();
+
+        let (positions, has_frozen) = <(Read<Position>, With<Frozen>)>::fetch(&world);
+        let matched: Vec<f32> = positions
+            .iter()
+            .filter(|(idx, _)| has_frozen.matches(*idx))
+            .map(|(_, p)| p.x)
+            .collect();
+        assert_eq!(matched, vec![1.0]);
+    }
+
+    #[test]
+    fn without_filter_in_tuple() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Frozen>();
+
+        let e1 = world.spawn();
+        let e2 = world.spawn();
+        world.insert(e1, Position { x: 1.0 }).unwrap();
+        world.insert(e1, Frozen).unwrap();
+        world.insert(e2, Position { x: 2.0 }).unwrap();
+
+        let (positions, not_frozen) = <(Read<Position>, Without<Frozen>)>::fetch(&world);
+        let matched: Vec<f32> = positions
+            .iter()
+            .filter(|(idx, _)| not_frozen.matches(*idx))
+            .map(|(_, p)| p.x)
+            .collect();
+        assert_eq!(matched, vec![2.0]);
+    }
+
+    #[test]
+    fn without_unregistered_matches_everything() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+
+        let e = world.spawn();
+        world.insert(e, Position { x: 1.0 }).unwrap();
+
+        // Frozen never registered — Without<Frozen> matches all entities
+        let (positions, not_frozen) = <(Read<Position>, Without<Frozen>)>::fetch(&world);
+        let count = positions
+            .iter()
+            .filter(|(idx, _)| not_frozen.matches(*idx))
+            .count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn with_unregistered_matches_nothing() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+
+        let e = world.spawn();
+        world.insert(e, Position { x: 1.0 }).unwrap();
+
+        // Frozen never registered — With<Frozen> matches no entities
+        let (positions, has_frozen) = <(Read<Position>, With<Frozen>)>::fetch(&world);
+        let count = positions
+            .iter()
+            .filter(|(idx, _)| has_frozen.matches(*idx))
+            .count();
+        assert_eq!(count, 0);
     }
 }
