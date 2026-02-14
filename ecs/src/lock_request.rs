@@ -1,6 +1,8 @@
 use std::marker::PhantomData;
+use std::sync::mpsc;
 
 use crate::access_set::AccessSet;
+use crate::main_thread_dispatcher::MainThreadWork;
 use crate::system_context::SystemContext;
 
 /// A pending lock request for a set of component/resource accesses.
@@ -43,15 +45,27 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
     /// deadlocks, fetches data without per-fetch locking, then calls
     /// the closure. All locks are released when the closure returns.
     ///
+    /// If the access set contains any main-thread resources
+    /// ([`MainThreadRes`](crate::MainThreadRes) or
+    /// [`MainThreadResMut`](crate::MainThreadResMut)), the entire closure
+    /// is transparently dispatched to the main thread via the
+    /// [`MainThreadDispatcher`](crate::main_thread_dispatcher::MainThreadDispatcher).
+    ///
     /// The closure is synchronous (`FnOnce`) to prevent holding locks
     /// across await points.
     pub async fn execute<R, F>(self, f: F) -> R
     where
-        F: FnOnce(A::Item<'_>) -> R,
+        F: FnOnce(A::Item<'_>) -> R + Send,
+        R: Send,
     {
-        self.execute_inner(f)
+        if A::needs_main_thread() {
+            self.execute_on_main_thread(f)
+        } else {
+            self.execute_inner(f)
+        }
     }
 
+    /// Fast path: runs directly on the calling thread.
     fn execute_inner<R, F>(&self, f: F) -> R
     where
         F: FnOnce(A::Item<'_>) -> R,
@@ -67,6 +81,53 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
 
         // Run closure (guards drop after closure returns)
         f(items)
+    }
+
+    /// Slow path: dispatches the closure to the main thread.
+    ///
+    /// Used when the access set contains `MainThreadRes` or `MainThreadResMut`.
+    /// If no dispatcher is present (single-threaded runner), falls through
+    /// to `execute_inner` since we are already on the main thread.
+    fn execute_on_main_thread<R, F>(&self, f: F) -> R
+    where
+        F: FnOnce(A::Item<'_>) -> R + Send,
+        R: Send,
+    {
+        match self.ctx.dispatcher() {
+            Some(dispatcher) => {
+                let world = self.ctx.world();
+                let (result_tx, result_rx) = mpsc::sync_channel::<R>(1);
+
+                let work: Box<dyn FnOnce() + Send + '_> = Box::new(move || {
+                    // This closure runs on the main thread.
+                    let _guards = {
+                        redlilium_core::profile_scope!("ecs: lock acquire (main-thread)");
+                        world.acquire_sorted(&A::access_infos())
+                    };
+                    let items = A::fetch_unlocked(world);
+                    let result = f(items);
+                    let _ = result_tx.send(result);
+                });
+
+                // SAFETY: The closure captures `&'a World` and `F` which live for
+                // the duration of `std::thread::scope` in the runner. The main
+                // thread executes this closure within the same scope, so all
+                // captured references are valid at the time of execution. The
+                // closure is consumed (FnOnce) before the scope exits.
+                let work: MainThreadWork = unsafe {
+                    std::mem::transmute::<Box<dyn FnOnce() + Send + '_>, MainThreadWork>(work)
+                };
+
+                dispatcher.send_work(work);
+                result_rx
+                    .recv()
+                    .expect("Main thread did not send result back")
+            }
+            None => {
+                // Single-threaded: no dispatcher, already on main thread
+                self.execute_inner(f)
+            }
+        }
     }
 }
 

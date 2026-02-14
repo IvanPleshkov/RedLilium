@@ -7,6 +7,7 @@ use crate::commands::CommandBuffer;
 use crate::component::Component;
 use crate::entity::{Entity, EntityAllocator};
 use crate::events::Events;
+use crate::main_thread_resource::MainThreadResources;
 use crate::query::{AddedFilter, ChangedFilter, ContainsChecker};
 use crate::resource::{Resource, ResourceRef, ResourceRefMut, Resources};
 use crate::sparse_set::{ComponentStorage, LockGuard, Ref, RefMut};
@@ -84,6 +85,7 @@ pub struct World {
     entities: EntityAllocator,
     components: HashMap<TypeId, ComponentStorage>,
     resources: Resources,
+    main_thread_resources: MainThreadResources,
     /// Global tick counter for change detection.
     tick: u64,
     /// Inspector metadata for registered component types, keyed by name.
@@ -97,6 +99,7 @@ impl World {
             entities: EntityAllocator::new(),
             components: HashMap::new(),
             resources: Resources::new(),
+            main_thread_resources: MainThreadResources::new(),
             tick: 0,
             inspector_entries: BTreeMap::new(),
         }
@@ -646,6 +649,52 @@ impl World {
     /// Panics if the resource does not exist or any borrow is active.
     pub fn resource_mut<T: 'static>(&self) -> ResourceRefMut<'_, T> {
         self.resources.borrow_mut::<T>()
+    }
+
+    // ---- Main-thread resource management ----
+
+    /// Inserts a main-thread resource during world setup.
+    ///
+    /// The resource does **not** need to implement `Send` or `Sync`.
+    /// Takes `&mut self`, so it can only be called before systems run
+    /// (during setup on the main thread).
+    pub fn insert_main_thread_resource<T: 'static>(&mut self, value: T) {
+        // SAFETY: &mut self guarantees exclusive access; setup is on main thread.
+        unsafe { self.main_thread_resources.insert(value) }
+    }
+
+    /// Returns whether a main-thread resource of type `T` exists.
+    pub fn has_main_thread_resource<T: 'static>(&self) -> bool {
+        // SAFETY: contains() only reads HashMap keys (TypeId), no data access.
+        unsafe { self.main_thread_resources.contains::<T>() }
+    }
+
+    /// Removes a main-thread resource and returns it, or `None` if absent.
+    ///
+    /// Takes `&mut self`, so it can only be called outside system execution.
+    pub fn remove_main_thread_resource<T: 'static>(&mut self) -> Option<T> {
+        // SAFETY: &mut self guarantees exclusive access.
+        unsafe { self.main_thread_resources.remove::<T>() }
+    }
+
+    /// Borrows a main-thread resource immutably.
+    ///
+    /// # Safety
+    ///
+    /// Caller must be on the main thread.
+    pub(crate) unsafe fn main_thread_resource<T: 'static>(&self) -> &T {
+        unsafe { self.main_thread_resources.borrow::<T>() }
+    }
+
+    /// Borrows a main-thread resource mutably.
+    ///
+    /// # Safety
+    ///
+    /// Caller must be on the main thread. No other borrows to this resource
+    /// may be active.
+    #[allow(clippy::mut_from_ref)] // SAFETY: caller ensures exclusive main-thread access
+    pub(crate) unsafe fn main_thread_resource_mut<T: 'static>(&self) -> &mut T {
+        unsafe { self.main_thread_resources.borrow_mut::<T>() }
     }
 
     // ---- Change detection ----

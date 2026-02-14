@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use crate::command_collector::CommandCollector;
 use crate::compute::{ComputePool, noop_waker};
 use crate::io_runtime::IoRuntime;
+use crate::main_thread_dispatcher::{MainThreadDispatcher, RunnerEvent};
 use crate::system_context::SystemContext;
 use crate::systems_container::SystemsContainer;
 use crate::world::World;
@@ -79,7 +80,16 @@ impl EcsRunnerMultiThread {
         // Scope the system execution so ctx and futures are dropped
         // before we need &mut world for command application.
         {
-            let ctx = SystemContext::new(world, &self.compute, &self.io, &commands);
+            // Unified event channel for completions AND main-thread dispatch
+            let (event_tx, event_rx) = mpsc::channel::<RunnerEvent>();
+            let dispatcher = MainThreadDispatcher::new(event_tx.clone());
+            let ctx = SystemContext::with_dispatcher(
+                world,
+                &self.compute,
+                &self.io,
+                &commands,
+                &dispatcher,
+            );
 
             // Atomic dependency counters
             let remaining_deps: Vec<AtomicUsize> = systems
@@ -88,7 +98,6 @@ impl EcsRunnerMultiThread {
                 .map(|&d| AtomicUsize::new(d))
                 .collect();
 
-            let (completion_tx, completion_rx) = mpsc::channel::<usize>();
             let mut started = vec![false; n];
             let mut completed_count = 0usize;
 
@@ -97,7 +106,7 @@ impl EcsRunnerMultiThread {
                 macro_rules! spawn_system {
                     ($i:expr) => {{
                         started[$i] = true;
-                        let tx = completion_tx.clone();
+                        let tx = event_tx.clone();
                         let ctx_ref = &ctx;
                         let compute_ref = &self.compute;
                         let idx = $i;
@@ -109,7 +118,7 @@ impl EcsRunnerMultiThread {
                             let guard = system.read().unwrap();
                             let future = guard.run_boxed(ctx_ref);
                             poll_future_to_completion_with_compute(future, compute_ref);
-                            let _ = tx.send(idx);
+                            let _ = tx.send(RunnerEvent::SystemCompleted(idx));
                         });
                     }};
                 }
@@ -123,9 +132,9 @@ impl EcsRunnerMultiThread {
 
                 // Coordination loop on the main thread
                 while completed_count < n {
-                    // Wait for a completion with short timeout (allows compute ticking)
-                    match completion_rx.recv_timeout(Duration::from_millis(1)) {
-                        Ok(completed_idx) => {
+                    // Wait for an event with short timeout (allows compute ticking)
+                    match event_rx.recv_timeout(Duration::from_millis(1)) {
+                        Ok(RunnerEvent::SystemCompleted(completed_idx)) => {
                             completed_count += 1;
 
                             // Decrement dependents and start newly ready systems
@@ -135,6 +144,10 @@ impl EcsRunnerMultiThread {
                                     spawn_system!(dep);
                                 }
                             }
+                        }
+                        Ok(RunnerEvent::MainThreadRequest(work)) => {
+                            redlilium_core::profile_scope!("ecs: main-thread dispatch");
+                            work();
                         }
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                         Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -147,7 +160,7 @@ impl EcsRunnerMultiThread {
                 }
 
                 // Drop the sender so scope join doesn't deadlock
-                drop(completion_tx);
+                drop(event_tx);
             });
         }
 

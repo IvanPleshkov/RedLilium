@@ -7,6 +7,7 @@ use crate::compute::ComputePool;
 use crate::entity::Entity;
 use crate::io_runtime::IoRuntime;
 use crate::lock_request::LockRequest;
+use crate::main_thread_dispatcher::MainThreadDispatcher;
 use crate::world::World;
 
 /// Context passed to systems during execution.
@@ -41,10 +42,14 @@ pub struct SystemContext<'a> {
     compute: &'a ComputePool,
     io: &'a IoRuntime,
     commands: &'a CommandCollector,
+    dispatcher: Option<&'a MainThreadDispatcher>,
 }
 
 impl<'a> SystemContext<'a> {
-    /// Creates a new system context.
+    /// Creates a new system context without a main-thread dispatcher.
+    ///
+    /// Used by the single-threaded runner where everything already
+    /// runs on the main thread.
     pub(crate) fn new(
         world: &'a World,
         compute: &'a ComputePool,
@@ -56,7 +61,33 @@ impl<'a> SystemContext<'a> {
             compute,
             io,
             commands,
+            dispatcher: None,
         }
+    }
+
+    /// Creates a new system context with a main-thread dispatcher.
+    ///
+    /// Used by the multi-threaded runner to enable main-thread resource
+    /// access from worker threads.
+    pub(crate) fn with_dispatcher(
+        world: &'a World,
+        compute: &'a ComputePool,
+        io: &'a IoRuntime,
+        commands: &'a CommandCollector,
+        dispatcher: &'a MainThreadDispatcher,
+    ) -> Self {
+        Self {
+            world,
+            compute,
+            io,
+            commands,
+            dispatcher: Some(dispatcher),
+        }
+    }
+
+    /// Returns the main-thread dispatcher, if one exists.
+    pub(crate) fn dispatcher(&self) -> Option<&MainThreadDispatcher> {
+        self.dispatcher
     }
 
     /// Creates a lock request for the given access set.

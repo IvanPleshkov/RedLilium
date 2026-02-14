@@ -31,6 +31,15 @@ pub trait AccessElement {
     /// The caller must ensure that the appropriate locks are already held
     /// externally (e.g. via `World::acquire_sorted`).
     fn fetch_unlocked(world: &World) -> Self::Item<'_>;
+
+    /// Whether this element requires main-thread access.
+    ///
+    /// Returns `true` for [`MainThreadRes`] and [`MainThreadResMut`].
+    /// When any element in an access set returns `true`, the entire
+    /// `execute()` closure is dispatched to the main thread.
+    fn needs_main_thread() -> bool {
+        false
+    }
 }
 
 /// Trait for a set of access elements (tuples of Read/Write/Res/etc.).
@@ -51,6 +60,11 @@ pub trait AccessSet {
     ///
     /// The caller must ensure locks are already held externally.
     fn fetch_unlocked(world: &World) -> Self::Item<'_>;
+
+    /// Returns `true` if any element in the set requires main-thread access.
+    fn needs_main_thread() -> bool {
+        false
+    }
 }
 
 // ---- Marker types ----
@@ -102,6 +116,32 @@ pub struct Res<T: 'static>(PhantomData<T>);
 ///
 /// Panics if the resource does not exist.
 pub struct ResMut<T: 'static>(PhantomData<T>);
+
+/// Shared read access to a main-thread resource of type `T`.
+///
+/// `T` does **not** need to be `Send + Sync`. The scheduler transparently
+/// dispatches the `execute()` closure to the main thread when this type
+/// is in the access set.
+///
+/// In the execute closure, yields `&T`.
+///
+/// # Panics
+///
+/// Panics if the main-thread resource does not exist.
+pub struct MainThreadRes<T: 'static>(PhantomData<T>);
+
+/// Exclusive write access to a main-thread resource of type `T`.
+///
+/// `T` does **not** need to be `Send + Sync`. The scheduler transparently
+/// dispatches the `execute()` closure to the main thread when this type
+/// is in the access set.
+///
+/// In the execute closure, yields `&mut T`.
+///
+/// # Panics
+///
+/// Panics if the main-thread resource does not exist.
+pub struct MainThreadResMut<T: 'static>(PhantomData<T>);
 
 // ---- AccessElement implementations ----
 
@@ -231,6 +271,56 @@ impl<T: 'static> AccessElement for ResMut<T> {
     }
 }
 
+impl<T: 'static> AccessElement for MainThreadRes<T> {
+    type Item<'w> = &'w T;
+
+    fn access_info() -> AccessInfo {
+        AccessInfo {
+            type_id: TypeId::of::<T>(),
+            is_write: false,
+        }
+    }
+
+    fn fetch(world: &World) -> Self::Item<'_> {
+        // SAFETY: only called from main thread via dispatcher
+        unsafe { world.main_thread_resource::<T>() }
+    }
+
+    fn fetch_unlocked(world: &World) -> Self::Item<'_> {
+        // Same as fetch — main-thread resources have no locks
+        unsafe { world.main_thread_resource::<T>() }
+    }
+
+    fn needs_main_thread() -> bool {
+        true
+    }
+}
+
+impl<T: 'static> AccessElement for MainThreadResMut<T> {
+    type Item<'w> = &'w mut T;
+
+    fn access_info() -> AccessInfo {
+        AccessInfo {
+            type_id: TypeId::of::<T>(),
+            is_write: true,
+        }
+    }
+
+    fn fetch(world: &World) -> Self::Item<'_> {
+        // SAFETY: only called from main thread via dispatcher
+        unsafe { world.main_thread_resource_mut::<T>() }
+    }
+
+    fn fetch_unlocked(world: &World) -> Self::Item<'_> {
+        // Same as fetch — main-thread resources have no locks
+        unsafe { world.main_thread_resource_mut::<T>() }
+    }
+
+    fn needs_main_thread() -> bool {
+        true
+    }
+}
+
 // ---- Tuple AccessSet implementations ----
 
 // Empty tuple (no access)
@@ -244,6 +334,10 @@ impl AccessSet for () {
     fn fetch(_world: &World) -> Self::Item<'_> {}
 
     fn fetch_unlocked(_world: &World) -> Self::Item<'_> {}
+
+    fn needs_main_thread() -> bool {
+        false
+    }
 }
 
 macro_rules! impl_access_set {
@@ -261,6 +355,10 @@ macro_rules! impl_access_set {
 
             fn fetch_unlocked(world: &World) -> Self::Item<'_> {
                 ($($T::fetch_unlocked(world),)+)
+            }
+
+            fn needs_main_thread() -> bool {
+                $($T::needs_main_thread())||+
             }
         }
     };

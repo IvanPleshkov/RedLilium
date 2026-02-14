@@ -53,6 +53,8 @@ pub mod hierarchy;
 pub mod inspect;
 mod io_runtime;
 mod lock_request;
+mod main_thread_dispatcher;
+mod main_thread_resource;
 #[cfg(any(
     feature = "physics-3d",
     feature = "physics-3d-f32",
@@ -94,7 +96,10 @@ pub use world::{ComponentNotRegistered, World};
 pub use compute_context::EcsComputeContext;
 
 // System & scheduling (new API)
-pub use access_set::{AccessSet, OptionalRead, OptionalWrite, Read, Res, ResMut, Write};
+pub use access_set::{
+    AccessSet, MainThreadRes, MainThreadResMut, OptionalRead, OptionalWrite, Read, Res, ResMut,
+    Write,
+};
 pub use bundle::Bundle;
 pub use command_collector::{CommandCollector, SpawnBuilder};
 pub use function_system::{FunctionSystem, IntoSystem};
