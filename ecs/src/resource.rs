@@ -1,4 +1,5 @@
 use std::any::{Any, TypeId, type_name};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
@@ -167,6 +168,7 @@ impl Resources {
         ResourceRefMut {
             guard,
             _marker: PhantomData,
+            borrowed: Cell::new(false),
         }
     }
 }
@@ -198,9 +200,30 @@ impl<T: 'static> Deref for ResourceRef<'_, T> {
 ///
 /// Holds an `RwLockWriteGuard<dyn Resource>` and downcasts to `&mut T` in
 /// [`DerefMut`]. Automatically releases the lock when dropped.
+///
+/// Contains a runtime borrow flag used by [`QueryItem`](crate::QueryItem)
+/// iteration to detect aliasing `&mut T` references (similar to `RefCell`).
 pub struct ResourceRefMut<'a, T: 'static> {
     guard: RwLockWriteGuard<'a, dyn Resource>,
     _marker: PhantomData<&'a mut T>,
+    /// Runtime borrow tracking for iterator safety.
+    /// `true` while a [`ResMutRef`](crate::query_guard::ResMutRef) derived
+    /// from this resource is alive.
+    pub(crate) borrowed: Cell<bool>,
+}
+
+impl<T: 'static> ResourceRefMut<'_, T> {
+    /// Returns a raw mutable pointer to the underlying resource data.
+    ///
+    /// Goes through `*mut RwLockWriteGuard` → `&mut dyn Resource` →
+    /// `downcast_mut` to avoid creating an intermediate `&T` that would
+    /// make a subsequent `&mut T` UB.
+    pub(crate) fn as_ptr_mut(&self) -> *mut T {
+        let guard_ptr = &self.guard as *const RwLockWriteGuard<'_, dyn Resource>
+            as *mut RwLockWriteGuard<'_, dyn Resource>;
+        // SAFETY: the write guard guarantees exclusive access to the data.
+        unsafe { (*guard_ptr).as_any_mut().downcast_mut::<T>().unwrap() as *mut T }
+    }
 }
 
 impl<T: 'static> Deref for ResourceRefMut<'_, T> {

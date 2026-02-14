@@ -1,4 +1,8 @@
+use std::cell::Cell;
+use std::ops::{Deref, DerefMut};
+
 use crate::access_set::AccessSet;
+use crate::resource::{ResourceRef, ResourceRefMut};
 use crate::sparse_set::{LockGuard, Ref, RefMut, SparseSetInner};
 use crate::system_context::LockTracking;
 
@@ -144,6 +148,102 @@ impl<'w, T: 'static> QueryItem for RefMut<'w, T> {
     }
 }
 
+impl<'w, T: 'static> QueryItem for ResourceRef<'w, T> {
+    type Item = &'w T;
+
+    fn query_count(&self) -> usize {
+        // Resources are singletons — never the smallest set, so they
+        // never drive iteration.
+        usize::MAX
+    }
+
+    fn query_entities(&self) -> &[u32] {
+        // Never selected (count is MAX), but must return a valid slice.
+        &[]
+    }
+
+    unsafe fn query_get(&self, _entity_index: u32) -> Option<&'w T> {
+        // SAFETY: the RwLockReadGuard inside ResourceRef keeps the data
+        // valid for 'w. Multiple shared references are safe (read-only).
+        unsafe {
+            let ptr: *const T = &**self;
+            Some(&*ptr)
+        }
+    }
+}
+
+impl<'w, T: 'static> QueryItem for ResourceRefMut<'w, T> {
+    type Item = ResMutRef<'w, T>;
+
+    fn query_count(&self) -> usize {
+        usize::MAX
+    }
+
+    fn query_entities(&self) -> &[u32] {
+        &[]
+    }
+
+    unsafe fn query_get(&self, _entity_index: u32) -> Option<ResMutRef<'w, T>> {
+        assert!(
+            !self.borrowed.get(),
+            "ResMut<{}> already borrowed mutably by a previous iterator item. \
+             Drop the previous item before calling next().",
+            std::any::type_name::<T>()
+        );
+        self.borrowed.set(true);
+        // SAFETY: the RwLockWriteGuard inside ResourceRefMut keeps exclusive
+        // access for 'w. The borrow flag ensures only one ResMutRef exists
+        // at a time, preventing aliasing &mut T.
+        // The flag pointer is valid because ResourceRefMut (owning the Cell)
+        // lives inside QueryGuard which outlives every ResMutRef.
+        let flag = &self.borrowed as *const Cell<bool>;
+        unsafe {
+            Some(ResMutRef {
+                ptr: &mut *self.as_ptr_mut(),
+                flag,
+            })
+        }
+    }
+}
+
+/// RAII guard for a mutable resource reference during iteration.
+///
+/// Returned by [`QueryIter::next()`] when the query includes
+/// [`ResMut<T>`](crate::ResMut). Dereferences to `&mut T`.
+///
+/// Clears the borrow flag on [`ResourceRefMut`] when dropped, allowing
+/// the next iteration step to create a new mutable reference. Attempting
+/// to hold two `ResMutRef`s from the same resource simultaneously (e.g.
+/// by calling `iter.next()` while a previous item is still alive) will
+/// panic at runtime, similar to [`RefCell`](std::cell::RefCell).
+pub struct ResMutRef<'w, T: 'static> {
+    ptr: &'w mut T,
+    flag: *const Cell<bool>,
+}
+
+impl<T: 'static> Deref for ResMutRef<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        self.ptr
+    }
+}
+
+impl<T: 'static> DerefMut for ResMutRef<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.ptr
+    }
+}
+
+impl<T: 'static> Drop for ResMutRef<'_, T> {
+    fn drop(&mut self) {
+        // SAFETY: the flag pointer is valid — it points to a Cell<bool>
+        // owned by ResourceRefMut inside the QueryGuard, which outlives
+        // every ResMutRef yielded by the iterator.
+        unsafe { &*self.flag }.set(false);
+    }
+}
+
 macro_rules! impl_query_item {
     ($($idx:tt $T:ident),+) => {
         impl<$($T: QueryItem),+> QueryItem for ($($T,)+) {
@@ -256,7 +356,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::access_set::{AccessSet, Read, Res, Write};
+    use crate::access_set::{AccessSet, Read, Res, ResMut, Write};
     use crate::world::World;
 
     struct Position {
@@ -532,6 +632,31 @@ mod tests {
     }
 
     #[test]
+    fn iter_with_resource() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Velocity>();
+        world.insert_resource(2.0f32); // speed multiplier
+
+        let e1 = world.spawn();
+        world.insert(e1, Position { x: 0.0 }).unwrap();
+        world.insert(e1, Velocity { x: 3.0 }).unwrap();
+        let e2 = world.spawn();
+        world.insert(e2, Position { x: 0.0 }).unwrap();
+        world.insert(e2, Velocity { x: 5.0 }).unwrap();
+
+        {
+            let q = query::<(Write<Position>, Read<Velocity>, Res<f32>)>(&world);
+            for (_, (pos, vel, factor)) in q {
+                pos.x += vel.x * *factor;
+            }
+        }
+
+        assert_eq!(world.get::<Position>(e1).unwrap().x, 6.0);
+        assert_eq!(world.get::<Position>(e2).unwrap().x, 10.0);
+    }
+
+    #[test]
     fn iter_into_guard_recovers_locks() {
         let mut world = World::new();
         world.register_component::<Position>();
@@ -549,5 +674,45 @@ mod tests {
         let guard = iter.into_guard();
         let (positions,) = &guard.items;
         assert_eq!(positions.get(e.index()).unwrap().x, 42.0);
+    }
+
+    #[test]
+    fn iter_with_res_mut() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.insert_resource(0.0f32); // accumulator
+
+        let e1 = world.spawn();
+        world.insert(e1, Position { x: 3.0 }).unwrap();
+        let e2 = world.spawn();
+        world.insert(e2, Position { x: 7.0 }).unwrap();
+
+        {
+            let q = query::<(Read<Position>, ResMut<f32>)>(&world);
+            for (_, (pos, mut acc)) in q {
+                *acc += pos.x;
+            }
+        }
+
+        let acc = world.resource::<f32>();
+        assert_eq!(*acc, 10.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "already borrowed mutably by a previous iterator item")]
+    fn iter_res_mut_detects_aliasing() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.insert_resource(0.0f32);
+
+        let e1 = world.spawn();
+        world.insert(e1, Position { x: 1.0 }).unwrap();
+        let e2 = world.spawn();
+        world.insert(e2, Position { x: 2.0 }).unwrap();
+
+        let q = query::<(Read<Position>, ResMut<f32>)>(&world);
+        let mut iter = QueryIter::from(q);
+        let _a = iter.next().unwrap(); // holds ResMutRef
+        let _b = iter.next().unwrap(); // panics: _a still alive
     }
 }
