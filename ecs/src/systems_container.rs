@@ -1,5 +1,5 @@
 use std::any::TypeId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
@@ -78,8 +78,14 @@ pub struct SystemsContainer {
     in_degrees: Vec<usize>,
     /// Map from TypeId to index in `systems`.
     id_to_idx: HashMap<TypeId, usize>,
+    /// Reverse map from index to TypeId.
+    idx_to_id: Vec<TypeId>,
     /// Pre-computed topological order for single-threaded execution.
     single_thread_order: Vec<usize>,
+    /// For each system index, the set of ancestor system TypeIds whose
+    /// results are accessible (i.e. guaranteed to have completed before
+    /// this system starts, based on the dependency graph).
+    accessible_results: Vec<HashSet<TypeId>>,
 }
 
 impl SystemsContainer {
@@ -91,7 +97,9 @@ impl SystemsContainer {
             edges: Vec::new(),
             in_degrees: Vec::new(),
             id_to_idx: HashMap::new(),
+            idx_to_id: Vec::new(),
             single_thread_order: Vec::new(),
+            accessible_results: Vec::new(),
         }
     }
 
@@ -117,10 +125,12 @@ impl SystemsContainer {
         let arc = Arc::new(RwLock::new(system));
         let idx = self.systems.len();
         self.id_to_idx.insert(type_id, idx);
+        self.idx_to_id.push(type_id);
         self.systems.push(arc.clone());
         self.names.push(std::any::type_name::<S>());
         self.edges.push(Vec::new());
         self.in_degrees.push(0);
+        self.accessible_results.push(HashSet::new());
         self.rebuild_order();
         arc
     }
@@ -202,6 +212,7 @@ impl SystemsContainer {
                 self.edges = test_edges;
                 self.in_degrees = test_in_degrees;
                 self.single_thread_order = order;
+                self.rebuild_accessible_results();
                 Ok(())
             }
             Err(cycle_indices) => {
@@ -266,11 +277,55 @@ impl SystemsContainer {
         &self.single_thread_order
     }
 
-    /// Rebuilds `single_thread_order` from the current graph.
+    /// Returns the set of ancestor system `TypeId`s whose results are
+    /// accessible to the system at the given index.
+    ///
+    /// Only systems that are guaranteed to complete before this system
+    /// (via transitive dependency edges) are included.
+    pub(crate) fn accessible_results(&self, idx: usize) -> &HashSet<TypeId> {
+        &self.accessible_results[idx]
+    }
+
+    /// Returns the system index for a given `TypeId`, if registered.
+    pub(crate) fn type_id_to_idx(&self) -> &HashMap<TypeId, usize> {
+        &self.id_to_idx
+    }
+
+    /// Rebuilds `single_thread_order` and `accessible_results` from the current graph.
     fn rebuild_order(&mut self) {
         // Graph is always acyclic (validated by add_edges), so unwrap is safe.
         self.single_thread_order =
             topological_sort(&self.edges, &self.in_degrees).expect("graph should be acyclic");
+        self.rebuild_accessible_results();
+    }
+
+    /// Computes the transitive ancestor set for each system.
+    ///
+    /// For each system S in topological order:
+    ///   accessible[S] = union of {P} ∪ accessible[P] for each direct predecessor P
+    fn rebuild_accessible_results(&mut self) {
+        let n = self.systems.len();
+
+        // Build reverse edges: reverse_edges[i] = direct predecessors of i
+        let mut reverse_edges: Vec<Vec<usize>> = vec![vec![]; n];
+        for (from, deps) in self.edges.iter().enumerate() {
+            for &to in deps {
+                reverse_edges[to].push(from);
+            }
+        }
+
+        let mut accessible: Vec<HashSet<TypeId>> = vec![HashSet::new(); n];
+
+        for &idx in &self.single_thread_order {
+            let mut set = HashSet::new();
+            for &pred_idx in &reverse_edges[idx] {
+                set.insert(self.idx_to_id[pred_idx]);
+                set.extend(&accessible[pred_idx]);
+            }
+            accessible[idx] = set;
+        }
+
+        self.accessible_results = accessible;
     }
 }
 
@@ -324,16 +379,19 @@ mod tests {
 
     struct SystemA;
     impl System for SystemA {
+        type Result = ();
         async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {}
     }
 
     struct SystemB;
     impl System for SystemB {
+        type Result = ();
         async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {}
     }
 
     struct SystemC;
     impl System for SystemC {
+        type Result = ();
         async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {}
     }
 

@@ -121,6 +121,7 @@ impl PhysicsWorld2D {
 pub struct StepPhysics2D;
 
 impl crate::System for StepPhysics2D {
+    type Result = ();
     async fn run<'a>(&'a self, ctx: &'a crate::SystemContext<'a>) {
         ctx.lock::<(
             crate::ResMut<PhysicsWorld2D>,

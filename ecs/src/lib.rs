@@ -70,6 +70,7 @@ mod sparse_set;
 mod spawn;
 mod system;
 pub mod system_context;
+pub(crate) mod system_results_store;
 pub mod systems;
 mod systems_container;
 #[cfg(feature = "inspector")]
@@ -107,7 +108,7 @@ pub use command_collector::{CommandCollector, SpawnBuilder};
 pub use function_system::{FunctionSystem, IntoSystem};
 pub use lock_request::LockRequest;
 pub use runner::{EcsRunner, EcsRunnerSingleThread, ShutdownError};
-pub use system::{System, SystemResult, run_system_blocking};
+pub use system::{System, run_system_blocking};
 pub use system_context::SystemContext;
 pub use systems_container::{CycleError, Edge, SystemsContainer};
 

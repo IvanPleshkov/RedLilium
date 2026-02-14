@@ -72,6 +72,7 @@ impl<F> System for FunctionSystem<F, fn()>
 where
     F: Fn() + Send + Sync + 'static,
 {
+    type Result = ();
     async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
         (self.func)();
     }
@@ -98,6 +99,7 @@ where
     A: AccessSet + Send + Sync + 'static,
     F: for<'a> Fn(A::Item<'a>) + Send + Sync + 'static,
 {
+    type Result = ();
     async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
         ctx.lock::<A>().execute(|items| (self.func)(items)).await;
     }

@@ -1,5 +1,5 @@
 use std::any::TypeId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::sync::Mutex;
 
@@ -12,6 +12,8 @@ use crate::io_runtime::IoRuntime;
 use crate::lock_request::LockRequest;
 use crate::main_thread_dispatcher::MainThreadDispatcher;
 use crate::query_guard::QueryGuard;
+use crate::system::System;
+use crate::system_results_store::SystemResultsStore;
 use crate::world::World;
 
 // ---------------------------------------------------------------------------
@@ -91,6 +93,11 @@ pub struct SystemContext<'a> {
     /// Per-system tracking of component locks currently held (via QueryGuard
     /// or lock().execute()). Used to detect same-system deadlocks.
     held_locks: Mutex<HashMap<TypeId, HeldLock>>,
+    /// Storage for results produced by completed systems.
+    system_results: Option<&'a SystemResultsStore>,
+    /// Set of system TypeIds whose results this system may read
+    /// (determined by the dependency graph — transitive ancestors).
+    accessible_results: Option<&'a HashSet<TypeId>>,
 }
 
 impl<'a> SystemContext<'a> {
@@ -111,6 +118,8 @@ impl<'a> SystemContext<'a> {
             commands,
             dispatcher: None,
             held_locks: Mutex::new(HashMap::new()),
+            system_results: None,
+            accessible_results: None,
         }
     }
 
@@ -132,7 +141,23 @@ impl<'a> SystemContext<'a> {
             commands,
             dispatcher: Some(dispatcher),
             held_locks: Mutex::new(HashMap::new()),
+            system_results: None,
+            accessible_results: None,
         }
+    }
+
+    /// Sets the system results store and accessible results set for this context.
+    ///
+    /// Called by runners before executing each system so that `system_result()`
+    /// can look up predecessor results.
+    pub(crate) fn with_system_results(
+        mut self,
+        store: &'a SystemResultsStore,
+        accessible: &'a HashSet<TypeId>,
+    ) -> Self {
+        self.system_results = Some(store);
+        self.accessible_results = Some(accessible);
+        self
     }
 
     /// Returns the main-thread dispatcher, if one exists.
@@ -299,6 +324,46 @@ impl<'a> SystemContext<'a> {
         let tracking = self.make_tracking(&sorted);
         let items = A::fetch_unlocked(self.world);
         QueryGuard::new_tracked(guards, items, tracking)
+    }
+
+    /// Returns the result produced by a predecessor system.
+    ///
+    /// The type parameter `S` identifies the producer system. This method
+    /// returns `&S::Result` — the value that system returned from its
+    /// [`run()`](System::run) method.
+    ///
+    /// # Access rules
+    ///
+    /// A system may only read results from systems that are **guaranteed**
+    /// to have completed before it starts. This is determined by the
+    /// dependency graph: if there is a transitive edge from `S` to the
+    /// current system, the result is accessible.
+    ///
+    /// # Panics
+    ///
+    /// - If no results store is available (called outside a runner).
+    /// - If system `S` is not an ancestor of the current system.
+    /// - If the result has not been stored yet (should not happen with
+    ///   correct dependency edges).
+    pub fn system_result<S: System>(&self) -> &S::Result {
+        let type_id = TypeId::of::<S>();
+
+        let accessible = self
+            .accessible_results
+            .expect("system_result() called outside a runner — no results available");
+        assert!(
+            accessible.contains(&type_id),
+            "System `{}` result is not accessible from this system — \
+             add a dependency edge to guarantee it completes first",
+            std::any::type_name::<S>()
+        );
+
+        let store = self
+            .system_results
+            .expect("system_result() called outside a runner — no results store");
+        store
+            .get::<S::Result>(type_id)
+            .expect("system result not yet available — dependency graph error")
     }
 
     /// Returns a reference to the compute pool for spawning background tasks.

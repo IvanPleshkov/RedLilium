@@ -9,6 +9,7 @@ use crate::compute::{ComputePool, noop_waker};
 use crate::io_runtime::IoRuntime;
 use crate::main_thread_dispatcher::{MainThreadDispatcher, RunnerEvent};
 use crate::system_context::SystemContext;
+use crate::system_results_store::SystemResultsStore;
 use crate::systems_container::SystemsContainer;
 use crate::world::World;
 
@@ -76,6 +77,7 @@ impl EcsRunnerMultiThread {
         }
 
         let commands = CommandCollector::new();
+        let results_store = SystemResultsStore::new(n, systems.type_id_to_idx().clone());
 
         // Scope the system execution so ctx and futures are dropped
         // before we need &mut world for command application.
@@ -83,13 +85,6 @@ impl EcsRunnerMultiThread {
             // Unified event channel for completions AND main-thread dispatch
             let (event_tx, event_rx) = mpsc::channel::<RunnerEvent>();
             let dispatcher = MainThreadDispatcher::new(event_tx.clone());
-            let ctx = SystemContext::with_dispatcher(
-                world,
-                &self.compute,
-                &self.io,
-                &commands,
-                &dispatcher,
-            );
 
             // Atomic dependency counters
             let remaining_deps: Vec<AtomicUsize> = systems
@@ -107,17 +102,34 @@ impl EcsRunnerMultiThread {
                     ($i:expr) => {{
                         started[$i] = true;
                         let tx = event_tx.clone();
-                        let ctx_ref = &ctx;
                         let compute_ref = &self.compute;
+                        let io_ref = &self.io;
+                        let commands_ref = &commands;
+                        let dispatcher_ref = &dispatcher;
+                        let results_ref = &results_store;
+                        let world_ref: &World = world;
                         let idx = $i;
+                        let accessible = systems.accessible_results(idx);
                         let system_name = systems.get_type_name(idx);
                         scope.spawn(move || {
                             redlilium_core::set_thread_name!("ecs: worker");
                             redlilium_core::profile_scope_dynamic!(system_name);
+
+                            let ctx = SystemContext::with_dispatcher(
+                                world_ref,
+                                compute_ref,
+                                io_ref,
+                                commands_ref,
+                                dispatcher_ref,
+                            )
+                            .with_system_results(results_ref, accessible);
+
                             let system = systems.get_system(idx);
                             let guard = system.read().unwrap();
-                            let future = guard.run_boxed(ctx_ref);
-                            poll_future_to_completion_with_compute(future, compute_ref);
+                            let future = guard.run_boxed(&ctx);
+                            let result =
+                                poll_future_to_completion_with_compute(future, compute_ref);
+                            results_ref.store(idx, result);
                             let _ = tx.send(RunnerEvent::SystemCompleted(idx));
                         });
                     }};
@@ -207,17 +219,21 @@ impl Default for EcsRunnerMultiThread {
 ///
 /// Uses budgeted compute ticking so a long-running compute task spawned
 /// by another system doesn't block this worker thread indefinitely.
+///
+/// Returns the type-erased result produced by the system.
 fn poll_future_to_completion_with_compute<'a>(
-    future: Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+    future: Pin<
+        Box<dyn std::future::Future<Output = Box<dyn std::any::Any + Send + Sync>> + Send + 'a>,
+    >,
     compute: &ComputePool,
-) {
+) -> Box<dyn std::any::Any + Send + Sync> {
     let mut future = future;
     let mut future = unsafe { Pin::new_unchecked(&mut future) };
     let waker = noop_waker();
     let mut cx = std::task::Context::from_waker(&waker);
     loop {
         match future.as_mut().poll(&mut cx) {
-            Poll::Ready(()) => break,
+            Poll::Ready(result) => break result,
             Poll::Pending => {
                 compute.tick_with_budget(Duration::from_millis(1));
                 std::thread::yield_now();
@@ -241,6 +257,7 @@ mod tests {
 
     struct MovementSystem;
     impl System for MovementSystem {
+        type Result = ();
         async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
             ctx.lock::<(Write<Position>, Read<Velocity>)>()
                 .execute(|(mut positions, velocities)| {
@@ -281,6 +298,7 @@ mod tests {
 
         struct FirstSystem(Arc<AtomicU32>);
         impl System for FirstSystem {
+            type Result = ();
             async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
                 self.0.store(1, Ordering::SeqCst);
             }
@@ -288,6 +306,7 @@ mod tests {
 
         struct SecondSystem(Arc<AtomicU32>);
         impl System for SecondSystem {
+            type Result = ();
             async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
                 assert_eq!(self.0.load(Ordering::SeqCst), 1);
                 self.0.store(2, Ordering::SeqCst);
@@ -310,6 +329,7 @@ mod tests {
     fn deferred_commands_applied_multi_thread() {
         struct SpawnSystem;
         impl System for SpawnSystem {
+            type Result = ();
             async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
                 ctx.commands(|world| {
                     world.insert_resource(42u32);
@@ -336,6 +356,7 @@ mod tests {
 
         struct IncrementA(Arc<AtomicU32>);
         impl System for IncrementA {
+            type Result = ();
             async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
                 self.0.fetch_add(1, Ordering::SeqCst);
             }
@@ -343,6 +364,7 @@ mod tests {
 
         struct IncrementB(Arc<AtomicU32>);
         impl System for IncrementB {
+            type Result = ();
             async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
                 self.0.fetch_add(1, Ordering::SeqCst);
             }

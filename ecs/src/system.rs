@@ -1,5 +1,5 @@
+use std::any::Any;
 use std::future::Future;
-use std::marker::PhantomData;
 use std::pin::Pin;
 
 use crate::command_collector::CommandCollector;
@@ -9,10 +9,11 @@ use crate::world::World;
 
 /// A type-erased system future.
 ///
-/// This is a boxed future returned by [`System::run`](crate::System::run).
-/// Each system invocation produces a `SystemFuture` that the runner polls
-/// to completion.
-pub(crate) type SystemFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+/// This is a boxed future returned by [`DynSystem::run_boxed`].
+/// The result is type-erased as `Box<dyn Any + Send + Sync>` so the runner
+/// can store it in [`SystemResultsStore`](crate::system_results_store::SystemResultsStore).
+pub(crate) type SystemFuture<'a> =
+    Pin<Box<dyn Future<Output = Box<dyn Any + Send + Sync>> + Send + 'a>>;
 
 /// A system that processes entities and components in the world.
 ///
@@ -74,12 +75,21 @@ pub(crate) type SystemFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>
 /// }
 /// ```
 pub trait System: Send + Sync + 'static {
+    /// The value returned by this system after execution.
+    ///
+    /// Downstream systems that depend on this system (via dependency edges)
+    /// can read the result through [`SystemContext::system_result::<Self>()`].
+    type Result: Send + Sync + 'static;
+
     /// Execute the system with the given context.
     ///
     /// Use [`SystemContext::lock()`] to borrow components.
     /// Locks are automatically released when the execute closure returns,
     /// making it safe to `.await` between lock-execute calls.
-    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> impl Future<Output = ()> + Send + 'a;
+    fn run<'a>(
+        &'a self,
+        ctx: &'a SystemContext<'a>,
+    ) -> impl Future<Output = Self::Result> + Send + 'a;
 }
 
 /// Object-safe version of [`System`] used internally for type erasure.
@@ -92,27 +102,42 @@ pub(crate) trait DynSystem: Send + Sync {
 
 impl<S: System> DynSystem for S {
     fn run_boxed<'a>(&'a self, ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
-        Box::pin(self.run(ctx))
+        Box::pin(async move {
+            let result = self.run(ctx).await;
+            Box::new(result) as Box<dyn Any + Send + Sync>
+        })
     }
 }
 
-/// Runs a system synchronously to completion.
+/// Runs a system synchronously to completion, returning its result.
 ///
 /// Creates a single-threaded [`SystemContext`], calls [`System::run`], and
 /// polls the returned future to completion. Drives the [`ComputePool`]
 /// between polls so spawned compute tasks make progress.
 ///
 /// Useful for tests and one-off system invocations outside a runner.
-pub fn run_system_blocking(
-    system: &impl System,
+pub fn run_system_blocking<S: System>(
+    system: &S,
     world: &World,
     compute: &ComputePool,
     io: &crate::io_runtime::IoRuntime,
-) {
+) -> S::Result {
     let commands = CommandCollector::new();
     let ctx = SystemContext::new(world, compute, io, &commands);
-    let future = Box::pin(system.run(&ctx));
-    poll_system_future_to_completion(future, compute);
+    let future = system.run(&ctx);
+    let mut future = core::pin::pin!(future);
+    let waker = noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+    loop {
+        match future.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(result) => break result,
+            std::task::Poll::Pending => {
+                compute.tick_all();
+                #[cfg(not(target_arch = "wasm32"))]
+                std::thread::yield_now();
+            }
+        }
+    }
 
     // Apply deferred commands
     // Safety: we need &mut World but only have &World.
@@ -121,8 +146,13 @@ pub fn run_system_blocking(
     // TODO: Reconsider this API or require &mut World.
 }
 
-/// Polls a system future to completion, driving compute tasks between polls.
-pub(crate) fn poll_system_future_to_completion(future: SystemFuture<'_>, compute: &ComputePool) {
+/// Polls a type-erased system future to completion, driving compute tasks between polls.
+///
+/// Returns the boxed result produced by the system.
+pub(crate) fn poll_system_future_to_completion(
+    future: SystemFuture<'_>,
+    compute: &ComputePool,
+) -> Box<dyn Any + Send + Sync> {
     let mut future = future;
     // Safety: future is on the stack and won't be moved after this point.
     let mut future = unsafe { Pin::new_unchecked(&mut future) };
@@ -130,47 +160,12 @@ pub(crate) fn poll_system_future_to_completion(future: SystemFuture<'_>, compute
     let mut cx = std::task::Context::from_waker(&waker);
     loop {
         match future.as_mut().poll(&mut cx) {
-            std::task::Poll::Ready(()) => break,
+            std::task::Poll::Ready(result) => break result,
             std::task::Poll::Pending => {
                 compute.tick_all();
                 #[cfg(not(target_arch = "wasm32"))]
                 std::thread::yield_now();
             }
-        }
-    }
-}
-
-/// Typed wrapper for system output, stored as a World resource.
-///
-/// Keyed by the system type `S` for uniqueness — multiple systems can
-/// produce different `T` values without collision.
-///
-/// # Example
-///
-/// ```ignore
-/// // Producer system stores result as resource:
-/// ctx.commands(|world| {
-///     world.insert_resource(SystemResult::<PhysicsSystem, PhysicsResult>::new(result));
-/// });
-///
-/// // Consumer system reads the result:
-/// ctx.lock::<(Res<SystemResult<PhysicsSystem, PhysicsResult>>,)>()
-///     .execute(|(result,)| {
-///         // use result.value
-///     }).await;
-/// ```
-pub struct SystemResult<S: 'static, T: Send + Sync + 'static> {
-    /// The system's output value.
-    pub value: T,
-    _marker: PhantomData<fn() -> S>,
-}
-
-impl<S: 'static, T: Send + Sync + 'static> SystemResult<S, T> {
-    /// Creates a new system result.
-    pub fn new(value: T) -> Self {
-        Self {
-            value,
-            _marker: PhantomData,
         }
     }
 }
@@ -190,11 +185,13 @@ mod tests {
 
     struct EmptySystem;
     impl System for EmptySystem {
+        type Result = ();
         async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {}
     }
 
     struct MovementSystem;
     impl System for MovementSystem {
+        type Result = ();
         async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
             ctx.lock::<(Write<Position>, Read<Velocity>)>()
                 .execute(|(mut positions, velocities)| {
@@ -222,6 +219,7 @@ mod tests {
 
         struct FlagSystem(std::sync::Arc<AtomicBool>);
         impl System for FlagSystem {
+            type Result = ();
             async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
                 self.0.store(true, Ordering::Relaxed);
             }
@@ -258,6 +256,7 @@ mod tests {
 
         struct ComputeSystem(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
         impl System for ComputeSystem {
+            type Result = ();
             async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
                 let slot = self.0.clone();
                 let mut handle = ctx.compute().spawn(Priority::Low, |_ctx| async { 99u32 });

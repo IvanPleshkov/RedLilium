@@ -143,6 +143,7 @@ mod tests {
 
     struct MovementSystem;
     impl System for MovementSystem {
+        type Result = ();
         async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
             ctx.lock::<(Write<Position>, Read<Velocity>)>()
                 .execute(|(mut positions, velocities)| {

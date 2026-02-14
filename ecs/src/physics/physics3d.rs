@@ -128,6 +128,7 @@ impl PhysicsWorld3D {
 pub struct StepPhysics3D;
 
 impl crate::System for StepPhysics3D {
+    type Result = ();
     async fn run<'a>(&'a self, ctx: &'a crate::SystemContext<'a>) {
         ctx.lock::<(
             crate::ResMut<PhysicsWorld3D>,

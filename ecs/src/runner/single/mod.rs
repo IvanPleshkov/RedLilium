@@ -5,6 +5,7 @@ use crate::compute::ComputePool;
 use crate::io_runtime::IoRuntime;
 use crate::system::poll_system_future_to_completion;
 use crate::system_context::SystemContext;
+use crate::system_results_store::SystemResultsStore;
 use crate::systems_container::SystemsContainer;
 use crate::world::World;
 
@@ -55,15 +56,19 @@ impl EcsRunnerSingleThread {
         }
 
         let commands = CommandCollector::new();
+        let results_store =
+            SystemResultsStore::new(systems.system_count(), systems.type_id_to_idx().clone());
 
         {
-            let ctx = SystemContext::new(world, &self.compute, &self.io, &commands);
-
             for &idx in order {
+                let ctx = SystemContext::new(world, &self.compute, &self.io, &commands)
+                    .with_system_results(&results_store, systems.accessible_results(idx));
+
                 let system = systems.get_system(idx);
                 let guard = system.read().unwrap();
                 let future = guard.run_boxed(&ctx);
-                poll_system_future_to_completion(future, &self.compute);
+                let result = poll_system_future_to_completion(future, &self.compute);
+                results_store.store(idx, result);
             }
         }
 
@@ -121,6 +126,7 @@ mod tests {
 
     struct MovementSystem;
     impl System for MovementSystem {
+        type Result = ();
         async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
             ctx.lock::<(Write<Position>, Read<Velocity>)>()
                 .execute(|(mut positions, velocities)| {
@@ -169,6 +175,7 @@ mod tests {
 
         struct FirstSystem(Arc<AtomicU32>);
         impl System for FirstSystem {
+            type Result = ();
             async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
                 self.0.store(1, Ordering::SeqCst);
             }
@@ -176,6 +183,7 @@ mod tests {
 
         struct SecondSystem(Arc<AtomicU32>);
         impl System for SecondSystem {
+            type Result = ();
             async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
                 // Should only run after FirstSystem set value to 1
                 assert_eq!(self.0.load(Ordering::SeqCst), 1);
@@ -199,6 +207,7 @@ mod tests {
     fn deferred_commands_applied() {
         struct SpawnSystem;
         impl System for SpawnSystem {
+            type Result = ();
             async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
                 ctx.commands(|world| {
                     world.insert_resource(42u32);
@@ -220,5 +229,109 @@ mod tests {
     fn graceful_shutdown_empty() {
         let runner = EcsRunnerSingleThread::new();
         assert!(runner.graceful_shutdown(Duration::from_secs(1)).is_ok());
+    }
+
+    #[test]
+    fn system_result_accessible_by_dependent() {
+        struct ProducerSystem;
+        impl System for ProducerSystem {
+            type Result = u32;
+            async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> u32 {
+                42
+            }
+        }
+
+        struct ConsumerSystem(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
+        impl System for ConsumerSystem {
+            type Result = ();
+            async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+                let value = *ctx.system_result::<ProducerSystem>();
+                *self.0.lock().unwrap() = Some(value);
+            }
+        }
+
+        let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut container = SystemsContainer::new();
+        container.add(ProducerSystem);
+        container.add(ConsumerSystem(result.clone()));
+        container
+            .add_edge::<ProducerSystem, ConsumerSystem>()
+            .unwrap();
+
+        let runner = EcsRunnerSingleThread::new();
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        assert_eq!(*result.lock().unwrap(), Some(42));
+    }
+
+    #[test]
+    #[should_panic(expected = "not accessible")]
+    fn system_result_panics_without_edge() {
+        struct ProducerSystem;
+        impl System for ProducerSystem {
+            type Result = u32;
+            async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> u32 {
+                42
+            }
+        }
+
+        struct ConsumerSystem;
+        impl System for ConsumerSystem {
+            type Result = ();
+            async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+                let _ = ctx.system_result::<ProducerSystem>();
+            }
+        }
+
+        let mut container = SystemsContainer::new();
+        container.add(ProducerSystem);
+        container.add(ConsumerSystem);
+        // No edge — should panic
+
+        let runner = EcsRunnerSingleThread::new();
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+    }
+
+    #[test]
+    fn system_result_transitive_access() {
+        struct SystemA;
+        impl System for SystemA {
+            type Result = String;
+            async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> String {
+                "hello".to_string()
+            }
+        }
+
+        struct SystemB;
+        impl System for SystemB {
+            type Result = ();
+            async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {}
+        }
+
+        // C depends on B depends on A, so C should be able to read A's result
+        struct SystemC(std::sync::Arc<std::sync::Mutex<Option<String>>>);
+        impl System for SystemC {
+            type Result = ();
+            async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+                let value = ctx.system_result::<SystemA>().clone();
+                *self.0.lock().unwrap() = Some(value);
+            }
+        }
+
+        let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut container = SystemsContainer::new();
+        container.add(SystemA);
+        container.add(SystemB);
+        container.add(SystemC(result.clone()));
+        container.add_edge::<SystemA, SystemB>().unwrap();
+        container.add_edge::<SystemB, SystemC>().unwrap();
+
+        let runner = EcsRunnerSingleThread::new();
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        assert_eq!(*result.lock().unwrap(), Some("hello".to_string()));
     }
 }

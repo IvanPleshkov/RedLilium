@@ -16,6 +16,7 @@ use crate::components::{Children, GlobalTransform, Parent, Transform};
 pub struct UpdateGlobalTransforms;
 
 impl crate::System for UpdateGlobalTransforms {
+    type Result = ();
     async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
         ctx.lock::<(
             crate::Read<Transform>,
