@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use redlilium_core::compute::{Priority, reset_yield_timer};
 
@@ -304,6 +304,51 @@ impl ComputePool {
         count
     }
 
+    /// Polls pending tasks until the time budget is exceeded.
+    ///
+    /// Each task is polled at most once. The budget is checked between polls,
+    /// so a single non-yielding task may exceed the budget — but no further
+    /// tasks will be polled after that.
+    ///
+    /// Returns the number of tasks that were polled.
+    pub fn tick_with_budget(&self, budget: Duration) -> usize {
+        redlilium_core::profile_scope!("ecs: compute tick_budget");
+        let start = Instant::now();
+        let mut tasks = self.tasks.lock().unwrap();
+
+        tasks.retain(|t| !t.state.cancelled.load(Ordering::Acquire));
+
+        if tasks.is_empty() {
+            return 0;
+        }
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut polled = 0;
+        let mut i = 0;
+
+        while i < tasks.len() {
+            // Check budget before starting the next poll
+            if polled > 0 && start.elapsed() >= budget {
+                break;
+            }
+
+            match tasks[i].future.as_mut().poll(&mut cx) {
+                Poll::Ready(()) => {
+                    tasks.swap_remove(i);
+                }
+                Poll::Pending => {
+                    i += 1;
+                }
+            }
+            polled += 1;
+        }
+
+        redlilium_core::profile_plot!("ecs: compute pending", tasks.len() as f64);
+
+        polled
+    }
+
     /// Extracts one task, polls it outside the lock, and returns it if pending.
     ///
     /// Unlike [`tick`], this method does not hold the mutex while polling,
@@ -598,5 +643,43 @@ mod tests {
             Poll::Ready(Some(99)) => {}
             other => panic!("Expected Ready(Some(99)), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn tick_with_budget_completes_fast_tasks() {
+        let pool = test_pool();
+        let h1 = pool.spawn(Priority::Low, |_ctx| async { 1u32 });
+        let h2 = pool.spawn(Priority::Low, |_ctx| async { 2u32 });
+
+        // Generous budget — both tasks should complete
+        let polled = pool.tick_with_budget(Duration::from_secs(1));
+        assert_eq!(polled, 2);
+        assert_eq!(pool.pending_count(), 0);
+        assert_eq!(h1.try_recv(), Some(1));
+        assert_eq!(h2.try_recv(), Some(2));
+    }
+
+    #[test]
+    fn tick_with_budget_stops_after_budget() {
+        let pool = test_pool();
+
+        // Spawn several tasks that yield so each poll returns Pending
+        for _ in 0..10 {
+            pool.spawn(Priority::Low, |_ctx| async {
+                yield_now().await;
+            });
+        }
+
+        // Zero budget — polls at most one task (first is always polled)
+        let polled = pool.tick_with_budget(Duration::ZERO);
+        assert_eq!(polled, 1);
+        // 10 tasks still pending (the one we polled yielded)
+        assert_eq!(pool.pending_count(), 10);
+    }
+
+    #[test]
+    fn tick_with_budget_empty_pool() {
+        let pool = test_pool();
+        assert_eq!(pool.tick_with_budget(Duration::from_secs(1)), 0);
     }
 }

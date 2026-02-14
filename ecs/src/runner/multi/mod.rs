@@ -155,8 +155,9 @@ impl EcsRunnerMultiThread {
                         }
                     }
 
-                    // Tick compute pool on main thread
-                    self.compute.tick_all();
+                    // Tick compute pool on main thread (budgeted to avoid blocking
+                    // on long-running tasks without yields)
+                    self.compute.tick_with_budget(Duration::from_millis(1));
                 }
 
                 // Drop the sender so scope join doesn't deadlock
@@ -172,22 +173,12 @@ impl EcsRunnerMultiThread {
             }
         }
 
-        // Drain remaining compute tasks across all threads
-        let pending = self.compute.pending_count();
-        if pending > 0 {
+        // Opportunistically tick remaining compute tasks (time-budgeted).
+        // Tasks that don't complete here persist in the pool and continue
+        // making progress on subsequent run() calls.
+        if self.compute.pending_count() > 0 {
             redlilium_core::profile_scope!("ecs: compute drain");
-            let budget = AtomicUsize::new(0);
-            std::thread::scope(|scope| {
-                for _ in 0..self.num_threads {
-                    scope.spawn(|| {
-                        while budget.fetch_add(1, Ordering::Relaxed) < pending {
-                            if self.compute.tick_extract() == 0 {
-                                break;
-                            }
-                        }
-                    });
-                }
-            });
+            self.compute.tick_with_budget(Duration::from_millis(2));
         }
     }
 
@@ -213,6 +204,9 @@ impl Default for EcsRunnerMultiThread {
 }
 
 /// Polls a future to completion, ticking compute between polls.
+///
+/// Uses budgeted compute ticking so a long-running compute task spawned
+/// by another system doesn't block this worker thread indefinitely.
 fn poll_future_to_completion_with_compute<'a>(
     future: Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
     compute: &ComputePool,
@@ -225,7 +219,7 @@ fn poll_future_to_completion_with_compute<'a>(
         match future.as_mut().poll(&mut cx) {
             Poll::Ready(()) => break,
             Poll::Pending => {
-                compute.tick_all();
+                compute.tick_with_budget(Duration::from_millis(1));
                 std::thread::yield_now();
             }
         }
