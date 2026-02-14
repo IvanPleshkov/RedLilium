@@ -8,6 +8,7 @@ use crate::entity::Entity;
 use crate::io_runtime::IoRuntime;
 use crate::lock_request::LockRequest;
 use crate::main_thread_dispatcher::MainThreadDispatcher;
+use crate::query_guard::QueryGuard;
 use crate::world::World;
 
 /// Context passed to systems during execution.
@@ -111,6 +112,60 @@ impl<'a> SystemContext<'a> {
             ctx: self,
             _marker: PhantomData,
         }
+    }
+
+    /// Acquires locks for the given access set and returns a guard holding
+    /// the locked data.
+    ///
+    /// Unlike [`lock().execute()`](LockRequest::execute), this does not
+    /// require a closure — the data is returned directly and can be used
+    /// in normal control flow. Locks are held until the returned
+    /// [`QueryGuard`] is dropped.
+    ///
+    /// Locks are acquired in TypeId-sorted order to prevent deadlocks,
+    /// identical to the `lock().execute()` path.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut q = ctx.query::<(Write<Position>, Read<Velocity>)>().await;
+    /// let (positions, velocities) = &mut q.items;
+    /// for (idx, pos) in positions.iter_mut() {
+    ///     if let Some(vel) = velocities.get(idx) {
+    ///         pos.x += vel.x;
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if the access set contains `MainThreadRes` or `MainThreadResMut`.
+    /// Use `lock().execute()` for main-thread resources.
+    pub async fn query<A: AccessSet>(&self) -> QueryGuard<'_, A> {
+        if A::needs_main_thread() {
+            panic!("query() does not support main-thread resources; use lock().execute() instead");
+        }
+
+        let infos = A::access_infos();
+        let guards = loop {
+            redlilium_core::profile_scope!("ecs: query acquire");
+            if let Some(guards) = self.world.try_acquire_sorted(&infos) {
+                break guards;
+            }
+            // Locks contended — yield to let the executor run compute tasks
+            let mut yielded = false;
+            std::future::poll_fn(|_| {
+                if yielded {
+                    std::task::Poll::Ready(())
+                } else {
+                    yielded = true;
+                    std::task::Poll::Pending
+                }
+            })
+            .await;
+        };
+        let items = A::fetch_unlocked(self.world);
+        QueryGuard::new(guards, items)
     }
 
     /// Returns a reference to the compute pool for spawning background tasks.
