@@ -1,6 +1,7 @@
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::{Arc, RwLock};
 
 use crate::system::{DynSystem, System};
 
@@ -62,8 +63,14 @@ impl std::error::Error for CycleError {}
 /// container.add_edge::<UpdateGlobalTransforms, UpdateCameraMatrices>().unwrap();
 /// ```
 pub struct SystemsContainer {
-    /// Registered systems in insertion order.
-    systems: Vec<Box<dyn DynSystem>>,
+    /// Registered systems in insertion order, each behind `Arc<RwLock<>>`.
+    ///
+    /// External code can hold typed `Arc<RwLock<S>>` clones (from [`add`])
+    /// to inspect or mutate system configuration outside the runner.
+    /// The runner read-locks each system during `run_boxed()`.
+    systems: Vec<Arc<RwLock<dyn DynSystem>>>,
+    /// Cached type names to avoid locking just for diagnostics.
+    names: Vec<&'static str>,
     /// Forward adjacency list: edges[i] = indices of systems that depend on i.
     edges: Vec<Vec<usize>>,
     /// Cached in-degree per system (number of dependencies).
@@ -79,6 +86,7 @@ impl SystemsContainer {
     pub fn new() -> Self {
         Self {
             systems: Vec::new(),
+            names: Vec::new(),
             edges: Vec::new(),
             in_degrees: Vec::new(),
             id_to_idx: HashMap::new(),
@@ -86,12 +94,17 @@ impl SystemsContainer {
         }
     }
 
-    /// Registers a system.
+    /// Registers a system, wrapping it in `Arc<RwLock<S>>`.
+    ///
+    /// Returns the typed `Arc` handle so the caller can keep a clone
+    /// for external access (e.g. inspector, editor). The container
+    /// stores a coerced `Arc<RwLock<dyn DynSystem>>` that shares the
+    /// same underlying data.
     ///
     /// # Panics
     ///
     /// Panics if a system of the same type is already registered.
-    pub fn add<S: System>(&mut self, system: S) {
+    pub fn add<S: System>(&mut self, system: S) -> Arc<RwLock<S>> {
         let type_id = TypeId::of::<S>();
 
         assert!(
@@ -100,12 +113,15 @@ impl SystemsContainer {
             std::any::type_name::<S>()
         );
 
+        let arc = Arc::new(RwLock::new(system));
         let idx = self.systems.len();
         self.id_to_idx.insert(type_id, idx);
-        self.systems.push(Box::new(system));
+        self.systems.push(arc.clone());
+        self.names.push(std::any::type_name::<S>());
         self.edges.push(Vec::new());
         self.in_degrees.push(0);
         self.rebuild_order();
+        arc
     }
 
     /// Adds a single ordering edge: `Before` must complete before `After` starts.
@@ -169,7 +185,7 @@ impl SystemsContainer {
             Err(cycle_indices) => {
                 let involved = cycle_indices
                     .iter()
-                    .map(|&idx| self.systems[idx].name().to_string())
+                    .map(|&idx| self.names[idx].to_string())
                     .collect();
                 Err(CycleError { involved })
             }
@@ -181,14 +197,16 @@ impl SystemsContainer {
         self.systems.len()
     }
 
-    /// Returns a reference to the system at the given index.
-    pub(crate) fn get_system(&self, idx: usize) -> &dyn DynSystem {
-        &*self.systems[idx]
+    /// Returns the `Arc<RwLock<dyn DynSystem>>` for the system at the given index.
+    ///
+    /// The runner read-locks this to call `run_boxed()`.
+    pub(crate) fn get_system(&self, idx: usize) -> &Arc<RwLock<dyn DynSystem>> {
+        &self.systems[idx]
     }
 
     /// Returns the type name of the system at the given index.
     pub fn get_type_name(&self, idx: usize) -> &'static str {
-        self.systems[idx].name()
+        self.names[idx]
     }
 
     /// Returns the indices of systems with no dependencies (in-degree 0).

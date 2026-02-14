@@ -189,7 +189,7 @@ impl<T: 'static> AccessElement for OptionalWrite<T> {
     }
 }
 
-impl<T: Send + Sync + 'static> AccessElement for Res<T> {
+impl<T: 'static> AccessElement for Res<T> {
     type Item<'w> = ResourceRef<'w, T>;
 
     fn access_info() -> AccessInfo {
@@ -203,12 +203,14 @@ impl<T: Send + Sync + 'static> AccessElement for Res<T> {
         world.resource::<T>()
     }
 
+    /// Resources self-lock via `Arc<RwLock<T>>`, so fetch_unlocked
+    /// behaves identically to fetch.
     fn fetch_unlocked(world: &World) -> Self::Item<'_> {
-        world.resource_unlocked::<T>()
+        world.resource::<T>()
     }
 }
 
-impl<T: Send + Sync + 'static> AccessElement for ResMut<T> {
+impl<T: 'static> AccessElement for ResMut<T> {
     type Item<'w> = ResourceRefMut<'w, T>;
 
     fn access_info() -> AccessInfo {
@@ -222,8 +224,10 @@ impl<T: Send + Sync + 'static> AccessElement for ResMut<T> {
         world.resource_mut::<T>()
     }
 
+    /// Resources self-lock via `Arc<RwLock<T>>`, so fetch_unlocked
+    /// behaves identically to fetch.
     fn fetch_unlocked(world: &World) -> Self::Item<'_> {
-        world.resource_mut_unlocked::<T>()
+        world.resource_mut::<T>()
     }
 }
 

@@ -87,15 +87,10 @@ pub trait System: Send + Sync + 'static {
 /// A blanket implementation converts any `System` into a `DynSystem`
 /// by wrapping the future in `Box::pin`.
 pub(crate) trait DynSystem: Send + Sync {
-    fn name(&self) -> &'static str;
     fn run_boxed<'a>(&'a self, ctx: &'a SystemContext<'a>) -> SystemFuture<'a>;
 }
 
 impl<S: System> DynSystem for S {
-    fn name(&self) -> &'static str {
-        std::any::type_name::<S>()
-    }
-
     fn run_boxed<'a>(&'a self, ctx: &'a SystemContext<'a>) -> SystemFuture<'a> {
         Box::pin(self.run(ctx))
     }

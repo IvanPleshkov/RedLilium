@@ -86,7 +86,7 @@ pub use redlilium_core::compute::{
     ComputeContext, IoHandle, IoRunner, Priority, YieldNow, reset_yield_timer, set_yield_interval,
     yield_now,
 };
-pub use resource::{ResourceRef, ResourceRefMut};
+pub use resource::{Resource, ResourceRef, ResourceRefMut};
 pub use sparse_set::{Ref, RefMut, SparseSetInner};
 pub use world::{ComponentNotRegistered, World};
 

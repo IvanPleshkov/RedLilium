@@ -106,7 +106,8 @@ impl EcsRunnerMultiThread {
                             redlilium_core::set_thread_name!("ecs: worker");
                             redlilium_core::profile_scope_dynamic!(system_name);
                             let system = systems.get_system(idx);
-                            let future = system.run_boxed(ctx_ref);
+                            let guard = system.read().unwrap();
+                            let future = guard.run_boxed(ctx_ref);
                             poll_future_to_completion_with_compute(future, compute_ref);
                             let _ = tx.send(idx);
                         });

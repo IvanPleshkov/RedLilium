@@ -8,8 +8,9 @@ use crate::component::Component;
 use crate::entity::{Entity, EntityAllocator};
 use crate::events::Events;
 use crate::query::{AddedFilter, ChangedFilter, ContainsChecker};
-use crate::resource::{ResourceRef, ResourceRefMut, Resources};
+use crate::resource::{Resource, ResourceRef, ResourceRefMut, Resources};
 use crate::sparse_set::{ComponentStorage, LockGuard, Ref, RefMut};
+use std::sync::{Arc, RwLock};
 
 /// Error returned when a component type has not been registered in the [`World`].
 ///
@@ -442,20 +443,13 @@ impl World {
         Some(RefMut::new_unlocked(storage))
     }
 
-    /// Borrows a resource immutably without acquiring a lock.
-    pub(crate) fn resource_unlocked<T: 'static>(&self) -> ResourceRef<'_, T> {
-        self.resources.borrow_unlocked::<T>()
-    }
-
-    /// Borrows a resource mutably without acquiring a lock.
-    pub(crate) fn resource_mut_unlocked<T: 'static>(&self) -> ResourceRefMut<'_, T> {
-        self.resources.borrow_mut_unlocked::<T>()
-    }
-
-    /// Acquires component/resource locks in TypeId-sorted order.
+    /// Acquires component locks in TypeId-sorted order.
     ///
     /// Used by `LockRequest` during system execution. Sorted acquisition
     /// prevents deadlocks when multiple systems run concurrently.
+    ///
+    /// Resources are NOT included — they lock themselves via their own
+    /// `Arc<RwLock<T>>` when accessed.
     pub(crate) fn acquire_sorted(&self, infos: &[AccessInfo]) -> Vec<LockGuard<'_>> {
         let mut sorted = infos.to_vec();
         sorted.sort_by_key(|info| info.type_id);
@@ -471,17 +465,14 @@ impl World {
         sorted
             .iter()
             .filter_map(|info| {
-                // Try component storage first
-                if let Some(storage) = self.components.get(&info.type_id) {
-                    let lock = storage.rw_lock();
-                    return Some(if info.is_write {
-                        LockGuard::Write(lock.write().unwrap())
-                    } else {
-                        LockGuard::Read(lock.read().unwrap())
-                    });
-                }
-                // Then try resource storage
-                self.resources.acquire_lock(info.type_id, info.is_write)
+                // Only component storages — resources self-lock via Arc<RwLock<T>>
+                let storage = self.components.get(&info.type_id)?;
+                let lock = storage.rw_lock();
+                Some(if info.is_write {
+                    LockGuard::Write(lock.write().unwrap())
+                } else {
+                    LockGuard::Read(lock.read().unwrap())
+                })
             })
             .collect()
     }
@@ -600,19 +591,43 @@ impl World {
 
     // ---- Resource management ----
 
-    /// Inserts or replaces a resource.
-    pub fn insert_resource<T: Send + Sync + 'static>(&mut self, value: T) {
-        self.resources.insert(value);
+    /// Inserts or replaces a resource, wrapping it in `Arc<RwLock<T>>`.
+    ///
+    /// Returns the typed `Arc` handle for external access (e.g. inspector,
+    /// editor). The world stores a coerced `Arc<RwLock<dyn Resource>>` that
+    /// shares the same underlying data and lock.
+    pub fn insert_resource<T: Resource>(&mut self, value: T) -> Arc<RwLock<T>> {
+        self.resources.insert(value)
     }
 
-    /// Removes a resource, returning it if present.
-    pub fn remove_resource<T: 'static>(&mut self) -> Option<T> {
+    /// Inserts a pre-existing `Arc<RwLock<T>>` as a resource.
+    ///
+    /// The Arc is coerced to `Arc<RwLock<dyn Resource>>` for storage;
+    /// both the caller's clone and the stored clone share the same lock.
+    pub fn insert_resource_shared<T: Resource>(&mut self, resource: Arc<RwLock<T>>) {
+        self.resources.insert_shared(resource);
+    }
+
+    /// Removes a resource, returning the `Arc<RwLock<dyn Resource>>` if present.
+    pub fn remove_resource<T: 'static>(&mut self) -> Option<Arc<RwLock<dyn Resource>>> {
         self.resources.remove::<T>()
     }
 
     /// Returns whether a resource of type T exists.
     pub fn has_resource<T: 'static>(&self) -> bool {
         self.resources.contains::<T>()
+    }
+
+    /// Returns the `Arc<RwLock<dyn Resource>>` handle for a resource.
+    ///
+    /// For typed access, keep the `Arc<RwLock<T>>` returned by
+    /// [`insert_resource`](World::insert_resource) instead.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the resource does not exist.
+    pub fn resource_handle<T: 'static>(&self) -> Arc<RwLock<dyn Resource>> {
+        self.resources.get_handle::<T>()
     }
 
     /// Borrows a resource of type T immutably.

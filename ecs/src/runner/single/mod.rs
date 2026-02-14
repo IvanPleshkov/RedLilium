@@ -61,7 +61,8 @@ impl EcsRunnerSingleThread {
 
             for &idx in order {
                 let system = systems.get_system(idx);
-                let future = system.run_boxed(&ctx);
+                let guard = system.read().unwrap();
+                let future = guard.run_boxed(&ctx);
                 poll_system_future_to_completion(future, &self.compute);
             }
         }

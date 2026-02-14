@@ -2,23 +2,53 @@ use std::any::{Any, TypeId, type_name};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use crate::sparse_set::LockGuard;
+/// Trait that all resources must implement.
+///
+/// Provides type-erased downcasting via [`Any`]. A blanket implementation
+/// covers all `Send + Sync + 'static` types automatically, so most users
+/// never need to implement this manually.
+///
+/// The World stores resources as `Arc<RwLock<dyn Resource>>`. External code
+/// (e.g. inspector, editor) can hold `Arc<RwLock<T>>` clones returned by
+/// [`Resources::insert`] for direct access outside the ECS runner.
+pub trait Resource: Send + Sync + 'static {
+    /// Returns a shared reference for downcasting.
+    fn as_any(&self) -> &dyn Any;
+    /// Returns an exclusive reference for downcasting.
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
 
-/// A single type-erased resource with per-resource RwLock synchronization.
+impl<T: Send + Sync + 'static> Resource for T {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+/// A single type-erased resource entry.
 struct ResourceEntry {
-    value: Box<dyn Any + Send + Sync>,
-    /// Per-resource lock for thread-safe borrow management.
-    lock: RwLock<()>,
+    /// The resource value, stored as `Arc<RwLock<dyn Resource>>`.
+    handle: Arc<RwLock<dyn Resource>>,
     type_name: &'static str,
 }
 
-/// Container for typed singleton resources.
+/// Container for typed singleton resources backed by `Arc<RwLock<dyn Resource>>`.
 ///
-/// Resources are global values stored once per World. They use per-resource
-/// RwLock synchronization: multiple shared borrows are allowed, but exclusive
-/// borrows require no other active borrows. Thread-safe via RwLock.
+/// Resources are global values stored once per World. Each resource is
+/// wrapped in `Arc<RwLock<dyn Resource>>`, enabling:
+///
+/// - **External access**: hold a typed `Arc<RwLock<T>>` clone (from
+///   [`insert`](Resources::insert)) to read/write the resource outside
+///   the ECS runner (e.g. inspector, editor UI).
+/// - **Dynamic dispatch**: all resources share a common `dyn Resource`
+///   interface with downcasting support.
+///
+/// Locking is done through the `Arc`'s own `RwLock` — no separate
+/// scheduler-level lock is needed.
 pub(crate) struct Resources {
     entries: HashMap<TypeId, ResourceEntry>,
 }
@@ -31,22 +61,41 @@ impl Resources {
         }
     }
 
-    /// Inserts or replaces a resource of type T.
-    pub fn insert<T: Send + Sync + 'static>(&mut self, value: T) {
+    /// Inserts a resource, wrapping it in `Arc<RwLock<T>>`.
+    ///
+    /// Returns the typed `Arc` handle so the caller can keep a clone
+    /// for external access (e.g. inspector). The world stores a coerced
+    /// `Arc<RwLock<dyn Resource>>` that shares the same underlying data.
+    pub fn insert<T: Resource>(&mut self, value: T) -> Arc<RwLock<T>> {
+        let arc = Arc::new(RwLock::new(value));
         self.entries.insert(
             TypeId::of::<T>(),
             ResourceEntry {
-                value: Box::new(value),
-                lock: RwLock::new(()),
+                handle: arc.clone(),
+                type_name: type_name::<T>(),
+            },
+        );
+        arc
+    }
+
+    /// Inserts a pre-existing `Arc<RwLock<T>>` as a resource.
+    ///
+    /// The Arc is coerced to `Arc<RwLock<dyn Resource>>` for storage;
+    /// both the caller's clone and the stored clone share the same
+    /// underlying lock and data.
+    pub fn insert_shared<T: Resource>(&mut self, resource: Arc<RwLock<T>>) {
+        self.entries.insert(
+            TypeId::of::<T>(),
+            ResourceEntry {
+                handle: resource,
                 type_name: type_name::<T>(),
             },
         );
     }
 
-    /// Removes a resource of type T, returning it if present.
-    pub fn remove<T: 'static>(&mut self) -> Option<T> {
-        let entry = self.entries.remove(&TypeId::of::<T>())?;
-        Some(*entry.value.downcast::<T>().unwrap())
+    /// Removes a resource, returning the `Arc<RwLock<dyn Resource>>` if present.
+    pub fn remove<T: 'static>(&mut self) -> Option<Arc<RwLock<dyn Resource>>> {
+        self.entries.remove(&TypeId::of::<T>()).map(|e| e.handle)
     }
 
     /// Returns whether a resource of type T exists.
@@ -59,7 +108,22 @@ impl Resources {
         self.entries.keys().copied()
     }
 
+    /// Returns the `Arc<RwLock<dyn Resource>>` handle for a resource.
+    ///
+    /// Panics if the resource does not exist.
+    pub fn get_handle<T: 'static>(&self) -> Arc<RwLock<dyn Resource>> {
+        let entry = self
+            .entries
+            .get(&TypeId::of::<T>())
+            .unwrap_or_else(|| panic!("Resource `{}` does not exist", type_name::<T>()));
+
+        entry.handle.clone()
+    }
+
     /// Borrows a resource of type T immutably.
+    ///
+    /// Acquires the `RwLock` read lock on the stored `Arc<RwLock<dyn Resource>>`.
+    /// The returned guard downcasts to `&T` via [`Deref`].
     ///
     /// Panics if the resource does not exist or is exclusively borrowed.
     pub fn borrow<T: 'static>(&self) -> ResourceRef<'_, T> {
@@ -68,7 +132,7 @@ impl Resources {
             .get(&TypeId::of::<T>())
             .unwrap_or_else(|| panic!("Resource `{}` does not exist", type_name::<T>()));
 
-        let guard = entry.lock.try_read().unwrap_or_else(|_| {
+        let guard = entry.handle.try_read().unwrap_or_else(|_| {
             panic!(
                 "Cannot borrow resource `{}` immutably: already borrowed mutably",
                 entry.type_name
@@ -76,12 +140,15 @@ impl Resources {
         });
 
         ResourceRef {
-            value: entry.value.downcast_ref::<T>().unwrap(),
-            _guard: Some(guard),
+            guard,
+            _marker: PhantomData,
         }
     }
 
     /// Borrows a resource of type T mutably.
+    ///
+    /// Acquires the `RwLock` write lock on the stored `Arc<RwLock<dyn Resource>>`.
+    /// The returned guard downcasts to `&mut T` via [`DerefMut`].
     ///
     /// Panics if the resource does not exist or any borrow is active.
     pub fn borrow_mut<T: 'static>(&self) -> ResourceRefMut<'_, T> {
@@ -90,65 +157,16 @@ impl Resources {
             .get(&TypeId::of::<T>())
             .unwrap_or_else(|| panic!("Resource `{}` does not exist", type_name::<T>()));
 
-        let guard = entry.lock.try_write().unwrap_or_else(|_| {
+        let guard = entry.handle.try_write().unwrap_or_else(|_| {
             panic!(
                 "Cannot borrow resource `{}` mutably: already borrowed",
                 entry.type_name
             )
         });
 
-        // SAFETY: write lock guarantees exclusive access.
-        let value = entry.value.downcast_ref::<T>().unwrap() as *const T as *mut T;
-
         ResourceRefMut {
-            value,
-            _guard: Some(guard),
+            guard,
             _marker: PhantomData,
-        }
-    }
-
-    /// Borrows a resource immutably without acquiring a lock.
-    ///
-    /// The caller must ensure the lock is already held externally.
-    pub(crate) fn borrow_unlocked<T: 'static>(&self) -> ResourceRef<'_, T> {
-        let entry = self
-            .entries
-            .get(&TypeId::of::<T>())
-            .unwrap_or_else(|| panic!("Resource `{}` does not exist", type_name::<T>()));
-
-        ResourceRef {
-            value: entry.value.downcast_ref::<T>().unwrap(),
-            _guard: None,
-        }
-    }
-
-    /// Borrows a resource mutably without acquiring a lock.
-    ///
-    /// The caller must ensure the write lock is already held externally.
-    pub(crate) fn borrow_mut_unlocked<T: 'static>(&self) -> ResourceRefMut<'_, T> {
-        let entry = self
-            .entries
-            .get(&TypeId::of::<T>())
-            .unwrap_or_else(|| panic!("Resource `{}` does not exist", type_name::<T>()));
-
-        let value = entry.value.downcast_ref::<T>().unwrap() as *const T as *mut T;
-
-        ResourceRefMut {
-            value,
-            _guard: None,
-            _marker: PhantomData,
-        }
-    }
-
-    /// Acquires a lock on a resource by TypeId for sorted lock acquisition.
-    ///
-    /// Returns `None` if the TypeId does not correspond to any resource.
-    pub(crate) fn acquire_lock(&self, type_id: TypeId, is_write: bool) -> Option<LockGuard<'_>> {
-        let entry = self.entries.get(&type_id)?;
-        if is_write {
-            Some(LockGuard::Write(entry.lock.write().unwrap()))
-        } else {
-            Some(LockGuard::Read(entry.lock.read().unwrap()))
         }
     }
 }
@@ -161,34 +179,27 @@ impl Default for Resources {
 
 /// Shared borrow of a resource.
 ///
+/// Holds an `RwLockReadGuard<dyn Resource>` and downcasts to `&T` in [`Deref`].
 /// Automatically releases the lock when dropped.
 pub struct ResourceRef<'a, T: 'static> {
-    value: &'a T,
-    _guard: Option<RwLockReadGuard<'a, ()>>,
+    guard: RwLockReadGuard<'a, dyn Resource>,
+    _marker: PhantomData<&'a T>,
 }
 
 impl<T: 'static> Deref for ResourceRef<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        self.value
+        self.guard.as_any().downcast_ref::<T>().unwrap()
     }
 }
 
-// ResourceRef holds either an RwLockReadGuard (auto-released on drop) or nothing.
-// No manual Drop needed.
-
-// SAFETY: ResourceRef only provides shared access. The RwLock ensures
-// no exclusive access exists when the guard is held.
-unsafe impl<T: Send + Sync + 'static> Send for ResourceRef<'_, T> {}
-unsafe impl<T: Send + Sync + 'static> Sync for ResourceRef<'_, T> {}
-
 /// Exclusive borrow of a resource.
 ///
-/// Automatically releases the lock when dropped.
+/// Holds an `RwLockWriteGuard<dyn Resource>` and downcasts to `&mut T` in
+/// [`DerefMut`]. Automatically releases the lock when dropped.
 pub struct ResourceRefMut<'a, T: 'static> {
-    value: *mut T,
-    _guard: Option<RwLockWriteGuard<'a, ()>>,
+    guard: RwLockWriteGuard<'a, dyn Resource>,
     _marker: PhantomData<&'a mut T>,
 }
 
@@ -196,25 +207,15 @@ impl<T: 'static> Deref for ResourceRefMut<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        // SAFETY: Exclusive access guaranteed by the write lock.
-        unsafe { &*self.value }
+        self.guard.as_any().downcast_ref::<T>().unwrap()
     }
 }
 
 impl<T: 'static> DerefMut for ResourceRefMut<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        // SAFETY: Exclusive access guaranteed by the write lock.
-        unsafe { &mut *self.value }
+        self.guard.as_any_mut().downcast_mut::<T>().unwrap()
     }
 }
-
-// ResourceRefMut holds either an RwLockWriteGuard (auto-released on drop) or nothing.
-// No manual Drop needed.
-
-// SAFETY: ResourceRefMut has exclusive access. The RwLock ensures
-// no other access exists when the guard is held.
-unsafe impl<T: Send + Sync + 'static> Send for ResourceRefMut<'_, T> {}
-unsafe impl<T: Send + Sync + 'static> Sync for ResourceRefMut<'_, T> {}
 
 #[cfg(test)]
 mod tests {
@@ -253,7 +254,8 @@ mod tests {
     fn remove_resource() {
         let mut resources = Resources::new();
         resources.insert(42u32);
-        assert_eq!(resources.remove::<u32>(), Some(42));
+        let removed = resources.remove::<u32>();
+        assert!(removed.is_some());
         assert!(!resources.contains::<u32>());
     }
 
@@ -289,5 +291,45 @@ mod tests {
     fn missing_resource_panics() {
         let resources = Resources::new();
         let _val = resources.borrow::<u32>();
+    }
+
+    #[test]
+    fn insert_returns_arc_handle() {
+        let mut resources = Resources::new();
+        let handle = resources.insert(42u32);
+
+        // External access via typed handle
+        assert_eq!(*handle.read().unwrap(), 42);
+
+        // Modify through typed handle
+        *handle.write().unwrap() = 99;
+
+        // World sees the change (same underlying Arc)
+        let val = resources.borrow::<u32>();
+        assert_eq!(*val, 99);
+    }
+
+    #[test]
+    fn insert_shared_same_arc() {
+        let mut resources = Resources::new();
+        let handle = Arc::new(RwLock::new(42u32));
+        resources.insert_shared(handle.clone());
+
+        // Modify through external handle
+        *handle.write().unwrap() = 99;
+
+        // World sees the change
+        let val = resources.borrow::<u32>();
+        assert_eq!(*val, 99);
+    }
+
+    #[test]
+    fn get_handle_returns_dyn_resource() {
+        let mut resources = Resources::new();
+        resources.insert(42u32);
+
+        let dyn_handle = resources.get_handle::<u32>();
+        let guard = dyn_handle.read().unwrap();
+        assert_eq!(*guard.as_any().downcast_ref::<u32>().unwrap(), 42);
     }
 }
