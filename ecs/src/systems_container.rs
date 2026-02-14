@@ -135,10 +135,38 @@ impl SystemsContainer {
         arc
     }
 
-    /// Registers a plain function as a system.
+    /// Registers a per-entity function as a system.
     ///
-    /// Converts the function via [`IntoSystem`] and registers the resulting
-    /// [`FunctionSystem`](crate::FunctionSystem). Returns the typed `Arc` handle.
+    /// The function is called once per matching entity during each tick.
+    /// Locking and inner-join iteration are handled automatically.
+    /// This is the simplest way to add logic that processes entities.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// fn movement((pos, vel): (&mut Position, &Velocity)) {
+    ///     pos.x += vel.x;
+    /// }
+    ///
+    /// let mut container = SystemsContainer::new();
+    /// container.add_fn::<(Write<Position>, Read<Velocity>), _>(movement);
+    /// ```
+    pub fn add_fn<A, F>(
+        &mut self,
+        func: F,
+    ) -> Arc<RwLock<crate::function_system::ForEachSystem<F, A>>>
+    where
+        A: crate::function_system::ForEachAccess + Send + Sync + 'static,
+        F: for<'a> Fn(A::EachItem<'a>) + Send + Sync + 'static,
+    {
+        self.add(crate::function_system::for_each::<A, F>(func))
+    }
+
+    /// Registers a function that receives raw component storages as a system.
+    ///
+    /// Unlike [`add_fn`](Self::add_fn), this gives you the full storage
+    /// objects (`Ref<T>`, `RefMut<T>`) so you can iterate and join manually.
+    /// Use this when you need custom iteration patterns.
     ///
     /// # Example
     ///
@@ -150,9 +178,9 @@ impl SystemsContainer {
     /// }
     ///
     /// let mut container = SystemsContainer::new();
-    /// container.add_fn::<(Write<Velocity>,), _>(gravity);
+    /// container.add_fn_raw::<(Write<Velocity>,), _>(gravity);
     /// ```
-    pub fn add_fn<Marker, F: IntoSystem<Marker>>(&mut self, func: F) -> Arc<RwLock<F::System>> {
+    pub fn add_fn_raw<Marker, F: IntoSystem<Marker>>(&mut self, func: F) -> Arc<RwLock<F::System>> {
         self.add(func.into_system())
     }
 

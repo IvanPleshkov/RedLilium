@@ -105,7 +105,9 @@ pub use access_set::{
 };
 pub use bundle::Bundle;
 pub use command_collector::{CommandCollector, SpawnBuilder};
-pub use function_system::{FunctionSystem, IntoSystem};
+pub use function_system::{
+    ForEach, ForEachAccess, ForEachSystem, FunctionSystem, IntoSystem, for_each,
+};
 pub use lock_request::LockRequest;
 pub use runner::{EcsRunner, EcsRunnerSingleThread, ShutdownError};
 pub use system::{System, run_system_blocking};
