@@ -152,6 +152,25 @@ impl<T: 'static> SparseSetInner<T> {
         &self.entities
     }
 
+    /// Returns a mutable pointer to the component for the given entity index.
+    ///
+    /// # Safety
+    ///
+    /// - `this` must be a valid, properly aligned pointer to an initialized
+    ///   `SparseSetInner<T>`.
+    /// - The caller must have exclusive access to the storage (e.g., write lock held).
+    /// - The caller must ensure no other mutable reference to the same dense
+    ///   slot exists.
+    pub(crate) unsafe fn get_ptr_mut(this: *mut Self, entity_index: u32) -> Option<*mut T> {
+        // SAFETY: caller guarantees `this` is valid and exclusively accessed.
+        unsafe {
+            let set = &mut *this;
+            let idx = entity_index as usize;
+            let dense_idx = *set.sparse.get(idx)?.as_ref()? as usize;
+            Some(set.dense.as_mut_ptr().add(dense_idx))
+        }
+    }
+
     // ---- Change detection ----
 
     /// Returns a mutable reference and marks the component as changed at `tick`.
@@ -387,6 +406,14 @@ impl<'a, T: 'static> Ref<'a, T> {
             _guard: None,
         }
     }
+
+    /// Returns a reference to the underlying storage with the storage lifetime.
+    ///
+    /// Unlike `Deref` (which ties the result to the borrow of `Ref`), this
+    /// returns a reference with the original `'a` lifetime of the storage.
+    pub(crate) fn storage(&self) -> &'a SparseSetInner<T> {
+        self.inner
+    }
 }
 
 impl<T: 'static> Deref for Ref<'_, T> {
@@ -442,6 +469,14 @@ impl<'a, T: 'static> RefMut<'a, T> {
             _guard: None,
             _marker: PhantomData,
         }
+    }
+
+    /// Returns the raw pointer to the underlying storage.
+    ///
+    /// Used by [`QueryItem`](crate::QueryItem) to access components without
+    /// requiring `&mut self`, enabling per-entity mutable access in iterators.
+    pub(crate) fn storage_ptr(&self) -> *mut SparseSetInner<T> {
+        self.inner
     }
 }
 

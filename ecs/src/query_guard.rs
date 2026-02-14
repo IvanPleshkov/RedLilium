@@ -1,5 +1,5 @@
 use crate::access_set::AccessSet;
-use crate::sparse_set::LockGuard;
+use crate::sparse_set::{LockGuard, Ref, RefMut, SparseSetInner};
 use crate::system_context::LockTracking;
 
 /// A guard holding component/resource locks and their fetched data.
@@ -66,6 +66,190 @@ impl<'a, A: AccessSet> QueryGuard<'a, A> {
             items,
             _tracking: Some(tracking),
         }
+    }
+}
+
+impl<'a, A: AccessSet> IntoIterator for QueryGuard<'a, A>
+where
+    A::Item<'a>: QueryItem,
+{
+    type Item = (u32, <A::Item<'a> as QueryItem>::Item);
+    type IntoIter = QueryIter<'a, A>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        QueryIter::from(self)
+    }
+}
+
+// ---- QueryItem trait and iterator ----
+
+/// Trait for types that provide per-entity access in a joined query.
+///
+/// Implemented for [`Ref`] (shared component access) and [`RefMut`]
+/// (exclusive component access), and for tuples of these types.
+///
+/// This trait enables [`QueryIter`] to perform inner joins across
+/// multiple component storages.
+pub trait QueryItem {
+    /// The per-entity reference type (e.g., `&T` or `&mut T`).
+    type Item;
+
+    /// Number of entities in this storage.
+    fn query_count(&self) -> usize;
+
+    /// Entity indices in dense order.
+    fn query_entities(&self) -> &[u32];
+
+    /// Fetch the item for a given entity index.
+    ///
+    /// # Safety
+    ///
+    /// For mutable items, the caller must ensure each `entity_index` is
+    /// accessed at most once (no aliasing mutable references).
+    unsafe fn query_get(&self, entity_index: u32) -> Option<Self::Item>;
+}
+
+impl<'w, T: 'static> QueryItem for Ref<'w, T> {
+    type Item = &'w T;
+
+    fn query_count(&self) -> usize {
+        self.len()
+    }
+
+    fn query_entities(&self) -> &[u32] {
+        self.entities()
+    }
+
+    unsafe fn query_get(&self, entity_index: u32) -> Option<&'w T> {
+        self.storage().get(entity_index)
+    }
+}
+
+impl<'w, T: 'static> QueryItem for RefMut<'w, T> {
+    type Item = &'w mut T;
+
+    fn query_count(&self) -> usize {
+        self.len()
+    }
+
+    fn query_entities(&self) -> &[u32] {
+        self.entities()
+    }
+
+    unsafe fn query_get(&self, entity_index: u32) -> Option<&'w mut T> {
+        // SAFETY: write lock is held (via QueryGuard._guards), and the caller
+        // (QueryIter) visits each entity_index at most once, so no aliasing
+        // mutable references are created.
+        unsafe { SparseSetInner::get_ptr_mut(self.storage_ptr(), entity_index).map(|p| &mut *p) }
+    }
+}
+
+macro_rules! impl_query_item {
+    ($($idx:tt $T:ident),+) => {
+        impl<$($T: QueryItem),+> QueryItem for ($($T,)+) {
+            type Item = ($($T::Item,)+);
+
+            fn query_count(&self) -> usize {
+                let mut min = usize::MAX;
+                $(
+                    min = min.min(self.$idx.query_count());
+                )+
+                min
+            }
+
+            fn query_entities(&self) -> &[u32] {
+                let mut _min_count = usize::MAX;
+                let mut min_entities: &[u32] = &[];
+                $(
+                    let count = self.$idx.query_count();
+                    if count < _min_count {
+                        _min_count = count;
+                        min_entities = self.$idx.query_entities();
+                    }
+                )+
+                min_entities
+            }
+
+            unsafe fn query_get(&self, entity_index: u32) -> Option<Self::Item> {
+                // SAFETY: delegates to each element's query_get with the same
+                // entity_index. The caller guarantees unique access per index.
+                unsafe {
+                    Some(($( self.$idx.query_get(entity_index)?, )+))
+                }
+            }
+        }
+    };
+}
+
+impl_query_item!(0 A);
+impl_query_item!(0 A, 1 B);
+impl_query_item!(0 A, 1 B, 2 C);
+impl_query_item!(0 A, 1 B, 2 C, 3 D);
+impl_query_item!(0 A, 1 B, 2 C, 3 D, 4 E);
+impl_query_item!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F);
+impl_query_item!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F, 6 G);
+impl_query_item!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F, 6 G, 7 H);
+
+/// Iterator over entities and their components from a [`QueryGuard`].
+///
+/// Created via [`From<QueryGuard>`] or [`QueryGuard::into_iter()`].
+/// Performs an inner join: iterates over the smallest component storage
+/// and yields only entities present in all queried storages.
+///
+/// Owns the underlying [`QueryGuard`], keeping locks held for the
+/// iterator's lifetime. Use [`into_guard`](QueryIter::into_guard) to
+/// recover the guard after (partial) iteration.
+///
+/// ```ignore
+/// let q = ctx.query::<(Write<Position>, Read<Velocity>)>().await;
+/// for (entity_idx, (pos, vel)) in q {
+///     pos.x += vel.x;
+/// }
+/// ```
+pub struct QueryIter<'a, A: AccessSet> {
+    guard: QueryGuard<'a, A>,
+    idx: usize,
+}
+
+impl<'a, A: AccessSet> QueryIter<'a, A> {
+    /// Converts this iterator back into the underlying [`QueryGuard`],
+    /// releasing the iterator state while keeping the locks held.
+    pub fn into_guard(self) -> QueryGuard<'a, A> {
+        self.guard
+    }
+}
+
+impl<'a, A: AccessSet> From<QueryGuard<'a, A>> for QueryIter<'a, A> {
+    fn from(guard: QueryGuard<'a, A>) -> Self {
+        Self { guard, idx: 0 }
+    }
+}
+
+impl<'a, A: AccessSet> Iterator for QueryIter<'a, A>
+where
+    A::Item<'a>: QueryItem,
+{
+    type Item = (u32, <A::Item<'a> as QueryItem>::Item);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let entities = self.guard.items.query_entities();
+        while self.idx < entities.len() {
+            let entity_idx = entities[self.idx];
+            self.idx += 1;
+            // SAFETY: the iterator visits each entity exactly once
+            // (monotonically increasing idx), so no aliasing mutable
+            // references are created across calls to next().
+            if let Some(item) = unsafe { self.guard.items.query_get(entity_idx) } {
+                return Some((entity_idx, item));
+            }
+        }
+        None
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let entities = self.guard.items.query_entities();
+        let remaining = entities.len().saturating_sub(self.idx);
+        (0, Some(remaining))
     }
 }
 
@@ -199,5 +383,171 @@ mod tests {
         let (positions,) = &q.items;
         let sum: f32 = positions.iter().map(|(_, p)| p.x).sum();
         assert_eq!(sum, 42.0);
+    }
+
+    // ---- QueryIter tests ----
+
+    #[test]
+    fn iter_read_only() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        let e1 = world.spawn();
+        let e2 = world.spawn();
+        world.insert(e1, Position { x: 1.0 }).unwrap();
+        world.insert(e2, Position { x: 2.0 }).unwrap();
+
+        let q = query::<(Read<Position>,)>(&world);
+        let mut sum = 0.0;
+        for (_, (pos,)) in q {
+            sum += pos.x;
+        }
+        assert_eq!(sum, 3.0);
+    }
+
+    #[test]
+    fn iter_write_mutates() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        let e = world.spawn();
+        world.insert(e, Position { x: 10.0 }).unwrap();
+
+        {
+            let q = query::<(Write<Position>,)>(&world);
+            for (_, (pos,)) in q {
+                pos.x = 99.0;
+            }
+        }
+
+        assert_eq!(world.get::<Position>(e).unwrap().x, 99.0);
+    }
+
+    #[test]
+    fn iter_join_two_components() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Velocity>();
+
+        // Entity with both components
+        let e1 = world.spawn();
+        world.insert(e1, Position { x: 10.0 }).unwrap();
+        world.insert(e1, Velocity { x: 5.0 }).unwrap();
+
+        // Entity with only Position
+        let e2 = world.spawn();
+        world.insert(e2, Position { x: 20.0 }).unwrap();
+
+        {
+            let q = query::<(Write<Position>, Read<Velocity>)>(&world);
+            let mut count = 0;
+            for (_, (pos, vel)) in q {
+                pos.x += vel.x;
+                count += 1;
+            }
+            // Only e1 has both components
+            assert_eq!(count, 1);
+        }
+
+        assert_eq!(world.get::<Position>(e1).unwrap().x, 15.0);
+        // e2 unchanged (didn't have Velocity)
+        assert_eq!(world.get::<Position>(e2).unwrap().x, 20.0);
+    }
+
+    #[test]
+    fn iter_uses_smallest_set() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Velocity>();
+
+        // 3 entities with Position, 1 with Velocity
+        for i in 0..3 {
+            let e = world.spawn();
+            world.insert(e, Position { x: i as f32 }).unwrap();
+        }
+        let e_vel = world.spawn();
+        world.insert(e_vel, Position { x: 100.0 }).unwrap();
+        world.insert(e_vel, Velocity { x: 1.0 }).unwrap();
+
+        let q = query::<(Read<Position>, Read<Velocity>)>(&world);
+        let results: Vec<_> = QueryIter::from(q).map(|(idx, (p, _))| (idx, p.x)).collect();
+        // Should only find the entity that has both
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1, 100.0);
+    }
+
+    #[test]
+    fn iter_empty_when_no_matches() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Velocity>();
+
+        let e = world.spawn();
+        world.insert(e, Position { x: 1.0 }).unwrap();
+        // No Velocity on any entity
+
+        let q = query::<(Read<Position>, Read<Velocity>)>(&world);
+        assert_eq!(QueryIter::from(q).count(), 0);
+    }
+
+    #[test]
+    fn iter_into_iterator() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        let e = world.spawn();
+        world.insert(e, Position { x: 42.0 }).unwrap();
+
+        let q = query::<(Read<Position>,)>(&world);
+        let mut found = false;
+        for (_, (pos,)) in q {
+            assert_eq!(pos.x, 42.0);
+            found = true;
+        }
+        assert!(found);
+    }
+
+    #[test]
+    fn iter_multiple_writes() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Velocity>();
+
+        let e1 = world.spawn();
+        world.insert(e1, Position { x: 1.0 }).unwrap();
+        world.insert(e1, Velocity { x: 10.0 }).unwrap();
+        let e2 = world.spawn();
+        world.insert(e2, Position { x: 2.0 }).unwrap();
+        world.insert(e2, Velocity { x: 20.0 }).unwrap();
+
+        {
+            let q = query::<(Write<Position>, Write<Velocity>)>(&world);
+            for (_, (pos, vel)) in q {
+                pos.x += 100.0;
+                vel.x += 100.0;
+            }
+        }
+
+        assert_eq!(world.get::<Position>(e1).unwrap().x, 101.0);
+        assert_eq!(world.get::<Velocity>(e1).unwrap().x, 110.0);
+        assert_eq!(world.get::<Position>(e2).unwrap().x, 102.0);
+        assert_eq!(world.get::<Velocity>(e2).unwrap().x, 120.0);
+    }
+
+    #[test]
+    fn iter_into_guard_recovers_locks() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        let e = world.spawn();
+        world.insert(e, Position { x: 1.0 }).unwrap();
+
+        let q = query::<(Write<Position>,)>(&world);
+        let mut iter = QueryIter::from(q);
+
+        // Partially consume the iterator
+        let (_, (pos,)) = iter.next().unwrap();
+        pos.x = 42.0;
+
+        // Recover the guard — locks still held
+        let guard = iter.into_guard();
+        let (positions,) = &guard.items;
+        assert_eq!(positions.get(e.index()).unwrap().x, 42.0);
     }
 }
