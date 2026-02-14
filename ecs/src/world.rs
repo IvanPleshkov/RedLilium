@@ -8,7 +8,7 @@ use crate::component::Component;
 use crate::entity::{Entity, EntityAllocator};
 use crate::events::Events;
 use crate::main_thread_resource::MainThreadResources;
-use crate::query::{AddedFilter, ChangedFilter, ContainsChecker};
+use crate::query::{AddedFilter, ChangedFilter, ContainsChecker, RemovedFilter};
 use crate::resource::{Resource, ResourceRef, ResourceRefMut, Resources};
 use crate::sparse_set::{ComponentStorage, LockGuard, Ref, RefMut};
 use std::sync::{Arc, RwLock};
@@ -116,14 +116,18 @@ impl World {
     ///
     /// Returns `true` if the entity was alive and is now despawned.
     /// Returns `false` if the entity was already dead.
+    /// Records removals for [`removed`](World::removed) filter queries.
     pub fn despawn(&mut self, entity: Entity) -> bool {
         if !self.entities.deallocate(entity) {
             return false;
         }
 
         let index = entity.index();
+        let tick = self.tick;
         for storage in self.components.values_mut() {
-            storage.remove_untyped(index);
+            if storage.remove_untyped(index) {
+                storage.record_removal(index, tick);
+            }
         }
         true
     }
@@ -323,9 +327,15 @@ impl World {
     /// Removes a component from an entity.
     ///
     /// Returns the removed value, or `None` if the entity did not have it.
+    /// Records the removal for [`removed`](World::removed) filter queries.
     pub fn remove<T: 'static>(&mut self, entity: Entity) -> Option<T> {
+        let tick = self.tick;
         let storage = self.components.get_mut(&TypeId::of::<T>())?;
-        storage.typed_mut::<T>().remove(entity.index())
+        let result = storage.typed_mut::<T>().remove(entity.index());
+        if result.is_some() {
+            storage.record_removal(entity.index(), tick);
+        }
+        result
     }
 
     /// Returns a reference to a component on an entity.
@@ -568,6 +578,19 @@ impl World {
         AddedFilter::new(storage, since_tick)
     }
 
+    /// Creates a filter matching entities whose component T was removed
+    /// since (strictly after) `since_tick`.
+    ///
+    /// Does not borrow component data. If T has never been registered,
+    /// the filter matches nothing.
+    ///
+    /// Removal records are accumulated across frames. Call
+    /// [`clear_removed_tracking`](World::clear_removed_tracking) to reset them.
+    pub fn removed<T: 'static>(&self, since_tick: u64) -> RemovedFilter<'_> {
+        let storage = self.components.get(&TypeId::of::<T>());
+        RemovedFilter::new(storage, since_tick)
+    }
+
     // ---- Inspector ----
 
     /// Returns the names of all inspector-registered components that an entity has.
@@ -750,6 +773,17 @@ impl World {
     /// Call this at the start of each frame, before running systems.
     pub fn advance_tick(&mut self) {
         self.tick += 1;
+    }
+
+    /// Clears all removal tracking records for all component types.
+    ///
+    /// Call this at the start of each frame (after systems have had a chance
+    /// to observe removals via [`removed`](World::removed)) to prevent
+    /// unbounded growth of removal records.
+    pub fn clear_removed_tracking(&mut self) {
+        for storage in self.components.values_mut() {
+            storage.clear_removed();
+        }
     }
 
     // ---- Commands ----
@@ -1107,5 +1141,125 @@ mod tests {
             }
         }
         assert_eq!(count, 1); // Only e1 has both
+    }
+
+    #[test]
+    fn removed_filter_after_remove() {
+        let mut world = World::new();
+        world.register_component::<Health>();
+
+        let entity = world.spawn();
+        world.insert(entity, Health(100)).unwrap();
+
+        world.advance_tick(); // tick = 1
+        let before_remove = world.current_tick();
+
+        world.advance_tick(); // tick = 2
+        world.remove::<Health>(entity);
+
+        let removed = world.removed::<Health>(before_remove);
+        assert!(removed.matches(entity.index()));
+    }
+
+    #[test]
+    fn removed_filter_not_matching_before_tick() {
+        let mut world = World::new();
+        world.register_component::<Health>();
+
+        let entity = world.spawn();
+        world.insert(entity, Health(100)).unwrap();
+
+        world.advance_tick(); // tick = 1
+        world.remove::<Health>(entity); // removed at tick 1
+
+        // Query with since_tick = 1, removal at tick 1 is NOT strictly after 1
+        let removed = world.removed::<Health>(1);
+        assert!(!removed.matches(entity.index()));
+
+        // Query with since_tick = 0, removal at tick 1 IS strictly after 0
+        let removed = world.removed::<Health>(0);
+        assert!(removed.matches(entity.index()));
+    }
+
+    #[test]
+    fn removed_filter_after_despawn() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Health>();
+
+        let entity = world.spawn();
+        world.insert(entity, Position { x: 1.0, y: 2.0 }).unwrap();
+        world.insert(entity, Health(100)).unwrap();
+
+        world.advance_tick(); // tick = 1
+        world.despawn(entity);
+
+        // Both components should be tracked as removed
+        let removed_pos = world.removed::<Position>(0);
+        let removed_health = world.removed::<Health>(0);
+        assert!(removed_pos.matches(entity.index()));
+        assert!(removed_health.matches(entity.index()));
+    }
+
+    #[test]
+    fn removed_filter_iter() {
+        let mut world = World::new();
+        world.register_component::<Health>();
+
+        let e1 = world.spawn();
+        let e2 = world.spawn();
+        let e3 = world.spawn();
+        world.insert(e1, Health(100)).unwrap();
+        world.insert(e2, Health(200)).unwrap();
+        world.insert(e3, Health(300)).unwrap();
+
+        world.advance_tick(); // tick = 1
+        world.remove::<Health>(e1);
+        world.remove::<Health>(e3);
+
+        let removed = world.removed::<Health>(0);
+        let mut entities: Vec<u32> = removed.iter().collect();
+        entities.sort();
+        assert_eq!(entities, vec![e1.index(), e3.index()]);
+    }
+
+    #[test]
+    fn clear_removed_tracking_works() {
+        let mut world = World::new();
+        world.register_component::<Health>();
+
+        let entity = world.spawn();
+        world.insert(entity, Health(100)).unwrap();
+
+        world.advance_tick(); // tick = 1
+        world.remove::<Health>(entity);
+
+        assert!(world.removed::<Health>(0).matches(entity.index()));
+
+        world.clear_removed_tracking();
+
+        assert!(!world.removed::<Health>(0).matches(entity.index()));
+    }
+
+    #[test]
+    fn removed_filter_unregistered_matches_nothing() {
+        let world = World::new();
+        let removed = world.removed::<Health>(0);
+        assert!(!removed.matches(0));
+        assert_eq!(removed.iter().count(), 0);
+    }
+
+    #[test]
+    fn remove_nonexistent_component_not_tracked() {
+        let mut world = World::new();
+        world.register_component::<Health>();
+
+        let entity = world.spawn();
+        // Don't insert Health, just try to remove it
+        world.advance_tick();
+        world.remove::<Health>(entity);
+
+        let removed = world.removed::<Health>(0);
+        assert!(!removed.matches(entity.index()));
     }
 }

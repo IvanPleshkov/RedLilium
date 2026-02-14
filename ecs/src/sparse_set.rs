@@ -231,6 +231,9 @@ pub(crate) struct ComponentStorage {
     changed_since_fn: ChangedSinceFn,
     /// Type-erased added_since check.
     added_since_fn: AddedSinceFn,
+    /// Records of (entity_index, tick) for recently removed components.
+    /// Cleared by [`World::clear_removed_tracking`](crate::World::clear_removed_tracking).
+    removed_ticks: Vec<(u32, u64)>,
 }
 
 impl ComponentStorage {
@@ -256,6 +259,7 @@ impl ComponentStorage {
                 let set = any.downcast_ref::<SparseSetInner<T>>().unwrap();
                 set.added_since(entity_index, since_tick)
             },
+            removed_ticks: Vec::new(),
         }
     }
 
@@ -320,6 +324,32 @@ impl ComponentStorage {
     /// Checks if the component was added since `since_tick` (type-erased).
     pub fn added_since_untyped(&self, entity_index: u32, since_tick: u64) -> bool {
         (self.added_since_fn)(self.inner.as_ref(), entity_index, since_tick)
+    }
+
+    /// Records that a component was removed from the given entity at the given tick.
+    pub fn record_removal(&mut self, entity_index: u32, tick: u64) {
+        self.removed_ticks.push((entity_index, tick));
+    }
+
+    /// Checks if a component was removed from the entity since (strictly after) `since_tick`.
+    pub fn removed_since_untyped(&self, entity_index: u32, since_tick: u64) -> bool {
+        self.removed_ticks
+            .iter()
+            .any(|&(e, t)| e == entity_index && t > since_tick)
+    }
+
+    /// Returns an iterator over `(entity_index, tick)` pairs for all removals
+    /// that happened since (strictly after) `since_tick`.
+    pub fn removed_entities_since(&self, since_tick: u64) -> impl Iterator<Item = u32> + '_ {
+        self.removed_ticks
+            .iter()
+            .filter(move |&&(_, t)| t > since_tick)
+            .map(|&(e, _)| e)
+    }
+
+    /// Clears all removal tracking records.
+    pub fn clear_removed(&mut self) {
+        self.removed_ticks.clear();
     }
 }
 
