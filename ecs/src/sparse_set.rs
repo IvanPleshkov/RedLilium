@@ -1,6 +1,4 @@
-use std::any::{Any, TypeId};
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::any::Any;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -206,129 +204,13 @@ type ContainsFn = fn(&dyn Any, u32) -> bool;
 type ChangedSinceFn = fn(&dyn Any, u32, u64) -> bool;
 type AddedSinceFn = fn(&dyn Any, u32, u64) -> bool;
 
-// ---------------------------------------------------------------------------
-// Thread-local held-lock tracking for same-thread deadlock detection
-// ---------------------------------------------------------------------------
-
-/// Tracks whether a lock is held as read (with count) or write.
-#[derive(Clone, Copy)]
-enum HeldLock {
-    Read(u32),
-    Write,
-}
-
-thread_local! {
-    /// Per-thread map of component TypeIds currently locked via `acquire_sorted`
-    /// or `try_acquire_sorted`. Used to detect same-thread deadlocks when a
-    /// system tries to lock a component that is already locked (e.g. nested
-    /// `query()` calls with overlapping access sets).
-    static HELD_LOCKS: RefCell<HashMap<TypeId, HeldLock>> = RefCell::new(HashMap::new());
-}
-
-/// Checks if acquiring a lock for `type_id` would conflict with locks already
-/// held on the current thread. Panics with a descriptive message if a
-/// same-thread deadlock would occur.
-///
-/// Conflict rules:
-/// - Write held + any new lock → deadlock
-/// - Read held + new write lock → deadlock
-/// - Read held + new read lock → OK (RwLock allows multiple readers)
-pub(crate) fn check_held_lock_conflict(type_id: TypeId, is_write: bool, type_name: &str) {
-    let conflict_info = HELD_LOCKS.with(|held| {
-        let held = held.borrow();
-        held.get(&type_id).copied().and_then(|state| {
-            let conflict = match state {
-                HeldLock::Write => true,
-                HeldLock::Read(_) => is_write,
-            };
-            if conflict { Some(state) } else { None }
-        })
-    });
-
-    if let Some(state) = conflict_info {
-        let held_mode = match state {
-            HeldLock::Write => "write",
-            HeldLock::Read(_) => "read",
-        };
-        let want_mode = if is_write { "write" } else { "read" };
-        panic!(
-            "ECS deadlock detected: component `{type_name}` is already locked for \
-             {held_mode} on this thread, but a new {want_mode} lock was requested. \
-             Drop the existing QueryGuard before acquiring new locks, or combine \
-             all needed accesses into a single query/lock call."
-        );
-    }
-}
-
-fn register_held_lock(type_id: TypeId, is_write: bool) {
-    HELD_LOCKS.with(|held| {
-        let mut held = held.borrow_mut();
-        if is_write {
-            held.insert(type_id, HeldLock::Write);
-        } else {
-            match held.get(&type_id).copied() {
-                Some(HeldLock::Read(n)) => {
-                    held.insert(type_id, HeldLock::Read(n + 1));
-                }
-                None => {
-                    held.insert(type_id, HeldLock::Read(1));
-                }
-                Some(HeldLock::Write) => {
-                    unreachable!("registering read lock while write lock is held");
-                }
-            }
-        }
-    });
-}
-
-fn unregister_held_lock(type_id: TypeId, is_write: bool) {
-    HELD_LOCKS.with(|held| {
-        let mut held = held.borrow_mut();
-        if is_write {
-            held.remove(&type_id);
-        } else {
-            match held.get(&type_id).copied() {
-                Some(HeldLock::Read(1)) => {
-                    held.remove(&type_id);
-                }
-                Some(HeldLock::Read(n)) => {
-                    held.insert(type_id, HeldLock::Read(n - 1));
-                }
-                _ => {}
-            }
-        }
-    });
-}
-
 /// A lock guard for either a read or write lock on a storage.
 ///
-/// Tracks the locked TypeId for same-thread deadlock detection. When the guard
-/// is dropped, the TypeId is unregistered from the thread-local held-lock set.
+/// The guard is held purely for its RAII drop behavior (releasing the lock).
+#[allow(dead_code)]
 pub(crate) enum LockGuard<'a> {
-    Read(#[allow(dead_code)] RwLockReadGuard<'a, ()>, TypeId),
-    Write(#[allow(dead_code)] RwLockWriteGuard<'a, ()>, TypeId),
-}
-
-impl<'a> LockGuard<'a> {
-    pub(crate) fn new_read(guard: RwLockReadGuard<'a, ()>, type_id: TypeId) -> Self {
-        register_held_lock(type_id, false);
-        LockGuard::Read(guard, type_id)
-    }
-
-    pub(crate) fn new_write(guard: RwLockWriteGuard<'a, ()>, type_id: TypeId) -> Self {
-        register_held_lock(type_id, true);
-        LockGuard::Write(guard, type_id)
-    }
-}
-
-impl Drop for LockGuard<'_> {
-    fn drop(&mut self) {
-        let (type_id, is_write) = match self {
-            LockGuard::Read(_, tid) => (*tid, false),
-            LockGuard::Write(_, tid) => (*tid, true),
-        };
-        unregister_held_lock(type_id, is_write);
-    }
+    Read(RwLockReadGuard<'a, ()>),
+    Write(RwLockWriteGuard<'a, ()>),
 }
 
 /// A type-erased sparse set that stores components of a single type.

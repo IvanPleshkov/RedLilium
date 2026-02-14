@@ -1,5 +1,6 @@
 use crate::access_set::AccessSet;
 use crate::sparse_set::LockGuard;
+use crate::system_context::LockTracking;
 
 /// A guard holding component/resource locks and their fetched data.
 ///
@@ -40,13 +41,30 @@ pub struct QueryGuard<'a, A: AccessSet> {
     /// The fetched component/resource data. Destructure this to access
     /// individual storages.
     pub items: A::Item<'a>,
+    /// Deadlock tracking — unregisters held locks when this guard is dropped.
+    /// `None` when created outside of a SystemContext (e.g. in tests).
+    _tracking: Option<LockTracking<'a>>,
 }
 
 impl<'a, A: AccessSet> QueryGuard<'a, A> {
+    #[cfg(test)]
     pub(crate) fn new(guards: Vec<LockGuard<'a>>, items: A::Item<'a>) -> Self {
         Self {
             _guards: guards,
             items,
+            _tracking: None,
+        }
+    }
+
+    pub(crate) fn new_tracked(
+        guards: Vec<LockGuard<'a>>,
+        items: A::Item<'a>,
+        tracking: LockTracking<'a>,
+    ) -> Self {
+        Self {
+            _guards: guards,
+            items,
+            _tracking: Some(tracking),
         }
     }
 }

@@ -10,7 +10,7 @@ use crate::events::Events;
 use crate::main_thread_resource::MainThreadResources;
 use crate::query::{AddedFilter, ChangedFilter, ContainsChecker, RemovedFilter};
 use crate::resource::{Resource, ResourceRef, ResourceRefMut, Resources};
-use crate::sparse_set::{self, ComponentStorage, LockGuard, Ref, RefMut};
+use crate::sparse_set::{ComponentStorage, LockGuard, Ref, RefMut};
 use std::sync::{Arc, RwLock};
 
 /// Error returned when a component type has not been registered in the [`World`].
@@ -463,11 +463,6 @@ impl World {
     ///
     /// Resources are NOT included — they lock themselves via their own
     /// `Arc<RwLock<T>>` when accessed.
-    ///
-    /// # Panics
-    ///
-    /// Panics if any requested component lock is already held by the current
-    /// thread (same-thread deadlock detection).
     pub(crate) fn acquire_sorted(&self, infos: &[AccessInfo]) -> Vec<LockGuard<'_>> {
         let mut sorted = infos.to_vec();
         sorted.sort_by_key(|info| info.type_id);
@@ -480,17 +475,6 @@ impl World {
             }
         });
 
-        // Check for same-thread deadlocks before acquiring any locks.
-        for info in &sorted {
-            if let Some(storage) = self.components.get(&info.type_id) {
-                sparse_set::check_held_lock_conflict(
-                    info.type_id,
-                    info.is_write,
-                    storage.type_name(),
-                );
-            }
-        }
-
         sorted
             .iter()
             .filter_map(|info| {
@@ -498,9 +482,9 @@ impl World {
                 let storage = self.components.get(&info.type_id)?;
                 let lock = storage.rw_lock();
                 Some(if info.is_write {
-                    LockGuard::new_write(lock.write().unwrap(), info.type_id)
+                    LockGuard::Write(lock.write().unwrap())
                 } else {
-                    LockGuard::new_read(lock.read().unwrap(), info.type_id)
+                    LockGuard::Read(lock.read().unwrap())
                 })
             })
             .collect()
@@ -515,11 +499,6 @@ impl World {
     /// Used by [`SystemContext::query()`](crate::SystemContext::query) to
     /// yield back to the executor when locks are unavailable, allowing
     /// compute tasks to run while waiting.
-    ///
-    /// # Panics
-    ///
-    /// Panics if any requested component lock is already held by the current
-    /// thread (same-thread deadlock detection).
     pub(crate) fn try_acquire_sorted(&self, infos: &[AccessInfo]) -> Option<Vec<LockGuard<'_>>> {
         let mut sorted = infos.to_vec();
         sorted.sort_by_key(|info| info.type_id);
@@ -532,17 +511,6 @@ impl World {
             }
         });
 
-        // Check for same-thread deadlocks before attempting any locks.
-        for info in &sorted {
-            if let Some(storage) = self.components.get(&info.type_id) {
-                sparse_set::check_held_lock_conflict(
-                    info.type_id,
-                    info.is_write,
-                    storage.type_name(),
-                );
-            }
-        }
-
         let mut guards = Vec::with_capacity(sorted.len());
         for info in &sorted {
             let Some(storage) = self.components.get(&info.type_id) else {
@@ -551,13 +519,18 @@ impl World {
             };
             let lock = storage.rw_lock();
             let guard = if info.is_write {
-                LockGuard::new_write(lock.try_write().ok()?, info.type_id)
+                LockGuard::Write(lock.try_write().ok()?)
             } else {
-                LockGuard::new_read(lock.try_read().ok()?, info.type_id)
+                LockGuard::Read(lock.try_read().ok()?)
             };
             guards.push(guard);
         }
         Some(guards)
+    }
+
+    /// Returns the human-readable type name for a component TypeId, if registered.
+    pub(crate) fn component_type_name(&self, type_id: TypeId) -> Option<&'static str> {
+        self.components.get(&type_id).map(|s| s.type_name())
     }
 
     /// Returns whether a component type has been registered.
@@ -1298,129 +1271,5 @@ mod tests {
 
         let removed = world.removed::<Health>(0);
         assert!(!removed.matches(entity.index()));
-    }
-
-    // ---- Same-thread deadlock detection ----
-
-    #[test]
-    #[should_panic(expected = "ECS deadlock detected")]
-    fn deadlock_write_then_write() {
-        let mut world = World::new();
-        world.register_component::<Position>();
-
-        let infos = vec![AccessInfo {
-            type_id: std::any::TypeId::of::<Position>(),
-            is_write: true,
-        }];
-        let _g1 = world.acquire_sorted(&infos);
-        let _g2 = world.acquire_sorted(&infos); // should panic
-    }
-
-    #[test]
-    #[should_panic(expected = "ECS deadlock detected")]
-    fn deadlock_write_then_read() {
-        let mut world = World::new();
-        world.register_component::<Position>();
-
-        let infos_w = vec![AccessInfo {
-            type_id: std::any::TypeId::of::<Position>(),
-            is_write: true,
-        }];
-        let infos_r = vec![AccessInfo {
-            type_id: std::any::TypeId::of::<Position>(),
-            is_write: false,
-        }];
-        let _g1 = world.acquire_sorted(&infos_w);
-        let _g2 = world.acquire_sorted(&infos_r); // should panic
-    }
-
-    #[test]
-    #[should_panic(expected = "ECS deadlock detected")]
-    fn deadlock_read_then_write() {
-        let mut world = World::new();
-        world.register_component::<Position>();
-
-        let infos_r = vec![AccessInfo {
-            type_id: std::any::TypeId::of::<Position>(),
-            is_write: false,
-        }];
-        let infos_w = vec![AccessInfo {
-            type_id: std::any::TypeId::of::<Position>(),
-            is_write: true,
-        }];
-        let _g1 = world.acquire_sorted(&infos_r);
-        let _g2 = world.acquire_sorted(&infos_w); // should panic
-    }
-
-    #[test]
-    fn no_deadlock_read_then_read() {
-        let mut world = World::new();
-        world.register_component::<Position>();
-
-        let infos = vec![AccessInfo {
-            type_id: std::any::TypeId::of::<Position>(),
-            is_write: false,
-        }];
-        let _g1 = world.acquire_sorted(&infos);
-        let _g2 = world.acquire_sorted(&infos); // read-read is OK
-    }
-
-    #[test]
-    fn deadlock_check_clears_after_drop() {
-        let mut world = World::new();
-        world.register_component::<Position>();
-
-        let infos = vec![AccessInfo {
-            type_id: std::any::TypeId::of::<Position>(),
-            is_write: true,
-        }];
-        {
-            let _g1 = world.acquire_sorted(&infos);
-        }
-        // After drop, should be able to acquire again
-        let _g2 = world.acquire_sorted(&infos);
-    }
-
-    #[test]
-    #[should_panic(expected = "ECS deadlock detected")]
-    fn deadlock_try_acquire_panics_too() {
-        let mut world = World::new();
-        world.register_component::<Position>();
-
-        let infos_w = vec![AccessInfo {
-            type_id: std::any::TypeId::of::<Position>(),
-            is_write: true,
-        }];
-        let infos_r = vec![AccessInfo {
-            type_id: std::any::TypeId::of::<Position>(),
-            is_write: false,
-        }];
-        let _g1 = world.acquire_sorted(&infos_w);
-        let _g2 = world.try_acquire_sorted(&infos_r); // should panic
-    }
-
-    #[test]
-    #[should_panic(expected = "ECS deadlock detected")]
-    fn deadlock_partial_overlap() {
-        let mut world = World::new();
-        world.register_component::<Position>();
-        world.register_component::<Velocity>();
-
-        let infos1 = vec![AccessInfo {
-            type_id: std::any::TypeId::of::<Position>(),
-            is_write: true,
-        }];
-        let infos2 = vec![
-            AccessInfo {
-                type_id: std::any::TypeId::of::<Position>(),
-                is_write: false,
-            },
-            AccessInfo {
-                type_id: std::any::TypeId::of::<Velocity>(),
-                is_write: true,
-            },
-        ];
-        let _g1 = world.acquire_sorted(&infos1);
-        let _g2 = world.acquire_sorted(&infos2); // Position overlaps
     }
 }

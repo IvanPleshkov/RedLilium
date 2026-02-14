@@ -13,6 +13,22 @@ pub struct AccessInfo {
     pub is_write: bool,
 }
 
+/// Normalizes access infos: sorts by TypeId and deduplicates, upgrading
+/// to write if any duplicate requests write access.
+pub(crate) fn normalize_access_infos(infos: &[AccessInfo]) -> Vec<AccessInfo> {
+    let mut sorted = infos.to_vec();
+    sorted.sort_by_key(|info| info.type_id);
+    sorted.dedup_by(|a, b| {
+        if a.type_id == b.type_id {
+            b.is_write = b.is_write || a.is_write;
+            true
+        } else {
+            false
+        }
+    });
+    sorted
+}
+
 /// Trait for a single access element (Read, Write, Res, etc.).
 ///
 /// Each element knows its TypeId, whether it's a write, and how to

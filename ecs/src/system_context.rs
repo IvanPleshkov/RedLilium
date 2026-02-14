@@ -1,6 +1,9 @@
+use std::any::TypeId;
+use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::sync::Mutex;
 
-use crate::access_set::AccessSet;
+use crate::access_set::{AccessInfo, AccessSet, normalize_access_infos};
 use crate::bundle::Bundle;
 use crate::command_collector::{CommandCollector, SpawnBuilder};
 use crate::compute::ComputePool;
@@ -10,6 +13,47 @@ use crate::lock_request::LockRequest;
 use crate::main_thread_dispatcher::MainThreadDispatcher;
 use crate::query_guard::QueryGuard;
 use crate::world::World;
+
+// ---------------------------------------------------------------------------
+// Held-lock tracking for same-system deadlock detection
+// ---------------------------------------------------------------------------
+
+/// Tracks whether a lock is held as read (with count) or write.
+#[derive(Clone, Copy)]
+enum HeldLock {
+    Read(u32),
+    Write,
+}
+
+/// RAII guard that unregisters held locks from a [`SystemContext`] when dropped.
+///
+/// Created by [`SystemContext::make_tracking`] and stored inside [`QueryGuard`]
+/// or used as a scope guard in [`LockRequest::execute`].
+pub(crate) struct LockTracking<'a> {
+    infos: Vec<AccessInfo>,
+    held_locks: &'a Mutex<HashMap<TypeId, HeldLock>>,
+}
+
+impl Drop for LockTracking<'_> {
+    fn drop(&mut self) {
+        let mut held = self.held_locks.lock().unwrap();
+        for info in &self.infos {
+            if info.is_write {
+                held.remove(&info.type_id);
+            } else {
+                match held.get(&info.type_id).copied() {
+                    Some(HeldLock::Read(1)) => {
+                        held.remove(&info.type_id);
+                    }
+                    Some(HeldLock::Read(n)) => {
+                        held.insert(info.type_id, HeldLock::Read(n - 1));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
 
 /// Context passed to systems during execution.
 ///
@@ -44,6 +88,9 @@ pub struct SystemContext<'a> {
     io: &'a IoRuntime,
     commands: &'a CommandCollector,
     dispatcher: Option<&'a MainThreadDispatcher>,
+    /// Per-system tracking of component locks currently held (via QueryGuard
+    /// or lock().execute()). Used to detect same-system deadlocks.
+    held_locks: Mutex<HashMap<TypeId, HeldLock>>,
 }
 
 impl<'a> SystemContext<'a> {
@@ -63,6 +110,7 @@ impl<'a> SystemContext<'a> {
             io,
             commands,
             dispatcher: None,
+            held_locks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -83,12 +131,89 @@ impl<'a> SystemContext<'a> {
             io,
             commands,
             dispatcher: Some(dispatcher),
+            held_locks: Mutex::new(HashMap::new()),
         }
     }
 
     /// Returns the main-thread dispatcher, if one exists.
     pub(crate) fn dispatcher(&self) -> Option<&MainThreadDispatcher> {
         self.dispatcher
+    }
+
+    /// Checks if the given normalized access infos would conflict with
+    /// component locks currently held by this system. Panics if a deadlock
+    /// would occur.
+    ///
+    /// Conflict rules:
+    /// - Write held + any new lock → deadlock
+    /// - Read held + new write lock → deadlock
+    /// - Read held + new read lock → OK
+    pub(crate) fn check_held_locks(&self, sorted: &[AccessInfo]) {
+        let held = self.held_locks.lock().unwrap();
+        for info in sorted {
+            if let Some(&state) = held.get(&info.type_id) {
+                let conflict = match state {
+                    HeldLock::Write => true,
+                    HeldLock::Read(_) => info.is_write,
+                };
+                if conflict {
+                    let type_name = self
+                        .world
+                        .component_type_name(info.type_id)
+                        .unwrap_or("<resource>");
+                    let held_mode = match state {
+                        HeldLock::Write => "write",
+                        HeldLock::Read(_) => "read",
+                    };
+                    let want_mode = if info.is_write { "write" } else { "read" };
+                    // Drop the lock before panicking to avoid poison
+                    drop(held);
+                    panic!(
+                        "ECS deadlock detected: component `{type_name}` is already locked \
+                         for {held_mode}, but a new {want_mode} lock was requested. \
+                         Drop the existing QueryGuard before acquiring new locks, or \
+                         combine all needed accesses into a single query/lock call."
+                    );
+                }
+            }
+        }
+    }
+
+    /// Registers component locks as held. Called after successful lock acquisition.
+    pub(crate) fn register_held_locks(&self, sorted: &[AccessInfo]) {
+        let mut held = self.held_locks.lock().unwrap();
+        for info in sorted {
+            // Only track component TypeIds (resources self-lock via their own RwLock)
+            if self.world.component_type_name(info.type_id).is_none() {
+                continue;
+            }
+            if info.is_write {
+                held.insert(info.type_id, HeldLock::Write);
+            } else {
+                match held.get(&info.type_id).copied() {
+                    Some(HeldLock::Read(n)) => {
+                        held.insert(info.type_id, HeldLock::Read(n + 1));
+                    }
+                    _ => {
+                        held.insert(info.type_id, HeldLock::Read(1));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Creates a [`LockTracking`] guard that will unregister the given
+    /// component locks when dropped.
+    pub(crate) fn make_tracking(&self, sorted: &[AccessInfo]) -> LockTracking<'_> {
+        let component_infos: Vec<AccessInfo> = sorted
+            .iter()
+            .filter(|i| self.world.component_type_name(i.type_id).is_some())
+            .copied()
+            .collect();
+        LockTracking {
+            infos: component_infos,
+            held_locks: &self.held_locks,
+        }
     }
 
     /// Creates a lock request for the given access set.
@@ -147,6 +272,11 @@ impl<'a> SystemContext<'a> {
         }
 
         let infos = A::access_infos();
+        let sorted = normalize_access_infos(&infos);
+
+        // Check for same-system deadlocks before trying to acquire.
+        self.check_held_locks(&sorted);
+
         let guards = loop {
             redlilium_core::profile_scope!("ecs: query acquire");
             if let Some(guards) = self.world.try_acquire_sorted(&infos) {
@@ -164,8 +294,11 @@ impl<'a> SystemContext<'a> {
             })
             .await;
         };
+
+        self.register_held_locks(&sorted);
+        let tracking = self.make_tracking(&sorted);
         let items = A::fetch_unlocked(self.world);
-        QueryGuard::new(guards, items)
+        QueryGuard::new_tracked(guards, items, tracking)
     }
 
     /// Returns a reference to the compute pool for spawning background tasks.
@@ -252,6 +385,30 @@ impl<'a> SystemContext<'a> {
     /// Returns a reference to the world.
     pub(crate) fn world(&self) -> &'a World {
         self.world
+    }
+
+    /// Synchronous version of [`query()`](SystemContext::query) for tests.
+    ///
+    /// Performs the same deadlock checks and tracking as the async version
+    /// but acquires locks synchronously (blocking).
+    #[cfg(test)]
+    pub(crate) fn query_sync<A: AccessSet>(&self) -> QueryGuard<'_, A> {
+        if A::needs_main_thread() {
+            panic!(
+                "query_sync() does not support main-thread resources; use lock().execute() instead"
+            );
+        }
+
+        let infos = A::access_infos();
+        let sorted = normalize_access_infos(&infos);
+        self.check_held_locks(&sorted);
+
+        let guards = self.world.acquire_sorted(&infos);
+
+        self.register_held_locks(&sorted);
+        let tracking = self.make_tracking(&sorted);
+        let items = A::fetch_unlocked(self.world);
+        QueryGuard::new_tracked(guards, items, tracking)
     }
 }
 
@@ -383,5 +540,153 @@ mod tests {
             Some(&Position { x: 1.0, y: 2.0 })
         );
         assert_eq!(world.get::<Health>(entity), Some(&Health(50)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Deadlock detection tests
+    // -----------------------------------------------------------------------
+
+    use crate::access_set::{Read, Write};
+
+    struct Velocity {
+        _x: f32,
+    }
+
+    fn make_ctx(_world: &World) -> (ComputePool, IoRuntime, CommandCollector) {
+        (
+            ComputePool::new(IoRuntime::new()),
+            IoRuntime::new(),
+            CommandCollector::new(),
+        )
+    }
+
+    #[test]
+    #[should_panic(expected = "ECS deadlock detected")]
+    fn deadlock_write_then_write() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.spawn();
+
+        let (compute, io, commands) = make_ctx(&world);
+        let ctx = SystemContext::new(&world, &compute, &io, &commands);
+
+        let _q1 = ctx.query_sync::<(Write<Position>,)>();
+        let _q2 = ctx.query_sync::<(Write<Position>,)>(); // should panic
+    }
+
+    #[test]
+    #[should_panic(expected = "ECS deadlock detected")]
+    fn deadlock_write_then_read() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.spawn();
+
+        let (compute, io, commands) = make_ctx(&world);
+        let ctx = SystemContext::new(&world, &compute, &io, &commands);
+
+        let _q1 = ctx.query_sync::<(Write<Position>,)>();
+        let _q2 = ctx.query_sync::<(Read<Position>,)>(); // should panic
+    }
+
+    #[test]
+    #[should_panic(expected = "ECS deadlock detected")]
+    fn deadlock_read_then_write() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.spawn();
+
+        let (compute, io, commands) = make_ctx(&world);
+        let ctx = SystemContext::new(&world, &compute, &io, &commands);
+
+        let _q1 = ctx.query_sync::<(Read<Position>,)>();
+        let _q2 = ctx.query_sync::<(Write<Position>,)>(); // should panic
+    }
+
+    #[test]
+    fn no_deadlock_read_then_read() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        let e = world.spawn();
+        world.insert(e, Position { x: 1.0, y: 2.0 }).unwrap();
+
+        let (compute, io, commands) = make_ctx(&world);
+        let ctx = SystemContext::new(&world, &compute, &io, &commands);
+
+        let q1 = ctx.query_sync::<(Read<Position>,)>();
+        let q2 = ctx.query_sync::<(Read<Position>,)>(); // should NOT panic
+        let (pos1,) = &q1.items;
+        let (pos2,) = &q2.items;
+        assert_eq!(pos1.len(), pos2.len());
+    }
+
+    #[test]
+    fn deadlock_check_clears_after_drop() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        let e = world.spawn();
+        world.insert(e, Position { x: 1.0, y: 2.0 }).unwrap();
+
+        let (compute, io, commands) = make_ctx(&world);
+        let ctx = SystemContext::new(&world, &compute, &io, &commands);
+
+        // Write lock, then drop
+        {
+            let _q1 = ctx.query_sync::<(Write<Position>,)>();
+        }
+        // Now a new write lock should succeed
+        let q2 = ctx.query_sync::<(Write<Position>,)>();
+        let (positions,) = &q2.items;
+        assert_eq!(positions.len(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "ECS deadlock detected")]
+    fn deadlock_query_then_execute() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        let e = world.spawn();
+        world.insert(e, Position { x: 1.0, y: 2.0 }).unwrap();
+
+        let (compute, io, commands) = make_ctx(&world);
+        let ctx = SystemContext::new(&world, &compute, &io, &commands);
+
+        let _q = ctx.query_sync::<(Write<Position>,)>();
+        // lock().execute_inner also uses tracking — should detect conflict
+        let req = ctx.lock::<(Write<Position>,)>();
+        req.execute_inner(|_| {}); // should panic
+    }
+
+    #[test]
+    #[should_panic(expected = "ECS deadlock detected")]
+    fn deadlock_partial_overlap() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Velocity>();
+        let e = world.spawn();
+        world.insert(e, Position { x: 1.0, y: 2.0 }).unwrap();
+        world.insert(e, Velocity { _x: 3.0 }).unwrap();
+
+        let (compute, io, commands) = make_ctx(&world);
+        let ctx = SystemContext::new(&world, &compute, &io, &commands);
+
+        let _q1 = ctx.query_sync::<(Write<Position>,)>();
+        // Overlaps on Position (write held + read wanted)
+        let _q2 = ctx.query_sync::<(Read<Position>, Read<Velocity>)>(); // should panic
+    }
+
+    #[test]
+    fn no_deadlock_disjoint_components() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Velocity>();
+        let e = world.spawn();
+        world.insert(e, Position { x: 1.0, y: 2.0 }).unwrap();
+        world.insert(e, Velocity { _x: 3.0 }).unwrap();
+
+        let (compute, io, commands) = make_ctx(&world);
+        let ctx = SystemContext::new(&world, &compute, &io, &commands);
+
+        let _q1 = ctx.query_sync::<(Write<Position>,)>();
+        let _q2 = ctx.query_sync::<(Write<Velocity>,)>(); // different component, should NOT panic
     }
 }

@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 use std::sync::mpsc;
 
-use crate::access_set::AccessSet;
+use crate::access_set::{AccessSet, normalize_access_infos};
 use crate::main_thread_dispatcher::MainThreadWork;
 use crate::system_context::SystemContext;
 
@@ -53,42 +53,45 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
     ///
     /// The closure is synchronous (`FnOnce`) to prevent holding locks
     /// across await points.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any requested component lock is already held by this
+    /// system (same-system deadlock detection via [`SystemContext`]).
     pub async fn execute<R, F>(self, f: F) -> R
     where
         F: FnOnce(A::Item<'_>) -> R + Send,
         R: Send,
     {
+        // Check + register tracking before acquiring actual locks.
+        let sorted = normalize_access_infos(&A::access_infos());
+        self.ctx.check_held_locks(&sorted);
+        self.ctx.register_held_locks(&sorted);
+        let _tracking = self.ctx.make_tracking(&sorted);
+
         if A::needs_main_thread() {
-            self.execute_on_main_thread(f)
+            self.run_on_main_thread(f)
         } else {
-            self.execute_inner(f)
+            self.run_local(f)
         }
+        // _tracking drops here → unregisters held locks
     }
 
-    /// Fast path: runs directly on the calling thread.
-    fn execute_inner<R, F>(&self, f: F) -> R
+    /// Fast path: runs directly on the calling thread (no tracking).
+    fn run_local<R, F>(&self, f: F) -> R
     where
         F: FnOnce(A::Item<'_>) -> R,
     {
-        // Acquire per-storage RwLocks in TypeId-sorted order (deadlock prevention)
         let _guards = {
             redlilium_core::profile_scope!("ecs: lock acquire");
             self.ctx.world().acquire_sorted(&A::access_infos())
         };
-
-        // Fetch typed data without per-fetch locking (locks already held)
         let items = A::fetch_unlocked(self.ctx.world());
-
-        // Run closure (guards drop after closure returns)
         f(items)
     }
 
-    /// Slow path: dispatches the closure to the main thread.
-    ///
-    /// Used when the access set contains `MainThreadRes` or `MainThreadResMut`.
-    /// If no dispatcher is present (single-threaded runner), falls through
-    /// to `execute_inner` since we are already on the main thread.
-    fn execute_on_main_thread<R, F>(&self, f: F) -> R
+    /// Slow path: dispatches the closure to the main thread (no tracking).
+    fn run_on_main_thread<R, F>(&self, f: F) -> R
     where
         F: FnOnce(A::Item<'_>) -> R + Send,
         R: Send,
@@ -99,7 +102,6 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
                 let (result_tx, result_rx) = mpsc::sync_channel::<R>(1);
 
                 let work: Box<dyn FnOnce() + Send + '_> = Box::new(move || {
-                    // This closure runs on the main thread.
                     let _guards = {
                         redlilium_core::profile_scope!("ecs: lock acquire (main-thread)");
                         world.acquire_sorted(&A::access_infos())
@@ -125,9 +127,25 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
             }
             None => {
                 // Single-threaded: no dispatcher, already on main thread
-                self.execute_inner(f)
+                self.run_local(f)
             }
         }
+    }
+
+    /// Synchronous tracked execution for use in tests.
+    ///
+    /// Same as `execute()` but synchronous. Checks for deadlocks,
+    /// registers locks, runs the closure, then unregisters.
+    #[cfg(test)]
+    pub(crate) fn execute_inner<R, F>(&self, f: F) -> R
+    where
+        F: FnOnce(A::Item<'_>) -> R,
+    {
+        let sorted = normalize_access_infos(&A::access_infos());
+        self.ctx.check_held_locks(&sorted);
+        self.ctx.register_held_locks(&sorted);
+        let _tracking = self.ctx.make_tracking(&sorted);
+        self.run_local(f)
     }
 }
 
