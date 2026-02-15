@@ -18,6 +18,14 @@ use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 /// | `on_remove` | Before component is removed | Cleanup resources |
 pub type ComponentHookFn = fn(&mut crate::world::World, crate::entity::Entity);
 
+/// Function that inserts a required component's default value on an entity
+/// if not already present.
+///
+/// Called after a component with requirements is first added to an entity.
+/// Transitivity is handled naturally: inserting a required component triggers
+/// its own requirements via the same mechanism in [`World::insert`](crate::World::insert).
+pub type RequiredComponentFn = fn(&mut crate::world::World, crate::entity::Entity);
+
 /// Typed sparse set storing components of type T.
 ///
 /// Uses a sparse array (entity index → dense index) and a dense array
@@ -287,6 +295,10 @@ pub(crate) struct ComponentStorage {
     pub(crate) on_replace: Option<ComponentHookFn>,
     /// Hook called just before a component is removed from an entity.
     pub(crate) on_remove: Option<ComponentHookFn>,
+    /// Functions that insert required components when this component is first
+    /// added to an entity. Each function checks for presence and inserts a
+    /// default if absent.
+    pub(crate) required_components: Vec<RequiredComponentFn>,
 }
 
 impl ComponentStorage {
@@ -317,6 +329,7 @@ impl ComponentStorage {
             on_insert: None,
             on_replace: None,
             on_remove: None,
+            required_components: Vec::new(),
         }
     }
 
@@ -371,6 +384,11 @@ impl ComponentStorage {
     /// Removes a component by entity index (type-erased). Returns true if removed.
     pub fn remove_untyped(&mut self, entity_index: u32) -> bool {
         (self.remove_fn)(self.inner.as_mut(), entity_index)
+    }
+
+    /// Returns true if this component has any required components registered.
+    pub fn has_required_components(&self) -> bool {
+        !self.required_components.is_empty()
     }
 
     /// Checks if the entity has this component (type-erased).

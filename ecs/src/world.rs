@@ -230,6 +230,50 @@ impl World {
         );
     }
 
+    /// Registers a requirement: inserting component `T` on an entity will
+    /// automatically insert `R::default()` if the entity does not already
+    /// have `R`.
+    ///
+    /// Requirements are transitive. If `T` requires `R` and `R` requires `S`,
+    /// inserting `T` will also insert `S` (because inserting `R` triggers
+    /// its own requirements).
+    ///
+    /// Auto-registers `R` if not already registered.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `T` has not been registered.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// world.register_component::<Camera>();
+    /// world.register_required::<Camera, Transform>();
+    /// world.register_required::<Camera, Visibility>();
+    ///
+    /// let entity = world.spawn();
+    /// world.insert(entity, camera).unwrap();
+    /// // Transform and Visibility are now also on the entity
+    /// ```
+    pub fn register_required<T: Send + Sync + 'static, R: Send + Sync + Default + 'static>(
+        &mut self,
+    ) -> &mut Self {
+        self.register_component::<R>();
+
+        let storage = self
+            .components
+            .get_mut(&TypeId::of::<T>())
+            .expect("Component T not registered — call register_component::<T>() first");
+
+        storage.required_components.push(|world, entity| {
+            if world.get::<R>(entity).is_none() {
+                let _ = world.insert(entity, R::default());
+            }
+        });
+
+        self
+    }
+
     /// Inserts a component on an entity.
     ///
     /// If the entity already has this component, the value is replaced.
@@ -256,8 +300,8 @@ impl World {
 
         let type_id = TypeId::of::<T>();
 
-        // Extract hook info (borrow released after this block)
-        let (had_component, on_add, on_insert, on_replace) = {
+        // Extract hook info and requirements (borrow released after this block)
+        let (had_component, on_add, on_insert, on_replace, required) = {
             let storage = self
                 .components
                 .get(&type_id)
@@ -269,6 +313,7 @@ impl World {
                 storage.on_add,
                 storage.on_insert,
                 storage.on_replace,
+                storage.required_components.clone(),
             )
         };
 
@@ -290,6 +335,13 @@ impl World {
         }
         if let Some(hook) = on_insert {
             hook(self, entity);
+        }
+
+        // Apply required components (only on first add)
+        if !had_component {
+            for req_fn in required {
+                req_fn(self, entity);
+            }
         }
 
         Ok(())
@@ -320,7 +372,7 @@ impl World {
         let type_id = TypeId::of::<T>();
         let tick = self.tick;
 
-        let (had_component, on_add, on_insert, on_replace) = {
+        let (had_component, on_add, on_insert, on_replace, required) = {
             let storage = self
                 .components
                 .get(&type_id)
@@ -332,6 +384,7 @@ impl World {
                 storage.on_add,
                 storage.on_insert,
                 storage.on_replace,
+                storage.required_components.clone(),
             )
         };
 
@@ -350,6 +403,13 @@ impl World {
         }
         if let Some(hook) = on_insert {
             hook(self, entity);
+        }
+
+        // Apply required components (only on first add)
+        if !had_component {
+            for req_fn in required {
+                req_fn(self, entity);
+            }
         }
 
         Ok(())
@@ -498,14 +558,19 @@ impl World {
         let type_id = TypeId::of::<T>();
 
         // Verify registered and extract hooks
-        let (on_add, on_insert, on_replace) = {
+        let (on_add, on_insert, on_replace, has_required) = {
             let storage = self
                 .components
                 .get(&type_id)
                 .ok_or(ComponentNotRegistered {
                     type_name: std::any::type_name::<T>(),
                 })?;
-            (storage.on_add, storage.on_insert, storage.on_replace)
+            (
+                storage.on_add,
+                storage.on_insert,
+                storage.on_replace,
+                storage.has_required_components(),
+            )
         };
         let has_hooks = on_add.is_some() || on_insert.is_some() || on_replace.is_some();
 
@@ -516,7 +581,7 @@ impl World {
             .typed_mut::<T>()
             .reserve(components.len());
 
-        if has_hooks {
+        if has_hooks || has_required {
             for (entity, component) in entities.iter().zip(components) {
                 assert!(
                     self.entities.is_alive(*entity),
@@ -544,9 +609,22 @@ impl World {
                 if let Some(hook) = on_insert {
                     hook(self, *entity);
                 }
+
+                // Apply required components (only on first add)
+                if !had {
+                    let required = self
+                        .components
+                        .get(&type_id)
+                        .unwrap()
+                        .required_components
+                        .clone();
+                    for req_fn in required {
+                        req_fn(self, *entity);
+                    }
+                }
             }
         } else {
-            // Fast path: no hooks, direct sparse set insert
+            // Fast path: no hooks and no required components, direct sparse set insert
             let storage = self.components.get_mut(&type_id).unwrap();
             let set = storage.typed_mut::<T>();
             for (entity, component) in entities.iter().zip(components) {
@@ -587,14 +665,19 @@ impl World {
         let tick = self.tick;
 
         // Verify registered and extract hooks
-        let (on_add, on_insert, on_replace) = {
+        let (on_add, on_insert, on_replace, has_required) = {
             let storage = self
                 .components
                 .get(&type_id)
                 .ok_or(ComponentNotRegistered {
                     type_name: std::any::type_name::<T>(),
                 })?;
-            (storage.on_add, storage.on_insert, storage.on_replace)
+            (
+                storage.on_add,
+                storage.on_insert,
+                storage.on_replace,
+                storage.has_required_components(),
+            )
         };
         let has_hooks = on_add.is_some() || on_insert.is_some() || on_replace.is_some();
 
@@ -605,7 +688,7 @@ impl World {
             .typed_mut::<T>()
             .reserve(components.len());
 
-        if has_hooks {
+        if has_hooks || has_required {
             for (entity, component) in entities.iter().zip(components) {
                 assert!(
                     self.entities.is_alive(*entity),
@@ -633,9 +716,22 @@ impl World {
                 if let Some(hook) = on_insert {
                     hook(self, *entity);
                 }
+
+                // Apply required components (only on first add)
+                if !had {
+                    let required = self
+                        .components
+                        .get(&type_id)
+                        .unwrap()
+                        .required_components
+                        .clone();
+                    for req_fn in required {
+                        req_fn(self, *entity);
+                    }
+                }
             }
         } else {
-            // Fast path: no hooks, direct sparse set insert
+            // Fast path: no hooks and no required components, direct sparse set insert
             let storage = self.components.get_mut(&type_id).unwrap();
             let set = storage.typed_mut::<T>();
             for (entity, component) in entities.iter().zip(components) {
@@ -2239,5 +2335,156 @@ mod tests {
 
         // Both hooks should have fired
         assert_eq!(*world.resource::<u32>(), 11);
+    }
+
+    // --- Required components tests ---
+
+    #[derive(Debug, Clone, PartialEq, Default)]
+    struct ReqA(u32);
+    #[derive(Debug, Clone, PartialEq, Default)]
+    struct ReqB(u32);
+    #[derive(Debug, Clone, PartialEq, Default)]
+    struct ReqC(u32);
+
+    #[test]
+    fn required_component_inserted_automatically() {
+        let mut world = World::new();
+        world.register_component::<ReqA>();
+        world.register_required::<ReqA, ReqB>();
+
+        let entity = world.spawn();
+        world.insert(entity, ReqA(1)).unwrap();
+
+        assert_eq!(world.get::<ReqB>(entity), Some(&ReqB(0)));
+    }
+
+    #[test]
+    fn required_component_not_overwritten() {
+        let mut world = World::new();
+        world.register_component::<ReqA>();
+        world.register_component::<ReqB>();
+        world.register_required::<ReqA, ReqB>();
+
+        let entity = world.spawn();
+        world.insert(entity, ReqB(42)).unwrap();
+        world.insert(entity, ReqA(1)).unwrap();
+
+        // Existing ReqB should NOT be overwritten
+        assert_eq!(world.get::<ReqB>(entity), Some(&ReqB(42)));
+    }
+
+    #[test]
+    fn required_component_not_applied_on_replace() {
+        let mut world = World::new();
+        world.register_component::<ReqA>();
+        world.register_required::<ReqA, ReqB>();
+
+        let entity = world.spawn();
+        world.insert(entity, ReqA(1)).unwrap();
+        assert_eq!(world.get::<ReqB>(entity), Some(&ReqB(0)));
+
+        // Remove ReqB, then replace ReqA — requirements should NOT fire again
+        world.remove::<ReqB>(entity);
+        world.insert(entity, ReqA(2)).unwrap();
+        assert!(world.get::<ReqB>(entity).is_none());
+    }
+
+    #[test]
+    fn transitive_requirements() {
+        let mut world = World::new();
+        world.register_component::<ReqA>();
+        world.register_required::<ReqA, ReqB>();
+        world.register_required::<ReqB, ReqC>();
+
+        let entity = world.spawn();
+        world.insert(entity, ReqA(1)).unwrap();
+
+        assert_eq!(world.get::<ReqB>(entity), Some(&ReqB(0)));
+        assert_eq!(world.get::<ReqC>(entity), Some(&ReqC(0)));
+    }
+
+    #[test]
+    fn required_components_coexist_with_on_add_hook() {
+        let mut world = World::new();
+        world.register_component::<ReqA>();
+        world.register_component::<Marker>();
+        world.register_required::<ReqA, ReqB>();
+
+        world.set_on_add::<ReqA>(|world, entity| {
+            let _ = world.insert(entity, Marker(99));
+        });
+
+        let entity = world.spawn();
+        world.insert(entity, ReqA(1)).unwrap();
+
+        assert_eq!(world.get::<ReqB>(entity), Some(&ReqB(0)));
+        assert_eq!(world.get::<Marker>(entity), Some(&Marker(99)));
+    }
+
+    #[test]
+    fn required_component_auto_registers() {
+        let mut world = World::new();
+        world.register_component::<ReqA>();
+        // Don't manually register ReqB — register_required should do it
+        world.register_required::<ReqA, ReqB>();
+
+        let entity = world.spawn();
+        world.insert(entity, ReqA(1)).unwrap();
+        assert_eq!(world.get::<ReqB>(entity), Some(&ReqB(0)));
+    }
+
+    #[test]
+    fn required_components_in_batch_insert() {
+        let mut world = World::new();
+        world.register_component::<ReqA>();
+        world.register_required::<ReqA, ReqB>();
+
+        let entities = world.spawn_batch(3);
+        let components = vec![ReqA(1), ReqA(2), ReqA(3)];
+        world.insert_batch(&entities, components).unwrap();
+
+        for e in &entities {
+            assert_eq!(world.get::<ReqB>(*e), Some(&ReqB(0)));
+        }
+    }
+
+    #[test]
+    fn required_components_in_batch_tracked() {
+        let mut world = World::new();
+        world.register_component::<ReqA>();
+        world.register_required::<ReqA, ReqB>();
+
+        let entities = world.spawn_batch(2);
+        let components = vec![ReqA(1), ReqA(2)];
+        world.insert_batch_tracked(&entities, components).unwrap();
+
+        for e in &entities {
+            assert_eq!(world.get::<ReqB>(*e), Some(&ReqB(0)));
+        }
+    }
+
+    #[test]
+    fn required_components_via_bundle() {
+        let mut world = World::new();
+        world.register_component::<ReqA>();
+        world.register_component::<Health>();
+        world.register_required::<ReqA, ReqB>();
+
+        let entity = world.spawn_with((ReqA(1), Health(100)));
+        assert_eq!(world.get::<ReqB>(entity), Some(&ReqB(0)));
+    }
+
+    #[test]
+    fn multiple_required_components() {
+        let mut world = World::new();
+        world.register_component::<ReqA>();
+        world.register_required::<ReqA, ReqB>();
+        world.register_required::<ReqA, ReqC>();
+
+        let entity = world.spawn();
+        world.insert(entity, ReqA(1)).unwrap();
+
+        assert_eq!(world.get::<ReqB>(entity), Some(&ReqB(0)));
+        assert_eq!(world.get::<ReqC>(entity), Some(&ReqC(0)));
     }
 }
