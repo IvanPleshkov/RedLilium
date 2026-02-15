@@ -2,6 +2,15 @@ use std::marker::PhantomData;
 
 use crate::sparse_set::ComponentStorage;
 
+/// Trait for filter types that can check entity membership.
+///
+/// Implemented by [`ContainsChecker`], [`ChangedFilter`], [`AddedFilter`],
+/// [`RemovedFilter`], [`OrFilter`], and [`AnyFilter`].
+pub trait Filter {
+    /// Returns `true` if the entity passes this filter.
+    fn matches(&self, entity_index: u32) -> bool;
+}
+
 /// Marker type for filtering entities that have component T,
 /// without borrowing the component data.
 ///
@@ -61,6 +70,12 @@ impl<'a> ContainsChecker<'a> {
     }
 }
 
+impl Filter for ContainsChecker<'_> {
+    fn matches(&self, entity_index: u32) -> bool {
+        self.matches(entity_index)
+    }
+}
+
 /// Filter for entities whose component was changed since a given tick.
 ///
 /// Created by [`World::changed`](crate::World::changed). Works like
@@ -98,6 +113,12 @@ impl<'a> ChangedFilter<'a> {
     }
 }
 
+impl Filter for ChangedFilter<'_> {
+    fn matches(&self, entity_index: u32) -> bool {
+        self.matches(entity_index)
+    }
+}
+
 /// Filter for entities whose component was added since a given tick.
 ///
 /// Created by [`World::added`](crate::World::added). Works like
@@ -120,6 +141,12 @@ impl<'a> AddedFilter<'a> {
     pub fn matches(&self, entity_index: u32) -> bool {
         self.storage
             .is_some_and(|s| s.added_since_untyped(entity_index, self.since_tick))
+    }
+}
+
+impl Filter for AddedFilter<'_> {
+    fn matches(&self, entity_index: u32) -> bool {
+        self.matches(entity_index)
     }
 }
 
@@ -170,6 +197,86 @@ impl<'a> RemovedFilter<'a> {
             .flat_map(move |s| s.removed_entities_since(self.since_tick))
     }
 }
+
+impl Filter for RemovedFilter<'_> {
+    fn matches(&self, entity_index: u32) -> bool {
+        self.matches(entity_index)
+    }
+}
+
+/// Composite filter that matches if **either** sub-filter matches (logical OR).
+///
+/// Created by [`Or<A, B>`](crate::Or) access element.
+///
+/// # Example
+///
+/// ```ignore
+/// let (positions, can_move) = ctx.query::<(Read<Pos>, Or<With<Flying>, With<Swimming>>)>();
+/// for (idx, pos) in positions.iter() {
+///     if can_move.matches(idx) {
+///         // entity has Flying OR Swimming
+///     }
+/// }
+/// ```
+pub struct OrFilter<A, B> {
+    a: A,
+    b: B,
+}
+
+impl<A: Filter, B: Filter> OrFilter<A, B> {
+    pub(crate) fn new(a: A, b: B) -> Self {
+        Self { a, b }
+    }
+}
+
+impl<A: Filter, B: Filter> Filter for OrFilter<A, B> {
+    fn matches(&self, entity_index: u32) -> bool {
+        self.a.matches(entity_index) || self.b.matches(entity_index)
+    }
+}
+
+/// Composite filter that matches if **any** sub-filter in the tuple matches.
+///
+/// Created by [`Any<(A, B, ...)>`](crate::Any) access element.
+/// Supports tuples of 2-8 filter elements.
+///
+/// # Example
+///
+/// ```ignore
+/// let (positions, movable) = ctx.query::<(Read<Pos>, Any<(With<Flying>, With<Swimming>, With<Walking>)>)>();
+/// for (idx, pos) in positions.iter() {
+///     if movable.matches(idx) {
+///         // entity has Flying OR Swimming OR Walking
+///     }
+/// }
+/// ```
+pub struct AnyFilter<T> {
+    filters: T,
+}
+
+impl<T> AnyFilter<T> {
+    pub(crate) fn new(filters: T) -> Self {
+        Self { filters }
+    }
+}
+
+macro_rules! impl_any_filter {
+    ($($idx:tt $T:ident),+) => {
+        impl<$($T: Filter),+> Filter for AnyFilter<($($T,)+)> {
+            fn matches(&self, entity_index: u32) -> bool {
+                $(self.filters.$idx.matches(entity_index))||+
+            }
+        }
+    };
+}
+
+impl_any_filter!(0 A, 1 B);
+impl_any_filter!(0 A, 1 B, 2 C);
+impl_any_filter!(0 A, 1 B, 2 C, 3 D);
+impl_any_filter!(0 A, 1 B, 2 C, 3 D, 4 E);
+impl_any_filter!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F);
+impl_any_filter!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F, 6 G);
+impl_any_filter!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F, 6 G, 7 H);
 
 #[cfg(test)]
 mod tests {
@@ -284,5 +391,98 @@ mod tests {
 
         storage.clear_removed();
         assert!(!RemovedFilter::new(Some(&storage), 0).matches(5));
+    }
+
+    // ---- OrFilter tests ----
+
+    #[test]
+    fn or_filter_matches_first() {
+        let mut s1 = ComponentStorage::new::<u32>();
+        s1.typed_mut::<u32>().insert(5, 42);
+        let s2 = ComponentStorage::new::<u64>();
+
+        let a = ContainsChecker::with(Some(&s1));
+        let b = ContainsChecker::with(Some(&s2));
+        let or = OrFilter::new(a, b);
+        assert!(or.matches(5)); // has u32
+    }
+
+    #[test]
+    fn or_filter_matches_second() {
+        let s1 = ComponentStorage::new::<u32>();
+        let mut s2 = ComponentStorage::new::<u64>();
+        s2.typed_mut::<u64>().insert(5, 99);
+
+        let a = ContainsChecker::with(Some(&s1));
+        let b = ContainsChecker::with(Some(&s2));
+        let or = OrFilter::new(a, b);
+        assert!(or.matches(5)); // has u64
+    }
+
+    #[test]
+    fn or_filter_matches_both() {
+        let mut s1 = ComponentStorage::new::<u32>();
+        s1.typed_mut::<u32>().insert(5, 42);
+        let mut s2 = ComponentStorage::new::<u64>();
+        s2.typed_mut::<u64>().insert(5, 99);
+
+        let a = ContainsChecker::with(Some(&s1));
+        let b = ContainsChecker::with(Some(&s2));
+        let or = OrFilter::new(a, b);
+        assert!(or.matches(5)); // has both
+    }
+
+    #[test]
+    fn or_filter_rejects_neither() {
+        let s1 = ComponentStorage::new::<u32>();
+        let s2 = ComponentStorage::new::<u64>();
+
+        let a = ContainsChecker::with(Some(&s1));
+        let b = ContainsChecker::with(Some(&s2));
+        let or = OrFilter::new(a, b);
+        assert!(!or.matches(5)); // has neither
+    }
+
+    #[test]
+    fn or_filter_via_filter_trait() {
+        let mut s1 = ComponentStorage::new::<u32>();
+        s1.typed_mut::<u32>().insert(5, 42);
+        let s2 = ComponentStorage::new::<u64>();
+
+        let a = ContainsChecker::with(Some(&s1));
+        let b = ContainsChecker::with(Some(&s2));
+        let or = OrFilter::new(a, b);
+        // Use via Filter trait
+        let f: &dyn Filter = &or;
+        assert!(f.matches(5));
+    }
+
+    // ---- AnyFilter tests ----
+
+    #[test]
+    fn any_filter_matches_one_of_three() {
+        let s1 = ComponentStorage::new::<u32>();
+        let mut s2 = ComponentStorage::new::<u64>();
+        s2.typed_mut::<u64>().insert(5, 99);
+        let s3 = ComponentStorage::new::<f32>();
+
+        let a = ContainsChecker::with(Some(&s1));
+        let b = ContainsChecker::with(Some(&s2));
+        let c = ContainsChecker::with(Some(&s3));
+        let any = AnyFilter::new((a, b, c));
+        assert!(any.matches(5)); // has u64
+    }
+
+    #[test]
+    fn any_filter_rejects_none() {
+        let s1 = ComponentStorage::new::<u32>();
+        let s2 = ComponentStorage::new::<u64>();
+        let s3 = ComponentStorage::new::<f32>();
+
+        let a = ContainsChecker::with(Some(&s1));
+        let b = ContainsChecker::with(Some(&s2));
+        let c = ContainsChecker::with(Some(&s3));
+        let any = AnyFilter::new((a, b, c));
+        assert!(!any.matches(5)); // has none
     }
 }

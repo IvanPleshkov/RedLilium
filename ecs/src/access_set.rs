@@ -1,7 +1,9 @@
 use std::any::TypeId;
 use std::marker::PhantomData;
 
-use crate::query::{AddedFilter, ContainsChecker, RemovedFilter, With, Without};
+use crate::query::{
+    AddedFilter, AnyFilter, ContainsChecker, Filter, OrFilter, RemovedFilter, With, Without,
+};
 use crate::resource::{ResourceRef, ResourceRefMut};
 use crate::sparse_set::{Ref, RefMut};
 use crate::world::World;
@@ -193,6 +195,48 @@ pub struct MaybeAdded<T: 'static>(PhantomData<T>);
 /// In the execute closure, yields [`RemovedFilter`](crate::RemovedFilter).
 /// If `T` has never been registered, the filter matches nothing (no panic).
 pub struct MaybeRemoved<T: 'static>(PhantomData<T>);
+
+/// Logical OR of two filter access elements.
+///
+/// In the execute closure, yields [`OrFilter`](crate::OrFilter).
+/// Matches entities where **either** filter A or filter B matches.
+///
+/// Both `A` and `B` must be filter access elements (e.g. [`With`], [`Without`],
+/// [`Added`], [`Removed`], or nested `Or`).
+///
+/// # Example
+///
+/// ```ignore
+/// ctx.lock::<(Read<Position>, Or<With<Flying>, With<Swimming>>)>()
+///     .execute(|(positions, can_move)| {
+///         for (idx, pos) in positions.iter() {
+///             if can_move.matches(idx) {
+///                 // entity has Flying OR Swimming
+///             }
+///         }
+///     });
+/// ```
+pub struct Or<A, B>(PhantomData<(A, B)>);
+
+/// Logical OR of any number of filter access elements (tuple-based).
+///
+/// In the execute closure, yields [`AnyFilter`](crate::AnyFilter).
+/// Matches entities where **any** of the sub-filters match.
+/// Supports tuples of 2-8 filter elements.
+///
+/// # Example
+///
+/// ```ignore
+/// ctx.lock::<(Read<Position>, Any<(With<Flying>, With<Swimming>, With<Walking>)>)>()
+///     .execute(|(positions, movable)| {
+///         for (idx, pos) in positions.iter() {
+///             if movable.matches(idx) {
+///                 // entity has Flying OR Swimming OR Walking
+///             }
+///         }
+///     });
+/// ```
+pub struct Any<T>(PhantomData<T>);
 
 // ---- AccessElement implementations ----
 
@@ -504,6 +548,71 @@ impl<T: 'static> AccessElement for Without<T> {
         world.without::<T>()
     }
 }
+
+// ---- Or<A, B> AccessElement ----
+
+impl<A, B> AccessElement for Or<A, B>
+where
+    A: AccessElement + 'static,
+    B: AccessElement + 'static,
+    for<'w> A::Item<'w>: Filter,
+    for<'w> B::Item<'w>: Filter,
+{
+    type Item<'w> = OrFilter<A::Item<'w>, B::Item<'w>>;
+
+    fn access_info() -> AccessInfo {
+        // Filters don't hold locks; use our own marker TypeId.
+        AccessInfo {
+            type_id: TypeId::of::<Or<A, B>>(),
+            is_write: false,
+        }
+    }
+
+    fn fetch(world: &World) -> Self::Item<'_> {
+        OrFilter::new(A::fetch(world), B::fetch(world))
+    }
+
+    fn fetch_unlocked(world: &World) -> Self::Item<'_> {
+        OrFilter::new(A::fetch_unlocked(world), B::fetch_unlocked(world))
+    }
+}
+
+// ---- Any<(A, B, ...)> AccessElement ----
+
+macro_rules! impl_any_access_element {
+    ($($idx:tt $T:ident),+) => {
+        impl<$($T),+> AccessElement for Any<($($T,)+)>
+        where
+            $($T: AccessElement + 'static,)+
+            $(for<'w> $T::Item<'w>: Filter,)+
+        {
+            type Item<'w> = AnyFilter<($($T::Item<'w>,)+)>;
+
+            fn access_info() -> AccessInfo {
+                AccessInfo {
+                    type_id: TypeId::of::<Any<($($T,)+)>>(),
+                    is_write: false,
+                }
+            }
+
+            fn fetch(world: &World) -> Self::Item<'_> {
+                AnyFilter::new(($($T::fetch(world),)+))
+            }
+
+            fn fetch_unlocked(world: &World) -> Self::Item<'_> {
+                AnyFilter::new(($($T::fetch_unlocked(world),)+))
+            }
+        }
+    };
+}
+
+impl_any_access_element!(0 A, 1 B);
+impl_any_access_element!(0 A, 1 B, 2 C);
+impl_any_access_element!(0 A, 1 B, 2 C, 3 D);
+impl_any_access_element!(0 A, 1 B, 2 C, 3 D, 4 E);
+impl_any_access_element!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F);
+impl_any_access_element!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F, 6 G);
+impl_any_access_element!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F, 6 G, 7 H);
 
 // ---- Tuple AccessSet implementations ----
 
@@ -896,6 +1005,200 @@ mod tests {
         let count = positions
             .iter()
             .filter(|(idx, _)| has_frozen.matches(*idx))
+            .count();
+        assert_eq!(count, 0);
+    }
+
+    // ---- Or<A, B> AccessElement tests ----
+
+    #[derive(Debug, PartialEq)]
+    struct Flying;
+    #[derive(Debug, PartialEq)]
+    struct Swimming;
+    #[derive(Debug, PartialEq)]
+    struct Walking;
+
+    #[test]
+    fn or_access_info_uses_marker_type() {
+        let info = <Or<With<Flying>, With<Swimming>>>::access_info();
+        assert_eq!(
+            info.type_id,
+            TypeId::of::<Or<With<Flying>, With<Swimming>>>()
+        );
+        assert!(!info.is_write);
+    }
+
+    #[test]
+    fn or_filter_in_tuple_matches_first() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Flying>();
+        world.register_component::<Swimming>();
+
+        let e1 = world.spawn();
+        let e2 = world.spawn();
+        let e3 = world.spawn();
+        world.insert(e1, Position { x: 1.0 }).unwrap();
+        world.insert(e1, Flying).unwrap();
+        world.insert(e2, Position { x: 2.0 }).unwrap();
+        world.insert(e2, Swimming).unwrap();
+        world.insert(e3, Position { x: 3.0 }).unwrap();
+        // e3 has neither Flying nor Swimming
+
+        let (positions, can_move) =
+            <(Read<Position>, Or<With<Flying>, With<Swimming>>)>::fetch(&world);
+        let mut matched: Vec<f32> = positions
+            .iter()
+            .filter(|(idx, _)| can_move.matches(*idx))
+            .map(|(_, p)| p.x)
+            .collect();
+        matched.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(matched, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn or_filter_rejects_neither() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Flying>();
+        world.register_component::<Swimming>();
+
+        let e = world.spawn();
+        world.insert(e, Position { x: 1.0 }).unwrap();
+
+        let (positions, can_move) =
+            <(Read<Position>, Or<With<Flying>, With<Swimming>>)>::fetch(&world);
+        let count = positions
+            .iter()
+            .filter(|(idx, _)| can_move.matches(*idx))
+            .count();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn or_with_without_combination() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Flying>();
+        world.register_component::<Frozen>();
+
+        let e1 = world.spawn();
+        let e2 = world.spawn();
+        let e3 = world.spawn();
+        world.insert(e1, Position { x: 1.0 }).unwrap();
+        world.insert(e1, Flying).unwrap(); // has Flying → matches With<Flying>
+        world.insert(e2, Position { x: 2.0 }).unwrap();
+        // e2: no Flying, no Frozen → matches Without<Frozen>
+        world.insert(e3, Position { x: 3.0 }).unwrap();
+        world.insert(e3, Frozen).unwrap();
+        // e3: no Flying, has Frozen → matches neither
+
+        let (positions, filter) =
+            <(Read<Position>, Or<With<Flying>, Without<Frozen>>)>::fetch(&world);
+        let mut matched: Vec<f32> = positions
+            .iter()
+            .filter(|(idx, _)| filter.matches(*idx))
+            .map(|(_, p)| p.x)
+            .collect();
+        matched.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(matched, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn nested_or() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Flying>();
+        world.register_component::<Swimming>();
+        world.register_component::<Walking>();
+
+        let e1 = world.spawn();
+        let e2 = world.spawn();
+        let e3 = world.spawn();
+        let e4 = world.spawn();
+        world.insert(e1, Position { x: 1.0 }).unwrap();
+        world.insert(e1, Flying).unwrap();
+        world.insert(e2, Position { x: 2.0 }).unwrap();
+        world.insert(e2, Swimming).unwrap();
+        world.insert(e3, Position { x: 3.0 }).unwrap();
+        world.insert(e3, Walking).unwrap();
+        world.insert(e4, Position { x: 4.0 }).unwrap();
+        // e4 has none
+
+        let (positions, filter) = <(
+            Read<Position>,
+            Or<With<Flying>, Or<With<Swimming>, With<Walking>>>,
+        )>::fetch(&world);
+        let mut matched: Vec<f32> = positions
+            .iter()
+            .filter(|(idx, _)| filter.matches(*idx))
+            .map(|(_, p)| p.x)
+            .collect();
+        matched.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(matched, vec![1.0, 2.0, 3.0]);
+    }
+
+    // ---- Any<(...)> AccessElement tests ----
+
+    #[test]
+    fn any_access_info_uses_marker_type() {
+        let info = <Any<(With<Flying>, With<Swimming>, With<Walking>)>>::access_info();
+        assert_eq!(
+            info.type_id,
+            TypeId::of::<Any<(With<Flying>, With<Swimming>, With<Walking>)>>()
+        );
+        assert!(!info.is_write);
+    }
+
+    #[test]
+    fn any_filter_in_tuple() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Flying>();
+        world.register_component::<Swimming>();
+        world.register_component::<Walking>();
+
+        let e1 = world.spawn();
+        let e2 = world.spawn();
+        let e3 = world.spawn();
+        let e4 = world.spawn();
+        world.insert(e1, Position { x: 1.0 }).unwrap();
+        world.insert(e1, Flying).unwrap();
+        world.insert(e2, Position { x: 2.0 }).unwrap();
+        world.insert(e2, Swimming).unwrap();
+        world.insert(e3, Position { x: 3.0 }).unwrap();
+        world.insert(e3, Walking).unwrap();
+        world.insert(e4, Position { x: 4.0 }).unwrap();
+        // e4 has none of the movement components
+
+        let (positions, movable) = <(
+            Read<Position>,
+            Any<(With<Flying>, With<Swimming>, With<Walking>)>,
+        )>::fetch(&world);
+        let mut matched: Vec<f32> = positions
+            .iter()
+            .filter(|(idx, _)| movable.matches(*idx))
+            .map(|(_, p)| p.x)
+            .collect();
+        matched.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(matched, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn any_filter_rejects_all() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Flying>();
+        world.register_component::<Swimming>();
+
+        let e = world.spawn();
+        world.insert(e, Position { x: 1.0 }).unwrap();
+
+        let (positions, movable) =
+            <(Read<Position>, Any<(With<Flying>, With<Swimming>)>)>::fetch(&world);
+        let count = positions
+            .iter()
+            .filter(|(idx, _)| movable.matches(*idx))
             .count();
         assert_eq!(count, 0);
     }

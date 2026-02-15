@@ -85,7 +85,10 @@ pub use egui;
 pub use entity::Entity;
 pub use events::{EventUpdateSystem, Events};
 pub use io_runtime::IoRuntime;
-pub use query::{AddedFilter, ChangedFilter, ContainsChecker, RemovedFilter, With, Without};
+pub use query::{
+    AddedFilter, AnyFilter, ChangedFilter, ContainsChecker, Filter, OrFilter, RemovedFilter, With,
+    Without,
+};
 pub use query_guard::{QueryGuard, QueryItem, QueryIter, ResMutRef};
 pub use redlilium_core::compute::{
     ComputeContext, IoHandle, IoRunner, Priority, YieldNow, reset_yield_timer, set_yield_interval,
@@ -99,8 +102,8 @@ pub use compute_context::EcsComputeContext;
 
 // System & scheduling (new API)
 pub use access_set::{
-    AccessSet, Added, MainThreadRes, MainThreadResMut, MaybeAdded, MaybeRemoved, OptionalRead,
-    OptionalWrite, Read, Removed, Res, ResMut, Write,
+    AccessSet, Added, Any, MainThreadRes, MainThreadResMut, MaybeAdded, MaybeRemoved, OptionalRead,
+    OptionalWrite, Or, Read, Removed, Res, ResMut, Write,
 };
 pub use bundle::Bundle;
 pub use command_collector::{CommandCollector, SpawnBuilder};
