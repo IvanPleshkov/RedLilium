@@ -129,7 +129,10 @@ pub struct StepPhysics3D;
 
 impl crate::System for StepPhysics3D {
     type Result = ();
-    fn run<'a>(&'a self, ctx: &'a crate::SystemContext<'a>) {
+    fn run<'a>(
+        &'a self,
+        ctx: &'a crate::SystemContext<'a>,
+    ) -> Result<(), crate::system::SystemError> {
         ctx.lock::<(
             crate::ResMut<PhysicsWorld3D>,
             crate::Read<RigidBody3DHandle>,
@@ -158,6 +161,7 @@ impl crate::System for StepPhysics3D {
                 }
             }
         });
+        Ok(())
     }
 }
 

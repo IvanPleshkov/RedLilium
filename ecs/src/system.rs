@@ -1,9 +1,45 @@
 use std::any::Any;
+use std::fmt;
 
 use crate::command_collector::CommandCollector;
 use crate::compute::ComputePool;
 use crate::system_context::SystemContext;
 use crate::world::World;
+
+/// Error type returned by system execution.
+///
+/// Covers explicit failures from system logic and panics caught by the
+/// runner via [`std::panic::catch_unwind`].
+#[derive(Debug)]
+pub enum SystemError {
+    /// The system panicked during execution.
+    ///
+    /// Contains the panic message if it could be extracted from the payload.
+    Panicked(String),
+}
+
+impl fmt::Display for SystemError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SystemError::Panicked(msg) => write!(f, "system panicked: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for SystemError {}
+
+/// Extracts a human-readable message from a panic payload.
+///
+/// Handles the two common payload types: `&str` and `String`.
+pub fn panic_payload_to_string(payload: &(dyn Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
 
 /// A system that processes entities and components in the world.
 ///
@@ -23,7 +59,7 @@ use crate::world::World;
 ///
 /// impl System for MovementSystem {
 ///     type Result = ();
-///     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+///     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
 ///         ctx.lock::<(Write<Position>, Read<Velocity>)>()
 ///             .execute(|(mut positions, velocities)| {
 ///                 for (idx, pos) in positions.iter_mut() {
@@ -32,6 +68,7 @@ use crate::world::World;
 ///                     }
 ///                 }
 ///             });
+///         Ok(())
 ///     }
 /// }
 /// ```
@@ -43,7 +80,7 @@ use crate::world::World;
 ///
 /// impl System for PathfindSystem {
 ///     type Result = ();
-///     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+///     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
 ///         // Phase 1: extract data (lock released after execute)
 ///         let graph = ctx.lock::<(Read<NavMesh>,)>()
 ///             .execute(|(nav,)| {
@@ -64,6 +101,7 @@ use crate::world::World;
 ///                 });
 ///             }
 ///         }
+///         Ok(())
 ///     }
 /// }
 /// ```
@@ -78,20 +116,28 @@ pub trait System: Send + Sync + 'static {
     ///
     /// Use [`SystemContext::lock()`] to borrow components.
     /// Locks are automatically released when the execute closure returns.
-    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Self::Result;
+    ///
+    /// Returns `Ok(result)` on success or `Err(SystemError)` on failure.
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<Self::Result, SystemError>;
 }
 
 /// Object-safe version of [`System`] used internally for type erasure.
 ///
 /// A blanket implementation converts any `System` into a `DynSystem`.
 pub(crate) trait DynSystem: Send + Sync {
-    fn run_boxed<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Box<dyn Any + Send + Sync>;
+    fn run_boxed<'a>(
+        &'a self,
+        ctx: &'a SystemContext<'a>,
+    ) -> Result<Box<dyn Any + Send + Sync>, SystemError>;
 }
 
 impl<S: System> DynSystem for S {
-    fn run_boxed<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Box<dyn Any + Send + Sync> {
-        let result = self.run(ctx);
-        Box::new(result) as Box<dyn Any + Send + Sync>
+    fn run_boxed<'a>(
+        &'a self,
+        ctx: &'a SystemContext<'a>,
+    ) -> Result<Box<dyn Any + Send + Sync>, SystemError> {
+        let result = self.run(ctx)?;
+        Ok(Box::new(result) as Box<dyn Any + Send + Sync>)
     }
 }
 
@@ -123,9 +169,10 @@ impl<S: System> DynSystem for S {
 ///
 /// impl ExclusiveSystem for SceneLoader {
 ///     type Result = ();
-///     fn run(&mut self, world: &mut World) {
+///     fn run(&mut self, world: &mut World) -> Result<(), SystemError> {
 ///         let e = world.spawn();
 ///         world.insert(e, Transform::IDENTITY).unwrap();
+///         Ok(())
 ///     }
 /// }
 /// ```
@@ -138,18 +185,20 @@ pub trait ExclusiveSystem: Send + Sync + 'static {
     type Result: Send + Sync + 'static;
 
     /// Execute the system with exclusive world access.
-    fn run(&mut self, world: &mut World) -> Self::Result;
+    ///
+    /// Returns `Ok(result)` on success or `Err(SystemError)` on failure.
+    fn run(&mut self, world: &mut World) -> Result<Self::Result, SystemError>;
 }
 
 /// Object-safe version of [`ExclusiveSystem`] used internally for type erasure.
 pub(crate) trait DynExclusiveSystem: Send + Sync {
-    fn run_boxed(&mut self, world: &mut World) -> Box<dyn Any + Send + Sync>;
+    fn run_boxed(&mut self, world: &mut World) -> Result<Box<dyn Any + Send + Sync>, SystemError>;
 }
 
 impl<S: ExclusiveSystem> DynExclusiveSystem for S {
-    fn run_boxed(&mut self, world: &mut World) -> Box<dyn Any + Send + Sync> {
-        let result = self.run(world);
-        Box::new(result) as Box<dyn Any + Send + Sync>
+    fn run_boxed(&mut self, world: &mut World) -> Result<Box<dyn Any + Send + Sync>, SystemError> {
+        let result = self.run(world)?;
+        Ok(Box::new(result) as Box<dyn Any + Send + Sync>)
     }
 }
 
@@ -182,8 +231,9 @@ where
     F: FnMut(&mut World) + Send + Sync + 'static,
 {
     type Result = ();
-    fn run(&mut self, world: &mut World) {
+    fn run(&mut self, world: &mut World) -> Result<(), SystemError> {
         (self.func)(world);
+        Ok(())
     }
 }
 
@@ -199,7 +249,7 @@ pub fn run_system_blocking<S: System>(
     world: &World,
     compute: &ComputePool,
     io: &crate::io_runtime::IoRuntime,
-) -> S::Result {
+) -> Result<S::Result, SystemError> {
     let commands = CommandCollector::new();
     let ctx = SystemContext::new(world, compute, io, &commands);
     system.run(&ctx)
@@ -212,7 +262,7 @@ pub fn run_system_blocking<S: System>(
 pub fn run_exclusive_system_blocking<S: ExclusiveSystem>(
     system: &mut S,
     world: &mut World,
-) -> S::Result {
+) -> Result<S::Result, SystemError> {
     system.run(world)
 }
 
@@ -232,13 +282,15 @@ mod tests {
     struct EmptySystem;
     impl System for EmptySystem {
         type Result = ();
-        fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {}
+        fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+            Ok(())
+        }
     }
 
     struct MovementSystem;
     impl System for MovementSystem {
         type Result = ();
-        fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+        fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
             ctx.lock::<(Write<Position>, Read<Velocity>)>().execute(
                 |(mut positions, velocities)| {
                     for (idx, pos) in positions.iter_mut() {
@@ -248,6 +300,7 @@ mod tests {
                     }
                 },
             );
+            Ok(())
         }
     }
 
@@ -256,7 +309,7 @@ mod tests {
         let world = World::new();
         let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
-        run_system_blocking(&EmptySystem, &world, &compute, &io);
+        run_system_blocking(&EmptySystem, &world, &compute, &io).unwrap();
     }
 
     #[test]
@@ -266,8 +319,9 @@ mod tests {
         struct FlagSystem(std::sync::Arc<AtomicBool>);
         impl System for FlagSystem {
             type Result = ();
-            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
                 self.0.store(true, Ordering::Relaxed);
+                Ok(())
             }
         }
 
@@ -276,7 +330,7 @@ mod tests {
         let world = World::new();
         let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
-        run_system_blocking(&sys, &world, &compute, &io);
+        run_system_blocking(&sys, &world, &compute, &io).unwrap();
         assert!(flag.load(Ordering::Relaxed));
     }
 
@@ -291,7 +345,7 @@ mod tests {
 
         let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
-        run_system_blocking(&MovementSystem, &world, &compute, &io);
+        run_system_blocking(&MovementSystem, &world, &compute, &io).unwrap();
 
         assert_eq!(world.get::<Position>(e).unwrap().x, 15.0);
     }
@@ -301,9 +355,10 @@ mod tests {
     struct SpawnExclusiveSystem;
     impl ExclusiveSystem for SpawnExclusiveSystem {
         type Result = ();
-        fn run(&mut self, world: &mut World) {
+        fn run(&mut self, world: &mut World) -> Result<(), SystemError> {
             let e = world.spawn();
             world.insert(e, Position { x: 99.0 }).unwrap();
+            Ok(())
         }
     }
 
@@ -313,7 +368,7 @@ mod tests {
         world.register_component::<Position>();
 
         let mut sys = SpawnExclusiveSystem;
-        run_exclusive_system_blocking(&mut sys, &mut world);
+        run_exclusive_system_blocking(&mut sys, &mut world).unwrap();
 
         assert_eq!(world.entity_count(), 1);
         let e = world.iter_entities().next().unwrap();
@@ -331,7 +386,7 @@ mod tests {
                 world.insert(e, Position { x: 42.0 }).unwrap();
             },
         };
-        run_exclusive_system_blocking(&mut sys, &mut world);
+        run_exclusive_system_blocking(&mut sys, &mut world).unwrap();
 
         assert_eq!(world.entity_count(), 1);
         let e = world.iter_entities().next().unwrap();
@@ -343,8 +398,8 @@ mod tests {
         struct CountSystem;
         impl ExclusiveSystem for CountSystem {
             type Result = u32;
-            fn run(&mut self, world: &mut World) -> u32 {
-                world.entity_count()
+            fn run(&mut self, world: &mut World) -> Result<u32, SystemError> {
+                Ok(world.entity_count())
             }
         }
 
@@ -353,7 +408,7 @@ mod tests {
         world.spawn();
 
         let mut sys = CountSystem;
-        let count = run_exclusive_system_blocking(&mut sys, &mut world);
+        let count = run_exclusive_system_blocking(&mut sys, &mut world).unwrap();
         assert_eq!(count, 2);
     }
 
@@ -364,11 +419,12 @@ mod tests {
         struct ComputeSystem(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
         impl System for ComputeSystem {
             type Result = ();
-            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
                 let slot = self.0.clone();
                 let mut handle = ctx.compute().spawn(Priority::Low, |_ctx| async { 99u32 });
                 let result = ctx.compute().block_on(&mut handle);
                 *slot.lock().unwrap() = result;
+                Ok(())
             }
         }
 
@@ -377,7 +433,7 @@ mod tests {
         let world = World::new();
         let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
-        run_system_blocking(&sys, &world, &compute, &io);
+        run_system_blocking(&sys, &world, &compute, &io).unwrap();
         assert_eq!(*result.lock().unwrap(), Some(99));
     }
 }

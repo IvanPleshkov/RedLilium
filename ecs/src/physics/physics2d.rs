@@ -122,7 +122,10 @@ pub struct StepPhysics2D;
 
 impl crate::System for StepPhysics2D {
     type Result = ();
-    fn run<'a>(&'a self, ctx: &'a crate::SystemContext<'a>) {
+    fn run<'a>(
+        &'a self,
+        ctx: &'a crate::SystemContext<'a>,
+    ) -> Result<(), crate::system::SystemError> {
         ctx.lock::<(
             crate::ResMut<PhysicsWorld2D>,
             crate::Read<RigidBody2DHandle>,
@@ -149,6 +152,7 @@ impl crate::System for StepPhysics2D {
                 }
             }
         });
+        Ok(())
     }
 }
 

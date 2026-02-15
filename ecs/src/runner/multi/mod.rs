@@ -5,6 +5,7 @@ use crate::command_collector::CommandCollector;
 use crate::compute::ComputePool;
 use crate::io_runtime::IoRuntime;
 use crate::main_thread_dispatcher::{MainThreadDispatcher, RunnerEvent};
+use crate::system::SystemError;
 use crate::system_context::SystemContext;
 use crate::system_results_store::SystemResultsStore;
 use crate::systems_container::SystemsContainer;
@@ -70,14 +71,15 @@ impl EcsRunnerMultiThread {
     ///
     /// All systems always run to completion. Remaining deferred commands
     /// are applied after every system has finished.
-    pub fn run(&self, world: &mut World, systems: &SystemsContainer) {
+    pub fn run(&self, world: &mut World, systems: &SystemsContainer) -> Vec<SystemError> {
         redlilium_core::profile_scope!("ecs: run (multi-thread)");
 
         let n = systems.system_count();
         if n == 0 {
-            return;
+            return Vec::new();
         }
 
+        let mut errors = Vec::new();
         let commands = CommandCollector::new();
         let results_store = SystemResultsStore::new(n, systems.type_id_to_idx().clone());
 
@@ -106,7 +108,7 @@ impl EcsRunnerMultiThread {
                 // Run any ready regular systems first (they may be independent
                 // of the exclusive system) to maximize parallelism before the barrier.
                 if !regular_ready.is_empty() {
-                    self.run_parallel_phase(
+                    errors.extend(self.run_parallel_phase(
                         world,
                         systems,
                         &commands,
@@ -115,7 +117,7 @@ impl EcsRunnerMultiThread {
                         &mut started,
                         &mut completed_count,
                         &regular_ready,
-                    );
+                    ));
                 }
 
                 // Apply pending deferred commands so the exclusive system
@@ -135,8 +137,10 @@ impl EcsRunnerMultiThread {
 
                     let system = systems.get_exclusive_system(exc_idx);
                     let mut guard = system.write().unwrap();
-                    let result = guard.run_boxed(world);
-                    results_store.store(exc_idx, result);
+                    match guard.run_boxed(world) {
+                        Ok(result) => results_store.store(exc_idx, result),
+                        Err(e) => errors.push(e),
+                    }
                 }
                 completed_count += 1;
                 for &dep in systems.dependents_of(exc_idx) {
@@ -144,7 +148,7 @@ impl EcsRunnerMultiThread {
                 }
             } else if !regular_ready.is_empty() {
                 // All ready systems are regular — run them in parallel
-                self.run_parallel_phase(
+                errors.extend(self.run_parallel_phase(
                     world,
                     systems,
                     &commands,
@@ -153,7 +157,7 @@ impl EcsRunnerMultiThread {
                     &mut started,
                     &mut completed_count,
                     &regular_ready,
-                );
+                ));
             } else {
                 // No ready systems — should not happen with a valid DAG
                 break;
@@ -173,6 +177,8 @@ impl EcsRunnerMultiThread {
             redlilium_core::profile_scope!("ecs: compute drain");
             self.compute.tick_with_budget(Duration::from_millis(2));
         }
+
+        errors
     }
 
     /// Runs a batch of regular systems in parallel using a scoped thread pool.
@@ -191,10 +197,11 @@ impl EcsRunnerMultiThread {
         started: &mut [bool],
         completed_count: &mut usize,
         initial_ready: &[usize],
-    ) {
+    ) -> Vec<SystemError> {
         let (event_tx, event_rx) = mpsc::channel::<RunnerEvent>();
         let dispatcher = MainThreadDispatcher::new(event_tx.clone());
         let mut active_count = 0usize;
+        let thread_errors = std::sync::Mutex::new(Vec::<SystemError>::new());
 
         std::thread::scope(|scope| {
             macro_rules! spawn_system {
@@ -211,6 +218,7 @@ impl EcsRunnerMultiThread {
                     let idx = $i;
                     let accessible = systems.accessible_results(idx);
                     let system_name = systems.get_type_name(idx);
+                    let errors_ref = &thread_errors;
                     scope.spawn(move || {
                         redlilium_core::set_thread_name!("ecs: worker");
                         redlilium_core::profile_scope_dynamic!(system_name);
@@ -226,8 +234,10 @@ impl EcsRunnerMultiThread {
 
                         let system = systems.get_system(idx);
                         let guard = system.read().unwrap();
-                        let result = guard.run_boxed(&ctx);
-                        results_ref.store(idx, result);
+                        match guard.run_boxed(&ctx) {
+                            Ok(result) => results_ref.store(idx, result),
+                            Err(e) => errors_ref.lock().unwrap().push(e),
+                        }
                         let _ = tx.send(RunnerEvent::SystemCompleted(idx));
                     });
                 }};
@@ -271,6 +281,8 @@ impl EcsRunnerMultiThread {
 
             drop(event_tx);
         });
+
+        thread_errors.into_inner().unwrap()
     }
 
     /// Cancels all pending compute tasks and ticks until drained or timeout.
@@ -310,7 +322,7 @@ mod tests {
     struct MovementSystem;
     impl System for MovementSystem {
         type Result = ();
-        fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+        fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), crate::system::SystemError> {
             ctx.lock::<(Write<Position>, Read<Velocity>)>().execute(
                 |(mut positions, velocities)| {
                     for (idx, pos) in positions.iter_mut() {
@@ -320,6 +332,7 @@ mod tests {
                     }
                 },
             );
+            Ok(())
         }
     }
 
@@ -351,17 +364,25 @@ mod tests {
         struct FirstSystem(Arc<AtomicU32>);
         impl System for FirstSystem {
             type Result = ();
-            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+            fn run<'a>(
+                &'a self,
+                _ctx: &'a SystemContext<'a>,
+            ) -> Result<(), crate::system::SystemError> {
                 self.0.store(1, Ordering::SeqCst);
+                Ok(())
             }
         }
 
         struct SecondSystem(Arc<AtomicU32>);
         impl System for SecondSystem {
             type Result = ();
-            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+            fn run<'a>(
+                &'a self,
+                _ctx: &'a SystemContext<'a>,
+            ) -> Result<(), crate::system::SystemError> {
                 assert_eq!(self.0.load(Ordering::SeqCst), 1);
                 self.0.store(2, Ordering::SeqCst);
+                Ok(())
             }
         }
 
@@ -382,10 +403,14 @@ mod tests {
         struct SpawnSystem;
         impl System for SpawnSystem {
             type Result = ();
-            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+            fn run<'a>(
+                &'a self,
+                ctx: &'a SystemContext<'a>,
+            ) -> Result<(), crate::system::SystemError> {
                 ctx.commands(|world| {
                     world.insert_resource(42u32);
                 });
+                Ok(())
             }
         }
 
@@ -409,16 +434,24 @@ mod tests {
         struct IncrementA(Arc<AtomicU32>);
         impl System for IncrementA {
             type Result = ();
-            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+            fn run<'a>(
+                &'a self,
+                _ctx: &'a SystemContext<'a>,
+            ) -> Result<(), crate::system::SystemError> {
                 self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
             }
         }
 
         struct IncrementB(Arc<AtomicU32>);
         impl System for IncrementB {
             type Result = ();
-            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+            fn run<'a>(
+                &'a self,
+                _ctx: &'a SystemContext<'a>,
+            ) -> Result<(), crate::system::SystemError> {
                 self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
             }
         }
 
@@ -443,8 +476,9 @@ mod tests {
         struct ExclSystem;
         impl ExclusiveSystem for ExclSystem {
             type Result = ();
-            fn run(&mut self, world: &mut World) {
+            fn run(&mut self, world: &mut World) -> Result<(), crate::system::SystemError> {
                 world.insert_resource(99u32);
+                Ok(())
             }
         }
 
@@ -463,19 +497,24 @@ mod tests {
         struct RegularSystem;
         impl System for RegularSystem {
             type Result = ();
-            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+            fn run<'a>(
+                &'a self,
+                ctx: &'a SystemContext<'a>,
+            ) -> Result<(), crate::system::SystemError> {
                 ctx.commands(|world| {
                     world.insert_resource(42u32);
                 });
+                Ok(())
             }
         }
 
         struct ExclSystem(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
         impl ExclusiveSystem for ExclSystem {
             type Result = ();
-            fn run(&mut self, world: &mut World) {
+            fn run(&mut self, world: &mut World) -> Result<(), crate::system::SystemError> {
                 let val = *world.resource::<u32>();
                 *self.0.lock().unwrap() = Some(val);
+                Ok(())
             }
         }
 
@@ -502,26 +541,35 @@ mod tests {
         struct First(Arc<AtomicU32>);
         impl System for First {
             type Result = ();
-            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+            fn run<'a>(
+                &'a self,
+                _ctx: &'a SystemContext<'a>,
+            ) -> Result<(), crate::system::SystemError> {
                 self.0.store(1, Ordering::SeqCst);
+                Ok(())
             }
         }
 
         struct Middle(Arc<AtomicU32>);
         impl ExclusiveSystem for Middle {
             type Result = ();
-            fn run(&mut self, _world: &mut World) {
+            fn run(&mut self, _world: &mut World) -> Result<(), crate::system::SystemError> {
                 assert_eq!(self.0.load(Ordering::SeqCst), 1);
                 self.0.store(2, Ordering::SeqCst);
+                Ok(())
             }
         }
 
         struct Last(Arc<AtomicU32>);
         impl System for Last {
             type Result = ();
-            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+            fn run<'a>(
+                &'a self,
+                _ctx: &'a SystemContext<'a>,
+            ) -> Result<(), crate::system::SystemError> {
                 assert_eq!(self.0.load(Ordering::SeqCst), 2);
                 self.0.store(3, Ordering::SeqCst);
+                Ok(())
             }
         }
 
@@ -544,17 +592,21 @@ mod tests {
         struct ExclProducer;
         impl ExclusiveSystem for ExclProducer {
             type Result = u32;
-            fn run(&mut self, _world: &mut World) -> u32 {
-                42
+            fn run(&mut self, _world: &mut World) -> Result<u32, crate::system::SystemError> {
+                Ok(42)
             }
         }
 
         struct Consumer(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
         impl System for Consumer {
             type Result = ();
-            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+            fn run<'a>(
+                &'a self,
+                ctx: &'a SystemContext<'a>,
+            ) -> Result<(), crate::system::SystemError> {
                 let val = *ctx.exclusive_system_result::<ExclProducer>();
                 *self.0.lock().unwrap() = Some(val);
+                Ok(())
             }
         }
 
@@ -581,26 +633,35 @@ mod tests {
         struct ParallelA(Arc<AtomicU32>);
         impl System for ParallelA {
             type Result = ();
-            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+            fn run<'a>(
+                &'a self,
+                _ctx: &'a SystemContext<'a>,
+            ) -> Result<(), crate::system::SystemError> {
                 self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
             }
         }
 
         struct ParallelB(Arc<AtomicU32>);
         impl System for ParallelB {
             type Result = ();
-            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+            fn run<'a>(
+                &'a self,
+                _ctx: &'a SystemContext<'a>,
+            ) -> Result<(), crate::system::SystemError> {
                 self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
             }
         }
 
         struct Barrier(Arc<AtomicU32>);
         impl ExclusiveSystem for Barrier {
             type Result = ();
-            fn run(&mut self, _world: &mut World) {
+            fn run(&mut self, _world: &mut World) -> Result<(), crate::system::SystemError> {
                 // Both parallel systems should have completed
                 assert_eq!(self.0.load(Ordering::SeqCst), 2);
                 self.0.store(10, Ordering::SeqCst);
+                Ok(())
             }
         }
 

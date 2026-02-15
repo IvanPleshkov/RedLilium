@@ -3,6 +3,7 @@ use std::time::Duration;
 use crate::command_collector::CommandCollector;
 use crate::compute::ComputePool;
 use crate::io_runtime::IoRuntime;
+use crate::system::SystemError;
 use crate::system_context::SystemContext;
 use crate::system_results_store::SystemResultsStore;
 use crate::systems_container::SystemsContainer;
@@ -46,14 +47,15 @@ impl EcsRunnerSingleThread {
     /// Each system runs to completion before the next one starts.
     /// The compute pool is driven between polls so spawned tasks
     /// make progress.
-    pub fn run(&self, world: &mut World, systems: &SystemsContainer) {
+    pub fn run(&self, world: &mut World, systems: &SystemsContainer) -> Vec<SystemError> {
         redlilium_core::profile_scope!("ecs: run (single-thread)");
 
         let order = systems.single_thread_order();
         if order.is_empty() {
-            return;
+            return Vec::new();
         }
 
+        let mut errors = Vec::new();
         let commands = CommandCollector::new();
         let results_store =
             SystemResultsStore::new(systems.system_count(), systems.type_id_to_idx().clone());
@@ -72,16 +74,20 @@ impl EcsRunnerSingleThread {
 
                     let system = systems.get_exclusive_system(idx);
                     let mut guard = system.write().unwrap();
-                    let result = guard.run_boxed(world);
-                    results_store.store(idx, result);
+                    match guard.run_boxed(world) {
+                        Ok(result) => results_store.store(idx, result),
+                        Err(e) => errors.push(e),
+                    }
                 } else {
                     let ctx = SystemContext::new(world, &self.compute, &self.io, &commands)
                         .with_system_results(&results_store, systems.accessible_results(idx));
 
                     let system = systems.get_system(idx);
                     let guard = system.read().unwrap();
-                    let result = guard.run_boxed(&ctx);
-                    results_store.store(idx, result);
+                    match guard.run_boxed(&ctx) {
+                        Ok(result) => results_store.store(idx, result),
+                        Err(e) => errors.push(e),
+                    }
                 }
             }
         }
@@ -99,6 +105,8 @@ impl EcsRunnerSingleThread {
             redlilium_core::profile_scope!("ecs: compute drain");
             self.compute.tick_all();
         }
+
+        errors
     }
 
     /// Cancels all pending compute tasks and ticks until drained or timeout.
@@ -130,6 +138,7 @@ mod tests {
     use super::*;
     use crate::access_set::{Read, Write};
     use crate::system::System;
+    use crate::system::SystemError;
 
     struct Position {
         x: f32,
@@ -141,7 +150,7 @@ mod tests {
     struct MovementSystem;
     impl System for MovementSystem {
         type Result = ();
-        fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+        fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
             ctx.lock::<(Write<Position>, Read<Velocity>)>().execute(
                 |(mut positions, velocities)| {
                     for (idx, pos) in positions.iter_mut() {
@@ -151,6 +160,7 @@ mod tests {
                     }
                 },
             );
+            Ok(())
         }
     }
 
@@ -190,18 +200,20 @@ mod tests {
         struct FirstSystem(Arc<AtomicU32>);
         impl System for FirstSystem {
             type Result = ();
-            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
                 self.0.store(1, Ordering::SeqCst);
+                Ok(())
             }
         }
 
         struct SecondSystem(Arc<AtomicU32>);
         impl System for SecondSystem {
             type Result = ();
-            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
                 // Should only run after FirstSystem set value to 1
                 assert_eq!(self.0.load(Ordering::SeqCst), 1);
                 self.0.store(2, Ordering::SeqCst);
+                Ok(())
             }
         }
 
@@ -222,10 +234,11 @@ mod tests {
         struct SpawnSystem;
         impl System for SpawnSystem {
             type Result = ();
-            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
                 ctx.commands(|world| {
                     world.insert_resource(42u32);
                 });
+                Ok(())
             }
         }
 
@@ -250,17 +263,18 @@ mod tests {
         struct ProducerSystem;
         impl System for ProducerSystem {
             type Result = u32;
-            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> u32 {
-                42
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<u32, SystemError> {
+                Ok(42)
             }
         }
 
         struct ConsumerSystem(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
         impl System for ConsumerSystem {
             type Result = ();
-            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
                 let value = *ctx.system_result::<ProducerSystem>();
                 *self.0.lock().unwrap() = Some(value);
+                Ok(())
             }
         }
 
@@ -285,16 +299,17 @@ mod tests {
         struct ProducerSystem;
         impl System for ProducerSystem {
             type Result = u32;
-            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> u32 {
-                42
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<u32, SystemError> {
+                Ok(42)
             }
         }
 
         struct ConsumerSystem;
         impl System for ConsumerSystem {
             type Result = ();
-            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
                 let _ = ctx.system_result::<ProducerSystem>();
+                Ok(())
             }
         }
 
@@ -313,24 +328,27 @@ mod tests {
         struct SystemA;
         impl System for SystemA {
             type Result = String;
-            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> String {
-                "hello".to_string()
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<String, SystemError> {
+                Ok("hello".to_string())
             }
         }
 
         struct SystemB;
         impl System for SystemB {
             type Result = ();
-            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {}
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+                Ok(())
+            }
         }
 
         // C depends on B depends on A, so C should be able to read A's result
         struct SystemC(std::sync::Arc<std::sync::Mutex<Option<String>>>);
         impl System for SystemC {
             type Result = ();
-            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
                 let value = ctx.system_result::<SystemA>().clone();
                 *self.0.lock().unwrap() = Some(value);
+                Ok(())
             }
         }
 
@@ -358,8 +376,9 @@ mod tests {
         struct SpawnSystem;
         impl ExclusiveSystem for SpawnSystem {
             type Result = ();
-            fn run(&mut self, world: &mut World) {
+            fn run(&mut self, world: &mut World) -> Result<(), SystemError> {
                 world.insert_resource(99u32);
+                Ok(())
             }
         }
 
@@ -378,19 +397,21 @@ mod tests {
         struct RegularSystem;
         impl System for RegularSystem {
             type Result = ();
-            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
                 ctx.commands(|world| {
                     world.insert_resource(42u32);
                 });
+                Ok(())
             }
         }
 
         struct ExclSystem(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
         impl ExclusiveSystem for ExclSystem {
             type Result = ();
-            fn run(&mut self, world: &mut World) {
+            fn run(&mut self, world: &mut World) -> Result<(), SystemError> {
                 let val = *world.resource::<u32>();
                 *self.0.lock().unwrap() = Some(val);
+                Ok(())
             }
         }
 
@@ -417,26 +438,29 @@ mod tests {
         struct First(Arc<AtomicU32>);
         impl System for First {
             type Result = ();
-            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
                 self.0.store(1, Ordering::SeqCst);
+                Ok(())
             }
         }
 
         struct Middle(Arc<AtomicU32>);
         impl ExclusiveSystem for Middle {
             type Result = ();
-            fn run(&mut self, _world: &mut World) {
+            fn run(&mut self, _world: &mut World) -> Result<(), SystemError> {
                 assert_eq!(self.0.load(Ordering::SeqCst), 1);
                 self.0.store(2, Ordering::SeqCst);
+                Ok(())
             }
         }
 
         struct Last(Arc<AtomicU32>);
         impl System for Last {
             type Result = ();
-            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
                 assert_eq!(self.0.load(Ordering::SeqCst), 2);
                 self.0.store(3, Ordering::SeqCst);
+                Ok(())
             }
         }
 
@@ -459,17 +483,18 @@ mod tests {
         struct ExclProducer;
         impl ExclusiveSystem for ExclProducer {
             type Result = u32;
-            fn run(&mut self, _world: &mut World) -> u32 {
-                42
+            fn run(&mut self, _world: &mut World) -> Result<u32, SystemError> {
+                Ok(42)
             }
         }
 
         struct Consumer(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
         impl System for Consumer {
             type Result = ();
-            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
                 let val = *ctx.exclusive_system_result::<ExclProducer>();
                 *self.0.lock().unwrap() = Some(val);
+                Ok(())
             }
         }
 

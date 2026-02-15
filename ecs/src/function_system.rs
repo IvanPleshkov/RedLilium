@@ -73,8 +73,9 @@ where
     F: Fn() + Send + Sync + 'static,
 {
     type Result = ();
-    fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+    fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), crate::system::SystemError> {
         (self.func)();
+        Ok(())
     }
 }
 
@@ -100,8 +101,9 @@ where
     F: for<'a> Fn(A::Item<'a>) + Send + Sync + 'static,
 {
     type Result = ();
-    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), crate::system::SystemError> {
         ctx.lock::<A>().execute(|items| (self.func)(items));
+        Ok(())
     }
 }
 
@@ -220,12 +222,13 @@ where
     F: for<'a> Fn(A::EachItem<'a>) + Send + Sync + 'static,
 {
     type Result = ();
-    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), crate::system::SystemError> {
         ctx.lock::<A>().execute(|items| {
             A::run_for_each(&items, |item| {
                 (self.func)(item);
             });
         });
+        Ok(())
     }
 }
 
@@ -299,7 +302,7 @@ mod tests {
         let world = World::new();
         let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
-        run_system_blocking(&sys, &world, &compute, &io);
+        run_system_blocking(&sys, &world, &compute, &io).unwrap();
         assert!(flag.load(Ordering::Relaxed));
     }
 
@@ -317,7 +320,7 @@ mod tests {
         let sys = IntoSystem::<(Read<Position>,)>::into_system(check_positions);
         let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
-        run_system_blocking(&sys, &world, &compute, &io);
+        run_system_blocking(&sys, &world, &compute, &io).unwrap();
     }
 
     #[test]
@@ -336,7 +339,7 @@ mod tests {
         let sys = IntoSystem::<(Write<Position>,)>::into_system(set_positions);
         let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
-        run_system_blocking(&sys, &world, &compute, &io);
+        run_system_blocking(&sys, &world, &compute, &io).unwrap();
         assert_eq!(world.get::<Position>(e).unwrap().x, 99.0);
     }
 
@@ -360,7 +363,7 @@ mod tests {
         let sys = IntoSystem::<(Write<Position>, Read<Velocity>)>::into_system(movement);
         let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
-        run_system_blocking(&sys, &world, &compute, &io);
+        run_system_blocking(&sys, &world, &compute, &io).unwrap();
         assert_eq!(world.get::<Position>(e).unwrap().x, 15.0);
     }
 
@@ -376,7 +379,7 @@ mod tests {
         let sys = IntoSystem::<(crate::access_set::Res<f64>,)>::into_system(read_dt);
         let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
-        run_system_blocking(&sys, &world, &compute, &io);
+        run_system_blocking(&sys, &world, &compute, &io).unwrap();
     }
 
     #[test]
@@ -391,7 +394,7 @@ mod tests {
             IntoSystem::<(crate::access_set::OptionalRead<Position>,)>::into_system(check_optional);
         let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
-        run_system_blocking(&sys, &world, &compute, &io);
+        run_system_blocking(&sys, &world, &compute, &io).unwrap();
     }
 
     #[test]
@@ -410,7 +413,7 @@ mod tests {
             IntoSystem::<(crate::access_set::OptionalRead<Position>,)>::into_system(check_optional);
         let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
-        run_system_blocking(&sys, &world, &compute, &io);
+        run_system_blocking(&sys, &world, &compute, &io).unwrap();
     }
 
     #[test]
@@ -430,7 +433,7 @@ mod tests {
 
         let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
-        run_system_blocking(&sys, &world, &compute, &io);
+        run_system_blocking(&sys, &world, &compute, &io).unwrap();
         assert_eq!(world.get::<Position>(e).unwrap().x, 77.0);
     }
 
@@ -480,7 +483,7 @@ mod tests {
 
         let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
-        run_system_blocking(&sys, &world, &compute, &io);
+        run_system_blocking(&sys, &world, &compute, &io).unwrap();
         assert_eq!(*sum.lock().unwrap(), 3.0);
     }
 
@@ -497,7 +500,7 @@ mod tests {
 
         let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
-        run_system_blocking(&sys, &world, &compute, &io);
+        run_system_blocking(&sys, &world, &compute, &io).unwrap();
         assert_eq!(world.get::<Position>(e).unwrap().x, 99.0);
     }
 
@@ -522,7 +525,7 @@ mod tests {
         let sys = for_each::<(Write<Position>, Read<Velocity>), _>(movement);
         let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
-        run_system_blocking(&sys, &world, &compute, &io);
+        run_system_blocking(&sys, &world, &compute, &io).unwrap();
 
         assert_eq!(world.get::<Position>(e1).unwrap().x, 15.0);
         assert_eq!(world.get::<Position>(e2).unwrap().x, 20.0); // unchanged
@@ -547,7 +550,7 @@ mod tests {
 
         let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
-        run_system_blocking(&sys, &world, &compute, &io);
+        run_system_blocking(&sys, &world, &compute, &io).unwrap();
         assert_eq!(world.get::<Position>(e).unwrap().x, 6.0);
     }
 
@@ -570,7 +573,7 @@ mod tests {
 
         let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
-        run_system_blocking(&sys, &world, &compute, &io);
+        run_system_blocking(&sys, &world, &compute, &io).unwrap();
         let acc = world.resource::<f32>();
         assert_eq!(*acc, 10.0);
     }
@@ -588,7 +591,7 @@ mod tests {
 
         let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
-        run_system_blocking(&sys, &world, &compute, &io);
+        run_system_blocking(&sys, &world, &compute, &io).unwrap();
         assert_eq!(world.get::<Position>(e).unwrap().x, 77.0);
     }
 
@@ -606,7 +609,7 @@ mod tests {
         let sys = IntoSystem::<ForEach<(Write<Position>,)>>::into_system(set_pos);
         let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
-        run_system_blocking(&sys, &world, &compute, &io);
+        run_system_blocking(&sys, &world, &compute, &io).unwrap();
         assert_eq!(world.get::<Position>(e).unwrap().x, 42.0);
     }
 

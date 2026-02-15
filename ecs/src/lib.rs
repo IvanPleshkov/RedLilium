@@ -113,8 +113,8 @@ pub use function_system::{
 pub use lock_request::LockRequest;
 pub use runner::{EcsRunner, EcsRunnerSingleThread, ShutdownError};
 pub use system::{
-    ExclusiveFunctionSystem, ExclusiveSystem, System, run_exclusive_system_blocking,
-    run_system_blocking,
+    ExclusiveFunctionSystem, ExclusiveSystem, System, SystemError, panic_payload_to_string,
+    run_exclusive_system_blocking, run_system_blocking,
 };
 pub use system_context::SystemContext;
 pub use systems_container::{CycleError, Edge, SystemsContainer};

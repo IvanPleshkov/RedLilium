@@ -17,7 +17,7 @@ pub struct UpdateGlobalTransforms;
 
 impl crate::System for UpdateGlobalTransforms {
     type Result = ();
-    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), crate::system::SystemError> {
         ctx.lock::<(
             crate::Read<Transform>,
             crate::Write<GlobalTransform>,
@@ -27,6 +27,7 @@ impl crate::System for UpdateGlobalTransforms {
         .execute(|(transforms, mut globals, children_storage, parents)| {
             update_global_transforms(&transforms, &mut globals, &children_storage, &parents);
         });
+        Ok(())
     }
 }
 

@@ -501,19 +501,34 @@ mod tests {
     struct SystemA;
     impl System for SystemA {
         type Result = ();
-        fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {}
+        fn run<'a>(
+            &'a self,
+            _ctx: &'a SystemContext<'a>,
+        ) -> Result<(), crate::system::SystemError> {
+            Ok(())
+        }
     }
 
     struct SystemB;
     impl System for SystemB {
         type Result = ();
-        fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {}
+        fn run<'a>(
+            &'a self,
+            _ctx: &'a SystemContext<'a>,
+        ) -> Result<(), crate::system::SystemError> {
+            Ok(())
+        }
     }
 
     struct SystemC;
     impl System for SystemC {
         type Result = ();
-        fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {}
+        fn run<'a>(
+            &'a self,
+            _ctx: &'a SystemContext<'a>,
+        ) -> Result<(), crate::system::SystemError> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -698,13 +713,23 @@ mod tests {
     struct ExclusiveA;
     impl ExclusiveSystem for ExclusiveA {
         type Result = ();
-        fn run(&mut self, _world: &mut crate::world::World) {}
+        fn run(
+            &mut self,
+            _world: &mut crate::world::World,
+        ) -> Result<(), crate::system::SystemError> {
+            Ok(())
+        }
     }
 
     struct ExclusiveB;
     impl ExclusiveSystem for ExclusiveB {
         type Result = ();
-        fn run(&mut self, _world: &mut crate::world::World) {}
+        fn run(
+            &mut self,
+            _world: &mut crate::world::World,
+        ) -> Result<(), crate::system::SystemError> {
+            Ok(())
+        }
     }
 
     #[test]

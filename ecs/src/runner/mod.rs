@@ -88,7 +88,11 @@ impl EcsRunner {
     ///
     /// All systems always run to completion. Deferred commands are applied
     /// after every system has finished.
-    pub fn run(&self, world: &mut World, systems: &SystemsContainer) {
+    pub fn run(
+        &self,
+        world: &mut World,
+        systems: &SystemsContainer,
+    ) -> Vec<crate::system::SystemError> {
         match self {
             Self::SingleThread(runner) => runner.run(world, systems),
             #[cfg(not(target_arch = "wasm32"))]
@@ -144,7 +148,7 @@ mod tests {
     struct MovementSystem;
     impl System for MovementSystem {
         type Result = ();
-        fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+        fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), crate::system::SystemError> {
             ctx.lock::<(Write<Position>, Read<Velocity>)>().execute(
                 |(mut positions, velocities)| {
                     for (idx, pos) in positions.iter_mut() {
@@ -154,6 +158,7 @@ mod tests {
                     }
                 },
             );
+            Ok(())
         }
     }
 

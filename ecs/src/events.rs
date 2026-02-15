@@ -115,11 +115,15 @@ impl<T: Send + Sync + 'static> Default for EventUpdateSystem<T> {
 
 impl<T: Send + Sync + 'static> crate::system::System for EventUpdateSystem<T> {
     type Result = ();
-    fn run<'a>(&'a self, ctx: &'a crate::system_context::SystemContext<'a>) {
+    fn run<'a>(
+        &'a self,
+        ctx: &'a crate::system_context::SystemContext<'a>,
+    ) -> Result<(), crate::system::SystemError> {
         ctx.lock::<(crate::access_set::ResMut<Events<T>>,)>()
             .execute(|(mut events,)| {
                 events.update();
             });
+        Ok(())
     }
 }
 
@@ -224,7 +228,7 @@ mod tests {
         let update = EventUpdateSystem::<TestEvent>::new();
         let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
-        run_system_blocking(&update, &world, &compute, &io);
+        run_system_blocking(&update, &world, &compute, &io).unwrap();
 
         // Event should be in previous now
         let events = world.resource::<Events<TestEvent>>();

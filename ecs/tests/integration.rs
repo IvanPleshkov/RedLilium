@@ -236,7 +236,7 @@ fn visibility_filtering_with_systems() {
     // Run transform system via run_blocking
     let compute = ComputePool::new(IoRuntime::new());
     let io = IoRuntime::new();
-    run_system_blocking(&UpdateGlobalTransforms, &world, &compute, &io);
+    run_system_blocking(&UpdateGlobalTransforms, &world, &compute, &io).unwrap();
 
     // Query visible entities (the rendering pattern)
     let globals = world.read::<GlobalTransform>().unwrap();
@@ -346,7 +346,7 @@ fn light_direction_from_transform() {
     // Run transform system via run_blocking
     let compute = ComputePool::new(IoRuntime::new());
     let io = IoRuntime::new();
-    run_system_blocking(&UpdateGlobalTransforms, &world, &compute, &io);
+    run_system_blocking(&UpdateGlobalTransforms, &world, &compute, &io).unwrap();
 
     // Query directional light direction from its global transform
     let globals = world.read::<GlobalTransform>().unwrap();
