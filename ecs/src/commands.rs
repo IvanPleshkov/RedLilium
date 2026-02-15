@@ -1,5 +1,7 @@
 use std::sync::Mutex;
 
+use crate::bundle::Bundle;
+use crate::entity::Entity;
 use crate::world::World;
 
 /// A boxed command closure that mutates the world.
@@ -75,6 +77,49 @@ impl CommandBuffer {
     pub fn remove<T: Send + Sync + 'static>(&self, entity: crate::entity::Entity) {
         self.push(move |world| {
             world.remove::<T>(entity);
+        });
+    }
+
+    /// Queues spawning `count` entities, each with a clone of the given bundle.
+    ///
+    /// # Panics
+    ///
+    /// Panics when applied if any component type has not been registered.
+    pub fn spawn_batch_with(&self, count: u32, bundle: impl Bundle + Clone) {
+        self.push(move |world| {
+            world.spawn_batch_with(count, bundle);
+        });
+    }
+
+    /// Queues despawning multiple entities at once.
+    pub fn despawn_batch(&self, entities: Vec<Entity>) {
+        self.push(move |world| {
+            world.despawn_batch(&entities);
+        });
+    }
+
+    /// Queues inserting a component on each entity from parallel vectors.
+    ///
+    /// # Panics
+    ///
+    /// Panics when applied if the component type has not been registered
+    /// or if the vectors have different lengths.
+    pub fn insert_batch<T: Send + Sync + 'static>(
+        &self,
+        entities: Vec<Entity>,
+        components: Vec<T>,
+    ) {
+        self.push(move |world| {
+            world
+                .insert_batch(&entities, components)
+                .expect("Component not registered");
+        });
+    }
+
+    /// Queues removing a component from multiple entities.
+    pub fn remove_batch<T: Send + Sync + 'static>(&self, entities: Vec<Entity>) {
+        self.push(move |world| {
+            world.remove_batch::<T>(&entities);
         });
     }
 
@@ -164,18 +209,18 @@ impl<'a> SpawnBuilder<'a> {
 mod tests {
     use super::*;
 
-    #[derive(Debug, PartialEq)]
+    #[derive(Debug, Clone, PartialEq)]
     struct Position {
         x: f32,
         y: f32,
     }
 
-    #[derive(Debug, PartialEq)]
+    #[derive(Debug, Clone, PartialEq)]
     struct Velocity {
         x: f32,
     }
 
-    #[derive(Debug, PartialEq)]
+    #[derive(Debug, Clone, PartialEq)]
     struct Health(u32);
 
     #[test]
@@ -358,6 +403,82 @@ mod tests {
         }
 
         assert_eq!(world.entity_count(), 2);
+    }
+
+    #[test]
+    fn spawn_batch_with_command() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+
+        let buffer = CommandBuffer::new();
+        buffer.spawn_batch_with(3, (Position { x: 1.0, y: 2.0 },));
+
+        let cmds = buffer.drain();
+        for cmd in cmds {
+            cmd(&mut world);
+        }
+
+        assert_eq!(world.entity_count(), 3);
+        for e in world.iter_entities() {
+            assert_eq!(world.get::<Position>(e), Some(&Position { x: 1.0, y: 2.0 }));
+        }
+    }
+
+    #[test]
+    fn despawn_batch_command() {
+        let mut world = World::new();
+        let entities = (0..4).map(|_| world.spawn()).collect::<Vec<_>>();
+
+        let buffer = CommandBuffer::new();
+        buffer.despawn_batch(entities.clone());
+
+        let cmds = buffer.drain();
+        for cmd in cmds {
+            cmd(&mut world);
+        }
+
+        assert_eq!(world.entity_count(), 0);
+    }
+
+    #[test]
+    fn insert_batch_command() {
+        let mut world = World::new();
+        world.register_component::<Health>();
+        let entities: Vec<_> = (0..3).map(|_| world.spawn()).collect();
+
+        let buffer = CommandBuffer::new();
+        buffer.insert_batch(entities.clone(), vec![Health(10), Health(20), Health(30)]);
+
+        let cmds = buffer.drain();
+        for cmd in cmds {
+            cmd(&mut world);
+        }
+
+        assert_eq!(world.get::<Health>(entities[0]), Some(&Health(10)));
+        assert_eq!(world.get::<Health>(entities[1]), Some(&Health(20)));
+        assert_eq!(world.get::<Health>(entities[2]), Some(&Health(30)));
+    }
+
+    #[test]
+    fn remove_batch_command() {
+        let mut world = World::new();
+        world.register_component::<Health>();
+        let entities: Vec<_> = (0..3).map(|_| world.spawn()).collect();
+        for e in &entities {
+            world.insert(*e, Health(100)).unwrap();
+        }
+
+        let buffer = CommandBuffer::new();
+        buffer.remove_batch::<Health>(entities.clone());
+
+        let cmds = buffer.drain();
+        for cmd in cmds {
+            cmd(&mut world);
+        }
+
+        for e in &entities {
+            assert!(world.get::<Health>(*e).is_none());
+        }
     }
 
     #[test]

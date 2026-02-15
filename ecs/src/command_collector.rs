@@ -63,6 +63,49 @@ impl CommandCollector {
         });
     }
 
+    /// Queues spawning `count` entities, each with a clone of the given bundle.
+    ///
+    /// # Panics
+    ///
+    /// Panics when applied if any component type has not been registered.
+    pub fn spawn_batch_with(&self, count: u32, bundle: impl Bundle + Clone) {
+        self.push(move |world| {
+            world.spawn_batch_with(count, bundle);
+        });
+    }
+
+    /// Queues despawning multiple entities at once.
+    pub fn despawn_batch(&self, entities: Vec<Entity>) {
+        self.push(move |world| {
+            world.despawn_batch(&entities);
+        });
+    }
+
+    /// Queues inserting a component on each entity from parallel vectors.
+    ///
+    /// # Panics
+    ///
+    /// Panics when applied if the component type has not been registered
+    /// or if the vectors have different lengths.
+    pub fn insert_batch<T: Send + Sync + 'static>(
+        &self,
+        entities: Vec<Entity>,
+        components: Vec<T>,
+    ) {
+        self.push(move |world| {
+            world
+                .insert_batch(&entities, components)
+                .expect("Component not registered");
+        });
+    }
+
+    /// Queues removing a component from multiple entities.
+    pub fn remove_batch<T: Send + Sync + 'static>(&self, entities: Vec<Entity>) {
+        self.push(move |world| {
+            world.remove_batch::<T>(&entities);
+        });
+    }
+
     /// Begins building a spawn command that creates an entity with components.
     ///
     /// # Example
@@ -172,13 +215,13 @@ impl Default for CommandCollector {
 mod tests {
     use super::*;
 
-    #[derive(Debug, PartialEq)]
+    #[derive(Debug, Clone, PartialEq)]
     struct Position {
         x: f32,
         y: f32,
     }
 
-    #[derive(Debug, PartialEq)]
+    #[derive(Debug, Clone, PartialEq)]
     struct Health(u32);
 
     fn apply(collector: &CommandCollector, world: &mut World) {
@@ -300,5 +343,64 @@ mod tests {
         apply(&collector, &mut world);
 
         assert_eq!(world.get::<Health>(entity), Some(&Health(150)));
+    }
+
+    #[test]
+    fn spawn_batch_with_collector() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+
+        let collector = CommandCollector::new();
+        collector.spawn_batch_with(3, (Position { x: 5.0, y: 6.0 },));
+        apply(&collector, &mut world);
+
+        assert_eq!(world.entity_count(), 3);
+        for e in world.iter_entities() {
+            assert_eq!(world.get::<Position>(e), Some(&Position { x: 5.0, y: 6.0 }));
+        }
+    }
+
+    #[test]
+    fn despawn_batch_collector() {
+        let mut world = World::new();
+        let entities: Vec<_> = (0..3).map(|_| world.spawn()).collect();
+
+        let collector = CommandCollector::new();
+        collector.despawn_batch(entities.clone());
+        apply(&collector, &mut world);
+
+        assert_eq!(world.entity_count(), 0);
+    }
+
+    #[test]
+    fn insert_batch_collector() {
+        let mut world = World::new();
+        world.register_component::<Health>();
+        let entities: Vec<_> = (0..2).map(|_| world.spawn()).collect();
+
+        let collector = CommandCollector::new();
+        collector.insert_batch(entities.clone(), vec![Health(10), Health(20)]);
+        apply(&collector, &mut world);
+
+        assert_eq!(world.get::<Health>(entities[0]), Some(&Health(10)));
+        assert_eq!(world.get::<Health>(entities[1]), Some(&Health(20)));
+    }
+
+    #[test]
+    fn remove_batch_collector() {
+        let mut world = World::new();
+        world.register_component::<Health>();
+        let entities: Vec<_> = (0..2).map(|_| world.spawn()).collect();
+        for e in &entities {
+            world.insert(*e, Health(100)).unwrap();
+        }
+
+        let collector = CommandCollector::new();
+        collector.remove_batch::<Health>(entities.clone());
+        apply(&collector, &mut world);
+
+        for e in &entities {
+            assert!(world.get::<Health>(*e).is_none());
+        }
     }
 }

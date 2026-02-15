@@ -137,6 +137,17 @@ impl<T: 'static> SparseSetInner<T> {
         self.dense.is_empty()
     }
 
+    /// Reserves capacity for at least `additional` more components.
+    ///
+    /// Pre-grows dense arrays to avoid repeated allocations during
+    /// batch insertions.
+    pub fn reserve(&mut self, additional: usize) {
+        self.dense.reserve(additional);
+        self.entities.reserve(additional);
+        self.ticks_added.reserve(additional);
+        self.ticks_changed.reserve(additional);
+    }
+
     /// Iterates over `(entity_index, &component)` pairs in dense order.
     pub fn iter(&self) -> impl Iterator<Item = (u32, &T)> {
         self.entities.iter().copied().zip(self.dense.iter())

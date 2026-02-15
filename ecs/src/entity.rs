@@ -117,6 +117,37 @@ impl EntityAllocator {
         self.count
     }
 
+    /// Allocates `count` entities at once, reusing recycled slots first.
+    ///
+    /// More efficient than calling [`allocate`](Self::allocate) in a loop
+    /// because internal vectors are grown in bulk.
+    pub fn allocate_many(&mut self, count: u32) -> Vec<Entity> {
+        let mut entities = Vec::with_capacity(count as usize);
+
+        // Reuse from free list first
+        let reuse = count.min(self.free_list.len() as u32);
+        for _ in 0..reuse {
+            let index = self.free_list.pop().unwrap();
+            self.alive[index as usize] = true;
+            entities.push(Entity::new(index, self.generations[index as usize]));
+        }
+
+        // Allocate fresh slots for remainder
+        let fresh = count - reuse;
+        if fresh > 0 {
+            let start = self.generations.len() as u32;
+            self.generations
+                .resize(self.generations.len() + fresh as usize, 0);
+            self.alive.resize(self.alive.len() + fresh as usize, true);
+            for i in 0..fresh {
+                entities.push(Entity::new(start + i, 0));
+            }
+        }
+
+        self.count += count;
+        entities
+    }
+
     /// Iterates over all currently alive entity IDs.
     pub fn iter_alive(&self) -> impl Iterator<Item = Entity> + '_ {
         self.alive
@@ -231,5 +262,57 @@ mod tests {
         let entity = Entity::new(42, 3);
         assert_eq!(format!("{:?}", entity), "Entity(42:3)");
         assert_eq!(format!("{}", entity), "Entity(42:3)");
+    }
+
+    #[test]
+    fn allocate_many_fresh() {
+        let mut alloc = EntityAllocator::new();
+        let entities = alloc.allocate_many(5);
+
+        assert_eq!(entities.len(), 5);
+        assert_eq!(alloc.count(), 5);
+        for (i, e) in entities.iter().enumerate() {
+            assert_eq!(e.index(), i as u32);
+            assert_eq!(e.generation(), 0);
+            assert!(alloc.is_alive(*e));
+        }
+    }
+
+    #[test]
+    fn allocate_many_reuses_free_list() {
+        let mut alloc = EntityAllocator::new();
+        let originals: Vec<_> = (0..5).map(|_| alloc.allocate()).collect();
+
+        // Despawn some
+        alloc.deallocate(originals[1]);
+        alloc.deallocate(originals[3]);
+
+        let batch = alloc.allocate_many(4);
+        assert_eq!(batch.len(), 4);
+        assert_eq!(alloc.count(), 7); // 3 original alive + 4 new
+
+        // First 2 should reuse recycled slots (indices 3 and 1, LIFO)
+        assert_eq!(batch[0].index(), 3);
+        assert_eq!(batch[0].generation(), 1);
+        assert_eq!(batch[1].index(), 1);
+        assert_eq!(batch[1].generation(), 1);
+
+        // Next 2 should be fresh
+        assert_eq!(batch[2].index(), 5);
+        assert_eq!(batch[2].generation(), 0);
+        assert_eq!(batch[3].index(), 6);
+        assert_eq!(batch[3].generation(), 0);
+
+        for e in &batch {
+            assert!(alloc.is_alive(*e));
+        }
+    }
+
+    #[test]
+    fn allocate_many_zero() {
+        let mut alloc = EntityAllocator::new();
+        let entities = alloc.allocate_many(0);
+        assert!(entities.is_empty());
+        assert_eq!(alloc.count(), 0);
     }
 }

@@ -324,6 +324,199 @@ impl World {
         entity
     }
 
+    // ---- Batch entity operations ----
+
+    /// Spawns `count` empty entities at once.
+    ///
+    /// More efficient than calling [`spawn`](World::spawn) in a loop because
+    /// the entity allocator grows its internal arrays in bulk.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let entities = world.spawn_batch(100);
+    /// assert_eq!(entities.len(), 100);
+    /// ```
+    pub fn spawn_batch(&mut self, count: u32) -> Vec<Entity> {
+        self.entities.allocate_many(count)
+    }
+
+    /// Spawns `count` entities, each with a clone of the given bundle.
+    ///
+    /// More efficient than calling [`spawn_with`](World::spawn_with) in a loop
+    /// because entity allocation is batched and component storage is pre-reserved.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any component type in the bundle has not been registered.
+    pub fn spawn_batch_with(&mut self, count: u32, bundle: impl Bundle + Clone) -> Vec<Entity> {
+        let entities = self.entities.allocate_many(count);
+        for entity in &entities {
+            bundle
+                .clone()
+                .insert_into(self, *entity)
+                .expect("Component in bundle not registered");
+        }
+        entities
+    }
+
+    /// Spawns `count` entities, calling `f(index)` to produce each entity's bundle.
+    ///
+    /// Use this when each entity needs different component data.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let entities = world.spawn_batch_with_fn(10, |i| {
+    ///     (Position { x: i as f32, y: 0.0 }, Health(100))
+    /// });
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if any component type in the bundle has not been registered.
+    pub fn spawn_batch_with_fn<B: Bundle>(
+        &mut self,
+        count: u32,
+        f: impl Fn(usize) -> B,
+    ) -> Vec<Entity> {
+        let entities = self.entities.allocate_many(count);
+        for (i, entity) in entities.iter().enumerate() {
+            f(i).insert_into(self, *entity)
+                .expect("Component in bundle not registered");
+        }
+        entities
+    }
+
+    /// Despawns multiple entities at once.
+    ///
+    /// Skips entities that are already dead.
+    /// Records removals for [`removed`](World::removed) filter queries.
+    pub fn despawn_batch(&mut self, entities: &[Entity]) {
+        let tick = self.tick;
+        for &entity in entities {
+            if !self.entities.deallocate(entity) {
+                continue;
+            }
+            let index = entity.index();
+            for storage in self.components.values_mut() {
+                if storage.remove_untyped(index) {
+                    storage.record_removal(index, tick);
+                }
+            }
+        }
+    }
+
+    /// Inserts a component on each entity from parallel slices.
+    ///
+    /// `entities` and `components` must have the same length.
+    /// Uses tick 0 (untracked). For change-tracked insertion,
+    /// use [`insert_batch_tracked`](World::insert_batch_tracked).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ComponentNotRegistered`] if `T` has never been registered.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the slices have different lengths or if any entity is dead.
+    pub fn insert_batch<T: Send + Sync + 'static>(
+        &mut self,
+        entities: &[Entity],
+        components: Vec<T>,
+    ) -> Result<(), ComponentNotRegistered> {
+        assert_eq!(
+            entities.len(),
+            components.len(),
+            "insert_batch: entities and components must have the same length"
+        );
+
+        let storage =
+            self.components
+                .get_mut(&TypeId::of::<T>())
+                .ok_or(ComponentNotRegistered {
+                    type_name: std::any::type_name::<T>(),
+                })?;
+        let set = storage.typed_mut::<T>();
+        set.reserve(components.len());
+
+        for (entity, component) in entities.iter().zip(components) {
+            assert!(
+                self.entities.is_alive(*entity),
+                "Cannot insert component on dead entity {entity}"
+            );
+            set.insert(entity.index(), component);
+        }
+        Ok(())
+    }
+
+    /// Inserts a component on each entity with change tracking.
+    ///
+    /// Like [`insert_batch`](World::insert_batch) but records the current tick.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ComponentNotRegistered`] if `T` has never been registered.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the slices have different lengths or if any entity is dead.
+    pub fn insert_batch_tracked<T: Send + Sync + 'static>(
+        &mut self,
+        entities: &[Entity],
+        components: Vec<T>,
+    ) -> Result<(), ComponentNotRegistered> {
+        assert_eq!(
+            entities.len(),
+            components.len(),
+            "insert_batch_tracked: entities and components must have the same length"
+        );
+
+        let tick = self.tick;
+        let storage =
+            self.components
+                .get_mut(&TypeId::of::<T>())
+                .ok_or(ComponentNotRegistered {
+                    type_name: std::any::type_name::<T>(),
+                })?;
+        let set = storage.typed_mut::<T>();
+        set.reserve(components.len());
+
+        for (entity, component) in entities.iter().zip(components) {
+            assert!(
+                self.entities.is_alive(*entity),
+                "Cannot insert component on dead entity {entity}"
+            );
+            set.insert_with_tick(entity.index(), component, tick);
+        }
+        Ok(())
+    }
+
+    /// Removes a component from multiple entities at once.
+    ///
+    /// Skips entities that don't have the component.
+    /// Records removals for [`removed`](World::removed) filter queries.
+    pub fn remove_batch<T: 'static>(&mut self, entities: &[Entity]) {
+        let tick = self.tick;
+        let Some(storage) = self.components.get_mut(&TypeId::of::<T>()) else {
+            return;
+        };
+
+        // Collect which entities were actually removed, then record.
+        let mut removed_indices = Vec::new();
+        {
+            let set = storage.typed_mut::<T>();
+            for &entity in entities {
+                if set.remove(entity.index()).is_some() {
+                    removed_indices.push(entity.index());
+                }
+            }
+        }
+        for index in removed_indices {
+            storage.record_removal(index, tick);
+        }
+    }
+
     /// Removes a component from an entity.
     ///
     /// Returns the removed value, or `None` if the entity did not have it.
@@ -814,19 +1007,19 @@ impl Default for World {
 mod tests {
     use super::*;
 
-    #[derive(Debug, PartialEq)]
+    #[derive(Debug, Clone, PartialEq)]
     struct Position {
         x: f32,
         y: f32,
     }
 
-    #[derive(Debug, PartialEq)]
+    #[derive(Debug, Clone, PartialEq)]
     struct Velocity {
         x: f32,
         y: f32,
     }
 
-    #[derive(Debug, PartialEq)]
+    #[derive(Debug, Clone, PartialEq)]
     struct Health(u32);
 
     struct Frozen;
@@ -1235,5 +1428,187 @@ mod tests {
 
         let removed = world.removed::<Health>(0);
         assert!(!removed.matches(entity.index()));
+    }
+
+    // ---- Batch operation tests ----
+
+    #[test]
+    fn spawn_batch_creates_entities() {
+        let mut world = World::new();
+        let entities = world.spawn_batch(5);
+
+        assert_eq!(entities.len(), 5);
+        assert_eq!(world.entity_count(), 5);
+        for e in &entities {
+            assert!(world.is_alive(*e));
+        }
+    }
+
+    #[test]
+    fn spawn_batch_zero() {
+        let mut world = World::new();
+        let entities = world.spawn_batch(0);
+        assert!(entities.is_empty());
+        assert_eq!(world.entity_count(), 0);
+    }
+
+    #[test]
+    fn spawn_batch_with_inserts_components() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Health>();
+
+        let entities = world.spawn_batch_with(3, (Position { x: 1.0, y: 2.0 }, Health(100)));
+
+        assert_eq!(entities.len(), 3);
+        for e in &entities {
+            assert_eq!(
+                world.get::<Position>(*e),
+                Some(&Position { x: 1.0, y: 2.0 })
+            );
+            assert_eq!(world.get::<Health>(*e), Some(&Health(100)));
+        }
+    }
+
+    #[test]
+    fn spawn_batch_with_fn_unique_data() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+
+        let entities = world.spawn_batch_with_fn(4, |i| {
+            (Position {
+                x: i as f32,
+                y: (i * 10) as f32,
+            },)
+        });
+
+        assert_eq!(entities.len(), 4);
+        for (i, e) in entities.iter().enumerate() {
+            assert_eq!(
+                world.get::<Position>(*e),
+                Some(&Position {
+                    x: i as f32,
+                    y: (i * 10) as f32
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn despawn_batch_removes_all() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Health>();
+
+        let entities = world.spawn_batch(4);
+        for e in &entities {
+            world.insert(*e, Position { x: 0.0, y: 0.0 }).unwrap();
+            world.insert(*e, Health(50)).unwrap();
+        }
+
+        world.advance_tick(); // tick = 1
+        world.despawn_batch(&entities);
+
+        assert_eq!(world.entity_count(), 0);
+        for e in &entities {
+            assert!(!world.is_alive(*e));
+        }
+
+        // Removal tracking should work
+        for e in &entities {
+            assert!(world.removed::<Position>(0).matches(e.index()));
+            assert!(world.removed::<Health>(0).matches(e.index()));
+        }
+    }
+
+    #[test]
+    fn despawn_batch_skips_dead() {
+        let mut world = World::new();
+        let entities = world.spawn_batch(3);
+        world.despawn(entities[1]); // pre-despawn one
+
+        world.despawn_batch(&entities); // should not panic on already dead entity[1]
+        assert_eq!(world.entity_count(), 0);
+    }
+
+    #[test]
+    fn insert_batch_adds_components() {
+        let mut world = World::new();
+        world.register_component::<Health>();
+
+        let entities = world.spawn_batch(3);
+        let healths = vec![Health(10), Health(20), Health(30)];
+
+        world.insert_batch(&entities, healths).unwrap();
+
+        assert_eq!(world.get::<Health>(entities[0]), Some(&Health(10)));
+        assert_eq!(world.get::<Health>(entities[1]), Some(&Health(20)));
+        assert_eq!(world.get::<Health>(entities[2]), Some(&Health(30)));
+    }
+
+    #[test]
+    fn insert_batch_tracked_records_tick() {
+        let mut world = World::new();
+        world.register_component::<Health>();
+        world.advance_tick(); // tick = 1
+
+        let entities = world.spawn_batch(2);
+        let healths = vec![Health(10), Health(20)];
+
+        world.insert_batch_tracked(&entities, healths).unwrap();
+
+        assert!(world.added::<Health>(0).matches(entities[0].index()));
+        assert!(world.added::<Health>(0).matches(entities[1].index()));
+    }
+
+    #[test]
+    #[should_panic(expected = "entities and components must have the same length")]
+    fn insert_batch_mismatched_lengths_panics() {
+        let mut world = World::new();
+        world.register_component::<Health>();
+
+        let entities = world.spawn_batch(2);
+        let healths = vec![Health(10)];
+
+        let _ = world.insert_batch(&entities, healths);
+    }
+
+    #[test]
+    fn insert_batch_unregistered_returns_err() {
+        let mut world = World::new();
+        let entities = world.spawn_batch(1);
+        let result = world.insert_batch(&entities, vec![Health(10)]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn remove_batch_removes_components() {
+        let mut world = World::new();
+        world.register_component::<Health>();
+
+        let entities = world.spawn_batch(3);
+        for (i, e) in entities.iter().enumerate() {
+            world.insert(*e, Health(i as u32 * 10)).unwrap();
+        }
+
+        world.advance_tick();
+        world.remove_batch::<Health>(&entities[0..2]);
+
+        assert!(world.get::<Health>(entities[0]).is_none());
+        assert!(world.get::<Health>(entities[1]).is_none());
+        assert_eq!(world.get::<Health>(entities[2]), Some(&Health(20)));
+
+        // Removal tracking
+        assert!(world.removed::<Health>(0).matches(entities[0].index()));
+        assert!(world.removed::<Health>(0).matches(entities[1].index()));
+        assert!(!world.removed::<Health>(0).matches(entities[2].index()));
+    }
+
+    #[test]
+    fn remove_batch_unregistered_no_panic() {
+        let mut world = World::new();
+        let entities = world.spawn_batch(2);
+        // Should not panic when component type is not registered
+        world.remove_batch::<Health>(&entities);
     }
 }
