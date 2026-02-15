@@ -4,7 +4,9 @@ use std::fmt;
 use std::sync::{Arc, RwLock};
 
 use crate::function_system::IntoSystem;
-use crate::system::{DynSystem, System};
+use crate::system::{
+    DynExclusiveSystem, DynSystem, ExclusiveFunctionSystem, ExclusiveSystem, System,
+};
 
 /// An explicit ordering edge between two systems.
 ///
@@ -45,12 +47,24 @@ impl fmt::Display for CycleError {
 
 impl std::error::Error for CycleError {}
 
+/// A registered system entry — either regular or exclusive.
+pub(crate) enum SystemEntry {
+    /// A regular system that borrows `&World` via `SystemContext`.
+    Regular(Arc<RwLock<dyn DynSystem>>),
+    /// An exclusive system that receives `&mut World` directly.
+    Exclusive(Arc<RwLock<dyn DynExclusiveSystem>>),
+}
+
 /// Container for registered systems with explicit dependency ordering.
 ///
-/// Systems are registered with [`add()`](SystemsContainer::add). Ordering
-/// constraints are added with [`add_edge()`](SystemsContainer::add_edge) or
+/// Systems are registered with [`add()`](SystemsContainer::add) (regular)
+/// or [`add_exclusive()`](SystemsContainer::add_exclusive) (exclusive).
+/// Ordering constraints are added with
+/// [`add_edge()`](SystemsContainer::add_edge) or
 /// [`add_edges()`](SystemsContainer::add_edges). Cycle detection uses Kahn's
 /// topological sort algorithm.
+///
+/// Edges work between any combination of regular and exclusive systems.
 ///
 /// The runner uses this container (immutably) to determine execution order
 /// and access system instances.
@@ -64,12 +78,8 @@ impl std::error::Error for CycleError {}
 /// container.add_edge::<UpdateGlobalTransforms, UpdateCameraMatrices>().unwrap();
 /// ```
 pub struct SystemsContainer {
-    /// Registered systems in insertion order, each behind `Arc<RwLock<>>`.
-    ///
-    /// External code can hold typed `Arc<RwLock<S>>` clones (from [`add`])
-    /// to inspect or mutate system configuration outside the runner.
-    /// The runner read-locks each system during `run_boxed()`.
-    systems: Vec<Arc<RwLock<dyn DynSystem>>>,
+    /// Registered systems in insertion order.
+    systems: Vec<SystemEntry>,
     /// Cached type names to avoid locking just for diagnostics.
     names: Vec<&'static str>,
     /// Forward adjacency list: edges[i] = indices of systems that depend on i.
@@ -126,7 +136,7 @@ impl SystemsContainer {
         let idx = self.systems.len();
         self.id_to_idx.insert(type_id, idx);
         self.idx_to_id.push(type_id);
-        self.systems.push(arc.clone());
+        self.systems.push(SystemEntry::Regular(arc.clone()));
         self.names.push(std::any::type_name::<S>());
         self.edges.push(Vec::new());
         self.in_degrees.push(0);
@@ -258,11 +268,94 @@ impl SystemsContainer {
         self.systems.len()
     }
 
-    /// Returns the `Arc<RwLock<dyn DynSystem>>` for the system at the given index.
+    /// Registers an exclusive system, wrapping it in `Arc<RwLock<S>>`.
+    ///
+    /// Returns the typed `Arc` handle. Exclusive systems receive `&mut World`
+    /// directly and act as barriers in the scheduler.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a system of the same type is already registered.
+    pub fn add_exclusive<S: ExclusiveSystem>(&mut self, system: S) -> Arc<RwLock<S>> {
+        let type_id = TypeId::of::<S>();
+
+        assert!(
+            !self.id_to_idx.contains_key(&type_id),
+            "System `{}` is already registered",
+            std::any::type_name::<S>()
+        );
+
+        let arc = Arc::new(RwLock::new(system));
+        let idx = self.systems.len();
+        self.id_to_idx.insert(type_id, idx);
+        self.idx_to_id.push(type_id);
+        self.systems.push(SystemEntry::Exclusive(arc.clone()));
+        self.names.push(std::any::type_name::<S>());
+        self.edges.push(Vec::new());
+        self.in_degrees.push(0);
+        self.accessible_results.push(HashSet::new());
+        self.rebuild_order();
+        arc
+    }
+
+    /// Registers a closure as an exclusive system.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// container.add_exclusive_fn(|world: &mut World| {
+    ///     world.insert_resource(42u32);
+    /// });
+    /// ```
+    pub fn add_exclusive_fn<F>(&mut self, func: F) -> Arc<RwLock<ExclusiveFunctionSystem<F>>>
+    where
+        F: FnMut(&mut crate::world::World) + Send + Sync + 'static,
+    {
+        self.add_exclusive(ExclusiveFunctionSystem::new(func))
+    }
+
+    /// Returns whether the system at the given index is exclusive.
+    pub(crate) fn is_exclusive(&self, idx: usize) -> bool {
+        matches!(&self.systems[idx], SystemEntry::Exclusive(_))
+    }
+
+    /// Returns the `Arc<RwLock<dyn DynSystem>>` for the regular system at the given index.
     ///
     /// The runner read-locks this to call `run_boxed()`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the system at `idx` is exclusive.
     pub(crate) fn get_system(&self, idx: usize) -> &Arc<RwLock<dyn DynSystem>> {
-        &self.systems[idx]
+        match &self.systems[idx] {
+            SystemEntry::Regular(sys) => sys,
+            SystemEntry::Exclusive(_) => {
+                panic!(
+                    "system `{}` at index {} is exclusive, not regular",
+                    self.names[idx], idx
+                )
+            }
+        }
+    }
+
+    /// Returns the `Arc<RwLock<dyn DynExclusiveSystem>>` for the exclusive system
+    /// at the given index.
+    ///
+    /// The runner write-locks this to call `run_boxed()`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the system at `idx` is regular.
+    pub(crate) fn get_exclusive_system(&self, idx: usize) -> &Arc<RwLock<dyn DynExclusiveSystem>> {
+        match &self.systems[idx] {
+            SystemEntry::Exclusive(sys) => sys,
+            SystemEntry::Regular(_) => {
+                panic!(
+                    "system `{}` at index {} is regular, not exclusive",
+                    self.names[idx], idx
+                )
+            }
+        }
     }
 
     /// Returns the type name of the system at the given index.
@@ -598,5 +691,111 @@ mod tests {
         container.add(SystemA);
 
         assert!(container.get_type_name(0).contains("SystemA"));
+    }
+
+    // ---- Exclusive system tests ----
+
+    struct ExclusiveA;
+    impl ExclusiveSystem for ExclusiveA {
+        type Result = ();
+        fn run(&mut self, _world: &mut crate::world::World) {}
+    }
+
+    struct ExclusiveB;
+    impl ExclusiveSystem for ExclusiveB {
+        type Result = ();
+        fn run(&mut self, _world: &mut crate::world::World) {}
+    }
+
+    #[test]
+    fn add_exclusive_system() {
+        let mut container = SystemsContainer::new();
+        container.add_exclusive(ExclusiveA);
+        assert_eq!(container.system_count(), 1);
+        assert!(container.is_exclusive(0));
+    }
+
+    #[test]
+    fn add_exclusive_fn_system() {
+        let mut container = SystemsContainer::new();
+        container.add_exclusive_fn(|_world: &mut crate::world::World| {});
+        assert_eq!(container.system_count(), 1);
+        assert!(container.is_exclusive(0));
+    }
+
+    #[test]
+    fn is_exclusive_false_for_regular() {
+        let mut container = SystemsContainer::new();
+        container.add(SystemA);
+        assert!(!container.is_exclusive(0));
+    }
+
+    #[test]
+    #[should_panic(expected = "already registered")]
+    fn duplicate_exclusive_panics() {
+        let mut container = SystemsContainer::new();
+        container.add_exclusive(ExclusiveA);
+        container.add_exclusive(ExclusiveA);
+    }
+
+    #[test]
+    fn edge_regular_to_exclusive() {
+        let mut container = SystemsContainer::new();
+        container.add(SystemA);
+        container.add_exclusive(ExclusiveA);
+        container.add_edge::<SystemA, ExclusiveA>().unwrap();
+
+        assert_eq!(container.ready_indices(), vec![0]);
+        assert_eq!(container.dependents_of(0), &[1]);
+    }
+
+    #[test]
+    fn edge_exclusive_to_regular() {
+        let mut container = SystemsContainer::new();
+        container.add_exclusive(ExclusiveA);
+        container.add(SystemA);
+        container.add_edge::<ExclusiveA, SystemA>().unwrap();
+
+        assert_eq!(container.ready_indices(), vec![0]);
+        assert_eq!(container.dependents_of(0), &[1]);
+    }
+
+    #[test]
+    fn edge_exclusive_to_exclusive() {
+        let mut container = SystemsContainer::new();
+        container.add_exclusive(ExclusiveA);
+        container.add_exclusive(ExclusiveB);
+        container.add_edge::<ExclusiveA, ExclusiveB>().unwrap();
+
+        assert_eq!(container.ready_indices(), vec![0]);
+    }
+
+    #[test]
+    fn mixed_dependency_chain() {
+        let mut container = SystemsContainer::new();
+        container.add(SystemA);
+        container.add_exclusive(ExclusiveA);
+        container.add(SystemB);
+        container.add_edge::<SystemA, ExclusiveA>().unwrap();
+        container.add_edge::<ExclusiveA, SystemB>().unwrap();
+
+        assert_eq!(container.in_degrees(), &[0, 1, 1]);
+        assert_eq!(container.ready_indices(), vec![0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "is exclusive, not regular")]
+    fn get_system_panics_for_exclusive() {
+        let mut container = SystemsContainer::new();
+        container.add_exclusive(ExclusiveA);
+        container.get_system(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "is regular, not exclusive")]
+    fn get_exclusive_system_panics_for_regular() {
+        let mut container = SystemsContainer::new();
+        container.add(SystemA);
+        container.get_exclusive_system(0);
     }
 }

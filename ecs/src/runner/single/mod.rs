@@ -60,13 +60,29 @@ impl EcsRunnerSingleThread {
 
         {
             for &idx in order {
-                let ctx = SystemContext::new(world, &self.compute, &self.io, &commands)
-                    .with_system_results(&results_store, systems.accessible_results(idx));
+                if systems.is_exclusive(idx) {
+                    // Apply pending deferred commands so the exclusive system
+                    // sees structural changes from predecessors.
+                    {
+                        redlilium_core::profile_scope!("ecs: apply commands (pre-exclusive)");
+                        for cmd in commands.drain() {
+                            cmd(world);
+                        }
+                    }
 
-                let system = systems.get_system(idx);
-                let guard = system.read().unwrap();
-                let result = guard.run_boxed(&ctx);
-                results_store.store(idx, result);
+                    let system = systems.get_exclusive_system(idx);
+                    let mut guard = system.write().unwrap();
+                    let result = guard.run_boxed(world);
+                    results_store.store(idx, result);
+                } else {
+                    let ctx = SystemContext::new(world, &self.compute, &self.io, &commands)
+                        .with_system_results(&results_store, systems.accessible_results(idx));
+
+                    let system = systems.get_system(idx);
+                    let guard = system.read().unwrap();
+                    let result = guard.run_boxed(&ctx);
+                    results_store.store(idx, result);
+                }
             }
         }
 
@@ -331,5 +347,142 @@ mod tests {
         runner.run(&mut world, &container);
 
         assert_eq!(*result.lock().unwrap(), Some("hello".to_string()));
+    }
+
+    // ---- Exclusive system tests ----
+
+    use crate::system::ExclusiveSystem;
+
+    #[test]
+    fn exclusive_system_modifies_world() {
+        struct SpawnSystem;
+        impl ExclusiveSystem for SpawnSystem {
+            type Result = ();
+            fn run(&mut self, world: &mut World) {
+                world.insert_resource(99u32);
+            }
+        }
+
+        let mut container = SystemsContainer::new();
+        container.add_exclusive(SpawnSystem);
+
+        let runner = EcsRunnerSingleThread::new();
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        assert_eq!(*world.resource::<u32>(), 99);
+    }
+
+    #[test]
+    fn exclusive_sees_commands_from_predecessor() {
+        struct RegularSystem;
+        impl System for RegularSystem {
+            type Result = ();
+            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+                ctx.commands(|world| {
+                    world.insert_resource(42u32);
+                });
+            }
+        }
+
+        struct ExclSystem(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
+        impl ExclusiveSystem for ExclSystem {
+            type Result = ();
+            fn run(&mut self, world: &mut World) {
+                let val = *world.resource::<u32>();
+                *self.0.lock().unwrap() = Some(val);
+            }
+        }
+
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut container = SystemsContainer::new();
+        container.add(RegularSystem);
+        container.add_exclusive(ExclSystem(observed.clone()));
+        container.add_edge::<RegularSystem, ExclSystem>().unwrap();
+
+        let runner = EcsRunnerSingleThread::new();
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        assert_eq!(*observed.lock().unwrap(), Some(42));
+    }
+
+    #[test]
+    fn mixed_chain_regular_exclusive_regular() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let order = Arc::new(AtomicU32::new(0));
+
+        struct First(Arc<AtomicU32>);
+        impl System for First {
+            type Result = ();
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+                self.0.store(1, Ordering::SeqCst);
+            }
+        }
+
+        struct Middle(Arc<AtomicU32>);
+        impl ExclusiveSystem for Middle {
+            type Result = ();
+            fn run(&mut self, _world: &mut World) {
+                assert_eq!(self.0.load(Ordering::SeqCst), 1);
+                self.0.store(2, Ordering::SeqCst);
+            }
+        }
+
+        struct Last(Arc<AtomicU32>);
+        impl System for Last {
+            type Result = ();
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+                assert_eq!(self.0.load(Ordering::SeqCst), 2);
+                self.0.store(3, Ordering::SeqCst);
+            }
+        }
+
+        let mut container = SystemsContainer::new();
+        container.add(First(order.clone()));
+        container.add_exclusive(Middle(order.clone()));
+        container.add(Last(order.clone()));
+        container.add_edge::<First, Middle>().unwrap();
+        container.add_edge::<Middle, Last>().unwrap();
+
+        let runner = EcsRunnerSingleThread::new();
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        assert_eq!(order.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn exclusive_system_result_accessible() {
+        struct ExclProducer;
+        impl ExclusiveSystem for ExclProducer {
+            type Result = u32;
+            fn run(&mut self, _world: &mut World) -> u32 {
+                42
+            }
+        }
+
+        struct Consumer(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
+        impl System for Consumer {
+            type Result = ();
+            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+                let val = *ctx.exclusive_system_result::<ExclProducer>();
+                *self.0.lock().unwrap() = Some(val);
+            }
+        }
+
+        let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut container = SystemsContainer::new();
+        container.add_exclusive(ExclProducer);
+        container.add(Consumer(result.clone()));
+        container.add_edge::<ExclProducer, Consumer>().unwrap();
+
+        let runner = EcsRunnerSingleThread::new();
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        assert_eq!(*result.lock().unwrap(), Some(42));
     }
 }

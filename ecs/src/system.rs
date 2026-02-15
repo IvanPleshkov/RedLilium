@@ -95,6 +95,98 @@ impl<S: System> DynSystem for S {
     }
 }
 
+/// A system that receives exclusive `&mut World` access.
+///
+/// Unlike [`System`], which accesses components through the lock-execute
+/// pattern on `&SystemContext`, exclusive systems get direct mutable access
+/// to the entire world. This enables immediate structural changes (spawn,
+/// despawn, insert, remove) without deferring to commands.
+///
+/// Exclusive systems act as **barriers** in the scheduler — no other system
+/// runs concurrently with an exclusive system. Pending deferred commands from
+/// predecessor regular systems are applied before the exclusive system runs.
+///
+/// # When to use
+///
+/// Use `ExclusiveSystem` when you need:
+/// - Direct `&mut World` access (e.g. scene loading, batch operations)
+/// - Immediate structural changes visible within the same frame
+/// - Operations that don't fit the lock-execute pattern
+///
+/// For most systems, prefer the regular [`System`] trait which enables
+/// parallel execution.
+///
+/// # Example
+///
+/// ```ignore
+/// struct SceneLoader;
+///
+/// impl ExclusiveSystem for SceneLoader {
+///     type Result = ();
+///     fn run(&mut self, world: &mut World) {
+///         let e = world.spawn();
+///         world.insert(e, Transform::IDENTITY).unwrap();
+///     }
+/// }
+/// ```
+pub trait ExclusiveSystem: Send + Sync + 'static {
+    /// The value returned by this system after execution.
+    ///
+    /// Downstream systems that depend on this system (via dependency edges)
+    /// can read the result through
+    /// [`SystemContext::exclusive_system_result::<Self>()`].
+    type Result: Send + Sync + 'static;
+
+    /// Execute the system with exclusive world access.
+    fn run(&mut self, world: &mut World) -> Self::Result;
+}
+
+/// Object-safe version of [`ExclusiveSystem`] used internally for type erasure.
+pub(crate) trait DynExclusiveSystem: Send + Sync {
+    fn run_boxed(&mut self, world: &mut World) -> Box<dyn Any + Send + Sync>;
+}
+
+impl<S: ExclusiveSystem> DynExclusiveSystem for S {
+    fn run_boxed(&mut self, world: &mut World) -> Box<dyn Any + Send + Sync> {
+        let result = self.run(world);
+        Box::new(result) as Box<dyn Any + Send + Sync>
+    }
+}
+
+/// An exclusive system built from a closure.
+///
+/// Wraps a `FnMut(&mut World)` as an [`ExclusiveSystem`]. Created via
+/// [`SystemsContainer::add_exclusive_fn`](crate::SystemsContainer::add_exclusive_fn).
+///
+/// # Example
+///
+/// ```ignore
+/// let mut container = SystemsContainer::new();
+/// container.add_exclusive_fn(|world: &mut World| {
+///     world.insert_resource(42u32);
+/// });
+/// ```
+pub struct ExclusiveFunctionSystem<F> {
+    func: F,
+}
+
+impl<F> ExclusiveFunctionSystem<F> {
+    /// Creates a new exclusive function system from a closure.
+    pub fn new(func: F) -> Self {
+        Self { func }
+    }
+}
+
+impl<F> ExclusiveSystem for ExclusiveFunctionSystem<F>
+where
+    F: FnMut(&mut World) + Send + Sync + 'static,
+{
+    type Result = ();
+    fn run(&mut self, world: &mut World) {
+        (self.func)(world);
+    }
+}
+
 /// Runs a system synchronously, returning its result.
 ///
 /// Creates a single-threaded [`SystemContext`], calls [`System::run`],
@@ -111,6 +203,17 @@ pub fn run_system_blocking<S: System>(
     let commands = CommandCollector::new();
     let ctx = SystemContext::new(world, compute, io, &commands);
     system.run(&ctx)
+}
+
+/// Runs an exclusive system synchronously, returning its result.
+///
+/// The system receives `&mut World` directly. Useful for tests and
+/// one-off invocations outside a runner.
+pub fn run_exclusive_system_blocking<S: ExclusiveSystem>(
+    system: &mut S,
+    world: &mut World,
+) -> S::Result {
+    system.run(world)
 }
 
 #[cfg(test)]
@@ -191,6 +294,67 @@ mod tests {
         run_system_blocking(&MovementSystem, &world, &compute, &io);
 
         assert_eq!(world.get::<Position>(e).unwrap().x, 15.0);
+    }
+
+    // ---- ExclusiveSystem tests ----
+
+    struct SpawnExclusiveSystem;
+    impl ExclusiveSystem for SpawnExclusiveSystem {
+        type Result = ();
+        fn run(&mut self, world: &mut World) {
+            let e = world.spawn();
+            world.insert(e, Position { x: 99.0 }).unwrap();
+        }
+    }
+
+    #[test]
+    fn exclusive_system_runs() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+
+        let mut sys = SpawnExclusiveSystem;
+        run_exclusive_system_blocking(&mut sys, &mut world);
+
+        assert_eq!(world.entity_count(), 1);
+        let e = world.iter_entities().next().unwrap();
+        assert_eq!(world.get::<Position>(e).unwrap().x, 99.0);
+    }
+
+    #[test]
+    fn exclusive_function_system_runs() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+
+        let mut sys = ExclusiveFunctionSystem {
+            func: |world: &mut World| {
+                let e = world.spawn();
+                world.insert(e, Position { x: 42.0 }).unwrap();
+            },
+        };
+        run_exclusive_system_blocking(&mut sys, &mut world);
+
+        assert_eq!(world.entity_count(), 1);
+        let e = world.iter_entities().next().unwrap();
+        assert_eq!(world.get::<Position>(e).unwrap().x, 42.0);
+    }
+
+    #[test]
+    fn exclusive_system_with_result() {
+        struct CountSystem;
+        impl ExclusiveSystem for CountSystem {
+            type Result = u32;
+            fn run(&mut self, world: &mut World) -> u32 {
+                world.entity_count()
+            }
+        }
+
+        let mut world = World::new();
+        world.spawn();
+        world.spawn();
+
+        let mut sys = CountSystem;
+        let count = run_exclusive_system_blocking(&mut sys, &mut world);
+        assert_eq!(count, 2);
     }
 
     #[test]

@@ -12,7 +12,7 @@ use crate::io_runtime::IoRuntime;
 use crate::lock_request::LockRequest;
 use crate::main_thread_dispatcher::MainThreadDispatcher;
 use crate::query_guard::QueryGuard;
-use crate::system::System;
+use crate::system::{ExclusiveSystem, System};
 use crate::system_results_store::SystemResultsStore;
 use crate::world::World;
 
@@ -329,7 +329,20 @@ impl<'a> SystemContext<'a> {
     ///   correct dependency edges).
     pub fn system_result<S: System>(&self) -> &S::Result {
         let type_id = TypeId::of::<S>();
+        self.fetch_result::<S::Result>(type_id, std::any::type_name::<S>())
+    }
 
+    /// Returns the result produced by a predecessor exclusive system.
+    ///
+    /// Works identically to [`system_result()`](Self::system_result) but
+    /// for [`ExclusiveSystem`] types.
+    pub fn exclusive_system_result<S: ExclusiveSystem>(&self) -> &S::Result {
+        let type_id = TypeId::of::<S>();
+        self.fetch_result::<S::Result>(type_id, std::any::type_name::<S>())
+    }
+
+    /// Internal helper for result lookup with access validation.
+    fn fetch_result<R: Send + Sync + 'static>(&self, type_id: TypeId, type_name: &str) -> &R {
         let accessible = self
             .accessible_results
             .expect("system_result() called outside a runner — no results available");
@@ -337,14 +350,14 @@ impl<'a> SystemContext<'a> {
             accessible.contains(&type_id),
             "System `{}` result is not accessible from this system — \
              add a dependency edge to guarantee it completes first",
-            std::any::type_name::<S>()
+            type_name
         );
 
         let store = self
             .system_results
             .expect("system_result() called outside a runner — no results store");
         store
-            .get::<S::Result>(type_id)
+            .get::<R>(type_id)
             .expect("system result not yet available — dependency graph error")
     }
 

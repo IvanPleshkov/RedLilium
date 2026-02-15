@@ -1,4 +1,3 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -18,6 +17,10 @@ use super::ShutdownError;
 /// Systems are dispatched to OS threads via `std::thread::scope`.
 /// Component access is synchronized through per-TypeId RwLocks acquired
 /// in sorted order to prevent deadlocks.
+///
+/// Exclusive systems act as barriers: when an exclusive system becomes
+/// ready, all running parallel systems must complete first, then the
+/// exclusive system runs alone with `&mut World`.
 pub struct EcsRunnerMultiThread {
     compute: ComputePool,
     io: IoRuntime,
@@ -60,12 +63,13 @@ impl EcsRunnerMultiThread {
 
     /// Runs all systems respecting dependency ordering, with parallel execution.
     ///
-    /// Independent systems (no dependency conflicts) run concurrently on
-    /// separate threads. Component access is synchronized via TypeId-ordered
-    /// RwLocks in the execute() closure.
+    /// Independent regular systems run concurrently on separate threads.
+    /// Exclusive systems act as barriers — they run alone with `&mut World`
+    /// after all preceding parallel systems have completed. Pending deferred
+    /// commands are applied before each exclusive system.
     ///
-    /// All systems always run to completion. Deferred commands are applied
-    /// after every system has finished.
+    /// All systems always run to completion. Remaining deferred commands
+    /// are applied after every system has finished.
     pub fn run(&self, world: &mut World, systems: &SystemsContainer) {
         redlilium_core::profile_scope!("ecs: run (multi-thread)");
 
@@ -77,103 +81,86 @@ impl EcsRunnerMultiThread {
         let commands = CommandCollector::new();
         let results_store = SystemResultsStore::new(n, systems.type_id_to_idx().clone());
 
-        // Scope the system execution so ctx and futures are dropped
-        // before we need &mut world for command application.
-        {
-            // Unified event channel for completions AND main-thread dispatch
-            let (event_tx, event_rx) = mpsc::channel::<RunnerEvent>();
-            let dispatcher = MainThreadDispatcher::new(event_tx.clone());
+        let mut remaining_deps: Vec<usize> = systems.in_degrees().to_vec();
+        let mut started = vec![false; n];
+        let mut completed_count = 0usize;
 
-            // Atomic dependency counters
-            let remaining_deps: Vec<AtomicUsize> = systems
-                .in_degrees()
-                .iter()
-                .map(|&d| AtomicUsize::new(d))
-                .collect();
+        while completed_count < n {
+            // Collect ready systems
+            let mut exclusive_ready = None;
+            let mut regular_ready = Vec::new();
 
-            let mut started = vec![false; n];
-            let mut completed_count = 0usize;
+            for i in 0..n {
+                if !started[i] && remaining_deps[i] == 0 {
+                    if systems.is_exclusive(i) {
+                        if exclusive_ready.is_none() {
+                            exclusive_ready = Some(i);
+                        }
+                    } else {
+                        regular_ready.push(i);
+                    }
+                }
+            }
 
-            std::thread::scope(|scope| {
-                // Inline helper: spawn a system on a scoped thread
-                macro_rules! spawn_system {
-                    ($i:expr) => {{
-                        started[$i] = true;
-                        let tx = event_tx.clone();
-                        let compute_ref = &self.compute;
-                        let io_ref = &self.io;
-                        let commands_ref = &commands;
-                        let dispatcher_ref = &dispatcher;
-                        let results_ref = &results_store;
-                        let world_ref: &World = world;
-                        let idx = $i;
-                        let accessible = systems.accessible_results(idx);
-                        let system_name = systems.get_type_name(idx);
-                        scope.spawn(move || {
-                            redlilium_core::set_thread_name!("ecs: worker");
-                            redlilium_core::profile_scope_dynamic!(system_name);
-
-                            let ctx = SystemContext::with_dispatcher(
-                                world_ref,
-                                compute_ref,
-                                io_ref,
-                                commands_ref,
-                                dispatcher_ref,
-                            )
-                            .with_system_results(results_ref, accessible);
-
-                            let system = systems.get_system(idx);
-                            let guard = system.read().unwrap();
-                            let result = guard.run_boxed(&ctx);
-                            results_ref.store(idx, result);
-                            let _ = tx.send(RunnerEvent::SystemCompleted(idx));
-                        });
-                    }};
+            if let Some(exc_idx) = exclusive_ready {
+                // Run any ready regular systems first (they may be independent
+                // of the exclusive system) to maximize parallelism before the barrier.
+                if !regular_ready.is_empty() {
+                    self.run_parallel_phase(
+                        world,
+                        systems,
+                        &commands,
+                        &results_store,
+                        &mut remaining_deps,
+                        &mut started,
+                        &mut completed_count,
+                        &regular_ready,
+                    );
                 }
 
-                // Start initial ready systems
-                for i in 0..n {
-                    if remaining_deps[i].load(Ordering::Acquire) == 0 {
-                        spawn_system!(i);
+                // Apply pending deferred commands so the exclusive system
+                // sees structural changes from predecessors.
+                {
+                    redlilium_core::profile_scope!("ecs: apply commands (pre-exclusive)");
+                    for cmd in commands.drain() {
+                        cmd(world);
                     }
                 }
 
-                // Coordination loop on the main thread
-                while completed_count < n {
-                    // Wait for an event with short timeout (allows compute ticking)
-                    match event_rx.recv_timeout(Duration::from_millis(1)) {
-                        Ok(RunnerEvent::SystemCompleted(completed_idx)) => {
-                            completed_count += 1;
+                // Run exclusive system with &mut World
+                started[exc_idx] = true;
+                {
+                    let system_name = systems.get_type_name(exc_idx);
+                    redlilium_core::profile_scope_dynamic!(system_name);
 
-                            // Decrement dependents and start newly ready systems
-                            for &dep in systems.dependents_of(completed_idx) {
-                                let prev = remaining_deps[dep].fetch_sub(1, Ordering::AcqRel);
-                                if prev == 1 && !started[dep] {
-                                    spawn_system!(dep);
-                                }
-                            }
-                        }
-                        Ok(RunnerEvent::MainThreadRequest(work)) => {
-                            redlilium_core::profile_scope!("ecs: main-thread dispatch");
-                            work();
-                        }
-                        Err(mpsc::RecvTimeoutError::Timeout) => {}
-                        Err(mpsc::RecvTimeoutError::Disconnected) => {
-                            break;
-                        }
-                    }
-
-                    // Tick compute pool on main thread (budgeted to avoid blocking
-                    // on long-running tasks without yields)
-                    self.compute.tick_with_budget(Duration::from_millis(1));
+                    let system = systems.get_exclusive_system(exc_idx);
+                    let mut guard = system.write().unwrap();
+                    let result = guard.run_boxed(world);
+                    results_store.store(exc_idx, result);
                 }
-
-                // Drop the sender so scope join doesn't deadlock
-                drop(event_tx);
-            });
+                completed_count += 1;
+                for &dep in systems.dependents_of(exc_idx) {
+                    remaining_deps[dep] -= 1;
+                }
+            } else if !regular_ready.is_empty() {
+                // All ready systems are regular — run them in parallel
+                self.run_parallel_phase(
+                    world,
+                    systems,
+                    &commands,
+                    &results_store,
+                    &mut remaining_deps,
+                    &mut started,
+                    &mut completed_count,
+                    &regular_ready,
+                );
+            } else {
+                // No ready systems — should not happen with a valid DAG
+                break;
+            }
         }
 
-        // Apply deferred commands (ctx and futures dropped, world is free)
+        // Apply remaining deferred commands
         {
             redlilium_core::profile_scope!("ecs: apply commands");
             for cmd in commands.drain() {
@@ -182,12 +169,108 @@ impl EcsRunnerMultiThread {
         }
 
         // Opportunistically tick remaining compute tasks (time-budgeted).
-        // Tasks that don't complete here persist in the pool and continue
-        // making progress on subsequent run() calls.
         if self.compute.pending_count() > 0 {
             redlilium_core::profile_scope!("ecs: compute drain");
             self.compute.tick_with_budget(Duration::from_millis(2));
         }
+    }
+
+    /// Runs a batch of regular systems in parallel using a scoped thread pool.
+    ///
+    /// Systems that become ready during execution (due to completions) are
+    /// also spawned — unless they are exclusive, in which case they are
+    /// deferred to the caller.
+    #[allow(clippy::too_many_arguments)]
+    fn run_parallel_phase(
+        &self,
+        world: &mut World,
+        systems: &SystemsContainer,
+        commands: &CommandCollector,
+        results_store: &SystemResultsStore,
+        remaining_deps: &mut [usize],
+        started: &mut [bool],
+        completed_count: &mut usize,
+        initial_ready: &[usize],
+    ) {
+        let (event_tx, event_rx) = mpsc::channel::<RunnerEvent>();
+        let dispatcher = MainThreadDispatcher::new(event_tx.clone());
+        let mut active_count = 0usize;
+
+        std::thread::scope(|scope| {
+            macro_rules! spawn_system {
+                ($i:expr) => {{
+                    started[$i] = true;
+                    active_count += 1;
+                    let tx = event_tx.clone();
+                    let compute_ref = &self.compute;
+                    let io_ref = &self.io;
+                    let commands_ref = commands;
+                    let dispatcher_ref = &dispatcher;
+                    let results_ref = results_store;
+                    let world_ref: &World = world;
+                    let idx = $i;
+                    let accessible = systems.accessible_results(idx);
+                    let system_name = systems.get_type_name(idx);
+                    scope.spawn(move || {
+                        redlilium_core::set_thread_name!("ecs: worker");
+                        redlilium_core::profile_scope_dynamic!(system_name);
+
+                        let ctx = SystemContext::with_dispatcher(
+                            world_ref,
+                            compute_ref,
+                            io_ref,
+                            commands_ref,
+                            dispatcher_ref,
+                        )
+                        .with_system_results(results_ref, accessible);
+
+                        let system = systems.get_system(idx);
+                        let guard = system.read().unwrap();
+                        let result = guard.run_boxed(&ctx);
+                        results_ref.store(idx, result);
+                        let _ = tx.send(RunnerEvent::SystemCompleted(idx));
+                    });
+                }};
+            }
+
+            // Start initial ready regular systems
+            for &i in initial_ready {
+                spawn_system!(i);
+            }
+
+            // Coordination loop — runs until all active systems complete.
+            // Newly ready regular systems are spawned immediately;
+            // exclusive systems are left for the outer loop.
+            while active_count > 0 {
+                match event_rx.recv_timeout(Duration::from_millis(1)) {
+                    Ok(RunnerEvent::SystemCompleted(completed_idx)) => {
+                        active_count -= 1;
+                        *completed_count += 1;
+
+                        for &dep in systems.dependents_of(completed_idx) {
+                            remaining_deps[dep] -= 1;
+                            if remaining_deps[dep] == 0
+                                && !started[dep]
+                                && !systems.is_exclusive(dep)
+                            {
+                                spawn_system!(dep);
+                            }
+                            // Exclusive systems deferred to outer loop
+                        }
+                    }
+                    Ok(RunnerEvent::MainThreadRequest(work)) => {
+                        redlilium_core::profile_scope!("ecs: main-thread dispatch");
+                        work();
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+
+                self.compute.tick_with_budget(Duration::from_millis(1));
+            }
+
+            drop(event_tx);
+        });
     }
 
     /// Cancels all pending compute tasks and ticks until drained or timeout.
@@ -349,5 +432,189 @@ mod tests {
         runner.run(&mut world, &container);
 
         assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+
+    // ---- Exclusive system tests ----
+
+    use crate::system::ExclusiveSystem;
+
+    #[test]
+    fn exclusive_system_multi_thread() {
+        struct ExclSystem;
+        impl ExclusiveSystem for ExclSystem {
+            type Result = ();
+            fn run(&mut self, world: &mut World) {
+                world.insert_resource(99u32);
+            }
+        }
+
+        let mut container = SystemsContainer::new();
+        container.add_exclusive(ExclSystem);
+
+        let runner = EcsRunnerMultiThread::new(2);
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        assert_eq!(*world.resource::<u32>(), 99);
+    }
+
+    #[test]
+    fn exclusive_sees_commands_multi_thread() {
+        struct RegularSystem;
+        impl System for RegularSystem {
+            type Result = ();
+            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+                ctx.commands(|world| {
+                    world.insert_resource(42u32);
+                });
+            }
+        }
+
+        struct ExclSystem(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
+        impl ExclusiveSystem for ExclSystem {
+            type Result = ();
+            fn run(&mut self, world: &mut World) {
+                let val = *world.resource::<u32>();
+                *self.0.lock().unwrap() = Some(val);
+            }
+        }
+
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut container = SystemsContainer::new();
+        container.add(RegularSystem);
+        container.add_exclusive(ExclSystem(observed.clone()));
+        container.add_edge::<RegularSystem, ExclSystem>().unwrap();
+
+        let runner = EcsRunnerMultiThread::new(2);
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        assert_eq!(*observed.lock().unwrap(), Some(42));
+    }
+
+    #[test]
+    fn mixed_chain_multi_thread() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let order = Arc::new(AtomicU32::new(0));
+
+        struct First(Arc<AtomicU32>);
+        impl System for First {
+            type Result = ();
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+                self.0.store(1, Ordering::SeqCst);
+            }
+        }
+
+        struct Middle(Arc<AtomicU32>);
+        impl ExclusiveSystem for Middle {
+            type Result = ();
+            fn run(&mut self, _world: &mut World) {
+                assert_eq!(self.0.load(Ordering::SeqCst), 1);
+                self.0.store(2, Ordering::SeqCst);
+            }
+        }
+
+        struct Last(Arc<AtomicU32>);
+        impl System for Last {
+            type Result = ();
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+                assert_eq!(self.0.load(Ordering::SeqCst), 2);
+                self.0.store(3, Ordering::SeqCst);
+            }
+        }
+
+        let mut container = SystemsContainer::new();
+        container.add(First(order.clone()));
+        container.add_exclusive(Middle(order.clone()));
+        container.add(Last(order.clone()));
+        container.add_edge::<First, Middle>().unwrap();
+        container.add_edge::<Middle, Last>().unwrap();
+
+        let runner = EcsRunnerMultiThread::new(4);
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        assert_eq!(order.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn exclusive_result_accessible_multi_thread() {
+        struct ExclProducer;
+        impl ExclusiveSystem for ExclProducer {
+            type Result = u32;
+            fn run(&mut self, _world: &mut World) -> u32 {
+                42
+            }
+        }
+
+        struct Consumer(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
+        impl System for Consumer {
+            type Result = ();
+            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+                let val = *ctx.exclusive_system_result::<ExclProducer>();
+                *self.0.lock().unwrap() = Some(val);
+            }
+        }
+
+        let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut container = SystemsContainer::new();
+        container.add_exclusive(ExclProducer);
+        container.add(Consumer(result.clone()));
+        container.add_edge::<ExclProducer, Consumer>().unwrap();
+
+        let runner = EcsRunnerMultiThread::new(2);
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        assert_eq!(*result.lock().unwrap(), Some(42));
+    }
+
+    #[test]
+    fn parallel_systems_before_exclusive_barrier() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let counter = Arc::new(AtomicU32::new(0));
+
+        struct ParallelA(Arc<AtomicU32>);
+        impl System for ParallelA {
+            type Result = ();
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        struct ParallelB(Arc<AtomicU32>);
+        impl System for ParallelB {
+            type Result = ();
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        struct Barrier(Arc<AtomicU32>);
+        impl ExclusiveSystem for Barrier {
+            type Result = ();
+            fn run(&mut self, _world: &mut World) {
+                // Both parallel systems should have completed
+                assert_eq!(self.0.load(Ordering::SeqCst), 2);
+                self.0.store(10, Ordering::SeqCst);
+            }
+        }
+
+        let mut container = SystemsContainer::new();
+        container.add(ParallelA(counter.clone()));
+        container.add(ParallelB(counter.clone()));
+        container.add_exclusive(Barrier(counter.clone()));
+        container.add_edge::<ParallelA, Barrier>().unwrap();
+        container.add_edge::<ParallelB, Barrier>().unwrap();
+
+        let runner = EcsRunnerMultiThread::new(4);
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        assert_eq!(counter.load(Ordering::SeqCst), 10);
     }
 }
