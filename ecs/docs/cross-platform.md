@@ -6,7 +6,7 @@ The ECS is designed to run on both native desktop platforms and WebAssembly (WAS
 
 | Feature | Native (x86_64, ARM) | WASM (wasm32) |
 |---------|----------------------|---------------|
-| Single-threaded runner | Yes | Yes |
+| Single-threaded runner | Yes | Yes (sequential) |
 | Multi-threaded runner | Yes | No |
 | Compute pool | Full (tick, tick_all, tick_extract) | Full |
 | IO runtime | tokio (1 worker thread) | wasm_bindgen_futures |

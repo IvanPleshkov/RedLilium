@@ -115,12 +115,11 @@ impl<T: Send + Sync + 'static> Default for EventUpdateSystem<T> {
 
 impl<T: Send + Sync + 'static> crate::system::System for EventUpdateSystem<T> {
     type Result = ();
-    async fn run<'a>(&'a self, ctx: &'a crate::system_context::SystemContext<'a>) {
+    fn run<'a>(&'a self, ctx: &'a crate::system_context::SystemContext<'a>) {
         ctx.lock::<(crate::access_set::ResMut<Events<T>>,)>()
             .execute(|(mut events,)| {
                 events.update();
-            })
-            .await;
+            });
     }
 }
 

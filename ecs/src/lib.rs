@@ -1,4 +1,3 @@
-#![allow(refining_impl_trait)]
 //! # RedLilium ECS
 //!
 //! Custom Entity-Component-System with integrated async compute support.
@@ -12,7 +11,7 @@
 //!
 //! ## Systems & Scheduling
 //!
-//! - [`System`] — Async system trait with compile-time borrow safety
+//! - [`System`] — System trait with compile-time borrow safety
 //! - [`SystemContext`] — Context for component access, compute, and commands
 //! - [`SystemsContainer`] — System registration with dependency tracking
 //! - [`EcsRunner`] — Single-threaded or multi-threaded system executor

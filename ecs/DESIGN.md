@@ -4,7 +4,7 @@
 
 Existing ECS solutions treat async compute as an afterthought — something bolted on through external task pools. In a real game engine, CPU cores sit idle while the slowest ECS system in a dependency stage finishes. Background work (navmesh rebuilds, pathfinding, LOD calculations, asset processing) has no way to fill those gaps.
 
-RedLilium ECS is designed from the ground up with a **unified scheduling model**: async ECS systems and background compute tasks share the same thread pool. When a core finishes its system and no other systems are ready, it automatically picks up async compute work. No idle cores.
+RedLilium ECS is designed from the ground up with a **unified scheduling model**: ECS systems and background compute tasks share the same thread pool. When a core finishes its system and no other systems are ready, it automatically picks up async compute work. No idle cores.
 
 ```
 Traditional ECS (wasted CPU):
@@ -24,7 +24,7 @@ Core 4: [cull █]  [navmesh ▒▒▒] [LOD ▒▒]  ← async compute fills ga
 
 ## Goals
 
-1. **Async-native scheduling** — ECS systems and compute tasks share one work-stealing thread pool. Idle cores automatically pick up background work.
+1. **Unified scheduling** — ECS systems and compute tasks share one work-stealing thread pool. Idle cores automatically pick up background work.
 
 2. **Priority-based execution** — Critical systems (physics, rendering) always run first. Background tasks (navmesh, pathfinding) fill gaps without affecting frame time.
 
@@ -42,37 +42,36 @@ Core 4: [cull █]  [navmesh ▒▒▒] [LOD ▒▒]  ← async compute fills ga
 
 ## Architecture Overview
 
-### Async Systems with Scoped World Access
+### Sync Systems with Lock-Execute Pattern
 
-The key architectural decision: **ECS systems are async and can spawn/await compute tasks within a single frame.** The hard problem of borrowing World data across await points is solved by `QueryAccess::scope()` — World borrows are confined to closures and automatically dropped before any `.await`.
+The key architectural decision: **ECS systems are synchronous functions that access the World through a lock-execute pattern.** Component locks are confined to closures and automatically dropped when the closure returns, preventing deadlocks in multi-threaded execution.
 
-- **Async systems** access the World through scoped closures. All systems complete within a single `schedule.run()` call. Between scopes, systems can `.await` compute tasks.
-- **Compute tasks** receive owned data (copies/clones extracted from scope). They run on the shared pool and may span multiple frames. Results come back via channels or `.await`.
+- **Sync systems** access the World through `ctx.lock::<A>().execute(|items| {...})`. All systems complete within a single `runner.run()` call.
+- **Compute tasks** receive owned data (copies/clones extracted from execute closures). They run on the shared pool and may span multiple frames. Systems can wait for results via `compute.block_on()` or fire-and-forget.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│ async system (completes within one frame)                │
+│ system with compute (completes within one frame)         │
 │                                                          │
-│  access.scope(|world| {     ← borrow World              │
-│      data = world.read::<NavMesh>().clone();             │
-│  });                         ← borrows dropped           │
+│  let data = ctx.lock::<(Read<NavMesh>,)>()               │
+│      .execute(|(nav,)| nav.clone());  ← locks released   │
 │                                                          │
-│  let handle = compute.spawn(Priority::High, |ctx| async {│
-│      heavy_pathfinding(data)  ← runs on pool thread     │
-│  });                                                     │
-│  let result = (&mut handle).await;  ← system suspends   │
-│                                       pool ticks task    │
-│  access.scope(|world| {     ← borrow World again        │
-│      apply_results(world, result);                       │
-│  });                         ← borrows dropped           │
+│  let mut handle = ctx.compute().spawn(Priority::High,    │
+│      |ctx| async { heavy_pathfinding(data) });           │
+│  let result = ctx.compute().block_on(&mut handle);       │
+│                      ← ticks pool until task completes   │
+│                                                          │
+│  if let Some(paths) = result {                           │
+│      ctx.commands(move |world| { apply(world, paths); });│
+│  }                                                       │
 └─────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────┐
 │ fire-and-forget compute tasks (may span multiple frames) │
 │                                                          │
-│  access.scope(|world| {                                  │
-│      let geometry = extract_geometry(world);             │
-│  });                                                     │
+│  let geometry = ctx.lock::<(Read<Geometry>,)>()          │
+│      .execute(|(geo,)| extract_geometry(&geo));          │
+│                                                          │
 │  compute.spawn(Priority::Low, |ctx| async move {        │
 │      rebuild_navmesh(geometry)  ← runs across frames    │
 │  });                                                     │
@@ -90,23 +89,23 @@ One pool, two priority levels, work-stealing:
 │            Shared Work-Stealing Pool              │
 │                                                   │
 │  ┌───────────────────┐  ┌─────────────────────┐  │
-│  │ System Futures    │  │ Compute Tasks       │  │
+│  │ Systems           │  │ Compute Tasks       │  │
 │  │ (high priority)   │  │ (fill gaps)         │  │
 │  │                   │  │                     │  │
-│  │ physics           │  │ navmesh.await       │  │
-│  │ AI                │  │ pathfind.await      │  │
-│  │ animation         │  │ LOD.await           │  │
-│  │ culling           │  │ terrain.await       │  │
+│  │ physics           │  │ navmesh             │  │
+│  │ AI                │  │ pathfind            │  │
+│  │ animation         │  │ LOD                 │  │
+│  │ culling           │  │ terrain             │  │
 │  └───────────────────┘  └─────────────────────┘  │
 │                                                   │
-│  Worker threads: poll system futures first,       │
+│  Worker threads: run assigned systems,            │
 │                  tick compute tasks when idle      │
 └──────────────────────────────────────────────────┘
 ```
 
 Each worker thread loop:
-1. Poll assigned system future → run it
-2. System yields (awaiting compute)? Tick compute tasks
+1. Run assigned system to completion
+2. No systems ready? Tick compute tasks
 3. Nothing at all? Park until woken
 
 ### Priority Levels
@@ -180,77 +179,58 @@ let mut transforms = world.write::<Transform>();
 
 ## System Scheduling
 
-Systems implement the `System` trait: an async `run` method and an `access` descriptor. The scheduler resolves dependencies and runs non-conflicting systems in parallel:
+Systems implement the `System` trait: a synchronous `run` method that receives a `SystemContext`. The scheduler resolves dependencies and runs non-conflicting systems in parallel:
 
 ```rust
 struct PhysicsSystem;
 
 impl System for PhysicsSystem {
-    fn run<'a>(&'a self, access: QueryAccess<'a>) -> SystemFuture<'a> {
-        SystemFuture::new(async move {
-            access.scope(|world| {
-                let mut transforms = world.write::<Transform>();
-                let bodies = world.read::<RigidBody>();
+    type Result = ();
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+        ctx.lock::<(Write<Transform>, Read<RigidBody>)>()
+            .execute(|(mut transforms, bodies)| {
                 // ... physics step
             });
-        })
-    }
-
-    fn access(&self) -> Access {
-        let mut a = Access::new();
-        a.add_write::<Transform>();
-        a.add_read::<RigidBody>();
-        a
     }
 }
 
 // Registration with ordering constraints:
-schedule.add(PhysicsSystem);
-schedule.add(AnimationSystem)
-    .after::<PhysicsSystem>();  // explicit dependency
+let mut container = SystemsContainer::new();
+container.add(PhysicsSystem);
+container.add(AnimationSystem);
+container.add_edge::<PhysicsSystem, AnimationSystem>().unwrap();
 
-schedule.build();               // topological sort + conflict detection
-schedule.run(&world, &compute); // all systems complete within this call
+runner.run(&mut world, &container); // all systems complete within this call
 ```
 
-## Async Compute Integration
+## Compute Integration
 
-Systems can spawn compute tasks and await results within the same frame:
+Systems can spawn compute tasks and wait for results within the same frame using `block_on`:
 
 ```rust
 impl System for PathfindSystem {
-    fn run<'a>(&'a self, access: QueryAccess<'a>) -> SystemFuture<'a> {
-        SystemFuture::new(async move {
-            // Phase 1: extract data (borrows scoped)
-            let graph = access.scope(|world| {
-                world.read::<NavMesh>().iter().next().map(|(_, n)| n.clone())
+    type Result = ();
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+        // Phase 1: extract data (locks released when execute returns)
+        let graph = ctx.lock::<(Read<NavMesh>,)>()
+            .execute(|(nav,)| {
+                nav.iter().next().map(|(_, n)| n.clone())
             });
 
-            // Phase 2: heavy compute (no borrows held, safe to .await)
-            let mut handle = access.compute().spawn(Priority::High, |_ctx| async move {
+        // Phase 2: heavy compute (no locks held)
+        if let Some(graph) = graph {
+            let mut handle = ctx.compute().spawn(Priority::High, |_ctx| async move {
                 compute_paths(graph)
             });
-            let paths = (&mut handle).await;
+            let paths = ctx.compute().block_on(&mut handle);
 
-            // Phase 3: apply results (borrows scoped again)
+            // Phase 3: apply results via deferred command
             if let Some(paths) = paths {
-                access.scope(|world| {
-                    let mut agents = world.write::<Agent>();
-                    for (idx, agent) in agents.iter_mut() {
-                        if let Some(path) = paths.get(&idx) {
-                            agent.path = path.clone();
-                        }
-                    }
+                ctx.commands(move |world| {
+                    // apply paths to agents
                 });
             }
-        })
-    }
-
-    fn access(&self) -> Access {
-        let mut a = Access::new();
-        a.add_read::<NavMesh>();
-        a.add_write::<Agent>();
-        a
+        }
     }
 }
 ```
@@ -281,11 +261,8 @@ All systems complete within a single `schedule.run()` call. There is no cross-fr
 ```
 1. world.advance_tick();               ← start new frame
 
-2. schedule.run_parallel(              ← systems execute by stage
-       &world, &pool, &compute
-   );
+2. runner.run(&mut world, &systems);   ← systems execute by dependency order
    // Stage 1: [physics, AI, animation] ← parallel, non-conflicting
-   //   each system may .await compute tasks
    //   idle threads tick compute pool
    // Stage 2: [transform_propagation]  ← depends on physics
    // Stage 3: [camera_update, culling] ← depends on transforms

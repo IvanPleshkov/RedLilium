@@ -408,19 +408,19 @@ mod tests {
     struct SystemA;
     impl System for SystemA {
         type Result = ();
-        async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {}
+        fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {}
     }
 
     struct SystemB;
     impl System for SystemB {
         type Result = ();
-        async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {}
+        fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {}
     }
 
     struct SystemC;
     impl System for SystemC {
         type Result = ();
-        async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {}
+        fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {}
     }
 
     #[test]

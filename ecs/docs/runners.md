@@ -51,14 +51,12 @@ runner.run(&mut world, &container);
 
 Execution model:
 ```
-System A → poll to completion
-System B → poll to completion
-System C → poll to completion
+System A → run to completion
+System B → run to completion
+System C → run to completion
 Apply commands
 Drain compute tasks
 ```
-
-Between each system poll, the compute pool is ticked so spawned tasks make progress.
 
 Properties:
 - Zero locking overhead (no contention on a single thread)
@@ -81,10 +79,10 @@ Execution model:
 ```
 Thread 1: System A (no deps) ──────────→ done → Signal
 Thread 2: System B (no deps) ──→ done → Signal
-Main:     Tick compute pool, coordinate
+Main:     Tick compute pool, coordinate, dispatch main-thread work
 Thread 1: System C (depends on A,B) ──→ done → Signal
 Apply commands
-Drain compute (parallel across threads)
+Drain remaining compute tasks
 ```
 
 How it works:
@@ -94,9 +92,10 @@ How it works:
    - Wait for system completion signals (1ms timeout).
    - Decrement dependents' counters.
    - Start newly-ready systems on available threads.
+   - Execute main-thread dispatch requests.
    - Tick the compute pool during idle time.
 4. After all systems complete, apply commands sequentially.
-5. Drain remaining compute tasks across all threads using `tick_extract()`.
+5. Drain remaining compute tasks (time-budgeted).
 
 Thread safety is ensured by:
 - Per-component `RwLock` synchronization.

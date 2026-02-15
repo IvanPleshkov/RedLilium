@@ -10,9 +10,6 @@ use crate::system_context::SystemContext;
 /// Created by [`SystemContext::lock()`]. Call [`execute()`](LockRequest::execute)
 /// to run a closure with the locked data.
 ///
-/// The `execute()` method is `async` to support future optimization to
-/// true async lock acquisition. Currently it completes synchronously.
-///
 /// # Example
 ///
 /// ```ignore
@@ -25,14 +22,14 @@ use crate::system_context::SystemContext;
 ///                 pos.x += vel.x;
 ///             }
 ///         }
-///     }).await;
+///     });
 /// ```
 ///
 /// # Lock ordering
 ///
 /// Locks are acquired in TypeId-sorted order via `World::acquire_sorted`
-/// to prevent deadlocks. The closure is synchronous (`FnOnce`), preventing
-/// locks from being held across await points.
+/// to prevent deadlocks. The closure is synchronous (`FnOnce`), ensuring
+/// locks are released deterministically when the closure returns.
 pub struct LockRequest<'a, A: AccessSet> {
     pub(crate) ctx: &'a SystemContext<'a>,
     pub(crate) _marker: PhantomData<A>,
@@ -51,14 +48,11 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
     /// is transparently dispatched to the main thread via the
     /// [`MainThreadDispatcher`](crate::main_thread_dispatcher::MainThreadDispatcher).
     ///
-    /// The closure is synchronous (`FnOnce`) to prevent holding locks
-    /// across await points.
-    ///
     /// # Panics
     ///
     /// Panics if any requested component lock is already held by this
     /// system (same-system deadlock detection via [`SystemContext`]).
-    pub async fn execute<R, F>(self, f: F) -> R
+    pub fn execute<R, F>(self, f: F) -> R
     where
         F: FnOnce(A::Item<'_>) -> R + Send,
         R: Send,
@@ -131,22 +125,6 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
             }
         }
     }
-
-    /// Synchronous tracked execution for use in tests.
-    ///
-    /// Same as `execute()` but synchronous. Checks for deadlocks,
-    /// registers locks, runs the closure, then unregisters.
-    #[cfg(test)]
-    pub(crate) fn execute_inner<R, F>(&self, f: F) -> R
-    where
-        F: FnOnce(A::Item<'_>) -> R,
-    {
-        let sorted = normalize_access_infos(&A::access_infos());
-        self.ctx.check_held_locks(&sorted);
-        self.ctx.register_held_locks(&sorted);
-        let _tracking = self.ctx.make_tracking(&sorted);
-        self.run_local(f)
-    }
 }
 
 #[cfg(test)]
@@ -179,7 +157,7 @@ mod tests {
 
         // Use pollster-style blocking since execute is async
         let request = ctx.lock::<(Read<Position>,)>();
-        let count = request.execute_inner(|(positions,)| positions.len());
+        let count = request.execute(|(positions,)| positions.len());
         assert_eq!(count, 1);
     }
 
@@ -196,7 +174,7 @@ mod tests {
         let ctx = SystemContext::new(&world, &compute, &io, &commands);
 
         let request = ctx.lock::<(Write<Position>,)>();
-        request.execute_inner(|(mut positions,)| {
+        request.execute(|(mut positions,)| {
             for (_, pos) in positions.iter_mut() {
                 pos.x = 99.0;
             }
@@ -220,7 +198,7 @@ mod tests {
         let ctx = SystemContext::new(&world, &compute, &io, &commands);
 
         let request = ctx.lock::<(Write<Position>, Read<Velocity>)>();
-        request.execute_inner(|(mut positions, velocities)| {
+        request.execute(|(mut positions, velocities)| {
             for (idx, pos) in positions.iter_mut() {
                 if let Some(vel) = velocities.get(idx) {
                     pos.x += vel.x;
@@ -244,8 +222,7 @@ mod tests {
         let ctx = SystemContext::new(&world, &compute, &io, &commands);
 
         let request = ctx.lock::<(Read<Position>,)>();
-        let sum =
-            request.execute_inner(|(positions,)| positions.iter().map(|(_, p)| p.x).sum::<f32>());
+        let sum = request.execute(|(positions,)| positions.iter().map(|(_, p)| p.x).sum::<f32>());
         assert_eq!(sum, 42.0);
     }
 }

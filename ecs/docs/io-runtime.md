@@ -4,9 +4,9 @@ The IO runtime bridges the ECS's custom manual-polling executor with a real asyn
 
 ## The Problem
 
-ECS systems and compute tasks run on a **noop-waker executor** — they are polled manually and don't use a real async runtime. This means standard `tokio` or browser APIs won't work directly because no one drives their wakers.
+Compute tasks run on a manually-polled executor — they don't use a real async runtime. This means standard `tokio` or browser APIs won't work directly because no one drives their wakers.
 
-The `IoRuntime` solves this by spawning IO work on a real runtime and communicating results back via channels that work with the noop-waker polling model.
+The `IoRuntime` solves this by spawning IO work on a real runtime and communicating results back via channels.
 
 ## Platform Implementations
 
@@ -81,15 +81,9 @@ Access the IO runtime through `SystemContext`:
 struct LoaderSystem;
 
 impl System for LoaderSystem {
-    async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
-        // Direct IO from system
-        let mut handle = ctx.io().run(async {
-            tokio::fs::read("asset.bin").await.unwrap()
-        });
-        // Note: polling this handle requires compute pool ticking,
-        // which happens automatically in the runner
-
-        // Better pattern: IO from within a compute task
+    type Result = ();
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+        // Spawn IO from within a compute task, then block_on for the result
         let mut task = ctx.compute().spawn(Priority::High, |cctx| async move {
             let data = cctx.io().run(async {
                 tokio::fs::read("asset.bin").await.unwrap()
@@ -97,7 +91,7 @@ impl System for LoaderSystem {
             parse_asset(data)
         });
 
-        let asset = (&mut task).await;
+        let asset = ctx.compute().block_on(&mut task);
     }
 }
 ```

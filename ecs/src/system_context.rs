@@ -76,7 +76,7 @@ impl Drop for LockTracking<'_> {
 ///                 pos.x += vel.x;
 ///             }
 ///         }
-///     }).await;
+///     });
 /// ```
 ///
 /// # Deferred commands
@@ -255,7 +255,7 @@ impl<'a> SystemContext<'a> {
     /// ctx.lock::<(Write<Position>, Read<Velocity>)>()
     ///     .execute(|(mut pos, vel)| {
     ///         // use pos and vel
-    ///     }).await;
+    ///     });
     /// ```
     pub fn lock<A: AccessSet>(&self) -> LockRequest<'_, A> {
         LockRequest {
@@ -278,7 +278,7 @@ impl<'a> SystemContext<'a> {
     /// # Example
     ///
     /// ```ignore
-    /// let mut q = ctx.query::<(Write<Position>, Read<Velocity>)>().await;
+    /// let mut q = ctx.query::<(Write<Position>, Read<Velocity>)>();
     /// let (positions, velocities) = &mut q.items;
     /// for (idx, pos) in positions.iter_mut() {
     ///     if let Some(vel) = velocities.get(idx) {
@@ -291,34 +291,16 @@ impl<'a> SystemContext<'a> {
     ///
     /// Panics if the access set contains `MainThreadRes` or `MainThreadResMut`.
     /// Use `lock().execute()` for main-thread resources.
-    pub async fn query<A: AccessSet>(&self) -> QueryGuard<'_, A> {
+    pub fn query<A: AccessSet>(&self) -> QueryGuard<'_, A> {
         if A::needs_main_thread() {
             panic!("query() does not support main-thread resources; use lock().execute() instead");
         }
 
         let infos = A::access_infos();
         let sorted = normalize_access_infos(&infos);
-
-        // Check for same-system deadlocks before trying to acquire.
         self.check_held_locks(&sorted);
 
-        let guards = loop {
-            redlilium_core::profile_scope!("ecs: query acquire");
-            if let Some(guards) = self.world.try_acquire_sorted(&infos) {
-                break guards;
-            }
-            // Locks contended — yield to let the executor run compute tasks
-            let mut yielded = false;
-            std::future::poll_fn(|_| {
-                if yielded {
-                    std::task::Poll::Ready(())
-                } else {
-                    yielded = true;
-                    std::task::Poll::Pending
-                }
-            })
-            .await;
-        };
+        let guards = self.world.acquire_sorted(&infos);
 
         self.register_held_locks(&sorted);
         let tracking = self.make_tracking(&sorted);
@@ -450,30 +432,6 @@ impl<'a> SystemContext<'a> {
     /// Returns a reference to the world.
     pub(crate) fn world(&self) -> &'a World {
         self.world
-    }
-
-    /// Synchronous version of [`query()`](SystemContext::query) for tests.
-    ///
-    /// Performs the same deadlock checks and tracking as the async version
-    /// but acquires locks synchronously (blocking).
-    #[cfg(test)]
-    pub(crate) fn query_sync<A: AccessSet>(&self) -> QueryGuard<'_, A> {
-        if A::needs_main_thread() {
-            panic!(
-                "query_sync() does not support main-thread resources; use lock().execute() instead"
-            );
-        }
-
-        let infos = A::access_infos();
-        let sorted = normalize_access_infos(&infos);
-        self.check_held_locks(&sorted);
-
-        let guards = self.world.acquire_sorted(&infos);
-
-        self.register_held_locks(&sorted);
-        let tracking = self.make_tracking(&sorted);
-        let items = A::fetch_unlocked(self.world);
-        QueryGuard::new_tracked(guards, items, tracking)
     }
 }
 
@@ -635,8 +593,8 @@ mod tests {
         let (compute, io, commands) = make_ctx(&world);
         let ctx = SystemContext::new(&world, &compute, &io, &commands);
 
-        let _q1 = ctx.query_sync::<(Write<Position>,)>();
-        let _q2 = ctx.query_sync::<(Write<Position>,)>(); // should panic
+        let _q1 = ctx.query::<(Write<Position>,)>();
+        let _q2 = ctx.query::<(Write<Position>,)>(); // should panic
     }
 
     #[test]
@@ -649,8 +607,8 @@ mod tests {
         let (compute, io, commands) = make_ctx(&world);
         let ctx = SystemContext::new(&world, &compute, &io, &commands);
 
-        let _q1 = ctx.query_sync::<(Write<Position>,)>();
-        let _q2 = ctx.query_sync::<(Read<Position>,)>(); // should panic
+        let _q1 = ctx.query::<(Write<Position>,)>();
+        let _q2 = ctx.query::<(Read<Position>,)>(); // should panic
     }
 
     #[test]
@@ -663,8 +621,8 @@ mod tests {
         let (compute, io, commands) = make_ctx(&world);
         let ctx = SystemContext::new(&world, &compute, &io, &commands);
 
-        let _q1 = ctx.query_sync::<(Read<Position>,)>();
-        let _q2 = ctx.query_sync::<(Write<Position>,)>(); // should panic
+        let _q1 = ctx.query::<(Read<Position>,)>();
+        let _q2 = ctx.query::<(Write<Position>,)>(); // should panic
     }
 
     #[test]
@@ -677,8 +635,8 @@ mod tests {
         let (compute, io, commands) = make_ctx(&world);
         let ctx = SystemContext::new(&world, &compute, &io, &commands);
 
-        let q1 = ctx.query_sync::<(Read<Position>,)>();
-        let q2 = ctx.query_sync::<(Read<Position>,)>(); // should NOT panic
+        let q1 = ctx.query::<(Read<Position>,)>();
+        let q2 = ctx.query::<(Read<Position>,)>(); // should NOT panic
         let (pos1,) = &q1.items;
         let (pos2,) = &q2.items;
         assert_eq!(pos1.len(), pos2.len());
@@ -696,10 +654,10 @@ mod tests {
 
         // Write lock, then drop
         {
-            let _q1 = ctx.query_sync::<(Write<Position>,)>();
+            let _q1 = ctx.query::<(Write<Position>,)>();
         }
         // Now a new write lock should succeed
-        let q2 = ctx.query_sync::<(Write<Position>,)>();
+        let q2 = ctx.query::<(Write<Position>,)>();
         let (positions,) = &q2.items;
         assert_eq!(positions.len(), 1);
     }
@@ -715,10 +673,10 @@ mod tests {
         let (compute, io, commands) = make_ctx(&world);
         let ctx = SystemContext::new(&world, &compute, &io, &commands);
 
-        let _q = ctx.query_sync::<(Write<Position>,)>();
-        // lock().execute_inner also uses tracking — should detect conflict
+        let _q = ctx.query::<(Write<Position>,)>();
+        // lock().execute also uses tracking — should detect conflict
         let req = ctx.lock::<(Write<Position>,)>();
-        req.execute_inner(|_| {}); // should panic
+        req.execute(|_| {}); // should panic
     }
 
     #[test]
@@ -734,9 +692,9 @@ mod tests {
         let (compute, io, commands) = make_ctx(&world);
         let ctx = SystemContext::new(&world, &compute, &io, &commands);
 
-        let _q1 = ctx.query_sync::<(Write<Position>,)>();
+        let _q1 = ctx.query::<(Write<Position>,)>();
         // Overlaps on Position (write held + read wanted)
-        let _q2 = ctx.query_sync::<(Read<Position>, Read<Velocity>)>(); // should panic
+        let _q2 = ctx.query::<(Read<Position>, Read<Velocity>)>(); // should panic
     }
 
     #[test]
@@ -751,7 +709,7 @@ mod tests {
         let (compute, io, commands) = make_ctx(&world);
         let ctx = SystemContext::new(&world, &compute, &io, &commands);
 
-        let _q1 = ctx.query_sync::<(Write<Position>,)>();
-        let _q2 = ctx.query_sync::<(Write<Velocity>,)>(); // different component, should NOT panic
+        let _q1 = ctx.query::<(Write<Position>,)>();
+        let _q2 = ctx.query::<(Write<Velocity>,)>(); // different component, should NOT panic
     }
 }

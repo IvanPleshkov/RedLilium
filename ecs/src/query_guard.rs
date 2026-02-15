@@ -21,11 +21,11 @@ use crate::system_context::LockTracking;
 ///
 /// ```ignore
 /// // Read-only:
-/// let q = ctx.query::<(Read<Position>, Read<Velocity>)>().await;
+/// let q = ctx.query::<(Read<Position>, Read<Velocity>)>();
 /// let (positions, velocities) = &q.items;
 ///
 /// // With writes:
-/// let mut q = ctx.query::<(Write<Position>, Read<Velocity>)>().await;
+/// let mut q = ctx.query::<(Write<Position>, Read<Velocity>)>();
 /// let (positions, velocities) = &mut q.items;
 /// for (idx, pos) in positions.iter_mut() {
 ///     if let Some(vel) = velocities.get(idx) {
@@ -301,7 +301,7 @@ impl_query_item!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F, 6 G, 7 H);
 /// recover the guard after (partial) iteration.
 ///
 /// ```ignore
-/// let q = ctx.query::<(Write<Position>, Read<Velocity>)>().await;
+/// let q = ctx.query::<(Write<Position>, Read<Velocity>)>();
 /// for (entity_idx, (pos, vel)) in q {
 ///     pos.x += vel.x;
 /// }

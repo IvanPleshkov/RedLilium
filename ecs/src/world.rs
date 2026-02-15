@@ -492,42 +492,6 @@ impl World {
 
     /// Non-blocking variant of [`acquire_sorted`](World::acquire_sorted).
     ///
-    /// Tries to acquire all component locks in TypeId-sorted order using
-    /// `try_read` / `try_write`. Returns `None` if any lock is contended,
-    /// dropping all already-acquired guards (RAII).
-    ///
-    /// Used by [`SystemContext::query()`](crate::SystemContext::query) to
-    /// yield back to the executor when locks are unavailable, allowing
-    /// compute tasks to run while waiting.
-    pub(crate) fn try_acquire_sorted(&self, infos: &[AccessInfo]) -> Option<Vec<LockGuard<'_>>> {
-        let mut sorted = infos.to_vec();
-        sorted.sort_by_key(|info| info.type_id);
-        sorted.dedup_by(|a, b| {
-            if a.type_id == b.type_id {
-                b.is_write = b.is_write || a.is_write;
-                true
-            } else {
-                false
-            }
-        });
-
-        let mut guards = Vec::with_capacity(sorted.len());
-        for info in &sorted {
-            let Some(storage) = self.components.get(&info.type_id) else {
-                // Resources self-lock via Arc<RwLock<T>> — skip
-                continue;
-            };
-            let lock = storage.rw_lock();
-            let guard = if info.is_write {
-                LockGuard::Write(lock.try_write().ok()?)
-            } else {
-                LockGuard::Read(lock.try_read().ok()?)
-            };
-            guards.push(guard);
-        }
-        Some(guards)
-    }
-
     /// Returns the human-readable type name for a component TypeId, if registered.
     pub(crate) fn component_type_name(&self, type_id: TypeId) -> Option<&'static str> {
         self.components.get(&type_id).map(|s| s.type_name())

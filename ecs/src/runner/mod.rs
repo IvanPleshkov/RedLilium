@@ -144,16 +144,16 @@ mod tests {
     struct MovementSystem;
     impl System for MovementSystem {
         type Result = ();
-        async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
-            ctx.lock::<(Write<Position>, Read<Velocity>)>()
-                .execute(|(mut positions, velocities)| {
+        fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+            ctx.lock::<(Write<Position>, Read<Velocity>)>().execute(
+                |(mut positions, velocities)| {
                     for (idx, pos) in positions.iter_mut() {
                         if let Some(vel) = velocities.get(idx) {
                             pos.x += vel.x;
                         }
                     }
-                })
-                .await;
+                },
+            );
         }
     }
 

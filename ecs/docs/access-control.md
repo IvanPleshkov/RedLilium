@@ -1,6 +1,6 @@
 # Access Control
 
-The access control system provides compile-time safe, deadlock-free component and resource access in systems. It uses **marker types** to declare data dependencies and a **lock-execute pattern** to prevent holding locks across async boundaries.
+The access control system provides compile-time safe, deadlock-free component and resource access in systems. It uses **marker types** to declare data dependencies and a **lock-execute pattern** to ensure deterministic lock release.
 
 ## Access Marker Types
 
@@ -21,7 +21,8 @@ use redlilium_ecs::{Read, Write, Res, ResMut, OptionalRead};
 struct MySystem;
 
 impl System for MySystem {
-    async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+    type Result = ();
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
         // Read two components and one resource
         ctx.lock::<(Write<Position>, Read<Velocity>, Res<DeltaTime>)>()
             .execute(|(mut positions, velocities, dt)| {
@@ -31,7 +32,7 @@ impl System for MySystem {
                         pos.y += vel.y * dt.0;
                     }
                 }
-            }).await;
+            });
     }
 }
 ```
@@ -51,7 +52,7 @@ ctx.lock::<(Write<Position>, OptionalRead<Gravity>)>()
         for (_, pos) in positions.iter_mut() {
             pos.y -= g;
         }
-    }).await;
+    });
 ```
 
 ## How Lock Ordering Works
@@ -84,7 +85,7 @@ The empty tuple is also valid (no-op):
 ```rust
 ctx.lock::<()>().execute(|()| {
     // no data access needed
-}).await;
+});
 ```
 
 ## Why Lock-Execute?
@@ -92,27 +93,25 @@ ctx.lock::<()>().execute(|()| {
 The execute closure is `FnOnce` (synchronous). This is a deliberate design choice:
 
 ```rust
-// COMPILE ERROR: Can't .await inside execute
 ctx.lock::<(Write<Position>,)>()
     .execute(|(mut positions)| {
-        // some_async_fn().await;  // This won't compile!
         for (_, pos) in positions.iter_mut() {
             pos.x += 1.0;
         }
-    }).await;
+    });
 ```
 
-This prevents a class of bugs where locks are held across suspension points, which could cause deadlocks in a multi-threaded executor. The `execute` closure does its work and returns, releasing all locks before the system can `.await` again.
+This ensures locks are always released deterministically when the closure returns. In a multi-threaded executor, this prevents deadlocks by guaranteeing that locks cannot be held indefinitely.
 
 ## Return Values from Execute
 
-The closure can return a value, which becomes the result of the `.await`:
+The closure can return a value:
 
 ```rust
 let total_health = ctx.lock::<(Read<Health>,)>()
     .execute(|(healths,)| {
         healths.iter().map(|(_, h)| h.value).sum::<f32>()
-    }).await;
+    });
 
 println!("Total health: {}", total_health);
 ```

@@ -17,15 +17,16 @@ From within a system:
 struct HeavySystem;
 
 impl System for HeavySystem {
-    async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+    type Result = ();
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
         // Spawn a background compute task
         let mut handle = ctx.compute().spawn(Priority::Low, |_cctx| async {
-            // This runs during idle time between system polls
+            // This runs during idle time on the compute pool
             expensive_calculation()
         });
 
-        // Await the result (system suspends until task completes)
-        let result = (&mut handle).await;
+        // Wait for the result (ticks compute pool until task completes)
+        let result = ctx.compute().block_on(&mut handle);
 
         if let Some(value) = result {
             ctx.commands(move |world| {
@@ -149,15 +150,12 @@ std::thread::scope(|scope| {
 
 ## Integration with Systems
 
-During system execution, the runner ticks the compute pool between system polls. This means compute tasks make progress even while the system is suspended (waiting for a task handle):
+Systems can interact with the compute pool in two ways:
 
-```
-System polls → Pending (awaiting TaskHandle)
-  ↓
-Runner ticks compute pool → task makes progress
-  ↓
-System re-polled → task complete → Ready
-```
+1. **Fire-and-forget**: Spawn a task and let it run in the background. Check results later via `try_recv()`.
+2. **Block on result**: Use `ctx.compute().block_on(&mut handle)` to tick the pool until the task completes, then use the result immediately.
+
+The runner also ticks the compute pool between systems and after all systems complete, ensuring background tasks make progress.
 
 ## EcsComputeContext
 

@@ -14,9 +14,8 @@ use crate::system_context::SystemContext;
 /// The function receives the access set's items as a tuple. All locks are
 /// acquired before the function runs and released after it returns.
 ///
-/// Function systems are **synchronous** — for multi-phase async systems,
-/// compute spawning, or deferred commands, use the struct-based [`System`]
-/// trait directly.
+/// For multi-phase systems, compute spawning, or deferred commands,
+/// use the struct-based [`System`] trait directly.
 ///
 /// # Example
 ///
@@ -74,7 +73,7 @@ where
     F: Fn() + Send + Sync + 'static,
 {
     type Result = ();
-    async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+    fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
         (self.func)();
     }
 }
@@ -101,8 +100,8 @@ where
     F: for<'a> Fn(A::Item<'a>) + Send + Sync + 'static,
 {
     type Result = ();
-    async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
-        ctx.lock::<A>().execute(|items| (self.func)(items)).await;
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+        ctx.lock::<A>().execute(|items| (self.func)(items));
     }
 }
 
@@ -221,14 +220,12 @@ where
     F: for<'a> Fn(A::EachItem<'a>) + Send + Sync + 'static,
 {
     type Result = ();
-    async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
-        ctx.lock::<A>()
-            .execute(|items| {
-                A::run_for_each(&items, |item| {
-                    (self.func)(item);
-                });
-            })
-            .await;
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+        ctx.lock::<A>().execute(|items| {
+            A::run_for_each(&items, |item| {
+                (self.func)(item);
+            });
+        });
     }
 }
 

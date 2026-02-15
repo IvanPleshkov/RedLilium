@@ -15,12 +15,11 @@ pub struct UpdateCameraMatrices;
 
 impl crate::System for UpdateCameraMatrices {
     type Result = ();
-    async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
         ctx.lock::<(crate::Read<GlobalTransform>, crate::Write<Camera>)>()
             .execute(|(globals, mut cameras)| {
                 update_camera_matrices(&globals, &mut cameras);
-            })
-            .await;
+            });
     }
 }
 

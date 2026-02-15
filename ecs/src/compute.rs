@@ -397,6 +397,31 @@ impl ComputePool {
         1
     }
 
+    /// Blocks the calling thread until the task completes, driving the
+    /// compute pool between attempts.
+    ///
+    /// Returns `Some(T)` if the task completes, `None` if cancelled.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut handle = pool.spawn(Priority::Low, |_ctx| async { 42u32 });
+    /// let result = pool.block_on(&mut handle); // Some(42)
+    /// ```
+    pub fn block_on<T>(&self, handle: &mut TaskHandle<T>) -> Option<T> {
+        loop {
+            if let Some(val) = handle.try_recv() {
+                return Some(val);
+            }
+            if handle.is_cancelled() {
+                return None;
+            }
+            self.tick_all();
+            #[cfg(not(target_arch = "wasm32"))]
+            std::thread::yield_now();
+        }
+    }
+
     /// Returns the number of pending (incomplete) tasks.
     pub fn pending_count(&self) -> usize {
         self.tasks.lock().unwrap().len()

@@ -1,11 +1,9 @@
-use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use crate::command_collector::CommandCollector;
-use crate::compute::{ComputePool, noop_waker};
+use crate::compute::ComputePool;
 use crate::io_runtime::IoRuntime;
 use crate::main_thread_dispatcher::{MainThreadDispatcher, RunnerEvent};
 use crate::system_context::SystemContext;
@@ -126,9 +124,7 @@ impl EcsRunnerMultiThread {
 
                             let system = systems.get_system(idx);
                             let guard = system.read().unwrap();
-                            let future = guard.run_boxed(&ctx);
-                            let result =
-                                poll_future_to_completion_with_compute(future, compute_ref);
+                            let result = guard.run_boxed(&ctx);
                             results_ref.store(idx, result);
                             let _ = tx.send(RunnerEvent::SystemCompleted(idx));
                         });
@@ -215,33 +211,6 @@ impl Default for EcsRunnerMultiThread {
     }
 }
 
-/// Polls a future to completion, ticking compute between polls.
-///
-/// Uses budgeted compute ticking so a long-running compute task spawned
-/// by another system doesn't block this worker thread indefinitely.
-///
-/// Returns the type-erased result produced by the system.
-fn poll_future_to_completion_with_compute<'a>(
-    future: Pin<
-        Box<dyn std::future::Future<Output = Box<dyn std::any::Any + Send + Sync>> + Send + 'a>,
-    >,
-    compute: &ComputePool,
-) -> Box<dyn std::any::Any + Send + Sync> {
-    let mut future = future;
-    let mut future = unsafe { Pin::new_unchecked(&mut future) };
-    let waker = noop_waker();
-    let mut cx = std::task::Context::from_waker(&waker);
-    loop {
-        match future.as_mut().poll(&mut cx) {
-            Poll::Ready(result) => break result,
-            Poll::Pending => {
-                compute.tick_with_budget(Duration::from_millis(1));
-                std::thread::yield_now();
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,16 +227,16 @@ mod tests {
     struct MovementSystem;
     impl System for MovementSystem {
         type Result = ();
-        async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
-            ctx.lock::<(Write<Position>, Read<Velocity>)>()
-                .execute(|(mut positions, velocities)| {
+        fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+            ctx.lock::<(Write<Position>, Read<Velocity>)>().execute(
+                |(mut positions, velocities)| {
                     for (idx, pos) in positions.iter_mut() {
                         if let Some(vel) = velocities.get(idx) {
                             pos.x += vel.x;
                         }
                     }
-                })
-                .await;
+                },
+            );
         }
     }
 
@@ -299,7 +268,7 @@ mod tests {
         struct FirstSystem(Arc<AtomicU32>);
         impl System for FirstSystem {
             type Result = ();
-            async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
                 self.0.store(1, Ordering::SeqCst);
             }
         }
@@ -307,7 +276,7 @@ mod tests {
         struct SecondSystem(Arc<AtomicU32>);
         impl System for SecondSystem {
             type Result = ();
-            async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
                 assert_eq!(self.0.load(Ordering::SeqCst), 1);
                 self.0.store(2, Ordering::SeqCst);
             }
@@ -330,7 +299,7 @@ mod tests {
         struct SpawnSystem;
         impl System for SpawnSystem {
             type Result = ();
-            async fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
+            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) {
                 ctx.commands(|world| {
                     world.insert_resource(42u32);
                 });
@@ -357,7 +326,7 @@ mod tests {
         struct IncrementA(Arc<AtomicU32>);
         impl System for IncrementA {
             type Result = ();
-            async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
                 self.0.fetch_add(1, Ordering::SeqCst);
             }
         }
@@ -365,7 +334,7 @@ mod tests {
         struct IncrementB(Arc<AtomicU32>);
         impl System for IncrementB {
             type Result = ();
-            async fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) {
                 self.0.fetch_add(1, Ordering::SeqCst);
             }
         }
