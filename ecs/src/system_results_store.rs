@@ -49,6 +49,13 @@ impl SystemResultsStore {
                 .expect("system result type mismatch"),
         )
     }
+
+    /// Consumes the store and returns the results as a flat vec of optional
+    /// boxed values. Used by runners to extract previous-tick results for
+    /// [`System::reuse_result`](crate::System::reuse_result).
+    pub(crate) fn into_prev_results(self) -> Vec<Option<Box<dyn Any + Send + Sync>>> {
+        self.slots.into_iter().map(OnceLock::into_inner).collect()
+    }
 }
 
 #[cfg(test)]

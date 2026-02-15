@@ -1,3 +1,5 @@
+use std::any::Any;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::command_collector::CommandCollector;
@@ -20,6 +22,7 @@ use super::ShutdownError;
 pub struct EcsRunnerSingleThread {
     compute: ComputePool,
     io: IoRuntime,
+    prev_results: Mutex<Vec<Option<Box<dyn Any + Send + Sync>>>>,
 }
 
 impl EcsRunnerSingleThread {
@@ -29,6 +32,7 @@ impl EcsRunnerSingleThread {
         Self {
             compute: ComputePool::new(io.clone()),
             io,
+            prev_results: Mutex::new(Vec::new()),
         }
     }
 
@@ -55,13 +59,24 @@ impl EcsRunnerSingleThread {
             return Vec::new();
         }
 
+        let n = systems.system_count();
         let mut errors = Vec::new();
         let commands = CommandCollector::new();
-        let results_store =
-            SystemResultsStore::new(systems.system_count(), systems.type_id_to_idx().clone());
+        let results_store = SystemResultsStore::new(n, systems.type_id_to_idx().clone());
+
+        // Take previous-tick results (if the system count matches).
+        let prev = std::mem::take(&mut *self.prev_results.lock().unwrap());
+        let mut prev = if prev.len() == n { prev } else { Vec::new() };
 
         {
             for &idx in order {
+                // Feed previous result to the system for memory reuse.
+                let prev_result = if idx < prev.len() {
+                    prev[idx].take()
+                } else {
+                    None
+                };
+
                 if systems.is_exclusive(idx) {
                     // Apply pending deferred commands so the exclusive system
                     // sees structural changes from predecessors.
@@ -74,6 +89,9 @@ impl EcsRunnerSingleThread {
 
                     let system = systems.get_exclusive_system(idx);
                     let mut guard = system.write().unwrap();
+                    if let Some(prev_result) = prev_result {
+                        guard.reuse_result_boxed(prev_result);
+                    }
                     match guard.run_boxed(world) {
                         Ok(result) => results_store.store(idx, result),
                         Err(e) => errors.push(e),
@@ -84,6 +102,9 @@ impl EcsRunnerSingleThread {
 
                     let system = systems.get_system(idx);
                     let guard = system.read().unwrap();
+                    if let Some(prev_result) = prev_result {
+                        guard.reuse_result_boxed(prev_result);
+                    }
                     match guard.run_boxed(&ctx) {
                         Ok(result) => results_store.store(idx, result),
                         Err(e) => errors.push(e),
@@ -105,6 +126,9 @@ impl EcsRunnerSingleThread {
             redlilium_core::profile_scope!("ecs: compute drain");
             self.compute.tick_all();
         }
+
+        // Save this tick's results for next tick's reuse.
+        *self.prev_results.lock().unwrap() = results_store.into_prev_results();
 
         errors
     }

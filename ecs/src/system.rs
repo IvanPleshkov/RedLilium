@@ -119,6 +119,15 @@ pub trait System: Send + Sync + 'static {
     ///
     /// Returns `Ok(result)` on success or `Err(SystemError)` on failure.
     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<Self::Result, SystemError>;
+
+    /// Receive the previous tick's result so allocated memory can be reused.
+    ///
+    /// Called by the runner before [`run()`](System::run) each tick.
+    /// The default implementation drops the value. Override this to store
+    /// the previous result internally (e.g. in a `Mutex<Option<Vec<…>>>`)
+    /// and reuse its allocation in the next [`run()`](System::run).
+    #[allow(unused_variables)]
+    fn reuse_result(&self, prev: Self::Result) {}
 }
 
 /// Object-safe version of [`System`] used internally for type erasure.
@@ -129,6 +138,8 @@ pub(crate) trait DynSystem: Send + Sync {
         &'a self,
         ctx: &'a SystemContext<'a>,
     ) -> Result<Box<dyn Any + Send + Sync>, SystemError>;
+
+    fn reuse_result_boxed(&self, prev: Box<dyn Any + Send + Sync>);
 }
 
 impl<S: System> DynSystem for S {
@@ -138,6 +149,12 @@ impl<S: System> DynSystem for S {
     ) -> Result<Box<dyn Any + Send + Sync>, SystemError> {
         let result = self.run(ctx)?;
         Ok(Box::new(result) as Box<dyn Any + Send + Sync>)
+    }
+
+    fn reuse_result_boxed(&self, prev: Box<dyn Any + Send + Sync>) {
+        if let Ok(typed) = prev.downcast::<S::Result>() {
+            self.reuse_result(*typed);
+        }
     }
 }
 
@@ -188,17 +205,31 @@ pub trait ExclusiveSystem: Send + Sync + 'static {
     ///
     /// Returns `Ok(result)` on success or `Err(SystemError)` on failure.
     fn run(&mut self, world: &mut World) -> Result<Self::Result, SystemError>;
+
+    /// Receive the previous tick's result so allocated memory can be reused.
+    ///
+    /// Called by the runner before [`run()`](ExclusiveSystem::run) each tick.
+    /// The default implementation drops the value.
+    #[allow(unused_variables)]
+    fn reuse_result(&mut self, prev: Self::Result) {}
 }
 
 /// Object-safe version of [`ExclusiveSystem`] used internally for type erasure.
 pub(crate) trait DynExclusiveSystem: Send + Sync {
     fn run_boxed(&mut self, world: &mut World) -> Result<Box<dyn Any + Send + Sync>, SystemError>;
+    fn reuse_result_boxed(&mut self, prev: Box<dyn Any + Send + Sync>);
 }
 
 impl<S: ExclusiveSystem> DynExclusiveSystem for S {
     fn run_boxed(&mut self, world: &mut World) -> Result<Box<dyn Any + Send + Sync>, SystemError> {
         let result = self.run(world)?;
         Ok(Box::new(result) as Box<dyn Any + Send + Sync>)
+    }
+
+    fn reuse_result_boxed(&mut self, prev: Box<dyn Any + Send + Sync>) {
+        if let Ok(typed) = prev.downcast::<S::Result>() {
+            self.reuse_result(*typed);
+        }
     }
 }
 

@@ -1,3 +1,5 @@
+use std::any::Any;
+use std::sync::Mutex;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -26,6 +28,7 @@ pub struct EcsRunnerMultiThread {
     compute: ComputePool,
     io: IoRuntime,
     num_threads: usize,
+    prev_results: Mutex<Vec<Option<Box<dyn Any + Send + Sync>>>>,
 }
 
 impl EcsRunnerMultiThread {
@@ -36,6 +39,7 @@ impl EcsRunnerMultiThread {
             compute: ComputePool::new(io.clone()),
             io,
             num_threads: num_threads.max(1),
+            prev_results: Mutex::new(Vec::new()),
         }
     }
 
@@ -87,6 +91,10 @@ impl EcsRunnerMultiThread {
         let mut started = vec![false; n];
         let mut completed_count = 0usize;
 
+        // Take previous-tick results (if the system count matches).
+        let prev = std::mem::take(&mut *self.prev_results.lock().unwrap());
+        let prev = Mutex::new(if prev.len() == n { prev } else { Vec::new() });
+
         while completed_count < n {
             // Collect ready systems
             let mut exclusive_ready = None;
@@ -117,6 +125,7 @@ impl EcsRunnerMultiThread {
                         &mut started,
                         &mut completed_count,
                         &regular_ready,
+                        &prev,
                     ));
                 }
 
@@ -135,8 +144,20 @@ impl EcsRunnerMultiThread {
                     let system_name = systems.get_type_name(exc_idx);
                     redlilium_core::profile_scope_dynamic!(system_name);
 
+                    let prev_result = {
+                        let mut prev_guard = prev.lock().unwrap();
+                        if exc_idx < prev_guard.len() {
+                            prev_guard[exc_idx].take()
+                        } else {
+                            None
+                        }
+                    };
+
                     let system = systems.get_exclusive_system(exc_idx);
                     let mut guard = system.write().unwrap();
+                    if let Some(prev_result) = prev_result {
+                        guard.reuse_result_boxed(prev_result);
+                    }
                     match guard.run_boxed(world) {
                         Ok(result) => results_store.store(exc_idx, result),
                         Err(e) => errors.push(e),
@@ -157,6 +178,7 @@ impl EcsRunnerMultiThread {
                     &mut started,
                     &mut completed_count,
                     &regular_ready,
+                    &prev,
                 ));
             } else {
                 // No ready systems — should not happen with a valid DAG
@@ -171,6 +193,9 @@ impl EcsRunnerMultiThread {
                 cmd(world);
             }
         }
+
+        // Save this tick's results for next tick's reuse.
+        *self.prev_results.lock().unwrap() = results_store.into_prev_results();
 
         // Opportunistically tick remaining compute tasks (time-budgeted).
         if self.compute.pending_count() > 0 {
@@ -197,6 +222,7 @@ impl EcsRunnerMultiThread {
         started: &mut [bool],
         completed_count: &mut usize,
         initial_ready: &[usize],
+        prev_results: &Mutex<Vec<Option<Box<dyn Any + Send + Sync>>>>,
     ) -> Vec<SystemError> {
         let (event_tx, event_rx) = mpsc::channel::<RunnerEvent>();
         let dispatcher = MainThreadDispatcher::new(event_tx.clone());
@@ -214,6 +240,7 @@ impl EcsRunnerMultiThread {
                     let commands_ref = commands;
                     let dispatcher_ref = &dispatcher;
                     let results_ref = results_store;
+                    let prev_ref = prev_results;
                     let world_ref: &World = world;
                     let idx = $i;
                     let accessible = systems.accessible_results(idx);
@@ -232,8 +259,20 @@ impl EcsRunnerMultiThread {
                         )
                         .with_system_results(results_ref, accessible);
 
+                        let prev_result = {
+                            let mut prev_guard = prev_ref.lock().unwrap();
+                            if idx < prev_guard.len() {
+                                prev_guard[idx].take()
+                            } else {
+                                None
+                            }
+                        };
+
                         let system = systems.get_system(idx);
                         let guard = system.read().unwrap();
+                        if let Some(prev_result) = prev_result {
+                            guard.reuse_result_boxed(prev_result);
+                        }
                         match guard.run_boxed(&ctx) {
                             Ok(result) => results_ref.store(idx, result),
                             Err(e) => errors_ref.lock().unwrap().push(e),
