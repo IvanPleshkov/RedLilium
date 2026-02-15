@@ -112,6 +112,40 @@ impl EcsRunnerMultiThread {
                 }
             }
 
+            // Filter out condition-failed systems before dispatching.
+            let mut skipped_any = false;
+
+            regular_ready.retain(|&i| {
+                if systems.check_conditions(i, &results_store) {
+                    true
+                } else {
+                    started[i] = true;
+                    completed_count += 1;
+                    for &dep in systems.dependents_of(i) {
+                        remaining_deps[dep] -= 1;
+                    }
+                    skipped_any = true;
+                    false
+                }
+            });
+
+            if let Some(exc_idx) = exclusive_ready
+                && !systems.check_conditions(exc_idx, &results_store)
+            {
+                started[exc_idx] = true;
+                completed_count += 1;
+                for &dep in systems.dependents_of(exc_idx) {
+                    remaining_deps[dep] -= 1;
+                }
+                skipped_any = true;
+                exclusive_ready = None;
+            }
+
+            // Re-scan if we skipped systems — their dependents may now be ready.
+            if skipped_any && exclusive_ready.is_none() && regular_ready.is_empty() {
+                continue;
+            }
+
             if let Some(exc_idx) = exclusive_ready {
                 // Run any ready regular systems first (they may be independent
                 // of the exclusive system) to maximize parallelism before the barrier.
@@ -296,15 +330,26 @@ impl EcsRunnerMultiThread {
                         active_count -= 1;
                         *completed_count += 1;
 
-                        for &dep in systems.dependents_of(completed_idx) {
+                        // Process dependents with cascading condition skips.
+                        let mut work_queue: Vec<usize> =
+                            systems.dependents_of(completed_idx).to_vec();
+
+                        while let Some(dep) = work_queue.pop() {
                             remaining_deps[dep] -= 1;
-                            if remaining_deps[dep] == 0
-                                && !started[dep]
-                                && !systems.is_exclusive(dep)
-                            {
-                                spawn_system!(dep);
+                            if remaining_deps[dep] == 0 && !started[dep] {
+                                if systems.is_exclusive(dep) {
+                                    // Exclusive systems deferred to outer loop
+                                    continue;
+                                }
+                                if systems.check_conditions(dep, results_store) {
+                                    spawn_system!(dep);
+                                } else {
+                                    // Skip: mark done, cascade to its dependents
+                                    started[dep] = true;
+                                    *completed_count += 1;
+                                    work_queue.extend_from_slice(systems.dependents_of(dep));
+                                }
                             }
-                            // Exclusive systems deferred to outer loop
                         }
                     }
                     Ok(RunnerEvent::MainThreadRequest(work)) => {
@@ -716,5 +761,278 @@ mod tests {
         runner.run(&mut world, &container);
 
         assert_eq!(counter.load(Ordering::SeqCst), 10);
+    }
+
+    // ---- Run condition tests ----
+
+    use crate::condition::{Condition, ConditionMode};
+
+    struct CondTrueSystem;
+    impl System for CondTrueSystem {
+        type Result = Condition<()>;
+        fn run<'a>(
+            &'a self,
+            _ctx: &'a SystemContext<'a>,
+        ) -> Result<Condition<()>, crate::system::SystemError> {
+            Ok(Condition::True(()))
+        }
+    }
+
+    struct CondFalseSystem;
+    impl System for CondFalseSystem {
+        type Result = Condition<()>;
+        fn run<'a>(
+            &'a self,
+            _ctx: &'a SystemContext<'a>,
+        ) -> Result<Condition<()>, crate::system::SystemError> {
+            Ok(Condition::False)
+        }
+    }
+
+    #[test]
+    fn condition_true_allows_system_multi_thread() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let ran = Arc::new(AtomicBool::new(false));
+
+        struct Target(Arc<AtomicBool>);
+        impl System for Target {
+            type Result = ();
+            fn run<'a>(
+                &'a self,
+                _ctx: &'a SystemContext<'a>,
+            ) -> Result<(), crate::system::SystemError> {
+                self.0.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let mut container = SystemsContainer::new();
+        container.add_condition(CondTrueSystem);
+        container.add(Target(ran.clone()));
+        container.add_edge::<CondTrueSystem, Target>().unwrap();
+
+        let runner = EcsRunnerMultiThread::new(2);
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        assert!(ran.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn condition_false_skips_system_multi_thread() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let ran = Arc::new(AtomicBool::new(false));
+
+        struct Target(Arc<AtomicBool>);
+        impl System for Target {
+            type Result = ();
+            fn run<'a>(
+                &'a self,
+                _ctx: &'a SystemContext<'a>,
+            ) -> Result<(), crate::system::SystemError> {
+                self.0.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let mut container = SystemsContainer::new();
+        container.add_condition(CondFalseSystem);
+        container.add(Target(ran.clone()));
+        container.add_edge::<CondFalseSystem, Target>().unwrap();
+
+        let runner = EcsRunnerMultiThread::new(2);
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        assert!(!ran.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn skipped_system_dependents_still_run_multi_thread() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let counter = Arc::new(AtomicU32::new(0));
+
+        struct Gated(Arc<AtomicU32>);
+        impl System for Gated {
+            type Result = ();
+            fn run<'a>(
+                &'a self,
+                _ctx: &'a SystemContext<'a>,
+            ) -> Result<(), crate::system::SystemError> {
+                self.0.fetch_add(10, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        struct Downstream(Arc<AtomicU32>);
+        impl System for Downstream {
+            type Result = ();
+            fn run<'a>(
+                &'a self,
+                _ctx: &'a SystemContext<'a>,
+            ) -> Result<(), crate::system::SystemError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let mut container = SystemsContainer::new();
+        container.add_condition(CondFalseSystem);
+        container.add(Gated(counter.clone()));
+        container.add(Downstream(counter.clone()));
+        container.add_edge::<CondFalseSystem, Gated>().unwrap();
+        container.add_edge::<Gated, Downstream>().unwrap();
+
+        let runner = EcsRunnerMultiThread::new(2);
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        // Gated was skipped (no +10), but Downstream still ran (+1)
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn multiple_conditions_all_mode_multi_thread() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let ran = Arc::new(AtomicBool::new(false));
+
+        struct Target(Arc<AtomicBool>);
+        impl System for Target {
+            type Result = ();
+            fn run<'a>(
+                &'a self,
+                _ctx: &'a SystemContext<'a>,
+            ) -> Result<(), crate::system::SystemError> {
+                self.0.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let mut container = SystemsContainer::new();
+        container.add_condition(CondTrueSystem);
+        container.add_condition(CondFalseSystem);
+        container.add(Target(ran.clone()));
+        container.add_edge::<CondTrueSystem, Target>().unwrap();
+        container.add_edge::<CondFalseSystem, Target>().unwrap();
+
+        let runner = EcsRunnerMultiThread::new(2);
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        assert!(!ran.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn multiple_conditions_any_mode_multi_thread() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let ran = Arc::new(AtomicBool::new(false));
+
+        struct Target(Arc<AtomicBool>);
+        impl System for Target {
+            type Result = ();
+            fn run<'a>(
+                &'a self,
+                _ctx: &'a SystemContext<'a>,
+            ) -> Result<(), crate::system::SystemError> {
+                self.0.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let mut container = SystemsContainer::new();
+        container.add_condition(CondTrueSystem);
+        container.add_condition(CondFalseSystem);
+        container.add(Target(ran.clone()));
+        container.add_edge::<CondTrueSystem, Target>().unwrap();
+        container.add_edge::<CondFalseSystem, Target>().unwrap();
+        container.set_condition_mode::<Target>(ConditionMode::Any);
+
+        let runner = EcsRunnerMultiThread::new(2);
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        assert!(ran.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn condition_gates_exclusive_multi_thread() {
+        struct ExclTarget;
+        impl ExclusiveSystem for ExclTarget {
+            type Result = ();
+            fn run(&mut self, world: &mut World) -> Result<(), crate::system::SystemError> {
+                world.insert_resource(99u32);
+                Ok(())
+            }
+        }
+
+        let mut container = SystemsContainer::new();
+        container.add_condition(CondFalseSystem);
+        container.add_exclusive(ExclTarget);
+        container.add_edge::<CondFalseSystem, ExclTarget>().unwrap();
+
+        let runner = EcsRunnerMultiThread::new(2);
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        assert!(!world.has_resource::<u32>());
+    }
+
+    #[test]
+    fn cascading_skip_multi_thread() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let counter = Arc::new(AtomicU32::new(0));
+
+        struct GatedA(Arc<AtomicU32>);
+        impl System for GatedA {
+            type Result = ();
+            fn run<'a>(
+                &'a self,
+                _ctx: &'a SystemContext<'a>,
+            ) -> Result<(), crate::system::SystemError> {
+                self.0.fetch_add(10, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        // CondFalse2 is also a condition, gated by GatedA (which is skipped),
+        // so CondFalse2 itself runs (it has no condition edge from CondFalseSystem).
+        // But for cascading test: CondFalse → GatedA(skipped) → Final(still runs)
+        struct Final(Arc<AtomicU32>);
+        impl System for Final {
+            type Result = ();
+            fn run<'a>(
+                &'a self,
+                _ctx: &'a SystemContext<'a>,
+            ) -> Result<(), crate::system::SystemError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let mut container = SystemsContainer::new();
+        container.add_condition(CondFalseSystem);
+        container.add(GatedA(counter.clone()));
+        container.add(Final(counter.clone()));
+        container.add_edge::<CondFalseSystem, GatedA>().unwrap();
+        container.add_edge::<GatedA, Final>().unwrap();
+
+        let runner = EcsRunnerMultiThread::new(2);
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        // GatedA skipped (no +10), Final still ran (+1)
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 }

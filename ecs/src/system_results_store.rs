@@ -50,6 +50,14 @@ impl SystemResultsStore {
         )
     }
 
+    /// Returns a type-erased reference to the result at the given index.
+    ///
+    /// Used by condition checking to evaluate results without knowing
+    /// the concrete type (the stored function pointer handles downcasting).
+    pub(crate) fn get_raw(&self, idx: usize) -> Option<&(dyn Any + Send + Sync)> {
+        self.slots[idx].get().map(|boxed| &**boxed)
+    }
+
     /// Consumes the store and returns the results as a flat vec of optional
     /// boxed values. Used by runners to extract previous-tick results for
     /// [`System::reuse_result`](crate::System::reuse_result).

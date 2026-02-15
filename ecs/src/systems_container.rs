@@ -1,8 +1,12 @@
-use std::any::TypeId;
+use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
+use crate::condition::{ConditionMode, ConditionResult, condition_checker};
+
+/// Function pointer type for condition checking.
+type ConditionCheckerFn = fn(&(dyn Any + Send + Sync)) -> bool;
 use crate::function_system::IntoSystem;
 use crate::system::{
     DynExclusiveSystem, DynSystem, ExclusiveFunctionSystem, ExclusiveSystem, System,
@@ -96,6 +100,15 @@ pub struct SystemsContainer {
     /// results are accessible (i.e. guaranteed to have completed before
     /// this system starts, based on the dependency graph).
     accessible_results: Vec<HashSet<TypeId>>,
+    /// Per-system condition checker. `Some` if this system was registered
+    /// via [`add_condition`](SystemsContainer::add_condition).
+    condition_checkers: Vec<Option<ConditionCheckerFn>>,
+    /// For each system, the indices of condition systems that gate it.
+    /// Populated automatically by [`add_edges`](SystemsContainer::add_edges)
+    /// when the source system has a condition checker.
+    condition_edges: Vec<Vec<usize>>,
+    /// For each system, how its conditions are combined.
+    condition_modes: Vec<ConditionMode>,
 }
 
 impl SystemsContainer {
@@ -110,6 +123,9 @@ impl SystemsContainer {
             idx_to_id: Vec::new(),
             single_thread_order: Vec::new(),
             accessible_results: Vec::new(),
+            condition_checkers: Vec::new(),
+            condition_edges: Vec::new(),
+            condition_modes: Vec::new(),
         }
     }
 
@@ -141,7 +157,35 @@ impl SystemsContainer {
         self.edges.push(Vec::new());
         self.in_degrees.push(0);
         self.accessible_results.push(HashSet::new());
+        self.condition_checkers.push(None);
+        self.condition_edges.push(Vec::new());
+        self.condition_modes.push(ConditionMode::All);
         self.rebuild_order();
+        arc
+    }
+
+    /// Registers a condition system.
+    ///
+    /// Like [`add()`](Self::add), but marks the system as a condition.
+    /// When edges are added from this system to other systems, those
+    /// edges are automatically treated as condition edges — the target
+    /// system will only run if this condition returns
+    /// [`Condition::True`](crate::Condition::True).
+    ///
+    /// The compile-time bound `S::Result: ConditionResult` ensures only
+    /// systems returning [`Condition<T>`](crate::Condition) can be registered
+    /// as conditions.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a system of the same type is already registered.
+    pub fn add_condition<S: System>(&mut self, system: S) -> Arc<RwLock<S>>
+    where
+        S::Result: ConditionResult,
+    {
+        let arc = self.add(system);
+        let idx = self.id_to_idx[&TypeId::of::<S>()];
+        self.condition_checkers[idx] = Some(condition_checker::<S::Result>);
         arc
     }
 
@@ -251,6 +295,17 @@ impl SystemsContainer {
                 self.in_degrees = test_in_degrees;
                 self.single_thread_order = order;
                 self.rebuild_accessible_results();
+
+                // Auto-detect condition edges: if the source system was
+                // registered via add_condition(), mark the edge as conditional.
+                for &(from, to) in &resolved {
+                    if self.condition_checkers[from].is_some()
+                        && !self.condition_edges[to].contains(&from)
+                    {
+                        self.condition_edges[to].push(from);
+                    }
+                }
+
                 Ok(())
             }
             Err(cycle_indices) => {
@@ -294,6 +349,9 @@ impl SystemsContainer {
         self.edges.push(Vec::new());
         self.in_degrees.push(0);
         self.accessible_results.push(HashSet::new());
+        self.condition_checkers.push(None);
+        self.condition_edges.push(Vec::new());
+        self.condition_modes.push(ConditionMode::All);
         self.rebuild_order();
         arc
     }
@@ -410,6 +468,50 @@ impl SystemsContainer {
     /// Returns the system index for a given `TypeId`, if registered.
     pub(crate) fn type_id_to_idx(&self) -> &HashMap<TypeId, usize> {
         &self.id_to_idx
+    }
+
+    /// Sets the condition evaluation mode for system `T`.
+    ///
+    /// By default, all conditions must pass ([`ConditionMode::All`]).
+    /// Use this to switch to [`ConditionMode::Any`] where at least
+    /// one passing condition is sufficient.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `T` is not registered.
+    pub fn set_condition_mode<T: 'static>(&mut self, mode: ConditionMode) {
+        let idx = *self
+            .id_to_idx
+            .get(&TypeId::of::<T>())
+            .unwrap_or_else(|| panic!("System `{}` is not registered", std::any::type_name::<T>()));
+        self.condition_modes[idx] = mode;
+    }
+
+    /// Evaluates the run conditions for the system at `idx`.
+    ///
+    /// Returns `true` if the system should run, `false` if it should be
+    /// skipped. Systems with no condition edges always return `true`.
+    pub(crate) fn check_conditions(
+        &self,
+        idx: usize,
+        results: &crate::system_results_store::SystemResultsStore,
+    ) -> bool {
+        let conditions = &self.condition_edges[idx];
+        if conditions.is_empty() {
+            return true;
+        }
+        match self.condition_modes[idx] {
+            ConditionMode::All => conditions.iter().all(|&cond_idx| {
+                let checker =
+                    self.condition_checkers[cond_idx].expect("condition system missing checker");
+                results.get_raw(cond_idx).is_some_and(checker)
+            }),
+            ConditionMode::Any => conditions.iter().any(|&cond_idx| {
+                let checker =
+                    self.condition_checkers[cond_idx].expect("condition system missing checker");
+                results.get_raw(cond_idx).is_some_and(checker)
+            }),
+        }
     }
 
     /// Rebuilds `single_thread_order` and `accessible_results` from the current graph.
@@ -822,5 +924,134 @@ mod tests {
         let mut container = SystemsContainer::new();
         container.add(SystemA);
         container.get_exclusive_system(0);
+    }
+
+    // ---- Condition system tests ----
+
+    use crate::condition::{Condition, ConditionMode};
+
+    struct CondTrue;
+    impl System for CondTrue {
+        type Result = Condition<()>;
+        fn run<'a>(
+            &'a self,
+            _ctx: &'a SystemContext<'a>,
+        ) -> Result<Condition<()>, crate::system::SystemError> {
+            Ok(Condition::True(()))
+        }
+    }
+
+    struct CondFalse;
+    impl System for CondFalse {
+        type Result = Condition<()>;
+        fn run<'a>(
+            &'a self,
+            _ctx: &'a SystemContext<'a>,
+        ) -> Result<Condition<()>, crate::system::SystemError> {
+            Ok(Condition::False)
+        }
+    }
+
+    #[test]
+    fn add_condition_creates_dependency() {
+        let mut container = SystemsContainer::new();
+        container.add_condition(CondTrue);
+        container.add(SystemA);
+        container.add_edge::<CondTrue, SystemA>().unwrap();
+
+        // Condition edge auto-detected
+        assert_eq!(container.condition_edges[1], vec![0]);
+        // Also a regular dependency
+        assert_eq!(container.dependents_of(0), &[1]);
+    }
+
+    #[test]
+    fn add_edge_non_condition_no_condition_edge() {
+        let mut container = SystemsContainer::new();
+        container.add(SystemA);
+        container.add(SystemB);
+        container.add_edge::<SystemA, SystemB>().unwrap();
+
+        // No condition edge created
+        assert!(container.condition_edges[1].is_empty());
+    }
+
+    #[test]
+    fn duplicate_condition_edge_is_idempotent() {
+        let mut container = SystemsContainer::new();
+        container.add_condition(CondTrue);
+        container.add(SystemA);
+        container.add_edge::<CondTrue, SystemA>().unwrap();
+        container.add_edge::<CondTrue, SystemA>().unwrap(); // duplicate
+
+        assert_eq!(container.condition_edges[1].len(), 1);
+    }
+
+    #[test]
+    fn set_condition_mode_works() {
+        let mut container = SystemsContainer::new();
+        container.add(SystemA);
+        assert_eq!(container.condition_modes[0], ConditionMode::All);
+
+        container.set_condition_mode::<SystemA>(ConditionMode::Any);
+        assert_eq!(container.condition_modes[0], ConditionMode::Any);
+    }
+
+    #[test]
+    #[should_panic(expected = "is not registered")]
+    fn set_condition_mode_panics_unregistered() {
+        let mut container = SystemsContainer::new();
+        container.set_condition_mode::<SystemA>(ConditionMode::Any);
+    }
+
+    #[test]
+    fn check_conditions_no_conditions_returns_true() {
+        use crate::system_results_store::SystemResultsStore;
+        use std::collections::HashMap;
+
+        let mut container = SystemsContainer::new();
+        container.add(SystemA);
+
+        let store = SystemResultsStore::new(1, HashMap::new());
+        assert!(container.check_conditions(0, &store));
+    }
+
+    #[test]
+    fn check_conditions_all_mode() {
+        use crate::system_results_store::SystemResultsStore;
+
+        let mut container = SystemsContainer::new();
+        container.add_condition(CondTrue);
+        container.add_condition(CondFalse);
+        container.add(SystemA);
+        container.add_edge::<CondTrue, SystemA>().unwrap();
+        container.add_edge::<CondFalse, SystemA>().unwrap();
+
+        let store = SystemResultsStore::new(3, container.type_id_to_idx().clone());
+        store.store(0, Box::new(Condition::<()>::True(())));
+        store.store(1, Box::new(Condition::<()>::False));
+
+        // All mode: one false → overall false
+        assert!(!container.check_conditions(2, &store));
+    }
+
+    #[test]
+    fn check_conditions_any_mode() {
+        use crate::system_results_store::SystemResultsStore;
+
+        let mut container = SystemsContainer::new();
+        container.add_condition(CondTrue);
+        container.add_condition(CondFalse);
+        container.add(SystemA);
+        container.add_edge::<CondTrue, SystemA>().unwrap();
+        container.add_edge::<CondFalse, SystemA>().unwrap();
+        container.set_condition_mode::<SystemA>(ConditionMode::Any);
+
+        let store = SystemResultsStore::new(3, container.type_id_to_idx().clone());
+        store.store(0, Box::new(Condition::<()>::True(())));
+        store.store(1, Box::new(Condition::<()>::False));
+
+        // Any mode: one true → overall true
+        assert!(container.check_conditions(2, &store));
     }
 }

@@ -70,6 +70,11 @@ impl EcsRunnerSingleThread {
 
         {
             for &idx in order {
+                // Check run conditions — skip this system if they fail.
+                if !systems.check_conditions(idx, &results_store) {
+                    continue;
+                }
+
                 // Feed previous result to the system for memory reuse.
                 let prev_result = if idx < prev.len() {
                     prev[idx].take()
@@ -527,6 +532,244 @@ mod tests {
         container.add_exclusive(ExclProducer);
         container.add(Consumer(result.clone()));
         container.add_edge::<ExclProducer, Consumer>().unwrap();
+
+        let runner = EcsRunnerSingleThread::new();
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        assert_eq!(*result.lock().unwrap(), Some(42));
+    }
+
+    // ---- Run condition tests ----
+
+    use crate::condition::{Condition, ConditionMode};
+
+    struct CondTrueSystem;
+    impl System for CondTrueSystem {
+        type Result = Condition<()>;
+        fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<Condition<()>, SystemError> {
+            Ok(Condition::True(()))
+        }
+    }
+
+    struct CondFalseSystem;
+    impl System for CondFalseSystem {
+        type Result = Condition<()>;
+        fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<Condition<()>, SystemError> {
+            Ok(Condition::False)
+        }
+    }
+
+    #[test]
+    fn condition_true_allows_system() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let ran = Arc::new(AtomicBool::new(false));
+
+        struct Target(Arc<AtomicBool>);
+        impl System for Target {
+            type Result = ();
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+                self.0.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let mut container = SystemsContainer::new();
+        container.add_condition(CondTrueSystem);
+        container.add(Target(ran.clone()));
+        container.add_edge::<CondTrueSystem, Target>().unwrap();
+
+        let runner = EcsRunnerSingleThread::new();
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        assert!(ran.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn condition_false_skips_system() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let ran = Arc::new(AtomicBool::new(false));
+
+        struct Target(Arc<AtomicBool>);
+        impl System for Target {
+            type Result = ();
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+                self.0.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let mut container = SystemsContainer::new();
+        container.add_condition(CondFalseSystem);
+        container.add(Target(ran.clone()));
+        container.add_edge::<CondFalseSystem, Target>().unwrap();
+
+        let runner = EcsRunnerSingleThread::new();
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        assert!(!ran.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn skipped_system_dependents_still_run() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let counter = Arc::new(AtomicU32::new(0));
+
+        struct Gated(Arc<AtomicU32>);
+        impl System for Gated {
+            type Result = ();
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+                self.0.fetch_add(10, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        struct Downstream(Arc<AtomicU32>);
+        impl System for Downstream {
+            type Result = ();
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let mut container = SystemsContainer::new();
+        container.add_condition(CondFalseSystem);
+        container.add(Gated(counter.clone()));
+        container.add(Downstream(counter.clone()));
+        container.add_edge::<CondFalseSystem, Gated>().unwrap();
+        container.add_edge::<Gated, Downstream>().unwrap();
+
+        let runner = EcsRunnerSingleThread::new();
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        // Gated was skipped (no +10), but Downstream still ran (+1)
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn multiple_conditions_all_mode() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let ran = Arc::new(AtomicBool::new(false));
+
+        struct Target(Arc<AtomicBool>);
+        impl System for Target {
+            type Result = ();
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+                self.0.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let mut container = SystemsContainer::new();
+        container.add_condition(CondTrueSystem);
+        container.add_condition(CondFalseSystem);
+        container.add(Target(ran.clone()));
+        container.add_edge::<CondTrueSystem, Target>().unwrap();
+        container.add_edge::<CondFalseSystem, Target>().unwrap();
+        // Default: All mode — both must be true
+
+        let runner = EcsRunnerSingleThread::new();
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        assert!(!ran.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn multiple_conditions_any_mode() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let ran = Arc::new(AtomicBool::new(false));
+
+        struct Target(Arc<AtomicBool>);
+        impl System for Target {
+            type Result = ();
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+                self.0.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let mut container = SystemsContainer::new();
+        container.add_condition(CondTrueSystem);
+        container.add_condition(CondFalseSystem);
+        container.add(Target(ran.clone()));
+        container.add_edge::<CondTrueSystem, Target>().unwrap();
+        container.add_edge::<CondFalseSystem, Target>().unwrap();
+        container.set_condition_mode::<Target>(ConditionMode::Any);
+
+        let runner = EcsRunnerSingleThread::new();
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        assert!(ran.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn condition_gates_exclusive_system() {
+        struct ExclTarget;
+        impl ExclusiveSystem for ExclTarget {
+            type Result = ();
+            fn run(&mut self, world: &mut World) -> Result<(), SystemError> {
+                world.insert_resource(99u32);
+                Ok(())
+            }
+        }
+
+        let mut container = SystemsContainer::new();
+        container.add_condition(CondFalseSystem);
+        container.add_exclusive(ExclTarget);
+        container.add_edge::<CondFalseSystem, ExclTarget>().unwrap();
+
+        let runner = EcsRunnerSingleThread::new();
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        // ExclTarget was skipped — resource not inserted
+        assert!(!world.has_resource::<u32>());
+    }
+
+    #[test]
+    fn condition_with_payload_piping() {
+        struct ConfigCondition;
+        impl System for ConfigCondition {
+            type Result = Condition<u32>;
+            fn run<'a>(
+                &'a self,
+                _ctx: &'a SystemContext<'a>,
+            ) -> Result<Condition<u32>, SystemError> {
+                Ok(Condition::True(42))
+            }
+        }
+
+        struct Reader(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
+        impl System for Reader {
+            type Result = ();
+            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+                let cond = ctx.system_result::<ConfigCondition>();
+                *self.0.lock().unwrap() = cond.value().copied();
+                Ok(())
+            }
+        }
+
+        let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut container = SystemsContainer::new();
+        container.add_condition(ConfigCondition);
+        container.add(Reader(result.clone()));
+        container.add_edge::<ConfigCondition, Reader>().unwrap();
 
         let runner = EcsRunnerSingleThread::new();
         let mut world = World::new();
