@@ -3,6 +3,21 @@ use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+/// Function signature for component lifecycle hooks.
+///
+/// Hooks receive exclusive world access and the entity being modified.
+/// They fire synchronously during structural changes (insert/remove/despawn).
+///
+/// # Hook types
+///
+/// | Hook | When | Typical use |
+/// |------|------|-------------|
+/// | `on_add` | First insertion only | Initialize derived state, required components |
+/// | `on_insert` | Every insertion (add + replace) | Sync external systems |
+/// | `on_replace` | Before existing value is overwritten | Cleanup old value |
+/// | `on_remove` | Before component is removed | Cleanup resources |
+pub type ComponentHookFn = fn(&mut crate::world::World, crate::entity::Entity);
+
 /// Typed sparse set storing components of type T.
 ///
 /// Uses a sparse array (entity index → dense index) and a dense array
@@ -264,6 +279,14 @@ pub(crate) struct ComponentStorage {
     /// Records of (entity_index, tick) for recently removed components.
     /// Cleared by [`World::clear_removed_tracking`](crate::World::clear_removed_tracking).
     removed_ticks: Vec<(u32, u64)>,
+    /// Hook called when a component is added to an entity for the first time.
+    pub(crate) on_add: Option<ComponentHookFn>,
+    /// Hook called on every insertion (both new addition and replacement).
+    pub(crate) on_insert: Option<ComponentHookFn>,
+    /// Hook called just before an existing component value is replaced.
+    pub(crate) on_replace: Option<ComponentHookFn>,
+    /// Hook called just before a component is removed from an entity.
+    pub(crate) on_remove: Option<ComponentHookFn>,
 }
 
 impl ComponentStorage {
@@ -290,6 +313,10 @@ impl ComponentStorage {
                 set.added_since(entity_index, since_tick)
             },
             removed_ticks: Vec::new(),
+            on_add: None,
+            on_insert: None,
+            on_replace: None,
+            on_remove: None,
         }
     }
 

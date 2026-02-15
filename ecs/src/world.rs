@@ -10,7 +10,7 @@ use crate::events::Events;
 use crate::main_thread_resource::MainThreadResources;
 use crate::query::{AddedFilter, ChangedFilter, ContainsChecker, RemovedFilter};
 use crate::resource::{Resource, ResourceRef, ResourceRefMut, Resources};
-use crate::sparse_set::{ComponentStorage, LockGuard, Ref, RefMut};
+use crate::sparse_set::{ComponentHookFn, ComponentStorage, LockGuard, Ref, RefMut};
 use std::sync::{Arc, RwLock};
 
 /// Error returned when a component type has not been registered in the [`World`].
@@ -116,14 +116,31 @@ impl World {
     ///
     /// Returns `true` if the entity was alive and is now despawned.
     /// Returns `false` if the entity was already dead.
+    /// Fires `on_remove` hooks before removal (entity still alive, components still readable).
     /// Records removals for [`removed`](World::removed) filter queries.
     pub fn despawn(&mut self, entity: Entity) -> bool {
-        if !self.entities.deallocate(entity) {
+        if !self.entities.is_alive(entity) {
             return false;
         }
 
         let index = entity.index();
         let tick = self.tick;
+
+        // Pass 1: collect on_remove hooks for components this entity has
+        let hooks: Vec<ComponentHookFn> = self
+            .components
+            .values()
+            .filter(|s| s.contains_untyped(index))
+            .filter_map(|s| s.on_remove)
+            .collect();
+
+        // Pass 2: fire hooks (entity still alive, components still readable)
+        for hook in hooks {
+            hook(self, entity);
+        }
+
+        // Deallocate entity and remove all components (including any added by hooks)
+        self.entities.deallocate(entity);
         for storage in self.components.values_mut() {
             if storage.remove_untyped(index) {
                 storage.record_removal(index, tick);
@@ -237,14 +254,44 @@ impl World {
             "Cannot insert component on dead entity {entity}"
         );
 
-        let storage =
-            self.components
-                .get_mut(&TypeId::of::<T>())
+        let type_id = TypeId::of::<T>();
+
+        // Extract hook info (borrow released after this block)
+        let (had_component, on_add, on_insert, on_replace) = {
+            let storage = self
+                .components
+                .get(&type_id)
                 .ok_or(ComponentNotRegistered {
                     type_name: std::any::type_name::<T>(),
                 })?;
+            (
+                storage.contains_untyped(entity.index()),
+                storage.on_add,
+                storage.on_insert,
+                storage.on_replace,
+            )
+        };
 
-        storage.typed_mut::<T>().insert(entity.index(), component);
+        // Fire on_replace BEFORE overwriting (old value still readable)
+        if had_component && let Some(hook) = on_replace {
+            hook(self, entity);
+        }
+
+        // Perform the actual insert
+        self.components
+            .get_mut(&type_id)
+            .unwrap()
+            .typed_mut::<T>()
+            .insert(entity.index(), component);
+
+        // Fire on_add / on_insert AFTER insertion
+        if !had_component && let Some(hook) = on_add {
+            hook(self, entity);
+        }
+        if let Some(hook) = on_insert {
+            hook(self, entity);
+        }
+
         Ok(())
     }
 
@@ -270,17 +317,41 @@ impl World {
             "Cannot insert component on dead entity {entity}"
         );
 
+        let type_id = TypeId::of::<T>();
         let tick = self.tick;
-        let storage =
-            self.components
-                .get_mut(&TypeId::of::<T>())
+
+        let (had_component, on_add, on_insert, on_replace) = {
+            let storage = self
+                .components
+                .get(&type_id)
                 .ok_or(ComponentNotRegistered {
                     type_name: std::any::type_name::<T>(),
                 })?;
+            (
+                storage.contains_untyped(entity.index()),
+                storage.on_add,
+                storage.on_insert,
+                storage.on_replace,
+            )
+        };
 
-        storage
+        if had_component && let Some(hook) = on_replace {
+            hook(self, entity);
+        }
+
+        self.components
+            .get_mut(&type_id)
+            .unwrap()
             .typed_mut::<T>()
             .insert_with_tick(entity.index(), component, tick);
+
+        if !had_component && let Some(hook) = on_add {
+            hook(self, entity);
+        }
+        if let Some(hook) = on_insert {
+            hook(self, entity);
+        }
+
         Ok(())
     }
 
@@ -391,19 +462,11 @@ impl World {
     /// Despawns multiple entities at once.
     ///
     /// Skips entities that are already dead.
+    /// Fires `on_remove` hooks before removal for each entity.
     /// Records removals for [`removed`](World::removed) filter queries.
     pub fn despawn_batch(&mut self, entities: &[Entity]) {
-        let tick = self.tick;
         for &entity in entities {
-            if !self.entities.deallocate(entity) {
-                continue;
-            }
-            let index = entity.index();
-            for storage in self.components.values_mut() {
-                if storage.remove_untyped(index) {
-                    storage.record_removal(index, tick);
-                }
-            }
+            self.despawn(entity);
         }
     }
 
@@ -412,6 +475,7 @@ impl World {
     /// `entities` and `components` must have the same length.
     /// Uses tick 0 (untracked). For change-tracked insertion,
     /// use [`insert_batch_tracked`](World::insert_batch_tracked).
+    /// Fires lifecycle hooks (`on_add`, `on_insert`, `on_replace`) per entity.
     ///
     /// # Errors
     ///
@@ -431,21 +495,67 @@ impl World {
             "insert_batch: entities and components must have the same length"
         );
 
-        let storage =
-            self.components
-                .get_mut(&TypeId::of::<T>())
+        let type_id = TypeId::of::<T>();
+
+        // Verify registered and extract hooks
+        let (on_add, on_insert, on_replace) = {
+            let storage = self
+                .components
+                .get(&type_id)
                 .ok_or(ComponentNotRegistered {
                     type_name: std::any::type_name::<T>(),
                 })?;
-        let set = storage.typed_mut::<T>();
-        set.reserve(components.len());
+            (storage.on_add, storage.on_insert, storage.on_replace)
+        };
+        let has_hooks = on_add.is_some() || on_insert.is_some() || on_replace.is_some();
 
-        for (entity, component) in entities.iter().zip(components) {
-            assert!(
-                self.entities.is_alive(*entity),
-                "Cannot insert component on dead entity {entity}"
-            );
-            set.insert(entity.index(), component);
+        // Reserve capacity upfront
+        self.components
+            .get_mut(&type_id)
+            .unwrap()
+            .typed_mut::<T>()
+            .reserve(components.len());
+
+        if has_hooks {
+            for (entity, component) in entities.iter().zip(components) {
+                assert!(
+                    self.entities.is_alive(*entity),
+                    "Cannot insert component on dead entity {entity}"
+                );
+                let had = self
+                    .components
+                    .get(&type_id)
+                    .unwrap()
+                    .contains_untyped(entity.index());
+
+                if had && let Some(hook) = on_replace {
+                    hook(self, *entity);
+                }
+
+                self.components
+                    .get_mut(&type_id)
+                    .unwrap()
+                    .typed_mut::<T>()
+                    .insert(entity.index(), component);
+
+                if !had && let Some(hook) = on_add {
+                    hook(self, *entity);
+                }
+                if let Some(hook) = on_insert {
+                    hook(self, *entity);
+                }
+            }
+        } else {
+            // Fast path: no hooks, direct sparse set insert
+            let storage = self.components.get_mut(&type_id).unwrap();
+            let set = storage.typed_mut::<T>();
+            for (entity, component) in entities.iter().zip(components) {
+                assert!(
+                    self.entities.is_alive(*entity),
+                    "Cannot insert component on dead entity {entity}"
+                );
+                set.insert(entity.index(), component);
+            }
         }
         Ok(())
     }
@@ -453,6 +563,7 @@ impl World {
     /// Inserts a component on each entity with change tracking.
     ///
     /// Like [`insert_batch`](World::insert_batch) but records the current tick.
+    /// Fires lifecycle hooks (`on_add`, `on_insert`, `on_replace`) per entity.
     ///
     /// # Errors
     ///
@@ -472,22 +583,68 @@ impl World {
             "insert_batch_tracked: entities and components must have the same length"
         );
 
+        let type_id = TypeId::of::<T>();
         let tick = self.tick;
-        let storage =
-            self.components
-                .get_mut(&TypeId::of::<T>())
+
+        // Verify registered and extract hooks
+        let (on_add, on_insert, on_replace) = {
+            let storage = self
+                .components
+                .get(&type_id)
                 .ok_or(ComponentNotRegistered {
                     type_name: std::any::type_name::<T>(),
                 })?;
-        let set = storage.typed_mut::<T>();
-        set.reserve(components.len());
+            (storage.on_add, storage.on_insert, storage.on_replace)
+        };
+        let has_hooks = on_add.is_some() || on_insert.is_some() || on_replace.is_some();
 
-        for (entity, component) in entities.iter().zip(components) {
-            assert!(
-                self.entities.is_alive(*entity),
-                "Cannot insert component on dead entity {entity}"
-            );
-            set.insert_with_tick(entity.index(), component, tick);
+        // Reserve capacity upfront
+        self.components
+            .get_mut(&type_id)
+            .unwrap()
+            .typed_mut::<T>()
+            .reserve(components.len());
+
+        if has_hooks {
+            for (entity, component) in entities.iter().zip(components) {
+                assert!(
+                    self.entities.is_alive(*entity),
+                    "Cannot insert component on dead entity {entity}"
+                );
+                let had = self
+                    .components
+                    .get(&type_id)
+                    .unwrap()
+                    .contains_untyped(entity.index());
+
+                if had && let Some(hook) = on_replace {
+                    hook(self, *entity);
+                }
+
+                self.components
+                    .get_mut(&type_id)
+                    .unwrap()
+                    .typed_mut::<T>()
+                    .insert_with_tick(entity.index(), component, tick);
+
+                if !had && let Some(hook) = on_add {
+                    hook(self, *entity);
+                }
+                if let Some(hook) = on_insert {
+                    hook(self, *entity);
+                }
+            }
+        } else {
+            // Fast path: no hooks, direct sparse set insert
+            let storage = self.components.get_mut(&type_id).unwrap();
+            let set = storage.typed_mut::<T>();
+            for (entity, component) in entities.iter().zip(components) {
+                assert!(
+                    self.entities.is_alive(*entity),
+                    "Cannot insert component on dead entity {entity}"
+                );
+                set.insert_with_tick(entity.index(), component, tick);
+            }
         }
         Ok(())
     }
@@ -495,14 +652,40 @@ impl World {
     /// Removes a component from multiple entities at once.
     ///
     /// Skips entities that don't have the component.
+    /// Fires `on_remove` hook for each entity before removal.
     /// Records removals for [`removed`](World::removed) filter queries.
     pub fn remove_batch<T: 'static>(&mut self, entities: &[Entity]) {
         let tick = self.tick;
-        let Some(storage) = self.components.get_mut(&TypeId::of::<T>()) else {
-            return;
+        let type_id = TypeId::of::<T>();
+
+        // Extract on_remove hook
+        let on_remove = {
+            let Some(storage) = self.components.get(&type_id) else {
+                return;
+            };
+            storage.on_remove
         };
 
-        // Collect which entities were actually removed, then record.
+        // Fire on_remove hooks before removal
+        if let Some(hook) = on_remove {
+            let with_component: Vec<Entity> = entities
+                .iter()
+                .copied()
+                .filter(|e| {
+                    self.components
+                        .get(&type_id)
+                        .is_some_and(|s| s.contains_untyped(e.index()))
+                })
+                .collect();
+            for entity in with_component {
+                hook(self, entity);
+            }
+        }
+
+        // Perform removals
+        let Some(storage) = self.components.get_mut(&type_id) else {
+            return;
+        };
         let mut removed_indices = Vec::new();
         {
             let set = storage.typed_mut::<T>();
@@ -520,10 +703,28 @@ impl World {
     /// Removes a component from an entity.
     ///
     /// Returns the removed value, or `None` if the entity did not have it.
-    /// Records the removal for [`removed`](World::removed) filter queries.
+    /// Fires `on_remove` hook before removal. Records the removal for
+    /// [`removed`](World::removed) filter queries.
     pub fn remove<T: 'static>(&mut self, entity: Entity) -> Option<T> {
         let tick = self.tick;
-        let storage = self.components.get_mut(&TypeId::of::<T>())?;
+        let type_id = TypeId::of::<T>();
+
+        // Check presence and extract hook
+        let on_remove = {
+            let storage = self.components.get(&type_id)?;
+            if !storage.contains_untyped(entity.index()) {
+                return None;
+            }
+            storage.on_remove
+        };
+
+        // Fire on_remove BEFORE removal (value still readable)
+        if let Some(hook) = on_remove {
+            hook(self, entity);
+        }
+
+        // Perform removal
+        let storage = self.components.get_mut(&type_id)?;
         let result = storage.typed_mut::<T>().remove(entity.index());
         if result.is_some() {
             storage.record_removal(entity.index(), tick);
@@ -698,6 +899,74 @@ impl World {
     /// Returns the TypeIds of all registered component types.
     pub fn component_type_ids(&self) -> impl Iterator<Item = TypeId> + '_ {
         self.components.keys().copied()
+    }
+
+    // ---- Lifecycle hooks ----
+
+    /// Sets the `on_add` hook for component type `T`.
+    ///
+    /// The hook fires after a component is inserted on an entity that
+    /// did **not** previously have it. It does not fire on replacement.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `T` has not been registered.
+    pub fn set_on_add<T: 'static>(&mut self, hook: ComponentHookFn) -> &mut Self {
+        self.components
+            .get_mut(&TypeId::of::<T>())
+            .expect("Component not registered")
+            .on_add = Some(hook);
+        self
+    }
+
+    /// Sets the `on_insert` hook for component type `T`.
+    ///
+    /// The hook fires after every insertion — both new additions and
+    /// replacements of existing values.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `T` has not been registered.
+    pub fn set_on_insert<T: 'static>(&mut self, hook: ComponentHookFn) -> &mut Self {
+        self.components
+            .get_mut(&TypeId::of::<T>())
+            .expect("Component not registered")
+            .on_insert = Some(hook);
+        self
+    }
+
+    /// Sets the `on_replace` hook for component type `T`.
+    ///
+    /// The hook fires just **before** an existing component value is
+    /// overwritten by a new insertion. The old value is still readable
+    /// via `world.get::<T>(entity)` inside the hook.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `T` has not been registered.
+    pub fn set_on_replace<T: 'static>(&mut self, hook: ComponentHookFn) -> &mut Self {
+        self.components
+            .get_mut(&TypeId::of::<T>())
+            .expect("Component not registered")
+            .on_replace = Some(hook);
+        self
+    }
+
+    /// Sets the `on_remove` hook for component type `T`.
+    ///
+    /// The hook fires just **before** the component is removed from the
+    /// entity (including during despawn). The value is still readable
+    /// via `world.get::<T>(entity)` inside the hook.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `T` has not been registered.
+    pub fn set_on_remove<T: 'static>(&mut self, hook: ComponentHookFn) -> &mut Self {
+        self.components
+            .get_mut(&TypeId::of::<T>())
+            .expect("Component not registered")
+            .on_remove = Some(hook);
+        self
     }
 
     /// Returns the TypeIds of all registered resource types.
@@ -1610,5 +1879,365 @@ mod tests {
         let entities = world.spawn_batch(2);
         // Should not panic when component type is not registered
         world.remove_batch::<Health>(&entities);
+    }
+
+    // ---- Lifecycle hook tests ----
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct Marker(u32);
+
+    #[test]
+    fn on_add_fires_on_first_insert() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Marker>();
+        world.set_on_add::<Position>(|world, entity| {
+            let _ = world.insert(entity, Marker(1));
+        });
+
+        let entity = world.spawn();
+        world.insert(entity, Position { x: 1.0, y: 2.0 }).unwrap();
+
+        // Marker should have been added by on_add hook
+        assert_eq!(world.get::<Marker>(entity), Some(&Marker(1)));
+    }
+
+    #[test]
+    fn on_add_does_not_fire_on_replace() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Marker>();
+        world.set_on_add::<Position>(|world, entity| {
+            let _ = world.insert(entity, Marker(1));
+        });
+
+        let entity = world.spawn();
+        world.insert(entity, Position { x: 1.0, y: 2.0 }).unwrap();
+        assert_eq!(world.get::<Marker>(entity), Some(&Marker(1)));
+
+        // Remove marker, then replace position — on_add should NOT fire
+        world.remove::<Marker>(entity);
+        world.insert(entity, Position { x: 3.0, y: 4.0 }).unwrap();
+        assert!(world.get::<Marker>(entity).is_none());
+    }
+
+    #[test]
+    fn on_insert_fires_on_every_insert() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Marker>();
+        world.set_on_insert::<Position>(|world, entity| {
+            let count = world.get::<Marker>(entity).map(|m| m.0).unwrap_or(0);
+            let _ = world.insert(entity, Marker(count + 1));
+        });
+
+        let entity = world.spawn();
+        world.insert(entity, Position { x: 1.0, y: 0.0 }).unwrap();
+        assert_eq!(world.get::<Marker>(entity), Some(&Marker(1)));
+
+        world.insert(entity, Position { x: 2.0, y: 0.0 }).unwrap();
+        assert_eq!(world.get::<Marker>(entity), Some(&Marker(2)));
+    }
+
+    #[test]
+    fn on_replace_fires_before_overwrite() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Marker>();
+        world.set_on_replace::<Position>(|world, entity| {
+            // Read old value and store it in Marker
+            if let Some(pos) = world.get::<Position>(entity) {
+                let _ = world.insert(entity, Marker(pos.x as u32));
+            }
+        });
+
+        let entity = world.spawn();
+        world.insert(entity, Position { x: 10.0, y: 0.0 }).unwrap();
+        // on_replace should NOT fire on first insert
+        assert!(world.get::<Marker>(entity).is_none());
+
+        world.insert(entity, Position { x: 20.0, y: 0.0 }).unwrap();
+        // Hook read old value x=10
+        assert_eq!(world.get::<Marker>(entity), Some(&Marker(10)));
+
+        world.insert(entity, Position { x: 30.0, y: 0.0 }).unwrap();
+        // Hook read old value x=20
+        assert_eq!(world.get::<Marker>(entity), Some(&Marker(20)));
+    }
+
+    #[test]
+    fn on_remove_fires_before_removal() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Marker>();
+        world.set_on_remove::<Position>(|world, entity| {
+            // Read component before it's removed
+            if let Some(pos) = world.get::<Position>(entity) {
+                let _ = world.insert(entity, Marker(pos.x as u32));
+            }
+        });
+
+        let entity = world.spawn();
+        world.insert(entity, Position { x: 42.0, y: 0.0 }).unwrap();
+        world.remove::<Position>(entity);
+
+        // Hook stored Position.x in Marker before removal
+        assert_eq!(world.get::<Marker>(entity), Some(&Marker(42)));
+        assert!(world.get::<Position>(entity).is_none());
+    }
+
+    #[test]
+    fn on_remove_fires_during_despawn() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.insert_resource(0u32);
+
+        world.set_on_remove::<Position>(|world, entity| {
+            if let Some(pos) = world.get::<Position>(entity) {
+                let mut counter = world.resource_mut::<u32>();
+                *counter = pos.x as u32;
+            }
+        });
+
+        let entity = world.spawn();
+        world.insert(entity, Position { x: 77.0, y: 0.0 }).unwrap();
+        world.despawn(entity);
+
+        let val = world.resource::<u32>();
+        assert_eq!(*val, 77);
+    }
+
+    #[test]
+    fn on_remove_fires_during_despawn_batch() {
+        let mut world = World::new();
+        world.register_component::<Health>();
+        world.insert_resource(0u32);
+
+        world.set_on_remove::<Health>(|world, _entity| {
+            let mut counter = world.resource_mut::<u32>();
+            *counter += 1;
+        });
+
+        let entities = world.spawn_batch(3);
+        for e in &entities {
+            world.insert(*e, Health(10)).unwrap();
+        }
+        world.despawn_batch(&entities);
+
+        let count = world.resource::<u32>();
+        assert_eq!(*count, 3);
+    }
+
+    #[test]
+    fn on_remove_entity_still_alive_during_despawn() {
+        let mut world = World::new();
+        world.register_component::<Health>();
+        world.insert_resource(false);
+
+        world.set_on_remove::<Health>(|world, entity| {
+            let mut was_alive = world.resource_mut::<bool>();
+            *was_alive = world.is_alive(entity);
+        });
+
+        let entity = world.spawn();
+        world.insert(entity, Health(1)).unwrap();
+        world.despawn(entity);
+
+        let was_alive = world.resource::<bool>();
+        assert!(*was_alive);
+    }
+
+    #[test]
+    fn hooks_fire_during_insert_batch() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Marker>();
+
+        world.set_on_add::<Position>(|world, entity| {
+            let _ = world.insert(entity, Marker(1));
+        });
+
+        let entities = world.spawn_batch(3);
+        let positions = vec![
+            Position { x: 1.0, y: 0.0 },
+            Position { x: 2.0, y: 0.0 },
+            Position { x: 3.0, y: 0.0 },
+        ];
+        world.insert_batch(&entities, positions).unwrap();
+
+        for e in &entities {
+            assert_eq!(world.get::<Marker>(*e), Some(&Marker(1)));
+        }
+    }
+
+    #[test]
+    fn hooks_fire_during_insert_batch_tracked() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Marker>();
+        world.advance_tick(); // tick = 1
+
+        world.set_on_add::<Position>(|world, entity| {
+            let _ = world.insert(entity, Marker(1));
+        });
+
+        let entities = world.spawn_batch(2);
+        let positions = vec![Position { x: 1.0, y: 0.0 }, Position { x: 2.0, y: 0.0 }];
+        world.insert_batch_tracked(&entities, positions).unwrap();
+
+        for e in &entities {
+            assert_eq!(world.get::<Marker>(*e), Some(&Marker(1)));
+        }
+        // Verify tick tracking still works
+        assert!(world.added::<Position>(0).matches(entities[0].index()));
+    }
+
+    #[test]
+    fn hooks_fire_during_remove_batch() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Marker>();
+
+        world.set_on_remove::<Position>(|world, entity| {
+            if let Some(pos) = world.get::<Position>(entity) {
+                let _ = world.insert(entity, Marker(pos.x as u32));
+            }
+        });
+
+        let entities = world.spawn_batch(3);
+        for (i, e) in entities.iter().enumerate() {
+            world
+                .insert(
+                    *e,
+                    Position {
+                        x: (i + 1) as f32,
+                        y: 0.0,
+                    },
+                )
+                .unwrap();
+        }
+        world.remove_batch::<Position>(&entities);
+
+        assert_eq!(world.get::<Marker>(entities[0]), Some(&Marker(1)));
+        assert_eq!(world.get::<Marker>(entities[1]), Some(&Marker(2)));
+        assert_eq!(world.get::<Marker>(entities[2]), Some(&Marker(3)));
+    }
+
+    #[test]
+    fn on_add_required_component_pattern() {
+        // Classic use case: inserting A automatically inserts B
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Velocity>();
+
+        world.set_on_add::<Position>(|world, entity| {
+            if world.get::<Velocity>(entity).is_none() {
+                let _ = world.insert(entity, Velocity { x: 0.0, y: 0.0 });
+            }
+        });
+
+        let entity = world.spawn();
+        world.insert(entity, Position { x: 1.0, y: 2.0 }).unwrap();
+
+        assert_eq!(
+            world.get::<Velocity>(entity),
+            Some(&Velocity { x: 0.0, y: 0.0 })
+        );
+    }
+
+    #[test]
+    fn multiple_hooks_on_same_component() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Marker>();
+        world.insert_resource(0u32);
+
+        world.set_on_add::<Position>(|world, entity| {
+            let _ = world.insert(entity, Marker(1));
+        });
+        world.set_on_insert::<Position>(|world, _entity| {
+            let mut counter = world.resource_mut::<u32>();
+            *counter += 1;
+        });
+
+        let entity = world.spawn();
+        world.insert(entity, Position { x: 1.0, y: 0.0 }).unwrap();
+
+        // Both hooks should have fired
+        assert_eq!(world.get::<Marker>(entity), Some(&Marker(1)));
+        assert_eq!(*world.resource::<u32>(), 1);
+
+        // Replace — only on_insert fires, not on_add
+        world.remove::<Marker>(entity);
+        world.insert(entity, Position { x: 2.0, y: 0.0 }).unwrap();
+
+        assert!(world.get::<Marker>(entity).is_none());
+        assert_eq!(*world.resource::<u32>(), 2);
+    }
+
+    #[test]
+    fn hooks_via_commands() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Marker>();
+        world.init_commands();
+
+        world.set_on_add::<Position>(|world, entity| {
+            let _ = world.insert(entity, Marker(99));
+        });
+
+        // Queue insertion via command buffer
+        let entity = world.spawn();
+        {
+            let cmds = world.resource::<CommandBuffer>();
+            cmds.push(move |world: &mut World| {
+                let _ = world.insert(entity, Position { x: 1.0, y: 0.0 });
+            });
+        }
+        world.apply_commands();
+
+        // Hook should have fired when command was applied
+        assert_eq!(world.get::<Marker>(entity), Some(&Marker(99)));
+    }
+
+    #[test]
+    fn no_hooks_batch_fast_path() {
+        // Ensure batch operations still work efficiently without hooks
+        let mut world = World::new();
+        world.register_component::<Health>();
+
+        let entities = world.spawn_batch(100);
+        let healths: Vec<Health> = (0..100).map(Health).collect();
+        world.insert_batch(&entities, healths).unwrap();
+
+        for (i, e) in entities.iter().enumerate() {
+            assert_eq!(world.get::<Health>(*e), Some(&Health(i as u32)));
+        }
+    }
+
+    #[test]
+    fn despawn_multiple_components_hooks() {
+        // Despawn fires on_remove for each component type
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Health>();
+        world.insert_resource(0u32);
+
+        world.set_on_remove::<Position>(|world, _entity| {
+            let mut c = world.resource_mut::<u32>();
+            *c += 10;
+        });
+        world.set_on_remove::<Health>(|world, _entity| {
+            let mut c = world.resource_mut::<u32>();
+            *c += 1;
+        });
+
+        let entity = world.spawn();
+        world.insert(entity, Position { x: 0.0, y: 0.0 }).unwrap();
+        world.insert(entity, Health(100)).unwrap();
+        world.despawn(entity);
+
+        // Both hooks should have fired
+        assert_eq!(*world.resource::<u32>(), 11);
     }
 }
