@@ -57,6 +57,7 @@ mod lock_request;
 mod main_thread_dispatcher;
 mod main_thread_resource;
 mod observer;
+mod par_for_each;
 #[cfg(any(
     feature = "physics-3d",
     feature = "physics-3d-f32",
@@ -120,9 +121,11 @@ pub use diagnostics::{
     AccessConflict, AmbiguityInfo, RunDiagnostics, RunReport, RunResult, SystemTiming, TimingReport,
 };
 pub use function_system::{
-    ForEach, ForEachAccess, ForEachSystem, FunctionSystem, IntoSystem, for_each,
+    ForEach, ForEachAccess, ForEachSystem, FunctionSystem, IntoSystem, ParForEach,
+    ParForEachSystem, for_each, par_for_each,
 };
 pub use lock_request::LockRequest;
+pub use par_for_each::ParConfig;
 pub use runner::{EcsRunner, EcsRunnerSingleThread, ShutdownError};
 pub use schedule::{
     FixedUpdate, PostUpdate, PreUpdate, ScheduleId, ScheduleLabel, Schedules, Startup, Time, Update,

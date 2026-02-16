@@ -252,6 +252,33 @@ impl SystemsContainer {
         self.add(crate::function_system::for_each::<A, F>(func))
     }
 
+    /// Registers a parallel per-entity function as a system.
+    ///
+    /// Like [`add_fn`](Self::add_fn) but uses parallel iteration to split
+    /// entity processing across threads. On WASM, falls back to sequential.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// fn movement((pos, vel): (&mut Position, &Velocity)) {
+    ///     pos.x += vel.x;
+    /// }
+    ///
+    /// let mut container = SystemsContainer::new();
+    /// container.add_par_fn::<(Write<Position>, Read<Velocity>), _>(movement);
+    /// ```
+    pub fn add_par_fn<A, F>(
+        &mut self,
+        func: F,
+    ) -> Arc<RwLock<crate::function_system::ParForEachSystem<F, A>>>
+    where
+        A: crate::function_system::ForEachAccess + Send + Sync + 'static,
+        F: for<'a> Fn(A::EachItem<'a>) + Send + Sync + 'static,
+        for<'a> A::Item<'a>: Sync,
+    {
+        self.add(crate::function_system::par_for_each::<A, F>(func))
+    }
+
     /// Registers a function that receives raw component storages as a system.
     ///
     /// Unlike [`add_fn`](Self::add_fn), this gives you the full storage

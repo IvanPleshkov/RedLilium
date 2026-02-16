@@ -75,6 +75,57 @@ impl<'a, A: AccessSet> QueryGuard<'a, A> {
     }
 }
 
+impl<'a, A: AccessSet> QueryGuard<'a, A>
+where
+    A::Item<'a>: QueryItem,
+{
+    /// Iterates over matching entities in parallel, calling `f` for each.
+    ///
+    /// Splits the entity list into batches and processes them on separate
+    /// threads via [`std::thread::scope`]. On WASM, falls back to
+    /// sequential iteration.
+    ///
+    /// The closure receives `(entity_index, item)` for each matching
+    /// entity. Since it is called from multiple threads, it must be `Fn`
+    /// (not `FnMut`). Use atomics, `Mutex`, or thread-local accumulators
+    /// for shared mutable state.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let q = ctx.query::<(Write<Position>, Read<Velocity>)>();
+    /// q.par_for_each(|entity_idx, (pos, vel)| {
+    ///     pos.x += vel.x;
+    /// });
+    /// ```
+    pub fn par_for_each<F>(&self, f: F)
+    where
+        A::Item<'a>: Sync,
+        F: Fn(u32, <A::Item<'a> as QueryItem>::Item) + Sync,
+    {
+        self.par_for_each_with(crate::par_for_each::ParConfig::default(), f);
+    }
+
+    /// Like [`par_for_each`](Self::par_for_each), but with explicit
+    /// parallelism configuration.
+    pub fn par_for_each_with<F>(&self, config: crate::par_for_each::ParConfig, f: F)
+    where
+        A::Item<'a>: Sync,
+        F: Fn(u32, <A::Item<'a> as QueryItem>::Item) + Sync,
+    {
+        if let Some(intersected) = self.items.query_intersected_entities() {
+            crate::par_for_each::par_for_each_entities(&self.items, &intersected, &config, &f);
+        } else {
+            crate::par_for_each::par_for_each_entities(
+                &self.items,
+                self.items.query_entities(),
+                &config,
+                &f,
+            );
+        }
+    }
+}
+
 impl<'a, A: AccessSet> IntoIterator for QueryGuard<'a, A>
 where
     A::Item<'a>: QueryItem,
@@ -916,5 +967,143 @@ mod tests {
 
         assert_eq!(world.get::<Position>(e).unwrap().x, 6.0);
         assert_eq!(world.get::<Position>(e2).unwrap().x, 100.0); // unchanged
+    }
+
+    // ---- par_for_each tests ----
+
+    #[test]
+    fn par_for_each_single_component_write() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        for i in 0..1000 {
+            let e = world.spawn();
+            world.insert(e, Position { x: i as f32 }).unwrap();
+        }
+
+        {
+            let q = query::<(Write<Position>,)>(&world);
+            q.par_for_each(|_entity, (pos,)| {
+                pos.x += 1.0;
+            });
+        }
+
+        let q2 = query::<(Read<Position>,)>(&world);
+        let mut count = 0;
+        for (_, (pos,)) in q2 {
+            assert!(pos.x >= 1.0);
+            count += 1;
+        }
+        assert_eq!(count, 1000);
+    }
+
+    #[test]
+    fn par_for_each_two_component_join() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Velocity>();
+
+        for i in 0..500 {
+            let e = world.spawn();
+            world.insert(e, Position { x: 0.0 }).unwrap();
+            world
+                .insert(
+                    e,
+                    Velocity {
+                        x: (i as f32) * 0.1,
+                    },
+                )
+                .unwrap();
+        }
+        // Entities without Velocity
+        for _ in 0..500 {
+            let e = world.spawn();
+            world.insert(e, Position { x: -1.0 }).unwrap();
+        }
+
+        {
+            let q = query::<(Write<Position>, Read<Velocity>)>(&world);
+            q.par_for_each(|_entity, (pos, vel)| {
+                pos.x += vel.x;
+            });
+        }
+
+        let q2 = query::<(Read<Position>,)>(&world);
+        for (_, (pos,)) in q2 {
+            assert!(pos.x >= -1.0);
+        }
+    }
+
+    #[test]
+    fn par_for_each_with_resource() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.insert_resource(2.0f32);
+
+        for _ in 0..100 {
+            let e = world.spawn();
+            world.insert(e, Position { x: 1.0 }).unwrap();
+        }
+
+        {
+            let q = query::<(Write<Position>, Res<f32>)>(&world);
+            q.par_for_each(|_entity, (pos, factor)| {
+                pos.x *= *factor;
+            });
+        }
+
+        let q2 = query::<(Read<Position>,)>(&world);
+        for (_, (pos,)) in q2 {
+            assert_eq!(pos.x, 2.0);
+        }
+    }
+
+    #[test]
+    fn par_for_each_accumulation_with_atomic() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let mut world = World::new();
+        world.register_component::<Position>();
+        for _ in 0..1000 {
+            let e = world.spawn();
+            world.insert(e, Position { x: 1.0 }).unwrap();
+        }
+
+        let counter = AtomicU32::new(0);
+        let q = query::<(Read<Position>,)>(&world);
+        q.par_for_each(|_entity, (_pos,)| {
+            counter.fetch_add(1, Ordering::Relaxed);
+        });
+
+        assert_eq!(counter.load(Ordering::SeqCst), 1000);
+    }
+
+    #[test]
+    fn par_for_each_empty_set() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+
+        let q = query::<(Read<Position>,)>(&world);
+        q.par_for_each(|_entity, (_pos,)| {
+            panic!("should not be called");
+        });
+    }
+
+    #[test]
+    fn par_for_each_small_set() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let mut world = World::new();
+        world.register_component::<Position>();
+        for _ in 0..10 {
+            let e = world.spawn();
+            world.insert(e, Position { x: 1.0 }).unwrap();
+        }
+
+        let counter = AtomicU32::new(0);
+        let q = query::<(Read<Position>,)>(&world);
+        q.par_for_each(|_entity, (_pos,)| {
+            counter.fetch_add(1, Ordering::Relaxed);
+        });
+        assert_eq!(counter.load(Ordering::SeqCst), 10);
     }
 }

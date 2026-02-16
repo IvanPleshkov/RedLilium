@@ -126,6 +126,46 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
             }
         }
     }
+
+    /// Acquires locks and iterates over matching entities in parallel.
+    ///
+    /// Convenience method that combines lock acquisition with parallel
+    /// per-entity iteration. The access set `A` must implement
+    /// [`ForEachAccess`](crate::ForEachAccess).
+    ///
+    /// On WASM, falls back to sequential iteration.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// ctx.lock::<(Write<Position>, Read<Velocity>)>()
+    ///     .par_for_each(|(pos, vel): (&mut Position, &Velocity)| {
+    ///         pos.x += vel.x;
+    ///     });
+    /// ```
+    pub fn par_for_each<F>(self, f: F)
+    where
+        A: crate::function_system::ForEachAccess,
+        for<'w> A::Item<'w>: Sync,
+        F: for<'w> Fn(<A as crate::function_system::ForEachAccess>::EachItem<'w>) + Send + Sync,
+    {
+        self.execute(|items| {
+            A::run_par_for_each(&items, &f);
+        });
+    }
+
+    /// Like [`par_for_each`](Self::par_for_each), but with explicit
+    /// parallelism configuration.
+    pub fn par_for_each_with<F>(self, config: crate::par_for_each::ParConfig, f: F)
+    where
+        A: crate::function_system::ForEachAccess,
+        for<'w> A::Item<'w>: Sync,
+        F: for<'w> Fn(<A as crate::function_system::ForEachAccess>::EachItem<'w>) + Send + Sync,
+    {
+        self.execute(|items| {
+            A::run_par_for_each_with(&items, &config, &f);
+        });
+    }
 }
 
 #[cfg(test)]
@@ -225,5 +265,57 @@ mod tests {
         let request = ctx.lock::<(Read<Position>,)>();
         let sum = request.execute(|(positions,)| positions.iter().map(|(_, p)| p.x).sum::<f32>());
         assert_eq!(sum, 42.0);
+    }
+
+    #[test]
+    fn par_for_each_via_lock_request() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+
+        for _ in 0..100 {
+            let e = world.spawn();
+            world.insert(e, Position { x: 1.0 }).unwrap();
+        }
+
+        let compute = ComputePool::new(IoRuntime::new());
+        let io = crate::io_runtime::IoRuntime::new();
+        let commands = CommandCollector::new();
+        let ctx = SystemContext::new(&world, &compute, &io, &commands);
+
+        ctx.lock::<(Write<Position>,)>()
+            .par_for_each(|(pos,): (&mut Position,)| {
+                pos.x = 42.0;
+            });
+
+        for e in world.iter_entities() {
+            assert_eq!(world.get::<Position>(e).unwrap().x, 42.0);
+        }
+    }
+
+    #[test]
+    fn par_for_each_two_components() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Velocity>();
+
+        for _ in 0..100 {
+            let e = world.spawn();
+            world.insert(e, Position { x: 0.0 }).unwrap();
+            world.insert(e, Velocity { x: 5.0 }).unwrap();
+        }
+
+        let compute = ComputePool::new(IoRuntime::new());
+        let io = crate::io_runtime::IoRuntime::new();
+        let commands = CommandCollector::new();
+        let ctx = SystemContext::new(&world, &compute, &io, &commands);
+
+        ctx.lock::<(Write<Position>, Read<Velocity>)>()
+            .par_for_each(|(pos, vel): (&mut Position, &Velocity)| {
+                pos.x += vel.x;
+            });
+
+        for e in world.iter_entities() {
+            assert_eq!(world.get::<Position>(e).unwrap().x, 5.0);
+        }
     }
 }

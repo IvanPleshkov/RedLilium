@@ -138,6 +138,24 @@ pub trait ForEachAccess: AccessSet {
     /// Performs an inner join: iterates the smallest component storage
     /// and yields only entities present in all queried storages.
     fn run_for_each<'w>(items: &Self::Item<'w>, f: impl FnMut(Self::EachItem<'w>));
+
+    /// Parallel version of [`run_for_each`](Self::run_for_each).
+    ///
+    /// Splits matching entities across threads using [`std::thread::scope`].
+    /// The closure must be `Fn + Sync` since it is called concurrently.
+    /// Falls back to sequential on WASM.
+    fn run_par_for_each<'w>(items: &Self::Item<'w>, f: impl Fn(Self::EachItem<'w>) + Sync)
+    where
+        Self::Item<'w>: Sync;
+
+    /// Like [`run_par_for_each`](Self::run_par_for_each), but with explicit
+    /// parallelism configuration.
+    fn run_par_for_each_with<'w>(
+        items: &Self::Item<'w>,
+        config: &crate::par_for_each::ParConfig,
+        f: impl Fn(Self::EachItem<'w>) + Sync,
+    ) where
+        Self::Item<'w>: Sync;
 }
 
 macro_rules! impl_for_each_access {
@@ -183,6 +201,50 @@ macro_rules! impl_for_each_access {
                     }, )+) };
                     f(item);
                 }
+            }
+
+            fn run_par_for_each<'w>(
+                items: &Self::Item<'w>,
+                f: impl Fn(Self::EachItem<'w>) + Sync,
+            )
+            where
+                Self::Item<'w>: Sync,
+            {
+                Self::run_par_for_each_with(items, &crate::par_for_each::ParConfig::default(), f);
+            }
+
+            fn run_par_for_each_with<'w>(
+                items: &Self::Item<'w>,
+                config: &crate::par_for_each::ParConfig,
+                f: impl Fn(Self::EachItem<'w>) + Sync,
+            )
+            where
+                Self::Item<'w>: Sync,
+            {
+                // Build entity list (same logic as sequential).
+                let entities: Vec<u32> = if let Some(intersected) = items.query_intersected_entities() {
+                    intersected
+                } else {
+                    let mut _min_count = usize::MAX;
+                    let mut min_entities: &[u32] = &[];
+                    $(
+                        let count = items.$idx.query_count();
+                        if count < _min_count {
+                            _min_count = count;
+                            min_entities = items.$idx.query_entities();
+                        }
+                    )+
+                    min_entities.to_vec()
+                };
+
+                crate::par_for_each::par_for_each_entities(
+                    items,
+                    &entities,
+                    config,
+                    &|_entity: u32, item: Self::EachItem<'w>| {
+                        f(item);
+                    },
+                );
             }
         }
     };
@@ -282,6 +344,97 @@ where
     F: for<'a> Fn(A::EachItem<'a>) + Send + Sync + 'static,
 {
     ForEachSystem {
+        func,
+        _marker: PhantomData,
+    }
+}
+
+// ---- Parallel per-entity function system ----
+
+/// Marker type for parallel per-entity function systems.
+///
+/// Used as the `Marker` parameter in [`IntoSystem<ParForEach<A>>`] to
+/// distinguish parallel per-entity functions from sequential ones.
+pub struct ParForEach<A>(PhantomData<A>);
+
+/// A system that calls a function once per matching entity, in parallel.
+///
+/// Created via [`par_for_each()`]. On WASM, falls back to sequential
+/// iteration. The function receives per-entity references (e.g.,
+/// `&mut Position`) rather than whole storages.
+///
+/// # Example
+///
+/// ```ignore
+/// use redlilium_ecs::*;
+///
+/// fn movement((pos, vel): (&mut Position, &Velocity)) {
+///     pos.x += vel.x;
+/// }
+///
+/// let mut container = SystemsContainer::new();
+/// container.add_par_fn::<(Write<Position>, Read<Velocity>), _>(movement);
+/// ```
+pub struct ParForEachSystem<F, A> {
+    func: F,
+    _marker: PhantomData<fn() -> A>,
+}
+
+impl<A, F> System for ParForEachSystem<F, A>
+where
+    A: ForEachAccess + Send + Sync + 'static,
+    F: for<'a> Fn(A::EachItem<'a>) + Send + Sync + 'static,
+    for<'a> A::Item<'a>: Sync,
+{
+    type Result = ();
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), crate::system::SystemError> {
+        ctx.lock::<A>().execute(|items| {
+            A::run_par_for_each(&items, |item| {
+                (self.func)(item);
+            });
+        });
+        Ok(())
+    }
+}
+
+impl<A, F> IntoSystem<ParForEach<A>> for F
+where
+    A: ForEachAccess + Send + Sync + 'static,
+    F: for<'a> Fn(A::EachItem<'a>) + Send + Sync + 'static,
+    for<'a> A::Item<'a>: Sync,
+{
+    type System = ParForEachSystem<F, A>;
+
+    fn into_system(self) -> Self::System {
+        ParForEachSystem {
+            func: self,
+            _marker: PhantomData,
+        }
+    }
+}
+
+/// Creates a [`ParForEachSystem`] that processes matching entities in parallel.
+///
+/// Falls back to sequential iteration on WASM.
+///
+/// # Example
+///
+/// ```ignore
+/// use redlilium_ecs::*;
+///
+/// fn movement((pos, vel): (&mut Position, &Velocity)) {
+///     pos.x += vel.x;
+/// }
+///
+/// let sys = par_for_each::<(Write<Position>, Read<Velocity>), _>(movement);
+/// ```
+pub fn par_for_each<A, F>(func: F) -> ParForEachSystem<F, A>
+where
+    A: ForEachAccess + Send + Sync + 'static,
+    F: for<'a> Fn(A::EachItem<'a>) + Send + Sync + 'static,
+    for<'a> A::Item<'a>: Sync,
+{
+    ParForEachSystem {
         func,
         _marker: PhantomData,
     }
@@ -635,5 +788,84 @@ mod tests {
         let mut container = crate::SystemsContainer::new();
         container.add_fn::<(Write<Position>, Read<Velocity>), _>(movement);
         assert_eq!(container.system_count(), 1);
+    }
+
+    // ---- ParForEachSystem tests ----
+
+    #[test]
+    fn par_for_each_system_single_write() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+
+        for _ in 0..200 {
+            let e = world.spawn();
+            world.insert(e, Position { x: 0.0 }).unwrap();
+        }
+
+        let sys = par_for_each::<(Write<Position>,), _>(|(pos,): (&mut Position,)| {
+            pos.x = 42.0;
+        });
+
+        let compute = ComputePool::new(IoRuntime::new());
+        let io = IoRuntime::new();
+        run_system_blocking(&sys, &world, &compute, &io).unwrap();
+
+        for e in world.iter_entities() {
+            assert_eq!(world.get::<Position>(e).unwrap().x, 42.0);
+        }
+    }
+
+    #[test]
+    fn par_for_each_system_two_component_join() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Velocity>();
+
+        for _ in 0..200 {
+            let e = world.spawn();
+            world.insert(e, Position { x: 0.0 }).unwrap();
+            world.insert(e, Velocity { x: 1.0 }).unwrap();
+        }
+        // Extra entities without Velocity
+        for _ in 0..100 {
+            let e = world.spawn();
+            world.insert(e, Position { x: -1.0 }).unwrap();
+        }
+
+        fn movement((pos, vel): (&mut Position, &Velocity)) {
+            pos.x += vel.x;
+        }
+
+        let sys = par_for_each::<(Write<Position>, Read<Velocity>), _>(movement);
+        let compute = ComputePool::new(IoRuntime::new());
+        let io = IoRuntime::new();
+        run_system_blocking(&sys, &world, &compute, &io).unwrap();
+
+        for e in world.iter_entities() {
+            let pos = world.get::<Position>(e).unwrap();
+            if world.get::<Velocity>(e).is_some() {
+                assert_eq!(pos.x, 1.0);
+            } else {
+                assert_eq!(pos.x, -1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn par_for_each_into_system() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        let e = world.spawn();
+        world.insert(e, Position { x: 0.0 }).unwrap();
+
+        fn set_pos((pos,): (&mut Position,)) {
+            pos.x = 99.0;
+        }
+
+        let sys = IntoSystem::<ParForEach<(Write<Position>,)>>::into_system(set_pos);
+        let compute = ComputePool::new(IoRuntime::new());
+        let io = IoRuntime::new();
+        run_system_blocking(&sys, &world, &compute, &io).unwrap();
+        assert_eq!(world.get::<Position>(e).unwrap().x, 99.0);
     }
 }

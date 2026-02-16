@@ -269,9 +269,7 @@ impl Schedules {
     /// Returns a mutable reference to the schedule for the given label,
     /// creating it if it doesn't exist.
     pub fn get_mut<L: ScheduleLabel>(&mut self) -> &mut SystemsContainer {
-        self.schedules
-            .entry(ScheduleId::of::<L>())
-            .or_default()
+        self.schedules.entry(ScheduleId::of::<L>()).or_default()
     }
 
     /// Returns a reference to the schedule for the given label, if it exists.
@@ -285,9 +283,7 @@ impl Schedules {
     /// Systems added here run once when the state transitions *into* this variant.
     pub fn on_enter<S: States>(&mut self, state: S) -> &mut SystemsContainer {
         let id = ScheduleId::OnEnter(TypeId::of::<S>(), hash_state(&state));
-        self.schedules
-            .entry(id)
-            .or_default()
+        self.schedules.entry(id).or_default()
     }
 
     /// Returns a mutable reference to the `OnExit` schedule for a specific
@@ -296,9 +292,7 @@ impl Schedules {
     /// Systems added here run once when the state transitions *out of* this variant.
     pub fn on_exit<S: States>(&mut self, state: S) -> &mut SystemsContainer {
         let id = ScheduleId::OnExit(TypeId::of::<S>(), hash_state(&state));
-        self.schedules
-            .entry(id)
-            .or_default()
+        self.schedules.entry(id).or_default()
     }
 
     /// Registers a state type with the schedule orchestrator.
