@@ -9,20 +9,37 @@ use crate::world::World;
 // Trigger marker types (used as TypeId keys internally)
 // ---------------------------------------------------------------------------
 
-/// Observer trigger that fires when a component is added for the first time.
+/// Observer trigger marker for first-time component addition.
 ///
-/// Used as a type parameter: `world.observe_add::<Health>(handler)`.
-pub(crate) struct OnAdd<T: 'static>(PhantomData<T>);
+/// Fires when a component is added to an entity that did not previously
+/// have it. Does **not** fire on replacement of an existing component.
+///
+/// Used as a type parameter with observer and trigger APIs:
+/// - `world.observe_add::<Health>(handler)` — register an observer
+/// - `world.enable_add_triggers::<Health>()` — enable trigger buffer
+/// - `Res<Triggers<OnAdd<Health>>>` — read triggered entities in systems
+pub struct OnAdd<T: 'static>(PhantomData<T>);
 
-/// Observer trigger that fires on every component insertion (add or replace).
+/// Observer trigger marker for every component insertion.
 ///
-/// Used as a type parameter: `world.observe_insert::<Health>(handler)`.
-pub(crate) struct OnInsert<T: 'static>(PhantomData<T>);
+/// Fires on both first-time addition and replacement of an existing value.
+///
+/// Used as a type parameter with observer and trigger APIs:
+/// - `world.observe_insert::<Health>(handler)` — register an observer
+/// - `world.enable_insert_triggers::<Health>()` — enable trigger buffer
+/// - `Res<Triggers<OnInsert<Health>>>` — read triggered entities in systems
+pub struct OnInsert<T: 'static>(PhantomData<T>);
 
-/// Observer trigger that fires when a component is removed (including despawn).
+/// Observer trigger marker for component removal (including despawn).
 ///
-/// Used as a type parameter: `world.observe_remove::<Health>(handler)`.
-pub(crate) struct OnRemove<T: 'static>(PhantomData<T>);
+/// Fires when a component is removed from an entity, either explicitly
+/// via `remove()` or implicitly via `despawn()`.
+///
+/// Used as a type parameter with observer and trigger APIs:
+/// - `world.observe_remove::<Health>(handler)` — register an observer
+/// - `world.enable_remove_triggers::<Health>()` — enable trigger buffer
+/// - `Res<Triggers<OnRemove<Health>>>` — read triggered entities in systems
+pub struct OnRemove<T: 'static>(PhantomData<T>);
 
 // ---------------------------------------------------------------------------
 // Internal types

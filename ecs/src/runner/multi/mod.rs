@@ -123,6 +123,9 @@ impl EcsRunnerMultiThread {
             None
         };
 
+        // Swap reactive trigger buffers (last tick's collecting → readable).
+        world.update_triggers();
+
         let mut remaining_deps: Vec<usize> = systems.in_degrees().to_vec();
         let mut started = vec![false; n];
         let mut completed_count = 0usize;

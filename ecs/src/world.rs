@@ -10,6 +10,7 @@ use crate::events::Events;
 use crate::main_thread_resource::MainThreadResources;
 use crate::observer::{Observers, OnAdd, OnInsert, OnRemove};
 use crate::query::{AddedFilter, ChangedFilter, ContainsChecker, RemovedFilter};
+use crate::reactive::Triggers;
 use crate::resource::{Resource, ResourceRef, ResourceRefMut, Resources};
 use crate::sparse_set::{ComponentHookFn, ComponentStorage, LockGuard, Ref, RefMut};
 use std::sync::{Arc, RwLock};
@@ -93,6 +94,8 @@ pub struct World {
     inspector_entries: BTreeMap<&'static str, InspectorEntry>,
     /// Deferred observer registry and pending triggers.
     observers: Observers,
+    /// Monomorphized swap functions for each registered `Triggers<M>` resource.
+    trigger_swap_fns: Vec<fn(&mut World)>,
 }
 
 impl World {
@@ -106,6 +109,7 @@ impl World {
             tick: 0,
             inspector_entries: BTreeMap::new(),
             observers: Observers::new(),
+            trigger_swap_fns: Vec::new(),
         }
     }
 
@@ -1199,6 +1203,67 @@ impl World {
         self.observers.has_pending()
     }
 
+    // ---- Reactive trigger buffers ----
+
+    /// Enables trigger collection for `OnAdd<T>`.
+    ///
+    /// Creates a [`Triggers<OnAdd<T>>`] resource and registers an internal
+    /// observer that collects triggered entities. Systems can then read
+    /// `Res<Triggers<OnAdd<T>>>` to get entities that had `T` added last tick.
+    ///
+    /// The component type `T` must be registered before calling this.
+    pub fn enable_add_triggers<T: Send + Sync + 'static>(&mut self) {
+        self.insert_resource(Triggers::<OnAdd<T>>::new());
+        self.observe_add::<T>(|world, entity| {
+            world.resource_mut::<Triggers<OnAdd<T>>>().push(entity);
+        });
+        self.trigger_swap_fns.push(swap_trigger_buffer::<OnAdd<T>>);
+    }
+
+    /// Enables trigger collection for `OnInsert<T>`.
+    ///
+    /// Creates a [`Triggers<OnInsert<T>>`] resource and registers an internal
+    /// observer that collects triggered entities. Fires on both first-time
+    /// addition and replacement of an existing value.
+    pub fn enable_insert_triggers<T: Send + Sync + 'static>(&mut self) {
+        self.insert_resource(Triggers::<OnInsert<T>>::new());
+        self.observe_insert::<T>(|world, entity| {
+            world.resource_mut::<Triggers<OnInsert<T>>>().push(entity);
+        });
+        self.trigger_swap_fns
+            .push(swap_trigger_buffer::<OnInsert<T>>);
+    }
+
+    /// Enables trigger collection for `OnRemove<T>`.
+    ///
+    /// Creates a [`Triggers<OnRemove<T>>`] resource and registers an internal
+    /// observer that collects triggered entities. Fires on explicit removal
+    /// and on despawn.
+    pub fn enable_remove_triggers<T: Send + Sync + 'static>(&mut self) {
+        self.insert_resource(Triggers::<OnRemove<T>>::new());
+        self.observe_remove::<T>(|world, entity| {
+            world.resource_mut::<Triggers<OnRemove<T>>>().push(entity);
+        });
+        self.trigger_swap_fns
+            .push(swap_trigger_buffer::<OnRemove<T>>);
+    }
+
+    /// Swaps all reactive trigger buffers.
+    ///
+    /// Moves `collecting` → `readable` and clears `collecting` for each
+    /// registered trigger buffer. Called by the runner at the start of
+    /// each tick, before any systems execute.
+    pub fn update_triggers(&mut self) {
+        if self.trigger_swap_fns.is_empty() {
+            return;
+        }
+        let fns = std::mem::take(&mut self.trigger_swap_fns);
+        for f in &fns {
+            f(self);
+        }
+        self.trigger_swap_fns = fns;
+    }
+
     /// Returns the TypeIds of all registered resource types.
     pub fn resource_type_ids(&self) -> impl Iterator<Item = TypeId> + '_ {
         self.resources.type_ids()
@@ -1494,6 +1559,13 @@ impl World {
     pub fn add_event<T: Send + Sync + 'static>(&mut self) {
         self.insert_resource(Events::<T>::new());
     }
+}
+
+/// Swaps the trigger buffer for marker type `M`.
+///
+/// Used as a monomorphized function pointer stored in `World::trigger_swap_fns`.
+fn swap_trigger_buffer<M: 'static>(world: &mut World) {
+    world.resource_mut::<Triggers<M>>().swap();
 }
 
 impl Default for World {

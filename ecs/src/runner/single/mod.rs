@@ -101,6 +101,9 @@ impl EcsRunnerSingleThread {
             None
         };
 
+        // Swap reactive trigger buffers (last tick's collecting → readable).
+        world.update_triggers();
+
         // Take previous-tick results (if the system count matches).
         let prev = std::mem::take(&mut *self.prev_results.lock().unwrap());
         let mut prev = if prev.len() == n { prev } else { Vec::new() };

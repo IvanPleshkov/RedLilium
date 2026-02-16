@@ -66,6 +66,7 @@ mod observer;
 pub mod physics;
 mod query;
 mod query_guard;
+mod reactive;
 mod resource;
 mod runner;
 mod sparse_set;
@@ -88,11 +89,13 @@ pub use egui;
 pub use entity::Entity;
 pub use events::{EventUpdateSystem, Events};
 pub use io_runtime::IoRuntime;
+pub use observer::{OnAdd, OnInsert, OnRemove};
 pub use query::{
     AddedFilter, AnyFilter, ChangedFilter, ContainsChecker, Filter, OrFilter, RemovedFilter, With,
     Without,
 };
 pub use query_guard::{QueryGuard, QueryItem, QueryIter, ResMutRef};
+pub use reactive::{HasTriggers, Triggers};
 pub use redlilium_core::compute::{
     ComputeContext, IoHandle, IoRunner, Priority, YieldNow, reset_yield_timer, set_yield_interval,
     yield_now,
