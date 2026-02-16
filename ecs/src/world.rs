@@ -8,6 +8,7 @@ use crate::component::Component;
 use crate::entity::{Entity, EntityAllocator};
 use crate::events::Events;
 use crate::main_thread_resource::MainThreadResources;
+use crate::observer::{Observers, OnAdd, OnInsert, OnRemove};
 use crate::query::{AddedFilter, ChangedFilter, ContainsChecker, RemovedFilter};
 use crate::resource::{Resource, ResourceRef, ResourceRefMut, Resources};
 use crate::sparse_set::{ComponentHookFn, ComponentStorage, LockGuard, Ref, RefMut};
@@ -90,6 +91,8 @@ pub struct World {
     tick: u64,
     /// Inspector metadata for registered component types, keyed by name.
     inspector_entries: BTreeMap<&'static str, InspectorEntry>,
+    /// Deferred observer registry and pending triggers.
+    observers: Observers,
 }
 
 impl World {
@@ -102,6 +105,7 @@ impl World {
             main_thread_resources: MainThreadResources::new(),
             tick: 0,
             inspector_entries: BTreeMap::new(),
+            observers: Observers::new(),
         }
     }
 
@@ -139,6 +143,15 @@ impl World {
             hook(self, entity);
         }
 
+        // Collect deferred OnRemove observer triggers before removing components.
+        // We need to check which component types have registered remove observers.
+        let observer_triggers: Vec<TypeId> = self
+            .components
+            .iter()
+            .filter(|(_, storage)| storage.contains_untyped(index))
+            .filter_map(|(type_id, _)| self.observers.remove_trigger_key(type_id))
+            .collect();
+
         // Deallocate entity and remove all components (including any added by hooks)
         self.entities.deallocate(entity);
         for storage in self.components.values_mut() {
@@ -146,6 +159,12 @@ impl World {
                 storage.record_removal(index, tick);
             }
         }
+
+        // Queue deferred observer triggers
+        for trigger_key in observer_triggers {
+            self.observers.push_trigger(trigger_key, entity);
+        }
+
         true
     }
 
@@ -346,6 +365,12 @@ impl World {
             }
         }
 
+        // Queue deferred observer triggers
+        if !had_component {
+            self.observers.push_typed_trigger::<OnAdd<T>>(entity);
+        }
+        self.observers.push_typed_trigger::<OnInsert<T>>(entity);
+
         Ok(())
     }
 
@@ -413,6 +438,12 @@ impl World {
                 req_fn(self, entity);
             }
         }
+
+        // Queue deferred observer triggers
+        if !had_component {
+            self.observers.push_typed_trigger::<OnAdd<T>>(entity);
+        }
+        self.observers.push_typed_trigger::<OnInsert<T>>(entity);
 
         Ok(())
     }
@@ -624,6 +655,12 @@ impl World {
                         req_fn(self, *entity);
                     }
                 }
+
+                // Queue deferred observer triggers
+                if !had {
+                    self.observers.push_typed_trigger::<OnAdd<T>>(*entity);
+                }
+                self.observers.push_typed_trigger::<OnInsert<T>>(*entity);
             }
         } else {
             // Fast path: no hooks and no required components, direct sparse set insert
@@ -634,7 +671,14 @@ impl World {
                     self.entities.is_alive(*entity),
                     "Cannot insert component on dead entity {entity}"
                 );
+                let had = set.contains(entity.index());
                 set.insert(entity.index(), component);
+
+                // Queue deferred observer triggers
+                if !had {
+                    self.observers.push_typed_trigger::<OnAdd<T>>(*entity);
+                }
+                self.observers.push_typed_trigger::<OnInsert<T>>(*entity);
             }
         }
         Ok(())
@@ -731,6 +775,12 @@ impl World {
                         req_fn(self, *entity);
                     }
                 }
+
+                // Queue deferred observer triggers
+                if !had {
+                    self.observers.push_typed_trigger::<OnAdd<T>>(*entity);
+                }
+                self.observers.push_typed_trigger::<OnInsert<T>>(*entity);
             }
         } else {
             // Fast path: no hooks and no required components, direct sparse set insert
@@ -741,7 +791,14 @@ impl World {
                     self.entities.is_alive(*entity),
                     "Cannot insert component on dead entity {entity}"
                 );
+                let had = set.contains(entity.index());
                 set.insert_with_tick(entity.index(), component, tick);
+
+                // Queue deferred observer triggers
+                if !had {
+                    self.observers.push_typed_trigger::<OnAdd<T>>(*entity);
+                }
+                self.observers.push_typed_trigger::<OnInsert<T>>(*entity);
             }
         }
         Ok(())
@@ -784,17 +841,22 @@ impl World {
         let Some(storage) = self.components.get_mut(&type_id) else {
             return;
         };
-        let mut removed_indices = Vec::new();
+        let mut removed_entities = Vec::new();
         {
             let set = storage.typed_mut::<T>();
             for &entity in entities {
                 if set.remove(entity.index()).is_some() {
-                    removed_indices.push(entity.index());
+                    removed_entities.push(entity);
                 }
             }
         }
-        for index in removed_indices {
-            storage.record_removal(index, tick);
+        for &entity in &removed_entities {
+            storage.record_removal(entity.index(), tick);
+        }
+
+        // Queue deferred observer triggers
+        for entity in removed_entities {
+            self.observers.push_typed_trigger::<OnRemove<T>>(entity);
         }
     }
 
@@ -826,6 +888,8 @@ impl World {
         let result = storage.typed_mut::<T>().remove(entity.index());
         if result.is_some() {
             storage.record_removal(entity.index(), tick);
+            // Queue deferred observer trigger
+            self.observers.push_typed_trigger::<OnRemove<T>>(entity);
         }
         result
     }
@@ -1065,6 +1129,74 @@ impl World {
             .expect("Component not registered")
             .on_remove = Some(hook);
         self
+    }
+
+    // ---- Deferred observers ----
+
+    /// Registers a deferred observer that fires when component `T` is
+    /// added for the first time on an entity.
+    ///
+    /// The component is readable via `world.get::<T>(entity)` inside the handler.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// world.observe_add::<Health>(|world, entity| {
+    ///     let hp = world.get::<Health>(entity).unwrap();
+    ///     println!("Entity {entity} gained {hp:?}");
+    /// });
+    /// ```
+    pub fn observe_add<T: 'static>(
+        &mut self,
+        handler: impl Fn(&mut World, Entity) + Send + Sync + 'static,
+    ) {
+        self.observers.add_on_add::<T>(handler);
+    }
+
+    /// Registers a deferred observer that fires on every insertion of
+    /// component `T` (both first-time additions and replacements).
+    ///
+    /// The new value is readable via `world.get::<T>(entity)`.
+    pub fn observe_insert<T: 'static>(
+        &mut self,
+        handler: impl Fn(&mut World, Entity) + Send + Sync + 'static,
+    ) {
+        self.observers.add_on_insert::<T>(handler);
+    }
+
+    /// Registers a deferred observer that fires when component `T` is
+    /// removed or the entity is despawned.
+    ///
+    /// **Note**: By the time the observer runs, the component has already
+    /// been removed. For cleanup that requires reading the component value,
+    /// use [`set_on_remove`](World::set_on_remove) hooks instead.
+    pub fn observe_remove<T: 'static>(
+        &mut self,
+        handler: impl Fn(&mut World, Entity) + Send + Sync + 'static,
+    ) {
+        self.observers.add_on_remove::<T>(handler);
+    }
+
+    /// Drains and fires all pending observer triggers.
+    ///
+    /// Called by the runner after applying deferred commands. Supports
+    /// cascading: observer handlers that perform mutations will queue
+    /// new triggers, which are processed in subsequent iterations.
+    ///
+    /// # Panics
+    ///
+    /// Panics if cascading exceeds 100 iterations.
+    pub fn flush_observers(&mut self) {
+        if !self.observers.has_pending() {
+            return;
+        }
+        let world_ptr: *mut World = self;
+        self.observers.flush(world_ptr);
+    }
+
+    /// Returns `true` if there are pending observer triggers.
+    pub fn has_pending_observers(&self) -> bool {
+        self.observers.has_pending()
     }
 
     /// Returns the TypeIds of all registered resource types.

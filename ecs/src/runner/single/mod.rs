@@ -126,6 +126,12 @@ impl EcsRunnerSingleThread {
             }
         }
 
+        // Flush deferred observers (may cascade)
+        {
+            redlilium_core::profile_scope!("ecs: flush observers");
+            world.flush_observers();
+        }
+
         // Drain remaining compute tasks (one poll per task)
         if self.compute.pending_count() > 0 {
             redlilium_core::profile_scope!("ecs: compute drain");

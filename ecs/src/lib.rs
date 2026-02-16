@@ -55,6 +55,7 @@ mod io_runtime;
 mod lock_request;
 mod main_thread_dispatcher;
 mod main_thread_resource;
+mod observer;
 #[cfg(any(
     feature = "physics-3d",
     feature = "physics-3d-f32",

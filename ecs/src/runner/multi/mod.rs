@@ -228,6 +228,12 @@ impl EcsRunnerMultiThread {
             }
         }
 
+        // Flush deferred observers (may cascade)
+        {
+            redlilium_core::profile_scope!("ecs: flush observers");
+            world.flush_observers();
+        }
+
         // Save this tick's results for next tick's reuse.
         *self.prev_results.lock().unwrap() = results_store.into_prev_results();
 
