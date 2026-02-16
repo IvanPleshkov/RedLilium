@@ -71,6 +71,7 @@ mod resource;
 mod runner;
 mod sparse_set;
 mod spawn;
+mod state;
 mod system;
 pub mod system_context;
 pub(crate) mod system_results_store;
@@ -122,6 +123,7 @@ pub use function_system::{
 };
 pub use lock_request::LockRequest;
 pub use runner::{EcsRunner, EcsRunnerSingleThread, ShutdownError};
+pub use state::{ApplyStateTransition, NextState, State, StateTransition, States, init_state};
 pub use system::{
     ExclusiveFunctionSystem, ExclusiveSystem, System, SystemError, panic_payload_to_string,
     run_exclusive_system_blocking, run_exclusive_system_once, run_system_blocking, run_system_once,
