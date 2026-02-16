@@ -52,6 +52,22 @@ pub trait Component: Send + Sync + 'static {
     /// The derive macro generates this by calling
     /// [`Inspect::show`](crate::inspect::Inspect) for each field.
     fn inspect_ui(&mut self, ui: &mut egui::Ui);
+
+    /// Register required components for this type.
+    ///
+    /// Called automatically by [`World::register_inspector`](crate::World::register_inspector)
+    /// and [`World::register_inspector_default`](crate::World::register_inspector_default).
+    ///
+    /// The `#[derive(Component)]` macro generates this from `#[require(...)]` attributes:
+    ///
+    /// ```ignore
+    /// #[derive(Component)]
+    /// #[require(Transform, GlobalTransform, Visibility)]
+    /// struct Camera { /* ... */ }
+    /// ```
+    ///
+    /// The default implementation does nothing.
+    fn register_required(_world: &mut crate::World) {}
 }
 
 #[cfg(test)]

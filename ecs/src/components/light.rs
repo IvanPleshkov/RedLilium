@@ -5,6 +5,7 @@ use redlilium_core::math::Vec3;
 /// Direction comes from the entity's [`GlobalTransform`](crate::GlobalTransform)
 /// forward vector.
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable, crate::Component)]
+#[require(crate::Transform, crate::GlobalTransform, crate::Visibility)]
 #[repr(C)]
 pub struct DirectionalLight {
     /// Light color (linear RGB).
@@ -34,6 +35,7 @@ impl Default for DirectionalLight {
 /// Position comes from the entity's [`GlobalTransform`](crate::GlobalTransform)
 /// translation.
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable, crate::Component)]
+#[require(crate::Transform, crate::GlobalTransform, crate::Visibility)]
 #[repr(C)]
 pub struct PointLight {
     /// Light color (linear RGB).
@@ -78,6 +80,7 @@ impl Default for PointLight {
 /// Position and direction come from the entity's
 /// [`GlobalTransform`](crate::GlobalTransform).
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable, crate::Component)]
+#[require(crate::Transform, crate::GlobalTransform, crate::Visibility)]
 #[repr(C)]
 pub struct SpotLight {
     /// Light color (linear RGB).

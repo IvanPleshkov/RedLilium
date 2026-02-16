@@ -6,6 +6,7 @@ use redlilium_core::math::{Mat4, orthographic_rh, perspective_rh};
 /// [`update_camera_matrices`](crate::systems::update_camera_matrices) system
 /// updates only the view matrix from the entity's world transform.
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable, crate::Component)]
+#[require(crate::Transform, crate::GlobalTransform, crate::Visibility)]
 #[repr(C)]
 pub struct Camera {
     /// Computed view matrix (world-to-camera). Updated by system.

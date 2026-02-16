@@ -188,6 +188,7 @@ impl World {
     /// for that.
     pub fn register_inspector<T: Component>(&mut self) {
         self.register_component::<T>();
+        T::register_required(self);
         self.inspector_entries.insert(
             T::NAME,
             InspectorEntry {
@@ -211,6 +212,7 @@ impl World {
     /// inserting a default instance via the inspector "Add Component" button.
     pub fn register_inspector_default<T: Component + Default>(&mut self) {
         self.register_component::<T>();
+        T::register_required(self);
         self.inspector_entries.insert(
             T::NAME,
             InspectorEntry {

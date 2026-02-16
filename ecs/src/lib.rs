@@ -151,22 +151,8 @@ pub fn register_std_components(world: &mut World) {
     world.register_component::<Parent>();
     world.register_component::<Children>();
 
-    // Required components — auto-inserted when the requiring component is first added
-    world.register_required::<Camera, Transform>();
-    world.register_required::<Camera, GlobalTransform>();
-    world.register_required::<Camera, Visibility>();
-
-    world.register_required::<DirectionalLight, Transform>();
-    world.register_required::<DirectionalLight, GlobalTransform>();
-    world.register_required::<DirectionalLight, Visibility>();
-
-    world.register_required::<PointLight, Transform>();
-    world.register_required::<PointLight, GlobalTransform>();
-    world.register_required::<PointLight, Visibility>();
-
-    world.register_required::<SpotLight, Transform>();
-    world.register_required::<SpotLight, GlobalTransform>();
-    world.register_required::<SpotLight, Visibility>();
+    // Required components are now declared via #[require(...)] on the component
+    // structs and registered automatically by register_inspector / register_inspector_default.
 
     // Physics descriptor + handle components (feature-gated)
     #[cfg(any(feature = "physics-3d", feature = "physics-3d-f32"))]

@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{Data, DeriveInput, Fields, parse_macro_input};
+use syn::{Data, DeriveInput, Fields, Meta, parse_macro_input};
 
 /// Derive the `Component` trait with automatic inspector UI generation.
 ///
@@ -18,12 +18,28 @@ use syn::{Data, DeriveInput, Fields, parse_macro_input};
 ///     max: f32,
 /// }
 /// ```
-#[proc_macro_derive(Component)]
+#[proc_macro_derive(Component, attributes(require))]
 pub fn derive_component(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
     let name_str = name.to_string();
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    // Collect required component types from #[require(Type1, Type2, ...)]
+    let mut required_types = Vec::new();
+    for attr in &input.attrs {
+        if attr.path().is_ident("require")
+            && let Meta::List(meta_list) = &attr.meta
+        {
+            let result = meta_list.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
+            );
+            match result {
+                Ok(paths) => required_types.extend(paths),
+                Err(e) => return e.to_compile_error().into(),
+            }
+        }
+    }
 
     let inspect_body = match &input.data {
         Data::Struct(data) => match &data.fields {
@@ -69,6 +85,21 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
         }
     };
 
+    let register_required_body = if required_types.is_empty() {
+        quote! {}
+    } else {
+        let stmts = required_types.iter().map(|ty| {
+            quote! {
+                world.register_required::<Self, #ty>();
+            }
+        });
+        quote! {
+            fn register_required(world: &mut redlilium_ecs::World) {
+                #(#stmts)*
+            }
+        }
+    };
+
     let expanded = quote! {
         impl #impl_generics redlilium_ecs::Component for #name #ty_generics #where_clause {
             const NAME: &'static str = #name_str;
@@ -78,6 +109,8 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                 use redlilium_ecs::inspect::InspectFallback as _;
                 #inspect_body
             }
+
+            #register_required_body
         }
     };
 
