@@ -470,6 +470,11 @@ impl SystemsContainer {
         &self.id_to_idx
     }
 
+    /// Returns the `TypeId` for the system at the given index.
+    pub(crate) fn idx_to_type_id(&self, idx: usize) -> TypeId {
+        self.idx_to_id[idx]
+    }
+
     /// Sets the condition evaluation mode for system `T`.
     ///
     /// By default, all conditions must pass ([`ConditionMode::All`]).

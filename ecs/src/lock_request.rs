@@ -60,6 +60,7 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
         // Check + register tracking before acquiring actual locks.
         let sorted = normalize_access_infos(&A::access_infos());
         self.ctx.check_held_locks(&sorted);
+        self.ctx.record_access(&sorted);
         self.ctx.register_held_locks(&sorted);
         let _tracking = self.ctx.make_tracking(&sorted);
 

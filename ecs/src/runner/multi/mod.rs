@@ -5,6 +5,10 @@ use std::time::{Duration, Instant};
 
 use crate::command_collector::CommandCollector;
 use crate::compute::ComputePool;
+use crate::diagnostics::{
+    AccessRecorder, RunDiagnostics, RunReport, RunResult, SystemTiming, TimingReport,
+    analyze_ambiguities,
+};
 use crate::io_runtime::IoRuntime;
 use crate::main_thread_dispatcher::{MainThreadDispatcher, RunnerEvent};
 use crate::system::SystemError;
@@ -69,23 +73,55 @@ impl EcsRunnerMultiThread {
     /// Runs all systems respecting dependency ordering, with parallel execution.
     ///
     /// Independent regular systems run concurrently on separate threads.
-    /// Exclusive systems act as barriers — they run alone with `&mut World`
+    /// Exclusive systems act as barriers -- they run alone with `&mut World`
     /// after all preceding parallel systems have completed. Pending deferred
     /// commands are applied before each exclusive system.
     ///
     /// All systems always run to completion. Remaining deferred commands
     /// are applied after every system has finished.
     pub fn run(&self, world: &mut World, systems: &SystemsContainer) -> Vec<SystemError> {
+        self.run_with(world, systems, &RunDiagnostics::default())
+            .errors
+    }
+
+    /// Runs all systems with optional diagnostics collection.
+    ///
+    /// Like [`run()`](Self::run), but accepts a [`RunDiagnostics`] config
+    /// and returns a [`RunResult`] containing both errors and a diagnostic
+    /// report.
+    pub fn run_with(
+        &self,
+        world: &mut World,
+        systems: &SystemsContainer,
+        diagnostics: &RunDiagnostics,
+    ) -> RunResult {
         redlilium_core::profile_scope!("ecs: run (multi-thread)");
 
         let n = systems.system_count();
         if n == 0 {
-            return Vec::new();
+            return RunResult {
+                errors: Vec::new(),
+                report: RunReport::default(),
+            };
         }
 
         let mut errors = Vec::new();
         let commands = CommandCollector::new();
         let results_store = SystemResultsStore::new(n, systems.type_id_to_idx().clone());
+
+        // Optional diagnostics state
+        let recorder = if diagnostics.detect_ambiguities {
+            Some(AccessRecorder::new(n))
+        } else {
+            None
+        };
+        let system_timings: Mutex<Vec<SystemTiming>> = Mutex::new(Vec::new());
+        let collect_timings = diagnostics.collect_timings;
+        let run_start = if collect_timings {
+            Some(Instant::now())
+        } else {
+            None
+        };
 
         let mut remaining_deps: Vec<usize> = systems.in_degrees().to_vec();
         let mut started = vec![false; n];
@@ -141,7 +177,7 @@ impl EcsRunnerMultiThread {
                 exclusive_ready = None;
             }
 
-            // Re-scan if we skipped systems — their dependents may now be ready.
+            // Re-scan if we skipped systems -- their dependents may now be ready.
             if skipped_any && exclusive_ready.is_none() && regular_ready.is_empty() {
                 continue;
             }
@@ -160,6 +196,9 @@ impl EcsRunnerMultiThread {
                         &mut completed_count,
                         &regular_ready,
                         &prev,
+                        &recorder,
+                        collect_timings,
+                        &system_timings,
                     ));
                 }
 
@@ -187,6 +226,12 @@ impl EcsRunnerMultiThread {
                         }
                     };
 
+                    let sys_start = if collect_timings {
+                        Some(Instant::now())
+                    } else {
+                        None
+                    };
+
                     let system = systems.get_exclusive_system(exc_idx);
                     let mut guard = system.write().unwrap();
                     if let Some(prev_result) = prev_result {
@@ -196,13 +241,20 @@ impl EcsRunnerMultiThread {
                         Ok(result) => results_store.store(exc_idx, result),
                         Err(e) => errors.push(e),
                     }
+
+                    if let Some(start) = sys_start {
+                        system_timings.lock().unwrap().push(SystemTiming {
+                            name: system_name,
+                            duration: start.elapsed(),
+                        });
+                    }
                 }
                 completed_count += 1;
                 for &dep in systems.dependents_of(exc_idx) {
                     remaining_deps[dep] -= 1;
                 }
             } else if !regular_ready.is_empty() {
-                // All ready systems are regular — run them in parallel
+                // All ready systems are regular -- run them in parallel
                 errors.extend(self.run_parallel_phase(
                     world,
                     systems,
@@ -213,9 +265,12 @@ impl EcsRunnerMultiThread {
                     &mut completed_count,
                     &regular_ready,
                     &prev,
+                    &recorder,
+                    collect_timings,
+                    &system_timings,
                 ));
             } else {
-                // No ready systems — should not happen with a valid DAG
+                // No ready systems -- should not happen with a valid DAG
                 break;
             }
         }
@@ -243,13 +298,44 @@ impl EcsRunnerMultiThread {
             self.compute.tick_with_budget(Duration::from_millis(2));
         }
 
-        errors
+        // Build diagnostic report
+        let ambiguities = if diagnostics.detect_ambiguities {
+            Some(analyze_ambiguities(
+                recorder.unwrap().into_records(),
+                systems,
+                world,
+            ))
+        } else {
+            None
+        };
+
+        let timings = if let Some(start) = run_start {
+            let wall_time = start.elapsed();
+            let collected = system_timings.into_inner().unwrap();
+            let total_cpu_time = collected.iter().map(|t| t.duration).sum();
+            Some(TimingReport {
+                wall_time,
+                total_cpu_time,
+                num_threads: self.num_threads,
+                systems: collected,
+            })
+        } else {
+            None
+        };
+
+        RunResult {
+            errors,
+            report: RunReport {
+                ambiguities,
+                timings,
+            },
+        }
     }
 
     /// Runs a batch of regular systems in parallel using a scoped thread pool.
     ///
     /// Systems that become ready during execution (due to completions) are
-    /// also spawned — unless they are exclusive, in which case they are
+    /// also spawned -- unless they are exclusive, in which case they are
     /// deferred to the caller.
     #[allow(clippy::too_many_arguments)]
     fn run_parallel_phase(
@@ -263,6 +349,9 @@ impl EcsRunnerMultiThread {
         completed_count: &mut usize,
         initial_ready: &[usize],
         prev_results: &Mutex<Vec<Option<Box<dyn Any + Send + Sync>>>>,
+        recorder: &Option<AccessRecorder>,
+        collect_timings: bool,
+        timing_out: &Mutex<Vec<SystemTiming>>,
     ) -> Vec<SystemError> {
         let (event_tx, event_rx) = mpsc::channel::<RunnerEvent>();
         let dispatcher = MainThreadDispatcher::new(event_tx.clone());
@@ -286,11 +375,14 @@ impl EcsRunnerMultiThread {
                     let accessible = systems.accessible_results(idx);
                     let system_name = systems.get_type_name(idx);
                     let errors_ref = &thread_errors;
+                    let recorder_ref = recorder;
+                    let timing_ref = timing_out;
+                    let do_timings = collect_timings;
                     scope.spawn(move || {
                         redlilium_core::set_thread_name!("ecs: worker");
                         redlilium_core::profile_scope_dynamic!(system_name);
 
-                        let ctx = SystemContext::with_dispatcher(
+                        let mut ctx = SystemContext::with_dispatcher(
                             world_ref,
                             compute_ref,
                             io_ref,
@@ -298,6 +390,9 @@ impl EcsRunnerMultiThread {
                             dispatcher_ref,
                         )
                         .with_system_results(results_ref, accessible);
+                        if let Some(rec) = recorder_ref {
+                            ctx = ctx.with_access_recorder(rec, idx);
+                        }
 
                         let prev_result = {
                             let mut prev_guard = prev_ref.lock().unwrap();
@@ -306,6 +401,12 @@ impl EcsRunnerMultiThread {
                             } else {
                                 None
                             }
+                        };
+
+                        let sys_start = if do_timings {
+                            Some(Instant::now())
+                        } else {
+                            None
                         };
 
                         let system = systems.get_system(idx);
@@ -317,6 +418,14 @@ impl EcsRunnerMultiThread {
                             Ok(result) => results_ref.store(idx, result),
                             Err(e) => errors_ref.lock().unwrap().push(e),
                         }
+
+                        if let Some(start) = sys_start {
+                            timing_ref.lock().unwrap().push(SystemTiming {
+                                name: system_name,
+                                duration: start.elapsed(),
+                            });
+                        }
+
                         let _ = tx.send(RunnerEvent::SystemCompleted(idx));
                     });
                 }};
@@ -327,7 +436,7 @@ impl EcsRunnerMultiThread {
                 spawn_system!(i);
             }
 
-            // Coordination loop — runs until all active systems complete.
+            // Coordination loop -- runs until all active systems complete.
             // Newly ready regular systems are spawned immediately;
             // exclusive systems are left for the outer loop.
             while active_count > 0 {
@@ -548,7 +657,7 @@ mod tests {
         let mut container = SystemsContainer::new();
         container.add(IncrementA(counter.clone()));
         container.add(IncrementB(counter.clone()));
-        // No edges — they can run in parallel
+        // No edges -- they can run in parallel
 
         let runner = EcsRunnerMultiThread::new(4);
         let mut world = World::new();
@@ -1012,9 +1121,6 @@ mod tests {
             }
         }
 
-        // CondFalse2 is also a condition, gated by GatedA (which is skipped),
-        // so CondFalse2 itself runs (it has no condition edge from CondFalseSystem).
-        // But for cascading test: CondFalse → GatedA(skipped) → Final(still runs)
         struct Final(Arc<AtomicU32>);
         impl System for Final {
             type Result = ();
@@ -1040,5 +1146,57 @@ mod tests {
 
         // GatedA skipped (no +10), Final still ran (+1)
         assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    // ---- Diagnostics tests ----
+
+    #[test]
+    fn ambiguity_detected_multi_thread() {
+        struct SysA;
+        impl System for SysA {
+            type Result = ();
+            fn run<'a>(
+                &'a self,
+                ctx: &'a SystemContext<'a>,
+            ) -> Result<(), crate::system::SystemError> {
+                ctx.lock::<(Write<Position>,)>().execute(|_| {});
+                Ok(())
+            }
+        }
+        struct SysB;
+        impl System for SysB {
+            type Result = ();
+            fn run<'a>(
+                &'a self,
+                ctx: &'a SystemContext<'a>,
+            ) -> Result<(), crate::system::SystemError> {
+                ctx.lock::<(Read<Position>,)>().execute(|_| {});
+                Ok(())
+            }
+        }
+
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.spawn();
+
+        let mut container = SystemsContainer::new();
+        container.add(SysA);
+        container.add(SysB);
+
+        let runner = EcsRunnerMultiThread::new(2);
+        let result = runner.run_with(
+            &mut world,
+            &container,
+            &RunDiagnostics {
+                detect_ambiguities: true,
+                ..Default::default()
+            },
+        );
+
+        let ambiguities = result.report.ambiguities.unwrap();
+        assert_eq!(ambiguities.len(), 1);
+        assert_eq!(ambiguities[0].conflicts.len(), 1);
+        assert!(ambiguities[0].conflicts[0].a_writes);
+        assert!(!ambiguities[0].conflicts[0].b_writes);
     }
 }

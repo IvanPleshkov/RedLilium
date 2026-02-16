@@ -100,6 +100,24 @@ impl EcsRunner {
         }
     }
 
+    /// Runs all systems with diagnostics collection controlled by `diagnostics`.
+    ///
+    /// Returns a [`RunResult`](crate::diagnostics::RunResult) containing any
+    /// system errors and an optional [`RunReport`](crate::diagnostics::RunReport)
+    /// with ambiguity and timing information.
+    pub fn run_with(
+        &self,
+        world: &mut World,
+        systems: &SystemsContainer,
+        diagnostics: &crate::diagnostics::RunDiagnostics,
+    ) -> crate::diagnostics::RunResult {
+        match self {
+            Self::SingleThread(runner) => runner.run_with(world, systems, diagnostics),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::MultiThread(runner) => runner.run_with(world, systems, diagnostics),
+        }
+    }
+
     /// Returns a reference to the compute pool owned by this runner.
     pub fn compute(&self) -> &ComputePool {
         match self {

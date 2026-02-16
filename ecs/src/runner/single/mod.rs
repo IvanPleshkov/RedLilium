@@ -4,6 +4,10 @@ use std::time::Duration;
 
 use crate::command_collector::CommandCollector;
 use crate::compute::ComputePool;
+use crate::diagnostics::{
+    AccessRecorder, RunDiagnostics, RunReport, RunResult, SystemTiming, TimingReport,
+    analyze_ambiguities,
+};
 use crate::io_runtime::IoRuntime;
 use crate::system::SystemError;
 use crate::system_context::SystemContext;
@@ -52,17 +56,50 @@ impl EcsRunnerSingleThread {
     /// The compute pool is driven between polls so spawned tasks
     /// make progress.
     pub fn run(&self, world: &mut World, systems: &SystemsContainer) -> Vec<SystemError> {
+        self.run_with(world, systems, &RunDiagnostics::default())
+            .errors
+    }
+
+    /// Runs all systems with optional diagnostics collection.
+    ///
+    /// Like [`run()`](Self::run), but accepts a [`RunDiagnostics`] config
+    /// and returns a [`RunResult`] containing both errors and a diagnostic
+    /// report.
+    pub fn run_with(
+        &self,
+        world: &mut World,
+        systems: &SystemsContainer,
+        diagnostics: &RunDiagnostics,
+    ) -> RunResult {
         redlilium_core::profile_scope!("ecs: run (single-thread)");
 
         let order = systems.single_thread_order();
         if order.is_empty() {
-            return Vec::new();
+            return RunResult {
+                errors: Vec::new(),
+                report: RunReport::default(),
+            };
         }
 
         let n = systems.system_count();
         let mut errors = Vec::new();
         let commands = CommandCollector::new();
         let results_store = SystemResultsStore::new(n, systems.type_id_to_idx().clone());
+
+        // Optional diagnostics state
+        let recorder = if diagnostics.detect_ambiguities {
+            Some(AccessRecorder::new(n))
+        } else {
+            None
+        };
+        let mut system_timings: Vec<SystemTiming> = Vec::new();
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let run_start = if diagnostics.collect_timings {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
 
         // Take previous-tick results (if the system count matches).
         let prev = std::mem::take(&mut *self.prev_results.lock().unwrap());
@@ -92,6 +129,13 @@ impl EcsRunnerSingleThread {
                         }
                     }
 
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let sys_start = if diagnostics.collect_timings {
+                        Some(std::time::Instant::now())
+                    } else {
+                        None
+                    };
+
                     let system = systems.get_exclusive_system(idx);
                     let mut guard = system.write().unwrap();
                     if let Some(prev_result) = prev_result {
@@ -101,9 +145,27 @@ impl EcsRunnerSingleThread {
                         Ok(result) => results_store.store(idx, result),
                         Err(e) => errors.push(e),
                     }
+
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some(start) = sys_start {
+                        system_timings.push(SystemTiming {
+                            name: systems.get_type_name(idx),
+                            duration: start.elapsed(),
+                        });
+                    }
                 } else {
-                    let ctx = SystemContext::new(world, &self.compute, &self.io, &commands)
+                    let mut ctx = SystemContext::new(world, &self.compute, &self.io, &commands)
                         .with_system_results(&results_store, systems.accessible_results(idx));
+                    if let Some(ref rec) = recorder {
+                        ctx = ctx.with_access_recorder(rec, idx);
+                    }
+
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let sys_start = if diagnostics.collect_timings {
+                        Some(std::time::Instant::now())
+                    } else {
+                        None
+                    };
 
                     let system = systems.get_system(idx);
                     let guard = system.read().unwrap();
@@ -113,6 +175,14 @@ impl EcsRunnerSingleThread {
                     match guard.run_boxed(&ctx) {
                         Ok(result) => results_store.store(idx, result),
                         Err(e) => errors.push(e),
+                    }
+
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some(start) = sys_start {
+                        system_timings.push(SystemTiming {
+                            name: systems.get_type_name(idx),
+                            duration: start.elapsed(),
+                        });
                     }
                 }
             }
@@ -141,7 +211,40 @@ impl EcsRunnerSingleThread {
         // Save this tick's results for next tick's reuse.
         *self.prev_results.lock().unwrap() = results_store.into_prev_results();
 
-        errors
+        // Build diagnostic report
+        let ambiguities = if diagnostics.detect_ambiguities {
+            Some(analyze_ambiguities(
+                recorder.unwrap().into_records(),
+                systems,
+                world,
+            ))
+        } else {
+            None
+        };
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let timings = if let Some(start) = run_start {
+            let wall_time = start.elapsed();
+            let total_cpu_time = system_timings.iter().map(|t| t.duration).sum();
+            Some(TimingReport {
+                wall_time,
+                total_cpu_time,
+                num_threads: 1,
+                systems: system_timings,
+            })
+        } else {
+            None
+        };
+        #[cfg(target_arch = "wasm32")]
+        let timings = None;
+
+        RunResult {
+            errors,
+            report: RunReport {
+                ambiguities,
+                timings,
+            },
+        }
     }
 
     /// Cancels all pending compute tasks and ticks until drained or timeout.

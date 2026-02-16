@@ -46,6 +46,7 @@ pub mod components;
 mod compute;
 mod compute_context;
 mod condition;
+pub mod diagnostics;
 mod entity;
 mod events;
 mod function_system;
@@ -110,6 +111,9 @@ pub use access_set::{
 pub use bundle::Bundle;
 pub use command_collector::{CommandCollector, SpawnBuilder};
 pub use condition::{Condition, ConditionMode, ConditionResult};
+pub use diagnostics::{
+    AccessConflict, AmbiguityInfo, RunDiagnostics, RunReport, RunResult, SystemTiming, TimingReport,
+};
 pub use function_system::{
     ForEach, ForEachAccess, ForEachSystem, FunctionSystem, IntoSystem, for_each,
 };

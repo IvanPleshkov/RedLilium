@@ -7,6 +7,7 @@ use crate::access_set::{AccessInfo, AccessSet, normalize_access_infos};
 use crate::bundle::Bundle;
 use crate::command_collector::{CommandCollector, SpawnBuilder};
 use crate::compute::ComputePool;
+use crate::diagnostics::AccessRecorder;
 use crate::entity::Entity;
 use crate::io_runtime::IoRuntime;
 use crate::lock_request::LockRequest;
@@ -98,6 +99,9 @@ pub struct SystemContext<'a> {
     /// Set of system TypeIds whose results this system may read
     /// (determined by the dependency graph — transitive ancestors).
     accessible_results: Option<&'a HashSet<TypeId>>,
+    /// Optional access recorder for ambiguity detection diagnostics.
+    /// Tuple of (recorder, system_index).
+    access_recorder: Option<(&'a AccessRecorder, usize)>,
 }
 
 impl<'a> SystemContext<'a> {
@@ -120,6 +124,7 @@ impl<'a> SystemContext<'a> {
             held_locks: Mutex::new(HashMap::new()),
             system_results: None,
             accessible_results: None,
+            access_recorder: None,
         }
     }
 
@@ -143,6 +148,7 @@ impl<'a> SystemContext<'a> {
             held_locks: Mutex::new(HashMap::new()),
             system_results: None,
             accessible_results: None,
+            access_recorder: None,
         }
     }
 
@@ -158,6 +164,26 @@ impl<'a> SystemContext<'a> {
         self.system_results = Some(store);
         self.accessible_results = Some(accessible);
         self
+    }
+
+    /// Attaches an access recorder for diagnostics.
+    ///
+    /// When set, every `lock()` / `query()` call records its access
+    /// infos into the recorder at the given system index.
+    pub(crate) fn with_access_recorder(
+        mut self,
+        recorder: &'a AccessRecorder,
+        system_idx: usize,
+    ) -> Self {
+        self.access_recorder = Some((recorder, system_idx));
+        self
+    }
+
+    /// Records access infos into the diagnostics recorder, if one is attached.
+    pub(crate) fn record_access(&self, sorted: &[AccessInfo]) {
+        if let Some((recorder, idx)) = &self.access_recorder {
+            recorder.record(*idx, sorted);
+        }
     }
 
     /// Returns the main-thread dispatcher, if one exists.
@@ -299,6 +325,7 @@ impl<'a> SystemContext<'a> {
         let infos = A::access_infos();
         let sorted = normalize_access_infos(&infos);
         self.check_held_locks(&sorted);
+        self.record_access(&sorted);
 
         let guards = self.world.acquire_sorted(&infos);
 
