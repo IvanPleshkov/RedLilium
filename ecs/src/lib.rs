@@ -69,6 +69,7 @@ mod query_guard;
 mod reactive;
 mod resource;
 mod runner;
+mod schedule;
 mod sparse_set;
 mod spawn;
 mod state;
@@ -123,6 +124,9 @@ pub use function_system::{
 };
 pub use lock_request::LockRequest;
 pub use runner::{EcsRunner, EcsRunnerSingleThread, ShutdownError};
+pub use schedule::{
+    FixedUpdate, PostUpdate, PreUpdate, ScheduleId, ScheduleLabel, Schedules, Startup, Time, Update,
+};
 pub use state::{ApplyStateTransition, NextState, State, StateTransition, States, init_state};
 pub use system::{
     ExclusiveFunctionSystem, ExclusiveSystem, System, SystemError, panic_payload_to_string,
