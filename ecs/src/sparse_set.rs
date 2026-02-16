@@ -3,6 +3,8 @@ use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+use fixedbitset::FixedBitSet;
+
 /// Function signature for component lifecycle hooks.
 ///
 /// Hooks receive exclusive world access and the entity being modified.
@@ -51,6 +53,9 @@ pub struct SparseSetInner<T: 'static> {
     ticks_added: Vec<u64>,
     /// Tick when each component was last changed (parallel to dense).
     ticks_changed: Vec<u64>,
+    /// Bitset tracking which entity indices have this component.
+    /// Bit N is set iff entity index N has this component stored.
+    membership: FixedBitSet,
 }
 
 impl<T: 'static> SparseSetInner<T> {
@@ -62,6 +67,7 @@ impl<T: 'static> SparseSetInner<T> {
             entities: Vec::new(),
             ticks_added: Vec::new(),
             ticks_changed: Vec::new(),
+            membership: FixedBitSet::new(),
         }
     }
 
@@ -98,6 +104,11 @@ impl<T: 'static> SparseSetInner<T> {
             self.entities.push(entity_index);
             self.ticks_added.push(tick);
             self.ticks_changed.push(tick);
+            // Track membership
+            if idx >= self.membership.len() {
+                self.membership.grow(idx + 1);
+            }
+            self.membership.insert(idx);
         }
     }
 
@@ -111,6 +122,7 @@ impl<T: 'static> SparseSetInner<T> {
 
         let dense_idx = self.sparse[idx]?;
         self.sparse[idx] = None;
+        self.membership.set(idx, false);
 
         let last_dense = self.dense.len() - 1;
         let dense_idx = dense_idx as usize;
@@ -186,6 +198,11 @@ impl<T: 'static> SparseSetInner<T> {
         &self.entities
     }
 
+    /// Returns the membership bitset tracking which entity indices have this component.
+    pub fn membership(&self) -> &FixedBitSet {
+        &self.membership
+    }
+
     /// Returns a mutable pointer to the component for the given entity index.
     ///
     /// # Safety
@@ -256,6 +273,7 @@ type RemoveFn = fn(&mut dyn Any, u32) -> bool;
 type ContainsFn = fn(&dyn Any, u32) -> bool;
 type ChangedSinceFn = fn(&dyn Any, u32, u64) -> bool;
 type AddedSinceFn = fn(&dyn Any, u32, u64) -> bool;
+type MembershipFn = fn(&dyn Any) -> &FixedBitSet;
 
 /// A lock guard for either a read or write lock on a storage.
 ///
@@ -284,6 +302,9 @@ pub(crate) struct ComponentStorage {
     changed_since_fn: ChangedSinceFn,
     /// Type-erased added_since check.
     added_since_fn: AddedSinceFn,
+    /// Type-erased membership bitset accessor.
+    #[allow(dead_code)]
+    membership_fn: MembershipFn,
     /// Records of (entity_index, tick) for recently removed components.
     /// Cleared by [`World::clear_removed_tracking`](crate::World::clear_removed_tracking).
     removed_ticks: Vec<(u32, u64)>,
@@ -323,6 +344,10 @@ impl ComponentStorage {
             added_since_fn: |any, entity_index, since_tick| {
                 let set = any.downcast_ref::<SparseSetInner<T>>().unwrap();
                 set.added_since(entity_index, since_tick)
+            },
+            membership_fn: |any| {
+                let set = any.downcast_ref::<SparseSetInner<T>>().unwrap();
+                set.membership()
             },
             removed_ticks: Vec::new(),
             on_add: None,
@@ -391,6 +416,12 @@ impl ComponentStorage {
         !self.required_components.is_empty()
     }
 
+    /// Returns the membership bitset for this component storage (type-erased).
+    #[allow(dead_code)]
+    pub fn membership(&self) -> &FixedBitSet {
+        (self.membership_fn)(self.inner.as_ref())
+    }
+
     /// Checks if the entity has this component (type-erased).
     pub fn contains_untyped(&self, entity_index: u32) -> bool {
         (self.contains_fn)(self.inner.as_ref(), entity_index)
@@ -443,13 +474,13 @@ impl ComponentStorage {
 /// `iter_unfiltered`) to include disabled entities.
 pub struct Ref<'a, T: 'static> {
     inner: &'a SparseSetInner<T>,
-    disabled: &'a [bool],
+    disabled: &'a FixedBitSet,
     _guard: Option<RwLockReadGuard<'a, ()>>,
 }
 
 impl<'a, T: 'static> Ref<'a, T> {
     /// Creates a new shared borrow guard, acquiring the storage's read lock.
-    pub(crate) fn new(storage: &'a ComponentStorage, disabled: &'a [bool]) -> Self {
+    pub(crate) fn new(storage: &'a ComponentStorage, disabled: &'a FixedBitSet) -> Self {
         let guard = storage.lock_read();
         Self {
             inner: storage.typed::<T>(),
@@ -462,7 +493,7 @@ impl<'a, T: 'static> Ref<'a, T> {
     ///
     /// The caller must ensure the lock is already held externally
     /// (e.g. via `acquire_sorted`).
-    pub(crate) fn new_unlocked(storage: &'a ComponentStorage, disabled: &'a [bool]) -> Self {
+    pub(crate) fn new_unlocked(storage: &'a ComponentStorage, disabled: &'a FixedBitSet) -> Self {
         Self {
             inner: storage.typed::<T>(),
             disabled,
@@ -482,8 +513,12 @@ impl<'a, T: 'static> Ref<'a, T> {
 
     /// Returns whether the entity at the given index is disabled.
     pub fn is_entity_disabled(&self, entity_index: u32) -> bool {
-        let idx = entity_index as usize;
-        idx < self.disabled.len() && self.disabled[idx]
+        self.disabled.contains(entity_index as usize)
+    }
+
+    /// Returns the disabled bitset reference.
+    pub fn disabled_bitset(&self) -> &'a FixedBitSet {
+        self.disabled
     }
 
     /// Returns a reference to the component for the given entity index.
@@ -561,14 +596,14 @@ unsafe impl<T: Send + Sync + 'static> Sync for Ref<'_, T> {}
 /// filter out disabled entities. Use the `_unfiltered` variants to include them.
 pub struct RefMut<'a, T: 'static> {
     inner: *mut SparseSetInner<T>,
-    disabled: &'a [bool],
+    disabled: &'a FixedBitSet,
     _guard: Option<RwLockWriteGuard<'a, ()>>,
     _marker: PhantomData<&'a mut SparseSetInner<T>>,
 }
 
 impl<'a, T: 'static> RefMut<'a, T> {
     /// Creates a new exclusive borrow guard, acquiring the storage's write lock.
-    pub(crate) fn new(storage: &'a ComponentStorage, disabled: &'a [bool]) -> Self {
+    pub(crate) fn new(storage: &'a ComponentStorage, disabled: &'a FixedBitSet) -> Self {
         let guard = storage.lock_write();
         // SAFETY: lock_write() guarantees exclusive access. We cast away
         // the shared reference to get a mutable pointer, which is safe because
@@ -586,7 +621,7 @@ impl<'a, T: 'static> RefMut<'a, T> {
     ///
     /// The caller must ensure the write lock is already held externally
     /// (e.g. via `acquire_sorted`).
-    pub(crate) fn new_unlocked(storage: &'a ComponentStorage, disabled: &'a [bool]) -> Self {
+    pub(crate) fn new_unlocked(storage: &'a ComponentStorage, disabled: &'a FixedBitSet) -> Self {
         let inner = storage.typed::<T>() as *const SparseSetInner<T> as *mut SparseSetInner<T>;
         Self {
             inner,
@@ -608,8 +643,12 @@ impl<'a, T: 'static> RefMut<'a, T> {
 
     /// Returns whether the entity at the given index is disabled.
     pub fn is_entity_disabled(&self, entity_index: u32) -> bool {
-        let idx = entity_index as usize;
-        idx < self.disabled.len() && self.disabled[idx]
+        self.disabled.contains(entity_index as usize)
+    }
+
+    /// Returns the disabled bitset reference.
+    pub fn disabled_bitset(&self) -> &'a FixedBitSet {
+        self.disabled
     }
 
     /// Returns a reference to the component for the given entity index.
@@ -653,10 +692,9 @@ impl<'a, T: 'static> RefMut<'a, T> {
     /// Iterates over `(entity_index, &mut component)` pairs, skipping disabled entities.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (u32, &mut T)> + '_ {
         // SAFETY: write lock guarantees exclusive access.
-        unsafe { &mut *self.inner }.iter_mut().filter(|(idx, _)| {
-            let i = *idx as usize;
-            !(i < self.disabled.len() && self.disabled[i])
-        })
+        unsafe { &mut *self.inner }
+            .iter_mut()
+            .filter(|(idx, _)| !self.disabled.contains(*idx as usize))
     }
 
     /// Iterates with mutation, marking all accessed components as changed at `tick`.
@@ -665,10 +703,7 @@ impl<'a, T: 'static> RefMut<'a, T> {
         // SAFETY: write lock guarantees exclusive access.
         unsafe { &mut *self.inner }
             .iter_mut_tracked(tick)
-            .filter(|(idx, _)| {
-                let i = *idx as usize;
-                !(i < self.disabled.len() && self.disabled[i])
-            })
+            .filter(|(idx, _)| !self.disabled.contains(*idx as usize))
     }
 
     /// Returns whether the entity has this component and is not disabled.
@@ -845,19 +880,21 @@ mod tests {
     #[test]
     fn lock_released_on_drop() {
         let storage = ComponentStorage::new::<u32>();
+        let empty = FixedBitSet::new();
         {
-            let _guard = Ref::<u32>::new(&storage, &[]);
+            let _guard = Ref::<u32>::new(&storage, &empty);
         }
         // After Ref is dropped, exclusive lock should succeed
-        let _guard = RefMut::<u32>::new(&storage, &[]);
+        let _guard = RefMut::<u32>::new(&storage, &empty);
     }
 
     #[test]
     fn ref_mut_allows_mutation() {
         let mut storage = ComponentStorage::new::<u32>();
         storage.typed_mut::<u32>().insert(0, 42);
+        let empty = FixedBitSet::new();
         {
-            let mut guard = RefMut::<u32>::new(&storage, &[]);
+            let mut guard = RefMut::<u32>::new(&storage, &empty);
             guard.insert(0, 99);
         }
         assert_eq!(storage.typed::<u32>().get(0), Some(&99));
@@ -979,5 +1016,69 @@ mod tests {
         assert!(!storage.changed_since_untyped(5, 10));
         assert!(storage.added_since_untyped(5, 9));
         assert!(!storage.added_since_untyped(5, 10));
+    }
+
+    // ---- Membership bitset tests ----
+
+    #[test]
+    fn membership_tracks_insert() {
+        let mut set = SparseSetInner::<u32>::new();
+        assert!(!set.membership().contains(5));
+        set.insert(5, 42);
+        assert!(set.membership().contains(5));
+    }
+
+    #[test]
+    fn membership_tracks_remove() {
+        let mut set = SparseSetInner::<u32>::new();
+        set.insert(5, 42);
+        assert!(set.membership().contains(5));
+        set.remove(5);
+        assert!(!set.membership().contains(5));
+    }
+
+    #[test]
+    fn membership_replace_keeps_bit() {
+        let mut set = SparseSetInner::<u32>::new();
+        set.insert(5, 42);
+        set.insert(5, 99); // replace
+        assert!(set.membership().contains(5));
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn membership_multiple_entities() {
+        let mut set = SparseSetInner::<u32>::new();
+        set.insert(0, 10);
+        set.insert(5, 20);
+        set.insert(100, 30);
+        assert!(set.membership().contains(0));
+        assert!(set.membership().contains(5));
+        assert!(set.membership().contains(100));
+        assert!(!set.membership().contains(1));
+        assert!(!set.membership().contains(50));
+    }
+
+    #[test]
+    fn membership_remove_middle_entity() {
+        let mut set = SparseSetInner::<u32>::new();
+        set.insert(0, 10);
+        set.insert(1, 20);
+        set.insert(2, 30);
+        set.remove(1);
+        assert!(set.membership().contains(0));
+        assert!(!set.membership().contains(1));
+        assert!(set.membership().contains(2));
+    }
+
+    #[test]
+    fn storage_membership_type_erased() {
+        let mut storage = ComponentStorage::new::<u32>();
+        storage.typed_mut::<u32>().insert(3, 42);
+        storage.typed_mut::<u32>().insert(7, 99);
+        let bits = storage.membership();
+        assert!(bits.contains(3));
+        assert!(bits.contains(7));
+        assert!(!bits.contains(0));
     }
 }

@@ -166,14 +166,14 @@ pub fn register_std_components(world: &mut World) {
     world.set_on_add::<Disabled>(|world, entity| {
         let idx = entity.index() as usize;
         if idx >= world.disabled_entities.len() {
-            world.disabled_entities.resize(idx + 1, false);
+            world.disabled_entities.grow(idx + 1);
         }
-        world.disabled_entities[idx] = true;
+        world.disabled_entities.insert(idx);
     });
     world.set_on_remove::<Disabled>(|world, entity| {
         let idx = entity.index() as usize;
         if idx < world.disabled_entities.len() {
-            world.disabled_entities[idx] = false;
+            world.disabled_entities.set(idx, false);
         }
     });
     world.register_component::<components::InheritedDisabled>();

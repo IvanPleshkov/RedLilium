@@ -149,7 +149,20 @@ macro_rules! impl_for_each_access {
             type EachItem<'w> = ($(<$T::Item<'w> as QueryItem>::Item,)+);
 
             fn run_for_each<'w>(items: &Self::Item<'w>, mut f: impl FnMut(Self::EachItem<'w>)) {
-                // Find the smallest storage to drive iteration.
+                // Try bitset-accelerated path first.
+                if let Some(intersected) = items.query_intersected_entities() {
+                    for &entity in &intersected {
+                        // SAFETY: bitset intersection guarantees all components
+                        // present and entity not disabled. Each index visited once.
+                        let item = unsafe { ($( match items.$idx.query_get(entity) {
+                            Some(v) => v,
+                            None => continue,
+                        }, )+) };
+                        f(item);
+                    }
+                    return;
+                }
+                // Fallback: find the smallest storage to drive iteration.
                 let mut _min_count = usize::MAX;
                 let mut min_entities: &[u32] = &[];
                 $(

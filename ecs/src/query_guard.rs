@@ -1,6 +1,8 @@
 use std::cell::Cell;
 use std::ops::{Deref, DerefMut};
 
+use fixedbitset::FixedBitSet;
+
 use crate::access_set::AccessSet;
 use crate::resource::{ResourceRef, ResourceRefMut};
 use crate::sparse_set::{LockGuard, Ref, RefMut, SparseSetInner};
@@ -111,6 +113,31 @@ pub trait QueryItem {
     /// For mutable items, the caller must ensure each `entity_index` is
     /// accessed at most once (no aliasing mutable references).
     unsafe fn query_get(&self, entity_index: u32) -> Option<Self::Item>;
+
+    /// Returns the component membership bitset, if available.
+    ///
+    /// Returns `Some` for component storages (`Ref`/`RefMut`), `None` for
+    /// resources (which are singletons and always match).
+    fn query_membership(&self) -> Option<&FixedBitSet> {
+        None
+    }
+
+    /// Returns the disabled-entities bitset, if available.
+    ///
+    /// Returns `Some` for component storages, `None` for resources.
+    fn query_disabled(&self) -> Option<&FixedBitSet> {
+        None
+    }
+
+    /// Pre-computes the set of entity indices that match all component storages.
+    ///
+    /// Returns `Some(entities)` when there are 2+ component memberships to
+    /// intersect, `None` otherwise (single component or resources only).
+    /// The returned vec contains only entities present in all storages and
+    /// not disabled.
+    fn query_intersected_entities(&self) -> Option<Vec<u32>> {
+        None
+    }
 }
 
 impl<'w, T: 'static> QueryItem for Ref<'w, T> {
@@ -129,6 +156,14 @@ impl<'w, T: 'static> QueryItem for Ref<'w, T> {
             return None;
         }
         self.storage().get(entity_index)
+    }
+
+    fn query_membership(&self) -> Option<&FixedBitSet> {
+        Some(self.storage().membership())
+    }
+
+    fn query_disabled(&self) -> Option<&FixedBitSet> {
+        Some(self.disabled_bitset())
     }
 }
 
@@ -151,6 +186,15 @@ impl<'w, T: 'static> QueryItem for RefMut<'w, T> {
         // (QueryIter) visits each entity_index at most once, so no aliasing
         // mutable references are created.
         unsafe { SparseSetInner::get_ptr_mut(self.storage_ptr(), entity_index).map(|p| &mut *p) }
+    }
+
+    fn query_membership(&self) -> Option<&FixedBitSet> {
+        // SAFETY: write lock guarantees exclusive access.
+        Some(unsafe { &*self.storage_ptr() }.membership())
+    }
+
+    fn query_disabled(&self) -> Option<&FixedBitSet> {
+        Some(self.disabled_bitset())
     }
 }
 
@@ -283,6 +327,33 @@ macro_rules! impl_query_item {
                     Some(($( self.$idx.query_get(entity_index)?, )+))
                 }
             }
+
+            fn query_intersected_entities(&self) -> Option<Vec<u32>> {
+                // Collect all component membership bitsets (skip resources which return None).
+                let mut bitsets: Vec<&FixedBitSet> = Vec::new();
+                $(
+                    if let Some(bs) = self.$idx.query_membership() {
+                        bitsets.push(bs);
+                    }
+                )+
+                // Need at least 2 component bitsets to benefit from intersection.
+                if bitsets.len() < 2 {
+                    return None;
+                }
+                // Sort by population count so we clone the smallest.
+                bitsets.sort_by_key(|bs| bs.count_ones(..));
+                // Clone the smallest and intersect with all others.
+                let mut result = bitsets[0].clone();
+                for bs in &bitsets[1..] {
+                    result.intersect_with(bs);
+                }
+                // Subtract disabled entities.
+                let disabled = None $(.or(self.$idx.query_disabled()))+;
+                if let Some(disabled) = disabled {
+                    result.difference_with(disabled);
+                }
+                Some(result.ones().map(|i| i as u32).collect())
+            }
         }
     };
 }
@@ -314,6 +385,9 @@ impl_query_item!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F, 6 G, 7 H);
 /// ```
 pub struct QueryIter<'a, A: AccessSet> {
     guard: QueryGuard<'a, A>,
+    /// Pre-computed matching entity indices (from bitset intersection),
+    /// or `None` to fall back to the smallest-set iteration path.
+    intersected: Option<Vec<u32>>,
     idx: usize,
 }
 
@@ -325,9 +399,17 @@ impl<'a, A: AccessSet> QueryIter<'a, A> {
     }
 }
 
-impl<'a, A: AccessSet> From<QueryGuard<'a, A>> for QueryIter<'a, A> {
+impl<'a, A: AccessSet> From<QueryGuard<'a, A>> for QueryIter<'a, A>
+where
+    A::Item<'a>: QueryItem,
+{
     fn from(guard: QueryGuard<'a, A>) -> Self {
-        Self { guard, idx: 0 }
+        let intersected = guard.items.query_intersected_entities();
+        Self {
+            guard,
+            intersected,
+            idx: 0,
+        }
     }
 }
 
@@ -338,22 +420,40 @@ where
     type Item = (u32, <A::Item<'a> as QueryItem>::Item);
 
     fn next(&mut self) -> Option<Self::Item> {
-        let entities = self.guard.items.query_entities();
-        while self.idx < entities.len() {
-            let entity_idx = entities[self.idx];
-            self.idx += 1;
-            // SAFETY: the iterator visits each entity exactly once
-            // (monotonically increasing idx), so no aliasing mutable
-            // references are created across calls to next().
-            if let Some(item) = unsafe { self.guard.items.query_get(entity_idx) } {
-                return Some((entity_idx, item));
+        if let Some(ref entities) = self.intersected {
+            // Bitset-accelerated path: every entity is guaranteed to match.
+            while self.idx < entities.len() {
+                let entity_idx = entities[self.idx];
+                self.idx += 1;
+                // SAFETY: bitset intersection guarantees the entity has all
+                // components and is not disabled. Each entity is visited once.
+                if let Some(item) = unsafe { self.guard.items.query_get(entity_idx) } {
+                    return Some((entity_idx, item));
+                }
+            }
+        } else {
+            // Fallback: walk the smallest set and probe other storages.
+            let entities = self.guard.items.query_entities();
+            while self.idx < entities.len() {
+                let entity_idx = entities[self.idx];
+                self.idx += 1;
+                // SAFETY: the iterator visits each entity exactly once
+                // (monotonically increasing idx), so no aliasing mutable
+                // references are created across calls to next().
+                if let Some(item) = unsafe { self.guard.items.query_get(entity_idx) } {
+                    return Some((entity_idx, item));
+                }
             }
         }
         None
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let entities = self.guard.items.query_entities();
+        let entities = if let Some(ref intersected) = self.intersected {
+            intersected.as_slice()
+        } else {
+            self.guard.items.query_entities()
+        };
         let remaining = entities.len().saturating_sub(self.idx);
         (0, Some(remaining))
     }
@@ -720,5 +820,101 @@ mod tests {
         let mut iter = QueryIter::from(q);
         let _a = iter.next().unwrap(); // holds ResMutRef
         let _b = iter.next().unwrap(); // panics: _a still alive
+    }
+
+    // ---- Bitset intersection tests ----
+
+    #[test]
+    fn iter_bitset_intersection_two_components() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Velocity>();
+
+        // 100 entities with Position only, 5 with both
+        for i in 0..100 {
+            let e = world.spawn();
+            world.insert(e, Position { x: i as f32 }).unwrap();
+        }
+        for _ in 0..5 {
+            let e = world.spawn();
+            world.insert(e, Position { x: 999.0 }).unwrap();
+            world.insert(e, Velocity { x: 1.0 }).unwrap();
+        }
+
+        let q = query::<(Read<Position>, Read<Velocity>)>(&world);
+        let results: Vec<_> = QueryIter::from(q).collect();
+        assert_eq!(results.len(), 5);
+        for (_, (pos, _)) in &results {
+            assert_eq!(pos.x, 999.0);
+        }
+    }
+
+    #[test]
+    fn iter_single_component_uses_fallback() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+
+        let e = world.spawn();
+        world.insert(e, Position { x: 42.0 }).unwrap();
+
+        let q = query::<(Read<Position>,)>(&world);
+        let iter = QueryIter::from(q);
+        // Single component should NOT use intersection (no benefit)
+        assert!(iter.intersected.is_none());
+        let results: Vec<_> = iter.collect();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn iter_bitset_intersection_with_write() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Velocity>();
+
+        let e1 = world.spawn();
+        world.insert(e1, Position { x: 10.0 }).unwrap();
+        world.insert(e1, Velocity { x: 5.0 }).unwrap();
+
+        let e2 = world.spawn();
+        world.insert(e2, Position { x: 20.0 }).unwrap();
+
+        {
+            let q = query::<(Write<Position>, Read<Velocity>)>(&world);
+            for (_, (pos, vel)) in q {
+                pos.x += vel.x;
+            }
+        }
+
+        assert_eq!(world.get::<Position>(e1).unwrap().x, 15.0);
+        assert_eq!(world.get::<Position>(e2).unwrap().x, 20.0); // unchanged
+    }
+
+    #[test]
+    fn iter_bitset_intersection_with_resource() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.register_component::<Velocity>();
+        world.insert_resource(2.0f32);
+
+        let e = world.spawn();
+        world.insert(e, Position { x: 0.0 }).unwrap();
+        world.insert(e, Velocity { x: 3.0 }).unwrap();
+
+        // Only entity with only Position
+        let e2 = world.spawn();
+        world.insert(e2, Position { x: 100.0 }).unwrap();
+
+        {
+            let q = query::<(Write<Position>, Read<Velocity>, Res<f32>)>(&world);
+            let iter = QueryIter::from(q);
+            // 2 component bitsets (Position + Velocity), so intersection is used
+            assert!(iter.intersected.is_some());
+            for (_, (pos, vel, factor)) in iter {
+                pos.x += vel.x * *factor;
+            }
+        }
+
+        assert_eq!(world.get::<Position>(e).unwrap().x, 6.0);
+        assert_eq!(world.get::<Position>(e2).unwrap().x, 100.0); // unchanged
     }
 }

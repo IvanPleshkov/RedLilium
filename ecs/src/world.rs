@@ -1,6 +1,8 @@
 use std::any::TypeId;
 use std::collections::{BTreeMap, HashMap};
 
+use fixedbitset::FixedBitSet;
+
 use crate::access_set::AccessInfo;
 use crate::bundle::Bundle;
 use crate::commands::CommandBuffer;
@@ -99,7 +101,9 @@ pub struct World {
     trigger_swap_fns: Vec<fn(&mut World)>,
     /// Tracks which entity indices are disabled (have the `Disabled` component).
     /// Updated by hooks on the `Disabled` component. Indexed by entity index.
-    pub(crate) disabled_entities: Vec<bool>,
+    pub(crate) disabled_entities: FixedBitSet,
+    /// Empty bitset returned for `Disabled` component queries (so they see all entities).
+    empty_bitset: FixedBitSet,
 }
 
 impl World {
@@ -114,7 +118,8 @@ impl World {
             inspector_entries: BTreeMap::new(),
             observers: Observers::new(),
             trigger_swap_fns: Vec::new(),
-            disabled_entities: Vec::new(),
+            disabled_entities: FixedBitSet::new(),
+            empty_bitset: FixedBitSet::new(),
         }
     }
 
@@ -919,9 +924,9 @@ impl World {
     ///
     /// For the `Disabled` component itself, returns an empty slice so that
     /// `Read<Disabled>` can iterate all disabled entities without self-filtering.
-    fn disabled_for<T: 'static>(&self) -> &[bool] {
+    fn disabled_for<T: 'static>(&self) -> &FixedBitSet {
         if TypeId::of::<T>() == TypeId::of::<Disabled>() {
-            &[]
+            &self.empty_bitset
         } else {
             &self.disabled_entities
         }
@@ -929,8 +934,7 @@ impl World {
 
     /// Returns whether the given entity is currently disabled.
     pub fn is_disabled(&self, entity: Entity) -> bool {
-        let idx = entity.index() as usize;
-        idx < self.disabled_entities.len() && self.disabled_entities[idx]
+        self.disabled_entities.contains(entity.index() as usize)
     }
 
     // ---- Query access (runtime borrow-checked, take &self) ----

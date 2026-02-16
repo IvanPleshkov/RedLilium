@@ -19,6 +19,7 @@ inspector = []
 redlilium-core = { path = "../core" }
 ecs-macro = { path = "../ecs-macro" }
 bytemuck = { workspace = true }
+fixedbitset = { workspace = true }
 log.workspace = true
 egui.workspace = true
 rapier3d-f64 = { workspace = true, optional = true }
