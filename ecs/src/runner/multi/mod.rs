@@ -97,7 +97,7 @@ impl EcsRunnerMultiThread {
     ) -> RunResult {
         redlilium_core::profile_scope!("ecs: run (multi-thread)");
 
-        let n = systems.system_count();
+        let n = systems.node_count();
         if n == 0 {
             return RunResult {
                 errors: Vec::new(),
@@ -139,9 +139,19 @@ impl EcsRunnerMultiThread {
             let mut exclusive_ready = None;
             let mut regular_ready = Vec::new();
 
+            let mut resolved_virtual = false;
+
             for i in 0..n {
                 if !started[i] && remaining_deps[i] == 0 {
-                    if systems.is_exclusive(i) {
+                    if systems.is_virtual(i) {
+                        // Immediately complete virtual barrier nodes.
+                        started[i] = true;
+                        completed_count += 1;
+                        for &dep in systems.dependents_of(i) {
+                            remaining_deps[dep] -= 1;
+                        }
+                        resolved_virtual = true;
+                    } else if systems.is_exclusive(i) {
                         if exclusive_ready.is_none() {
                             exclusive_ready = Some(i);
                         }
@@ -149,6 +159,11 @@ impl EcsRunnerMultiThread {
                         regular_ready.push(i);
                     }
                 }
+            }
+
+            // Re-scan if we resolved virtual nodes — their dependents may now be ready.
+            if resolved_virtual && exclusive_ready.is_none() && regular_ready.is_empty() {
+                continue;
             }
 
             // Filter out condition-failed systems before dispatching.
@@ -455,6 +470,13 @@ impl EcsRunnerMultiThread {
                         while let Some(dep) = work_queue.pop() {
                             remaining_deps[dep] -= 1;
                             if remaining_deps[dep] == 0 && !started[dep] {
+                                if systems.is_virtual(dep) {
+                                    // Immediately complete virtual barrier nodes.
+                                    started[dep] = true;
+                                    *completed_count += 1;
+                                    work_queue.extend_from_slice(systems.dependents_of(dep));
+                                    continue;
+                                }
                                 if systems.is_exclusive(dep) {
                                     // Exclusive systems deferred to outer loop
                                     continue;
@@ -1201,5 +1223,59 @@ mod tests {
         assert_eq!(ambiguities[0].conflicts.len(), 1);
         assert!(ambiguities[0].conflicts[0].a_writes);
         assert!(!ambiguities[0].conflicts[0].b_writes);
+    }
+
+    // ---- System set tests ----
+
+    #[test]
+    fn set_ordering_enforced_multi_thread() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let counter = Arc::new(AtomicU32::new(0));
+
+        struct AlphaSystem(Arc<AtomicU32>);
+        impl System for AlphaSystem {
+            type Result = ();
+            fn run<'a>(
+                &'a self,
+                _ctx: &'a SystemContext<'a>,
+            ) -> Result<(), crate::system::SystemError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        struct BetaSystem(Arc<AtomicU32>);
+        impl System for BetaSystem {
+            type Result = ();
+            fn run<'a>(
+                &'a self,
+                _ctx: &'a SystemContext<'a>,
+            ) -> Result<(), crate::system::SystemError> {
+                // Must run after AlphaSystem has completed
+                assert!(self.0.load(Ordering::SeqCst) >= 1);
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        struct SetA;
+        impl crate::SystemSet for SetA {}
+        struct SetB;
+        impl crate::SystemSet for SetB {}
+
+        let mut container = SystemsContainer::new();
+        container.add(AlphaSystem(counter.clone()));
+        container.add(BetaSystem(counter.clone()));
+        container.add_to_set::<AlphaSystem, SetA>().unwrap();
+        container.add_to_set::<BetaSystem, SetB>().unwrap();
+        container.add_set_edge::<SetA, SetB>().unwrap();
+
+        let runner = EcsRunnerMultiThread::new(2);
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
     }
 }

@@ -46,7 +46,8 @@
       "Bash(xargs:*)",
       "Bash(git stash:*)",
       "Bash(cargo fmt:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "WebFetch(domain:bevy.org)"
     ],
     "deny": [
       "Read(target/**)"

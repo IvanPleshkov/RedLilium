@@ -221,11 +221,11 @@ pub(crate) fn analyze_ambiguities(
         .collect();
 
     for i in 0..n {
-        if systems.is_exclusive(i) || normalized[i].is_empty() {
+        if systems.is_exclusive(i) || systems.is_virtual(i) || normalized[i].is_empty() {
             continue;
         }
         for j in (i + 1)..n {
-            if systems.is_exclusive(j) || normalized[j].is_empty() {
+            if systems.is_exclusive(j) || systems.is_virtual(j) || normalized[j].is_empty() {
                 continue;
             }
 

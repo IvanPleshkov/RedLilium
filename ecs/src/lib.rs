@@ -127,7 +127,7 @@ pub use system::{
     run_exclusive_system_blocking, run_system_blocking,
 };
 pub use system_context::SystemContext;
-pub use systems_container::{CycleError, Edge, SystemsContainer};
+pub use systems_container::{CycleError, Edge, SystemSet, SystemsContainer};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use runner::EcsRunnerMultiThread;

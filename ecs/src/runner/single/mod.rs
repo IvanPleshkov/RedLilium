@@ -81,7 +81,7 @@ impl EcsRunnerSingleThread {
             };
         }
 
-        let n = systems.system_count();
+        let n = systems.node_count();
         let mut errors = Vec::new();
         let commands = CommandCollector::new();
         let results_store = SystemResultsStore::new(n, systems.type_id_to_idx().clone());
@@ -110,6 +110,11 @@ impl EcsRunnerSingleThread {
 
         {
             for &idx in order {
+                // Skip virtual barrier nodes — no system to execute.
+                if systems.is_virtual(idx) {
+                    continue;
+                }
+
                 // Check run conditions — skip this system if they fail.
                 if !systems.check_conditions(idx, &results_store) {
                     continue;
@@ -888,5 +893,55 @@ mod tests {
         runner.run(&mut world, &container);
 
         assert_eq!(*result.lock().unwrap(), Some(42));
+    }
+
+    // ---- System set tests ----
+
+    #[test]
+    fn set_ordering_enforced_single_thread() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let counter = Arc::new(AtomicU32::new(0));
+
+        struct AlphaSystem(Arc<AtomicU32>);
+        impl System for AlphaSystem {
+            type Result = ();
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+                // Should run first; store 1
+                assert_eq!(self.0.load(Ordering::SeqCst), 0);
+                self.0.store(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        struct BetaSystem(Arc<AtomicU32>);
+        impl System for BetaSystem {
+            type Result = ();
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+                // Should run after AlphaSystem
+                assert_eq!(self.0.load(Ordering::SeqCst), 1);
+                self.0.store(2, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        struct SetA;
+        impl crate::SystemSet for SetA {}
+        struct SetB;
+        impl crate::SystemSet for SetB {}
+
+        let mut container = SystemsContainer::new();
+        container.add(AlphaSystem(counter.clone()));
+        container.add(BetaSystem(counter.clone()));
+        container.add_to_set::<AlphaSystem, SetA>().unwrap();
+        container.add_to_set::<BetaSystem, SetB>().unwrap();
+        container.add_set_edge::<SetA, SetB>().unwrap();
+
+        let runner = EcsRunnerSingleThread::new();
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
     }
 }

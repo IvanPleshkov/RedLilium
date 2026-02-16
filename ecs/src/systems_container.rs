@@ -1,6 +1,7 @@
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::marker::PhantomData;
 use std::sync::{Arc, RwLock};
 
 use crate::condition::{ConditionMode, ConditionResult, condition_checker};
@@ -11,6 +12,31 @@ use crate::function_system::IntoSystem;
 use crate::system::{
     DynExclusiveSystem, DynSystem, ExclusiveFunctionSystem, ExclusiveSystem, System,
 };
+
+/// Marker trait for system set types.
+///
+/// System sets group multiple systems so that ordering constraints and
+/// run conditions can be applied to the entire group at once.
+///
+/// # Example
+///
+/// ```ignore
+/// struct PhysicsSet;
+/// impl SystemSet for PhysicsSet {}
+///
+/// struct RenderSet;
+/// impl SystemSet for RenderSet {}
+///
+/// container.add_to_set::<MovementSystem, PhysicsSet>().unwrap();
+/// container.add_set_edge::<PhysicsSet, RenderSet>().unwrap();
+/// ```
+pub trait SystemSet: 'static {}
+
+/// Phantom type for the enter barrier of a [`SystemSet`].
+struct SetEnter<S: SystemSet>(PhantomData<S>);
+
+/// Phantom type for the exit barrier of a [`SystemSet`].
+struct SetExit<S: SystemSet>(PhantomData<S>);
 
 /// An explicit ordering edge between two systems.
 ///
@@ -51,12 +77,15 @@ impl fmt::Display for CycleError {
 
 impl std::error::Error for CycleError {}
 
-/// A registered system entry — either regular or exclusive.
+/// A registered system entry — regular, exclusive, or virtual.
 pub(crate) enum SystemEntry {
     /// A regular system that borrows `&World` via `SystemContext`.
     Regular(Arc<RwLock<dyn DynSystem>>),
     /// An exclusive system that receives `&mut World` directly.
     Exclusive(Arc<RwLock<dyn DynExclusiveSystem>>),
+    /// A virtual sentinel node used for system set barriers.
+    /// Not executed by runners — purely participates in the dependency graph.
+    Virtual,
 }
 
 /// Container for registered systems with explicit dependency ordering.
@@ -109,6 +138,10 @@ pub struct SystemsContainer {
     condition_edges: Vec<Vec<usize>>,
     /// For each system, how its conditions are combined.
     condition_modes: Vec<ConditionMode>,
+    /// Map from set TypeId to `(enter_idx, exit_idx)` virtual barrier nodes.
+    set_barriers: HashMap<TypeId, (usize, usize)>,
+    /// For each node, whether it is a virtual set barrier.
+    is_virtual: Vec<bool>,
 }
 
 impl SystemsContainer {
@@ -126,6 +159,8 @@ impl SystemsContainer {
             condition_checkers: Vec::new(),
             condition_edges: Vec::new(),
             condition_modes: Vec::new(),
+            set_barriers: HashMap::new(),
+            is_virtual: Vec::new(),
         }
     }
 
@@ -160,6 +195,7 @@ impl SystemsContainer {
         self.condition_checkers.push(None);
         self.condition_edges.push(Vec::new());
         self.condition_modes.push(ConditionMode::All);
+        self.is_virtual.push(false);
         self.rebuild_order();
         arc
     }
@@ -318,9 +354,25 @@ impl SystemsContainer {
         }
     }
 
-    /// Returns the number of registered systems.
+    /// Returns the number of real (non-virtual) registered systems.
+    ///
+    /// This excludes virtual barrier nodes used by system sets.
     pub fn system_count(&self) -> usize {
+        self.systems.len() - self.set_barriers.len() * 2
+    }
+
+    /// Returns the total number of nodes in the graph (real + virtual).
+    ///
+    /// Used internally by runners for array sizing.
+    pub(crate) fn node_count(&self) -> usize {
         self.systems.len()
+    }
+
+    /// Returns whether the node at the given index is a virtual set barrier.
+    ///
+    /// Virtual nodes participate in dependency tracking but are never executed.
+    pub(crate) fn is_virtual(&self, idx: usize) -> bool {
+        self.is_virtual[idx]
     }
 
     /// Registers an exclusive system, wrapping it in `Arc<RwLock<S>>`.
@@ -352,6 +404,7 @@ impl SystemsContainer {
         self.condition_checkers.push(None);
         self.condition_edges.push(Vec::new());
         self.condition_modes.push(ConditionMode::All);
+        self.is_virtual.push(false);
         self.rebuild_order();
         arc
     }
@@ -393,6 +446,12 @@ impl SystemsContainer {
                     self.names[idx], idx
                 )
             }
+            SystemEntry::Virtual => {
+                panic!(
+                    "node `{}` at index {} is a virtual set barrier, not a regular system",
+                    self.names[idx], idx
+                )
+            }
         }
     }
 
@@ -410,6 +469,12 @@ impl SystemsContainer {
             SystemEntry::Regular(_) => {
                 panic!(
                     "system `{}` at index {} is regular, not exclusive",
+                    self.names[idx], idx
+                )
+            }
+            SystemEntry::Virtual => {
+                panic!(
+                    "node `{}` at index {} is a virtual set barrier, not an exclusive system",
                     self.names[idx], idx
                 )
             }
@@ -517,6 +582,176 @@ impl SystemsContainer {
                 results.get_raw(cond_idx).is_some_and(checker)
             }),
         }
+    }
+
+    // --- System Sets -----------------------------------------------------------
+
+    /// Adds a system to a system set.
+    ///
+    /// Creates dependency edges so that the set's enter barrier runs before
+    /// the system and the system completes before the set's exit barrier.
+    /// The set is auto-created on first use.
+    ///
+    /// If a condition has already been applied to the set, the new member
+    /// inherits those condition edges.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `Sys` is not registered.
+    pub fn add_to_set<Sys: 'static, S: SystemSet>(&mut self) -> Result<(), CycleError> {
+        let sys_idx = *self.id_to_idx.get(&TypeId::of::<Sys>()).unwrap_or_else(|| {
+            panic!(
+                "System `{}` is not registered",
+                std::any::type_name::<Sys>()
+            )
+        });
+
+        let set_id = TypeId::of::<S>();
+        let (enter_idx, _exit_idx) = self.ensure_set_exists::<S>();
+
+        // Check if already a member (idempotent).
+        if self.edges[enter_idx].contains(&sys_idx) {
+            return Ok(());
+        }
+
+        // Add edges: enter → system → exit
+        let enter_type_id = TypeId::of::<SetEnter<S>>();
+        let exit_type_id = TypeId::of::<SetExit<S>>();
+        self.add_edges(&[
+            Edge {
+                from: enter_type_id,
+                to: TypeId::of::<Sys>(),
+            },
+            Edge {
+                from: TypeId::of::<Sys>(),
+                to: exit_type_id,
+            },
+        ])?;
+
+        // Inherit condition edges from the set's enter barrier.
+        let (enter_idx, _) = self.set_barriers[&set_id];
+        let enter_conditions = self.condition_edges[enter_idx].clone();
+        for cond_idx in enter_conditions {
+            if !self.condition_edges[sys_idx].contains(&cond_idx) {
+                self.condition_edges[sys_idx].push(cond_idx);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Adds an ordering edge between two system sets.
+    ///
+    /// All systems in `Before` must complete before any system in `After`
+    /// starts. Both sets are auto-created on first use.
+    pub fn add_set_edge<Before: SystemSet, After: SystemSet>(&mut self) -> Result<(), CycleError> {
+        self.ensure_set_exists::<Before>();
+        self.ensure_set_exists::<After>();
+
+        let exit_before = TypeId::of::<SetExit<Before>>();
+        let enter_after = TypeId::of::<SetEnter<After>>();
+        self.add_edges(&[Edge {
+            from: exit_before,
+            to: enter_after,
+        }])
+    }
+
+    /// Applies a condition to all members of a system set.
+    ///
+    /// The condition system must already be registered via
+    /// [`add_condition()`](Self::add_condition). When the condition is
+    /// false, all member systems in the set are skipped.
+    ///
+    /// Systems added to the set after this call automatically inherit
+    /// the condition.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `Cond` is not registered.
+    pub fn add_set_condition<S: SystemSet, Cond: 'static>(&mut self) -> Result<(), CycleError> {
+        let (enter_idx, _exit_idx) = self.ensure_set_exists::<S>();
+
+        let cond_id = TypeId::of::<Cond>();
+        let cond_idx = *self.id_to_idx.get(&cond_id).unwrap_or_else(|| {
+            panic!(
+                "Condition system `{}` is not registered",
+                std::any::type_name::<Cond>()
+            )
+        });
+
+        // Add ordering edge: condition → enter barrier.
+        let enter_type_id = TypeId::of::<SetEnter<S>>();
+        self.add_edges(&[Edge {
+            from: cond_id,
+            to: enter_type_id,
+        }])?;
+
+        // Store condition on the enter barrier so future members inherit it.
+        if !self.condition_edges[enter_idx].contains(&cond_idx) {
+            self.condition_edges[enter_idx].push(cond_idx);
+        }
+
+        // Apply condition to all current member systems.
+        let set_id = TypeId::of::<S>();
+        let (enter_idx, _) = self.set_barriers[&set_id];
+        let member_indices: Vec<usize> = self.edges[enter_idx]
+            .iter()
+            .copied()
+            .filter(|&i| !self.is_virtual[i])
+            .collect();
+
+        for member_idx in member_indices {
+            if !self.condition_edges[member_idx].contains(&cond_idx) {
+                self.condition_edges[member_idx].push(cond_idx);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Ensures the virtual enter/exit barrier nodes exist for a set.
+    ///
+    /// Returns `(enter_idx, exit_idx)`. Creates them on first call.
+    fn ensure_set_exists<S: SystemSet>(&mut self) -> (usize, usize) {
+        let set_id = TypeId::of::<S>();
+        if let Some(&pair) = self.set_barriers.get(&set_id) {
+            return pair;
+        }
+
+        let enter_id = TypeId::of::<SetEnter<S>>();
+        let exit_id = TypeId::of::<SetExit<S>>();
+
+        // Create enter barrier node.
+        let enter_idx = self.systems.len();
+        self.systems.push(SystemEntry::Virtual);
+        self.names.push(std::any::type_name::<SetEnter<S>>());
+        self.edges.push(Vec::new());
+        self.in_degrees.push(0);
+        self.id_to_idx.insert(enter_id, enter_idx);
+        self.idx_to_id.push(enter_id);
+        self.accessible_results.push(HashSet::new());
+        self.condition_checkers.push(None);
+        self.condition_edges.push(Vec::new());
+        self.condition_modes.push(ConditionMode::All);
+        self.is_virtual.push(true);
+
+        // Create exit barrier node.
+        let exit_idx = self.systems.len();
+        self.systems.push(SystemEntry::Virtual);
+        self.names.push(std::any::type_name::<SetExit<S>>());
+        self.edges.push(Vec::new());
+        self.in_degrees.push(0);
+        self.id_to_idx.insert(exit_id, exit_idx);
+        self.idx_to_id.push(exit_id);
+        self.accessible_results.push(HashSet::new());
+        self.condition_checkers.push(None);
+        self.condition_edges.push(Vec::new());
+        self.condition_modes.push(ConditionMode::All);
+        self.is_virtual.push(true);
+
+        self.set_barriers.insert(set_id, (enter_idx, exit_idx));
+        self.rebuild_order();
+        (enter_idx, exit_idx)
     }
 
     /// Rebuilds `single_thread_order` and `accessible_results` from the current graph.
@@ -1058,5 +1293,160 @@ mod tests {
 
         // Any mode: one true → overall true
         assert!(container.check_conditions(2, &store));
+    }
+
+    // ---- System set tests ----
+
+    struct SetAlpha;
+    impl SystemSet for SetAlpha {}
+
+    struct SetBeta;
+    impl SystemSet for SetBeta {}
+
+    #[test]
+    fn add_to_set_creates_dependencies() {
+        let mut container = SystemsContainer::new();
+        container.add(SystemA);
+        container.add_to_set::<SystemA, SetAlpha>().unwrap();
+
+        // 1 real system + 2 virtual barrier nodes
+        assert_eq!(container.system_count(), 1);
+        assert_eq!(container.node_count(), 3);
+
+        // SystemA (idx 0) should depend on enter (idx 1)
+        // and exit (idx 2) should depend on SystemA
+        let enter_idx = 1;
+        let exit_idx = 2;
+        assert!(container.is_virtual(enter_idx));
+        assert!(container.is_virtual(exit_idx));
+        assert!(!container.is_virtual(0));
+
+        // enter → SystemA
+        assert!(container.dependents_of(enter_idx).contains(&0));
+        // SystemA → exit
+        assert!(container.dependents_of(0).contains(&exit_idx));
+    }
+
+    #[test]
+    fn add_set_edge_orders_sets() {
+        let mut container = SystemsContainer::new();
+        container.add(SystemA);
+        container.add(SystemB);
+        container.add_to_set::<SystemA, SetAlpha>().unwrap();
+        container.add_to_set::<SystemB, SetBeta>().unwrap();
+        container.add_set_edge::<SetAlpha, SetBeta>().unwrap();
+
+        // In topological order, SystemA must come before SystemB.
+        let order = container.single_thread_order();
+        let pos_a = order.iter().position(|&i| i == 0).unwrap();
+        let pos_b = order.iter().position(|&i| i == 1).unwrap();
+        assert!(pos_a < pos_b);
+    }
+
+    #[test]
+    fn set_auto_created_on_first_use() {
+        let mut container = SystemsContainer::new();
+        container.add(SystemA);
+
+        assert!(container.set_barriers.is_empty());
+        container.add_to_set::<SystemA, SetAlpha>().unwrap();
+        assert_eq!(container.set_barriers.len(), 1);
+    }
+
+    #[test]
+    fn add_to_set_idempotent() {
+        let mut container = SystemsContainer::new();
+        container.add(SystemA);
+        container.add_to_set::<SystemA, SetAlpha>().unwrap();
+
+        let node_count_before = container.node_count();
+        container.add_to_set::<SystemA, SetAlpha>().unwrap();
+        assert_eq!(container.node_count(), node_count_before);
+    }
+
+    #[test]
+    fn set_edge_cycle_detection() {
+        let mut container = SystemsContainer::new();
+        container.add(SystemA);
+        container.add(SystemB);
+        container.add_to_set::<SystemA, SetAlpha>().unwrap();
+        container.add_to_set::<SystemB, SetBeta>().unwrap();
+        container.add_set_edge::<SetAlpha, SetBeta>().unwrap();
+
+        let result = container.add_set_edge::<SetBeta, SetAlpha>();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn set_condition_skips_all_members() {
+        use crate::system_results_store::SystemResultsStore;
+
+        let mut container = SystemsContainer::new();
+        container.add_condition(CondFalse);
+        container.add(SystemA);
+        container.add(SystemB);
+        container.add_to_set::<SystemA, SetAlpha>().unwrap();
+        container.add_to_set::<SystemB, SetAlpha>().unwrap();
+        container
+            .add_set_condition::<SetAlpha, CondFalse>()
+            .unwrap();
+
+        let store =
+            SystemResultsStore::new(container.node_count(), container.type_id_to_idx().clone());
+        store.store(0, Box::new(Condition::<()>::False));
+
+        // Both members should be gated by the false condition.
+        assert!(!container.check_conditions(1, &store)); // SystemA
+        assert!(!container.check_conditions(2, &store)); // SystemB
+    }
+
+    #[test]
+    fn set_condition_inherited_by_later_members() {
+        use crate::system_results_store::SystemResultsStore;
+
+        let mut container = SystemsContainer::new();
+        container.add_condition(CondFalse);
+        container.add(SystemA);
+        container.add(SystemB);
+
+        // Add SystemA to set and apply condition first.
+        container.add_to_set::<SystemA, SetAlpha>().unwrap();
+        container
+            .add_set_condition::<SetAlpha, CondFalse>()
+            .unwrap();
+
+        // Add SystemB to set AFTER condition was applied.
+        container.add_to_set::<SystemB, SetAlpha>().unwrap();
+
+        let store =
+            SystemResultsStore::new(container.node_count(), container.type_id_to_idx().clone());
+        store.store(0, Box::new(Condition::<()>::False));
+
+        // SystemB (added later) should still inherit the condition.
+        let sys_b_idx = *container.id_to_idx.get(&TypeId::of::<SystemB>()).unwrap();
+        assert!(!container.check_conditions(sys_b_idx, &store));
+    }
+
+    #[test]
+    fn virtual_nodes_excluded_from_system_count() {
+        let mut container = SystemsContainer::new();
+        container.add(SystemA);
+        container.add(SystemB);
+        container.add_to_set::<SystemA, SetAlpha>().unwrap();
+
+        assert_eq!(container.system_count(), 2);
+        assert_eq!(container.node_count(), 4); // 2 systems + 2 virtual
+    }
+
+    #[test]
+    fn system_in_multiple_sets() {
+        let mut container = SystemsContainer::new();
+        container.add(SystemA);
+        container.add_to_set::<SystemA, SetAlpha>().unwrap();
+        container.add_to_set::<SystemA, SetBeta>().unwrap();
+
+        // Should have 4 virtual nodes (2 per set) + 1 real system
+        assert_eq!(container.system_count(), 1);
+        assert_eq!(container.node_count(), 5);
     }
 }
