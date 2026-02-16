@@ -297,6 +297,46 @@ pub fn run_exclusive_system_blocking<S: ExclusiveSystem>(
     system.run(world)
 }
 
+/// Runs a system once, applying deferred commands and flushing observers.
+///
+/// Unlike [`run_system_blocking`], this function fully processes side effects:
+/// 1. Runs the system, collecting deferred commands
+/// 2. Applies all deferred commands to the world
+/// 3. Flushes pending observers (may cascade)
+///
+/// Useful for one-shot gameplay actions, event handlers, and testing.
+pub fn run_system_once<S: System>(
+    system: &S,
+    world: &mut World,
+    compute: &ComputePool,
+    io: &crate::io_runtime::IoRuntime,
+) -> Result<S::Result, SystemError> {
+    let commands = CommandCollector::new();
+    let result = {
+        let ctx = SystemContext::new(world, compute, io, &commands);
+        system.run(&ctx)?
+    };
+    for cmd in commands.drain() {
+        cmd(world);
+    }
+    world.flush_observers();
+    Ok(result)
+}
+
+/// Runs an exclusive system once, flushing observers afterward.
+///
+/// Unlike [`run_exclusive_system_blocking`], this function flushes pending
+/// observers after the system completes. Since exclusive systems receive
+/// `&mut World` directly, any mutations they perform may trigger observers.
+pub fn run_exclusive_system_once<S: ExclusiveSystem>(
+    system: &mut S,
+    world: &mut World,
+) -> Result<S::Result, SystemError> {
+    let result = system.run(world)?;
+    world.flush_observers();
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,6 +481,95 @@ mod tests {
         let mut sys = CountSystem;
         let count = run_exclusive_system_blocking(&mut sys, &mut world).unwrap();
         assert_eq!(count, 2);
+    }
+
+    // ---- One-shot system tests ----
+
+    #[test]
+    fn run_system_once_applies_commands() {
+        struct SpawnViaCommands;
+        impl System for SpawnViaCommands {
+            type Result = ();
+            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+                ctx.commands(|world| {
+                    let e = world.spawn();
+                    world.insert(e, Position { x: 42.0 }).unwrap();
+                });
+                Ok(())
+            }
+        }
+
+        let mut world = World::new();
+        world.register_component::<Position>();
+        let compute = ComputePool::new(IoRuntime::new());
+        let io = IoRuntime::new();
+
+        run_system_once(&SpawnViaCommands, &mut world, &compute, &io).unwrap();
+
+        assert_eq!(world.entity_count(), 1);
+        let e = world.iter_entities().next().unwrap();
+        assert_eq!(world.get::<Position>(e).unwrap().x, 42.0);
+    }
+
+    #[test]
+    fn run_system_once_flushes_observers() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct InsertViaCommands;
+        impl System for InsertViaCommands {
+            type Result = ();
+            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+                ctx.commands(|world| {
+                    let e = world.spawn();
+                    world.insert(e, Position { x: 1.0 }).unwrap();
+                });
+                Ok(())
+            }
+        }
+
+        let counter = std::sync::Arc::new(AtomicU32::new(0));
+        let counter_clone = counter.clone();
+
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.observe_add::<Position>(move |_world, _entity| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let compute = ComputePool::new(IoRuntime::new());
+        let io = IoRuntime::new();
+
+        run_system_once(&InsertViaCommands, &mut world, &compute, &io).unwrap();
+
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn run_exclusive_system_once_flushes_observers() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct InsertExclusive;
+        impl ExclusiveSystem for InsertExclusive {
+            type Result = ();
+            fn run(&mut self, world: &mut World) -> Result<(), SystemError> {
+                let e = world.spawn();
+                world.insert(e, Position { x: 1.0 }).unwrap();
+                Ok(())
+            }
+        }
+
+        let counter = std::sync::Arc::new(AtomicU32::new(0));
+        let counter_clone = counter.clone();
+
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.observe_add::<Position>(move |_world, _entity| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        run_exclusive_system_once(&mut InsertExclusive, &mut world).unwrap();
+
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 
     #[test]
