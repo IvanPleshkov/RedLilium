@@ -20,7 +20,7 @@
 
 use crate::{CommandBuffer, CommandCollector, Entity, World};
 
-use crate::components::{Children, Parent};
+use crate::components::{Children, Disabled, InheritedDisabled, Parent};
 
 /// Sets `entity` as a child of `parent`.
 ///
@@ -111,6 +111,75 @@ fn despawn_subtree(world: &mut World, entity: Entity) {
     world.despawn(entity);
 }
 
+// ---- Entity disabling (always recursive) ----
+
+/// Disables an entity and all descendants recursively.
+///
+/// The target entity is marked as "manually disabled" (`Disabled` without
+/// `InheritedDisabled`). Descendants that are not already disabled receive
+/// both `Disabled` and `InheritedDisabled`. Already-disabled descendants
+/// are left alone (they keep their manual status).
+///
+/// Observers for [`OnAdd<Disabled>`](crate::OnAdd) fire on each newly-disabled entity.
+pub fn disable(world: &mut World, entity: Entity) {
+    if world.get::<Disabled>(entity).is_none() {
+        world
+            .insert(entity, Disabled)
+            .expect("Disabled not registered");
+    }
+    // Ensure it's manually disabled (not inherited)
+    world.remove::<InheritedDisabled>(entity);
+    disable_subtree(world, entity);
+}
+
+fn disable_subtree(world: &mut World, entity: Entity) {
+    let child_entities = world
+        .get::<Children>(entity)
+        .map(|c| c.0.clone())
+        .unwrap_or_default();
+    for child in child_entities {
+        if world.get::<Disabled>(child).is_none() {
+            world
+                .insert(child, Disabled)
+                .expect("Disabled not registered");
+            world
+                .insert(child, InheritedDisabled)
+                .expect("InheritedDisabled not registered");
+        }
+        disable_subtree(world, child);
+    }
+}
+
+/// Enables an entity and re-enables inherited-disabled descendants.
+///
+/// Descendants that were manually disabled (have `Disabled` without
+/// `InheritedDisabled`) are left alone.
+///
+/// Observers for [`OnRemove<Disabled>`](crate::OnRemove) fire on each re-enabled entity.
+pub fn enable(world: &mut World, entity: Entity) {
+    world.remove::<Disabled>(entity);
+    world.remove::<InheritedDisabled>(entity);
+    enable_subtree(world, entity);
+}
+
+fn enable_subtree(world: &mut World, entity: Entity) {
+    let child_entities = world
+        .get::<Children>(entity)
+        .map(|c| c.0.clone())
+        .unwrap_or_default();
+    for child in child_entities {
+        if world.get::<InheritedDisabled>(child).is_some() {
+            world.remove::<Disabled>(child);
+            world.remove::<InheritedDisabled>(child);
+            enable_subtree(world, child);
+        } else if world.get::<Disabled>(child).is_none() {
+            // Child is enabled — recurse in case deeper descendants are inherited-disabled
+            enable_subtree(world, child);
+        }
+        // If child has Disabled but NOT InheritedDisabled, it was manually disabled — skip
+    }
+}
+
 // ---- CommandBuffer extensions ----
 
 /// Extension trait adding hierarchy commands to [`CommandBuffer`].
@@ -125,6 +194,12 @@ pub trait HierarchyCommands {
 
     /// Queues a [`despawn_recursive`] command.
     fn cmd_despawn_recursive(&self, entity: Entity);
+
+    /// Queues a [`disable`] command (always recursive).
+    fn cmd_disable(&self, entity: Entity);
+
+    /// Queues an [`enable`] command (always recursive).
+    fn cmd_enable(&self, entity: Entity);
 }
 
 impl HierarchyCommands for CommandBuffer {
@@ -145,6 +220,18 @@ impl HierarchyCommands for CommandBuffer {
             despawn_recursive(world, entity);
         });
     }
+
+    fn cmd_disable(&self, entity: Entity) {
+        self.push(move |world| {
+            disable(world, entity);
+        });
+    }
+
+    fn cmd_enable(&self, entity: Entity) {
+        self.push(move |world| {
+            enable(world, entity);
+        });
+    }
 }
 
 impl HierarchyCommands for CommandCollector {
@@ -163,6 +250,18 @@ impl HierarchyCommands for CommandCollector {
     fn cmd_despawn_recursive(&self, entity: Entity) {
         self.push(move |world| {
             despawn_recursive(world, entity);
+        });
+    }
+
+    fn cmd_disable(&self, entity: Entity) {
+        self.push(move |world| {
+            disable(world, entity);
+        });
+    }
+
+    fn cmd_enable(&self, entity: Entity) {
+        self.push(move |world| {
+            enable(world, entity);
         });
     }
 }

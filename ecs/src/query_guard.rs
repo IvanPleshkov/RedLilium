@@ -125,6 +125,9 @@ impl<'w, T: 'static> QueryItem for Ref<'w, T> {
     }
 
     unsafe fn query_get(&self, entity_index: u32) -> Option<&'w T> {
+        if self.is_entity_disabled(entity_index) {
+            return None;
+        }
         self.storage().get(entity_index)
     }
 }
@@ -141,6 +144,9 @@ impl<'w, T: 'static> QueryItem for RefMut<'w, T> {
     }
 
     unsafe fn query_get(&self, entity_index: u32) -> Option<&'w mut T> {
+        if self.is_entity_disabled(entity_index) {
+            return None;
+        }
         // SAFETY: write lock is held (via QueryGuard._guards), and the caller
         // (QueryIter) visits each entity_index at most once, so no aliasing
         // mutable references are created.

@@ -134,7 +134,9 @@ pub use runner::EcsRunnerMultiThread;
 
 // Standard components & systems (merged from ecs-std)
 pub use components::*;
-pub use hierarchy::{HierarchyCommands, despawn_recursive, remove_parent, set_parent};
+pub use hierarchy::{
+    HierarchyCommands, despawn_recursive, disable, enable, remove_parent, set_parent,
+};
 pub use spawn::spawn_scene;
 pub use systems::{UpdateCameraMatrices, UpdateGlobalTransforms};
 
@@ -158,6 +160,23 @@ pub fn register_std_components(world: &mut World) {
     // Hierarchy components (storage only — managed by hierarchy functions)
     world.register_component::<Parent>();
     world.register_component::<Children>();
+
+    // Disabled/InheritedDisabled — hooks keep `disabled_entities` mirror in sync
+    world.register_component::<Disabled>();
+    world.set_on_add::<Disabled>(|world, entity| {
+        let idx = entity.index() as usize;
+        if idx >= world.disabled_entities.len() {
+            world.disabled_entities.resize(idx + 1, false);
+        }
+        world.disabled_entities[idx] = true;
+    });
+    world.set_on_remove::<Disabled>(|world, entity| {
+        let idx = entity.index() as usize;
+        if idx < world.disabled_entities.len() {
+            world.disabled_entities[idx] = false;
+        }
+    });
+    world.register_component::<components::InheritedDisabled>();
 
     // Required components are now declared via #[require(...)] on the component
     // structs and registered automatically by register_inspector / register_inspector_default.

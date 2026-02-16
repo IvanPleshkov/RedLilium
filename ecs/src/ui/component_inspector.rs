@@ -52,10 +52,26 @@ pub fn show_component_inspector(
                 selected.index(),
                 selected.generation()
             ));
+
+            // Enabled/Disabled toggle
+            let is_disabled = world.is_disabled(selected);
+            let mut enabled = !is_disabled;
+            if ui.checkbox(&mut enabled, "Enabled").changed() {
+                if enabled {
+                    crate::hierarchy::enable(world, selected);
+                } else {
+                    crate::hierarchy::disable(world, selected);
+                }
+            }
+
             ui.separator();
 
-            // Collect components this entity has
-            let present = world.inspectable_components_of(selected);
+            // Collect components this entity has, hiding Disabled/InheritedDisabled
+            let present: Vec<&str> = world
+                .inspectable_components_of(selected)
+                .into_iter()
+                .filter(|name| *name != "Disabled" && *name != "InheritedDisabled")
+                .collect();
 
             // Track which components to remove after iteration
             let mut to_remove: Vec<&str> = Vec::new();

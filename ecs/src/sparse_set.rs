@@ -437,17 +437,23 @@ impl ComponentStorage {
 ///
 /// Automatically releases the lock when dropped.
 /// Dereferences to [`SparseSetInner<T>`] for accessing component data.
+///
+/// Inherent methods (`get`, `iter`, `contains`, etc.) automatically filter
+/// out disabled entities. Use the `_unfiltered` variants (e.g. `get_unfiltered`,
+/// `iter_unfiltered`) to include disabled entities.
 pub struct Ref<'a, T: 'static> {
     inner: &'a SparseSetInner<T>,
+    disabled: &'a [bool],
     _guard: Option<RwLockReadGuard<'a, ()>>,
 }
 
 impl<'a, T: 'static> Ref<'a, T> {
     /// Creates a new shared borrow guard, acquiring the storage's read lock.
-    pub(crate) fn new(storage: &'a ComponentStorage) -> Self {
+    pub(crate) fn new(storage: &'a ComponentStorage, disabled: &'a [bool]) -> Self {
         let guard = storage.lock_read();
         Self {
             inner: storage.typed::<T>(),
+            disabled,
             _guard: Some(guard),
         }
     }
@@ -456,9 +462,10 @@ impl<'a, T: 'static> Ref<'a, T> {
     ///
     /// The caller must ensure the lock is already held externally
     /// (e.g. via `acquire_sorted`).
-    pub(crate) fn new_unlocked(storage: &'a ComponentStorage) -> Self {
+    pub(crate) fn new_unlocked(storage: &'a ComponentStorage, disabled: &'a [bool]) -> Self {
         Self {
             inner: storage.typed::<T>(),
+            disabled,
             _guard: None,
         }
     }
@@ -469,6 +476,62 @@ impl<'a, T: 'static> Ref<'a, T> {
     /// returns a reference with the original `'a` lifetime of the storage.
     pub(crate) fn storage(&self) -> &'a SparseSetInner<T> {
         self.inner
+    }
+
+    // ---- Disabled-filtered methods (shadow Deref'd SparseSetInner methods) ----
+
+    /// Returns whether the entity at the given index is disabled.
+    pub fn is_entity_disabled(&self, entity_index: u32) -> bool {
+        let idx = entity_index as usize;
+        idx < self.disabled.len() && self.disabled[idx]
+    }
+
+    /// Returns a reference to the component for the given entity index.
+    /// Returns `None` if the entity is disabled or does not have this component.
+    pub fn get(&self, entity_index: u32) -> Option<&T> {
+        if self.is_entity_disabled(entity_index) {
+            return None;
+        }
+        self.inner.get(entity_index)
+    }
+
+    /// Iterates over `(entity_index, &component)` pairs, skipping disabled entities.
+    pub fn iter(&self) -> impl Iterator<Item = (u32, &T)> + '_ {
+        self.inner
+            .iter()
+            .filter(|(idx, _)| !self.is_entity_disabled(*idx))
+    }
+
+    /// Returns whether the entity has this component and is not disabled.
+    pub fn contains(&self, entity_index: u32) -> bool {
+        !self.is_entity_disabled(entity_index) && self.inner.contains(entity_index)
+    }
+
+    /// Returns true if the component was changed since `since_tick` and the entity is not disabled.
+    pub fn changed_since(&self, entity_index: u32, since_tick: u64) -> bool {
+        !self.is_entity_disabled(entity_index) && self.inner.changed_since(entity_index, since_tick)
+    }
+
+    /// Returns true if the component was added since `since_tick` and the entity is not disabled.
+    pub fn added_since(&self, entity_index: u32, since_tick: u64) -> bool {
+        !self.is_entity_disabled(entity_index) && self.inner.added_since(entity_index, since_tick)
+    }
+
+    // ---- Unfiltered escape hatches ----
+
+    /// Returns a reference to the component, ignoring disabled status.
+    pub fn get_unfiltered(&self, entity_index: u32) -> Option<&T> {
+        self.inner.get(entity_index)
+    }
+
+    /// Iterates over all `(entity_index, &component)` pairs, including disabled entities.
+    pub fn iter_unfiltered(&self) -> impl Iterator<Item = (u32, &T)> + '_ {
+        self.inner.iter()
+    }
+
+    /// Returns whether the entity has this component, ignoring disabled status.
+    pub fn contains_unfiltered(&self, entity_index: u32) -> bool {
+        self.inner.contains(entity_index)
     }
 }
 
@@ -493,15 +556,19 @@ unsafe impl<T: Send + Sync + 'static> Sync for Ref<'_, T> {}
 ///
 /// Automatically releases the lock when dropped.
 /// Dereferences to [`SparseSetInner<T>`] for accessing and modifying component data.
+///
+/// Inherent methods (`get`, `get_mut`, `iter`, `iter_mut`, etc.) automatically
+/// filter out disabled entities. Use the `_unfiltered` variants to include them.
 pub struct RefMut<'a, T: 'static> {
     inner: *mut SparseSetInner<T>,
+    disabled: &'a [bool],
     _guard: Option<RwLockWriteGuard<'a, ()>>,
     _marker: PhantomData<&'a mut SparseSetInner<T>>,
 }
 
 impl<'a, T: 'static> RefMut<'a, T> {
     /// Creates a new exclusive borrow guard, acquiring the storage's write lock.
-    pub(crate) fn new(storage: &'a ComponentStorage) -> Self {
+    pub(crate) fn new(storage: &'a ComponentStorage, disabled: &'a [bool]) -> Self {
         let guard = storage.lock_write();
         // SAFETY: lock_write() guarantees exclusive access. We cast away
         // the shared reference to get a mutable pointer, which is safe because
@@ -509,6 +576,7 @@ impl<'a, T: 'static> RefMut<'a, T> {
         let inner = storage.typed::<T>() as *const SparseSetInner<T> as *mut SparseSetInner<T>;
         Self {
             inner,
+            disabled,
             _guard: Some(guard),
             _marker: PhantomData,
         }
@@ -518,10 +586,11 @@ impl<'a, T: 'static> RefMut<'a, T> {
     ///
     /// The caller must ensure the write lock is already held externally
     /// (e.g. via `acquire_sorted`).
-    pub(crate) fn new_unlocked(storage: &'a ComponentStorage) -> Self {
+    pub(crate) fn new_unlocked(storage: &'a ComponentStorage, disabled: &'a [bool]) -> Self {
         let inner = storage.typed::<T>() as *const SparseSetInner<T> as *mut SparseSetInner<T>;
         Self {
             inner,
+            disabled,
             _guard: None,
             _marker: PhantomData,
         }
@@ -533,6 +602,117 @@ impl<'a, T: 'static> RefMut<'a, T> {
     /// requiring `&mut self`, enabling per-entity mutable access in iterators.
     pub(crate) fn storage_ptr(&self) -> *mut SparseSetInner<T> {
         self.inner
+    }
+
+    // ---- Disabled-filtered methods (shadow Deref'd SparseSetInner methods) ----
+
+    /// Returns whether the entity at the given index is disabled.
+    pub fn is_entity_disabled(&self, entity_index: u32) -> bool {
+        let idx = entity_index as usize;
+        idx < self.disabled.len() && self.disabled[idx]
+    }
+
+    /// Returns a reference to the component for the given entity index.
+    /// Returns `None` if the entity is disabled or does not have this component.
+    pub fn get(&self, entity_index: u32) -> Option<&T> {
+        if self.is_entity_disabled(entity_index) {
+            return None;
+        }
+        // SAFETY: write lock guarantees exclusive access.
+        unsafe { &*self.inner }.get(entity_index)
+    }
+
+    /// Returns a mutable reference to the component for the given entity index.
+    /// Returns `None` if the entity is disabled or does not have this component.
+    pub fn get_mut(&mut self, entity_index: u32) -> Option<&mut T> {
+        if self.is_entity_disabled(entity_index) {
+            return None;
+        }
+        // SAFETY: write lock guarantees exclusive access.
+        unsafe { &mut *self.inner }.get_mut(entity_index)
+    }
+
+    /// Returns a mutable reference and marks the component as changed at `tick`.
+    /// Returns `None` if the entity is disabled or does not have this component.
+    pub fn get_mut_tracked(&mut self, entity_index: u32, tick: u64) -> Option<&mut T> {
+        if self.is_entity_disabled(entity_index) {
+            return None;
+        }
+        // SAFETY: write lock guarantees exclusive access.
+        unsafe { &mut *self.inner }.get_mut_tracked(entity_index, tick)
+    }
+
+    /// Iterates over `(entity_index, &component)` pairs, skipping disabled entities.
+    pub fn iter(&self) -> impl Iterator<Item = (u32, &T)> + '_ {
+        // SAFETY: write lock guarantees exclusive access.
+        unsafe { &*self.inner }
+            .iter()
+            .filter(|(idx, _)| !self.is_entity_disabled(*idx))
+    }
+
+    /// Iterates over `(entity_index, &mut component)` pairs, skipping disabled entities.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (u32, &mut T)> + '_ {
+        // SAFETY: write lock guarantees exclusive access.
+        unsafe { &mut *self.inner }.iter_mut().filter(|(idx, _)| {
+            let i = *idx as usize;
+            !(i < self.disabled.len() && self.disabled[i])
+        })
+    }
+
+    /// Iterates with mutation, marking all accessed components as changed at `tick`.
+    /// Skips disabled entities.
+    pub fn iter_mut_tracked(&mut self, tick: u64) -> impl Iterator<Item = (u32, &mut T)> + '_ {
+        // SAFETY: write lock guarantees exclusive access.
+        unsafe { &mut *self.inner }
+            .iter_mut_tracked(tick)
+            .filter(|(idx, _)| {
+                let i = *idx as usize;
+                !(i < self.disabled.len() && self.disabled[i])
+            })
+    }
+
+    /// Returns whether the entity has this component and is not disabled.
+    pub fn contains(&self, entity_index: u32) -> bool {
+        !self.is_entity_disabled(entity_index) && unsafe { &*self.inner }.contains(entity_index)
+    }
+
+    /// Returns true if the component was changed since `since_tick` and the entity is not disabled.
+    pub fn changed_since(&self, entity_index: u32, since_tick: u64) -> bool {
+        !self.is_entity_disabled(entity_index)
+            && unsafe { &*self.inner }.changed_since(entity_index, since_tick)
+    }
+
+    /// Returns true if the component was added since `since_tick` and the entity is not disabled.
+    pub fn added_since(&self, entity_index: u32, since_tick: u64) -> bool {
+        !self.is_entity_disabled(entity_index)
+            && unsafe { &*self.inner }.added_since(entity_index, since_tick)
+    }
+
+    // ---- Unfiltered escape hatches ----
+
+    /// Returns a reference to the component, ignoring disabled status.
+    pub fn get_unfiltered(&self, entity_index: u32) -> Option<&T> {
+        unsafe { &*self.inner }.get(entity_index)
+    }
+
+    /// Returns a mutable reference to the component, ignoring disabled status.
+    pub fn get_mut_unfiltered(&mut self, entity_index: u32) -> Option<&mut T> {
+        unsafe { &mut *self.inner }.get_mut(entity_index)
+    }
+
+    /// Iterates over all `(entity_index, &component)` pairs, including disabled entities.
+    pub fn iter_unfiltered(&self) -> impl Iterator<Item = (u32, &T)> + '_ {
+        unsafe { &*self.inner }.iter()
+    }
+
+    /// Iterates mutably over all `(entity_index, &mut component)` pairs, including disabled entities.
+    pub fn iter_mut_unfiltered(&mut self) -> impl Iterator<Item = (u32, &mut T)> + '_ {
+        unsafe { &mut *self.inner }.iter_mut()
+    }
+
+    /// Returns whether the entity has this component, ignoring disabled status.
+    pub fn contains_unfiltered(&self, entity_index: u32) -> bool {
+        unsafe { &*self.inner }.contains(entity_index)
     }
 }
 
@@ -666,10 +846,10 @@ mod tests {
     fn lock_released_on_drop() {
         let storage = ComponentStorage::new::<u32>();
         {
-            let _guard = Ref::<u32>::new(&storage);
+            let _guard = Ref::<u32>::new(&storage, &[]);
         }
         // After Ref is dropped, exclusive lock should succeed
-        let _guard = RefMut::<u32>::new(&storage);
+        let _guard = RefMut::<u32>::new(&storage, &[]);
     }
 
     #[test]
@@ -677,7 +857,7 @@ mod tests {
         let mut storage = ComponentStorage::new::<u32>();
         storage.typed_mut::<u32>().insert(0, 42);
         {
-            let mut guard = RefMut::<u32>::new(&storage);
+            let mut guard = RefMut::<u32>::new(&storage, &[]);
             guard.insert(0, 99);
         }
         assert_eq!(storage.typed::<u32>().get(0), Some(&99));

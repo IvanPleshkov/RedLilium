@@ -5,6 +5,7 @@ use crate::access_set::AccessInfo;
 use crate::bundle::Bundle;
 use crate::commands::CommandBuffer;
 use crate::component::Component;
+use crate::components::Disabled;
 use crate::entity::{Entity, EntityAllocator};
 use crate::events::Events;
 use crate::main_thread_resource::MainThreadResources;
@@ -96,6 +97,9 @@ pub struct World {
     observers: Observers,
     /// Monomorphized swap functions for each registered `Triggers<M>` resource.
     trigger_swap_fns: Vec<fn(&mut World)>,
+    /// Tracks which entity indices are disabled (have the `Disabled` component).
+    /// Updated by hooks on the `Disabled` component. Indexed by entity index.
+    pub(crate) disabled_entities: Vec<bool>,
 }
 
 impl World {
@@ -110,6 +114,7 @@ impl World {
             inspector_entries: BTreeMap::new(),
             observers: Observers::new(),
             trigger_swap_fns: Vec::new(),
+            disabled_entities: Vec::new(),
         }
     }
 
@@ -910,6 +915,24 @@ impl World {
         storage.typed_mut::<T>().get_mut(entity.index())
     }
 
+    /// Returns the disabled-entities slice to pass to `Ref`/`RefMut`.
+    ///
+    /// For the `Disabled` component itself, returns an empty slice so that
+    /// `Read<Disabled>` can iterate all disabled entities without self-filtering.
+    fn disabled_for<T: 'static>(&self) -> &[bool] {
+        if TypeId::of::<T>() == TypeId::of::<Disabled>() {
+            &[]
+        } else {
+            &self.disabled_entities
+        }
+    }
+
+    /// Returns whether the given entity is currently disabled.
+    pub fn is_disabled(&self, entity: Entity) -> bool {
+        let idx = entity.index() as usize;
+        idx < self.disabled_entities.len() && self.disabled_entities[idx]
+    }
+
     // ---- Query access (runtime borrow-checked, take &self) ----
 
     /// Gets shared read access to all components of type T.
@@ -931,7 +954,7 @@ impl World {
             .ok_or(ComponentNotRegistered {
                 type_name: std::any::type_name::<T>(),
             })?;
-        Ok(Ref::new(storage))
+        Ok(Ref::new(storage, self.disabled_for::<T>()))
     }
 
     /// Gets shared read access to all components of type T, returning `None`
@@ -940,7 +963,7 @@ impl World {
     /// Non-panicking variant of [`read`](World::read). Used by `OptionalRead<T>`.
     pub fn try_read<T: 'static>(&self) -> Option<Ref<'_, T>> {
         let storage = self.components.get(&TypeId::of::<T>())?;
-        Some(Ref::new(storage))
+        Some(Ref::new(storage, self.disabled_for::<T>()))
     }
 
     /// Gets exclusive write access to all components of type T.
@@ -962,7 +985,7 @@ impl World {
             .ok_or(ComponentNotRegistered {
                 type_name: std::any::type_name::<T>(),
             })?;
-        Ok(RefMut::new(storage))
+        Ok(RefMut::new(storage, self.disabled_for::<T>()))
     }
 
     /// Gets exclusive write access to all components of type T, returning `None`
@@ -971,7 +994,7 @@ impl World {
     /// Non-panicking variant of [`write`](World::write). Used by `OptionalWrite<T>`.
     pub fn try_write<T: 'static>(&self) -> Option<RefMut<'_, T>> {
         let storage = self.components.get(&TypeId::of::<T>())?;
-        Some(RefMut::new(storage))
+        Some(RefMut::new(storage, self.disabled_for::<T>()))
     }
 
     // ---- Unlocked access (for use when locks are held externally) ----
@@ -986,7 +1009,7 @@ impl World {
             .ok_or(ComponentNotRegistered {
                 type_name: std::any::type_name::<T>(),
             })?;
-        Ok(Ref::new_unlocked(storage))
+        Ok(Ref::new_unlocked(storage, self.disabled_for::<T>()))
     }
 
     /// Gets exclusive write access without acquiring a lock.
@@ -1001,19 +1024,19 @@ impl World {
             .ok_or(ComponentNotRegistered {
                 type_name: std::any::type_name::<T>(),
             })?;
-        Ok(RefMut::new_unlocked(storage))
+        Ok(RefMut::new_unlocked(storage, self.disabled_for::<T>()))
     }
 
     /// Gets optional shared read access without acquiring a lock.
     pub(crate) fn try_read_unlocked<T: 'static>(&self) -> Option<Ref<'_, T>> {
         let storage = self.components.get(&TypeId::of::<T>())?;
-        Some(Ref::new_unlocked(storage))
+        Some(Ref::new_unlocked(storage, self.disabled_for::<T>()))
     }
 
     /// Gets optional exclusive write access without acquiring a lock.
     pub(crate) fn try_write_unlocked<T: 'static>(&self) -> Option<RefMut<'_, T>> {
         let storage = self.components.get(&TypeId::of::<T>())?;
-        Some(RefMut::new_unlocked(storage))
+        Some(RefMut::new_unlocked(storage, self.disabled_for::<T>()))
     }
 
     /// Acquires component locks in TypeId-sorted order.
