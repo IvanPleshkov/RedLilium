@@ -151,13 +151,46 @@ build_single_page() {
     fi
 
     if monolith "$PRINT_HTML" -o "$SINGLE_PAGE_OUTPUT" 2>/dev/null; then
-        # Remove print button and print CSS so the page behaves as a normal reader
+        # Patch the single-page HTML:
+        # 1. Remove print button and print CSS
+        # 2. Rewrite internal .html links to in-page #anchors
         python3 -c "
 import re, sys
+
 with open(sys.argv[1], 'r') as f:
     html = f.read()
+
+# Remove print button, print CSS, and auto-print JS
 html = re.sub(r'<a [^>]*title=\"Print this book\"[^>]*>.*?</a>', '', html, flags=re.DOTALL)
 html = re.sub(r'<link[^>]*media=\"print\"[^>]*>', '', html)
+html = re.sub(r'window\.setTimeout\(window\.print.*?\);?', '', html)
+
+# Build link map by matching TOC hrefs (in order) to h1 ids (in order)
+toc_hrefs = re.findall(r'href=\"([^\"]*?\.html)\"', html)
+# Filter to only internal chapter links (not external urls or file:// paths)
+toc_hrefs = [h for h in toc_hrefs if not h.startswith('http') and not h.startswith('file:')]
+# Deduplicate preserving order
+seen = set()
+unique_hrefs = []
+for h in toc_hrefs:
+    if h not in seen:
+        seen.add(h)
+        unique_hrefs.append(h)
+
+h1_ids = re.findall(r'<h1 id=\"([^\"]+)\">', html)
+
+link_map = {}
+for href, anchor in zip(unique_hrefs, h1_ids):
+    link_map[href] = '#' + anchor
+
+def replace_link(m):
+    href = m.group(1)
+    if href in link_map:
+        return 'href=\"' + link_map[href] + '\"'
+    return m.group(0)
+
+html = re.sub(r'href=\"([^\"]*?\.html)\"', replace_link, html)
+
 with open(sys.argv[1], 'w') as f:
     f.write(html)
 " "$SINGLE_PAGE_OUTPUT"

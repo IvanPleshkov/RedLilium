@@ -143,11 +143,43 @@ function Build-SinglePage {
 
     monolith $printHtml -o $singlePageOutput 2>$null
     if ($LASTEXITCODE -eq 0) {
-        # Remove print button and print CSS so the page behaves as a normal reader
-        $content = Get-Content -Raw $singlePageOutput
-        $content = [regex]::Replace($content, '<a [^>]*title="Print this book"[^>]*>.*?</a>', '', [System.Text.RegularExpressions.RegexOptions]::Singleline)
-        $content = [regex]::Replace($content, '<link[^>]*media="print"[^>]*>', '')
-        Set-Content -Path $singlePageOutput -Value $content -NoNewline
+        # Patch: remove print button/CSS and rewrite internal links to in-page anchors
+        python3 -c @"
+import re, sys
+
+with open(sys.argv[1], 'r') as f:
+    html = f.read()
+
+html = re.sub(r'<a [^>]*title="Print this book"[^>]*>.*?</a>', '', html, flags=re.DOTALL)
+html = re.sub(r'<link[^>]*media="print"[^>]*>', '', html)
+html = re.sub(r'window\.setTimeout\(window\.print.*?\);?', '', html)
+
+toc_hrefs = re.findall(r'href="([^"]*?\.html)"', html)
+toc_hrefs = [h for h in toc_hrefs if not h.startswith('http') and not h.startswith('file:')]
+seen = set()
+unique_hrefs = []
+for h in toc_hrefs:
+    if h not in seen:
+        seen.add(h)
+        unique_hrefs.append(h)
+
+h1_ids = re.findall(r'<h1 id="([^"]+)">', html)
+
+link_map = {}
+for href, anchor in zip(unique_hrefs, h1_ids):
+    link_map[href] = '#' + anchor
+
+def replace_link(m):
+    href = m.group(1)
+    if href in link_map:
+        return 'href="' + link_map[href] + '"'
+    return m.group(0)
+
+html = re.sub(r'href="([^"]*?\.html)"', replace_link, html)
+
+with open(sys.argv[1], 'w') as f:
+    f.write(html)
+"@ $singlePageOutput
 
         $fileSize = (Get-Item $singlePageOutput).Length / 1MB
         $fileSizeStr = "{0:N1} MB" -f $fileSize
