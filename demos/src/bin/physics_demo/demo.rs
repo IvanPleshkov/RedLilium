@@ -13,66 +13,14 @@ use winit::event::KeyEvent;
 use winit::keyboard::{KeyCode, PhysicalKey};
 
 use redlilium_ecs::{
-    Camera, EcsRunner, Entity, GlobalTransform, SystemsContainer, Transform, World,
+    Camera, EcsRunner, Entity, GlobalTransform, OrbitCamera, SystemsContainer, UpdateOrbitCamera,
+    WindowInput, World,
 };
 
 use crate::renderer::PhysicsRenderer;
 use crate::scenes_2d::{self, PhysicsScene2D};
 use crate::scenes_3d::{self, PhysicsScene3D};
 use crate::ui::{Dimension, PhysicsUi};
-
-// ---------------------------------------------------------------------------
-// Orbit camera (just stores orbital parameters)
-// ---------------------------------------------------------------------------
-
-struct OrbitCamera {
-    target: Vec3,
-    distance: f32,
-    azimuth: f32,
-    elevation: f32,
-}
-
-impl OrbitCamera {
-    fn new() -> Self {
-        Self {
-            target: Vec3::new(0.0, 3.0, 0.0),
-            distance: 20.0,
-            azimuth: 0.5,
-            elevation: 0.4,
-        }
-    }
-
-    fn rotate(&mut self, delta_azimuth: f32, delta_elevation: f32) {
-        self.azimuth += delta_azimuth;
-        self.elevation = (self.elevation + delta_elevation).clamp(-1.5, 1.5);
-    }
-
-    fn zoom(&mut self, delta: f32) {
-        self.distance = (self.distance - delta).clamp(2.0, 60.0);
-    }
-
-    fn position(&self) -> Vec3 {
-        let x = self.distance * self.elevation.cos() * self.azimuth.sin();
-        let y = self.distance * self.elevation.sin();
-        let z = self.distance * self.elevation.cos() * self.azimuth.cos();
-        self.target + Vec3::new(x, y, z)
-    }
-
-    /// Compute the Transform for the camera entity (position + look-at rotation).
-    fn to_transform(&self) -> Transform {
-        let eye = self.position();
-        let eye_point = redlilium_core::math::nalgebra::Point3::from(eye);
-        let target_point = redlilium_core::math::nalgebra::Point3::from(self.target);
-        let up = Vec3::new(0.0, 1.0, 0.0);
-
-        let view_iso =
-            redlilium_core::math::nalgebra::Isometry3::look_at_rh(&eye_point, &target_point, &up);
-        let camera_iso = view_iso.inverse();
-        let rotation = camera_iso.rotation.into_inner();
-
-        Transform::new(eye, rotation, Vec3::new(1.0, 1.0, 1.0))
-    }
-}
 
 // ---------------------------------------------------------------------------
 // PhysicsDemoApp
@@ -91,7 +39,9 @@ pub struct PhysicsDemoApp {
 
     // Rendering
     renderer: Option<PhysicsRenderer>,
-    camera: OrbitCamera,
+
+    // Input
+    window_input: Option<Arc<RwLock<WindowInput>>>,
 
     // UI
     egui_controller: Option<EguiController>,
@@ -99,11 +49,6 @@ pub struct PhysicsDemoApp {
 
     // Inspector
     inspector_state: redlilium_ecs::ui::InspectorState,
-
-    // Input state
-    mouse_pressed: bool,
-    last_mouse_x: f64,
-    last_mouse_y: f64,
 }
 
 impl PhysicsDemoApp {
@@ -127,18 +72,15 @@ impl PhysicsDemoApp {
             runner: None,
             camera_entity: None,
             renderer: None,
-            camera: OrbitCamera::new(),
+            window_input: None,
             egui_controller: None,
             ui,
             inspector_state: redlilium_ecs::ui::InspectorState::new(),
-            mouse_pressed: false,
-            last_mouse_x: 0.0,
-            last_mouse_y: 0.0,
         }
     }
 
     /// Create a fresh ECS world and populate it with the active scene.
-    fn setup_active_scene(&mut self, aspect: f32) {
+    fn setup_active_scene(&mut self, ctx: &AppContext) {
         let (dim, index) = if let Ok(ui) = self.ui.read() {
             (ui.active_dim, ui.active_index)
         } else {
@@ -148,8 +90,20 @@ impl PhysicsDemoApp {
         let mut world = World::new();
         redlilium_ecs::register_std_components(&mut world);
 
+        // Insert WindowInput resource
+        let input = WindowInput {
+            window_width: ctx.width() as f32,
+            window_height: ctx.height() as f32,
+            ..WindowInput::default()
+        };
+        let input_handle = world.insert_resource(input);
+        self.window_input = Some(input_handle);
+
         // Build systems container for the appropriate dimension
         let mut systems = SystemsContainer::new();
+
+        // Orbit camera system (always runs, even when paused)
+        systems.add(UpdateOrbitCamera);
 
         match dim {
             Dimension::ThreeD => {
@@ -162,6 +116,8 @@ impl PhysicsDemoApp {
                 let _ = systems.add_edge::<SyncPhysicsBodies3D, SyncPhysicsJoints3D>();
                 let _ = systems.add_edge::<SyncPhysicsJoints3D, StepPhysics3D>();
                 let _ = systems.add_edge::<StepPhysics3D, redlilium_ecs::UpdateGlobalTransforms>();
+                let _ =
+                    systems.add_edge::<UpdateOrbitCamera, redlilium_ecs::UpdateGlobalTransforms>();
                 let _ = systems.add_edge::<redlilium_ecs::UpdateGlobalTransforms, redlilium_ecs::UpdateCameraMatrices>();
 
                 if let Some(scene) = self.scenes_3d.get(index) {
@@ -178,6 +134,8 @@ impl PhysicsDemoApp {
                 let _ = systems.add_edge::<SyncPhysicsBodies2D, SyncPhysicsJoints2D>();
                 let _ = systems.add_edge::<SyncPhysicsJoints2D, StepPhysics2D>();
                 let _ = systems.add_edge::<StepPhysics2D, redlilium_ecs::UpdateGlobalTransforms>();
+                let _ =
+                    systems.add_edge::<UpdateOrbitCamera, redlilium_ecs::UpdateGlobalTransforms>();
                 let _ = systems.add_edge::<redlilium_ecs::UpdateGlobalTransforms, redlilium_ecs::UpdateCameraMatrices>();
 
                 if let Some(scene) = self.scenes_2d.get(index) {
@@ -186,13 +144,17 @@ impl PhysicsDemoApp {
             }
         }
 
-        // Spawn camera entity with ECS Camera component
+        // Spawn camera entity with OrbitCamera component
         let cam_entity = world.spawn();
+        let orbit = OrbitCamera::new(Vec3::new(0.0, 3.0, 0.0), 20.0)
+            .with_azimuth(0.5)
+            .with_elevation(0.4);
+        let _ = world.insert(cam_entity, orbit);
         let _ = world.insert(
             cam_entity,
-            Camera::perspective(std::f32::consts::FRAC_PI_4, aspect, 0.1, 200.0),
+            Camera::perspective(std::f32::consts::FRAC_PI_4, ctx.aspect_ratio(), 0.1, 200.0),
         );
-        let _ = world.insert(cam_entity, self.camera.to_transform());
+        let _ = world.insert(cam_entity, orbit.to_transform());
         let _ = world.insert(cam_entity, GlobalTransform::IDENTITY);
         self.camera_entity = Some(cam_entity);
 
@@ -224,6 +186,33 @@ impl PhysicsDemoApp {
                         ui.body_count = physics.bodies.len();
                         ui.collider_count = physics.colliders.len();
                     }
+                }
+            }
+        }
+    }
+
+    /// Set physics timestep to zero (freeze) or restore default.
+    fn set_physics_paused(&self, paused: bool) {
+        let Some(world) = &self.world else { return };
+        let dim = self
+            .ui
+            .read()
+            .map(|ui| ui.active_dim)
+            .unwrap_or(Dimension::ThreeD);
+
+        match dim {
+            Dimension::ThreeD => {
+                if world.has_resource::<redlilium_ecs::physics::physics3d::PhysicsWorld3D>() {
+                    let mut physics =
+                        world.resource_mut::<redlilium_ecs::physics::physics3d::PhysicsWorld3D>();
+                    physics.integration_parameters.dt = if paused { 0.0 } else { 1.0 / 60.0 };
+                }
+            }
+            Dimension::TwoD => {
+                if world.has_resource::<redlilium_ecs::physics::physics2d::PhysicsWorld2D>() {
+                    let mut physics =
+                        world.resource_mut::<redlilium_ecs::physics::physics2d::PhysicsWorld2D>();
+                    physics.integration_parameters.dt = if paused { 0.0 } else { 1.0 / 60.0 };
                 }
             }
         }
@@ -264,7 +253,7 @@ impl AppHandler for PhysicsDemoApp {
         ));
 
         // Setup initial scene
-        self.setup_active_scene(ctx.aspect_ratio());
+        self.setup_active_scene(ctx);
     }
 
     fn on_resize(&mut self, ctx: &mut AppContext) {
@@ -273,6 +262,14 @@ impl AppHandler for PhysicsDemoApp {
         }
         if let Some(egui) = &mut self.egui_controller {
             egui.on_resize(ctx.width(), ctx.height());
+        }
+
+        // Update WindowInput dimensions
+        if let Some(handle) = &self.window_input
+            && let Ok(mut input) = handle.write()
+        {
+            input.window_width = ctx.width() as f32;
+            input.window_height = ctx.height() as f32;
         }
 
         // Update camera projection for new aspect ratio
@@ -296,31 +293,37 @@ impl AppHandler for PhysicsDemoApp {
         };
 
         if scene_changed || reset {
-            self.setup_active_scene(ctx.aspect_ratio());
+            self.setup_active_scene(ctx);
         }
 
-        // Update camera entity Transform from orbit params
-        if let (Some(world), Some(cam_entity)) = (&mut self.world, self.camera_entity) {
-            let _ = world.insert(cam_entity, self.camera.to_transform());
-        }
-
-        // Step physics and update transforms/camera if not paused
+        // Freeze physics when paused (dt=0), but still run all systems
+        // so orbit camera + transforms + camera matrices update
         let paused = self.ui.read().map(|ui| ui.paused).unwrap_or(false);
+        self.set_physics_paused(paused);
 
-        if !paused
-            && let (Some(world), Some(systems), Some(runner)) =
-                (&mut self.world, &self.systems, &self.runner)
+        if let (Some(world), Some(systems), Some(runner)) =
+            (&mut self.world, &self.systems, &self.runner)
         {
             runner.run(world, systems);
         }
 
-        // Read camera view_proj from ECS Camera component
+        // Read camera data from ECS
         let dim = self
             .ui
             .read()
             .map(|ui| ui.active_dim)
             .unwrap_or(Dimension::ThreeD);
-        let camera_pos = self.camera.position();
+
+        let camera_pos = if let (Some(world), Some(cam_entity)) = (&self.world, self.camera_entity)
+        {
+            let orbits = world.read::<OrbitCamera>().unwrap();
+            orbits
+                .get(cam_entity.index())
+                .map(|o| o.position())
+                .unwrap_or(Vec3::zeros())
+        } else {
+            Vec3::zeros()
+        };
 
         let view_proj = if let (Some(world), Some(cam_entity)) = (&self.world, self.camera_entity) {
             let cameras = world.read::<Camera>().unwrap();
@@ -351,6 +354,14 @@ impl AppHandler for PhysicsDemoApp {
                     }
                 }
             }
+        }
+
+        // Clear per-frame deltas after systems have consumed them,
+        // so next frame's events accumulate fresh deltas.
+        if let Some(handle) = &self.window_input
+            && let Ok(mut input) = handle.write()
+        {
+            input.begin_frame();
         }
 
         true
@@ -426,13 +437,12 @@ impl AppHandler for PhysicsDemoApp {
             false
         };
 
-        if self.mouse_pressed && !egui_wants {
-            let dx = (x - self.last_mouse_x) as f32 * 0.005;
-            let dy = (y - self.last_mouse_y) as f32 * 0.005;
-            self.camera.rotate(-dx, -dy);
+        if let Some(handle) = &self.window_input
+            && let Ok(mut input) = handle.write()
+        {
+            input.on_mouse_move(x, y);
+            input.ui_wants_input = egui_wants;
         }
-        self.last_mouse_x = x;
-        self.last_mouse_y = y;
     }
 
     fn on_mouse_button(
@@ -447,8 +457,17 @@ impl AppHandler for PhysicsDemoApp {
             false
         };
 
-        if button == winit::event::MouseButton::Left && !egui_wants {
-            self.mouse_pressed = pressed;
+        if let Some(handle) = &self.window_input
+            && let Ok(mut input) = handle.write()
+        {
+            let idx = match button {
+                winit::event::MouseButton::Left => 0,
+                winit::event::MouseButton::Right => 1,
+                winit::event::MouseButton::Middle => 2,
+                _ => return,
+            };
+            input.on_mouse_button(idx, pressed);
+            input.ui_wants_input = egui_wants;
         }
     }
 
@@ -459,8 +478,11 @@ impl AppHandler for PhysicsDemoApp {
             false
         };
 
-        if !egui_wants {
-            self.camera.zoom(dy * 0.5);
+        if let Some(handle) = &self.window_input
+            && let Ok(mut input) = handle.write()
+        {
+            input.on_scroll(0.0, dy);
+            input.ui_wants_input = egui_wants;
         }
     }
 
