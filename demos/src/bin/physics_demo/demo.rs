@@ -133,24 +133,28 @@ impl PhysicsDemoApp {
 
         match dim {
             Dimension::ThreeD => {
-                systems.add(redlilium_ecs::physics::physics3d::StepPhysics3D);
+                use redlilium_ecs::physics::physics3d::*;
+                systems.add_exclusive(SyncPhysicsBodies3D);
+                systems.add_exclusive(SyncPhysicsJoints3D);
+                systems.add(StepPhysics3D);
                 systems.add(redlilium_ecs::UpdateGlobalTransforms);
-                let _ = systems.add_edge::<
-                    redlilium_ecs::physics::physics3d::StepPhysics3D,
-                    redlilium_ecs::UpdateGlobalTransforms,
-                >();
+                let _ = systems.add_edge::<SyncPhysicsBodies3D, SyncPhysicsJoints3D>();
+                let _ = systems.add_edge::<SyncPhysicsJoints3D, StepPhysics3D>();
+                let _ = systems.add_edge::<StepPhysics3D, redlilium_ecs::UpdateGlobalTransforms>();
 
                 if let Some(scene) = self.scenes_3d.get(index) {
                     scene.setup(&mut world);
                 }
             }
             Dimension::TwoD => {
-                systems.add(redlilium_ecs::physics::physics2d::StepPhysics2D);
+                use redlilium_ecs::physics::physics2d::*;
+                systems.add_exclusive(SyncPhysicsBodies2D);
+                systems.add_exclusive(SyncPhysicsJoints2D);
+                systems.add(StepPhysics2D);
                 systems.add(redlilium_ecs::UpdateGlobalTransforms);
-                let _ = systems.add_edge::<
-                    redlilium_ecs::physics::physics2d::StepPhysics2D,
-                    redlilium_ecs::UpdateGlobalTransforms,
-                >();
+                let _ = systems.add_edge::<SyncPhysicsBodies2D, SyncPhysicsJoints2D>();
+                let _ = systems.add_edge::<SyncPhysicsJoints2D, StepPhysics2D>();
+                let _ = systems.add_edge::<StepPhysics2D, redlilium_ecs::UpdateGlobalTransforms>();
 
                 if let Some(scene) = self.scenes_2d.get(index) {
                     scene.setup(&mut world);

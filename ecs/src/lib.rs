@@ -211,7 +211,9 @@ pub fn register_std_components(world: &mut World) {
     {
         world.register_inspector_default::<physics::components3d::RigidBody3D>();
         world.register_inspector_default::<physics::components3d::Collider3D>();
+        world.register_inspector::<physics::components3d::ImpulseJoint3D>();
         world.register_component::<physics::physics3d::RigidBody3DHandle>();
+        world.register_component::<physics::physics3d::ImpulseJoint3DHandle>();
         world.enable_clone::<physics::components3d::RigidBody3D>();
         world.enable_clone::<physics::components3d::Collider3D>();
     }
@@ -219,7 +221,9 @@ pub fn register_std_components(world: &mut World) {
     {
         world.register_inspector_default::<physics::components2d::RigidBody2D>();
         world.register_inspector_default::<physics::components2d::Collider2D>();
+        world.register_inspector::<physics::components2d::ImpulseJoint2D>();
         world.register_component::<physics::physics2d::RigidBody2DHandle>();
+        world.register_component::<physics::physics2d::ImpulseJoint2DHandle>();
         world.enable_clone::<physics::components2d::RigidBody2D>();
         world.enable_clone::<physics::components2d::Collider2D>();
     }

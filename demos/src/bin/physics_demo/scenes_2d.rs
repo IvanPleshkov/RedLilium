@@ -1,14 +1,15 @@
-//! 2D physics scene definitions using the component approach.
+//! 2D physics scene definitions using the reactive ECS approach.
 //!
 //! Each scene spawns entities with [`RigidBody2D`] + [`Collider2D`] + [`Transform`]
-//! descriptor components, then calls [`build_physics_world_2d`] to materialize
-//! them into rapier physics objects.
+//! descriptor components. The sync systems automatically create rapier physics
+//! objects from these descriptors. Joints use [`ImpulseJoint2D`] components
+//! with entity references that are automatically remapped in prefabs.
 
 use redlilium_core::math;
 use redlilium_ecs::Transform;
 use redlilium_ecs::World;
-use redlilium_ecs::physics::components2d::{Collider2D, RigidBody2D, build_physics_world_2d};
-use redlilium_ecs::physics::physics2d::{PhysicsWorld2D, RigidBody2DHandle};
+use redlilium_ecs::physics::components2d::{Collider2D, ImpulseJoint2D, RigidBody2D};
+use redlilium_ecs::physics::physics2d::PhysicsWorld2D;
 use redlilium_ecs::physics::rapier2d::prelude::*;
 
 /// Trait for a 2D physics demo scene.
@@ -65,8 +66,6 @@ impl PhysicsScene2D for BallsScene2D {
                 Transform::from_translation(math::Vec3::new(x, y, 0.0)),
             );
         }
-
-        build_physics_world_2d(world);
     }
 }
 
@@ -108,8 +107,6 @@ impl PhysicsScene2D for StackingScene2D {
                 );
             }
         }
-
-        build_physics_world_2d(world);
     }
 }
 
@@ -127,6 +124,7 @@ impl PhysicsScene2D for JointsScene2D {
     fn setup(&self, world: &mut World) {
         let count = 12;
         let spacing = 1.0f32;
+        let half_spacing = spacing / 2.0;
         let mut entities = Vec::new();
 
         for i in 0..count {
@@ -149,19 +147,18 @@ impl PhysicsScene2D for JointsScene2D {
             entities.push(entity);
         }
 
-        // Build physics from descriptors
-        build_physics_world_2d(world);
-
-        // Connect with revolute joints
-        let half_spacing = spacing as f64 / 2.0;
+        // Connect with revolute joints via ImpulseJoint2D components
         for i in 0..count - 1 {
-            let h1 = world.get::<RigidBody2DHandle>(entities[i]).unwrap().0;
-            let h2 = world.get::<RigidBody2DHandle>(entities[i + 1]).unwrap().0;
-            let joint = RevoluteJointBuilder::new()
-                .local_anchor1(Vector::new(half_spacing, 0.0))
-                .local_anchor2(Vector::new(-half_spacing, 0.0));
-            let mut physics = world.resource_mut::<PhysicsWorld2D>();
-            physics.add_impulse_joint(h1, h2, joint);
+            let joint_entity = world.spawn();
+            let _ = world.insert(
+                joint_entity,
+                ImpulseJoint2D::revolute(
+                    entities[i],
+                    entities[i + 1],
+                    math::Vec2::new(half_spacing, 0.0),
+                    math::Vec2::new(-half_spacing, 0.0),
+                ),
+            );
         }
     }
 }
@@ -195,8 +192,8 @@ impl PhysicsScene2D for TrimeshScene2D {
             );
         }
 
-        // Build physics from descriptors
-        build_physics_world_2d(world);
+        // Create resource early so sync system finds it and just adds descriptors
+        let mut physics = PhysicsWorld2D::default();
 
         // Create polyline ground directly via rapier
         let vertices: Vec<_> = (0..40)
@@ -208,16 +205,17 @@ impl PhysicsScene2D for TrimeshScene2D {
             .collect();
         let indices: Vec<_> = (0..vertices.len() as u32 - 1).map(|i| [i, i + 1]).collect();
 
-        let ground_handle = {
-            let mut physics = world.resource_mut::<PhysicsWorld2D>();
-            let ground_handle = physics.add_body(RigidBodyBuilder::fixed().build());
-            let polyline = ColliderBuilder::polyline(vertices, Some(indices)).build();
-            physics.add_collider(polyline, ground_handle);
-            ground_handle
-        };
+        let ground_handle = physics.add_body(RigidBodyBuilder::fixed().build());
+        let polyline = ColliderBuilder::polyline(vertices, Some(indices)).build();
+        physics.add_collider(polyline, ground_handle);
+
+        world.insert_resource(physics);
 
         let ground_entity = world.spawn();
-        let _ = world.insert(ground_entity, RigidBody2DHandle(ground_handle));
+        let _ = world.insert(
+            ground_entity,
+            redlilium_ecs::physics::physics2d::RigidBody2DHandle(ground_handle),
+        );
         let _ = world.insert(ground_entity, Transform::IDENTITY);
         let _ = world.insert(ground_entity, redlilium_ecs::GlobalTransform::IDENTITY);
     }
@@ -264,8 +262,6 @@ impl PhysicsScene2D for CharacterScene2D {
             Collider2D::capsule_y(0.4, 0.25),
             Transform::from_translation(math::Vec3::new(0.0, 3.0, 0.0)),
         );
-
-        build_physics_world_2d(world);
     }
 }
 
@@ -304,7 +300,18 @@ impl PhysicsScene2D for RagdollScene2D {
             Transform::from_translation(math::Vec3::new(0.0, 7.0, 0.0)),
         );
 
-        let mut arm_entities = Vec::new();
+        // Neck joint
+        let neck_joint = world.spawn();
+        let _ = world.insert(
+            neck_joint,
+            ImpulseJoint2D::revolute(
+                torso,
+                head,
+                math::Vec2::new(0.0, 0.5),
+                math::Vec2::new(0.0, -0.25),
+            ),
+        );
+
         for side in [-1.0f32, 1.0] {
             let arm = spawn_entity(
                 world,
@@ -312,10 +319,20 @@ impl PhysicsScene2D for RagdollScene2D {
                 Collider2D::capsule_y(0.3, 0.08),
                 Transform::from_translation(math::Vec3::new(side * 0.7, 5.8, 0.0)),
             );
-            arm_entities.push((side, arm));
+
+            // Shoulder joint
+            let shoulder_joint = world.spawn();
+            let _ = world.insert(
+                shoulder_joint,
+                ImpulseJoint2D::revolute(
+                    torso,
+                    arm,
+                    math::Vec2::new(side * 0.35, 0.4),
+                    math::Vec2::new(0.0, 0.3),
+                ),
+            );
         }
 
-        let mut leg_entities = Vec::new();
         for side in [-1.0f32, 1.0] {
             let leg = spawn_entity(
                 world,
@@ -323,42 +340,18 @@ impl PhysicsScene2D for RagdollScene2D {
                 Collider2D::capsule_y(0.35, 0.1),
                 Transform::from_translation(math::Vec3::new(side * 0.2, 5.0, 0.0)),
             );
-            leg_entities.push((side, leg));
-        }
 
-        // Build physics
-        build_physics_world_2d(world);
-
-        // Create joints
-        let torso_h = world.get::<RigidBody2DHandle>(torso).unwrap().0;
-        let head_h = world.get::<RigidBody2DHandle>(head).unwrap().0;
-
-        {
-            let neck = RevoluteJointBuilder::new()
-                .local_anchor1(Vector::new(0.0, 0.5))
-                .local_anchor2(Vector::new(0.0, -0.25));
-            let mut physics = world.resource_mut::<PhysicsWorld2D>();
-            physics.add_impulse_joint(torso_h, head_h, neck);
-        }
-
-        for (side, arm) in &arm_entities {
-            let side = *side as f64;
-            let arm_h = world.get::<RigidBody2DHandle>(*arm).unwrap().0;
-            let shoulder = RevoluteJointBuilder::new()
-                .local_anchor1(Vector::new(side * 0.35, 0.4))
-                .local_anchor2(Vector::new(0.0, 0.3));
-            let mut physics = world.resource_mut::<PhysicsWorld2D>();
-            physics.add_impulse_joint(torso_h, arm_h, shoulder);
-        }
-
-        for (side, leg) in &leg_entities {
-            let side = *side as f64;
-            let leg_h = world.get::<RigidBody2DHandle>(*leg).unwrap().0;
-            let hip = RevoluteJointBuilder::new()
-                .local_anchor1(Vector::new(side * 0.2, -0.5))
-                .local_anchor2(Vector::new(0.0, 0.35));
-            let mut physics = world.resource_mut::<PhysicsWorld2D>();
-            physics.add_impulse_joint(torso_h, leg_h, hip);
+            // Hip joint
+            let hip_joint = world.spawn();
+            let _ = world.insert(
+                hip_joint,
+                ImpulseJoint2D::revolute(
+                    torso,
+                    leg,
+                    math::Vec2::new(side * 0.2, -0.5),
+                    math::Vec2::new(0.0, 0.35),
+                ),
+            );
         }
     }
 }
@@ -394,7 +387,6 @@ impl PhysicsScene2D for VehicleScene2D {
 
         // Wheels
         let wheel_offsets = [math::Vec2::new(-0.8, -0.4), math::Vec2::new(0.8, -0.4)];
-        let mut wheel_entities = Vec::new();
         for offset in &wheel_offsets {
             let wheel_pos =
                 math::Vec3::new(chassis_pos.x + offset.x, chassis_pos.y + offset.y, 0.0);
@@ -404,21 +396,13 @@ impl PhysicsScene2D for VehicleScene2D {
                 Collider2D::ball(0.3).with_friction(1.5).with_density(0.5),
                 Transform::from_translation(wheel_pos),
             );
-            wheel_entities.push((*offset, wheel));
-        }
 
-        // Build physics
-        build_physics_world_2d(world);
-
-        // Create wheel joints
-        let chassis_h = world.get::<RigidBody2DHandle>(chassis).unwrap().0;
-        for (offset, wheel_entity) in &wheel_entities {
-            let wheel_h = world.get::<RigidBody2DHandle>(*wheel_entity).unwrap().0;
-            let axle = RevoluteJointBuilder::new()
-                .local_anchor1(Vector::new(offset.x as f64, offset.y as f64))
-                .local_anchor2(Vector::ZERO);
-            let mut physics = world.resource_mut::<PhysicsWorld2D>();
-            physics.add_impulse_joint(chassis_h, wheel_h, axle);
+            // Axle joint (revolute)
+            let axle_joint = world.spawn();
+            let _ = world.insert(
+                axle_joint,
+                ImpulseJoint2D::revolute(chassis, wheel, *offset, math::Vec2::new(0.0, 0.0)),
+            );
         }
     }
 }

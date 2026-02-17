@@ -148,6 +148,17 @@ impl EntityAllocator {
         entities
     }
 
+    /// Returns the alive entity at the given index, or `None` if the slot is
+    /// empty or has been recycled.
+    pub fn entity_at_index(&self, index: u32) -> Option<Entity> {
+        let idx = index as usize;
+        if idx < self.alive.len() && self.alive[idx] {
+            Some(Entity::new(index, self.generations[idx]))
+        } else {
+            None
+        }
+    }
+
     /// Iterates over all currently alive entity IDs.
     pub fn iter_alive(&self) -> impl Iterator<Item = Entity> + '_ {
         self.alive

@@ -1,14 +1,15 @@
-//! 3D physics scene definitions using the component approach.
+//! 3D physics scene definitions using the reactive ECS approach.
 //!
 //! Each scene spawns entities with [`RigidBody3D`] + [`Collider3D`] + [`Transform`]
-//! descriptor components, then calls [`build_physics_world_3d`] to materialize
-//! them into rapier physics objects.
+//! descriptor components. The sync systems automatically create rapier physics
+//! objects from these descriptors. Joints use [`ImpulseJoint3D`] components
+//! with entity references that are automatically remapped in prefabs.
 
 use redlilium_core::math;
 use redlilium_ecs::Transform;
 use redlilium_ecs::World;
-use redlilium_ecs::physics::components3d::{Collider3D, RigidBody3D, build_physics_world_3d};
-use redlilium_ecs::physics::physics3d::{PhysicsWorld3D, RigidBody3DHandle};
+use redlilium_ecs::physics::components3d::{Collider3D, ImpulseJoint3D, RigidBody3D};
+use redlilium_ecs::physics::physics3d::PhysicsWorld3D;
 use redlilium_ecs::physics::rapier3d::prelude::*;
 
 /// Trait for a 3D physics demo scene.
@@ -76,8 +77,6 @@ impl PhysicsScene3D for BallsScene {
                 );
             }
         }
-
-        build_physics_world_3d(world);
     }
 }
 
@@ -120,8 +119,6 @@ impl PhysicsScene3D for StackingScene {
                 );
             }
         }
-
-        build_physics_world_3d(world);
     }
 }
 
@@ -139,6 +136,7 @@ impl PhysicsScene3D for JointsScene {
     fn setup(&self, world: &mut World) {
         let size = 5;
         let spacing = 2.0f32;
+        let half = spacing / 2.0;
         let mut entity_grid: Vec<Vec<redlilium_ecs::Entity>> = Vec::new();
 
         for i in 0..size {
@@ -166,36 +164,32 @@ impl PhysicsScene3D for JointsScene {
             entity_grid.push(row);
         }
 
-        // Build physics from descriptors
-        build_physics_world_3d(world);
-
-        // Connect neighbours with spherical joints
-        let half = spacing as f64 / 2.0;
+        // Connect neighbours with spherical joints via ImpulseJoint3D components
         for i in 0..size {
             for j in 0..size {
                 if i + 1 < size {
-                    let h1 = world.get::<RigidBody3DHandle>(entity_grid[i][j]).unwrap().0;
-                    let h2 = world
-                        .get::<RigidBody3DHandle>(entity_grid[i + 1][j])
-                        .unwrap()
-                        .0;
-                    let joint = SphericalJointBuilder::new()
-                        .local_anchor1(Vector::new(half, 0.0, 0.0))
-                        .local_anchor2(Vector::new(-half, 0.0, 0.0));
-                    let mut physics = world.resource_mut::<PhysicsWorld3D>();
-                    physics.add_impulse_joint(h1, h2, joint);
+                    let joint_entity = world.spawn();
+                    let _ = world.insert(
+                        joint_entity,
+                        ImpulseJoint3D::spherical(
+                            entity_grid[i][j],
+                            entity_grid[i + 1][j],
+                            math::Vec3::new(half, 0.0, 0.0),
+                            math::Vec3::new(-half, 0.0, 0.0),
+                        ),
+                    );
                 }
                 if j + 1 < size {
-                    let h1 = world.get::<RigidBody3DHandle>(entity_grid[i][j]).unwrap().0;
-                    let h2 = world
-                        .get::<RigidBody3DHandle>(entity_grid[i][j + 1])
-                        .unwrap()
-                        .0;
-                    let joint = SphericalJointBuilder::new()
-                        .local_anchor1(Vector::new(0.0, 0.0, half))
-                        .local_anchor2(Vector::new(0.0, 0.0, -half));
-                    let mut physics = world.resource_mut::<PhysicsWorld3D>();
-                    physics.add_impulse_joint(h1, h2, joint);
+                    let joint_entity = world.spawn();
+                    let _ = world.insert(
+                        joint_entity,
+                        ImpulseJoint3D::spherical(
+                            entity_grid[i][j],
+                            entity_grid[i][j + 1],
+                            math::Vec3::new(0.0, 0.0, half),
+                            math::Vec3::new(0.0, 0.0, -half),
+                        ),
+                    );
                 }
             }
         }
@@ -234,8 +228,8 @@ impl PhysicsScene3D for TrimeshScene {
             );
         }
 
-        // Build physics from descriptor components
-        build_physics_world_3d(world);
+        // Create resource early so sync system finds it and just adds descriptors
+        let mut physics = PhysicsWorld3D::default();
 
         // Add trimesh ground directly via rapier (trimesh is a resource-heavy shape,
         // not representable as a simple Pod component)
@@ -265,20 +259,21 @@ impl PhysicsScene3D for TrimeshScene {
             }
         }
 
-        let ground_handle = {
-            let mut physics = world.resource_mut::<PhysicsWorld3D>();
-            let ground_handle = physics.add_body(RigidBodyBuilder::fixed().build());
-            let trimesh = ColliderBuilder::trimesh(vertices, indices)
-                .expect("valid trimesh")
-                .restitution(0.3)
-                .build();
-            physics.add_collider(trimesh, ground_handle);
-            ground_handle
-        };
+        let ground_handle = physics.add_body(RigidBodyBuilder::fixed().build());
+        let trimesh = ColliderBuilder::trimesh(vertices, indices)
+            .expect("valid trimesh")
+            .restitution(0.3)
+            .build();
+        physics.add_collider(trimesh, ground_handle);
+
+        world.insert_resource(physics);
 
         // Spawn ECS entity for the ground trimesh (handle only, no descriptors)
         let ground_entity = world.spawn();
-        let _ = world.insert(ground_entity, RigidBody3DHandle(ground_handle));
+        let _ = world.insert(
+            ground_entity,
+            redlilium_ecs::physics::physics3d::RigidBody3DHandle(ground_handle),
+        );
         let _ = world.insert(ground_entity, Transform::IDENTITY);
         let _ = world.insert(ground_entity, redlilium_ecs::GlobalTransform::IDENTITY);
     }
@@ -337,8 +332,6 @@ impl PhysicsScene3D for CharacterScene {
             Collider3D::capsule_y(0.5, 0.3),
             Transform::from_translation(math::Vec3::new(0.0, 2.0, 0.0)),
         );
-
-        build_physics_world_3d(world);
     }
 }
 
@@ -377,7 +370,18 @@ impl PhysicsScene3D for RagdollScene {
             Transform::from_translation(math::Vec3::new(0.0, 6.0, 0.0)),
         );
 
-        let mut arm_entities = Vec::new();
+        // Neck joint
+        let neck_joint = world.spawn();
+        let _ = world.insert(
+            neck_joint,
+            ImpulseJoint3D::spherical(
+                torso,
+                head,
+                math::Vec3::new(0.0, 0.5, 0.0),
+                math::Vec3::new(0.0, -0.25, 0.0),
+            ),
+        );
+
         for side in [-1.0f32, 1.0] {
             let upper_arm = spawn_entity(
                 world,
@@ -391,10 +395,33 @@ impl PhysicsScene3D for RagdollScene {
                 Collider3D::capsule_y(0.2, 0.07),
                 Transform::from_translation(math::Vec3::new(side * 0.7, 4.7, 0.0)),
             );
-            arm_entities.push((side, upper_arm, forearm));
+
+            // Shoulder (spherical)
+            let shoulder_joint = world.spawn();
+            let _ = world.insert(
+                shoulder_joint,
+                ImpulseJoint3D::spherical(
+                    torso,
+                    upper_arm,
+                    math::Vec3::new(side * 0.35, 0.4, 0.0),
+                    math::Vec3::new(0.0, 0.25, 0.0),
+                ),
+            );
+
+            // Elbow (revolute around Z)
+            let elbow_joint = world.spawn();
+            let _ = world.insert(
+                elbow_joint,
+                ImpulseJoint3D::revolute(
+                    upper_arm,
+                    forearm,
+                    math::Vec3::new(0.0, 0.0, 1.0),
+                    math::Vec3::new(0.0, -0.25, 0.0),
+                    math::Vec3::new(0.0, 0.2, 0.0),
+                ),
+            );
         }
 
-        let mut leg_entities = Vec::new();
         for side in [-1.0f32, 1.0] {
             let thigh = spawn_entity(
                 world,
@@ -408,64 +435,31 @@ impl PhysicsScene3D for RagdollScene {
                 Collider3D::capsule_y(0.25, 0.08),
                 Transform::from_translation(math::Vec3::new(side * 0.2, 3.4, 0.0)),
             );
-            leg_entities.push((side, thigh, shin));
-        }
 
-        // Build physics from descriptors
-        build_physics_world_3d(world);
+            // Hip (spherical)
+            let hip_joint = world.spawn();
+            let _ = world.insert(
+                hip_joint,
+                ImpulseJoint3D::spherical(
+                    torso,
+                    thigh,
+                    math::Vec3::new(side * 0.2, -0.5, 0.0),
+                    math::Vec3::new(0.0, 0.3, 0.0),
+                ),
+            );
 
-        // Create joints using handles
-        let torso_h = world.get::<RigidBody3DHandle>(torso).unwrap().0;
-        let head_h = world.get::<RigidBody3DHandle>(head).unwrap().0;
-
-        {
-            let neck = SphericalJointBuilder::new()
-                .local_anchor1(Vector::new(0.0, 0.5, 0.0))
-                .local_anchor2(Vector::new(0.0, -0.25, 0.0));
-            let mut physics = world.resource_mut::<PhysicsWorld3D>();
-            physics.add_impulse_joint(torso_h, head_h, neck);
-        }
-
-        for (side, upper_arm, forearm) in &arm_entities {
-            let side = *side as f64;
-            let ua_h = world.get::<RigidBody3DHandle>(*upper_arm).unwrap().0;
-            let fa_h = world.get::<RigidBody3DHandle>(*forearm).unwrap().0;
-
-            {
-                let shoulder = SphericalJointBuilder::new()
-                    .local_anchor1(Vector::new(side * 0.35, 0.4, 0.0))
-                    .local_anchor2(Vector::new(0.0, 0.25, 0.0));
-                let mut physics = world.resource_mut::<PhysicsWorld3D>();
-                physics.add_impulse_joint(torso_h, ua_h, shoulder);
-            }
-            {
-                let elbow = RevoluteJointBuilder::new(Vector::new(0.0, 0.0, 1.0))
-                    .local_anchor1(Vector::new(0.0, -0.25, 0.0))
-                    .local_anchor2(Vector::new(0.0, 0.2, 0.0));
-                let mut physics = world.resource_mut::<PhysicsWorld3D>();
-                physics.add_impulse_joint(ua_h, fa_h, elbow);
-            }
-        }
-
-        for (side, thigh, shin) in &leg_entities {
-            let side = *side as f64;
-            let th_h = world.get::<RigidBody3DHandle>(*thigh).unwrap().0;
-            let sh_h = world.get::<RigidBody3DHandle>(*shin).unwrap().0;
-
-            {
-                let hip = SphericalJointBuilder::new()
-                    .local_anchor1(Vector::new(side * 0.2, -0.5, 0.0))
-                    .local_anchor2(Vector::new(0.0, 0.3, 0.0));
-                let mut physics = world.resource_mut::<PhysicsWorld3D>();
-                physics.add_impulse_joint(torso_h, th_h, hip);
-            }
-            {
-                let knee = RevoluteJointBuilder::new(Vector::new(1.0, 0.0, 0.0))
-                    .local_anchor1(Vector::new(0.0, -0.3, 0.0))
-                    .local_anchor2(Vector::new(0.0, 0.25, 0.0));
-                let mut physics = world.resource_mut::<PhysicsWorld3D>();
-                physics.add_impulse_joint(th_h, sh_h, knee);
-            }
+            // Knee (revolute around X)
+            let knee_joint = world.spawn();
+            let _ = world.insert(
+                knee_joint,
+                ImpulseJoint3D::revolute(
+                    thigh,
+                    shin,
+                    math::Vec3::new(1.0, 0.0, 0.0),
+                    math::Vec3::new(0.0, -0.3, 0.0),
+                    math::Vec3::new(0.0, 0.25, 0.0),
+                ),
+            );
         }
     }
 }
@@ -507,7 +501,6 @@ impl PhysicsScene3D for VehicleScene {
             math::Vec3::new(0.8, -0.3, -0.6),
         ];
 
-        let mut wheel_entities = Vec::new();
         for offset in &wheel_offsets {
             let wheel_pos = chassis_pos + *offset;
             let wheel = spawn_entity(
@@ -516,25 +509,19 @@ impl PhysicsScene3D for VehicleScene {
                 Collider3D::ball(0.3).with_friction(1.5).with_density(0.5),
                 Transform::from_translation(wheel_pos),
             );
-            wheel_entities.push((*offset, wheel));
-        }
 
-        // Build physics from descriptors
-        build_physics_world_3d(world);
-
-        // Create wheel joints
-        let chassis_h = world.get::<RigidBody3DHandle>(chassis).unwrap().0;
-        for (offset, wheel_entity) in &wheel_entities {
-            let wheel_h = world.get::<RigidBody3DHandle>(*wheel_entity).unwrap().0;
-            let axle = RevoluteJointBuilder::new(Vector::new(0.0, 0.0, 1.0))
-                .local_anchor1(Vector::new(
-                    offset.x as f64,
-                    offset.y as f64,
-                    offset.z as f64,
-                ))
-                .local_anchor2(Vector::ZERO);
-            let mut physics = world.resource_mut::<PhysicsWorld3D>();
-            physics.add_impulse_joint(chassis_h, wheel_h, axle);
+            // Axle joint (revolute around Z)
+            let axle_joint = world.spawn();
+            let _ = world.insert(
+                axle_joint,
+                ImpulseJoint3D::revolute(
+                    chassis,
+                    wheel,
+                    math::Vec3::new(0.0, 0.0, 1.0),
+                    *offset,
+                    math::Vec3::new(0.0, 0.0, 0.0),
+                ),
+            );
         }
     }
 }

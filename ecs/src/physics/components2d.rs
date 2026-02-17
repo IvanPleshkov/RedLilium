@@ -1,8 +1,9 @@
 //! 2D physics descriptor components.
 //!
-//! Components that describe rigid body and collider properties for 2D physics.
-//! Use [`build_physics_world_2d`] to materialize these descriptors into
-//! actual rapier physics objects in the ECS world.
+//! Components that describe rigid body, collider, and joint properties for 2D physics.
+//! Use the [`SyncPhysicsBodies2D`](super::physics2d::SyncPhysicsBodies2D) and
+//! [`SyncPhysicsJoints2D`](super::physics2d::SyncPhysicsJoints2D) systems
+//! to automatically materialize these descriptors into rapier physics objects.
 
 use redlilium_core::math::Vec2;
 
@@ -180,6 +181,87 @@ impl Default for Collider2D {
 }
 
 // ---------------------------------------------------------------------------
+// Joint descriptor
+// ---------------------------------------------------------------------------
+
+/// 2D joint type descriptor.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JointType2D {
+    /// Hinge joint (rotation around Z axis). In 2D the rotation axis is implicit.
+    Revolute { anchor1: Vec2, anchor2: Vec2 },
+    /// Rigid attachment (no relative movement).
+    Fixed { anchor1: Vec2, anchor2: Vec2 },
+    /// Sliding joint along an axis.
+    Prismatic {
+        axis: Vec2,
+        anchor1: Vec2,
+        anchor2: Vec2,
+    },
+}
+
+/// Describes a 2D impulse joint between two rigid body entities.
+///
+/// Attach this component to a (possibly dedicated) entity to create a joint
+/// constraint. The `body1` and `body2` fields reference entities that must
+/// have [`RigidBody2D`] + [`Collider2D`] components.
+///
+/// Entity references are automatically remapped during prefab instantiation
+/// via the `#[derive(Component)]` macro.
+#[derive(Debug, Clone, PartialEq, crate::Component)]
+pub struct ImpulseJoint2D {
+    /// First body entity.
+    pub body1: crate::Entity,
+    /// Second body entity.
+    pub body2: crate::Entity,
+    /// Joint type and parameters.
+    pub joint_type: JointType2D,
+}
+
+impl ImpulseJoint2D {
+    /// Creates a revolute (hinge) joint.
+    pub fn revolute(
+        body1: crate::Entity,
+        body2: crate::Entity,
+        anchor1: Vec2,
+        anchor2: Vec2,
+    ) -> Self {
+        Self {
+            body1,
+            body2,
+            joint_type: JointType2D::Revolute { anchor1, anchor2 },
+        }
+    }
+
+    /// Creates a fixed (rigid attachment) joint.
+    pub fn fixed(body1: crate::Entity, body2: crate::Entity, anchor1: Vec2, anchor2: Vec2) -> Self {
+        Self {
+            body1,
+            body2,
+            joint_type: JointType2D::Fixed { anchor1, anchor2 },
+        }
+    }
+
+    /// Creates a prismatic (slider) joint along the given axis.
+    pub fn prismatic(
+        body1: crate::Entity,
+        body2: crate::Entity,
+        axis: Vec2,
+        anchor1: Vec2,
+        anchor2: Vec2,
+    ) -> Self {
+        Self {
+            body1,
+            body2,
+            joint_type: JointType2D::Prismatic {
+                axis,
+                anchor1,
+                anchor2,
+            },
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Build function — materializes descriptors into rapier objects
 // ---------------------------------------------------------------------------
 
@@ -235,7 +317,36 @@ impl Collider2D {
     }
 }
 
+impl ImpulseJoint2D {
+    /// Convert this descriptor into a rapier `GenericJoint`.
+    pub(crate) fn to_rapier_joint(&self) -> GenericJoint {
+        use redlilium_core::math::Real;
+
+        match &self.joint_type {
+            JointType2D::Revolute { anchor1, anchor2 } => RevoluteJointBuilder::new()
+                .local_anchor1(Vector::new(anchor1.x as Real, anchor1.y as Real))
+                .local_anchor2(Vector::new(anchor2.x as Real, anchor2.y as Real))
+                .into(),
+            JointType2D::Fixed { anchor1, anchor2 } => FixedJointBuilder::new()
+                .local_anchor1(Vector::new(anchor1.x as Real, anchor1.y as Real))
+                .local_anchor2(Vector::new(anchor2.x as Real, anchor2.y as Real))
+                .into(),
+            JointType2D::Prismatic {
+                axis,
+                anchor1,
+                anchor2,
+            } => PrismaticJointBuilder::new(Vector::new(axis.x as Real, axis.y as Real))
+                .local_anchor1(Vector::new(anchor1.x as Real, anchor1.y as Real))
+                .local_anchor2(Vector::new(anchor2.x as Real, anchor2.y as Real))
+                .into(),
+        }
+    }
+}
+
 /// Materializes [`RigidBody2D`] + [`Collider2D`] descriptors into rapier objects.
+///
+/// **Deprecated:** Use [`SyncPhysicsBodies2D`](super::physics2d::SyncPhysicsBodies2D)
+/// exclusive system instead, which automatically tracks spawns and despawns.
 ///
 /// Creates a [`PhysicsWorld2D`] resource and iterates all entities that have
 /// both descriptor components plus a [`Transform`](crate::Transform).
@@ -243,6 +354,9 @@ impl Collider2D {
 /// [`RigidBody2DHandle`] component on the entity.
 ///
 /// Call this once after spawning all physics entities in a scene.
+#[deprecated(
+    note = "Use `SyncPhysicsBodies2D` exclusive system instead, which automatically tracks spawns and despawns."
+)]
 pub fn build_physics_world_2d(world: &mut crate::World) {
     // Phase 1: collect entity data (clone non-Copy components, copy the rest)
     let entities: Vec<_> = world
@@ -327,6 +441,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn build_physics_world_2d_test() {
         let mut world = crate::World::new();
         world.register_component::<RigidBody2D>();

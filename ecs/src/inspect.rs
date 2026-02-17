@@ -159,6 +159,23 @@ impl Inspect<'_, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Entity inspector
+// ---------------------------------------------------------------------------
+
+impl Inspect<'_, crate::Entity> {
+    pub fn show(&mut self, name: &str, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(name);
+            ui.label(format!(
+                "Entity({}v{})",
+                self.0.index(),
+                self.0.generation()
+            ));
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Math type inspectors (via redlilium_core re-exports of nalgebra)
 // ---------------------------------------------------------------------------
 

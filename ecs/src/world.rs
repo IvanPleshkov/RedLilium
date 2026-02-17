@@ -202,6 +202,12 @@ impl World {
         self.entities.count()
     }
 
+    /// Returns the alive entity at the given slot index, or `None` if the
+    /// slot is empty or has been recycled.
+    pub(crate) fn entity_at_index(&self, index: u32) -> Option<Entity> {
+        self.entities.entity_at_index(index)
+    }
+
     /// Iterates over all currently alive entity IDs.
     pub fn iter_entities(&self) -> impl Iterator<Item = Entity> + '_ {
         self.entities.iter_alive()

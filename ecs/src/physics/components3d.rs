@@ -1,8 +1,9 @@
 //! 3D physics descriptor components.
 //!
-//! Components that describe rigid body and collider properties.
-//! Use [`build_physics_world_3d`] to materialize these descriptors into
-//! actual rapier physics objects in the ECS world.
+//! Components that describe rigid body, collider, and joint properties.
+//! Use the [`SyncPhysicsBodies3D`](super::physics3d::SyncPhysicsBodies3D) and
+//! [`SyncPhysicsJoints3D`](super::physics3d::SyncPhysicsJoints3D) systems
+//! to automatically materialize these descriptors into rapier physics objects.
 
 use redlilium_core::math::Vec3;
 
@@ -192,11 +193,202 @@ impl Default for Collider3D {
 }
 
 // ---------------------------------------------------------------------------
+// Joint descriptor
+// ---------------------------------------------------------------------------
+
+/// 3D joint type descriptor.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JointType3D {
+    /// Ball-and-socket joint with anchor points on each body.
+    Spherical { anchor1: Vec3, anchor2: Vec3 },
+    /// Hinge joint around an axis.
+    Revolute {
+        axis: Vec3,
+        anchor1: Vec3,
+        anchor2: Vec3,
+    },
+    /// Rigid attachment (no relative movement).
+    Fixed { anchor1: Vec3, anchor2: Vec3 },
+    /// Sliding joint along an axis.
+    Prismatic {
+        axis: Vec3,
+        anchor1: Vec3,
+        anchor2: Vec3,
+    },
+}
+
+/// Describes a 3D impulse joint between two rigid body entities.
+///
+/// Attach this component to a (possibly dedicated) entity to create a joint
+/// constraint. The `body1` and `body2` fields reference entities that must
+/// have [`RigidBody3D`] + [`Collider3D`] components.
+///
+/// Entity references are automatically remapped during prefab instantiation
+/// via the `#[derive(Component)]` macro.
+///
+/// # Example
+///
+/// ```ignore
+/// let joint_entity = world.spawn();
+/// world.insert(joint_entity, ImpulseJoint3D::spherical(
+///     body_a, body_b,
+///     Vec3::new(1.0, 0.0, 0.0),
+///     Vec3::new(-1.0, 0.0, 0.0),
+/// ));
+/// ```
+#[derive(Debug, Clone, PartialEq, crate::Component)]
+pub struct ImpulseJoint3D {
+    /// First body entity.
+    pub body1: crate::Entity,
+    /// Second body entity.
+    pub body2: crate::Entity,
+    /// Joint type and parameters.
+    pub joint_type: JointType3D,
+}
+
+impl ImpulseJoint3D {
+    /// Creates a spherical (ball-and-socket) joint.
+    pub fn spherical(
+        body1: crate::Entity,
+        body2: crate::Entity,
+        anchor1: Vec3,
+        anchor2: Vec3,
+    ) -> Self {
+        Self {
+            body1,
+            body2,
+            joint_type: JointType3D::Spherical { anchor1, anchor2 },
+        }
+    }
+
+    /// Creates a revolute (hinge) joint around the given axis.
+    pub fn revolute(
+        body1: crate::Entity,
+        body2: crate::Entity,
+        axis: Vec3,
+        anchor1: Vec3,
+        anchor2: Vec3,
+    ) -> Self {
+        Self {
+            body1,
+            body2,
+            joint_type: JointType3D::Revolute {
+                axis,
+                anchor1,
+                anchor2,
+            },
+        }
+    }
+
+    /// Creates a fixed (rigid attachment) joint.
+    pub fn fixed(body1: crate::Entity, body2: crate::Entity, anchor1: Vec3, anchor2: Vec3) -> Self {
+        Self {
+            body1,
+            body2,
+            joint_type: JointType3D::Fixed { anchor1, anchor2 },
+        }
+    }
+
+    /// Creates a prismatic (slider) joint along the given axis.
+    pub fn prismatic(
+        body1: crate::Entity,
+        body2: crate::Entity,
+        axis: Vec3,
+        anchor1: Vec3,
+        anchor2: Vec3,
+    ) -> Self {
+        Self {
+            body1,
+            body2,
+            joint_type: JointType3D::Prismatic {
+                axis,
+                anchor1,
+                anchor2,
+            },
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Build function — materializes descriptors into rapier objects
 // ---------------------------------------------------------------------------
 
 use super::physics3d::{PhysicsWorld3D, RigidBody3DHandle};
 use super::rapier3d::prelude::*;
+
+impl ImpulseJoint3D {
+    /// Convert this descriptor into a rapier `GenericJoint`.
+    pub(crate) fn to_rapier_joint(&self) -> GenericJoint {
+        use redlilium_core::math::Real;
+
+        match &self.joint_type {
+            JointType3D::Spherical { anchor1, anchor2 } => SphericalJointBuilder::new()
+                .local_anchor1(Vector::new(
+                    anchor1.x as Real,
+                    anchor1.y as Real,
+                    anchor1.z as Real,
+                ))
+                .local_anchor2(Vector::new(
+                    anchor2.x as Real,
+                    anchor2.y as Real,
+                    anchor2.z as Real,
+                ))
+                .into(),
+            JointType3D::Revolute {
+                axis,
+                anchor1,
+                anchor2,
+            } => RevoluteJointBuilder::new(Vector::new(
+                axis.x as Real,
+                axis.y as Real,
+                axis.z as Real,
+            ))
+            .local_anchor1(Vector::new(
+                anchor1.x as Real,
+                anchor1.y as Real,
+                anchor1.z as Real,
+            ))
+            .local_anchor2(Vector::new(
+                anchor2.x as Real,
+                anchor2.y as Real,
+                anchor2.z as Real,
+            ))
+            .into(),
+            JointType3D::Fixed { anchor1, anchor2 } => FixedJointBuilder::new()
+                .local_anchor1(Vector::new(
+                    anchor1.x as Real,
+                    anchor1.y as Real,
+                    anchor1.z as Real,
+                ))
+                .local_anchor2(Vector::new(
+                    anchor2.x as Real,
+                    anchor2.y as Real,
+                    anchor2.z as Real,
+                ))
+                .into(),
+            JointType3D::Prismatic {
+                axis,
+                anchor1,
+                anchor2,
+            } => PrismaticJointBuilder::new(Vector::new(
+                axis.x as Real,
+                axis.y as Real,
+                axis.z as Real,
+            ))
+            .local_anchor1(Vector::new(
+                anchor1.x as Real,
+                anchor1.y as Real,
+                anchor1.z as Real,
+            ))
+            .local_anchor2(Vector::new(
+                anchor2.x as Real,
+                anchor2.y as Real,
+                anchor2.z as Real,
+            ))
+            .into(),
+        }
+    }
+}
 
 impl RigidBody3D {
     /// Convert this descriptor + transform into a rapier `RigidBody`.
@@ -272,6 +464,9 @@ impl Collider3D {
 
 /// Materializes [`RigidBody3D`] + [`Collider3D`] descriptors into rapier objects.
 ///
+/// **Deprecated:** Use [`SyncPhysicsBodies3D`](super::physics3d::SyncPhysicsBodies3D)
+/// exclusive system instead, which automatically tracks spawns and despawns.
+///
 /// Creates a [`PhysicsWorld3D`] resource and iterates all entities that have
 /// both descriptor components plus a [`Transform`](crate::Transform).
 /// For each, builds a rapier rigid body and collider, and inserts a
@@ -291,6 +486,9 @@ impl Collider3D {
 /// build_physics_world_3d(world);
 /// // Now the entity has a RigidBody3DHandle and a PhysicsWorld3D resource exists.
 /// ```
+#[deprecated(
+    note = "Use `SyncPhysicsBodies3D` exclusive system instead, which automatically tracks spawns and despawns."
+)]
 pub fn build_physics_world_3d(world: &mut crate::World) {
     // Phase 1: collect entity data (clone non-Copy components, copy the rest)
     let entities: Vec<_> = world
@@ -392,6 +590,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn build_physics_world() {
         let mut world = crate::World::new();
         world.register_component::<RigidBody3D>();
