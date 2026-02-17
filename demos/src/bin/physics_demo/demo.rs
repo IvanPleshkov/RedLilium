@@ -13,8 +13,8 @@ use winit::event::KeyEvent;
 use winit::keyboard::{KeyCode, PhysicalKey};
 
 use redlilium_ecs::{
-    Camera, EcsRunner, Entity, GlobalTransform, OrbitCamera, SystemsContainer, UpdateOrbitCamera,
-    WindowInput, World,
+    Camera, EcsRunner, Entity, FreeFlyCamera, GlobalTransform, SystemsContainer,
+    UpdateFreeFlyCamera, WindowInput, World,
 };
 
 use crate::renderer::PhysicsRenderer;
@@ -102,8 +102,8 @@ impl PhysicsDemoApp {
         // Build systems container for the appropriate dimension
         let mut systems = SystemsContainer::new();
 
-        // Orbit camera system (always runs, even when paused)
-        systems.add(UpdateOrbitCamera);
+        // Free-fly camera system (always runs, even when paused)
+        systems.add(UpdateFreeFlyCamera);
 
         match dim {
             Dimension::ThreeD => {
@@ -116,8 +116,8 @@ impl PhysicsDemoApp {
                 let _ = systems.add_edge::<SyncPhysicsBodies3D, SyncPhysicsJoints3D>();
                 let _ = systems.add_edge::<SyncPhysicsJoints3D, StepPhysics3D>();
                 let _ = systems.add_edge::<StepPhysics3D, redlilium_ecs::UpdateGlobalTransforms>();
-                let _ =
-                    systems.add_edge::<UpdateOrbitCamera, redlilium_ecs::UpdateGlobalTransforms>();
+                let _ = systems
+                    .add_edge::<UpdateFreeFlyCamera, redlilium_ecs::UpdateGlobalTransforms>();
                 let _ = systems.add_edge::<redlilium_ecs::UpdateGlobalTransforms, redlilium_ecs::UpdateCameraMatrices>();
 
                 if let Some(scene) = self.scenes_3d.get(index) {
@@ -134,8 +134,8 @@ impl PhysicsDemoApp {
                 let _ = systems.add_edge::<SyncPhysicsBodies2D, SyncPhysicsJoints2D>();
                 let _ = systems.add_edge::<SyncPhysicsJoints2D, StepPhysics2D>();
                 let _ = systems.add_edge::<StepPhysics2D, redlilium_ecs::UpdateGlobalTransforms>();
-                let _ =
-                    systems.add_edge::<UpdateOrbitCamera, redlilium_ecs::UpdateGlobalTransforms>();
+                let _ = systems
+                    .add_edge::<UpdateFreeFlyCamera, redlilium_ecs::UpdateGlobalTransforms>();
                 let _ = systems.add_edge::<redlilium_ecs::UpdateGlobalTransforms, redlilium_ecs::UpdateCameraMatrices>();
 
                 if let Some(scene) = self.scenes_2d.get(index) {
@@ -144,17 +144,17 @@ impl PhysicsDemoApp {
             }
         }
 
-        // Spawn camera entity with OrbitCamera component
+        // Spawn camera entity with FreeFlyCamera component
         let cam_entity = world.spawn();
-        let orbit = OrbitCamera::new(Vec3::new(0.0, 3.0, 0.0), 20.0)
-            .with_azimuth(0.5)
-            .with_elevation(0.4);
-        let _ = world.insert(cam_entity, orbit);
+        let fly_cam = FreeFlyCamera::new(Vec3::new(0.0, 3.0, 0.0), 20.0)
+            .with_yaw(0.5)
+            .with_pitch(0.4);
+        let _ = world.insert(cam_entity, fly_cam);
         let _ = world.insert(
             cam_entity,
             Camera::perspective(std::f32::consts::FRAC_PI_4, ctx.aspect_ratio(), 0.1, 200.0),
         );
-        let _ = world.insert(cam_entity, orbit.to_transform());
+        let _ = world.insert(cam_entity, fly_cam.to_transform());
         let _ = world.insert(cam_entity, GlobalTransform::IDENTITY);
         self.camera_entity = Some(cam_entity);
 
@@ -229,7 +229,9 @@ impl AppHandler for PhysicsDemoApp {
             self.scenes_3d.len(),
             self.scenes_2d.len()
         );
-        log::info!("Controls: LMB drag=orbit, scroll=zoom, H=toggle UI, Space=pause");
+        log::info!(
+            "Controls: drag=orbit, Ctrl+drag=free look, WASD=move, QE=up/down, scroll=zoom, H=toggle UI, Space=pause"
+        );
 
         // Create ECS runner
         self.runner = Some(EcsRunner::single_thread());
@@ -316,11 +318,17 @@ impl AppHandler for PhysicsDemoApp {
 
         let camera_pos = if let (Some(world), Some(cam_entity)) = (&self.world, self.camera_entity)
         {
-            let orbits = world.read::<OrbitCamera>().unwrap();
-            orbits
-                .get(cam_entity.index())
-                .map(|o| o.position())
-                .unwrap_or(Vec3::zeros())
+            let fly_cams = world.read::<FreeFlyCamera>().unwrap();
+            if let Some(cam) = fly_cams.get(cam_entity.index()) {
+                // Update camera debug info in UI
+                if let Ok(mut ui) = self.ui.write() {
+                    ui.camera_distance = cam.distance;
+                    ui.camera_speed = cam.move_speed * cam.speed_multiplier;
+                }
+                cam.eye_position()
+            } else {
+                Vec3::zeros()
+            }
         } else {
             Vec3::zeros()
         };
@@ -491,7 +499,31 @@ impl AppHandler for PhysicsDemoApp {
             egui.on_key(event);
         }
 
-        if !event.state.is_pressed() {
+        let pressed = event.state.is_pressed();
+
+        // Forward movement/modifier keys to WindowInput (track held state)
+        if let Some(handle) = &self.window_input
+            && let Ok(mut input) = handle.write()
+        {
+            match event.physical_key {
+                PhysicalKey::Code(KeyCode::KeyW) => input.key_w = pressed,
+                PhysicalKey::Code(KeyCode::KeyA) => input.key_a = pressed,
+                PhysicalKey::Code(KeyCode::KeyS) => input.key_s = pressed,
+                PhysicalKey::Code(KeyCode::KeyD) => input.key_d = pressed,
+                PhysicalKey::Code(KeyCode::KeyQ) => input.key_q = pressed,
+                PhysicalKey::Code(KeyCode::KeyE) => input.key_e = pressed,
+                PhysicalKey::Code(KeyCode::ControlLeft | KeyCode::ControlRight) => {
+                    input.key_ctrl = pressed;
+                }
+                PhysicalKey::Code(KeyCode::ShiftLeft | KeyCode::ShiftRight) => {
+                    input.key_shift = pressed;
+                }
+                _ => {}
+            }
+        }
+
+        // Actions on key press only
+        if !pressed {
             return;
         }
 

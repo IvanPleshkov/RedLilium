@@ -28,6 +28,25 @@ pub struct WindowInput {
     pub mouse_middle: bool,
     /// Scroll delta accumulated this frame (x, y). Positive y = scroll up.
     pub scroll_delta: [f32; 2],
+
+    // -- Keyboard state --
+    /// Whether the W key is currently held.
+    pub key_w: bool,
+    /// Whether the A key is currently held.
+    pub key_a: bool,
+    /// Whether the S key is currently held.
+    pub key_s: bool,
+    /// Whether the D key is currently held.
+    pub key_d: bool,
+    /// Whether the Q key is currently held.
+    pub key_q: bool,
+    /// Whether the E key is currently held.
+    pub key_e: bool,
+    /// Whether the Control key is currently held (Ctrl on Windows/Linux, Control on macOS).
+    pub key_ctrl: bool,
+    /// Whether the Shift key is currently held.
+    pub key_shift: bool,
+
     /// When `true`, a UI layer (e.g. egui) wants keyboard/mouse input.
     /// Systems that consume input should skip processing when this is set.
     pub ui_wants_input: bool,
@@ -89,6 +108,14 @@ impl Default for WindowInput {
             mouse_right: false,
             mouse_middle: false,
             scroll_delta: [0.0, 0.0],
+            key_w: false,
+            key_a: false,
+            key_s: false,
+            key_d: false,
+            key_q: false,
+            key_e: false,
+            key_ctrl: false,
+            key_shift: false,
             ui_wants_input: false,
         }
     }

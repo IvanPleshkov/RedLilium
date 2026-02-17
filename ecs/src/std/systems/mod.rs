@@ -1,7 +1,7 @@
 mod camera;
-mod orbit_camera;
+mod free_fly_camera;
 mod transform;
 
 pub use camera::UpdateCameraMatrices;
-pub use orbit_camera::UpdateOrbitCamera;
+pub use free_fly_camera::UpdateFreeFlyCamera;
 pub use transform::UpdateGlobalTransforms;

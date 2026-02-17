@@ -152,7 +152,7 @@ pub use self::std::hierarchy::{
 };
 pub use self::std::spawn::spawn_scene;
 pub use self::std::systems;
-pub use self::std::systems::{UpdateCameraMatrices, UpdateGlobalTransforms, UpdateOrbitCamera};
+pub use self::std::systems::{UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms};
 
 // Rendering components, resources, and systems (feature-gated)
 #[cfg(feature = "rendering")]
@@ -178,7 +178,7 @@ pub fn register_std_components(world: &mut World) {
 
     // Inspector-enabled, readonly (no Default — constructed with parameters)
     world.register_inspector::<Camera>();
-    world.register_inspector_default::<OrbitCamera>();
+    world.register_inspector_default::<FreeFlyCamera>();
 
     // Hierarchy components (inspector-enabled for clone/remap support)
     world.register_inspector::<Parent>();
@@ -210,7 +210,7 @@ pub fn register_std_components(world: &mut World) {
     world.enable_clone::<Visibility>();
     world.enable_clone::<Name>();
     world.enable_clone::<Camera>();
-    world.enable_clone::<OrbitCamera>();
+    world.enable_clone::<FreeFlyCamera>();
     world.enable_clone::<Parent>();
     world.enable_clone::<Children>();
     world.enable_clone::<DirectionalLight>();

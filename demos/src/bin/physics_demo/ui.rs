@@ -23,6 +23,10 @@ pub struct PhysicsUi {
     pub collider_count: usize,
     pub show_inspector: bool,
 
+    // Camera debug info (written by the app each frame)
+    pub camera_distance: f32,
+    pub camera_speed: f32,
+
     // Signals consumed by the app each frame
     scene_changed: bool,
     reset_requested: bool,
@@ -42,6 +46,8 @@ impl PhysicsUi {
             body_count: 0,
             collider_count: 0,
             show_inspector: false,
+            camera_distance: 0.0,
+            camera_speed: 0.0,
             scene_changed: false,
             reset_requested: false,
         }
@@ -152,10 +158,18 @@ impl EguiApp for PhysicsUi {
                 ui.label(format!("Colliders: {}", self.collider_count));
 
                 ui.separator();
+
+                // ---- Camera debug ----
+                ui.label(format!("Camera dist: {:.1}", self.camera_distance));
+                ui.label(format!("Camera speed: {:.2}", self.camera_speed));
+
+                ui.separator();
                 ui.checkbox(&mut self.show_inspector, "World Inspector");
 
                 ui.separator();
-                ui.small("LMB: Orbit | Scroll: Zoom | H: Toggle UI | Space: Pause");
+                ui.small("Mouse drag: Orbit | Ctrl+drag: Free look");
+                ui.small("WASD: Move | Q/E: Down/Up | Shift: Boost | Scroll: Zoom");
+                ui.small("H: Toggle UI | Space: Pause");
             });
     }
 }

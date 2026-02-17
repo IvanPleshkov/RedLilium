@@ -14,4 +14,4 @@ pub use hierarchy::{
     HierarchyCommands, despawn_recursive, disable, enable, remove_parent, set_parent,
 };
 pub use spawn::spawn_scene;
-pub use systems::{UpdateCameraMatrices, UpdateGlobalTransforms, UpdateOrbitCamera};
+pub use systems::{UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms};
