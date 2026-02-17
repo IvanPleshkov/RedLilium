@@ -38,6 +38,9 @@ console_error_panic_hook = "0.1"
 # Testing
 rstest = "0.26.1"
 
+# Benchmarking
+criterion = { version = "0.5", features = ["html_reports"] }
+
 # GPU backends
 wgpu = "28.0.0"
 ash = "0.38.0"

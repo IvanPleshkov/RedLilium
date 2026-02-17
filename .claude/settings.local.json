@@ -51,7 +51,8 @@
       "WebFetch(domain:bevy-cheatbook.github.io)",
       "WebFetch(domain:ajmmertens.medium.com)",
       "WebFetch(domain:www.flecs.dev)",
-      "WebFetch(domain:taintedcoders.com)"
+      "WebFetch(domain:taintedcoders.com)",
+      "Bash(cargo bench:*)"
     ],
     "deny": [
       "Read(target/**)"

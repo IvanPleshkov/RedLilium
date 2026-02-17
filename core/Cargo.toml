@@ -23,3 +23,10 @@ image = { workspace = true, optional = true }
 
 # Profiling (optional)
 tracy-client = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "core_benchmarks"
+harness = false

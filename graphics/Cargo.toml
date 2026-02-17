@@ -47,3 +47,8 @@ tracy-client = { workspace = true, optional = true }
 rstest.workspace = true
 pollster.workspace = true
 env_logger.workspace = true
+criterion = { workspace = true }
+
+[[bench]]
+name = "graphics_benchmarks"
+harness = false
