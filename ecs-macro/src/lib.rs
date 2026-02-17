@@ -2,12 +2,15 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Data, DeriveInput, Fields, Meta, parse_macro_input};
 
-/// Derive the `Component` trait with automatic inspector UI generation.
+/// Derive the `Component` trait with automatic inspector UI, entity collection,
+/// and entity remapping.
 ///
-/// Generates `component_name()` returning the struct name, and `inspect_ui()`
-/// using the [`Inspect`](redlilium_ecs::inspect::Inspect) wrapper for each field.
+/// Generates:
+/// - `inspect_ui()` using [`Inspect`](redlilium_ecs::inspect::Inspect) wrappers
+/// - `collect_entities()` using [`EntityRef`](redlilium_ecs::map_entities::EntityRef) wrappers
+/// - `remap_entities()` using [`EntityMut`](redlilium_ecs::map_entities::EntityMut) wrappers
 ///
-/// Fields starting with `_` are skipped in the inspector.
+/// Fields starting with `_` are skipped in all generated methods.
 ///
 /// # Example
 ///
@@ -41,10 +44,10 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
         }
     }
 
-    let inspect_body = match &input.data {
+    let (inspect_body, collect_body, remap_body) = match &input.data {
         Data::Struct(data) => match &data.fields {
             Fields::Named(fields) => {
-                let stmts = fields
+                let visible_fields: Vec<_> = fields
                     .named
                     .iter()
                     .filter(|f| {
@@ -52,28 +55,65 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                             .as_ref()
                             .is_some_and(|id| id.to_string().starts_with('_'))
                     })
-                    .map(|f| {
-                        let fname = f.ident.as_ref().unwrap();
-                        let fname_str = fname.to_string();
-                        quote! {
-                            redlilium_ecs::inspect::Inspect(&mut self.#fname).show(#fname_str, ui);
-                        }
-                    });
-                quote! { #(#stmts)* }
+                    .collect();
+
+                let inspect_stmts = visible_fields.iter().map(|f| {
+                    let fname = f.ident.as_ref().unwrap();
+                    let fname_str = fname.to_string();
+                    quote! {
+                        redlilium_ecs::inspect::Inspect(&mut self.#fname).show(#fname_str, ui);
+                    }
+                });
+                let collect_stmts = visible_fields.iter().map(|f| {
+                    let fname = f.ident.as_ref().unwrap();
+                    quote! {
+                        redlilium_ecs::map_entities::EntityRef(&self.#fname).collect_entities(collector);
+                    }
+                });
+                let remap_stmts = visible_fields.iter().map(|f| {
+                    let fname = f.ident.as_ref().unwrap();
+                    quote! {
+                        redlilium_ecs::map_entities::EntityMut(&mut self.#fname).remap_entities(map);
+                    }
+                });
+
+                (
+                    quote! { #(#inspect_stmts)* },
+                    quote! { #(#collect_stmts)* },
+                    quote! { #(#remap_stmts)* },
+                )
             }
             Fields::Unnamed(fields) => {
-                let stmts = fields.unnamed.iter().enumerate().map(|(i, _)| {
-                    let idx_str = i.to_string();
-                    let idx = syn::Index::from(i);
+                let indices: Vec<_> = (0..fields.unnamed.len()).map(syn::Index::from).collect();
+
+                let inspect_stmts = indices.iter().map(|idx| {
+                    let idx_str = idx.index.to_string();
                     quote! {
                         redlilium_ecs::inspect::Inspect(&mut self.#idx).show(#idx_str, ui);
                     }
                 });
-                quote! { #(#stmts)* }
+                let collect_stmts = indices.iter().map(|idx| {
+                    quote! {
+                        redlilium_ecs::map_entities::EntityRef(&self.#idx).collect_entities(collector);
+                    }
+                });
+                let remap_stmts = indices.iter().map(|idx| {
+                    quote! {
+                        redlilium_ecs::map_entities::EntityMut(&mut self.#idx).remap_entities(map);
+                    }
+                });
+
+                (
+                    quote! { #(#inspect_stmts)* },
+                    quote! { #(#collect_stmts)* },
+                    quote! { #(#remap_stmts)* },
+                )
             }
-            Fields::Unit => {
-                quote! { let _ = ui; }
-            }
+            Fields::Unit => (
+                quote! { let _ = ui; },
+                quote! { let _ = collector; },
+                quote! { let _ = map; },
+            ),
         },
         _ => {
             return syn::Error::new_spanned(
@@ -108,6 +148,18 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                 #[allow(unused_imports)]
                 use redlilium_ecs::inspect::InspectFallback as _;
                 #inspect_body
+            }
+
+            fn collect_entities(&self, collector: &mut Vec<redlilium_ecs::Entity>) {
+                #[allow(unused_imports)]
+                use redlilium_ecs::map_entities::EntityRefFallback as _;
+                #collect_body
+            }
+
+            fn remap_entities(&mut self, map: &mut dyn FnMut(redlilium_ecs::Entity) -> redlilium_ecs::Entity) {
+                #[allow(unused_imports)]
+                use redlilium_ecs::map_entities::EntityMutFallback as _;
+                #remap_body
             }
 
             #register_required_body

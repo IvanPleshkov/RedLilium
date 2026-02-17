@@ -56,6 +56,7 @@ mod io_runtime;
 mod lock_request;
 mod main_thread_dispatcher;
 mod main_thread_resource;
+pub mod map_entities;
 mod observer;
 mod par_for_each;
 #[cfg(any(
@@ -151,8 +152,9 @@ pub use systems::{UpdateCameraMatrices, UpdateGlobalTransforms};
 
 /// Register all standard component types with the world.
 ///
-/// Registers storage, inspector metadata, and (where applicable) default
-/// insertion support. Call this before running systems or using the inspector.
+/// Registers storage, inspector metadata, clone support, and (where
+/// applicable) default insertion support. Call this before running
+/// systems or using the inspector.
 pub fn register_std_components(world: &mut World) {
     // Inspector-enabled components (support "Add Component" via Default)
     world.register_inspector_default::<Transform>();
@@ -166,9 +168,9 @@ pub fn register_std_components(world: &mut World) {
     // Inspector-enabled, readonly (no Default — constructed with parameters)
     world.register_inspector::<Camera>();
 
-    // Hierarchy components (storage only — managed by hierarchy functions)
-    world.register_component::<Parent>();
-    world.register_component::<Children>();
+    // Hierarchy components (inspector-enabled for clone/remap support)
+    world.register_inspector::<Parent>();
+    world.register_inspector_default::<Children>();
 
     // Disabled/InheritedDisabled — hooks keep `disabled_entities` mirror in sync
     world.register_component::<Disabled>();
@@ -190,17 +192,33 @@ pub fn register_std_components(world: &mut World) {
     // Required components are now declared via #[require(...)] on the component
     // structs and registered automatically by register_inspector / register_inspector_default.
 
+    // Enable clone for all standard Clone components (prefab support)
+    world.enable_clone::<Transform>();
+    world.enable_clone::<GlobalTransform>();
+    world.enable_clone::<Visibility>();
+    world.enable_clone::<Name>();
+    world.enable_clone::<Camera>();
+    world.enable_clone::<Parent>();
+    world.enable_clone::<Children>();
+    world.enable_clone::<DirectionalLight>();
+    world.enable_clone::<PointLight>();
+    world.enable_clone::<SpotLight>();
+
     // Physics descriptor + handle components (feature-gated)
     #[cfg(any(feature = "physics-3d", feature = "physics-3d-f32"))]
     {
         world.register_inspector_default::<physics::components3d::RigidBody3D>();
         world.register_inspector_default::<physics::components3d::Collider3D>();
         world.register_component::<physics::physics3d::RigidBody3DHandle>();
+        world.enable_clone::<physics::components3d::RigidBody3D>();
+        world.enable_clone::<physics::components3d::Collider3D>();
     }
     #[cfg(any(feature = "physics-2d", feature = "physics-2d-f32"))]
     {
         world.register_inspector_default::<physics::components2d::RigidBody2D>();
         world.register_inspector_default::<physics::components2d::Collider2D>();
         world.register_component::<physics::physics2d::RigidBody2DHandle>();
+        world.enable_clone::<physics::components2d::RigidBody2D>();
+        world.enable_clone::<physics::components2d::Collider2D>();
     }
 }

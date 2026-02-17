@@ -54,6 +54,12 @@ struct InspectorEntry {
     remove_fn: fn(&mut World, Entity) -> bool,
     /// Insert a default instance on an entity (None if T doesn't impl Default).
     insert_default_fn: Option<fn(&mut World, Entity)>,
+    /// Collect all entity references from this component on an entity.
+    collect_entities_fn: fn(&World, Entity, &mut Vec<Entity>),
+    /// Remap all entity references in this component on an entity.
+    remap_entities_fn: fn(&mut World, Entity, &mut dyn FnMut(Entity) -> Entity),
+    /// Clone this component from src entity to dst entity. None if T is not Clone.
+    clone_fn: Option<fn(&mut World, Entity, Entity) -> bool>,
 }
 
 /// An independent ECS world containing entities, components, and resources.
@@ -235,6 +241,17 @@ impl World {
                 },
                 remove_fn: |world, entity| world.remove::<T>(entity).is_some(),
                 insert_default_fn: None,
+                collect_entities_fn: |world, entity, collector| {
+                    if let Some(comp) = world.get::<T>(entity) {
+                        comp.collect_entities(collector);
+                    }
+                },
+                remap_entities_fn: |world, entity, map| {
+                    if let Some(comp) = world.get_mut::<T>(entity) {
+                        comp.remap_entities(map);
+                    }
+                },
+                clone_fn: None,
             },
         );
     }
@@ -261,6 +278,17 @@ impl World {
                 insert_default_fn: Some(|world, entity| {
                     let _ = world.insert(entity, T::default());
                 }),
+                collect_entities_fn: |world, entity, collector| {
+                    if let Some(comp) = world.get::<T>(entity) {
+                        comp.collect_entities(collector);
+                    }
+                },
+                remap_entities_fn: |world, entity, map| {
+                    if let Some(comp) = world.get_mut::<T>(entity) {
+                        comp.remap_entities(map);
+                    }
+                },
+                clone_fn: None,
             },
         );
     }
@@ -307,6 +335,36 @@ impl World {
         });
 
         self
+    }
+
+    /// Enables type-erased cloning for a component type.
+    ///
+    /// After calling this, the component will be included when using
+    /// [`clone_entity`](World::clone_entity) or
+    /// [`clone_entity_tree`](World::clone_entity_tree).
+    ///
+    /// The component must have been previously registered via
+    /// [`register_inspector`](World::register_inspector) or
+    /// [`register_inspector_default`](World::register_inspector_default).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// world.register_inspector_default::<Transform>();
+    /// world.enable_clone::<Transform>();
+    /// ```
+    pub fn enable_clone<T: Component + Clone>(&mut self) {
+        if let Some(entry) = self.inspector_entries.get_mut(T::NAME) {
+            entry.clone_fn = Some(|world, src, dst| {
+                let cloned = world.get::<T>(src).cloned();
+                if let Some(val) = cloned {
+                    let _ = world.insert(dst, val);
+                    true
+                } else {
+                    false
+                }
+            });
+        }
     }
 
     /// Inserts a component on an entity.
@@ -1409,6 +1467,166 @@ impl World {
         if let Some(f) = insert_fn {
             f(self, entity);
         }
+    }
+
+    /// Collects all entity references from a component by name on an entity.
+    ///
+    /// Appends referenced entities to `collector`. Does nothing if the
+    /// component name is unknown or the entity doesn't have it.
+    pub fn collect_entities_by_name(
+        &self,
+        entity: Entity,
+        name: &str,
+        collector: &mut Vec<Entity>,
+    ) {
+        if let Some(entry) = self.inspector_entries.get(name) {
+            (entry.collect_entities_fn)(self, entity, collector);
+        }
+    }
+
+    /// Remaps all entity references in a component by name on an entity.
+    ///
+    /// Does nothing if the component name is unknown or the entity doesn't have it.
+    pub fn remap_entities_by_name(
+        &mut self,
+        entity: Entity,
+        name: &str,
+        map: &mut dyn FnMut(Entity) -> Entity,
+    ) {
+        let remap_fn = self
+            .inspector_entries
+            .get(name)
+            .map(|e| e.remap_entities_fn);
+        if let Some(f) = remap_fn {
+            f(self, entity, map);
+        }
+    }
+
+    /// Collects all entity references from all registered components on an entity.
+    ///
+    /// Iterates every inspector-registered component type and appends any
+    /// entity references found to `collector`.
+    pub fn collect_all_entities(&self, entity: Entity, collector: &mut Vec<Entity>) {
+        for entry in self.inspector_entries.values() {
+            (entry.collect_entities_fn)(self, entity, collector);
+        }
+    }
+
+    /// Remaps all entity references in all registered components on an entity.
+    ///
+    /// Iterates every inspector-registered component type and remaps any
+    /// entity references found using the provided mapping function.
+    pub fn remap_all_entities(&mut self, entity: Entity, map: &mut dyn FnMut(Entity) -> Entity) {
+        let fns: Vec<_> = self
+            .inspector_entries
+            .values()
+            .map(|e| e.remap_entities_fn)
+            .collect();
+        for f in fns {
+            f(self, entity, map);
+        }
+    }
+
+    /// Clones all clone-enabled components from one entity to a new entity.
+    ///
+    /// Spawns a new entity and copies every component that was registered
+    /// with [`enable_clone`](World::enable_clone). Components without clone
+    /// support are silently skipped.
+    ///
+    /// Does **not** traverse the hierarchy or remap entity references.
+    /// For hierarchy-aware cloning, use [`clone_entity_tree`](World::clone_entity_tree).
+    ///
+    /// Returns `None` if the source entity is not alive.
+    pub fn clone_entity(&mut self, src: Entity) -> Option<Entity> {
+        if !self.is_alive(src) {
+            return None;
+        }
+        let dst = self.spawn();
+
+        let clone_fns: Vec<_> = self
+            .inspector_entries
+            .values()
+            .filter_map(|e| {
+                if (e.has_fn)(self, src) {
+                    e.clone_fn
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for f in clone_fns {
+            f(self, src, dst);
+        }
+
+        Some(dst)
+    }
+
+    /// Clones an entity subtree, remapping all internal entity references.
+    ///
+    /// Performs a breadth-first walk from `root` through [`Children`](crate::Children)
+    /// components, clones all clone-enabled components on every entity in the
+    /// subtree, then remaps all entity references (via [`remap_all_entities`])
+    /// so that internal references point to the new cloned entities.
+    ///
+    /// Entity references that point **outside** the subtree are left unchanged.
+    ///
+    /// Returns a mapping from old entity IDs to new entity IDs.
+    /// The cloned root is `mapping[&root]`.
+    ///
+    /// Returns an empty map if `root` is not alive.
+    pub fn clone_entity_tree(&mut self, root: Entity) -> HashMap<Entity, Entity> {
+        if !self.is_alive(root) {
+            return HashMap::new();
+        }
+
+        // 1. Collect all entities in subtree via Children (BFS)
+        let mut old_entities = vec![root];
+        let mut i = 0;
+        while i < old_entities.len() {
+            let entity = old_entities[i];
+            if let Some(children) = self.get::<crate::Children>(entity) {
+                old_entities.extend(children.0.iter().copied());
+            }
+            i += 1;
+        }
+
+        // 2. Spawn new entities and build old→new mapping
+        let mut mapping = HashMap::with_capacity(old_entities.len());
+        for &old in &old_entities {
+            let new = self.spawn();
+            mapping.insert(old, new);
+        }
+
+        // 3. Clone all components from each old entity to corresponding new entity
+        let clone_fns: Vec<_> = self
+            .inspector_entries
+            .values()
+            .filter_map(|e| e.clone_fn.map(|clone| (e.has_fn, clone)))
+            .collect();
+
+        for (&old, &new) in &mapping {
+            for &(has_fn, clone_fn) in &clone_fns {
+                if has_fn(self, old) {
+                    clone_fn(self, old, new);
+                }
+            }
+        }
+
+        // 4. Remap all entity references in new entities
+        let remap_fns: Vec<_> = self
+            .inspector_entries
+            .values()
+            .map(|e| e.remap_entities_fn)
+            .collect();
+
+        for &new in mapping.values() {
+            for &f in &remap_fns {
+                f(self, new, &mut |e| *mapping.get(&e).unwrap_or(&e));
+            }
+        }
+
+        mapping
     }
 
     // ---- Resource management ----
@@ -2719,5 +2937,296 @@ mod tests {
 
         assert_eq!(world.get::<ReqB>(entity), Some(&ReqB(0)));
         assert_eq!(world.get::<ReqC>(entity), Some(&ReqC(0)));
+    }
+
+    // --- Entity collect/remap tests ---
+
+    #[test]
+    fn collect_entities_from_parent() {
+        use crate::components::{Children, Parent};
+
+        let mut world = World::new();
+        world.register_inspector::<Parent>();
+        world.register_inspector_default::<Children>();
+
+        let parent = world.spawn();
+        let child = world.spawn();
+        world.insert(child, Parent(parent)).unwrap();
+
+        let mut collected = Vec::new();
+        world.collect_entities_by_name(child, "Parent", &mut collected);
+        assert_eq!(collected, vec![parent]);
+    }
+
+    #[test]
+    fn collect_entities_from_children() {
+        use crate::components::{Children, Parent};
+
+        let mut world = World::new();
+        world.register_inspector::<Parent>();
+        world.register_inspector_default::<Children>();
+
+        let parent = world.spawn();
+        let c1 = world.spawn();
+        let c2 = world.spawn();
+        world.insert(parent, Children(vec![c1, c2])).unwrap();
+
+        let mut collected = Vec::new();
+        world.collect_entities_by_name(parent, "Children", &mut collected);
+        assert_eq!(collected, vec![c1, c2]);
+    }
+
+    #[test]
+    fn remap_entities_in_parent() {
+        use crate::components::{Children, Parent};
+
+        let mut world = World::new();
+        world.register_inspector::<Parent>();
+        world.register_inspector_default::<Children>();
+
+        let old_parent = world.spawn();
+        let new_parent = world.spawn();
+        let child = world.spawn();
+        world.insert(child, Parent(old_parent)).unwrap();
+
+        world.remap_entities_by_name(child, "Parent", &mut |e| {
+            if e == old_parent { new_parent } else { e }
+        });
+
+        assert_eq!(world.get::<Parent>(child), Some(&Parent(new_parent)));
+    }
+
+    #[test]
+    fn remap_entities_in_children() {
+        use crate::components::{Children, Parent};
+
+        let mut world = World::new();
+        world.register_inspector::<Parent>();
+        world.register_inspector_default::<Children>();
+
+        let parent = world.spawn();
+        let old_c1 = world.spawn();
+        let old_c2 = world.spawn();
+        let new_c1 = world.spawn();
+        let new_c2 = world.spawn();
+        world
+            .insert(parent, Children(vec![old_c1, old_c2]))
+            .unwrap();
+
+        world.remap_entities_by_name(parent, "Children", &mut |e| {
+            if e == old_c1 {
+                new_c1
+            } else if e == old_c2 {
+                new_c2
+            } else {
+                e
+            }
+        });
+
+        assert_eq!(
+            world.get::<Children>(parent),
+            Some(&Children(vec![new_c1, new_c2]))
+        );
+    }
+
+    #[test]
+    fn collect_all_entities_gathers_from_all_components() {
+        use crate::components::{Children, Parent};
+
+        let mut world = World::new();
+        world.register_inspector::<Parent>();
+        world.register_inspector_default::<Children>();
+
+        let parent = world.spawn();
+        let c1 = world.spawn();
+        let c2 = world.spawn();
+        // Entity has both Parent (pointing at parent) and Children (containing c1, c2)
+        let entity = world.spawn();
+        world.insert(entity, Parent(parent)).unwrap();
+        world.insert(entity, Children(vec![c1, c2])).unwrap();
+
+        let mut collected = Vec::new();
+        world.collect_all_entities(entity, &mut collected);
+        assert_eq!(collected.len(), 3);
+        assert!(collected.contains(&parent));
+        assert!(collected.contains(&c1));
+        assert!(collected.contains(&c2));
+    }
+
+    #[test]
+    fn collect_noop_for_non_entity_component() {
+        let mut world = World::new();
+        world.register_inspector_default::<crate::components::Transform>();
+
+        let entity = world.spawn();
+        world
+            .insert(entity, crate::components::Transform::IDENTITY)
+            .unwrap();
+
+        let mut collected = Vec::new();
+        world.collect_entities_by_name(entity, "Transform", &mut collected);
+        assert!(collected.is_empty());
+    }
+
+    // --- Clone entity tests ---
+
+    #[test]
+    fn clone_entity_copies_components() {
+        let mut world = World::new();
+        crate::register_std_components(&mut world);
+
+        let src = world.spawn();
+        let t = crate::components::Transform::from_translation(redlilium_core::math::Vec3::new(
+            1.0, 2.0, 3.0,
+        ));
+        world.insert(src, t).unwrap();
+        world
+            .insert(src, crate::components::Name::new("original"))
+            .unwrap();
+
+        let dst = world.clone_entity(src).unwrap();
+
+        assert_ne!(src, dst);
+        assert_eq!(world.get::<crate::components::Transform>(dst), Some(&t));
+        assert_eq!(
+            world
+                .get::<crate::components::Name>(dst)
+                .map(|n| n.as_str()),
+            Some("original"),
+        );
+    }
+
+    #[test]
+    fn clone_entity_dead_source_returns_none() {
+        let mut world = World::new();
+        crate::register_std_components(&mut world);
+
+        let src = world.spawn();
+        world.despawn(src);
+
+        assert!(world.clone_entity(src).is_none());
+    }
+
+    #[test]
+    fn clone_entity_tree_flat() {
+        let mut world = World::new();
+        crate::register_std_components(&mut world);
+
+        let parent = world.spawn();
+        world
+            .insert(parent, crate::components::Name::new("parent"))
+            .unwrap();
+        world
+            .insert(parent, crate::components::Transform::IDENTITY)
+            .unwrap();
+
+        let child_a = world.spawn();
+        world
+            .insert(child_a, crate::components::Name::new("child_a"))
+            .unwrap();
+        crate::hierarchy::set_parent(&mut world, child_a, parent);
+
+        let child_b = world.spawn();
+        world
+            .insert(child_b, crate::components::Name::new("child_b"))
+            .unwrap();
+        crate::hierarchy::set_parent(&mut world, child_b, parent);
+
+        // 3 original + 3 cloned = 6
+        let entity_count_before = world.entity_count();
+        let mapping = world.clone_entity_tree(parent);
+        assert_eq!(mapping.len(), 3);
+        assert_eq!(world.entity_count(), entity_count_before + 3);
+
+        let new_parent = mapping[&parent];
+        let new_child_a = mapping[&child_a];
+        let new_child_b = mapping[&child_b];
+
+        // Verify component data cloned
+        assert_eq!(
+            world
+                .get::<crate::components::Name>(new_parent)
+                .map(|n| n.as_str()),
+            Some("parent"),
+        );
+        assert_eq!(
+            world
+                .get::<crate::components::Name>(new_child_a)
+                .map(|n| n.as_str()),
+            Some("child_a"),
+        );
+
+        // Verify hierarchy remapped
+        let children = world.get::<crate::Children>(new_parent).unwrap();
+        assert_eq!(children.0, vec![new_child_a, new_child_b]);
+
+        let parent_of_a = world.get::<crate::Parent>(new_child_a).unwrap();
+        assert_eq!(parent_of_a.0, new_parent);
+
+        let parent_of_b = world.get::<crate::Parent>(new_child_b).unwrap();
+        assert_eq!(parent_of_b.0, new_parent);
+
+        // Cloned root should have no parent (original didn't)
+        assert!(world.get::<crate::Parent>(new_parent).is_none());
+    }
+
+    #[test]
+    fn clone_entity_tree_deep() {
+        let mut world = World::new();
+        crate::register_std_components(&mut world);
+
+        // root -> mid -> leaf
+        let root = world.spawn();
+        world
+            .insert(root, crate::components::Name::new("root"))
+            .unwrap();
+
+        let mid = world.spawn();
+        world
+            .insert(mid, crate::components::Name::new("mid"))
+            .unwrap();
+        crate::hierarchy::set_parent(&mut world, mid, root);
+
+        let leaf = world.spawn();
+        world
+            .insert(leaf, crate::components::Name::new("leaf"))
+            .unwrap();
+        crate::hierarchy::set_parent(&mut world, leaf, mid);
+
+        let mapping = world.clone_entity_tree(root);
+        assert_eq!(mapping.len(), 3);
+
+        let new_root = mapping[&root];
+        let new_mid = mapping[&mid];
+        let new_leaf = mapping[&leaf];
+
+        // root -> mid
+        let root_children = world.get::<crate::Children>(new_root).unwrap();
+        assert_eq!(root_children.0, vec![new_mid]);
+
+        // mid -> leaf
+        let mid_children = world.get::<crate::Children>(new_mid).unwrap();
+        assert_eq!(mid_children.0, vec![new_leaf]);
+
+        // leaf has parent = mid
+        assert_eq!(world.get::<crate::Parent>(new_leaf).unwrap().0, new_mid);
+
+        // mid has parent = root
+        assert_eq!(world.get::<crate::Parent>(new_mid).unwrap().0, new_root);
+
+        // root has no parent
+        assert!(world.get::<crate::Parent>(new_root).is_none());
+    }
+
+    #[test]
+    fn clone_entity_tree_dead_root_returns_empty() {
+        let mut world = World::new();
+        crate::register_std_components(&mut world);
+
+        let root = world.spawn();
+        world.despawn(root);
+
+        let mapping = world.clone_entity_tree(root);
+        assert!(mapping.is_empty());
     }
 }

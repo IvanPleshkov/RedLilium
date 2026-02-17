@@ -53,6 +53,24 @@ pub trait Component: Send + Sync + 'static {
     /// [`Inspect::show`](crate::inspect::Inspect) for each field.
     fn inspect_ui(&mut self, ui: &mut egui::Ui);
 
+    /// Collect all [`Entity`](crate::Entity) references stored in this component.
+    ///
+    /// The derive macro generates this by wrapping each field in
+    /// [`EntityRef`](crate::map_entities::EntityRef). Fields of type `Entity`,
+    /// `Vec<Entity>`, and `Option<Entity>` are collected; all others are skipped.
+    ///
+    /// The default implementation is a no-op (no entity references).
+    fn collect_entities(&self, _collector: &mut Vec<crate::Entity>) {}
+
+    /// Remap all [`Entity`](crate::Entity) references stored in this component.
+    ///
+    /// The derive macro generates this by wrapping each field in
+    /// [`EntityMut`](crate::map_entities::EntityMut). Fields of type `Entity`,
+    /// `Vec<Entity>`, and `Option<Entity>` are remapped; all others are skipped.
+    ///
+    /// The default implementation is a no-op (no entity references).
+    fn remap_entities(&mut self, _map: &mut dyn FnMut(crate::Entity) -> crate::Entity) {}
+
     /// Register required components for this type.
     ///
     /// Called automatically by [`World::register_inspector`](crate::World::register_inspector)

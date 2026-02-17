@@ -15,7 +15,7 @@ pub struct Parent(pub Entity);
 /// Automatically managed by [`set_parent`](crate::hierarchy::set_parent)
 /// and [`remove_parent`](crate::hierarchy::remove_parent).
 /// Do not modify directly — use the hierarchy functions instead.
-#[derive(Debug, Clone, Default, crate::Component)]
+#[derive(Debug, Clone, Default, PartialEq, crate::Component)]
 pub struct Children(pub Vec<Entity>);
 
 impl Children {
