@@ -24,3 +24,8 @@ demos/web/pkg/
 
 # Logs
 *.log
+
+# mdbook generated output
+/book/book/
+/book/redlilium-book.html
+/redlilium-book.zip

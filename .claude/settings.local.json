@@ -52,7 +52,12 @@
       "WebFetch(domain:ajmmertens.medium.com)",
       "WebFetch(domain:www.flecs.dev)",
       "WebFetch(domain:taintedcoders.com)",
-      "Bash(cargo bench:*)"
+      "Bash(cargo bench:*)",
+      "Bash(cargo install:*)",
+      "Bash(mdbook init:*)",
+      "Bash(mdbook build:*)",
+      "Bash(monolith:*)",
+      "Bash(zip -r:*)"
     ],
     "deny": [
       "Read(target/**)"
