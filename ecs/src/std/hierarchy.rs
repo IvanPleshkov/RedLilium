@@ -20,7 +20,7 @@
 
 use crate::{CommandBuffer, CommandCollector, Entity, World};
 
-use crate::components::{Children, Disabled, InheritedDisabled, Parent};
+use super::components::{Children, Disabled, InheritedDisabled, Parent};
 
 /// Sets `entity` as a child of `parent`.
 ///

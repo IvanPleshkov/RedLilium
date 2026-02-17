@@ -1,7 +1,7 @@
 use crate::{Ref, RefMut, SystemContext};
 use redlilium_core::math::Mat4;
 
-use crate::components::{Children, GlobalTransform, Parent, Transform};
+use crate::std::components::{Children, GlobalTransform, Parent, Transform};
 
 /// System that updates all [`GlobalTransform`] components from local [`Transform`],
 /// respecting the parent-child hierarchy.
@@ -87,7 +87,7 @@ fn propagate_children(
 mod tests {
     use super::*;
     use crate::World;
-    use crate::hierarchy::set_parent;
+    use crate::std::hierarchy::set_parent;
     use redlilium_core::math::{Vec3, quat_from_rotation_y};
 
     /// Helper: register hierarchy + transform components so tests don't panic.

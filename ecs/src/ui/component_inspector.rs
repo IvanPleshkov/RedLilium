@@ -58,9 +58,9 @@ pub fn show_component_inspector(
             let mut enabled = !is_disabled;
             if ui.checkbox(&mut enabled, "Enabled").changed() {
                 if enabled {
-                    crate::hierarchy::enable(world, selected);
+                    crate::std::hierarchy::enable(world, selected);
                 } else {
-                    crate::hierarchy::disable(world, selected);
+                    crate::std::hierarchy::disable(world, selected);
                 }
             }
 

@@ -1,7 +1,7 @@
 use redlilium_core::math::{Vec3, quat_from_rotation_y};
 use redlilium_ecs::Component;
 
-use redlilium_ecs::components::*;
+use redlilium_ecs::std::components::*;
 
 // ---------------------------------------------------------------------------
 // Component names

@@ -1,8 +1,8 @@
 use crate::{Entity, World};
 use redlilium_core::scene::{CameraProjection, Scene, SceneNode};
 
-use crate::components::{Camera, GlobalTransform, Name, Transform, Visibility};
-use crate::hierarchy::set_parent;
+use super::components::{Camera, GlobalTransform, Name, Transform, Visibility};
+use super::hierarchy::set_parent;
 
 /// Spawns all entities from a loaded [`Scene`] into the ECS [`World`].
 ///

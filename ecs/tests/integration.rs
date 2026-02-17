@@ -4,8 +4,8 @@ use redlilium_ecs::{
     ComputePool, EcsRunner, IoRuntime, SystemsContainer, World, run_system_blocking,
 };
 
-use redlilium_ecs::components::*;
-use redlilium_ecs::systems::*;
+use redlilium_ecs::std::components::*;
+use redlilium_ecs::std::systems::*;
 use redlilium_ecs::{register_std_components, spawn_scene};
 
 // ---------------------------------------------------------------------------

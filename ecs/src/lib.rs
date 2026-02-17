@@ -42,7 +42,6 @@ mod bundle;
 mod command_collector;
 mod commands;
 pub mod component;
-pub mod components;
 mod compute;
 mod compute_context;
 mod condition;
@@ -50,7 +49,6 @@ pub mod diagnostics;
 mod entity;
 mod events;
 mod function_system;
-pub mod hierarchy;
 pub mod inspect;
 mod io_runtime;
 mod lock_request;
@@ -74,12 +72,12 @@ mod resource;
 mod runner;
 mod schedule;
 mod sparse_set;
-mod spawn;
 mod state;
+#[allow(clippy::module_inception)]
+pub mod std;
 mod system;
 pub mod system_context;
 pub(crate) mod system_results_store;
-pub mod systems;
 mod systems_container;
 #[cfg(feature = "inspector")]
 pub mod ui;
@@ -144,13 +142,15 @@ pub use systems_container::{CycleError, Edge, SystemSet, SystemsContainer};
 #[cfg(not(target_arch = "wasm32"))]
 pub use runner::EcsRunnerMultiThread;
 
-// Standard components & systems (merged from ecs-std)
-pub use components::*;
-pub use hierarchy::{
+// Standard components & systems
+pub use self::std::components;
+pub use self::std::components::*;
+pub use self::std::hierarchy::{
     HierarchyCommands, despawn_recursive, disable, enable, remove_parent, set_parent,
 };
-pub use spawn::spawn_scene;
-pub use systems::{UpdateCameraMatrices, UpdateGlobalTransforms};
+pub use self::std::spawn::spawn_scene;
+pub use self::std::systems;
+pub use self::std::systems::{UpdateCameraMatrices, UpdateGlobalTransforms};
 
 /// Register all standard component types with the world.
 ///
@@ -189,7 +189,7 @@ pub fn register_std_components(world: &mut World) {
             world.disabled_entities.set(idx, false);
         }
     });
-    world.register_component::<components::InheritedDisabled>();
+    world.register_component::<self::std::components::InheritedDisabled>();
 
     // Required components are now declared via #[require(...)] on the component
     // structs and registered automatically by register_inspector / register_inspector_default.

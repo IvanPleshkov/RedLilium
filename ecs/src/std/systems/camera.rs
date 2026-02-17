@@ -1,6 +1,6 @@
 use crate::{Ref, RefMut, SystemContext};
 
-use crate::components::{Camera, GlobalTransform};
+use crate::std::components::{Camera, GlobalTransform};
 
 /// System that updates view matrices for all [`Camera`] components.
 ///
@@ -41,7 +41,7 @@ fn update_camera_matrices(globals: &Ref<GlobalTransform>, cameras: &mut RefMut<C
 mod tests {
     use super::*;
     use crate::World;
-    use crate::components::Transform;
+    use crate::std::components::Transform;
     use redlilium_core::math::{Mat4, Vec3, mat4_from_translation};
 
     #[test]

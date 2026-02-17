@@ -2,7 +2,7 @@
 
 use crate::{Entity, World};
 
-use crate::components::{Children, Name, Parent};
+use crate::std::components::{Children, Name, Parent};
 
 use super::InspectorState;
 

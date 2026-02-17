@@ -7,7 +7,6 @@ use crate::access_set::AccessInfo;
 use crate::bundle::Bundle;
 use crate::commands::CommandBuffer;
 use crate::component::Component;
-use crate::components::Disabled;
 use crate::entity::{Entity, EntityAllocator};
 use crate::events::Events;
 use crate::main_thread_resource::MainThreadResources;
@@ -16,6 +15,7 @@ use crate::query::{AddedFilter, ChangedFilter, ContainsChecker, RemovedFilter};
 use crate::reactive::Triggers;
 use crate::resource::{Resource, ResourceRef, ResourceRefMut, Resources};
 use crate::sparse_set::{ComponentHookFn, ComponentStorage, LockGuard, Ref, RefMut};
+use crate::std::components::Disabled;
 use std::sync::{Arc, RwLock};
 
 /// Error returned when a component type has not been registered in the [`World`].
@@ -3005,7 +3005,7 @@ mod tests {
 
     #[test]
     fn collect_entities_from_parent() {
-        use crate::components::{Children, Parent};
+        use crate::std::components::{Children, Parent};
 
         let mut world = World::new();
         world.register_inspector::<Parent>();
@@ -3022,7 +3022,7 @@ mod tests {
 
     #[test]
     fn collect_entities_from_children() {
-        use crate::components::{Children, Parent};
+        use crate::std::components::{Children, Parent};
 
         let mut world = World::new();
         world.register_inspector::<Parent>();
@@ -3040,7 +3040,7 @@ mod tests {
 
     #[test]
     fn remap_entities_in_parent() {
-        use crate::components::{Children, Parent};
+        use crate::std::components::{Children, Parent};
 
         let mut world = World::new();
         world.register_inspector::<Parent>();
@@ -3060,7 +3060,7 @@ mod tests {
 
     #[test]
     fn remap_entities_in_children() {
-        use crate::components::{Children, Parent};
+        use crate::std::components::{Children, Parent};
 
         let mut world = World::new();
         world.register_inspector::<Parent>();
@@ -3093,7 +3093,7 @@ mod tests {
 
     #[test]
     fn collect_all_entities_gathers_from_all_components() {
-        use crate::components::{Children, Parent};
+        use crate::std::components::{Children, Parent};
 
         let mut world = World::new();
         world.register_inspector::<Parent>();
@@ -3118,11 +3118,11 @@ mod tests {
     #[test]
     fn collect_noop_for_non_entity_component() {
         let mut world = World::new();
-        world.register_inspector_default::<crate::components::Transform>();
+        world.register_inspector_default::<crate::std::components::Transform>();
 
         let entity = world.spawn();
         world
-            .insert(entity, crate::components::Transform::IDENTITY)
+            .insert(entity, crate::std::components::Transform::IDENTITY)
             .unwrap();
 
         let mut collected = Vec::new();
@@ -3138,21 +3138,24 @@ mod tests {
         crate::register_std_components(&mut world);
 
         let src = world.spawn();
-        let t = crate::components::Transform::from_translation(redlilium_core::math::Vec3::new(
-            1.0, 2.0, 3.0,
-        ));
+        let t = crate::std::components::Transform::from_translation(
+            redlilium_core::math::Vec3::new(1.0, 2.0, 3.0),
+        );
         world.insert(src, t).unwrap();
         world
-            .insert(src, crate::components::Name::new("original"))
+            .insert(src, crate::std::components::Name::new("original"))
             .unwrap();
 
         let dst = world.clone_entity(src).unwrap();
 
         assert_ne!(src, dst);
-        assert_eq!(world.get::<crate::components::Transform>(dst), Some(&t));
+        assert_eq!(
+            world.get::<crate::std::components::Transform>(dst),
+            Some(&t)
+        );
         assert_eq!(
             world
-                .get::<crate::components::Name>(dst)
+                .get::<crate::std::components::Name>(dst)
                 .map(|n| n.as_str()),
             Some("original"),
         );
@@ -3176,23 +3179,23 @@ mod tests {
 
         let parent = world.spawn();
         world
-            .insert(parent, crate::components::Name::new("parent"))
+            .insert(parent, crate::std::components::Name::new("parent"))
             .unwrap();
         world
-            .insert(parent, crate::components::Transform::IDENTITY)
+            .insert(parent, crate::std::components::Transform::IDENTITY)
             .unwrap();
 
         let child_a = world.spawn();
         world
-            .insert(child_a, crate::components::Name::new("child_a"))
+            .insert(child_a, crate::std::components::Name::new("child_a"))
             .unwrap();
-        crate::hierarchy::set_parent(&mut world, child_a, parent);
+        crate::std::hierarchy::set_parent(&mut world, child_a, parent);
 
         let child_b = world.spawn();
         world
-            .insert(child_b, crate::components::Name::new("child_b"))
+            .insert(child_b, crate::std::components::Name::new("child_b"))
             .unwrap();
-        crate::hierarchy::set_parent(&mut world, child_b, parent);
+        crate::std::hierarchy::set_parent(&mut world, child_b, parent);
 
         // 3 original + 3 cloned = 6
         let entity_count_before = world.entity_count();
@@ -3207,13 +3210,13 @@ mod tests {
         // Verify component data cloned
         assert_eq!(
             world
-                .get::<crate::components::Name>(new_parent)
+                .get::<crate::std::components::Name>(new_parent)
                 .map(|n| n.as_str()),
             Some("parent"),
         );
         assert_eq!(
             world
-                .get::<crate::components::Name>(new_child_a)
+                .get::<crate::std::components::Name>(new_child_a)
                 .map(|n| n.as_str()),
             Some("child_a"),
         );
@@ -3240,20 +3243,20 @@ mod tests {
         // root -> mid -> leaf
         let root = world.spawn();
         world
-            .insert(root, crate::components::Name::new("root"))
+            .insert(root, crate::std::components::Name::new("root"))
             .unwrap();
 
         let mid = world.spawn();
         world
-            .insert(mid, crate::components::Name::new("mid"))
+            .insert(mid, crate::std::components::Name::new("mid"))
             .unwrap();
-        crate::hierarchy::set_parent(&mut world, mid, root);
+        crate::std::hierarchy::set_parent(&mut world, mid, root);
 
         let leaf = world.spawn();
         world
-            .insert(leaf, crate::components::Name::new("leaf"))
+            .insert(leaf, crate::std::components::Name::new("leaf"))
             .unwrap();
-        crate::hierarchy::set_parent(&mut world, leaf, mid);
+        crate::std::hierarchy::set_parent(&mut world, leaf, mid);
 
         let mapping = world.clone_entity_tree(root);
         assert_eq!(mapping.len(), 3);
@@ -3300,12 +3303,12 @@ mod tests {
         crate::register_std_components(&mut world);
 
         let src = world.spawn();
-        let t = crate::components::Transform::from_translation(redlilium_core::math::Vec3::new(
-            5.0, 6.0, 7.0,
-        ));
+        let t = crate::std::components::Transform::from_translation(
+            redlilium_core::math::Vec3::new(5.0, 6.0, 7.0),
+        );
         world.insert(src, t).unwrap();
         world
-            .insert(src, crate::components::Name::new("prefab_src"))
+            .insert(src, crate::std::components::Name::new("prefab_src"))
             .unwrap();
 
         let prefab = world.extract_prefab(src);
@@ -3316,10 +3319,13 @@ mod tests {
 
         let dst = spawned[0];
         assert_ne!(src, dst);
-        assert_eq!(world.get::<crate::components::Transform>(dst), Some(&t));
+        assert_eq!(
+            world.get::<crate::std::components::Transform>(dst),
+            Some(&t)
+        );
         assert_eq!(
             world
-                .get::<crate::components::Name>(dst)
+                .get::<crate::std::components::Name>(dst)
                 .map(|n| n.as_str()),
             Some("prefab_src"),
         );
@@ -3333,18 +3339,18 @@ mod tests {
         // Build: parent -> child_a, child_b
         let parent = world.spawn();
         world
-            .insert(parent, crate::components::Name::new("parent"))
+            .insert(parent, crate::std::components::Name::new("parent"))
             .unwrap();
         let child_a = world.spawn();
         world
-            .insert(child_a, crate::components::Name::new("child_a"))
+            .insert(child_a, crate::std::components::Name::new("child_a"))
             .unwrap();
-        crate::hierarchy::set_parent(&mut world, child_a, parent);
+        crate::std::hierarchy::set_parent(&mut world, child_a, parent);
         let child_b = world.spawn();
         world
-            .insert(child_b, crate::components::Name::new("child_b"))
+            .insert(child_b, crate::std::components::Name::new("child_b"))
             .unwrap();
-        crate::hierarchy::set_parent(&mut world, child_b, parent);
+        crate::std::hierarchy::set_parent(&mut world, child_b, parent);
 
         let prefab = world.extract_prefab(parent);
         assert_eq!(prefab.entity_count(), 3);
@@ -3375,7 +3381,7 @@ mod tests {
         // Component data cloned
         assert_eq!(
             world
-                .get::<crate::components::Name>(new_parent)
+                .get::<crate::std::components::Name>(new_parent)
                 .map(|n| n.as_str()),
             Some("parent"),
         );
@@ -3388,7 +3394,7 @@ mod tests {
 
         let src = world.spawn();
         world
-            .insert(src, crate::components::Name::new("template"))
+            .insert(src, crate::std::components::Name::new("template"))
             .unwrap();
 
         let prefab = world.extract_prefab(src);
@@ -3399,13 +3405,13 @@ mod tests {
         assert_ne!(a[0], b[0]);
         assert_eq!(
             world
-                .get::<crate::components::Name>(a[0])
+                .get::<crate::std::components::Name>(a[0])
                 .map(|n| n.as_str()),
             Some("template"),
         );
         assert_eq!(
             world
-                .get::<crate::components::Name>(b[0])
+                .get::<crate::std::components::Name>(b[0])
                 .map(|n| n.as_str()),
             Some("template"),
         );
@@ -3418,14 +3424,14 @@ mod tests {
 
         let src = world_a.spawn();
         world_a
-            .insert(src, crate::components::Name::new("cross"))
+            .insert(src, crate::std::components::Name::new("cross"))
             .unwrap();
         world_a
             .insert(
                 src,
-                crate::components::Transform::from_translation(redlilium_core::math::Vec3::new(
-                    1.0, 2.0, 3.0,
-                )),
+                crate::std::components::Transform::from_translation(
+                    redlilium_core::math::Vec3::new(1.0, 2.0, 3.0),
+                ),
             )
             .unwrap();
 
@@ -3439,12 +3445,12 @@ mod tests {
         assert_eq!(spawned.len(), 1);
         assert_eq!(
             world_b
-                .get::<crate::components::Name>(spawned[0])
+                .get::<crate::std::components::Name>(spawned[0])
                 .map(|n| n.as_str()),
             Some("cross"),
         );
         let t = world_b
-            .get::<crate::components::Transform>(spawned[0])
+            .get::<crate::std::components::Transform>(spawned[0])
             .unwrap();
         assert!((t.translation - redlilium_core::math::Vec3::new(1.0, 2.0, 3.0)).norm() < 1e-6);
     }

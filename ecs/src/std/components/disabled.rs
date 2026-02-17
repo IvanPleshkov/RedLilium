@@ -1,7 +1,7 @@
 /// Marks an entity as disabled. Disabled entities are automatically
 /// filtered from all queries (`Read<T>`, `Write<T>`, `QueryIter`, `ForEach`).
 ///
-/// Use [`disable`](crate::hierarchy::disable) / [`enable`](crate::hierarchy::enable)
+/// Use [`disable`](crate::std::hierarchy::disable) / [`enable`](crate::std::hierarchy::enable)
 /// to disable/enable entities. These always propagate to children.
 ///
 /// To access disabled entities, use the `_unfiltered` methods on
@@ -11,9 +11,9 @@
 pub struct Disabled;
 
 /// Internal marker: entity was disabled by propagation from a parent's
-/// [`disable`](crate::hierarchy::disable) call, not by the user directly.
+/// [`disable`](crate::std::hierarchy::disable) call, not by the user directly.
 ///
-/// Used by [`enable`](crate::hierarchy::enable) to distinguish which
+/// Used by [`enable`](crate::std::hierarchy::enable) to distinguish which
 /// children should be re-enabled vs left alone (manually disabled).
 ///
 /// Not part of the public API — users interact with [`Disabled`] only.
