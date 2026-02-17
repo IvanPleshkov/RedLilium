@@ -2998,6 +2998,7 @@ dependencies = [
  "rapier3d",
  "rapier3d-f64",
  "redlilium-core",
+ "redlilium-graphics",
  "tokio",
  "wasm-bindgen-futures",
 ]

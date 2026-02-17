@@ -3,7 +3,7 @@
 use std::sync::{Arc, RwLock};
 
 use redlilium_app::{AppContext, AppHandler, DrawContext};
-use redlilium_core::math::{Vec3, look_at_rh, perspective_rh};
+use redlilium_core::math::{Vec3, perspective_rh};
 use redlilium_core::profiling::{profile_function, profile_scope};
 use redlilium_graphics::{
     ColorAttachment, DepthStencilAttachment, FrameSchedule, GraphicsPass, RenderTarget,
@@ -12,7 +12,9 @@ use redlilium_graphics::{
 use winit::event::KeyEvent;
 use winit::keyboard::{KeyCode, PhysicalKey};
 
-use redlilium_ecs::{EcsRunner, SystemsContainer, World};
+use redlilium_ecs::{
+    Camera, EcsRunner, Entity, GlobalTransform, SystemsContainer, Transform, World,
+};
 
 use crate::renderer::PhysicsRenderer;
 use crate::scenes_2d::{self, PhysicsScene2D};
@@ -20,7 +22,7 @@ use crate::scenes_3d::{self, PhysicsScene3D};
 use crate::ui::{Dimension, PhysicsUi};
 
 // ---------------------------------------------------------------------------
-// Orbit camera
+// Orbit camera (just stores orbital parameters)
 // ---------------------------------------------------------------------------
 
 struct OrbitCamera {
@@ -55,6 +57,21 @@ impl OrbitCamera {
         let z = self.distance * self.elevation.cos() * self.azimuth.cos();
         self.target + Vec3::new(x, y, z)
     }
+
+    /// Compute the Transform for the camera entity (position + look-at rotation).
+    fn to_transform(&self) -> Transform {
+        let eye = self.position();
+        let eye_point = redlilium_core::math::nalgebra::Point3::from(eye);
+        let target_point = redlilium_core::math::nalgebra::Point3::from(self.target);
+        let up = Vec3::new(0.0, 1.0, 0.0);
+
+        let view_iso =
+            redlilium_core::math::nalgebra::Isometry3::look_at_rh(&eye_point, &target_point, &up);
+        let camera_iso = view_iso.inverse();
+        let rotation = camera_iso.rotation.into_inner();
+
+        Transform::new(eye, rotation, Vec3::new(1.0, 1.0, 1.0))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -70,6 +87,8 @@ pub struct PhysicsDemoApp {
     world: Option<World>,
     systems: Option<SystemsContainer>,
     runner: Option<EcsRunner>,
+    camera_entity: Option<Entity>,
+
     // Rendering
     renderer: Option<PhysicsRenderer>,
     camera: OrbitCamera,
@@ -106,6 +125,7 @@ impl PhysicsDemoApp {
             world: None,
             systems: None,
             runner: None,
+            camera_entity: None,
             renderer: None,
             camera: OrbitCamera::new(),
             egui_controller: None,
@@ -118,7 +138,7 @@ impl PhysicsDemoApp {
     }
 
     /// Create a fresh ECS world and populate it with the active scene.
-    fn setup_active_scene(&mut self) {
+    fn setup_active_scene(&mut self, aspect: f32) {
         let (dim, index) = if let Ok(ui) = self.ui.read() {
             (ui.active_dim, ui.active_index)
         } else {
@@ -138,9 +158,11 @@ impl PhysicsDemoApp {
                 systems.add_exclusive(SyncPhysicsJoints3D);
                 systems.add(StepPhysics3D);
                 systems.add(redlilium_ecs::UpdateGlobalTransforms);
+                systems.add(redlilium_ecs::UpdateCameraMatrices);
                 let _ = systems.add_edge::<SyncPhysicsBodies3D, SyncPhysicsJoints3D>();
                 let _ = systems.add_edge::<SyncPhysicsJoints3D, StepPhysics3D>();
                 let _ = systems.add_edge::<StepPhysics3D, redlilium_ecs::UpdateGlobalTransforms>();
+                let _ = systems.add_edge::<redlilium_ecs::UpdateGlobalTransforms, redlilium_ecs::UpdateCameraMatrices>();
 
                 if let Some(scene) = self.scenes_3d.get(index) {
                     scene.setup(&mut world);
@@ -152,15 +174,27 @@ impl PhysicsDemoApp {
                 systems.add_exclusive(SyncPhysicsJoints2D);
                 systems.add(StepPhysics2D);
                 systems.add(redlilium_ecs::UpdateGlobalTransforms);
+                systems.add(redlilium_ecs::UpdateCameraMatrices);
                 let _ = systems.add_edge::<SyncPhysicsBodies2D, SyncPhysicsJoints2D>();
                 let _ = systems.add_edge::<SyncPhysicsJoints2D, StepPhysics2D>();
                 let _ = systems.add_edge::<StepPhysics2D, redlilium_ecs::UpdateGlobalTransforms>();
+                let _ = systems.add_edge::<redlilium_ecs::UpdateGlobalTransforms, redlilium_ecs::UpdateCameraMatrices>();
 
                 if let Some(scene) = self.scenes_2d.get(index) {
                     scene.setup(&mut world);
                 }
             }
         }
+
+        // Spawn camera entity with ECS Camera component
+        let cam_entity = world.spawn();
+        let _ = world.insert(
+            cam_entity,
+            Camera::perspective(std::f32::consts::FRAC_PI_4, aspect, 0.1, 200.0),
+        );
+        let _ = world.insert(cam_entity, self.camera.to_transform());
+        let _ = world.insert(cam_entity, GlobalTransform::IDENTITY);
+        self.camera_entity = Some(cam_entity);
 
         // Update UI stats
         self.update_ui_stats(&world, dim);
@@ -230,7 +264,7 @@ impl AppHandler for PhysicsDemoApp {
         ));
 
         // Setup initial scene
-        self.setup_active_scene();
+        self.setup_active_scene(ctx.aspect_ratio());
     }
 
     fn on_resize(&mut self, ctx: &mut AppContext) {
@@ -239,6 +273,15 @@ impl AppHandler for PhysicsDemoApp {
         }
         if let Some(egui) = &mut self.egui_controller {
             egui.on_resize(ctx.width(), ctx.height());
+        }
+
+        // Update camera projection for new aspect ratio
+        if let (Some(world), Some(cam_entity)) = (&self.world, self.camera_entity) {
+            let mut cameras = world.write::<Camera>().unwrap();
+            if let Some(cam) = cameras.get_mut(cam_entity.index()) {
+                cam.projection_matrix =
+                    perspective_rh(std::f32::consts::FRAC_PI_4, ctx.aspect_ratio(), 0.1, 200.0);
+            }
         }
     }
 
@@ -253,10 +296,15 @@ impl AppHandler for PhysicsDemoApp {
         };
 
         if scene_changed || reset {
-            self.setup_active_scene();
+            self.setup_active_scene(ctx.aspect_ratio());
         }
 
-        // Step physics if not paused
+        // Update camera entity Transform from orbit params
+        if let (Some(world), Some(cam_entity)) = (&mut self.world, self.camera_entity) {
+            let _ = world.insert(cam_entity, self.camera.to_transform());
+        }
+
+        // Step physics and update transforms/camera if not paused
         let paused = self.ui.read().map(|ui| ui.paused).unwrap_or(false);
 
         if !paused
@@ -266,18 +314,24 @@ impl AppHandler for PhysicsDemoApp {
             runner.run(world, systems);
         }
 
-        // Update renderer with current physics state
+        // Read camera view_proj from ECS Camera component
         let dim = self
             .ui
             .read()
             .map(|ui| ui.active_dim)
             .unwrap_or(Dimension::ThreeD);
         let camera_pos = self.camera.position();
-        let aspect = ctx.width() as f32 / ctx.height().max(1) as f32;
-        let up = Vec3::new(0.0, 1.0, 0.0);
-        let view = look_at_rh(&camera_pos, &self.camera.target, &up);
-        let proj = perspective_rh(std::f32::consts::FRAC_PI_4, aspect, 0.1, 200.0);
-        let view_proj = proj * view;
+
+        let view_proj = if let (Some(world), Some(cam_entity)) = (&self.world, self.camera_entity) {
+            let cameras = world.read::<Camera>().unwrap();
+            if let Some(cam) = cameras.get(cam_entity.index()) {
+                cam.view_projection()
+            } else {
+                redlilium_core::math::Mat4::identity()
+            }
+        } else {
+            redlilium_core::math::Mat4::identity()
+        };
 
         if let (Some(renderer), Some(world)) = (&mut self.renderer, &self.world) {
             let device = ctx.device();

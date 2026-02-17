@@ -68,6 +68,8 @@ pub mod prefab;
 mod query;
 mod query_guard;
 mod reactive;
+#[cfg(feature = "rendering")]
+pub mod rendering;
 mod resource;
 mod runner;
 mod schedule;
@@ -152,6 +154,13 @@ pub use self::std::spawn::spawn_scene;
 pub use self::std::systems;
 pub use self::std::systems::{UpdateCameraMatrices, UpdateGlobalTransforms};
 
+// Rendering components, resources, and systems (feature-gated)
+#[cfg(feature = "rendering")]
+pub use rendering::{
+    CameraTarget, ForwardRenderSystem, RenderMaterial, RenderMesh, RenderSchedule, TextureManager,
+    register_rendering_components,
+};
+
 /// Register all standard component types with the world.
 ///
 /// Registers storage, inspector metadata, clone support, and (where
@@ -226,5 +235,11 @@ pub fn register_std_components(world: &mut World) {
         world.register_component::<physics::physics2d::ImpulseJoint2DHandle>();
         world.enable_clone::<physics::components2d::RigidBody2D>();
         world.enable_clone::<physics::components2d::Collider2D>();
+    }
+
+    // Rendering components (feature-gated)
+    #[cfg(feature = "rendering")]
+    {
+        rendering::register_rendering_components(world);
     }
 }
