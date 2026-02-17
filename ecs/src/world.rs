@@ -44,6 +44,8 @@ impl std::error::Error for ComponentNotRegistered {}
 // Inspector metadata (stored in World, separate from component storages)
 // ---------------------------------------------------------------------------
 
+type ExtractFn = fn(&World, Entity) -> Option<Box<dyn crate::prefab::ComponentBag>>;
+
 /// Type-erased inspector operations for a single component type.
 struct InspectorEntry {
     /// Check if an entity has this component.
@@ -60,6 +62,8 @@ struct InspectorEntry {
     remap_entities_fn: fn(&mut World, Entity, &mut dyn FnMut(Entity) -> Entity),
     /// Clone this component from src entity to dst entity. None if T is not Clone.
     clone_fn: Option<fn(&mut World, Entity, Entity) -> bool>,
+    /// Extract this component into a type-erased bag. None if T is not Clone.
+    extract_fn: Option<ExtractFn>,
 }
 
 /// An independent ECS world containing entities, components, and resources.
@@ -252,6 +256,7 @@ impl World {
                     }
                 },
                 clone_fn: None,
+                extract_fn: None,
             },
         );
     }
@@ -289,6 +294,7 @@ impl World {
                     }
                 },
                 clone_fn: None,
+                extract_fn: None,
             },
         );
     }
@@ -363,6 +369,11 @@ impl World {
                 } else {
                     false
                 }
+            });
+            entry.extract_fn = Some(|world, entity| {
+                world.get::<T>(entity).cloned().map(|v| {
+                    Box::new(crate::prefab::TypedBag(v)) as Box<dyn crate::prefab::ComponentBag>
+                })
             });
         }
     }
@@ -1627,6 +1638,51 @@ impl World {
         }
 
         mapping
+    }
+
+    /// Extracts a prefab from an entity subtree.
+    ///
+    /// Performs a breadth-first walk from `root` through [`Children`](crate::Children)
+    /// components and extracts all clone-enabled components into a portable
+    /// [`Prefab`](crate::prefab::Prefab). The prefab is fully self-contained
+    /// and can be instantiated into any world.
+    ///
+    /// Components without clone/extract support are silently skipped.
+    ///
+    /// Returns an empty prefab if `root` is not alive.
+    pub fn extract_prefab(&self, root: Entity) -> crate::prefab::Prefab {
+        if !self.is_alive(root) {
+            return crate::prefab::Prefab::empty();
+        }
+
+        // 1. BFS walk via Children to collect all entities in subtree
+        let mut old_entities = vec![root];
+        let mut i = 0;
+        while i < old_entities.len() {
+            let entity = old_entities[i];
+            if let Some(children) = self.get::<crate::Children>(entity) {
+                old_entities.extend(children.0.iter().copied());
+            }
+            i += 1;
+        }
+
+        // 2. Collect extract_fns
+        let extract_fns: Vec<_> = self
+            .inspector_entries
+            .values()
+            .filter_map(|e| e.extract_fn)
+            .collect();
+
+        // 3. For each entity, extract all components into bags
+        let entities = old_entities
+            .iter()
+            .map(|&entity| {
+                let bags: Vec<_> = extract_fns.iter().filter_map(|f| f(self, entity)).collect();
+                (entity, bags)
+            })
+            .collect();
+
+        crate::prefab::Prefab::new(entities)
     }
 
     // ---- Resource management ----
@@ -3228,5 +3284,174 @@ mod tests {
 
         let mapping = world.clone_entity_tree(root);
         assert!(mapping.is_empty());
+    }
+
+    // --- Prefab extract + instantiate tests ---
+
+    #[test]
+    fn extract_and_instantiate_single_entity() {
+        let mut world = World::new();
+        crate::register_std_components(&mut world);
+
+        let src = world.spawn();
+        let t = crate::components::Transform::from_translation(redlilium_core::math::Vec3::new(
+            5.0, 6.0, 7.0,
+        ));
+        world.insert(src, t).unwrap();
+        world
+            .insert(src, crate::components::Name::new("prefab_src"))
+            .unwrap();
+
+        let prefab = world.extract_prefab(src);
+        assert_eq!(prefab.entity_count(), 1);
+
+        let spawned = prefab.instantiate(&mut world);
+        assert_eq!(spawned.len(), 1);
+
+        let dst = spawned[0];
+        assert_ne!(src, dst);
+        assert_eq!(world.get::<crate::components::Transform>(dst), Some(&t));
+        assert_eq!(
+            world
+                .get::<crate::components::Name>(dst)
+                .map(|n| n.as_str()),
+            Some("prefab_src"),
+        );
+    }
+
+    #[test]
+    fn extract_and_instantiate_tree_with_hierarchy() {
+        let mut world = World::new();
+        crate::register_std_components(&mut world);
+
+        // Build: parent -> child_a, child_b
+        let parent = world.spawn();
+        world
+            .insert(parent, crate::components::Name::new("parent"))
+            .unwrap();
+        let child_a = world.spawn();
+        world
+            .insert(child_a, crate::components::Name::new("child_a"))
+            .unwrap();
+        crate::hierarchy::set_parent(&mut world, child_a, parent);
+        let child_b = world.spawn();
+        world
+            .insert(child_b, crate::components::Name::new("child_b"))
+            .unwrap();
+        crate::hierarchy::set_parent(&mut world, child_b, parent);
+
+        let prefab = world.extract_prefab(parent);
+        assert_eq!(prefab.entity_count(), 3);
+
+        let spawned = prefab.instantiate(&mut world);
+        assert_eq!(spawned.len(), 3);
+
+        let new_parent = spawned[0];
+        let new_child_a = spawned[1];
+        let new_child_b = spawned[2];
+
+        // Verify hierarchy is remapped
+        let children = world.get::<crate::Children>(new_parent).unwrap();
+        assert_eq!(children.0, vec![new_child_a, new_child_b]);
+
+        assert_eq!(
+            world.get::<crate::Parent>(new_child_a).unwrap().0,
+            new_parent,
+        );
+        assert_eq!(
+            world.get::<crate::Parent>(new_child_b).unwrap().0,
+            new_parent,
+        );
+
+        // Root has no parent
+        assert!(world.get::<crate::Parent>(new_parent).is_none());
+
+        // Component data cloned
+        assert_eq!(
+            world
+                .get::<crate::components::Name>(new_parent)
+                .map(|n| n.as_str()),
+            Some("parent"),
+        );
+    }
+
+    #[test]
+    fn prefab_instantiate_multiple_times() {
+        let mut world = World::new();
+        crate::register_std_components(&mut world);
+
+        let src = world.spawn();
+        world
+            .insert(src, crate::components::Name::new("template"))
+            .unwrap();
+
+        let prefab = world.extract_prefab(src);
+
+        let a = prefab.instantiate(&mut world);
+        let b = prefab.instantiate(&mut world);
+
+        assert_ne!(a[0], b[0]);
+        assert_eq!(
+            world
+                .get::<crate::components::Name>(a[0])
+                .map(|n| n.as_str()),
+            Some("template"),
+        );
+        assert_eq!(
+            world
+                .get::<crate::components::Name>(b[0])
+                .map(|n| n.as_str()),
+            Some("template"),
+        );
+    }
+
+    #[test]
+    fn prefab_cross_world() {
+        let mut world_a = World::new();
+        crate::register_std_components(&mut world_a);
+
+        let src = world_a.spawn();
+        world_a
+            .insert(src, crate::components::Name::new("cross"))
+            .unwrap();
+        world_a
+            .insert(
+                src,
+                crate::components::Transform::from_translation(redlilium_core::math::Vec3::new(
+                    1.0, 2.0, 3.0,
+                )),
+            )
+            .unwrap();
+
+        let prefab = world_a.extract_prefab(src);
+
+        // Instantiate into a completely different world
+        let mut world_b = World::new();
+        crate::register_std_components(&mut world_b);
+
+        let spawned = prefab.instantiate(&mut world_b);
+        assert_eq!(spawned.len(), 1);
+        assert_eq!(
+            world_b
+                .get::<crate::components::Name>(spawned[0])
+                .map(|n| n.as_str()),
+            Some("cross"),
+        );
+        let t = world_b
+            .get::<crate::components::Transform>(spawned[0])
+            .unwrap();
+        assert!((t.translation - redlilium_core::math::Vec3::new(1.0, 2.0, 3.0)).norm() < 1e-6);
+    }
+
+    #[test]
+    fn extract_prefab_dead_root_returns_empty() {
+        let mut world = World::new();
+        crate::register_std_components(&mut world);
+
+        let root = world.spawn();
+        world.despawn(root);
+
+        let prefab = world.extract_prefab(root);
+        assert!(prefab.is_empty());
     }
 }
