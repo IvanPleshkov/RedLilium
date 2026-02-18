@@ -813,7 +813,7 @@ mod tests {
         }
 
         // Disable the entity
-        let _ = world.insert(e, crate::Disabled);
+        world.set_entity_flags(e, crate::Entity::DISABLED);
 
         // Run sync — body should be removed from rapier
         run_exclusive_system_once(&mut SyncPhysicsBodies3D, &mut world).unwrap();
@@ -824,7 +824,7 @@ mod tests {
         }
 
         // Re-enable the entity
-        world.remove::<crate::Disabled>(e);
+        world.clear_entity_flags(e, crate::Entity::DISABLED);
 
         // Run sync — body should be re-created
         run_exclusive_system_once(&mut SyncPhysicsBodies3D, &mut world).unwrap();

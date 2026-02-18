@@ -1,5 +1,4 @@
 mod camera;
-mod disabled;
 mod free_fly_camera;
 mod hierarchy;
 mod light;
@@ -9,8 +8,6 @@ mod visibility;
 mod window_input;
 
 pub use camera::Camera;
-pub use disabled::Disabled;
-pub(crate) use disabled::InheritedDisabled;
 pub use free_fly_camera::FreeFlyCamera;
 pub use hierarchy::{Children, Parent};
 pub use light::{DirectionalLight, PointLight, SpotLight};

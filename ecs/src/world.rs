@@ -1,8 +1,6 @@
 use std::any::TypeId;
 use std::collections::{BTreeMap, HashMap};
 
-use fixedbitset::FixedBitSet;
-
 use crate::access_set::AccessInfo;
 use crate::bundle::Bundle;
 use crate::commands::CommandBuffer;
@@ -15,7 +13,6 @@ use crate::query::{AddedFilter, ChangedFilter, ContainsChecker, RemovedFilter};
 use crate::reactive::Triggers;
 use crate::resource::{Resource, ResourceRef, ResourceRefMut, Resources};
 use crate::sparse_set::{ComponentHookFn, ComponentStorage, LockGuard, Ref, RefMut};
-use crate::std::components::Disabled;
 use std::sync::{Arc, RwLock};
 
 /// Error returned when a component type has not been registered in the [`World`].
@@ -109,11 +106,6 @@ pub struct World {
     observers: Observers,
     /// Monomorphized swap functions for each registered `Triggers<M>` resource.
     trigger_swap_fns: Vec<fn(&mut World)>,
-    /// Tracks which entity indices are disabled (have the `Disabled` component).
-    /// Updated by hooks on the `Disabled` component. Indexed by entity index.
-    pub(crate) disabled_entities: FixedBitSet,
-    /// Empty bitset returned for `Disabled` component queries (so they see all entities).
-    empty_bitset: FixedBitSet,
 }
 
 impl World {
@@ -128,8 +120,6 @@ impl World {
             inspector_entries: BTreeMap::new(),
             observers: Observers::new(),
             trigger_swap_fns: Vec::new(),
-            disabled_entities: FixedBitSet::new(),
-            empty_bitset: FixedBitSet::new(),
         }
     }
 
@@ -137,7 +127,7 @@ impl World {
 
     /// Spawns a new entity and returns its ID.
     pub fn spawn(&mut self) -> Entity {
-        self.entities.allocate()
+        self.entities.allocate(self.tick)
     }
 
     /// Despawns an entity, removing all its components.
@@ -591,7 +581,7 @@ impl World {
     /// assert_eq!(entities.len(), 100);
     /// ```
     pub fn spawn_batch(&mut self, count: u32) -> Vec<Entity> {
-        self.entities.allocate_many(count)
+        self.entities.allocate_many(count, self.tick)
     }
 
     /// Spawns `count` entities, each with a clone of the given bundle.
@@ -603,7 +593,7 @@ impl World {
     ///
     /// Panics if any component type in the bundle has not been registered.
     pub fn spawn_batch_with(&mut self, count: u32, bundle: impl Bundle + Clone) -> Vec<Entity> {
-        let entities = self.entities.allocate_many(count);
+        let entities = self.entities.allocate_many(count, self.tick);
         for entity in &entities {
             bundle
                 .clone()
@@ -633,7 +623,7 @@ impl World {
         count: u32,
         f: impl Fn(usize) -> B,
     ) -> Vec<Entity> {
-        let entities = self.entities.allocate_many(count);
+        let entities = self.entities.allocate_many(count, self.tick);
         for (i, entity) in entities.iter().enumerate() {
             f(i).insert_into(self, *entity)
                 .expect("Component in bundle not registered");
@@ -995,21 +985,47 @@ impl World {
         storage.typed_mut::<T>().get_mut(entity.index())
     }
 
-    /// Returns the disabled-entities slice to pass to `Ref`/`RefMut`.
+    /// Returns the per-entity flag slice from the entity allocator.
     ///
-    /// For the `Disabled` component itself, returns an empty slice so that
-    /// `Read<Disabled>` can iterate all disabled entities without self-filtering.
-    fn disabled_for<T: 'static>(&self) -> &FixedBitSet {
-        if TypeId::of::<T>() == TypeId::of::<Disabled>() {
-            &self.empty_bitset
-        } else {
-            &self.disabled_entities
-        }
+    /// Used by `Ref`/`RefMut` to filter disabled entities during iteration.
+    pub(crate) fn entity_flags(&self) -> &[u32] {
+        &self.entities.flags
     }
 
     /// Returns whether the given entity is currently disabled.
     pub fn is_disabled(&self, entity: Entity) -> bool {
-        self.disabled_entities.contains(entity.index() as usize)
+        self.entities.flags[entity.index() as usize] & Entity::DISABLED != 0
+    }
+
+    /// Returns the current flags for an entity.
+    pub fn get_entity_flags(&self, entity: Entity) -> u32 {
+        self.entities.get_flags(entity.index())
+    }
+
+    /// Sets flag bits on an entity (OR operation).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the entity is not alive.
+    pub fn set_entity_flags(&mut self, entity: Entity, bits: u32) {
+        assert!(
+            self.entities.is_alive(entity),
+            "Cannot set flags on dead entity {entity}"
+        );
+        self.entities.set_flags(entity.index(), bits);
+    }
+
+    /// Clears flag bits on an entity (AND-NOT operation).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the entity is not alive.
+    pub fn clear_entity_flags(&mut self, entity: Entity, bits: u32) {
+        assert!(
+            self.entities.is_alive(entity),
+            "Cannot clear flags on dead entity {entity}"
+        );
+        self.entities.clear_flags(entity.index(), bits);
     }
 
     // ---- Query access (runtime borrow-checked, take &self) ----
@@ -1033,7 +1049,7 @@ impl World {
             .ok_or(ComponentNotRegistered {
                 type_name: std::any::type_name::<T>(),
             })?;
-        Ok(Ref::new(storage, self.disabled_for::<T>()))
+        Ok(Ref::new(storage, self.entity_flags()))
     }
 
     /// Gets shared read access to all components of type T, returning `None`
@@ -1042,7 +1058,7 @@ impl World {
     /// Non-panicking variant of [`read`](World::read). Used by `OptionalRead<T>`.
     pub fn try_read<T: 'static>(&self) -> Option<Ref<'_, T>> {
         let storage = self.components.get(&TypeId::of::<T>())?;
-        Some(Ref::new(storage, self.disabled_for::<T>()))
+        Some(Ref::new(storage, self.entity_flags()))
     }
 
     /// Gets exclusive write access to all components of type T.
@@ -1064,7 +1080,7 @@ impl World {
             .ok_or(ComponentNotRegistered {
                 type_name: std::any::type_name::<T>(),
             })?;
-        Ok(RefMut::new(storage, self.disabled_for::<T>()))
+        Ok(RefMut::new(storage, self.entity_flags()))
     }
 
     /// Gets exclusive write access to all components of type T, returning `None`
@@ -1073,7 +1089,7 @@ impl World {
     /// Non-panicking variant of [`write`](World::write). Used by `OptionalWrite<T>`.
     pub fn try_write<T: 'static>(&self) -> Option<RefMut<'_, T>> {
         let storage = self.components.get(&TypeId::of::<T>())?;
-        Some(RefMut::new(storage, self.disabled_for::<T>()))
+        Some(RefMut::new(storage, self.entity_flags()))
     }
 
     // ---- Unlocked access (for use when locks are held externally) ----
@@ -1088,7 +1104,7 @@ impl World {
             .ok_or(ComponentNotRegistered {
                 type_name: std::any::type_name::<T>(),
             })?;
-        Ok(Ref::new_unlocked(storage, self.disabled_for::<T>()))
+        Ok(Ref::new_unlocked(storage, self.entity_flags()))
     }
 
     /// Gets exclusive write access without acquiring a lock.
@@ -1103,19 +1119,19 @@ impl World {
             .ok_or(ComponentNotRegistered {
                 type_name: std::any::type_name::<T>(),
             })?;
-        Ok(RefMut::new_unlocked(storage, self.disabled_for::<T>()))
+        Ok(RefMut::new_unlocked(storage, self.entity_flags()))
     }
 
     /// Gets optional shared read access without acquiring a lock.
     pub(crate) fn try_read_unlocked<T: 'static>(&self) -> Option<Ref<'_, T>> {
         let storage = self.components.get(&TypeId::of::<T>())?;
-        Some(Ref::new_unlocked(storage, self.disabled_for::<T>()))
+        Some(Ref::new_unlocked(storage, self.entity_flags()))
     }
 
     /// Gets optional exclusive write access without acquiring a lock.
     pub(crate) fn try_write_unlocked<T: 'static>(&self) -> Option<RefMut<'_, T>> {
         let storage = self.components.get(&TypeId::of::<T>())?;
-        Some(RefMut::new_unlocked(storage, self.disabled_for::<T>()))
+        Some(RefMut::new_unlocked(storage, self.entity_flags()))
     }
 
     /// Acquires component locks in TypeId-sorted order.
@@ -2102,11 +2118,12 @@ mod tests {
         world.insert(old, Position { x: 1.0, y: 2.0 }).unwrap();
 
         world.despawn(old);
+        world.advance_tick(); // Advance tick so recycled slot gets a different spawn_tick
         let new = world.spawn();
 
-        // Same index, different generation
+        // Same index, different spawn tick
         assert_eq!(new.index(), old.index());
-        assert_ne!(new.generation(), old.generation());
+        assert_ne!(new.spawn_tick(), old.spawn_tick());
 
         // New entity should not have old entity's components
         assert!(world.get::<Position>(new).is_none());

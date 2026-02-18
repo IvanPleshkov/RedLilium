@@ -167,9 +167,9 @@ impl Inspect<'_, crate::Entity> {
         ui.horizontal(|ui| {
             ui.label(name);
             ui.label(format!(
-                "Entity({}v{})",
+                "Entity({}@{})",
                 self.0.index(),
-                self.0.generation()
+                self.0.spawn_tick()
             ));
         });
     }

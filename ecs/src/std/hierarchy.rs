@@ -20,7 +20,7 @@
 
 use crate::{CommandBuffer, CommandCollector, Entity, World};
 
-use super::components::{Children, Disabled, InheritedDisabled, Parent};
+use super::components::{Children, Parent};
 
 /// Sets `entity` as a child of `parent`.
 ///
@@ -111,24 +111,18 @@ fn despawn_subtree(world: &mut World, entity: Entity) {
     world.despawn(entity);
 }
 
-// ---- Entity disabling (always recursive) ----
+// ---- Entity disabling (always recursive, flag-based) ----
 
 /// Disables an entity and all descendants recursively.
 ///
-/// The target entity is marked as "manually disabled" (`Disabled` without
-/// `InheritedDisabled`). Descendants that are not already disabled receive
-/// both `Disabled` and `InheritedDisabled`. Already-disabled descendants
-/// are left alone (they keep their manual status).
-///
-/// Observers for [`OnAdd<Disabled>`](crate::OnAdd) fire on each newly-disabled entity.
+/// The target entity gets the `DISABLED` flag set and `INHERITED_DISABLED`
+/// cleared (marking it as manually disabled). Descendants that are not
+/// already disabled receive both `DISABLED` and `INHERITED_DISABLED` flags.
+/// Already-disabled descendants keep their manual status.
 pub fn disable(world: &mut World, entity: Entity) {
-    if world.get::<Disabled>(entity).is_none() {
-        world
-            .insert(entity, Disabled)
-            .expect("Disabled not registered");
-    }
-    // Ensure it's manually disabled (not inherited)
-    world.remove::<InheritedDisabled>(entity);
+    // Mark as manually disabled (DISABLED set, INHERITED_DISABLED cleared)
+    world.set_entity_flags(entity, Entity::DISABLED);
+    world.clear_entity_flags(entity, Entity::INHERITED_DISABLED);
     disable_subtree(world, entity);
 }
 
@@ -138,13 +132,10 @@ fn disable_subtree(world: &mut World, entity: Entity) {
         .map(|c| c.0.clone())
         .unwrap_or_default();
     for child in child_entities {
-        if world.get::<Disabled>(child).is_none() {
-            world
-                .insert(child, Disabled)
-                .expect("Disabled not registered");
-            world
-                .insert(child, InheritedDisabled)
-                .expect("InheritedDisabled not registered");
+        let flags = world.get_entity_flags(child);
+        if flags & Entity::DISABLED == 0 {
+            // Child was enabled — disable it as inherited
+            world.set_entity_flags(child, Entity::DISABLED | Entity::INHERITED_DISABLED);
         }
         disable_subtree(world, child);
     }
@@ -152,13 +143,10 @@ fn disable_subtree(world: &mut World, entity: Entity) {
 
 /// Enables an entity and re-enables inherited-disabled descendants.
 ///
-/// Descendants that were manually disabled (have `Disabled` without
-/// `InheritedDisabled`) are left alone.
-///
-/// Observers for [`OnRemove<Disabled>`](crate::OnRemove) fire on each re-enabled entity.
+/// Descendants that were manually disabled (have `DISABLED` without
+/// `INHERITED_DISABLED`) are left alone — their subtrees are not traversed.
 pub fn enable(world: &mut World, entity: Entity) {
-    world.remove::<Disabled>(entity);
-    world.remove::<InheritedDisabled>(entity);
+    world.clear_entity_flags(entity, Entity::DISABLED | Entity::INHERITED_DISABLED);
     enable_subtree(world, entity);
 }
 
@@ -168,15 +156,16 @@ fn enable_subtree(world: &mut World, entity: Entity) {
         .map(|c| c.0.clone())
         .unwrap_or_default();
     for child in child_entities {
-        if world.get::<InheritedDisabled>(child).is_some() {
-            world.remove::<Disabled>(child);
-            world.remove::<InheritedDisabled>(child);
+        let flags = world.get_entity_flags(child);
+        if flags & Entity::INHERITED_DISABLED != 0 {
+            // Child was inherited-disabled — re-enable it and recurse
+            world.clear_entity_flags(child, Entity::DISABLED | Entity::INHERITED_DISABLED);
             enable_subtree(world, child);
-        } else if world.get::<Disabled>(child).is_none() {
+        } else if flags & Entity::DISABLED == 0 {
             // Child is enabled — recurse in case deeper descendants are inherited-disabled
             enable_subtree(world, child);
         }
-        // If child has Disabled but NOT InheritedDisabled, it was manually disabled — skip
+        // If child has DISABLED but NOT INHERITED_DISABLED, it was manually disabled — skip
     }
 }
 

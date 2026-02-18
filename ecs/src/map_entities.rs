@@ -183,7 +183,7 @@ mod tests {
     fn remap_vec_entities() {
         let mut entities = vec![make_entity(1), make_entity(2), make_entity(3)];
         EntityMut(&mut entities)
-            .remap_entities(&mut |e| Entity::new(e.index() + 10, e.generation()));
+            .remap_entities(&mut |e| Entity::new(e.index() + 10, e.spawn_tick()));
         assert_eq!(
             entities,
             vec![make_entity(11), make_entity(12), make_entity(13)]

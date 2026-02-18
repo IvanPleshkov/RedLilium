@@ -105,7 +105,7 @@ Thread-safety is achieved through:
 - [ ] Define `Backend` trait with lifecycle methods
 - [ ] Define `RenderPass` trait for pass abstraction
 - [ ] Define resource types (Buffer, Texture, Sampler)
-- [ ] Define handle types with generation-based validation
+- [ ] Define handle types with spawn-tick-based validation
 - [ ] Implement `DummyBackend` for testing
 
 #### Phase 2.2: Render Graph Infrastructure

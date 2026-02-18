@@ -48,9 +48,9 @@ pub fn show_component_inspector(
         .open(&mut open)
         .show(ctx, |ui| {
             ui.heading(format!(
-                "Entity({}:{})",
+                "Entity({}@{})",
                 selected.index(),
-                selected.generation()
+                selected.spawn_tick()
             ));
 
             // Enabled/Disabled toggle
@@ -66,11 +66,10 @@ pub fn show_component_inspector(
 
             ui.separator();
 
-            // Collect components this entity has, hiding Disabled/InheritedDisabled
+            // Collect components this entity has
             let present: Vec<&str> = world
                 .inspectable_components_of(selected)
                 .into_iter()
-                .filter(|name| *name != "Disabled" && *name != "InheritedDisabled")
                 .collect();
 
             // Track which components to remove after iteration

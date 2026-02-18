@@ -120,8 +120,8 @@ fn entity_label(world: &World, entity: Entity) -> String {
     if let Some(name) = world.get::<Name>(entity) {
         let s = name.as_str();
         if !s.is_empty() {
-            return format!("{} [{}:{}]", s, entity.index(), entity.generation());
+            return format!("{} [{}@{}]", s, entity.index(), entity.spawn_tick());
         }
     }
-    format!("Entity({}:{})", entity.index(), entity.generation())
+    format!("Entity({}@{})", entity.index(), entity.spawn_tick())
 }

@@ -173,10 +173,10 @@ pub trait QueryItem {
         None
     }
 
-    /// Returns the disabled-entities bitset, if available.
+    /// Returns the per-entity flags slice, if available.
     ///
     /// Returns `Some` for component storages, `None` for resources.
-    fn query_disabled(&self) -> Option<&FixedBitSet> {
+    fn query_flags(&self) -> Option<&[u32]> {
         None
     }
 
@@ -213,8 +213,8 @@ impl<'w, T: 'static> QueryItem for Ref<'w, T> {
         Some(self.storage().membership())
     }
 
-    fn query_disabled(&self) -> Option<&FixedBitSet> {
-        Some(self.disabled_bitset())
+    fn query_flags(&self) -> Option<&[u32]> {
+        Some(self.entity_flags())
     }
 }
 
@@ -244,8 +244,8 @@ impl<'w, T: 'static> QueryItem for RefMut<'w, T> {
         Some(unsafe { &*self.storage_ptr() }.membership())
     }
 
-    fn query_disabled(&self) -> Option<&FixedBitSet> {
-        Some(self.disabled_bitset())
+    fn query_flags(&self) -> Option<&[u32]> {
+        Some(self.entity_flags())
     }
 }
 
@@ -398,12 +398,15 @@ macro_rules! impl_query_item {
                 for bs in &bitsets[1..] {
                     result.intersect_with(bs);
                 }
-                // Subtract disabled entities.
-                let disabled = None $(.or(self.$idx.query_disabled()))+;
-                if let Some(disabled) = disabled {
-                    result.difference_with(disabled);
+                // Filter out disabled entities via flag bits.
+                let flags = None $(.or(self.$idx.query_flags()))+;
+                if let Some(flags) = flags {
+                    Some(result.ones().filter(|&i| {
+                        i >= flags.len() || flags[i] & crate::entity::Entity::DISABLED == 0
+                    }).map(|i| i as u32).collect())
+                } else {
+                    Some(result.ones().map(|i| i as u32).collect())
                 }
-                Some(result.ones().map(|i| i as u32).collect())
             }
         }
     };

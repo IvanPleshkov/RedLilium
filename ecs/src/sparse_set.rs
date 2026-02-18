@@ -5,6 +5,8 @@ use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use fixedbitset::FixedBitSet;
 
+use crate::entity::Entity;
+
 /// Function signature for component lifecycle hooks.
 ///
 /// Hooks receive exclusive world access and the entity being modified.
@@ -470,21 +472,21 @@ impl ComponentStorage {
 /// Dereferences to [`SparseSetInner<T>`] for accessing component data.
 ///
 /// Inherent methods (`get`, `iter`, `contains`, etc.) automatically filter
-/// out disabled entities. Use the `_unfiltered` variants (e.g. `get_unfiltered`,
-/// `iter_unfiltered`) to include disabled entities.
+/// out disabled entities (via entity flag bits). Use the `_unfiltered`
+/// variants (e.g. `get_unfiltered`, `iter_unfiltered`) to include them.
 pub struct Ref<'a, T: 'static> {
     inner: &'a SparseSetInner<T>,
-    disabled: &'a FixedBitSet,
+    entity_flags: &'a [u32],
     _guard: Option<RwLockReadGuard<'a, ()>>,
 }
 
 impl<'a, T: 'static> Ref<'a, T> {
     /// Creates a new shared borrow guard, acquiring the storage's read lock.
-    pub(crate) fn new(storage: &'a ComponentStorage, disabled: &'a FixedBitSet) -> Self {
+    pub(crate) fn new(storage: &'a ComponentStorage, entity_flags: &'a [u32]) -> Self {
         let guard = storage.lock_read();
         Self {
             inner: storage.typed::<T>(),
-            disabled,
+            entity_flags,
             _guard: Some(guard),
         }
     }
@@ -493,10 +495,10 @@ impl<'a, T: 'static> Ref<'a, T> {
     ///
     /// The caller must ensure the lock is already held externally
     /// (e.g. via `acquire_sorted`).
-    pub(crate) fn new_unlocked(storage: &'a ComponentStorage, disabled: &'a FixedBitSet) -> Self {
+    pub(crate) fn new_unlocked(storage: &'a ComponentStorage, entity_flags: &'a [u32]) -> Self {
         Self {
             inner: storage.typed::<T>(),
-            disabled,
+            entity_flags,
             _guard: None,
         }
     }
@@ -513,12 +515,13 @@ impl<'a, T: 'static> Ref<'a, T> {
 
     /// Returns whether the entity at the given index is disabled.
     pub fn is_entity_disabled(&self, entity_index: u32) -> bool {
-        self.disabled.contains(entity_index as usize)
+        let idx = entity_index as usize;
+        idx < self.entity_flags.len() && self.entity_flags[idx] & Entity::DISABLED != 0
     }
 
-    /// Returns the disabled bitset reference.
-    pub fn disabled_bitset(&self) -> &'a FixedBitSet {
-        self.disabled
+    /// Returns the entity flags slice reference.
+    pub fn entity_flags(&self) -> &'a [u32] {
+        self.entity_flags
     }
 
     /// Returns a reference to the component for the given entity index.
@@ -593,17 +596,18 @@ unsafe impl<T: Send + Sync + 'static> Sync for Ref<'_, T> {}
 /// Dereferences to [`SparseSetInner<T>`] for accessing and modifying component data.
 ///
 /// Inherent methods (`get`, `get_mut`, `iter`, `iter_mut`, etc.) automatically
-/// filter out disabled entities. Use the `_unfiltered` variants to include them.
+/// filter out disabled entities (via entity flag bits). Use the `_unfiltered`
+/// variants to include them.
 pub struct RefMut<'a, T: 'static> {
     inner: *mut SparseSetInner<T>,
-    disabled: &'a FixedBitSet,
+    entity_flags: &'a [u32],
     _guard: Option<RwLockWriteGuard<'a, ()>>,
     _marker: PhantomData<&'a mut SparseSetInner<T>>,
 }
 
 impl<'a, T: 'static> RefMut<'a, T> {
     /// Creates a new exclusive borrow guard, acquiring the storage's write lock.
-    pub(crate) fn new(storage: &'a ComponentStorage, disabled: &'a FixedBitSet) -> Self {
+    pub(crate) fn new(storage: &'a ComponentStorage, entity_flags: &'a [u32]) -> Self {
         let guard = storage.lock_write();
         // SAFETY: lock_write() guarantees exclusive access. We cast away
         // the shared reference to get a mutable pointer, which is safe because
@@ -611,7 +615,7 @@ impl<'a, T: 'static> RefMut<'a, T> {
         let inner = storage.typed::<T>() as *const SparseSetInner<T> as *mut SparseSetInner<T>;
         Self {
             inner,
-            disabled,
+            entity_flags,
             _guard: Some(guard),
             _marker: PhantomData,
         }
@@ -621,11 +625,11 @@ impl<'a, T: 'static> RefMut<'a, T> {
     ///
     /// The caller must ensure the write lock is already held externally
     /// (e.g. via `acquire_sorted`).
-    pub(crate) fn new_unlocked(storage: &'a ComponentStorage, disabled: &'a FixedBitSet) -> Self {
+    pub(crate) fn new_unlocked(storage: &'a ComponentStorage, entity_flags: &'a [u32]) -> Self {
         let inner = storage.typed::<T>() as *const SparseSetInner<T> as *mut SparseSetInner<T>;
         Self {
             inner,
-            disabled,
+            entity_flags,
             _guard: None,
             _marker: PhantomData,
         }
@@ -643,12 +647,13 @@ impl<'a, T: 'static> RefMut<'a, T> {
 
     /// Returns whether the entity at the given index is disabled.
     pub fn is_entity_disabled(&self, entity_index: u32) -> bool {
-        self.disabled.contains(entity_index as usize)
+        let idx = entity_index as usize;
+        idx < self.entity_flags.len() && self.entity_flags[idx] & Entity::DISABLED != 0
     }
 
-    /// Returns the disabled bitset reference.
-    pub fn disabled_bitset(&self) -> &'a FixedBitSet {
-        self.disabled
+    /// Returns the entity flags slice reference.
+    pub fn entity_flags(&self) -> &'a [u32] {
+        self.entity_flags
     }
 
     /// Returns a reference to the component for the given entity index.
@@ -691,19 +696,27 @@ impl<'a, T: 'static> RefMut<'a, T> {
 
     /// Iterates over `(entity_index, &mut component)` pairs, skipping disabled entities.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (u32, &mut T)> + '_ {
+        let flags = self.entity_flags;
         // SAFETY: write lock guarantees exclusive access.
         unsafe { &mut *self.inner }
             .iter_mut()
-            .filter(|(idx, _)| !self.disabled.contains(*idx as usize))
+            .filter(move |(idx, _)| {
+                let i = *idx as usize;
+                i >= flags.len() || flags[i] & Entity::DISABLED == 0
+            })
     }
 
     /// Iterates with mutation, marking all accessed components as changed at `tick`.
     /// Skips disabled entities.
     pub fn iter_mut_tracked(&mut self, tick: u64) -> impl Iterator<Item = (u32, &mut T)> + '_ {
+        let flags = self.entity_flags;
         // SAFETY: write lock guarantees exclusive access.
         unsafe { &mut *self.inner }
             .iter_mut_tracked(tick)
-            .filter(|(idx, _)| !self.disabled.contains(*idx as usize))
+            .filter(move |(idx, _)| {
+                let i = *idx as usize;
+                i >= flags.len() || flags[i] & Entity::DISABLED == 0
+            })
     }
 
     /// Returns whether the entity has this component and is not disabled.
@@ -880,21 +893,21 @@ mod tests {
     #[test]
     fn lock_released_on_drop() {
         let storage = ComponentStorage::new::<u32>();
-        let empty = FixedBitSet::new();
+        let flags: &[u32] = &[];
         {
-            let _guard = Ref::<u32>::new(&storage, &empty);
+            let _guard = Ref::<u32>::new(&storage, flags);
         }
         // After Ref is dropped, exclusive lock should succeed
-        let _guard = RefMut::<u32>::new(&storage, &empty);
+        let _guard = RefMut::<u32>::new(&storage, flags);
     }
 
     #[test]
     fn ref_mut_allows_mutation() {
         let mut storage = ComponentStorage::new::<u32>();
         storage.typed_mut::<u32>().insert(0, 42);
-        let empty = FixedBitSet::new();
+        let flags: &[u32] = &[];
         {
-            let mut guard = RefMut::<u32>::new(&storage, &empty);
+            let mut guard = RefMut::<u32>::new(&storage, flags);
             guard.insert(0, 99);
         }
         assert_eq!(storage.typed::<u32>().get(0), Some(&99));

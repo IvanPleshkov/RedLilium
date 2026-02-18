@@ -287,7 +287,7 @@ On web, `pool.scope()` runs tasks sequentially, and async compute tasks tick coo
 ## Implementation Plan
 
 ### Phase 1: Foundation
-- Entity storage (generational IDs)
+- Entity storage (128-bit IDs with spawn_tick)
 - Component storage (sparse sets, type-erased)
 - Basic queries (iteration, With/Without filters)
 - Resources (typed singletons)
