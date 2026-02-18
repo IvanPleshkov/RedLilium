@@ -21,9 +21,9 @@
 //! // During setup — register_std_components stores inspector metadata in the World
 //! redlilium_ecs::register_std_components(&mut world);
 //!
-//! // During frame, inside egui update:
-//! show_world_inspector(ctx, &world, &mut state);
-//! show_component_inspector(ctx, &mut world, &mut state);
+//! // During frame, render into any egui::Ui container:
+//! show_world_inspector(ui, &world, &mut state);
+//! show_component_inspector(ui, &mut world, &mut state);
 //! ```
 
 mod component_inspector;
@@ -38,10 +38,6 @@ use crate::Entity;
 pub struct InspectorState {
     /// Currently selected entity (if any).
     pub selected: Option<Entity>,
-    /// Whether the world inspector window is open.
-    pub world_inspector_open: bool,
-    /// Whether the component inspector window is open.
-    pub component_inspector_open: bool,
     /// Filter text for entity search.
     pub filter: String,
     /// Tracks which tree nodes are expanded (by entity index).
@@ -54,8 +50,6 @@ impl InspectorState {
     pub fn new() -> Self {
         Self {
             selected: None,
-            world_inspector_open: true,
-            component_inspector_open: true,
             filter: String::new(),
             expanded: std::collections::HashSet::new(),
             add_component_open: false,

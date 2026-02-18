@@ -6,47 +6,37 @@ use crate::std::components::{Children, Name, Parent};
 
 use super::InspectorState;
 
-/// Show the world inspector window — a tree of all entities organized by hierarchy.
+/// Render the world inspector — a tree of all entities organized by hierarchy.
 ///
 /// Root entities (those without a `Parent`) appear at the top level.
 /// Children appear nested under their parent, expandable via a toggle.
 ///
 /// Entities with a [`Name`] component display their name; others show `Entity(index:gen)`.
-pub fn show_world_inspector(ctx: &egui::Context, world: &World, state: &mut InspectorState) {
-    if !state.world_inspector_open {
-        return;
-    }
+///
+/// The caller is responsible for placing this in whatever container they want
+/// (dock tab, side panel, window, etc.).
+pub fn show_world_inspector(ui: &mut egui::Ui, world: &World, state: &mut InspectorState) {
+    // Filter input
+    ui.horizontal(|ui| {
+        ui.label("Filter:");
+        ui.text_edit_singleline(&mut state.filter);
+    });
+    ui.separator();
 
-    let mut open = state.world_inspector_open;
-    egui::Window::new("World Inspector")
-        .default_pos([10.0, 250.0])
-        .default_width(250.0)
-        .resizable(true)
-        .open(&mut open)
-        .show(ctx, |ui| {
-            // Filter input
-            ui.horizontal(|ui| {
-                ui.label("Filter:");
-                ui.text_edit_singleline(&mut state.filter);
-            });
-            ui.separator();
+    // Entity count
+    ui.label(format!("Entities: {}", world.entity_count()));
+    ui.separator();
 
-            // Entity count
-            ui.label(format!("Entities: {}", world.entity_count()));
-            ui.separator();
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            // Collect root entities (no Parent component)
+            let roots = collect_roots(world);
 
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    // Collect root entities (no Parent component)
-                    let roots = collect_roots(world);
-
-                    for entity in &roots {
-                        show_entity_node(ui, world, *entity, state);
-                    }
-                });
+            for entity in &roots {
+                show_entity_node(ui, world, *entity, state);
+            }
         });
-    state.world_inspector_open = open;
 }
 
 /// Collect entities that have no Parent component (root entities).

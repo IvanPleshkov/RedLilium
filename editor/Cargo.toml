@@ -8,8 +8,11 @@ description = "Editor application for RedLilium Engine"
 
 [dependencies]
 redlilium-core = { path = "../core" }
-redlilium-ecs = { path = "../ecs" }
+redlilium-ecs = { path = "../ecs", features = ["inspector"] }
 redlilium-graphics = { path = "../graphics" }
 redlilium-app = { path = "../app" }
 
 log = { workspace = true }
+egui = { workspace = true }
+egui_dock = { workspace = true }
+winit = { workspace = true }

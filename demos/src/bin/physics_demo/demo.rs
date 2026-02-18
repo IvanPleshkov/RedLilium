@@ -7,7 +7,8 @@ use redlilium_core::math::{Vec3, perspective_rh};
 use redlilium_core::profiling::{profile_function, profile_scope};
 use redlilium_graphics::{
     ColorAttachment, DepthStencilAttachment, FrameSchedule, GraphicsPass, RenderTarget,
-    RenderTargetConfig, egui::EguiController,
+    RenderTargetConfig,
+    egui::{EguiController, egui},
 };
 use winit::event::KeyEvent;
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -412,18 +413,30 @@ impl AppHandler for PhysicsDemoApp {
             if show_inspector {
                 let egui_ctx = egui.context().clone();
                 if let Some(world) = &self.world {
-                    redlilium_ecs::ui::show_world_inspector(
-                        &egui_ctx,
-                        world,
-                        &mut self.inspector_state,
-                    );
+                    egui::Window::new("World Inspector")
+                        .default_pos([10.0, 250.0])
+                        .default_width(250.0)
+                        .resizable(true)
+                        .show(&egui_ctx, |ui| {
+                            redlilium_ecs::ui::show_world_inspector(
+                                ui,
+                                world,
+                                &mut self.inspector_state,
+                            );
+                        });
                 }
                 if let Some(world) = &mut self.world {
-                    redlilium_ecs::ui::show_component_inspector(
-                        &egui_ctx,
-                        world,
-                        &mut self.inspector_state,
-                    );
+                    egui::Window::new("Component Inspector")
+                        .default_pos([270.0, 250.0])
+                        .default_width(320.0)
+                        .resizable(true)
+                        .show(&egui_ctx, |ui| {
+                            redlilium_ecs::ui::show_component_inspector(
+                                ui,
+                                world,
+                                &mut self.inspector_state,
+                            );
+                        });
                 }
             }
 

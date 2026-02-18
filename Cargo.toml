@@ -56,6 +56,7 @@ bytemuck = { version = "1.21", features = ["derive"] }
 
 # UI
 egui = "0.33.3"
+egui_dock = "0.18.0"
 
 # glTF loading
 gltf-dep = { package = "gltf", version = "1.4.1" }
