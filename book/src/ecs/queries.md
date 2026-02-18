@@ -25,8 +25,9 @@ impl System for MovementSystem {
 
 | Type | Provides | Notes |
 |------|----------|-------|
-| `Read<T>` | `Ref<'_, T>` (shared) | Panics if `T` not registered |
-| `Write<T>` | `RefMut<'_, T>` (exclusive) | Panics if `T` not registered |
+| `Read<T>` | `Ref<'_, T>` (shared) | Skips disabled and static entities |
+| `ReadAll<T>` | `Ref<'_, T>` (shared) | Skips disabled only, includes static |
+| `Write<T>` | `RefMut<'_, T>` (exclusive) | Skips disabled and static entities |
 | `OptionalRead<T>` | `Option<Ref<'_, T>>` | Returns `None` if not registered |
 | `OptionalWrite<T>` | `Option<RefMut<'_, T>>` | Returns `None` if not registered |
 | `Res<T>` | `ResourceRef<'_, T>` | Shared resource access |

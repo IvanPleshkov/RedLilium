@@ -286,8 +286,27 @@ On web, `pool.scope()` runs tasks sequentially, and async compute tasks tick coo
 
 ## Implementation Plan
 
+### Entity Flags
+
+Each entity carries a `u32` flags field in its 128-bit identifier. Flags control query visibility without requiring component insertion/removal:
+
+| Bit | Flag | Description |
+|-----|------|-------------|
+| 0 | `DISABLED` | Manually disabled by user/system |
+| 1 | `INHERITED_DISABLED` | Disabled because a parent was disabled |
+| 2 | `STATIC` | Manually marked static (rarely-changing) |
+| 3 | `INHERITED_STATIC` | Static because a parent was marked static |
+
+**Filtering semantics**:
+- `Read<T>` / `Write<T>` — exclude entities with `DISABLED` or `STATIC` set
+- `ReadAll<T>` — exclude `DISABLED` only, include static entities
+- `World::get()` / `World::get_mut()` — no filtering (exclusive system access)
+- `_unfiltered` methods on `Ref`/`RefMut` — bypass all flag checks
+
+Both disabled and static flags propagate through the parent-child hierarchy. The `INHERITED_*` variants distinguish manual vs propagated state so that `enable`/`unmark_static` preserve manually-flagged children.
+
 ### Phase 1: Foundation
-- Entity storage (128-bit IDs with spawn_tick)
+- Entity storage (128-bit IDs with spawn_tick and flag bits)
 - Component storage (sparse sets, type-erased)
 - Basic queries (iteration, With/Without filters)
 - Resources (typed singletons)

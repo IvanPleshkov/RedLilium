@@ -114,18 +114,43 @@ struct FollowTarget {
 // }
 ```
 
-## Disabled Entities
+## Entity Flags
 
-Entities with the `Disabled` component are automatically excluded from all standard queries. This lets you "deactivate" entities without despawning them:
+Entities carry per-entity flag bits that control query visibility. Flags are set and cleared via `World::set_entity_flags` / `World::clear_entity_flags`, or through the hierarchy functions.
+
+### Disabled
+
+Disabled entities are excluded from all `Read<T>` and `Write<T>` queries:
 
 ```rust
-world.register_component::<Disabled>();
+// Disable an entity and all its descendants
+disable(&mut world, entity);
 
-// Disable an entity
-world.insert(entity, Disabled).unwrap();
-
-// The entity won't appear in Read<T> / Write<T> iterations
-// To include disabled entities, use the _unfiltered methods on Ref/RefMut
+// Re-enable
+enable(&mut world, entity);
 ```
 
-See [Hierarchy](./hierarchy.md) for recursive enable/disable operations.
+### Static
+
+Static entities represent rarely-changing data (terrain, baked lighting, static geometry). They are excluded from both `Read<T>` and `Write<T>` queries — regular systems cannot see or mutate them:
+
+```rust
+// Mark an entity and all descendants as static
+mark_static(&mut world, entity);
+
+// Unmark
+unmark_static(&mut world, entity);
+```
+
+To **read** static entity data, use `ReadAll<T>` instead of `Read<T>`:
+
+```rust
+ctx.lock::<(ReadAll<Transform>,)>()
+    .execute(|(transforms,)| {
+        // Sees ALL active entities, including static ones
+    });
+```
+
+To **mutate** static entity components, use exclusive system access (`&mut World`).
+
+Both disabled and static flags propagate through the hierarchy. See [Hierarchy](./hierarchy.md) for details.

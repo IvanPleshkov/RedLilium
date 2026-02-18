@@ -34,6 +34,14 @@ impl Entity {
     pub const DISABLED: u32 = 1 << 0;
     /// Entity is disabled because a parent was disabled (propagated).
     pub const INHERITED_DISABLED: u32 = 1 << 1;
+    /// Entity is manually marked as static (rarely-changing, e.g. terrain).
+    ///
+    /// Static entities are excluded from both `Read<T>` and `Write<T>` queries.
+    /// Use `ReadAll<T>` to include them in read-only queries, or access them
+    /// directly via exclusive systems (`&mut World`).
+    pub const STATIC: u32 = 1 << 2;
+    /// Entity is static because a parent was marked static (propagated).
+    pub const INHERITED_STATIC: u32 = 1 << 3;
 
     /// Creates a new entity from an index and spawn tick. Flags default to 0.
     pub(crate) fn new(index: u32, spawn_tick: u64) -> Self {
@@ -72,6 +80,11 @@ impl Entity {
     /// Returns `true` if the entity has the DISABLED flag set.
     pub fn is_disabled(&self) -> bool {
         self.flags & Self::DISABLED != 0
+    }
+
+    /// Returns `true` if the entity has the STATIC flag set.
+    pub fn is_static(&self) -> bool {
+        self.flags & Self::STATIC != 0
     }
 }
 

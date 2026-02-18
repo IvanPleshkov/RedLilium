@@ -136,6 +136,20 @@ pub struct Res<T: 'static>(PhantomData<T>);
 /// Panics if the resource does not exist.
 pub struct ResMut<T: 'static>(PhantomData<T>);
 
+/// Shared read access to component type `T`, including static entities.
+///
+/// Like [`Read<T>`], but the resulting [`Ref`] only excludes disabled
+/// entities — static entities are included in iteration. Use this in
+/// systems that need to observe all active entities (e.g., rendering,
+/// physics broadphase).
+///
+/// In the execute closure, yields `Ref<'_, T>`.
+///
+/// # Panics
+///
+/// Panics if `T` has never been registered.
+pub struct ReadAll<T: 'static>(PhantomData<T>);
+
 /// Shared read access to a main-thread resource of type `T`.
 ///
 /// `T` does **not** need to be `Send + Sync`. The scheduler transparently
@@ -283,6 +297,29 @@ impl<T: 'static> AccessElement for Write<T> {
         world
             .write_unlocked::<T>()
             .expect("Component not registered for Write<T> access")
+    }
+}
+
+impl<T: 'static> AccessElement for ReadAll<T> {
+    type Item<'w> = Ref<'w, T>;
+
+    fn access_info() -> AccessInfo {
+        AccessInfo {
+            type_id: TypeId::of::<T>(),
+            is_write: false,
+        }
+    }
+
+    fn fetch(world: &World) -> Self::Item<'_> {
+        world
+            .read_all::<T>()
+            .expect("Component not registered for ReadAll<T> access")
+    }
+
+    fn fetch_unlocked(world: &World) -> Self::Item<'_> {
+        world
+            .read_all_unlocked::<T>()
+            .expect("Component not registered for ReadAll<T> access")
     }
 }
 

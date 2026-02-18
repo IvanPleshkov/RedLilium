@@ -997,6 +997,11 @@ impl World {
         self.entities.flags[entity.index() as usize] & Entity::DISABLED != 0
     }
 
+    /// Returns whether the given entity is currently static.
+    pub fn is_static(&self, entity: Entity) -> bool {
+        self.entities.flags[entity.index() as usize] & Entity::STATIC != 0
+    }
+
     /// Returns the current flags for an entity.
     pub fn get_entity_flags(&self, entity: Entity) -> u32 {
         self.entities.get_flags(entity.index())
@@ -1092,6 +1097,38 @@ impl World {
         Some(RefMut::new(storage, self.entity_flags()))
     }
 
+    // ---- ReadAll access (includes static entities) ----
+
+    /// Gets shared read access including static entities.
+    ///
+    /// Like [`read`](World::read), but only excludes disabled entities —
+    /// static entities are included. Use this in systems that need to
+    /// observe all active entities (e.g., rendering, physics broadphase).
+    pub fn read_all<T: 'static>(&self) -> Result<Ref<'_, T>, ComponentNotRegistered> {
+        let storage = self
+            .components
+            .get(&TypeId::of::<T>())
+            .ok_or(ComponentNotRegistered {
+                type_name: std::any::type_name::<T>(),
+            })?;
+        Ok(Ref::new_with_mask(
+            storage,
+            self.entity_flags(),
+            Entity::DISABLED,
+        ))
+    }
+
+    /// Gets shared read access including static entities, returning `None`
+    /// if the type has never been registered.
+    pub fn try_read_all<T: 'static>(&self) -> Option<Ref<'_, T>> {
+        let storage = self.components.get(&TypeId::of::<T>())?;
+        Some(Ref::new_with_mask(
+            storage,
+            self.entity_flags(),
+            Entity::DISABLED,
+        ))
+    }
+
     // ---- Unlocked access (for use when locks are held externally) ----
 
     /// Gets shared read access without acquiring a lock.
@@ -1132,6 +1169,23 @@ impl World {
     pub(crate) fn try_write_unlocked<T: 'static>(&self) -> Option<RefMut<'_, T>> {
         let storage = self.components.get(&TypeId::of::<T>())?;
         Some(RefMut::new_unlocked(storage, self.entity_flags()))
+    }
+
+    /// Gets shared read access including static entities, without acquiring a lock.
+    pub(crate) fn read_all_unlocked<T: 'static>(
+        &self,
+    ) -> Result<Ref<'_, T>, ComponentNotRegistered> {
+        let storage = self
+            .components
+            .get(&TypeId::of::<T>())
+            .ok_or(ComponentNotRegistered {
+                type_name: std::any::type_name::<T>(),
+            })?;
+        Ok(Ref::new_unlocked_with_mask(
+            storage,
+            self.entity_flags(),
+            Entity::DISABLED,
+        ))
     }
 
     /// Acquires component locks in TypeId-sorted order.

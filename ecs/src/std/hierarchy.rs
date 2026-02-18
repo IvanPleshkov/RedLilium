@@ -169,6 +169,67 @@ fn enable_subtree(world: &mut World, entity: Entity) {
     }
 }
 
+// ---- Entity static marking (always recursive, flag-based) ----
+
+/// Marks an entity and all descendants as static recursively.
+///
+/// The target entity gets the `STATIC` flag set and `INHERITED_STATIC`
+/// cleared (marking it as manually static). Descendants that are not
+/// already static receive both `STATIC` and `INHERITED_STATIC` flags.
+/// Already-static descendants keep their manual status.
+///
+/// Static entities are excluded from both `Read<T>` and `Write<T>` queries.
+/// Use `ReadAll<T>` to include them in read-only queries, or access them
+/// directly via exclusive systems (`&mut World`).
+pub fn mark_static(world: &mut World, entity: Entity) {
+    world.set_entity_flags(entity, Entity::STATIC);
+    world.clear_entity_flags(entity, Entity::INHERITED_STATIC);
+    mark_static_subtree(world, entity);
+}
+
+fn mark_static_subtree(world: &mut World, entity: Entity) {
+    let child_entities = world
+        .get::<Children>(entity)
+        .map(|c| c.0.clone())
+        .unwrap_or_default();
+    for child in child_entities {
+        let flags = world.get_entity_flags(child);
+        if flags & Entity::STATIC == 0 {
+            // Child was not static — mark it as inherited
+            world.set_entity_flags(child, Entity::STATIC | Entity::INHERITED_STATIC);
+        }
+        mark_static_subtree(world, child);
+    }
+}
+
+/// Unmarks an entity as static and re-enables inherited-static descendants.
+///
+/// Descendants that were manually marked static (have `STATIC` without
+/// `INHERITED_STATIC`) are left alone — their subtrees are not traversed.
+pub fn unmark_static(world: &mut World, entity: Entity) {
+    world.clear_entity_flags(entity, Entity::STATIC | Entity::INHERITED_STATIC);
+    unmark_static_subtree(world, entity);
+}
+
+fn unmark_static_subtree(world: &mut World, entity: Entity) {
+    let child_entities = world
+        .get::<Children>(entity)
+        .map(|c| c.0.clone())
+        .unwrap_or_default();
+    for child in child_entities {
+        let flags = world.get_entity_flags(child);
+        if flags & Entity::INHERITED_STATIC != 0 {
+            // Child was inherited-static — clear it and recurse
+            world.clear_entity_flags(child, Entity::STATIC | Entity::INHERITED_STATIC);
+            unmark_static_subtree(world, child);
+        } else if flags & Entity::STATIC == 0 {
+            // Child is not static — recurse in case deeper descendants are inherited-static
+            unmark_static_subtree(world, child);
+        }
+        // If child has STATIC but NOT INHERITED_STATIC, it was manually marked — skip
+    }
+}
+
 // ---- CommandBuffer extensions ----
 
 /// Extension trait adding hierarchy commands to [`CommandBuffer`].
@@ -189,6 +250,12 @@ pub trait HierarchyCommands {
 
     /// Queues an [`enable`] command (always recursive).
     fn cmd_enable(&self, entity: Entity);
+
+    /// Queues a [`mark_static`] command (always recursive).
+    fn cmd_mark_static(&self, entity: Entity);
+
+    /// Queues an [`unmark_static`] command (always recursive).
+    fn cmd_unmark_static(&self, entity: Entity);
 }
 
 impl HierarchyCommands for CommandBuffer {
@@ -221,6 +288,18 @@ impl HierarchyCommands for CommandBuffer {
             enable(world, entity);
         });
     }
+
+    fn cmd_mark_static(&self, entity: Entity) {
+        self.push(move |world| {
+            mark_static(world, entity);
+        });
+    }
+
+    fn cmd_unmark_static(&self, entity: Entity) {
+        self.push(move |world| {
+            unmark_static(world, entity);
+        });
+    }
 }
 
 impl HierarchyCommands for CommandCollector {
@@ -251,6 +330,18 @@ impl HierarchyCommands for CommandCollector {
     fn cmd_enable(&self, entity: Entity) {
         self.push(move |world| {
             enable(world, entity);
+        });
+    }
+
+    fn cmd_mark_static(&self, entity: Entity) {
+        self.push(move |world| {
+            mark_static(world, entity);
+        });
+    }
+
+    fn cmd_unmark_static(&self, entity: Entity) {
+        self.push(move |world| {
+            unmark_static(world, entity);
         });
     }
 }

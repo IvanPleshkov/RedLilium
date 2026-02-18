@@ -48,14 +48,28 @@ despawn_recursive(&mut world, parent);
 Enable and disable propagate through the hierarchy:
 
 ```rust
-// Disable entity and all children (adds Disabled component)
+// Disable entity and all children (sets DISABLED flag)
 disable(&mut world, entity);
 
-// Re-enable entity and all children (removes Disabled component)
+// Re-enable entity and all children (clears DISABLED flag)
 enable(&mut world, entity);
 ```
 
-Disabled entities are excluded from standard queries (see [Components - Disabled Entities](./components.md#disabled-entities)).
+Disabled entities are excluded from all queries (see [Components - Entity Flags](./components.md#entity-flags)).
+
+### Mark Static / Unmark Static
+
+Static marking propagates through the hierarchy, same as disable/enable:
+
+```rust
+// Mark entity and all children as static (sets STATIC flag)
+mark_static(&mut world, entity);
+
+// Unmark entity and inherited-static children (clears STATIC flag)
+unmark_static(&mut world, entity);
+```
+
+Static entities are excluded from `Read<T>` and `Write<T>` queries. Use `ReadAll<T>` to include them in read-only queries. Manually-static children are preserved when a parent is unmarked.
 
 ## Deferred Hierarchy Commands
 

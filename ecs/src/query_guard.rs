@@ -180,12 +180,21 @@ pub trait QueryItem {
         None
     }
 
+    /// Returns the exclude mask used by this query item, if available.
+    ///
+    /// Returns `Some` for component storages (`Ref`/`RefMut`), `None` for
+    /// resources. Used by `query_intersected_entities()` to combine masks
+    /// from all elements in a tuple query.
+    fn query_exclude_mask(&self) -> Option<u32> {
+        None
+    }
+
     /// Pre-computes the set of entity indices that match all component storages.
     ///
     /// Returns `Some(entities)` when there are 2+ component memberships to
     /// intersect, `None` otherwise (single component or resources only).
     /// The returned vec contains only entities present in all storages and
-    /// not disabled.
+    /// not excluded (disabled/static).
     fn query_intersected_entities(&self) -> Option<Vec<u32>> {
         None
     }
@@ -203,7 +212,7 @@ impl<'w, T: 'static> QueryItem for Ref<'w, T> {
     }
 
     unsafe fn query_get(&self, entity_index: u32) -> Option<&'w T> {
-        if self.is_entity_disabled(entity_index) {
+        if self.is_entity_excluded(entity_index) {
             return None;
         }
         self.storage().get(entity_index)
@@ -215,6 +224,10 @@ impl<'w, T: 'static> QueryItem for Ref<'w, T> {
 
     fn query_flags(&self) -> Option<&[u32]> {
         Some(self.entity_flags())
+    }
+
+    fn query_exclude_mask(&self) -> Option<u32> {
+        Some(self.exclude_mask())
     }
 }
 
@@ -230,7 +243,7 @@ impl<'w, T: 'static> QueryItem for RefMut<'w, T> {
     }
 
     unsafe fn query_get(&self, entity_index: u32) -> Option<&'w mut T> {
-        if self.is_entity_disabled(entity_index) {
+        if self.is_entity_excluded(entity_index) {
             return None;
         }
         // SAFETY: write lock is held (via QueryGuard._guards), and the caller
@@ -246,6 +259,10 @@ impl<'w, T: 'static> QueryItem for RefMut<'w, T> {
 
     fn query_flags(&self) -> Option<&[u32]> {
         Some(self.entity_flags())
+    }
+
+    fn query_exclude_mask(&self) -> Option<u32> {
+        Some(self.exclude_mask())
     }
 }
 
@@ -398,11 +415,13 @@ macro_rules! impl_query_item {
                 for bs in &bitsets[1..] {
                     result.intersect_with(bs);
                 }
-                // Filter out disabled entities via flag bits.
+                // Combine exclude masks from all elements (OR = most restrictive).
+                let mask = 0u32 $(| self.$idx.query_exclude_mask().unwrap_or(0))+;
+                // Filter out excluded entities via flag bits.
                 let flags = None $(.or(self.$idx.query_flags()))+;
                 if let Some(flags) = flags {
                     Some(result.ones().filter(|&i| {
-                        i >= flags.len() || flags[i] & crate::entity::Entity::DISABLED == 0
+                        i >= flags.len() || flags[i] & mask == 0
                     }).map(|i| i as u32).collect())
                 } else {
                     Some(result.ones().map(|i| i as u32).collect())
