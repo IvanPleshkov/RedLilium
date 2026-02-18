@@ -9,7 +9,10 @@ use redlilium_graphics::{FrameSchedule, RenderTarget};
 use winit::event::{KeyEvent, MouseButton, MouseScrollDelta};
 
 use crate::dock::{self, EditorTabViewer, Tab};
+#[cfg(not(target_os = "macos"))]
 use crate::menu;
+#[cfg(target_os = "macos")]
+use crate::menu::NativeMenu;
 use crate::toolbar::{self, PlayState};
 
 /// A minimal EguiApp that does nothing.
@@ -40,6 +43,8 @@ pub struct Editor {
     dock_state: DockState<Tab>,
     inspector_state: InspectorState,
     play_state: PlayState,
+    #[cfg(target_os = "macos")]
+    native_menu: Option<NativeMenu>,
 }
 
 impl Editor {
@@ -55,6 +60,8 @@ impl Editor {
             dock_state: dock::create_default_layout(),
             inspector_state: InspectorState::new(),
             play_state: PlayState::Editing,
+            #[cfg(target_os = "macos")]
+            native_menu: None,
         }
     }
 }
@@ -73,6 +80,12 @@ impl AppHandler for Editor {
             ctx.surface_format(),
         ));
 
+        // Create native menu after the event loop / NSApplication is initialized
+        #[cfg(target_os = "macos")]
+        {
+            self.native_menu = Some(NativeMenu::new());
+        }
+
         self.schedules.run_startup(&mut self.world, &self.runner);
     }
 
@@ -83,6 +96,14 @@ impl AppHandler for Editor {
     }
 
     fn on_update(&mut self, ctx: &mut AppContext) -> bool {
+        // Poll native menu events (macOS only)
+        #[cfg(target_os = "macos")]
+        if let Some(menu) = &self.native_menu
+            && let Some(action) = menu.poll_event()
+        {
+            log::info!("Menu action: {:?}", action);
+        }
+
         if self.play_state == PlayState::Playing {
             self.schedules
                 .run_frame(&mut self.world, &self.runner, ctx.delta_time() as f64);
@@ -103,7 +124,8 @@ impl AppHandler for Editor {
 
             let egui_ctx = egui.context().clone();
 
-            // Menu bar (topmost)
+            // Menu bar (egui fallback for non-macOS platforms)
+            #[cfg(not(target_os = "macos"))]
             menu::draw_menu_bar(&egui_ctx);
 
             // Toolbar (below menu bar)

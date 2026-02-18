@@ -1844,30 +1844,52 @@ impl VulkanBackend {
         // Vulkan's Y-axis points down (0=top, height=bottom), but wgpu/OpenGL use Y-up.
         // Using a negative height viewport flips the Y-axis, making the coordinate system
         // consistent with wgpu behavior. This requires VK_KHR_maintenance1 (Vulkan 1.1+).
-        let viewport = vk::Viewport {
-            x: 0.0,
-            y: render_area.extent.height as f32, // Start at bottom
-            width: render_area.extent.width as f32,
-            height: -(render_area.extent.height as f32), // Negative height flips Y
-            min_depth: 0.0,                              // Near plane maps to depth 0
-            max_depth: 1.0,                              // Far plane maps to depth 1
+        let viewport = if let Some(vp) = pass.viewport() {
+            // Pass-level viewport override (apply Y-flip)
+            vk::Viewport {
+                x: vp.x,
+                y: vp.y + vp.height, // Start at bottom of viewport
+                width: vp.width,
+                height: -vp.height, // Negative height flips Y
+                min_depth: vp.min_depth,
+                max_depth: vp.max_depth,
+            }
+        } else {
+            vk::Viewport {
+                x: 0.0,
+                y: render_area.extent.height as f32, // Start at bottom
+                width: render_area.extent.width as f32,
+                height: -(render_area.extent.height as f32), // Negative height flips Y
+                min_depth: 0.0,                              // Near plane maps to depth 0
+                max_depth: 1.0,                              // Far plane maps to depth 1
+            }
         };
         unsafe {
             self.device.cmd_set_viewport(cmd, 0, &[viewport]);
         }
 
-        // Set scissor to match render area
-        let scissor = vk::Rect2D {
-            offset: render_area.offset,
-            extent: render_area.extent,
+        // Set scissor rect (use pass override or fall back to render area)
+        let default_scissor = if let Some(sr) = pass.scissor_rect() {
+            vk::Rect2D {
+                offset: vk::Offset2D { x: sr.x, y: sr.y },
+                extent: vk::Extent2D {
+                    width: sr.width,
+                    height: sr.height,
+                },
+            }
+        } else {
+            vk::Rect2D {
+                offset: render_area.offset,
+                extent: render_area.extent,
+            }
         };
         unsafe {
-            self.device.cmd_set_scissor(cmd, 0, &[scissor]);
+            self.device.cmd_set_scissor(cmd, 0, &[default_scissor]);
         }
 
         // Encode draw commands
         for draw_cmd in pass.draw_commands() {
-            self.encode_draw_command(cmd, draw_cmd, render_targets)?;
+            self.encode_draw_command(cmd, draw_cmd, default_scissor)?;
         }
 
         // End dynamic rendering
@@ -1885,7 +1907,7 @@ impl VulkanBackend {
         &self,
         cmd: vk::CommandBuffer,
         draw_cmd: &crate::graph::DrawCommand,
-        render_targets: &crate::graph::RenderTargetConfig,
+        pass_scissor: vk::Rect2D,
     ) -> Result<(), GraphicsError> {
         use crate::materials::BoundResource;
 
@@ -2164,14 +2186,10 @@ impl VulkanBackend {
             }
         }
 
-        // Restore default scissor if we set a custom one
-        if custom_scissor && let Some((width, height)) = render_targets.dimensions() {
-            let default_scissor = vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent: vk::Extent2D { width, height },
-            };
+        // Restore pass-level scissor if we set a per-draw one
+        if custom_scissor {
             unsafe {
-                self.device.cmd_set_scissor(cmd, 0, &[default_scissor]);
+                self.device.cmd_set_scissor(cmd, 0, &[pass_scissor]);
             }
         }
 

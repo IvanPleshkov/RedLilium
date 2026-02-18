@@ -115,7 +115,7 @@ pub use compute_context::EcsComputeContext;
 // System & scheduling (new API)
 pub use access_set::{
     AccessSet, Added, Any, MainThreadRes, MainThreadResMut, MaybeAdded, MaybeRemoved, OptionalRead,
-    OptionalWrite, Or, Read, ReadAll, Removed, Res, ResMut, Write,
+    OptionalWrite, Or, Read, ReadAll, Removed, Res, ResMut, Write, WriteAll,
 };
 pub use bundle::Bundle;
 pub use command_collector::{CommandCollector, SpawnBuilder};
@@ -148,8 +148,8 @@ pub use runner::EcsRunnerMultiThread;
 pub use self::std::components;
 pub use self::std::components::*;
 pub use self::std::hierarchy::{
-    HierarchyCommands, despawn_recursive, disable, enable, mark_static, remove_parent, set_parent,
-    unmark_static,
+    HierarchyCommands, despawn_recursive, disable, enable, mark_editor, mark_static, remove_parent,
+    set_parent, unmark_editor, unmark_static,
 };
 pub use self::std::spawn::spawn_scene;
 pub use self::std::systems;

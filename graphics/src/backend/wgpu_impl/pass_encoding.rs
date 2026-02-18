@@ -135,9 +135,19 @@ impl WgpuBackend {
             multiview_mask: None,
         });
 
-        // Set viewport
-        if let Some((width, height)) = render_targets.dimensions() {
+        // Set viewport (use pass override or fall back to full target dimensions)
+        let default_dims = render_targets.dimensions();
+        if let Some(vp) = pass.viewport() {
+            render_pass.set_viewport(vp.x, vp.y, vp.width, vp.height, vp.min_depth, vp.max_depth);
+        } else if let Some((width, height)) = default_dims {
             render_pass.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
+        }
+
+        // Set scissor rect (use pass override or fall back to full target dimensions)
+        let pass_scissor = pass.scissor_rect();
+        if let Some(sr) = pass_scissor {
+            render_pass.set_scissor_rect(sr.x as u32, sr.y as u32, sr.width, sr.height);
+        } else if let Some((width, height)) = default_dims {
             render_pass.set_scissor_rect(0, 0, width, height);
         }
 
@@ -251,6 +261,17 @@ impl WgpuBackend {
                 }
             }
 
+            // Set per-draw scissor rect if specified
+            let custom_scissor = draw_cmd.scissor_rect.is_some();
+            if let Some(scissor) = &draw_cmd.scissor_rect {
+                render_pass.set_scissor_rect(
+                    scissor.x as u32,
+                    scissor.y as u32,
+                    scissor.width,
+                    scissor.height,
+                );
+            }
+
             if mesh.is_indexed() {
                 if let Some(index_buffer) = mesh.index_buffer()
                     && let GpuBuffer::Wgpu(wgpu_buffer) = index_buffer.gpu_handle()
@@ -271,6 +292,15 @@ impl WgpuBackend {
                     0..mesh.vertex_count(),
                     draw_cmd.first_instance..(draw_cmd.first_instance + draw_cmd.instance_count),
                 );
+            }
+
+            // Restore pass-level scissor after per-draw override
+            if custom_scissor {
+                if let Some(sr) = pass_scissor {
+                    render_pass.set_scissor_rect(sr.x as u32, sr.y as u32, sr.width, sr.height);
+                } else if let Some((width, height)) = default_dims {
+                    render_pass.set_scissor_rect(0, 0, width, height);
+                }
             }
         }
 

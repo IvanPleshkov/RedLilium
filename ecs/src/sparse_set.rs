@@ -485,12 +485,12 @@ pub struct Ref<'a, T: 'static> {
 }
 
 impl<'a, T: 'static> Ref<'a, T> {
-    /// Default exclude mask: skip disabled and static entities.
-    const DEFAULT_MASK: u32 = Entity::DISABLED | Entity::STATIC;
+    /// Default exclude mask: skip disabled, static, and editor entities.
+    const DEFAULT_MASK: u32 = Entity::DISABLED | Entity::STATIC | Entity::EDITOR;
 
     /// Creates a new shared borrow guard, acquiring the storage's read lock.
     ///
-    /// Uses the default exclude mask (`DISABLED | STATIC`).
+    /// Uses the default exclude mask (`DISABLED | STATIC | EDITOR`).
     pub(crate) fn new(storage: &'a ComponentStorage, entity_flags: &'a [u32]) -> Self {
         let guard = storage.lock_read();
         Self {
@@ -664,12 +664,12 @@ pub struct RefMut<'a, T: 'static> {
 }
 
 impl<'a, T: 'static> RefMut<'a, T> {
-    /// Default exclude mask: skip disabled and static entities.
-    const DEFAULT_MASK: u32 = Entity::DISABLED | Entity::STATIC;
+    /// Default exclude mask: skip disabled, static, and editor entities.
+    const DEFAULT_MASK: u32 = Entity::DISABLED | Entity::STATIC | Entity::EDITOR;
 
     /// Creates a new exclusive borrow guard, acquiring the storage's write lock.
     ///
-    /// Uses the default exclude mask (`DISABLED | STATIC`).
+    /// Uses the default exclude mask (`DISABLED | STATIC | EDITOR`).
     pub(crate) fn new(storage: &'a ComponentStorage, entity_flags: &'a [u32]) -> Self {
         let guard = storage.lock_write();
         // SAFETY: lock_write() guarantees exclusive access. We cast away
@@ -685,6 +685,26 @@ impl<'a, T: 'static> RefMut<'a, T> {
         }
     }
 
+    /// Creates a new exclusive borrow guard with a custom exclude mask.
+    ///
+    /// Used by `WriteAll<T>` to create a `RefMut` that only excludes disabled
+    /// entities (mask = `DISABLED`), including static and editor entities.
+    pub(crate) fn new_with_mask(
+        storage: &'a ComponentStorage,
+        entity_flags: &'a [u32],
+        exclude_mask: u32,
+    ) -> Self {
+        let guard = storage.lock_write();
+        let inner = storage.typed::<T>() as *const SparseSetInner<T> as *mut SparseSetInner<T>;
+        Self {
+            inner,
+            entity_flags,
+            exclude_mask,
+            _guard: Some(guard),
+            _marker: PhantomData,
+        }
+    }
+
     /// Creates an exclusive borrow without acquiring a lock.
     ///
     /// The caller must ensure the write lock is already held externally
@@ -695,6 +715,22 @@ impl<'a, T: 'static> RefMut<'a, T> {
             inner,
             entity_flags,
             exclude_mask: Self::DEFAULT_MASK,
+            _guard: None,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Creates an exclusive borrow without acquiring a lock, with a custom exclude mask.
+    pub(crate) fn new_unlocked_with_mask(
+        storage: &'a ComponentStorage,
+        entity_flags: &'a [u32],
+        exclude_mask: u32,
+    ) -> Self {
+        let inner = storage.typed::<T>() as *const SparseSetInner<T> as *mut SparseSetInner<T>;
+        Self {
+            inner,
+            entity_flags,
+            exclude_mask,
             _guard: None,
             _marker: PhantomData,
         }

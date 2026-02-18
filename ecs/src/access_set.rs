@@ -150,6 +150,19 @@ pub struct ResMut<T: 'static>(PhantomData<T>);
 /// Panics if `T` has never been registered.
 pub struct ReadAll<T: 'static>(PhantomData<T>);
 
+/// Exclusive write access including static and editor entities.
+///
+/// Like [`Write`], but only excludes disabled entities — static and editor
+/// entities are included. Use this in editor systems or rendering passes
+/// that need to mutate all active entities.
+///
+/// In the execute closure, yields `RefMut<'_, T>`.
+///
+/// # Panics
+///
+/// Panics if `T` has never been registered.
+pub struct WriteAll<T: 'static>(PhantomData<T>);
+
 /// Shared read access to a main-thread resource of type `T`.
 ///
 /// `T` does **not** need to be `Send + Sync`. The scheduler transparently
@@ -320,6 +333,29 @@ impl<T: 'static> AccessElement for ReadAll<T> {
         world
             .read_all_unlocked::<T>()
             .expect("Component not registered for ReadAll<T> access")
+    }
+}
+
+impl<T: 'static> AccessElement for WriteAll<T> {
+    type Item<'w> = RefMut<'w, T>;
+
+    fn access_info() -> AccessInfo {
+        AccessInfo {
+            type_id: TypeId::of::<T>(),
+            is_write: true,
+        }
+    }
+
+    fn fetch(world: &World) -> Self::Item<'_> {
+        world
+            .write_all::<T>()
+            .expect("Component not registered for WriteAll<T> access")
+    }
+
+    fn fetch_unlocked(world: &World) -> Self::Item<'_> {
+        world
+            .write_all_unlocked::<T>()
+            .expect("Component not registered for WriteAll<T> access")
     }
 }
 

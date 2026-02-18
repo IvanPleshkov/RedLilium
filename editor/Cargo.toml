@@ -16,3 +16,6 @@ log = { workspace = true }
 egui = { workspace = true }
 egui_dock = { workspace = true }
 winit = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = "0.17"

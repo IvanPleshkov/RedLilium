@@ -230,6 +230,67 @@ fn unmark_static_subtree(world: &mut World, entity: Entity) {
     }
 }
 
+// ---- Entity editor marking (always recursive, flag-based) ----
+
+/// Marks an entity and all descendants as editor entities recursively.
+///
+/// The target entity gets the `EDITOR` flag set and `INHERITED_EDITOR`
+/// cleared (marking it as manually editor). Descendants that are not
+/// already editor receive both `EDITOR` and `INHERITED_EDITOR` flags.
+/// Already-editor descendants keep their manual status.
+///
+/// Editor entities are excluded from both `Read<T>` and `Write<T>` queries.
+/// Use `ReadAll<T>` / `WriteAll<T>` to include them, or access them
+/// directly via exclusive systems (`&mut World`).
+pub fn mark_editor(world: &mut World, entity: Entity) {
+    world.set_entity_flags(entity, Entity::EDITOR);
+    world.clear_entity_flags(entity, Entity::INHERITED_EDITOR);
+    mark_editor_subtree(world, entity);
+}
+
+fn mark_editor_subtree(world: &mut World, entity: Entity) {
+    let child_entities = world
+        .get::<Children>(entity)
+        .map(|c| c.0.clone())
+        .unwrap_or_default();
+    for child in child_entities {
+        let flags = world.get_entity_flags(child);
+        if flags & Entity::EDITOR == 0 {
+            // Child was not editor — mark it as inherited
+            world.set_entity_flags(child, Entity::EDITOR | Entity::INHERITED_EDITOR);
+        }
+        mark_editor_subtree(world, child);
+    }
+}
+
+/// Unmarks an entity as editor and re-enables inherited-editor descendants.
+///
+/// Descendants that were manually marked editor (have `EDITOR` without
+/// `INHERITED_EDITOR`) are left alone — their subtrees are not traversed.
+pub fn unmark_editor(world: &mut World, entity: Entity) {
+    world.clear_entity_flags(entity, Entity::EDITOR | Entity::INHERITED_EDITOR);
+    unmark_editor_subtree(world, entity);
+}
+
+fn unmark_editor_subtree(world: &mut World, entity: Entity) {
+    let child_entities = world
+        .get::<Children>(entity)
+        .map(|c| c.0.clone())
+        .unwrap_or_default();
+    for child in child_entities {
+        let flags = world.get_entity_flags(child);
+        if flags & Entity::INHERITED_EDITOR != 0 {
+            // Child was inherited-editor — clear it and recurse
+            world.clear_entity_flags(child, Entity::EDITOR | Entity::INHERITED_EDITOR);
+            unmark_editor_subtree(world, child);
+        } else if flags & Entity::EDITOR == 0 {
+            // Child is not editor — recurse in case deeper descendants are inherited-editor
+            unmark_editor_subtree(world, child);
+        }
+        // If child has EDITOR but NOT INHERITED_EDITOR, it was manually marked — skip
+    }
+}
+
 // ---- CommandBuffer extensions ----
 
 /// Extension trait adding hierarchy commands to [`CommandBuffer`].
@@ -256,6 +317,12 @@ pub trait HierarchyCommands {
 
     /// Queues an [`unmark_static`] command (always recursive).
     fn cmd_unmark_static(&self, entity: Entity);
+
+    /// Queues a [`mark_editor`] command (always recursive).
+    fn cmd_mark_editor(&self, entity: Entity);
+
+    /// Queues an [`unmark_editor`] command (always recursive).
+    fn cmd_unmark_editor(&self, entity: Entity);
 }
 
 impl HierarchyCommands for CommandBuffer {
@@ -300,6 +367,18 @@ impl HierarchyCommands for CommandBuffer {
             unmark_static(world, entity);
         });
     }
+
+    fn cmd_mark_editor(&self, entity: Entity) {
+        self.push(move |world| {
+            mark_editor(world, entity);
+        });
+    }
+
+    fn cmd_unmark_editor(&self, entity: Entity) {
+        self.push(move |world| {
+            unmark_editor(world, entity);
+        });
+    }
 }
 
 impl HierarchyCommands for CommandCollector {
@@ -342,6 +421,18 @@ impl HierarchyCommands for CommandCollector {
     fn cmd_unmark_static(&self, entity: Entity) {
         self.push(move |world| {
             unmark_static(world, entity);
+        });
+    }
+
+    fn cmd_mark_editor(&self, entity: Entity) {
+        self.push(move |world| {
+            mark_editor(world, entity);
+        });
+    }
+
+    fn cmd_unmark_editor(&self, entity: Entity) {
+        self.push(move |world| {
+            unmark_editor(world, entity);
         });
     }
 }

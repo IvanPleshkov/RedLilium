@@ -42,6 +42,14 @@ impl Entity {
     pub const STATIC: u32 = 1 << 2;
     /// Entity is static because a parent was marked static (propagated).
     pub const INHERITED_STATIC: u32 = 1 << 3;
+    /// Entity is an editor-only entity (camera, grid, gizmos, etc.).
+    ///
+    /// Editor entities are excluded from `Read<T>` and `Write<T>` queries.
+    /// Use `ReadAll<T>` / `WriteAll<T>` to include them, or access them
+    /// directly via exclusive systems (`&mut World`).
+    pub const EDITOR: u32 = 1 << 4;
+    /// Entity is an editor entity because a parent was marked as editor (propagated).
+    pub const INHERITED_EDITOR: u32 = 1 << 5;
 
     /// Creates a new entity from an index and spawn tick. Flags default to 0.
     pub(crate) fn new(index: u32, spawn_tick: u64) -> Self {
@@ -85,6 +93,11 @@ impl Entity {
     /// Returns `true` if the entity has the STATIC flag set.
     pub fn is_static(&self) -> bool {
         self.flags & Self::STATIC != 0
+    }
+
+    /// Returns `true` if the entity has the EDITOR flag set.
+    pub fn is_editor(&self) -> bool {
+        self.flags & Self::EDITOR != 0
     }
 }
 

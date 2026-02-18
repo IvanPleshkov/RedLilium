@@ -6,7 +6,7 @@ use crate::materials::BoundResource;
 use crate::materials::MaterialInstance;
 use crate::mesh::Mesh;
 use crate::resources::Buffer;
-use crate::types::ScissorRect;
+use crate::types::{ScissorRect, Viewport};
 
 use super::resource_usage::{
     BufferAccessMode, PassResourceUsage, SurfaceAccess, TextureAccessMode,
@@ -435,6 +435,8 @@ impl std::fmt::Debug for IndirectDrawCommand {
 pub struct GraphicsPass {
     name: String,
     render_targets: Option<RenderTargetConfig>,
+    viewport: Option<Viewport>,
+    scissor_rect: Option<ScissorRect>,
     draw_commands: Vec<DrawCommand>,
     indirect_draw_commands: Vec<IndirectDrawCommand>,
 }
@@ -445,6 +447,8 @@ impl GraphicsPass {
         Self {
             name,
             render_targets: None,
+            viewport: None,
+            scissor_rect: None,
             draw_commands: Vec::new(),
             indirect_draw_commands: Vec::new(),
         }
@@ -463,6 +467,30 @@ impl GraphicsPass {
     /// Set the render target configuration.
     pub fn set_render_targets(&mut self, config: RenderTargetConfig) {
         self.render_targets = Some(config);
+    }
+
+    /// Get the pass-level viewport override.
+    pub fn viewport(&self) -> Option<&Viewport> {
+        self.viewport.as_ref()
+    }
+
+    /// Set a pass-level viewport override.
+    ///
+    /// When set, this viewport is used instead of the full render target dimensions.
+    pub fn set_viewport(&mut self, viewport: Viewport) {
+        self.viewport = Some(viewport);
+    }
+
+    /// Get the pass-level scissor rect override.
+    pub fn scissor_rect(&self) -> Option<&ScissorRect> {
+        self.scissor_rect.as_ref()
+    }
+
+    /// Set a pass-level scissor rect override.
+    ///
+    /// When set, this scissor rect is used instead of the full render target dimensions.
+    pub fn set_scissor_rect(&mut self, rect: ScissorRect) {
+        self.scissor_rect = Some(rect);
     }
 
     /// Check if this pass has render targets configured.

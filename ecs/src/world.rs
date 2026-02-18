@@ -1002,6 +1002,11 @@ impl World {
         self.entities.flags[entity.index() as usize] & Entity::STATIC != 0
     }
 
+    /// Returns whether the given entity is an editor entity.
+    pub fn is_editor(&self, entity: Entity) -> bool {
+        self.entities.flags[entity.index() as usize] & Entity::EDITOR != 0
+    }
+
     /// Returns the current flags for an entity.
     pub fn get_entity_flags(&self, entity: Entity) -> u32 {
         self.entities.get_flags(entity.index())
@@ -1129,6 +1134,38 @@ impl World {
         ))
     }
 
+    // ---- WriteAll access (includes static and editor entities) ----
+
+    /// Gets exclusive write access including static and editor entities.
+    ///
+    /// Like [`write`](World::write), but only excludes disabled entities —
+    /// static and editor entities are included. Use this in editor systems
+    /// that need to mutate all active entities.
+    pub fn write_all<T: 'static>(&self) -> Result<RefMut<'_, T>, ComponentNotRegistered> {
+        let storage = self
+            .components
+            .get(&TypeId::of::<T>())
+            .ok_or(ComponentNotRegistered {
+                type_name: std::any::type_name::<T>(),
+            })?;
+        Ok(RefMut::new_with_mask(
+            storage,
+            self.entity_flags(),
+            Entity::DISABLED,
+        ))
+    }
+
+    /// Gets exclusive write access including static and editor entities,
+    /// returning `None` if the type has never been registered.
+    pub fn try_write_all<T: 'static>(&self) -> Option<RefMut<'_, T>> {
+        let storage = self.components.get(&TypeId::of::<T>())?;
+        Some(RefMut::new_with_mask(
+            storage,
+            self.entity_flags(),
+            Entity::DISABLED,
+        ))
+    }
+
     // ---- Unlocked access (for use when locks are held externally) ----
 
     /// Gets shared read access without acquiring a lock.
@@ -1182,6 +1219,24 @@ impl World {
                 type_name: std::any::type_name::<T>(),
             })?;
         Ok(Ref::new_unlocked_with_mask(
+            storage,
+            self.entity_flags(),
+            Entity::DISABLED,
+        ))
+    }
+
+    /// Gets exclusive write access including static and editor entities,
+    /// without acquiring a lock.
+    pub(crate) fn write_all_unlocked<T: 'static>(
+        &self,
+    ) -> Result<RefMut<'_, T>, ComponentNotRegistered> {
+        let storage = self
+            .components
+            .get(&TypeId::of::<T>())
+            .ok_or(ComponentNotRegistered {
+                type_name: std::any::type_name::<T>(),
+            })?;
+        Ok(RefMut::new_unlocked_with_mask(
             storage,
             self.entity_flags(),
             Entity::DISABLED,
