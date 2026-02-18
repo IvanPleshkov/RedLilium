@@ -1,6 +1,7 @@
 mod dock;
 mod editor;
 mod menu;
+mod scene_view;
 mod toolbar;
 
 use redlilium_app::{App, AppArgs, DefaultAppArgs};

@@ -54,6 +54,8 @@ pub fn create_default_layout() -> DockState<Tab> {
 pub struct EditorTabViewer<'a> {
     pub world: &'a mut World,
     pub inspector_state: &'a mut InspectorState,
+    /// Output: the SceneView panel rect from this frame (egui logical points).
+    pub scene_view_rect: Option<egui::Rect>,
 }
 
 impl TabViewer for EditorTabViewer<'_> {
@@ -72,9 +74,9 @@ impl TabViewer for EditorTabViewer<'_> {
                 redlilium_ecs::ui::show_component_inspector(ui, self.world, self.inspector_state);
             }
             Tab::SceneView => {
-                ui.centered_and_justified(|ui| {
-                    ui.label("Scene View");
-                });
+                // Record the available rect; the scene pass renders directly
+                // to the swapchain in this area.
+                self.scene_view_rect = Some(ui.available_rect_before_wrap());
             }
             Tab::Assets => {
                 ui.centered_and_justified(|ui| {
@@ -82,6 +84,11 @@ impl TabViewer for EditorTabViewer<'_> {
                 });
             }
         }
+    }
+
+    fn clear_background(&self, tab: &Self::Tab) -> bool {
+        // SceneView renders directly to the swapchain — don't paint over it.
+        !matches!(tab, Tab::SceneView)
     }
 
     fn closeable(&mut self, _tab: &mut Tab) -> bool {

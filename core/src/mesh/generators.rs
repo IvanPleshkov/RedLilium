@@ -17,6 +17,14 @@ struct PnuVertex {
     uv: [f32; 2],
 }
 
+/// Internal vertex type for cube generation (position + normal).
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct PnVertex {
+    position: [f32; 3],
+    normal: [f32; 3],
+}
+
 /// Internal vertex type for quad generation (position + uv).
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -126,6 +134,142 @@ pub fn generate_quad(half_width: f32, half_height: f32) -> CpuMesh {
         .with_label("quad")
 }
 
+/// Generate a cube mesh centered at the origin.
+///
+/// Creates an axis-aligned cube with the given half-size. Each face has its own
+/// set of vertices with correct per-face normals. The mesh uses the
+/// `position_normal` layout (24 bytes per vertex) with u32 indices.
+///
+/// # Arguments
+///
+/// * `half_size` - Half the side length of the cube
+pub fn generate_cube(half_size: f32) -> CpuMesh {
+    let s = half_size;
+
+    // 6 faces × 4 vertices = 24 vertices, each with per-face normal
+    let vertices = [
+        // +Z face (front)
+        PnVertex {
+            position: [-s, -s, s],
+            normal: [0.0, 0.0, 1.0],
+        },
+        PnVertex {
+            position: [s, -s, s],
+            normal: [0.0, 0.0, 1.0],
+        },
+        PnVertex {
+            position: [s, s, s],
+            normal: [0.0, 0.0, 1.0],
+        },
+        PnVertex {
+            position: [-s, s, s],
+            normal: [0.0, 0.0, 1.0],
+        },
+        // -Z face (back)
+        PnVertex {
+            position: [s, -s, -s],
+            normal: [0.0, 0.0, -1.0],
+        },
+        PnVertex {
+            position: [-s, -s, -s],
+            normal: [0.0, 0.0, -1.0],
+        },
+        PnVertex {
+            position: [-s, s, -s],
+            normal: [0.0, 0.0, -1.0],
+        },
+        PnVertex {
+            position: [s, s, -s],
+            normal: [0.0, 0.0, -1.0],
+        },
+        // +X face (right)
+        PnVertex {
+            position: [s, -s, s],
+            normal: [1.0, 0.0, 0.0],
+        },
+        PnVertex {
+            position: [s, -s, -s],
+            normal: [1.0, 0.0, 0.0],
+        },
+        PnVertex {
+            position: [s, s, -s],
+            normal: [1.0, 0.0, 0.0],
+        },
+        PnVertex {
+            position: [s, s, s],
+            normal: [1.0, 0.0, 0.0],
+        },
+        // -X face (left)
+        PnVertex {
+            position: [-s, -s, -s],
+            normal: [-1.0, 0.0, 0.0],
+        },
+        PnVertex {
+            position: [-s, -s, s],
+            normal: [-1.0, 0.0, 0.0],
+        },
+        PnVertex {
+            position: [-s, s, s],
+            normal: [-1.0, 0.0, 0.0],
+        },
+        PnVertex {
+            position: [-s, s, -s],
+            normal: [-1.0, 0.0, 0.0],
+        },
+        // +Y face (top)
+        PnVertex {
+            position: [-s, s, s],
+            normal: [0.0, 1.0, 0.0],
+        },
+        PnVertex {
+            position: [s, s, s],
+            normal: [0.0, 1.0, 0.0],
+        },
+        PnVertex {
+            position: [s, s, -s],
+            normal: [0.0, 1.0, 0.0],
+        },
+        PnVertex {
+            position: [-s, s, -s],
+            normal: [0.0, 1.0, 0.0],
+        },
+        // -Y face (bottom)
+        PnVertex {
+            position: [-s, -s, -s],
+            normal: [0.0, -1.0, 0.0],
+        },
+        PnVertex {
+            position: [s, -s, -s],
+            normal: [0.0, -1.0, 0.0],
+        },
+        PnVertex {
+            position: [s, -s, s],
+            normal: [0.0, -1.0, 0.0],
+        },
+        PnVertex {
+            position: [-s, -s, s],
+            normal: [0.0, -1.0, 0.0],
+        },
+    ];
+
+    // 6 faces × 2 triangles × 3 indices = 36 indices
+    let indices: [u32; 36] = [
+        0, 1, 2, 2, 3, 0, // +Z
+        4, 5, 6, 6, 7, 4, // -Z
+        8, 9, 10, 10, 11, 8, // +X
+        12, 13, 14, 14, 15, 12, // -X
+        16, 17, 18, 18, 19, 16, // +Y
+        20, 21, 22, 22, 23, 20, // -Y
+    ];
+
+    let vertex_bytes = bytemuck::cast_slice(&vertices).to_vec();
+
+    CpuMesh::new(VertexLayout::position_normal())
+        .with_vertex_data(0, vertex_bytes)
+        .with_indices_u32(&indices)
+        .with_label("cube")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,5 +308,21 @@ mod tests {
         let data = mesh.vertex_buffer_data(0).unwrap();
         // 4 vertices * 20 bytes = 80
         assert_eq!(data.len(), 4 * 20);
+    }
+
+    #[test]
+    fn test_generate_cube() {
+        let mesh = generate_cube(0.5);
+        assert_eq!(mesh.vertex_count(), 24);
+        assert!(mesh.is_indexed());
+        assert_eq!(mesh.index_count(), 36);
+    }
+
+    #[test]
+    fn test_cube_vertex_data_size() {
+        let mesh = generate_cube(0.5);
+        let data = mesh.vertex_buffer_data(0).unwrap();
+        // 24 vertices * 24 bytes = 576
+        assert_eq!(data.len(), 24 * 24);
     }
 }

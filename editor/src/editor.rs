@@ -13,6 +13,7 @@ use crate::dock::{self, EditorTabViewer, Tab};
 use crate::menu;
 #[cfg(target_os = "macos")]
 use crate::menu::NativeMenu;
+use crate::scene_view::SceneViewState;
 use crate::toolbar::{self, PlayState};
 
 /// A minimal EguiApp that does nothing.
@@ -45,6 +46,9 @@ pub struct Editor {
     play_state: PlayState,
     #[cfg(target_os = "macos")]
     native_menu: Option<NativeMenu>,
+
+    // Scene rendering
+    scene_view: Option<SceneViewState>,
 }
 
 impl Editor {
@@ -62,6 +66,7 @@ impl Editor {
             play_state: PlayState::Editing,
             #[cfg(target_os = "macos")]
             native_menu: None,
+            scene_view: None,
         }
     }
 }
@@ -80,6 +85,11 @@ impl AppHandler for Editor {
             ctx.surface_format(),
         ));
 
+        // Create scene view GPU resources (depth texture sized to full window)
+        let mut scene_view = SceneViewState::new(ctx.device().clone(), ctx.surface_format());
+        scene_view.resize_if_needed(ctx.width(), ctx.height());
+        self.scene_view = Some(scene_view);
+
         // Create native menu after the event loop / NSApplication is initialized
         #[cfg(target_os = "macos")]
         {
@@ -92,6 +102,10 @@ impl AppHandler for Editor {
     fn on_resize(&mut self, ctx: &mut AppContext) {
         if let Some(egui) = &mut self.egui_controller {
             egui.on_resize(ctx.width(), ctx.height());
+        }
+        // Depth texture must match swapchain (full window) dimensions
+        if let Some(sv) = &mut self.scene_view {
+            sv.resize_if_needed(ctx.width(), ctx.height());
         }
     }
 
@@ -108,11 +122,19 @@ impl AppHandler for Editor {
             self.schedules
                 .run_frame(&mut self.world, &self.runner, ctx.delta_time() as f64);
         }
+
+        // Animate the scene view cube
+        if let Some(scene_view) = &mut self.scene_view {
+            scene_view.update(ctx.device(), ctx.delta_time());
+        }
+
         true
     }
 
     fn on_draw(&mut self, mut ctx: DrawContext) -> FrameSchedule {
-        let mut graph = ctx.acquire_graph();
+        // === Graph 1: egui UI ===
+        let mut ui_graph = ctx.acquire_graph();
+        let mut scene_view_rect = None;
 
         if let Some(egui) = &mut self.egui_controller {
             let width = ctx.width();
@@ -131,21 +153,48 @@ impl AppHandler for Editor {
             // Toolbar (below menu bar)
             self.play_state = toolbar::draw_toolbar(&egui_ctx, self.play_state);
 
-            // Dock area fills remaining space
-            egui::CentralPanel::default().show(&egui_ctx, |ui| {
-                let mut tab_viewer = EditorTabViewer {
-                    world: &mut self.world,
-                    inspector_state: &mut self.inspector_state,
-                };
-                egui_dock::DockArea::new(&mut self.dock_state).show_inside(ui, &mut tab_viewer);
-            });
+            // Dock area fills remaining space (transparent so scene renders through)
+            let panel_frame =
+                egui::Frame::central_panel(&egui_ctx.style()).fill(egui::Color32::TRANSPARENT);
+            egui::CentralPanel::default()
+                .frame(panel_frame)
+                .show(&egui_ctx, |ui| {
+                    let mut tab_viewer = EditorTabViewer {
+                        world: &mut self.world,
+                        inspector_state: &mut self.inspector_state,
+                        scene_view_rect: None,
+                    };
+                    egui_dock::DockArea::new(&mut self.dock_state).show_inside(ui, &mut tab_viewer);
+                    scene_view_rect = tab_viewer.scene_view_rect;
+                });
+
+            // Update viewport/scissor from SceneView panel rect
+            if let Some(rect) = scene_view_rect
+                && let Some(sv) = &mut self.scene_view
+            {
+                sv.set_viewport(rect, egui_ctx.pixels_per_point());
+            }
 
             if let Some(egui_pass) = egui.end_frame(&render_target, width, height) {
-                graph.add_graphics_pass(egui_pass);
+                ui_graph.add_graphics_pass(egui_pass);
             }
         }
 
-        let _handle = ctx.submit("editor_ui", graph, &[]);
+        // === Submit scene first (clears swapchain), then egui on top ===
+        let mut deps = Vec::new();
+
+        if let Some(scene_view) = &self.scene_view
+            && scene_view.has_viewport()
+        {
+            let mut scene_graph = ctx.acquire_graph();
+            let scene_pass = scene_view.build_scene_pass(ctx.swapchain_texture());
+            scene_graph.add_graphics_pass(scene_pass);
+            let scene_handle = ctx.submit("scene", scene_graph, &[]);
+            deps.push(scene_handle);
+        }
+
+        let _ui_handle = ctx.submit("editor_ui", ui_graph, &deps);
+
         ctx.finish(&[])
     }
 

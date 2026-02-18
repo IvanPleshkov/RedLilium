@@ -3496,6 +3496,7 @@ dependencies = [
 name = "redlilium-editor"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "egui",
  "egui_dock",
  "log",

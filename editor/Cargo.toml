@@ -13,6 +13,7 @@ redlilium-graphics = { path = "../graphics" }
 redlilium-app = { path = "../app" }
 
 log = { workspace = true }
+bytemuck = { workspace = true }
 egui = { workspace = true }
 egui_dock = { workspace = true }
 winit = { workspace = true }
