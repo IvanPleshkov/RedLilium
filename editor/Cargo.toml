@@ -1,0 +1,15 @@
+[package]
+name = "redlilium-editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Editor application for RedLilium Engine"
+
+[dependencies]
+redlilium-core = { path = "../core" }
+redlilium-ecs = { path = "../ecs" }
+redlilium-graphics = { path = "../graphics" }
+redlilium-app = { path = "../app" }
+
+log = { workspace = true }

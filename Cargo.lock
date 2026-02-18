@@ -3004,6 +3004,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "redlilium-editor"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "redlilium-app",
+ "redlilium-core",
+ "redlilium-ecs",
+ "redlilium-graphics",
+]
+
+[[package]]
 name = "redlilium-graphics"
 version = "0.1.0"
 dependencies = [

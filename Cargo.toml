@@ -7,6 +7,7 @@ members = [
     "graphics",
     "app",
     "demos",
+    "editor",
 ]
 
 [workspace.package]
