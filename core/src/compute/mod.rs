@@ -7,13 +7,23 @@
 //! - [`YieldNow`] — Cooperative yielding future
 //! - [`IoRunner`] — Trait for spawning real async IO operations
 //! - [`ComputeContext`] — Trait combining yield + IO for compute tasks
+//! - [`ComputeMutex`] — Async-aware mutex for cooperative executors
+//! - [`ComputeRwLock`] — Async-aware reader-writer lock for cooperative executors
 
+mod cancellation;
 mod io_handle;
+mod mutex;
 mod priority;
+mod rwlock;
 mod yield_now;
 
+pub use cancellation::{CancellationToken, Cancelled, Checkpoint};
 pub use io_handle::IoHandle;
+pub use mutex::{ComputeMutex, ComputeMutexGuard, ComputeMutexLock};
 pub use priority::Priority;
+pub use rwlock::{
+    ComputeReadGuard, ComputeRwLock, ComputeRwLockRead, ComputeRwLockWrite, ComputeWriteGuard,
+};
 pub use yield_now::{YieldNow, reset_yield_timer, set_yield_interval, yield_now};
 
 use std::future::Future;
@@ -82,6 +92,30 @@ pub trait ComputeContext: Clone + Send + Sync + 'static {
     /// Calls can be liberal — the runtime only actually suspends when
     /// enough wall-clock time has elapsed since the last real yield.
     fn yield_now(&self) -> YieldNow;
+
+    /// Yields control and checks for cancellation.
+    ///
+    /// Like [`yield_now()`](Self::yield_now), but returns `Err(Cancelled)`
+    /// if the task has been cancelled. Use with `?` to stop cooperative
+    /// tasks early at yield points.
+    ///
+    /// The default implementation never cancels (no token attached).
+    /// Implementations backed by a task pool should override this to
+    /// wire in the real cancellation token.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// async fn work<C: ComputeContext>(ctx: &C) -> Result<u32, Cancelled> {
+    ///     for i in 0..1000 {
+    ///         ctx.checkpoint().await?;
+    ///     }
+    ///     Ok(42)
+    /// }
+    /// ```
+    fn checkpoint(&self) -> Checkpoint {
+        Checkpoint::yield_only()
+    }
 
     /// Returns a reference to the IO runner for spawning async IO tasks.
     fn io(&self) -> &Self::Io;

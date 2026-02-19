@@ -103,8 +103,10 @@ pub use query::{
 pub use query_guard::{QueryGuard, QueryItem, QueryIter, ResMutRef};
 pub use reactive::{HasTriggers, Triggers};
 pub use redlilium_core::compute::{
-    ComputeContext, IoHandle, IoRunner, Priority, YieldNow, reset_yield_timer, set_yield_interval,
-    yield_now,
+    CancellationToken, Cancelled, Checkpoint, ComputeContext, ComputeMutex, ComputeMutexGuard,
+    ComputeMutexLock, ComputeReadGuard, ComputeRwLock, ComputeRwLockRead, ComputeRwLockWrite,
+    ComputeWriteGuard, IoHandle, IoRunner, Priority, YieldNow, reset_yield_timer,
+    set_yield_interval, yield_now,
 };
 pub use resource::{Resource, ResourceRef, ResourceRefMut};
 pub use sparse_set::{Ref, RefMut, SparseSetInner};

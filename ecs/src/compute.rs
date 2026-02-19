@@ -5,25 +5,27 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::time::{Duration, Instant};
 
-use redlilium_core::compute::{Priority, reset_yield_timer};
+use redlilium_core::compute::{CancellationToken, Priority, reset_yield_timer};
 
 use crate::compute_context::EcsComputeContext;
 use crate::io_runtime::IoRuntime;
 
 /// Shared state between a [`TaskHandle`] and the pool's internal future wrapper.
 ///
-/// Tracks completion and cancellation flags atomically so the handle can
-/// query status without consuming the result value.
+/// Tracks completion via an atomic flag and cancellation via a
+/// [`CancellationToken`] that is also wired into the task's
+/// [`EcsComputeContext`] so that [`checkpoint()`](redlilium_core::compute::ComputeContext::checkpoint)
+/// can detect cancellation at yield points.
 struct TaskState {
     completed: AtomicBool,
-    cancelled: AtomicBool,
+    token: CancellationToken,
 }
 
 impl TaskState {
     fn new() -> Self {
         Self {
             completed: AtomicBool::new(false),
-            cancelled: AtomicBool::new(false),
+            token: CancellationToken::new(),
         }
     }
 }
@@ -75,15 +77,19 @@ impl<T> TaskHandle<T> {
 
     /// Returns whether the task has been cancelled.
     pub fn is_cancelled(&self) -> bool {
-        self.state.cancelled.load(Ordering::Acquire)
+        self.state.token.is_cancelled()
     }
 
     /// Requests cancellation of the task.
     ///
-    /// The pool will drop the task's future on its next tick instead of
-    /// polling it. If the task has already completed, this has no effect.
+    /// The task will observe the cancellation at its next
+    /// [`checkpoint()`](redlilium_core::compute::ComputeContext::checkpoint)
+    /// and can stop early. The pool also drops cancelled tasks that haven't
+    /// reached a checkpoint on its next tick.
+    ///
+    /// If the task has already completed, this has no effect.
     pub fn cancel(&self) {
-        self.state.cancelled.store(true, Ordering::Release);
+        self.state.token.cancel();
     }
 
     /// Blocks until the task completes and returns the result.
@@ -121,7 +127,7 @@ impl<T> Future for TaskHandle<T> {
         match self.receiver.try_recv() {
             Ok(val) => Poll::Ready(Some(val)),
             Err(std::sync::mpsc::TryRecvError::Empty) => {
-                if self.state.cancelled.load(Ordering::Acquire) {
+                if self.state.token.is_cancelled() {
                     Poll::Ready(None)
                 } else {
                     Poll::Pending
@@ -200,7 +206,7 @@ impl ComputePool {
         let state = Arc::new(TaskState::new());
         let task_state = state.clone();
 
-        let ctx = EcsComputeContext::new(self.io.clone());
+        let ctx = EcsComputeContext::new(self.io.clone(), state.token.clone());
         let future = f(ctx);
 
         let wrapped = async move {
@@ -232,12 +238,15 @@ impl ComputePool {
     ///
     /// Returns the number of tasks that were polled (0 or 1).
     /// Completed and cancelled tasks are automatically removed from the pool.
+    ///
+    /// Cancelled tasks are polled one final time so that
+    /// [`checkpoint()`](redlilium_core::compute::ComputeContext::checkpoint)
+    /// can return [`Cancelled`](redlilium_core::compute::Cancelled) and the
+    /// task body can clean up. If the task is still `Pending` after that
+    /// poll it is dropped.
     pub fn tick(&self) -> usize {
         redlilium_core::profile_scope!("ecs: compute tick");
         let mut tasks = self.tasks.lock().unwrap();
-
-        // Remove cancelled tasks first
-        tasks.retain(|t| !t.state.cancelled.load(Ordering::Acquire));
 
         if tasks.is_empty() {
             return 0;
@@ -260,6 +269,10 @@ impl ComputePool {
             Poll::Ready(()) => {
                 tasks.swap_remove(best_idx);
             }
+            Poll::Pending if tasks[best_idx].state.token.is_cancelled() => {
+                // Cancelled task didn't finish on its grace poll — drop it.
+                tasks.swap_remove(best_idx);
+            }
             Poll::Pending => {}
         }
 
@@ -270,12 +283,10 @@ impl ComputePool {
     ///
     /// Returns the number of tasks that were polled.
     /// Completed and cancelled tasks are automatically removed.
+    /// Cancelled tasks receive one final poll so checkpoints can fire.
     pub fn tick_all(&self) -> usize {
         redlilium_core::profile_scope!("ecs: compute tick_all");
         let mut tasks = self.tasks.lock().unwrap();
-
-        // Remove cancelled tasks first
-        tasks.retain(|t| !t.state.cancelled.load(Ordering::Acquire));
 
         let count = tasks.len();
         if count == 0 {
@@ -285,13 +296,14 @@ impl ComputePool {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        // Poll all tasks, collecting indices of completed ones
         let mut i = 0;
         while i < tasks.len() {
             match tasks[i].future.as_mut().poll(&mut cx) {
                 Poll::Ready(()) => {
                     tasks.swap_remove(i);
-                    // Don't increment i — the swapped task needs to be checked
+                }
+                Poll::Pending if tasks[i].state.token.is_cancelled() => {
+                    tasks.swap_remove(i);
                 }
                 Poll::Pending => {
                     i += 1;
@@ -316,8 +328,6 @@ impl ComputePool {
         let start = Instant::now();
         let mut tasks = self.tasks.lock().unwrap();
 
-        tasks.retain(|t| !t.state.cancelled.load(Ordering::Acquire));
-
         if tasks.is_empty() {
             return 0;
         }
@@ -328,13 +338,15 @@ impl ComputePool {
         let mut i = 0;
 
         while i < tasks.len() {
-            // Check budget before starting the next poll
             if polled > 0 && start.elapsed() >= budget {
                 break;
             }
 
             match tasks[i].future.as_mut().poll(&mut cx) {
                 Poll::Ready(()) => {
+                    tasks.swap_remove(i);
+                }
+                Poll::Pending if tasks[i].state.token.is_cancelled() => {
                     tasks.swap_remove(i);
                 }
                 Poll::Pending => {
@@ -362,9 +374,6 @@ impl ComputePool {
         let mut task = {
             let mut tasks = self.tasks.lock().unwrap();
 
-            // Remove cancelled tasks first
-            tasks.retain(|t| !t.state.cancelled.load(Ordering::Acquire));
-
             if tasks.is_empty() {
                 return 0;
             }
@@ -386,7 +395,10 @@ impl ComputePool {
 
         match task.future.as_mut().poll(&mut cx) {
             Poll::Ready(()) => {
-                // Task completed, don't return it to the pool
+                // Task completed (or cancelled via checkpoint), don't return it
+            }
+            Poll::Pending if task.state.token.is_cancelled() => {
+                // Cancelled task didn't finish on its grace poll — drop it
             }
             Poll::Pending => {
                 // Put the task back
@@ -441,7 +453,7 @@ pub(crate) fn noop_waker() -> Waker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use redlilium_core::compute::yield_now;
+    use redlilium_core::compute::{ComputeContext, yield_now};
 
     fn test_pool() -> ComputePool {
         ComputePool::new(IoRuntime::new())
@@ -554,25 +566,27 @@ mod tests {
     }
 
     #[test]
-    fn cancel_prevents_execution() {
+    fn cancel_drops_non_checkpoint_task() {
         let pool = test_pool();
+
+        // Task that yields but never calls checkpoint — not cancellation-aware.
+        // On the grace poll it may finish, but at minimum it is removed from the pool.
         let handle = pool.spawn(Priority::Low, |_ctx| async {
             yield_now().await;
+            yield_now().await; // two yields so the grace poll re-enters a yield → Pending
             42u32
         });
 
-        // First tick: task yields
+        // First tick: first yield suspends
         pool.tick();
         assert!(!handle.is_done());
 
-        // Cancel before it can complete
         handle.cancel();
         assert!(handle.is_cancelled());
 
-        // Next tick should drop the cancelled task
+        // Grace poll: resumes first yield, hits second yield → Pending + cancelled → dropped
         pool.tick();
         assert_eq!(pool.pending_count(), 0);
-        assert!(!handle.is_done());
     }
 
     #[test]
@@ -706,5 +720,75 @@ mod tests {
     fn tick_with_budget_empty_pool() {
         let pool = test_pool();
         assert_eq!(pool.tick_with_budget(Duration::from_secs(1)), 0);
+    }
+
+    #[test]
+    fn checkpoint_stops_on_cancel() {
+        let pool = test_pool();
+        let handle = pool.spawn(Priority::Low, |ctx| async move {
+            let mut count = 0u32;
+            loop {
+                count += 1;
+                if ctx.checkpoint().await.is_err() {
+                    return count;
+                }
+            }
+        });
+
+        // Tick a few times — task keeps yielding and looping
+        pool.tick();
+        pool.tick();
+        assert!(pool.pending_count() > 0);
+
+        // Cancel and tick — task should observe Cancelled and return
+        handle.cancel();
+        pool.tick();
+        assert_eq!(pool.pending_count(), 0);
+
+        let count = handle.try_recv().unwrap();
+        assert!(count > 0, "task ran at least once before being cancelled");
+    }
+
+    #[test]
+    fn checkpoint_with_question_mark() {
+        let pool = test_pool();
+        let handle = pool.spawn(Priority::Low, |ctx| async move {
+            let mut sum = 0u32;
+            for i in 0..100 {
+                sum += i;
+                ctx.checkpoint().await.ok()?;
+            }
+            Some(sum)
+        });
+
+        // Let it run to completion without cancelling
+        while pool.pending_count() > 0 {
+            pool.tick();
+        }
+
+        // 0+1+2+...+99 = 4950
+        assert_eq!(handle.try_recv(), Some(Some(4950)));
+    }
+
+    #[test]
+    fn checkpoint_with_question_mark_cancelled() {
+        let pool = test_pool();
+        let handle = pool.spawn(Priority::Low, |ctx| async move {
+            let mut sum = 0u32;
+            for i in 0..100 {
+                sum += i;
+                ctx.checkpoint().await.ok()?;
+            }
+            Some(sum)
+        });
+
+        // Tick once so the task starts, then cancel
+        pool.tick();
+        handle.cancel();
+        pool.tick();
+
+        assert_eq!(pool.pending_count(), 0);
+        // Task returned None via `?` propagation
+        assert_eq!(handle.try_recv(), Some(None));
     }
 }
