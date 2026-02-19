@@ -2,6 +2,8 @@
 //!
 //! This module provides translation from winit events to egui input events.
 
+use std::path::PathBuf;
+
 use egui::{Key, Modifiers, PointerButton, Pos2, RawInput, Rect, Vec2};
 use winit::event::{MouseButton, MouseScrollDelta};
 use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
@@ -22,6 +24,10 @@ pub struct EguiInputState {
     pub pixels_per_point: f32,
     /// Events collected this frame.
     pub events: Vec<egui::Event>,
+    /// Files being hovered over the window.
+    hovered_files: Vec<egui::HoveredFile>,
+    /// Files dropped onto the window this frame.
+    dropped_files: Vec<egui::DroppedFile>,
     /// System clipboard for copy/paste (desktop only).
     #[cfg(not(target_arch = "wasm32"))]
     clipboard: Option<arboard::Clipboard>,
@@ -43,6 +49,8 @@ impl EguiInputState {
             ),
             pixels_per_point,
             events: Vec::new(),
+            hovered_files: Vec::new(),
+            dropped_files: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             clipboard: arboard::Clipboard::new().ok(),
         }
@@ -185,6 +193,27 @@ impl EguiInputState {
         }
     }
 
+    /// Handle a file being hovered over the window.
+    pub fn on_file_hovered(&mut self, path: PathBuf) {
+        self.hovered_files.push(egui::HoveredFile {
+            path: Some(path),
+            ..Default::default()
+        });
+    }
+
+    /// Handle file hover leaving the window.
+    pub fn on_file_hover_cancelled(&mut self) {
+        self.hovered_files.clear();
+    }
+
+    /// Handle a file dropped onto the window.
+    pub fn on_file_dropped(&mut self, path: PathBuf) {
+        self.dropped_files.push(egui::DroppedFile {
+            path: Some(path),
+            ..Default::default()
+        });
+    }
+
     /// Take the raw input for this frame and prepare for next frame.
     pub fn take_raw_input(&mut self, time: f64) -> RawInput {
         let events = std::mem::take(&mut self.events);
@@ -209,8 +238,8 @@ impl EguiInputState {
             predicted_dt: 1.0 / 60.0,
             modifiers: self.modifiers,
             events,
-            hovered_files: Vec::new(),
-            dropped_files: Vec::new(),
+            hovered_files: std::mem::take(&mut self.hovered_files),
+            dropped_files: std::mem::take(&mut self.dropped_files),
             focused: true,
             ..Default::default()
         }

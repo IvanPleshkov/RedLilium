@@ -560,6 +560,24 @@ impl AppHandler for Editor {
         }
     }
 
+    fn on_file_dropped(&mut self, _ctx: &mut AppContext, path: std::path::PathBuf) {
+        if let Some(egui) = &mut self.egui_controller {
+            egui.on_file_dropped(path);
+        }
+    }
+
+    fn on_file_hovered(&mut self, _ctx: &mut AppContext, path: std::path::PathBuf) {
+        if let Some(egui) = &mut self.egui_controller {
+            egui.on_file_hovered(path);
+        }
+    }
+
+    fn on_file_hover_cancelled(&mut self, _ctx: &mut AppContext) {
+        if let Some(egui) = &mut self.egui_controller {
+            egui.on_file_hover_cancelled();
+        }
+    }
+
     fn on_key(&mut self, _ctx: &mut AppContext, event: &KeyEvent) {
         if let Some(egui) = &mut self.egui_controller {
             egui.on_key(event);

@@ -538,6 +538,24 @@ where
                 }
             }
 
+            WindowEvent::DroppedFile(path) => {
+                if let Some(ctx) = &mut self.context {
+                    self.handler.on_file_dropped(ctx, path);
+                }
+            }
+
+            WindowEvent::HoveredFile(path) => {
+                if let Some(ctx) = &mut self.context {
+                    self.handler.on_file_hovered(ctx, path);
+                }
+            }
+
+            WindowEvent::HoveredFileCancelled => {
+                if let Some(ctx) = &mut self.context {
+                    self.handler.on_file_hover_cancelled(ctx);
+                }
+            }
+
             _ => {}
         }
     }

@@ -2,6 +2,7 @@
 //!
 //! The controller handles input processing, UI updates, and rendering.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use egui::{Context, TextureId};
@@ -146,6 +147,21 @@ impl EguiController {
         }
 
         self.wants_keyboard_input
+    }
+
+    /// Handle a file being hovered over the window.
+    pub fn on_file_hovered(&mut self, path: PathBuf) {
+        self.input_state.on_file_hovered(path);
+    }
+
+    /// Handle file hover leaving the window.
+    pub fn on_file_hover_cancelled(&mut self) {
+        self.input_state.on_file_hover_cancelled();
+    }
+
+    /// Handle a file dropped onto the window.
+    pub fn on_file_dropped(&mut self, path: PathBuf) {
+        self.input_state.on_file_dropped(path);
     }
 
     /// Begin a new frame and run the egui app.

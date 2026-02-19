@@ -30,6 +30,8 @@ pub struct AssetBrowser {
     dir_cache: HashMap<String, Vec<String>>,
     /// In-flight listing requests: vfs_path -> request_id.
     pending_requests: HashMap<String, VfsRequestId>,
+    /// In-flight write requests: vfs_path -> request_id.
+    pending_writes: HashMap<String, VfsRequestId>,
 }
 
 impl AssetBrowser {
@@ -44,6 +46,7 @@ impl AssetBrowser {
             bg_vfs: BackgroundVfs::new(),
             dir_cache: HashMap::new(),
             pending_requests: HashMap::new(),
+            pending_writes: HashMap::new(),
         }
     }
 
@@ -64,6 +67,23 @@ impl AssetBrowser {
                     log::warn!("VFS list_dir failed: {e}");
                     self.pending_requests.retain(|_, rid| *rid != id);
                 }
+                VfsResult::Write(Ok(())) => {
+                    if let Some((path, _)) = self.pending_writes.iter().find(|(_, rid)| **rid == id)
+                    {
+                        let path = path.clone();
+                        log::info!("File imported: {path}");
+                        // Invalidate parent directory cache to trigger refresh
+                        if let Some((parent, _)) = path.rsplit_once('/') {
+                            self.dir_cache.remove(parent);
+                        }
+                        self.pending_writes.remove(&path);
+                        self.cached_key = None;
+                    }
+                }
+                VfsResult::Write(Err(e)) => {
+                    log::error!("VFS write failed: {e}");
+                    self.pending_writes.retain(|_, rid| *rid != id);
+                }
             }
         }
     }
@@ -83,6 +103,12 @@ impl AssetBrowser {
 
     /// Draw the asset browser UI.
     pub fn show(&mut self, ui: &mut egui::Ui, vfs: &Vfs) {
+        // Handle files dropped from external apps (Finder, Explorer, etc.)
+        self.handle_dropped_files(ui, vfs);
+
+        // Show drop target overlay when files are being hovered
+        let hovering = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
+
         ui.horizontal(|ui| {
             // Left panel: directory tree (fixed width)
             let tree_width = ui.available_width() * 0.3;
@@ -115,6 +141,43 @@ impl AssetBrowser {
                 },
             );
         });
+
+        if hovering && self.selected.is_some() {
+            let rect = ui.min_rect();
+            ui.painter().rect_stroke(
+                rect,
+                4.0,
+                egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
+                egui::StrokeKind::Outside,
+            );
+        }
+    }
+
+    /// Import files dropped from external applications into the selected VFS directory.
+    fn handle_dropped_files(&mut self, ui: &egui::Ui, vfs: &Vfs) {
+        let Some((source, dir_path)) = &self.selected else {
+            return;
+        };
+        let source = source.clone();
+        let dir_path = dir_path.clone();
+
+        let dropped: Vec<_> = ui.ctx().input(|i| i.raw.dropped_files.clone());
+        for file in dropped {
+            let Some(path) = &file.path else { continue };
+            let Ok(data) = std::fs::read(path) else {
+                log::error!("Failed to read dropped file: {}", path.display());
+                continue;
+            };
+            let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+            let vfs_path = if dir_path.is_empty() {
+                format!("{source}/{file_name}")
+            } else {
+                format!("{source}/{dir_path}/{file_name}")
+            };
+            log::info!("Importing: {} ({} bytes)", vfs_path, data.len());
+            let id = self.bg_vfs.write(vfs, &vfs_path, data);
+            self.pending_writes.insert(vfs_path, id);
+        }
     }
 
     /// Draw the directory tree (left panel).

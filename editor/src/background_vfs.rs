@@ -9,6 +9,7 @@ pub struct VfsRequestId(u64);
 /// Result of a completed background VFS operation.
 pub enum VfsResult {
     ListDir(Result<Vec<String>, VfsError>),
+    Write(Result<(), VfsError>),
 }
 
 /// Non-blocking VFS dispatcher for the editor UI.
@@ -53,6 +54,22 @@ impl BackgroundVfs {
         self.runtime.spawn(async move {
             let result = future.await;
             let _ = tx.send((id, VfsResult::ListDir(result)));
+        });
+
+        id
+    }
+
+    /// Dispatch an async `write` request. Returns an ID to match the result.
+    pub fn write(&mut self, vfs: &Vfs, path: &str, data: Vec<u8>) -> VfsRequestId {
+        let id = VfsRequestId(self.next_id);
+        self.next_id += 1;
+
+        let future = vfs.write(path, data);
+        let tx = self.result_tx.clone();
+
+        self.runtime.spawn(async move {
+            let result = future.await;
+            let _ = tx.send((id, VfsResult::Write(result)));
         });
 
         id

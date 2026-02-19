@@ -1,5 +1,7 @@
 //! Application handler trait.
 
+use std::path::PathBuf;
+
 use crate::context::{AppContext, DrawContext};
 use redlilium_graphics::FrameSchedule;
 use winit::event::{KeyEvent, MouseButton};
@@ -75,6 +77,15 @@ pub trait AppHandler {
 
     /// Called when the mouse wheel is scrolled.
     fn on_mouse_scroll(&mut self, _ctx: &mut AppContext, _delta_x: f32, _delta_y: f32) {}
+
+    /// Called when a file is dropped onto the window.
+    fn on_file_dropped(&mut self, _ctx: &mut AppContext, _path: PathBuf) {}
+
+    /// Called when a file is being dragged over the window.
+    fn on_file_hovered(&mut self, _ctx: &mut AppContext, _path: PathBuf) {}
+
+    /// Called when a file drag leaves the window without dropping.
+    fn on_file_hover_cancelled(&mut self, _ctx: &mut AppContext) {}
 
     /// Called when the application is closing.
     ///
