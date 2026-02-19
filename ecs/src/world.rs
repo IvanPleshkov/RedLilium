@@ -194,6 +194,7 @@ impl World {
 
     /// Returns the alive entity at the given slot index, or `None` if the
     /// slot is empty or has been recycled.
+    #[allow(dead_code)]
     pub(crate) fn entity_at_index(&self, index: u32) -> Option<Entity> {
         self.entities.entity_at_index(index)
     }

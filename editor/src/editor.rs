@@ -3,13 +3,15 @@ use std::sync::{Arc, RwLock};
 
 use egui_dock::DockState;
 use redlilium_app::{AppContext, AppHandler, DrawContext};
-use redlilium_core::math::Vec3;
+use redlilium_core::math::{Vec3, mat4_to_cols_array_2d};
 use redlilium_core::mesh::generators;
+use redlilium_debug_drawer::{DebugDrawer, DebugDrawerRenderer};
 use redlilium_ecs::ui::InspectorState;
 use redlilium_ecs::{
-    Camera, EcsRunner, Entity, FreeFlyCamera, GlobalTransform, PostUpdate, RenderMaterial,
-    RenderMesh, Schedules, Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera,
-    UpdateGlobalTransforms, Visibility, WindowInput, World, register_std_components,
+    Camera, DrawGrid, EcsRunner, Entity, FreeFlyCamera, GlobalTransform, GridConfig, PostUpdate,
+    RenderMaterial, RenderMesh, Schedules, Transform, Update, UpdateCameraMatrices,
+    UpdateFreeFlyCamera, UpdateGlobalTransforms, Visibility, WindowInput, World,
+    register_std_components,
 };
 use redlilium_graphics::egui::{EguiApp, EguiController};
 use redlilium_graphics::{Buffer, FrameSchedule, RenderTarget};
@@ -51,6 +53,8 @@ pub struct EditorWorld {
     pub window_input: Arc<RwLock<WindowInput>>,
     /// Per-entity uniform buffers for scene rendering.
     pub entity_buffers: Vec<(Entity, Arc<Buffer>)>,
+    /// Handle to the DebugDrawer resource for advance_tick / take_render_data.
+    pub debug_drawer: Arc<RwLock<DebugDrawer>>,
 }
 
 pub struct Editor {
@@ -69,6 +73,7 @@ pub struct Editor {
 
     // Scene rendering
     scene_view: Option<SceneViewState>,
+    debug_drawer_renderer: Option<DebugDrawerRenderer>,
 
     // Input state for egui feedback
     egui_wants_pointer: bool,
@@ -88,6 +93,7 @@ impl Editor {
             #[cfg(target_os = "macos")]
             native_menu: None,
             scene_view: None,
+            debug_drawer_renderer: None,
             egui_wants_pointer: false,
             egui_wants_keyboard: false,
         }
@@ -101,6 +107,10 @@ impl Editor {
 
         // Insert WindowInput resource
         let window_input_handle = world.insert_resource(WindowInput::default());
+
+        // Insert debug drawing resources
+        let debug_drawer_handle = world.insert_resource(DebugDrawer::new());
+        world.insert_resource(GridConfig::new());
 
         // --- Editor camera ---
         let editor_camera = world.spawn();
@@ -172,8 +182,9 @@ impl Editor {
         // --- Setup schedules ---
         let mut schedules = Schedules::new();
 
-        // Update: camera input
+        // Update: camera input + debug grid
         schedules.get_mut::<Update>().add(UpdateFreeFlyCamera);
+        schedules.get_mut::<Update>().add(DrawGrid);
 
         // PostUpdate: transform propagation -> camera matrices
         schedules
@@ -191,6 +202,7 @@ impl Editor {
             editor_camera,
             window_input: window_input_handle,
             entity_buffers,
+            debug_drawer: debug_drawer_handle,
         }
     }
 
@@ -244,6 +256,12 @@ impl AppHandler for Editor {
 
         self.scene_view = Some(scene_view);
 
+        // Create debug drawer renderer
+        self.debug_drawer_renderer = Some(DebugDrawerRenderer::new(
+            ctx.device().clone(),
+            ctx.surface_format(),
+        ));
+
         // Run startup schedules
         let runner = &self.runner;
         let ew = &mut self.worlds[0];
@@ -292,6 +310,14 @@ impl AppHandler for Editor {
             let ew = self.active_world();
             if let Ok(mut input) = ew.window_input.write() {
                 input.begin_frame();
+            }
+        }
+
+        // Advance debug drawer tick (systems will write to the new tick)
+        {
+            let ew = self.active_world();
+            if let Ok(drawer) = ew.debug_drawer.read() {
+                drawer.advance_tick();
             }
         }
 
@@ -402,6 +428,41 @@ impl AppHandler for Editor {
                 scene_graph.add_graphics_pass(scene_pass);
                 let scene_handle = ctx.submit("scene", scene_graph, &[]);
                 deps.push(scene_handle);
+            }
+        }
+
+        // Debug draw pass (between scene and UI)
+        if let Some(renderer) = &mut self.debug_drawer_renderer
+            && let Some(scene_view) = &self.scene_view
+            && !self.worlds.is_empty()
+        {
+            let ew = &self.worlds[self.active_world];
+            if let Ok(drawer) = ew.debug_drawer.read() {
+                let vertices = drawer.take_render_data();
+                if !vertices.is_empty() {
+                    // Update view-projection matrix from camera
+                    if let Ok(cameras) = ew.world.read_all::<Camera>()
+                        && let Some((_, camera)) = cameras.iter().next()
+                    {
+                        renderer.update_view_proj(mat4_to_cols_array_2d(&camera.view_projection()));
+                    }
+
+                    let render_target = RenderTarget::from_surface(ctx.swapchain_texture());
+                    if let Some(mut debug_pass) =
+                        renderer.create_graphics_pass(&vertices, &render_target)
+                    {
+                        if let Some(vp) = scene_view.viewport() {
+                            debug_pass.set_viewport(vp);
+                        }
+                        if let Some(scissor) = scene_view.scissor() {
+                            debug_pass.set_scissor_rect(scissor);
+                        }
+                        let mut debug_graph = ctx.acquire_graph();
+                        debug_graph.add_graphics_pass(debug_pass);
+                        let debug_handle = ctx.submit("debug_draw", debug_graph, &deps);
+                        deps = vec![debug_handle];
+                    }
+                }
             }
         }
 

@@ -11,6 +11,7 @@ redlilium-core = { path = "../core" }
 redlilium-ecs = { path = "../ecs", features = ["inspector", "rendering"] }
 redlilium-graphics = { path = "../graphics" }
 redlilium-app = { path = "../app" }
+redlilium-debug-drawer = { path = "../debug_drawer" }
 
 log = { workspace = true }
 bytemuck = { workspace = true }

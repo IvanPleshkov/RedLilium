@@ -14,4 +14,6 @@ pub use hierarchy::{
     HierarchyCommands, despawn_recursive, disable, enable, remove_parent, set_parent,
 };
 pub use spawn::spawn_scene;
+#[cfg(feature = "rendering")]
+pub use systems::DrawGrid;
 pub use systems::{UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms};

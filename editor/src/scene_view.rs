@@ -255,6 +255,16 @@ impl SceneViewState {
         self.viewport.is_some()
     }
 
+    /// Get the current viewport, if set.
+    pub fn viewport(&self) -> Option<Viewport> {
+        self.viewport
+    }
+
+    /// Get the current scissor rect, if set.
+    pub fn scissor(&self) -> Option<ScissorRect> {
+        self.scissor
+    }
+
     /// Get the viewport aspect ratio, or 1.0 if no viewport is set.
     pub fn aspect_ratio(&self) -> f32 {
         if let Some(vp) = &self.viewport {

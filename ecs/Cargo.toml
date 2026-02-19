@@ -13,7 +13,7 @@ physics-3d-f32 = ["dep:rapier3d", "redlilium-core/physics-math", "redlilium-core
 physics-2d = ["dep:rapier2d-f64", "redlilium-core/physics-math"]
 physics-2d-f32 = ["dep:rapier2d", "redlilium-core/physics-math", "redlilium-core/physics-f32"]
 physics = ["physics-3d", "physics-2d"]
-rendering = ["dep:redlilium-graphics"]
+rendering = ["dep:redlilium-graphics", "dep:redlilium-debug-drawer"]
 inspector = []
 
 [dependencies]
@@ -28,6 +28,7 @@ rapier3d = { workspace = true, optional = true }
 rapier2d-f64 = { workspace = true, optional = true }
 rapier2d = { workspace = true, optional = true }
 redlilium-graphics = { path = "../graphics", optional = true }
+redlilium-debug-drawer = { path = "../debug_drawer", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }

@@ -155,9 +155,13 @@ pub use self::std::hierarchy::{
 };
 pub use self::std::spawn::spawn_scene;
 pub use self::std::systems;
+#[cfg(feature = "rendering")]
+pub use self::std::systems::DrawGrid;
 pub use self::std::systems::{UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms};
 
 // Rendering components, resources, and systems (feature-gated)
+#[cfg(feature = "rendering")]
+pub use redlilium_debug_drawer::{DebugDrawer, DebugDrawerRenderer};
 #[cfg(feature = "rendering")]
 pub use rendering::{
     CameraTarget, ForwardRenderSystem, RenderMaterial, RenderMesh, RenderSchedule, TextureManager,
