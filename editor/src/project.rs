@@ -2,6 +2,7 @@ use std::path::Path;
 
 use redlilium_vfs::{FileSystemProvider, SftpConfig, SftpProvider, Vfs};
 use serde::Deserialize;
+use serde::de;
 
 /// Top-level project configuration loaded from `project.toml`.
 #[derive(Debug, Clone, Deserialize)]
@@ -34,11 +35,45 @@ pub struct MountConfig {
     pub host: Option<String>,
     pub port: Option<u16>,
     pub username: Option<String>,
-    pub key: Option<String>,
+    /// SSH private key paths to try (first match wins).
+    /// Supports a single string or a list of strings in TOML.
+    #[serde(default, deserialize_with = "deserialize_string_or_vec")]
+    pub key: Vec<String>,
 }
 
 fn default_mount_type() -> String {
     "filesystem".into()
+}
+
+/// Deserialize a TOML value that can be either a single string or a list of strings.
+/// Allows `key = "~/.ssh/id_ed25519"` and `key = ["~/.ssh/id_ed25519", "C:\\..."]`.
+fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: de::Deserializer<'de>,
+{
+    struct StringOrVec;
+
+    impl<'de> de::Visitor<'de> for StringOrVec {
+        type Value = Vec<String>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a string or list of strings")
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            Ok(vec![v.to_owned()])
+        }
+
+        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut vec = Vec::new();
+            while let Some(s) = seq.next_element()? {
+                vec.push(s);
+            }
+            Ok(vec)
+        }
+    }
+
+    deserializer.deserialize_any(StringOrVec)
 }
 
 /// Load a project config from a TOML file.
@@ -69,14 +104,16 @@ pub fn build_vfs(config: &ProjectConfig) -> Vfs {
                 vfs.mount(&mount.name, FileSystemProvider::new(&mount.path));
             }
             "sftp" => {
+                let key_paths = if mount.key.is_empty() {
+                    vec!["~/.ssh/id_ed25519".into()]
+                } else {
+                    mount.key.clone()
+                };
                 let sftp_config = SftpConfig {
                     host: mount.host.clone().unwrap_or_else(|| "localhost".into()),
                     port: mount.port.unwrap_or(22),
                     username: mount.username.clone().unwrap_or_else(|| "root".into()),
-                    key_path: mount
-                        .key
-                        .clone()
-                        .unwrap_or_else(|| "~/.ssh/id_ed25519".into()),
+                    key_paths,
                     remote_root: mount.path.clone(),
                 };
                 log::info!(
@@ -134,7 +171,7 @@ pub fn load_or_default(path: &Path) -> (ProjectConfig, Vfs) {
                     host: None,
                     port: None,
                     username: None,
-                    key: None,
+                    key: Vec::new(),
                 }],
             }
         }

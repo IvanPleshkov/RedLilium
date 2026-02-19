@@ -11,7 +11,9 @@ pub struct SftpConfig {
     pub host: String,
     pub port: u16,
     pub username: String,
-    pub key_path: String,
+    /// SSH private key paths to try, in order. The first one that exists and
+    /// loads successfully is used. Supports `~` expansion on Unix.
+    pub key_paths: Vec<String>,
     pub remote_root: String,
 }
 
@@ -31,7 +33,7 @@ pub struct SftpConfig {
 /// host = "192.168.1.100"
 /// port = 22
 /// username = "deploy"
-/// key = "~/.ssh/id_ed25519"
+/// key = ["~/.ssh/id_ed25519", "C:\\Users\\me\\.ssh\\id_ed25519"]
 /// path = "/data/assets"
 /// ```
 pub struct SftpProvider {
@@ -72,10 +74,11 @@ fn sftp_err(msg: impl std::fmt::Display) -> VfsError {
     VfsError::Io(std::io::Error::other(msg.to_string()))
 }
 
-/// Expand leading `~` to `$HOME`.
+/// Expand leading `~` to the user's home directory.
+/// Checks `$HOME` (Unix) then `%USERPROFILE%` (Windows).
 fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix('~')
-        && let Ok(home) = std::env::var("HOME")
+        && let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE"))
     {
         return format!("{home}{rest}");
     }
@@ -210,12 +213,42 @@ impl russh::client::Handler for SshHandler {
     }
 }
 
+/// Try loading the first available SSH key from the list of paths.
+fn load_first_key(key_paths: &[String]) -> Result<russh_keys::PrivateKey, VfsError> {
+    if key_paths.is_empty() {
+        return Err(sftp_err("no SSH key paths configured"));
+    }
+
+    let mut last_err = String::new();
+    for raw_path in key_paths {
+        let expanded = expand_tilde(raw_path);
+        let path = Path::new(&expanded);
+        if !path.exists() {
+            log::debug!("SSH key not found, skipping: {expanded}");
+            continue;
+        }
+        match russh_keys::load_secret_key(path, None) {
+            Ok(key) => {
+                log::info!("Using SSH key: {expanded}");
+                return Ok(key);
+            }
+            Err(e) => {
+                log::debug!("Failed to load SSH key {expanded}: {e}");
+                last_err = format!("{expanded}: {e}");
+            }
+        }
+    }
+
+    Err(sftp_err(format!(
+        "no usable SSH key found (tried: {}, last error: {last_err})",
+        key_paths.join(", ")
+    )))
+}
+
 async fn establish_session(
     config: &SftpConfig,
 ) -> Result<russh_sftp::client::SftpSession, VfsError> {
-    let key_path = expand_tilde(&config.key_path);
-    let key = russh_keys::load_secret_key(Path::new(&key_path), None)
-        .map_err(|e| sftp_err(format!("failed to load SSH key {key_path}: {e}")))?;
+    let key = load_first_key(&config.key_paths)?;
 
     let ssh_config = russh::client::Config::default();
     let mut handle = russh::client::connect(

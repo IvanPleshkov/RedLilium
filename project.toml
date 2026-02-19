@@ -12,5 +12,8 @@ type = "sftp"
 host = "78.46.173.242"
 port = 22
 username = "root"
-key = "~/.ssh/id_ed25519"
+key = [
+    "~/.ssh/id_ed25519",           # Linux / macOS
+    "C:\\Users\\pleshkov\\.ssh\\id_ed25519",  # Windows
+]
 path = "/root/assets"
