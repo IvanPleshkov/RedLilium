@@ -58,7 +58,8 @@
       "Bash(mdbook build:*)",
       "Bash(monolith:*)",
       "Bash(zip -r:*)",
-      "Bash(git mv:*)"
+      "Bash(git mv:*)",
+      "Bash(cargo clean:*)"
     ],
     "deny": [
       "Read(target/**)"

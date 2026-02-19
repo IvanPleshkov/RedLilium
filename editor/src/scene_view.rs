@@ -1,103 +1,89 @@
-//! Scene view state for rendering 3D content into an egui dock panel.
+//! Scene view state for rendering ECS entities into the editor's SceneView panel.
 //!
-//! Renders directly to the swapchain using a viewport/scissor that matches
-//! the egui SceneView panel rect. No offscreen color texture is used.
+//! Reads Camera, GlobalTransform, RenderMesh, RenderMaterial, and Visibility
+//! from the ECS World and builds a forward rendering pass targeting the
+//! swapchain with viewport/scissor matching the egui panel rect.
 
 use std::sync::Arc;
 
-use redlilium_core::math::{Mat4, Vec3, look_at_rh, mat4_to_cols_array_2d, perspective_rh};
-use redlilium_core::mesh::generators;
+use redlilium_core::math::{Mat4, mat4_to_cols_array_2d};
+use redlilium_ecs::{
+    Camera, Entity, GlobalTransform, RenderMaterial, RenderMesh, Visibility, World,
+};
 use redlilium_graphics::{
-    BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferDescriptor, BufferUsage,
-    ColorAttachment, DepthStencilAttachment, GraphicsDevice, GraphicsPass, Material,
+    BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, Buffer, BufferDescriptor,
+    BufferUsage, ColorAttachment, DepthStencilAttachment, GraphicsDevice, GraphicsPass, Material,
     MaterialDescriptor, MaterialInstance, Mesh, RenderTargetConfig, ScissorRect, ShaderSource,
     ShaderStage, ShaderStageFlags, SurfaceTexture, TextureDescriptor, TextureFormat, TextureUsage,
     Viewport,
 };
 
-/// WGSL shader for a flat-colored cube with simple directional lighting.
+/// WGSL shader for lit scene rendering with camera VP + model matrix uniforms.
 const SCENE_SHADER_WGSL: &str = r#"
 struct Uniforms {
-    mvp: mat4x4<f32>,
+    view_projection: mat4x4<f32>,
+    model: mat4x4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
-    @location(0) normal: vec3<f32>,
+    @location(0) world_normal: vec3<f32>,
 };
 
 @vertex
 fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>) -> VertexOutput {
     var out: VertexOutput;
-    out.clip_position = uniforms.mvp * vec4<f32>(position, 1.0);
-    out.normal = normal;
+    let world_pos = uniforms.model * vec4<f32>(position, 1.0);
+    out.clip_position = uniforms.view_projection * world_pos;
+    out.world_normal = (uniforms.model * vec4<f32>(normal, 0.0)).xyz;
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.3));
-    let ndotl = max(dot(in.normal, light_dir), 0.0);
-    let base_color = vec3<f32>(0.2, 0.5, 0.8);
-    let color = base_color * (0.3 + 0.7 * ndotl);
+    let n = normalize(in.world_normal);
+    let ndotl = max(dot(n, light_dir), 0.0);
+    let base_color = vec3<f32>(0.6, 0.6, 0.65);
+    let ambient = vec3<f32>(0.15, 0.15, 0.18);
+    let color = ambient + base_color * ndotl;
     return vec4<f32>(color, 1.0);
 }
 "#;
 
+/// Per-entity uniform data: VP + model matrix.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct Uniforms {
-    mvp: [[f32; 4]; 4],
+struct SceneUniforms {
+    view_projection: [[f32; 4]; 4],
+    model: [[f32; 4]; 4],
 }
 
 /// Manages GPU resources and rendering for the editor's SceneView panel.
 pub struct SceneViewState {
     device: Arc<GraphicsDevice>,
     depth_texture: Arc<redlilium_graphics::Texture>,
-    mesh: Arc<Mesh>,
-    #[allow(dead_code)]
-    material: Arc<Material>,
-    material_instance: Arc<MaterialInstance>,
-    uniform_buffer: Arc<redlilium_graphics::Buffer>,
+    scene_material: Arc<Material>,
+    _binding_layout: Arc<BindingLayout>,
     viewport: Option<Viewport>,
     scissor: Option<ScissorRect>,
     last_size: (u32, u32),
-    rotation: f32,
 }
 
 impl SceneViewState {
     /// Create scene view resources.
-    ///
-    /// `surface_format` must match the swapchain format since we render directly
-    /// to the surface.
     pub fn new(device: Arc<GraphicsDevice>, surface_format: TextureFormat) -> Self {
-        // Cube mesh
-        let cpu_cube = generators::generate_cube(0.5);
-        let mesh = device
-            .create_mesh_from_cpu(&cpu_cube)
-            .expect("Failed to create cube mesh");
-
-        // Uniform buffer for MVP matrix
-        let uniform_buffer = device
-            .create_buffer(&BufferDescriptor::new(
-                std::mem::size_of::<Uniforms>() as u64,
-                BufferUsage::UNIFORM | BufferUsage::COPY_DST,
-            ))
-            .expect("Failed to create uniform buffer");
-
-        // Binding layout: slot 0 = uniform buffer (vertex stage)
-        #[allow(clippy::arc_with_non_send_sync)]
+        // Binding layout: slot 0 = uniform buffer (vertex + fragment)
         let binding_layout = Arc::new(
             BindingLayout::new().with_entry(
                 BindingLayoutEntry::new(0, BindingType::UniformBuffer)
-                    .with_visibility(ShaderStageFlags::VERTEX),
+                    .with_visibility(ShaderStageFlags::VERTEX | ShaderStageFlags::FRAGMENT),
             ),
         );
 
-        // Material (shader + pipeline config)
-        let material = device
+        let scene_material = device
             .create_material(
                 &MaterialDescriptor::new()
                     .with_shader(ShaderSource::new(
@@ -110,38 +96,54 @@ impl SceneViewState {
                         SCENE_SHADER_WGSL.as_bytes().to_vec(),
                         "fs_main",
                     ))
-                    .with_binding_layout(binding_layout)
+                    .with_binding_layout(binding_layout.clone())
                     .with_vertex_layout(redlilium_graphics::VertexLayout::position_normal())
                     .with_color_format(surface_format)
                     .with_depth_format(TextureFormat::Depth32Float)
-                    .with_label("scene_cube_material"),
+                    .with_label("editor_scene_material"),
             )
-            .expect("Failed to create scene material");
+            .expect("Failed to create editor scene material");
 
-        // Binding group with the uniform buffer
-        #[allow(clippy::arc_with_non_send_sync)]
-        let binding_group = Arc::new(BindingGroup::new().with_buffer(0, uniform_buffer.clone()));
-
-        let material_instance =
-            Arc::new(MaterialInstance::new(material.clone()).with_binding_group(binding_group));
-
-        // Initial depth texture (will be resized on first frame)
-        let initial_w = 256;
-        let initial_h = 256;
-        let depth_texture = Self::create_depth_texture(&device, initial_w, initial_h);
+        let depth_texture = Self::create_depth_texture(&device, 256, 256);
 
         Self {
             device,
             depth_texture,
-            mesh,
-            material,
-            material_instance,
-            uniform_buffer,
+            scene_material,
+            _binding_layout: binding_layout,
             viewport: None,
             scissor: None,
-            last_size: (initial_w, initial_h),
-            rotation: 0.0,
+            last_size: (256, 256),
         }
+    }
+
+    /// Create GPU resources for a renderable entity: uniform buffer + MaterialInstance.
+    ///
+    /// Returns `(uniform_buffer, gpu_mesh, material_instance)`.
+    pub fn create_entity_resources(
+        &self,
+        cpu_mesh: &redlilium_core::mesh::CpuMesh,
+    ) -> (Arc<Buffer>, Arc<Mesh>, Arc<MaterialInstance>) {
+        let uniform_buffer = self
+            .device
+            .create_buffer(&BufferDescriptor::new(
+                std::mem::size_of::<SceneUniforms>() as u64,
+                BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+            ))
+            .expect("Failed to create entity uniform buffer");
+
+        let binding_group = Arc::new(BindingGroup::new().with_buffer(0, uniform_buffer.clone()));
+
+        let material_instance = Arc::new(
+            MaterialInstance::new(self.scene_material.clone()).with_binding_group(binding_group),
+        );
+
+        let gpu_mesh = self
+            .device
+            .create_mesh_from_cpu(cpu_mesh)
+            .expect("Failed to create entity GPU mesh");
+
+        (uniform_buffer, gpu_mesh, material_instance)
     }
 
     /// Update the viewport and scissor from an egui panel rect.
@@ -155,7 +157,7 @@ impl SceneViewState {
         self.scissor = Some(ScissorRect::new(x as i32, y as i32, w as u32, h as u32));
     }
 
-    /// Recreate the depth texture if the window size changed. Returns `true` if resized.
+    /// Recreate the depth texture if the window size changed.
     pub fn resize_if_needed(&mut self, width: u32, height: u32) -> bool {
         let width = width.max(1);
         let height = height.max(1);
@@ -169,47 +171,49 @@ impl SceneViewState {
         true
     }
 
-    /// Animate the cube and upload the MVP matrix.
-    pub fn update(&mut self, device: &Arc<GraphicsDevice>, delta_time: f32) {
-        self.rotation += delta_time * 0.8;
-
-        // Compute aspect from viewport (panel) dimensions
-        let aspect = if let Some(vp) = &self.viewport {
-            vp.width / vp.height.max(1.0)
-        } else {
-            let (w, h) = self.last_size;
-            w as f32 / h.max(1) as f32
+    /// Update per-entity uniform buffers with current camera VP and model matrices.
+    pub fn update_uniforms(&self, world: &World, entity_buffers: &[(Entity, Arc<Buffer>)]) {
+        // Get camera view-projection matrix (use read_all to include editor-flagged camera)
+        let Ok(cameras) = world.read_all::<Camera>() else {
+            return;
         };
-
-        // Camera
-        let proj = perspective_rh(std::f32::consts::FRAC_PI_4, aspect, 0.1, 100.0);
-        let eye = Vec3::new(2.0, 2.0, 2.0);
-        let target = Vec3::zeros();
-        let up = Vec3::new(0.0, 1.0, 0.0);
-        let view = look_at_rh(&eye, &target, &up);
-
-        // Rotation around Y axis
-        let cos_r = self.rotation.cos();
-        let sin_r = self.rotation.sin();
-        #[rustfmt::skip]
-        let model = Mat4::new(
-             cos_r, 0.0, sin_r, 0.0,
-             0.0,   1.0, 0.0,   0.0,
-            -sin_r, 0.0, cos_r, 0.0,
-             0.0,   0.0, 0.0,   1.0,
-        );
-
-        let mvp = proj * view * model;
-        let uniforms = Uniforms {
-            mvp: mat4_to_cols_array_2d(&mvp),
+        let Some((_, camera)) = cameras.iter().next() else {
+            return;
         };
+        let vp = camera.view_projection();
 
-        let _ = device.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+        // Update each entity's uniform buffer
+        let Ok(globals) = world.read::<GlobalTransform>() else {
+            return;
+        };
+        for (entity, buffer) in entity_buffers {
+            let model = globals
+                .get(entity.index())
+                .map(|g| g.0)
+                .unwrap_or_else(Mat4::identity);
+
+            let uniforms = SceneUniforms {
+                view_projection: mat4_to_cols_array_2d(&vp),
+                model: mat4_to_cols_array_2d(&model),
+            };
+
+            let _ = self
+                .device
+                .write_buffer(buffer, 0, bytemuck::bytes_of(&uniforms));
+        }
     }
 
-    /// Build a graphics pass that renders the scene into the swapchain
+    /// Build a graphics pass that renders ECS entities to the swapchain
     /// at the SceneView panel's viewport.
-    pub fn build_scene_pass(&self, swapchain: &SurfaceTexture) -> GraphicsPass {
+    pub fn build_scene_pass(
+        &self,
+        world: &World,
+        swapchain: &SurfaceTexture,
+    ) -> Option<GraphicsPass> {
+        let meshes = world.read::<RenderMesh>().ok()?;
+        let materials = world.read::<RenderMaterial>().ok()?;
+        let visibilities = world.read::<Visibility>().ok()?;
+
         let mut pass = GraphicsPass::new("scene_view".into());
 
         pass.set_render_targets(
@@ -231,13 +235,34 @@ impl SceneViewState {
             pass.set_scissor_rect(*scissor);
         }
 
-        pass.add_draw(self.mesh.clone(), self.material_instance.clone());
-        pass
+        for (entity_idx, render_mesh) in meshes.iter() {
+            let Some(render_material) = materials.get(entity_idx) else {
+                continue;
+            };
+            if let Some(vis) = visibilities.get(entity_idx)
+                && !vis.is_visible()
+            {
+                continue;
+            }
+            pass.add_draw(render_mesh.0.clone(), render_material.0.clone());
+        }
+
+        Some(pass)
     }
 
     /// Whether the viewport has been set (i.e. the SceneView tab is visible).
     pub fn has_viewport(&self) -> bool {
         self.viewport.is_some()
+    }
+
+    /// Get the viewport aspect ratio, or 1.0 if no viewport is set.
+    pub fn aspect_ratio(&self) -> f32 {
+        if let Some(vp) = &self.viewport {
+            vp.width / vp.height.max(1.0)
+        } else {
+            let (w, h) = self.last_size;
+            w as f32 / h.max(1) as f32
+        }
     }
 
     fn create_depth_texture(

@@ -19,6 +19,8 @@ use crate::io_runtime::IoRuntime;
 struct TaskState {
     completed: AtomicBool,
     token: CancellationToken,
+    /// Panic message if the task panicked during polling.
+    panicked: Mutex<Option<String>>,
 }
 
 impl TaskState {
@@ -26,7 +28,12 @@ impl TaskState {
         Self {
             completed: AtomicBool::new(false),
             token: CancellationToken::new(),
+            panicked: Mutex::new(None),
         }
+    }
+
+    fn set_panicked(&self, msg: String) {
+        *self.panicked.lock().unwrap() = Some(msg);
     }
 }
 
@@ -78,6 +85,20 @@ impl<T> TaskHandle<T> {
     /// Returns whether the task has been cancelled.
     pub fn is_cancelled(&self) -> bool {
         self.state.token.is_cancelled()
+    }
+
+    /// Returns whether the task panicked during execution.
+    ///
+    /// If true, [`try_recv()`](TaskHandle::try_recv) will return `None`
+    /// and [`panic_message()`](TaskHandle::panic_message) contains the
+    /// panic payload.
+    pub fn is_panicked(&self) -> bool {
+        self.state.panicked.lock().unwrap().is_some()
+    }
+
+    /// Returns the panic message if the task panicked, `None` otherwise.
+    pub fn panic_message(&self) -> Option<String> {
+        self.state.panicked.lock().unwrap().clone()
     }
 
     /// Requests cancellation of the task.
@@ -234,6 +255,26 @@ impl ComputePool {
         TaskHandle { receiver, state }
     }
 
+    /// Polls a task once, catching panics.
+    ///
+    /// Returns `true` if the task should be removed from the pool
+    /// (completed, cancelled after grace poll, or panicked).
+    fn poll_task_guarded(task: &mut PendingTask, cx: &mut Context<'_>) -> bool {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            task.future.as_mut().poll(cx)
+        })) {
+            Ok(Poll::Ready(())) => true,
+            Ok(Poll::Pending) if task.state.token.is_cancelled() => true,
+            Ok(Poll::Pending) => false,
+            Err(payload) => {
+                let msg = crate::system::panic_payload_to_string(&*payload);
+                task.state.set_panicked(msg);
+                task.state.completed.store(true, Ordering::Release);
+                true
+            }
+        }
+    }
+
     /// Polls the highest-priority pending task once.
     ///
     /// Returns the number of tasks that were polled (0 or 1).
@@ -265,15 +306,8 @@ impl ComputePool {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        match tasks[best_idx].future.as_mut().poll(&mut cx) {
-            Poll::Ready(()) => {
-                tasks.swap_remove(best_idx);
-            }
-            Poll::Pending if tasks[best_idx].state.token.is_cancelled() => {
-                // Cancelled task didn't finish on its grace poll — drop it.
-                tasks.swap_remove(best_idx);
-            }
-            Poll::Pending => {}
+        if Self::poll_task_guarded(&mut tasks[best_idx], &mut cx) {
+            tasks.swap_remove(best_idx);
         }
 
         1
@@ -298,16 +332,10 @@ impl ComputePool {
 
         let mut i = 0;
         while i < tasks.len() {
-            match tasks[i].future.as_mut().poll(&mut cx) {
-                Poll::Ready(()) => {
-                    tasks.swap_remove(i);
-                }
-                Poll::Pending if tasks[i].state.token.is_cancelled() => {
-                    tasks.swap_remove(i);
-                }
-                Poll::Pending => {
-                    i += 1;
-                }
+            if Self::poll_task_guarded(&mut tasks[i], &mut cx) {
+                tasks.swap_remove(i);
+            } else {
+                i += 1;
             }
         }
 
@@ -342,16 +370,10 @@ impl ComputePool {
                 break;
             }
 
-            match tasks[i].future.as_mut().poll(&mut cx) {
-                Poll::Ready(()) => {
-                    tasks.swap_remove(i);
-                }
-                Poll::Pending if tasks[i].state.token.is_cancelled() => {
-                    tasks.swap_remove(i);
-                }
-                Poll::Pending => {
-                    i += 1;
-                }
+            if Self::poll_task_guarded(&mut tasks[i], &mut cx) {
+                tasks.swap_remove(i);
+            } else {
+                i += 1;
             }
             polled += 1;
         }
@@ -393,17 +415,9 @@ impl ComputePool {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        match task.future.as_mut().poll(&mut cx) {
-            Poll::Ready(()) => {
-                // Task completed (or cancelled via checkpoint), don't return it
-            }
-            Poll::Pending if task.state.token.is_cancelled() => {
-                // Cancelled task didn't finish on its grace poll — drop it
-            }
-            Poll::Pending => {
-                // Put the task back
-                self.tasks.lock().unwrap().push(task);
-            }
+        if !Self::poll_task_guarded(&mut task, &mut cx) {
+            // Task still pending — put it back
+            self.tasks.lock().unwrap().push(task);
         }
 
         1
@@ -768,6 +782,40 @@ mod tests {
 
         // 0+1+2+...+99 = 4950
         assert_eq!(handle.try_recv(), Some(Some(4950)));
+    }
+
+    #[test]
+    fn panicking_task_caught_and_reported() {
+        let pool = test_pool();
+        let handle = pool.spawn(Priority::Low, |_ctx| async {
+            panic!("compute boom");
+        });
+
+        pool.tick();
+
+        assert_eq!(pool.pending_count(), 0);
+        assert!(handle.is_done());
+        assert!(handle.is_panicked());
+        assert_eq!(handle.panic_message().unwrap(), "compute boom");
+        // Sender was dropped — no result
+        assert!(handle.try_recv().is_none());
+    }
+
+    #[test]
+    fn panicking_task_does_not_affect_others() {
+        let pool = test_pool();
+
+        pool.spawn(Priority::High, |_ctx| async {
+            panic!("bad task");
+        });
+        let good = pool.spawn(Priority::Low, |_ctx| async { 42u32 });
+
+        // Tick twice: first polls the high-priority (panics), second polls the low-priority
+        pool.tick();
+        pool.tick();
+
+        assert_eq!(pool.pending_count(), 0);
+        assert_eq!(good.try_recv(), Some(42));
     }
 
     #[test]

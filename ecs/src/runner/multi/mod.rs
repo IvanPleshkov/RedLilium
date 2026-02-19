@@ -11,7 +11,7 @@ use crate::diagnostics::{
 };
 use crate::io_runtime::IoRuntime;
 use crate::main_thread_dispatcher::{MainThreadDispatcher, RunnerEvent};
-use crate::system::SystemError;
+use crate::system::{SystemError, panic_payload_to_string};
 use crate::system_context::SystemContext;
 use crate::system_results_store::SystemResultsStore;
 use crate::systems_container::SystemsContainer;
@@ -255,9 +255,14 @@ impl EcsRunnerMultiThread {
                     if let Some(prev_result) = prev_result {
                         guard.reuse_result_boxed(prev_result);
                     }
-                    match guard.run_boxed(world) {
-                        Ok(result) => results_store.store(exc_idx, result),
-                        Err(e) => errors.push(e),
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        guard.run_boxed(world)
+                    })) {
+                        Ok(Ok(result)) => results_store.store(exc_idx, result),
+                        Ok(Err(e)) => errors.push(e),
+                        Err(payload) => {
+                            errors.push(SystemError::Panicked(panic_payload_to_string(&*payload)));
+                        }
                     }
 
                     if let Some(start) = sys_start {
@@ -432,9 +437,16 @@ impl EcsRunnerMultiThread {
                         if let Some(prev_result) = prev_result {
                             guard.reuse_result_boxed(prev_result);
                         }
-                        match guard.run_boxed(&ctx) {
-                            Ok(result) => results_ref.store(idx, result),
-                            Err(e) => errors_ref.lock().unwrap().push(e),
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            guard.run_boxed(&ctx)
+                        })) {
+                            Ok(Ok(result)) => results_ref.store(idx, result),
+                            Ok(Err(e)) => errors_ref.lock().unwrap().push(e),
+                            Err(payload) => {
+                                errors_ref.lock().unwrap().push(SystemError::Panicked(
+                                    panic_payload_to_string(&*payload),
+                                ));
+                            }
                         }
 
                         if let Some(start) = sys_start {
@@ -1277,5 +1289,99 @@ mod tests {
         runner.run(&mut world, &container);
 
         assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+
+    // ---- Panic protection tests ----
+
+    #[test]
+    fn panicking_system_caught_multi_thread() {
+        struct PanicSystem;
+        impl System for PanicSystem {
+            type Result = ();
+            fn run<'a>(
+                &'a self,
+                _ctx: &'a SystemContext<'a>,
+            ) -> Result<(), crate::system::SystemError> {
+                panic!("system boom");
+            }
+        }
+
+        let mut container = SystemsContainer::new();
+        container.add(PanicSystem);
+
+        let runner = EcsRunnerMultiThread::new(2);
+        let mut world = World::new();
+        let errors = runner.run(&mut world, &container);
+
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0].to_string().contains("system boom"),
+            "expected panic message, got: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn panicking_system_does_not_block_others_multi_thread() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let ran = Arc::new(AtomicBool::new(false));
+
+        struct PanicSystem;
+        impl System for PanicSystem {
+            type Result = ();
+            fn run<'a>(
+                &'a self,
+                _ctx: &'a SystemContext<'a>,
+            ) -> Result<(), crate::system::SystemError> {
+                panic!("first panics");
+            }
+        }
+
+        struct OkSystem(Arc<AtomicBool>);
+        impl System for OkSystem {
+            type Result = ();
+            fn run<'a>(
+                &'a self,
+                _ctx: &'a SystemContext<'a>,
+            ) -> Result<(), crate::system::SystemError> {
+                self.0.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let mut container = SystemsContainer::new();
+        container.add(PanicSystem);
+        container.add(OkSystem(ran.clone()));
+        container.add_edge::<PanicSystem, OkSystem>().unwrap();
+
+        let runner = EcsRunnerMultiThread::new(2);
+        let mut world = World::new();
+        let errors = runner.run(&mut world, &container);
+
+        assert_eq!(errors.len(), 1);
+        assert!(ran.load(Ordering::SeqCst), "second system should still run");
+    }
+
+    #[test]
+    fn panicking_exclusive_system_caught_multi_thread() {
+        struct PanicExcl;
+        impl ExclusiveSystem for PanicExcl {
+            type Result = ();
+            fn run(&mut self, _world: &mut World) -> Result<(), crate::system::SystemError> {
+                panic!("exclusive boom");
+            }
+        }
+
+        let mut container = SystemsContainer::new();
+        container.add_exclusive(PanicExcl);
+
+        let runner = EcsRunnerMultiThread::new(2);
+        let mut world = World::new();
+        let errors = runner.run(&mut world, &container);
+
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].to_string().contains("exclusive boom"));
     }
 }

@@ -8,7 +8,7 @@ description = "Editor application for RedLilium Engine"
 
 [dependencies]
 redlilium-core = { path = "../core" }
-redlilium-ecs = { path = "../ecs", features = ["inspector"] }
+redlilium-ecs = { path = "../ecs", features = ["inspector", "rendering"] }
 redlilium-graphics = { path = "../graphics" }
 redlilium-app = { path = "../app" }
 
