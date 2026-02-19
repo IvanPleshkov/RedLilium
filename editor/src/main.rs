@@ -2,6 +2,7 @@ mod asset_browser;
 mod background_vfs;
 mod dock;
 mod editor;
+mod fs_watcher;
 mod menu;
 mod project;
 mod scene_view;

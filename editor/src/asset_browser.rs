@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use redlilium_vfs::Vfs;
 
 use crate::background_vfs::{BackgroundVfs, VfsRequestId, VfsResult};
+use crate::fs_watcher::FsWatcher;
 use crate::project::ProjectConfig;
 
 /// A directory entry in the asset browser.
@@ -32,6 +33,8 @@ pub struct AssetBrowser {
     pending_requests: HashMap<String, VfsRequestId>,
     /// In-flight write requests: vfs_path -> request_id.
     pending_writes: HashMap<String, VfsRequestId>,
+    /// Watches local filesystem mounts for external changes.
+    fs_watcher: Option<FsWatcher>,
 }
 
 impl AssetBrowser {
@@ -47,11 +50,21 @@ impl AssetBrowser {
             dir_cache: HashMap::new(),
             pending_requests: HashMap::new(),
             pending_writes: HashMap::new(),
+            fs_watcher: FsWatcher::new(config),
         }
     }
 
-    /// Poll completed background VFS results. Call once per frame.
+    /// Poll completed background VFS results and filesystem changes. Call once per frame.
     pub fn poll(&mut self) {
+        // Check for external filesystem changes
+        if let Some(watcher) = &self.fs_watcher {
+            for vfs_dir in watcher.poll_changes() {
+                log::debug!("Filesystem change detected: {vfs_dir}");
+                self.dir_cache.remove(&vfs_dir);
+                self.cached_key = None;
+            }
+        }
+
         for (id, result) in self.bg_vfs.poll_results() {
             match result {
                 VfsResult::ListDir(Ok(entries)) => {

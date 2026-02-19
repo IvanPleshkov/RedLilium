@@ -87,5 +87,8 @@ russh = "0.48"
 russh-keys = "0.48"
 russh-sftp = "2.1"
 
+# File watching
+notify = "8"
+
 # Profiling (optional)
 tracy-client = "0.18"
