@@ -14,9 +14,9 @@ use redlilium_ecs::{
     register_std_components,
 };
 use redlilium_graphics::egui::{EguiApp, EguiController};
-use redlilium_graphics::{Buffer, FrameSchedule, RenderTarget};
+use redlilium_graphics::{Buffer, FrameSchedule, RenderTarget, TextureFormat};
 use winit::event::{KeyEvent, MouseButton, MouseScrollDelta};
-use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::keyboard::PhysicalKey;
 
 use crate::dock::{self, EditorTabViewer, Tab};
 #[cfg(not(target_os = "macos"))]
@@ -78,6 +78,12 @@ pub struct Editor {
     // Input state for egui feedback
     egui_wants_pointer: bool,
     egui_wants_keyboard: bool,
+
+    // Scene view interaction
+    /// Scene view rect in physical pixels (x, y, w, h).
+    scene_view_rect_phys: Option<[f32; 4]>,
+    /// Current cursor position in physical pixels (for hit-testing).
+    cursor_pos: [f32; 2],
 }
 
 impl Editor {
@@ -96,6 +102,8 @@ impl Editor {
             debug_drawer_renderer: None,
             egui_wants_pointer: false,
             egui_wants_keyboard: false,
+            scene_view_rect_phys: None,
+            cursor_pos: [0.0, 0.0],
         }
     }
 
@@ -211,11 +219,21 @@ impl Editor {
         &self.worlds[self.active_world]
     }
 
+    /// Whether the cursor is currently inside the scene view panel.
+    fn cursor_in_scene_view(&self) -> bool {
+        if let Some([x, y, w, h]) = self.scene_view_rect_phys {
+            let [cx, cy] = self.cursor_pos;
+            cx >= x && cx <= x + w && cy >= y && cy <= y + h
+        } else {
+            false
+        }
+    }
+
     /// Update WindowInput's ui_wants_input flag from egui state.
     fn sync_input_flags(&self) {
         let ew = self.active_world();
         if let Ok(mut input) = ew.window_input.write() {
-            input.ui_wants_input = self.egui_wants_pointer || self.egui_wants_keyboard;
+            input.ui_wants_input = !self.cursor_in_scene_view();
         }
     }
 
@@ -256,10 +274,11 @@ impl AppHandler for Editor {
 
         self.scene_view = Some(scene_view);
 
-        // Create debug drawer renderer
+        // Create debug drawer renderer (with depth testing against scene)
         self.debug_drawer_renderer = Some(DebugDrawerRenderer::new(
             ctx.device().clone(),
             ctx.surface_format(),
+            Some(TextureFormat::Depth32Float),
         ));
 
         // Run startup schedules
@@ -305,14 +324,6 @@ impl AppHandler for Editor {
         // Sync ui_wants_input flag from previous frame's egui state
         self.sync_input_flags();
 
-        // Begin input frame (clears per-frame deltas)
-        {
-            let ew = self.active_world();
-            if let Ok(mut input) = ew.window_input.write() {
-                input.begin_frame();
-            }
-        }
-
         // Advance debug drawer tick (systems will write to the new tick)
         {
             let ew = self.active_world();
@@ -332,6 +343,14 @@ impl AppHandler for Editor {
             let ew = &mut worlds[*active_world];
             ew.schedules
                 .run_frame(&mut ew.world, runner, ctx.delta_time() as f64);
+        }
+
+        // Clear per-frame deltas *after* systems have consumed them
+        {
+            let ew = self.active_world();
+            if let Ok(mut input) = ew.window_input.write() {
+                input.begin_frame();
+            }
         }
 
         // Update GPU uniform buffers from ECS data
@@ -400,6 +419,13 @@ impl AppHandler for Editor {
 
         // Update viewport/scissor from SceneView panel rect (outside egui block)
         if let Some(rect) = scene_view_rect {
+            // Store physical-pixel rect for input hit-testing
+            self.scene_view_rect_phys = Some([
+                rect.min.x * pixels_per_point,
+                rect.min.y * pixels_per_point,
+                rect.width() * pixels_per_point,
+                rect.height() * pixels_per_point,
+            ]);
             if let Some(sv) = &mut self.scene_view {
                 sv.set_viewport(rect, pixels_per_point);
             }
@@ -448,8 +474,9 @@ impl AppHandler for Editor {
                     }
 
                     let render_target = RenderTarget::from_surface(ctx.swapchain_texture());
+                    let depth_tex = scene_view.depth_texture();
                     if let Some(mut debug_pass) =
-                        renderer.create_graphics_pass(&vertices, &render_target)
+                        renderer.create_graphics_pass(&vertices, &render_target, Some(depth_tex))
                     {
                         if let Some(vp) = scene_view.viewport() {
                             debug_pass.set_viewport(vp);
@@ -472,6 +499,7 @@ impl AppHandler for Editor {
     }
 
     fn on_mouse_move(&mut self, _ctx: &mut AppContext, x: f64, y: f64) {
+        self.cursor_pos = [x as f32, y as f32];
         if let Some(egui) = &mut self.egui_controller {
             egui.on_mouse_move(x, y);
         }
@@ -487,7 +515,9 @@ impl AppHandler for Editor {
         if let Some(egui) = &mut self.egui_controller {
             egui.on_mouse_button(button, pressed);
         }
-        if !self.worlds.is_empty() {
+        // Only forward presses when cursor is in scene view; always forward
+        // releases so buttons don't get stuck.
+        if !self.worlds.is_empty() && (!pressed || self.cursor_in_scene_view()) {
             let idx = match button {
                 MouseButton::Left => 0,
                 MouseButton::Right => 1,
@@ -505,7 +535,7 @@ impl AppHandler for Editor {
         if let Some(egui) = &mut self.egui_controller {
             egui.on_mouse_scroll(MouseScrollDelta::LineDelta(dx, dy));
         }
-        if !self.worlds.is_empty() {
+        if !self.worlds.is_empty() && self.cursor_in_scene_view() {
             let ew = self.active_world();
             if let Ok(mut input) = ew.window_input.write() {
                 input.on_scroll(dx, dy);
@@ -517,24 +547,19 @@ impl AppHandler for Editor {
         if let Some(egui) = &mut self.egui_controller {
             egui.on_key(event);
         }
-        if !self.worlds.is_empty() {
-            let pressed = event.state.is_pressed();
+        // Only forward key presses when egui doesn't want keyboard; always
+        // forward releases so keys don't get stuck.
+        if !self.worlds.is_empty()
+            && (!event.state.is_pressed() || !self.egui_wants_keyboard)
+            && let PhysicalKey::Code(winit_key) = event.physical_key
+            && let Some(key) = redlilium_app::input::map_winit_key(winit_key)
+        {
             let ew = self.active_world();
             if let Ok(mut input) = ew.window_input.write() {
-                match event.physical_key {
-                    PhysicalKey::Code(KeyCode::KeyW) => input.key_w = pressed,
-                    PhysicalKey::Code(KeyCode::KeyA) => input.key_a = pressed,
-                    PhysicalKey::Code(KeyCode::KeyS) => input.key_s = pressed,
-                    PhysicalKey::Code(KeyCode::KeyD) => input.key_d = pressed,
-                    PhysicalKey::Code(KeyCode::KeyQ) => input.key_q = pressed,
-                    PhysicalKey::Code(KeyCode::KeyE) => input.key_e = pressed,
-                    PhysicalKey::Code(KeyCode::ControlLeft | KeyCode::ControlRight) => {
-                        input.key_ctrl = pressed;
-                    }
-                    PhysicalKey::Code(KeyCode::ShiftLeft | KeyCode::ShiftRight) => {
-                        input.key_shift = pressed;
-                    }
-                    _ => {}
+                if event.state.is_pressed() {
+                    input.on_key_pressed(key);
+                } else {
+                    input.on_key_released(key);
                 }
             }
         }

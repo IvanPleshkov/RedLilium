@@ -1,3 +1,5 @@
+use redlilium_core::input::KeyCode;
+
 use crate::std::components::{FreeFlyCamera, WindowInput};
 
 /// System that updates the free-fly camera from window input.
@@ -41,7 +43,9 @@ impl crate::System for UpdateFreeFlyCamera {
                     let dx = input.cursor_delta[0] * cam.rotate_sensitivity;
                     let dy = input.cursor_delta[1] * cam.rotate_sensitivity;
 
-                    if input.key_ctrl {
+                    let ctrl = input.is_key_pressed(KeyCode::ControlLeft)
+                        || input.is_key_pressed(KeyCode::ControlRight);
+                    if ctrl {
                         // Fly mode: Ctrl held — rotate view, target follows
                         cam.free_rotate(-dx, dy);
                     } else {
@@ -51,7 +55,9 @@ impl crate::System for UpdateFreeFlyCamera {
                 }
 
                 // Shift: ramp up speed multiplier; release resets it
-                if input.key_shift {
+                let shift = input.is_key_pressed(KeyCode::ShiftLeft)
+                    || input.is_key_pressed(KeyCode::ShiftRight);
+                if shift {
                     cam.speed_multiplier = (cam.speed_multiplier * cam.speed_boost_acceleration)
                         .min(cam.max_speed_multiplier);
                 } else {
@@ -63,22 +69,22 @@ impl crate::System for UpdateFreeFlyCamera {
                 let mut move_right = 0.0f32;
                 let mut move_up = 0.0f32;
 
-                if input.key_w {
+                if input.is_key_pressed(KeyCode::W) {
                     move_forward += 1.0;
                 }
-                if input.key_s {
+                if input.is_key_pressed(KeyCode::S) {
                     move_forward -= 1.0;
                 }
-                if input.key_d {
+                if input.is_key_pressed(KeyCode::D) {
                     move_right += 1.0;
                 }
-                if input.key_a {
+                if input.is_key_pressed(KeyCode::A) {
                     move_right -= 1.0;
                 }
-                if input.key_e {
+                if input.is_key_pressed(KeyCode::E) {
                     move_up += 1.0;
                 }
-                if input.key_q {
+                if input.is_key_pressed(KeyCode::Q) {
                     move_up -= 1.0;
                 }
 

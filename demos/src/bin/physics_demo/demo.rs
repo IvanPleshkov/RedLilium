@@ -92,11 +92,9 @@ impl PhysicsDemoApp {
         redlilium_ecs::register_std_components(&mut world);
 
         // Insert WindowInput resource
-        let input = WindowInput {
-            window_width: ctx.width() as f32,
-            window_height: ctx.height() as f32,
-            ..WindowInput::default()
-        };
+        let mut input = WindowInput::default();
+        input.window_width = ctx.width() as f32;
+        input.window_height = ctx.height() as f32;
         let input_handle = world.insert_resource(input);
         self.window_input = Some(input_handle);
 
@@ -514,24 +512,16 @@ impl AppHandler for PhysicsDemoApp {
 
         let pressed = event.state.is_pressed();
 
-        // Forward movement/modifier keys to WindowInput (track held state)
-        if let Some(handle) = &self.window_input
+        // Forward keys to WindowInput via platform-agnostic KeyCode
+        if let PhysicalKey::Code(winit_key) = event.physical_key
+            && let Some(key) = redlilium_app::input::map_winit_key(winit_key)
+            && let Some(handle) = &self.window_input
             && let Ok(mut input) = handle.write()
         {
-            match event.physical_key {
-                PhysicalKey::Code(KeyCode::KeyW) => input.key_w = pressed,
-                PhysicalKey::Code(KeyCode::KeyA) => input.key_a = pressed,
-                PhysicalKey::Code(KeyCode::KeyS) => input.key_s = pressed,
-                PhysicalKey::Code(KeyCode::KeyD) => input.key_d = pressed,
-                PhysicalKey::Code(KeyCode::KeyQ) => input.key_q = pressed,
-                PhysicalKey::Code(KeyCode::KeyE) => input.key_e = pressed,
-                PhysicalKey::Code(KeyCode::ControlLeft | KeyCode::ControlRight) => {
-                    input.key_ctrl = pressed;
-                }
-                PhysicalKey::Code(KeyCode::ShiftLeft | KeyCode::ShiftRight) => {
-                    input.key_shift = pressed;
-                }
-                _ => {}
+            if pressed {
+                input.on_key_pressed(key);
+            } else {
+                input.on_key_released(key);
             }
         }
 

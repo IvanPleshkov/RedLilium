@@ -1,3 +1,7 @@
+use std::collections::HashSet;
+
+use redlilium_core::input::KeyCode;
+
 /// Platform-agnostic window and input state, updated by the application layer.
 ///
 /// This is an ECS **resource** (not a component). Insert it into the world with
@@ -5,8 +9,10 @@
 /// or [`ResMut<WindowInput>`].
 ///
 /// The application layer is responsible for:
-/// 1. Calling [`begin_frame()`](WindowInput::begin_frame) at the start of each frame.
-/// 2. Forwarding platform events via `on_mouse_move`, `on_mouse_button`, `on_scroll`.
+/// 1. Calling [`begin_frame()`](WindowInput::begin_frame) after systems have
+///    consumed the current frame's deltas.
+/// 2. Forwarding platform events via `on_mouse_move`, `on_mouse_button`,
+///    `on_scroll`, `on_key_pressed`, `on_key_released`.
 /// 3. Setting `ui_wants_input` when a UI layer (e.g. egui) consumes input.
 ///
 /// This type intentionally has no dependency on `winit` or any windowing crate.
@@ -29,23 +35,8 @@ pub struct WindowInput {
     /// Scroll delta accumulated this frame (x, y). Positive y = scroll up.
     pub scroll_delta: [f32; 2],
 
-    // -- Keyboard state --
-    /// Whether the W key is currently held.
-    pub key_w: bool,
-    /// Whether the A key is currently held.
-    pub key_a: bool,
-    /// Whether the S key is currently held.
-    pub key_s: bool,
-    /// Whether the D key is currently held.
-    pub key_d: bool,
-    /// Whether the Q key is currently held.
-    pub key_q: bool,
-    /// Whether the E key is currently held.
-    pub key_e: bool,
-    /// Whether the Control key is currently held (Ctrl on Windows/Linux, Control on macOS).
-    pub key_ctrl: bool,
-    /// Whether the Shift key is currently held.
-    pub key_shift: bool,
+    /// Set of currently pressed keyboard keys.
+    pressed_keys: HashSet<KeyCode>,
 
     /// When `true`, a UI layer (e.g. egui) wants keyboard/mouse input.
     /// Systems that consume input should skip processing when this is set.
@@ -53,8 +44,8 @@ pub struct WindowInput {
 }
 
 impl WindowInput {
-    /// Reset per-frame deltas. Call at the start of each frame before
-    /// forwarding new input events.
+    /// Reset per-frame deltas. Call **after** systems have consumed the
+    /// current frame's input, before forwarding new input events.
     pub fn begin_frame(&mut self) {
         self.cursor_delta = [0.0, 0.0];
         self.scroll_delta = [0.0, 0.0];
@@ -87,6 +78,21 @@ impl WindowInput {
         self.scroll_delta[1] += dy;
     }
 
+    /// Record a key press.
+    pub fn on_key_pressed(&mut self, key: KeyCode) {
+        self.pressed_keys.insert(key);
+    }
+
+    /// Record a key release.
+    pub fn on_key_released(&mut self, key: KeyCode) {
+        self.pressed_keys.remove(&key);
+    }
+
+    /// Check whether a key is currently pressed.
+    pub fn is_key_pressed(&self, key: KeyCode) -> bool {
+        self.pressed_keys.contains(&key)
+    }
+
     /// Window aspect ratio (width / height). Returns 1.0 if height is zero.
     pub fn aspect_ratio(&self) -> f32 {
         if self.window_height > 0.0 {
@@ -108,14 +114,7 @@ impl Default for WindowInput {
             mouse_right: false,
             mouse_middle: false,
             scroll_delta: [0.0, 0.0],
-            key_w: false,
-            key_a: false,
-            key_s: false,
-            key_d: false,
-            key_q: false,
-            key_e: false,
-            key_ctrl: false,
-            key_shift: false,
+            pressed_keys: HashSet::new(),
             ui_wants_input: false,
         }
     }
@@ -170,6 +169,28 @@ mod tests {
         input.on_scroll(0.5, -1.0);
         assert!((input.scroll_delta[0] - 1.5).abs() < f32::EPSILON);
         assert!((input.scroll_delta[1] - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn key_press_and_release() {
+        let mut input = WindowInput::default();
+        assert!(!input.is_key_pressed(KeyCode::W));
+
+        input.on_key_pressed(KeyCode::W);
+        assert!(input.is_key_pressed(KeyCode::W));
+
+        input.on_key_released(KeyCode::W);
+        assert!(!input.is_key_pressed(KeyCode::W));
+    }
+
+    #[test]
+    fn multiple_keys_pressed() {
+        let mut input = WindowInput::default();
+        input.on_key_pressed(KeyCode::W);
+        input.on_key_pressed(KeyCode::ShiftLeft);
+        assert!(input.is_key_pressed(KeyCode::W));
+        assert!(input.is_key_pressed(KeyCode::ShiftLeft));
+        assert!(!input.is_key_pressed(KeyCode::A));
     }
 
     #[test]

@@ -39,6 +39,7 @@ mod app;
 mod args;
 mod context;
 mod handler;
+pub mod input;
 
 pub use app::App;
 pub use args::{AppArgs, DefaultAppArgs, WindowMode};

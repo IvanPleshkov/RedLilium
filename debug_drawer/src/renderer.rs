@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use redlilium_graphics::device::GraphicsDevice;
 use redlilium_graphics::graph::{
-    ColorAttachment, GraphicsPass, LoadOp, RenderTarget, RenderTargetConfig,
+    ColorAttachment, DepthStencilAttachment, GraphicsPass, LoadOp, RenderTarget, RenderTargetConfig,
 };
 use redlilium_graphics::materials::{
     BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, MaterialDescriptor,
@@ -12,7 +12,7 @@ use redlilium_graphics::mesh::{
     Mesh, PrimitiveTopology, VertexAttribute, VertexAttributeFormat, VertexAttributeSemantic,
     VertexBufferLayout, VertexLayout,
 };
-use redlilium_graphics::resources::Buffer;
+use redlilium_graphics::resources::{Buffer, Texture};
 use redlilium_graphics::shader::ShaderComposer;
 use redlilium_graphics::types::{BufferDescriptor, BufferUsage, TextureFormat};
 
@@ -45,7 +45,12 @@ impl DebugDrawerRenderer {
     /// # Arguments
     /// * `device` - The graphics device
     /// * `surface_format` - The color format of the render target
-    pub fn new(device: Arc<GraphicsDevice>, surface_format: TextureFormat) -> Self {
+    /// * `depth_format` - Optional depth format for depth testing against the scene
+    pub fn new(
+        device: Arc<GraphicsDevice>,
+        surface_format: TextureFormat,
+        depth_format: Option<TextureFormat>,
+    ) -> Self {
         // Vertex layout: Position (Float3) + Color (Float4)
         let vertex_layout = Arc::new(
             VertexLayout::new()
@@ -85,26 +90,30 @@ impl DebugDrawerRenderer {
         let shader_bytes = composed_shader.as_bytes().to_vec();
 
         // Material with LineList topology and alpha blending
+        let mut material_desc = MaterialDescriptor::new()
+            .with_shader(ShaderSource::new(
+                ShaderStage::Vertex,
+                shader_bytes.clone(),
+                "vs_main",
+            ))
+            .with_shader(ShaderSource::new(
+                ShaderStage::Fragment,
+                shader_bytes,
+                "fs_main",
+            ))
+            .with_binding_layout(uniform_binding_layout.clone())
+            .with_vertex_layout(vertex_layout.clone())
+            .with_topology(PrimitiveTopology::LineList)
+            .with_blend_state(BlendState::alpha_blending())
+            .with_color_format(surface_format)
+            .with_label("debug_draw_material");
+
+        if let Some(fmt) = depth_format {
+            material_desc = material_desc.with_depth_format(fmt);
+        }
+
         let material = device
-            .create_material(
-                &MaterialDescriptor::new()
-                    .with_shader(ShaderSource::new(
-                        ShaderStage::Vertex,
-                        shader_bytes.clone(),
-                        "vs_main",
-                    ))
-                    .with_shader(ShaderSource::new(
-                        ShaderStage::Fragment,
-                        shader_bytes,
-                        "fs_main",
-                    ))
-                    .with_binding_layout(uniform_binding_layout.clone())
-                    .with_vertex_layout(vertex_layout.clone())
-                    .with_topology(PrimitiveTopology::LineList)
-                    .with_blend_state(BlendState::alpha_blending())
-                    .with_color_format(surface_format)
-                    .with_label("debug_draw_material"),
-            )
+            .create_material(&material_desc)
             .expect("Failed to create debug draw material");
 
         // Uniform buffer (view-projection matrix)
@@ -161,6 +170,7 @@ impl DebugDrawerRenderer {
         &mut self,
         vertices: &[DebugVertex],
         render_target: &RenderTarget,
+        depth_texture: Option<&Arc<Texture>>,
     ) -> Option<GraphicsPass> {
         if vertices.is_empty() {
             return None;
@@ -215,12 +225,17 @@ impl DebugDrawerRenderer {
             MaterialInstance::new(self.material.clone()).with_binding_group(uniform_binding),
         );
 
-        // Build the pass (draws on top of existing content)
+        // Build the pass (draws with depth testing against existing scene depth)
         let mut pass = GraphicsPass::new("debug_draw".into());
-        pass.set_render_targets(
-            RenderTargetConfig::new()
-                .with_color(ColorAttachment::new(render_target.clone()).with_load_op(LoadOp::Load)),
-        );
+        let mut target_config = RenderTargetConfig::new()
+            .with_color(ColorAttachment::new(render_target.clone()).with_load_op(LoadOp::Load));
+
+        if let Some(depth) = depth_texture {
+            target_config = target_config
+                .with_depth_stencil(DepthStencilAttachment::from_texture(depth.clone()));
+        }
+
+        pass.set_render_targets(target_config);
         pass.add_draw(gpu_mesh, material_instance);
 
         Some(pass)

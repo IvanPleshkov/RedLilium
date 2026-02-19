@@ -265,6 +265,11 @@ impl SceneViewState {
         self.scissor
     }
 
+    /// Get the depth texture (for sharing with other passes like debug draw).
+    pub fn depth_texture(&self) -> &Arc<redlilium_graphics::Texture> {
+        &self.depth_texture
+    }
+
     /// Get the viewport aspect ratio, or 1.0 if no viewport is set.
     pub fn aspect_ratio(&self) -> f32 {
         if let Some(vp) = &self.viewport {

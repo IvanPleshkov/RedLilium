@@ -14,7 +14,7 @@
 //! ```ignore
 //! // Setup (once)
 //! let drawer = Arc::new(DebugDrawer::new());
-//! let mut renderer = DebugDrawerRenderer::new(device, surface_format);
+//! let mut renderer = DebugDrawerRenderer::new(device, surface_format, Some(depth_format));
 //!
 //! // Each frame:
 //! drawer.advance_tick();
@@ -28,7 +28,7 @@
 //! // At render time:
 //! renderer.update_view_proj(camera_view_proj_matrix);
 //! let render_data = drawer.take_render_data();
-//! if let Some(pass) = renderer.create_graphics_pass(&render_data, &render_target) {
+//! if let Some(pass) = renderer.create_graphics_pass(&render_data, &render_target, Some(&depth_texture)) {
 //!     graph.add_graphics_pass(pass);
 //! }
 //! ```
