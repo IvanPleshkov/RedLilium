@@ -15,9 +15,11 @@ use redlilium_ecs::{
 };
 use redlilium_graphics::egui::{EguiApp, EguiController};
 use redlilium_graphics::{Buffer, FrameSchedule, RenderTarget, TextureFormat};
+use redlilium_vfs::Vfs;
 use winit::event::{KeyEvent, MouseButton, MouseScrollDelta};
 use winit::keyboard::PhysicalKey;
 
+use crate::asset_browser::AssetBrowser;
 use crate::dock::{self, EditorTabViewer, Tab};
 #[cfg(not(target_os = "macos"))]
 use crate::menu;
@@ -63,6 +65,10 @@ pub struct Editor {
     active_world: usize,
     runner: EcsRunner,
 
+    // VFS and asset browser
+    vfs: Vfs,
+    asset_browser: AssetBrowser,
+
     // UI
     egui_controller: Option<EguiController>,
     dock_state: DockState<Tab>,
@@ -88,10 +94,16 @@ pub struct Editor {
 
 impl Editor {
     pub fn new() -> Self {
+        let project_path = std::path::Path::new("project.toml");
+        let (config, vfs) = crate::project::load_or_default(project_path);
+        let asset_browser = AssetBrowser::new(&config);
+
         Self {
             worlds: Vec::new(),
             active_world: 0,
             runner: EcsRunner::single_thread(),
+            vfs,
+            asset_browser,
             egui_controller: None,
             dock_state: dock::create_default_layout(),
             inspector_state: InspectorState::new(),
@@ -324,6 +336,9 @@ impl AppHandler for Editor {
         // Sync ui_wants_input flag from previous frame's egui state
         self.sync_input_flags();
 
+        // Poll completed background VFS results for the asset browser
+        self.asset_browser.poll();
+
         // Advance debug drawer tick (systems will write to the new tick)
         {
             let ew = self.active_world();
@@ -399,6 +414,8 @@ impl AppHandler for Editor {
                         let mut tab_viewer = EditorTabViewer {
                             world,
                             inspector_state: &mut self.inspector_state,
+                            vfs: &self.vfs,
+                            asset_browser: &mut self.asset_browser,
                             scene_view_rect: None,
                         };
                         egui_dock::DockArea::new(&mut self.dock_state)

@@ -21,6 +21,7 @@
 //!
 //! - [`MemoryProvider`] — In-memory storage for tests and embedded assets (read-write)
 //! - [`FileSystemProvider`] — Native filesystem access (read-write, native only)
+//! - [`SftpProvider`] — Remote SSH/SFTP access (read-write, requires `sftp` feature)
 //!
 //! Custom providers can implement the [`VfsProvider`] trait for packed archives,
 //! HTTP fetch, or other storage backends.
@@ -36,12 +37,18 @@ mod error;
 mod filesystem;
 mod memory;
 pub mod path;
+mod poll;
 mod provider;
+#[cfg(all(feature = "sftp", not(target_arch = "wasm32")))]
+mod sftp;
 mod vfs;
 
 pub use error::VfsError;
 #[cfg(all(feature = "filesystem", not(target_arch = "wasm32")))]
 pub use filesystem::FileSystemProvider;
 pub use memory::MemoryProvider;
+pub use poll::poll_now;
 pub use provider::{VfsFuture, VfsProvider};
+#[cfg(all(feature = "sftp", not(target_arch = "wasm32")))]
+pub use sftp::{SftpConfig, SftpProvider};
 pub use vfs::Vfs;

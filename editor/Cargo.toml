@@ -12,12 +12,16 @@ redlilium-ecs = { path = "../ecs", features = ["inspector", "rendering"] }
 redlilium-graphics = { path = "../graphics" }
 redlilium-app = { path = "../app" }
 redlilium-debug-drawer = { path = "../debug_drawer" }
+redlilium-vfs = { path = "../vfs", features = ["sftp"] }
 
 log = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
 bytemuck = { workspace = true }
 egui = { workspace = true }
 egui_dock = { workspace = true }
 winit = { workspace = true }
+tokio = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = "0.17"

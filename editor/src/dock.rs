@@ -1,6 +1,9 @@
 use egui_dock::{DockState, NodeIndex, TabViewer};
 use redlilium_ecs::World;
 use redlilium_ecs::ui::InspectorState;
+use redlilium_vfs::Vfs;
+
+use crate::asset_browser::AssetBrowser;
 
 /// Identifiers for editor dock tabs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +57,8 @@ pub fn create_default_layout() -> DockState<Tab> {
 pub struct EditorTabViewer<'a> {
     pub world: &'a mut World,
     pub inspector_state: &'a mut InspectorState,
+    pub vfs: &'a Vfs,
+    pub asset_browser: &'a mut AssetBrowser,
     /// Output: the SceneView panel rect from this frame (egui logical points).
     pub scene_view_rect: Option<egui::Rect>,
 }
@@ -79,9 +84,7 @@ impl TabViewer for EditorTabViewer<'_> {
                 self.scene_view_rect = Some(ui.available_rect_before_wrap());
             }
             Tab::Assets => {
-                ui.centered_and_justified(|ui| {
-                    ui.label("Assets Browser");
-                });
+                self.asset_browser.show(ui, self.vfs);
             }
         }
     }

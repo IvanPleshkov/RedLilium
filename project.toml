@@ -1,0 +1,16 @@
+[project]
+name = "RedLilium Sample"
+
+[[mount]]
+name = "shaders"
+path = "./shaders"
+
+# Example SFTP mount (uncomment and fill in your server details):
+[[mount]]
+name = "remote"
+type = "sftp"
+host = "78.46.173.242"
+port = 22
+username = "root"
+key = "~/.ssh/id_ed25519"
+path = "/root/assets"

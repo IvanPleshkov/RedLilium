@@ -8,6 +8,14 @@ description = "Virtual file system for RedLilium Engine"
 [features]
 default = ["filesystem"]
 filesystem = []
+sftp = ["dep:async-trait", "dep:russh", "dep:russh-keys", "dep:russh-sftp", "dep:tokio"]
 
 [dependencies]
 log.workspace = true
+
+# SFTP support (optional)
+async-trait = { workspace = true, optional = true }
+russh = { workspace = true, optional = true }
+russh-keys = { workspace = true, optional = true }
+russh-sftp = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }

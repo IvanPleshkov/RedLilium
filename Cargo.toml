@@ -77,5 +77,15 @@ rapier2d-f64 = { package = "rapier2d-f64", version = "0.32" }
 # Async IO runtime
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 
+# Serialization
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# SSH/SFTP (for VFS sftp feature)
+async-trait = "0.1"
+russh = "0.48"
+russh-keys = "0.48"
+russh-sftp = "2.1"
+
 # Profiling (optional)
 tracy-client = "0.18"

@@ -1,6 +1,9 @@
+mod asset_browser;
+mod background_vfs;
 mod dock;
 mod editor;
 mod menu;
+mod project;
 mod scene_view;
 mod toolbar;
 
