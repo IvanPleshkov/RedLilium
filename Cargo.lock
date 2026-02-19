@@ -3451,6 +3451,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "redlilium-debug-drawer"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "log",
+ "parking_lot",
+ "redlilium-graphics",
+]
+
+[[package]]
 name = "redlilium-demos"
 version = "0.1.0"
 dependencies = [

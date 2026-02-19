@@ -73,7 +73,7 @@ pub struct Mesh {
 impl Mesh {
     /// Create a new mesh (called by GraphicsDevice).
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+    pub fn new(
         device: Arc<GraphicsDevice>,
         layout: Arc<VertexLayout>,
         topology: PrimitiveTopology,

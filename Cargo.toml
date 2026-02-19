@@ -8,6 +8,7 @@ members = [
     "app",
     "demos",
     "editor",
+    "debug_drawer",
 ]
 
 [workspace.package]

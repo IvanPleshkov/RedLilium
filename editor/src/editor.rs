@@ -9,7 +9,7 @@ use redlilium_ecs::ui::InspectorState;
 use redlilium_ecs::{
     Camera, EcsRunner, Entity, FreeFlyCamera, GlobalTransform, PostUpdate, RenderMaterial,
     RenderMesh, Schedules, Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera,
-    UpdateGlobalTransforms, Visibility, WindowInput, World, mark_editor, register_std_components,
+    UpdateGlobalTransforms, Visibility, WindowInput, World, register_std_components,
 };
 use redlilium_graphics::egui::{EguiApp, EguiController};
 use redlilium_graphics::{Buffer, FrameSchedule, RenderTarget};
@@ -119,8 +119,10 @@ impl Editor {
             .unwrap();
         world.insert(editor_camera, Visibility::VISIBLE).unwrap();
 
-        // Mark as editor entity (excluded from game Read/Write queries)
-        mark_editor(&mut world, editor_camera);
+        // NOTE: We intentionally do NOT mark the editor camera as EDITOR here.
+        // Standard systems (UpdateFreeFlyCamera, UpdateGlobalTransforms,
+        // UpdateCameraMatrices) use Read/Write which skip editor-flagged entities.
+        // Since this is an isolated editor world, the flag is unnecessary.
 
         // --- Demo scene entities ---
         let cpu_cube = generators::generate_cube(0.5);
