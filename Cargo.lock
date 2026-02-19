@@ -4306,6 +4306,7 @@ dependencies = [
  "ecs-macro",
  "egui",
  "fixedbitset",
+ "image",
  "log",
  "rapier2d",
  "rapier2d-f64",
