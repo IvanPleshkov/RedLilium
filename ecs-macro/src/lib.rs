@@ -91,8 +91,19 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                     let fname = f.ident.as_ref().unwrap();
                     let fname_str = fname.to_string();
                     quote! {
-                        redlilium_ecs::inspect::Inspect(&mut self.#fname).show(#fname_str, ui);
+                        let #fname = match redlilium_ecs::inspect::Inspect(&self.#fname).show(#fname_str, ui) {
+                            Some(v) => { _changed = true; v }
+                            None => self.#fname.clone(),
+                        };
                     }
+                });
+                let visible_names: Vec<_> = visible_fields
+                    .iter()
+                    .map(|f| f.ident.as_ref().unwrap())
+                    .collect();
+                let skipped_clone = skipped_fields.iter().map(|f| {
+                    let fname = f.ident.as_ref().unwrap();
+                    quote! { #fname: self.#fname.clone() }
                 });
                 let collect_stmts = visible_fields.iter().map(|f| {
                         let fname = f.ident.as_ref().unwrap();
@@ -168,7 +179,11 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                 };
 
                 (
-                    quote! { #(#inspect_stmts)* },
+                    quote! {
+                        let mut _changed = false;
+                        #(#inspect_stmts)*
+                        if _changed { Some(Self { #(#visible_names,)* #(#skipped_clone,)* }) } else { None }
+                    },
                     quote! { #(#collect_stmts)* },
                     quote! { #(#remap_stmts)* },
                     serialize_body,
@@ -178,12 +193,24 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
             Fields::Unnamed(fields) => {
                 let indices: Vec<_> = (0..fields.unnamed.len()).map(syn::Index::from).collect();
 
-                let inspect_stmts = indices.iter().map(|idx| {
+                let inspect_field_vars: Vec<_> = indices
+                    .iter()
+                    .map(|idx| {
+                        syn::Ident::new(
+                            &format!("_field_{}", idx.index),
+                            proc_macro2::Span::call_site(),
+                        )
+                    })
+                    .collect();
+                let inspect_stmts: Vec<_> = indices.iter().zip(inspect_field_vars.iter()).map(|(idx, var)| {
                     let idx_str = idx.index.to_string();
                     quote! {
-                        redlilium_ecs::inspect::Inspect(&mut self.#idx).show(#idx_str, ui);
+                        let #var = match redlilium_ecs::inspect::Inspect(&self.#idx).show(#idx_str, ui) {
+                            Some(v) => { _changed = true; v }
+                            None => self.#idx.clone(),
+                        };
                     }
-                });
+                }).collect();
                 let collect_stmts = indices.iter().map(|idx| {
                         quote! {
                             redlilium_ecs::map_entities::EntityRef(&self.#idx).collect_entities(collector);
@@ -263,7 +290,11 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                 };
 
                 (
-                    quote! { #(#inspect_stmts)* },
+                    quote! {
+                        let mut _changed = false;
+                        #(#inspect_stmts)*
+                        if _changed { Some(Self(#(#inspect_field_vars,)*)) } else { None }
+                    },
                     quote! { #(#collect_stmts)* },
                     quote! { #(#remap_stmts)* },
                     serialize_body,
@@ -271,7 +302,7 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                 )
             }
             Fields::Unit => (
-                quote! { let _ = ui; },
+                quote! { let _ = ui; None },
                 quote! { let _ = collector; },
                 quote! { let _ = map; },
                 if skip_serialization {
@@ -334,7 +365,7 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
         impl #impl_generics redlilium_ecs::Component for #name #ty_generics #where_clause {
             const NAME: &'static str = #name_str;
 
-            fn inspect_ui(&mut self, ui: &mut redlilium_ecs::egui::Ui) {
+            fn inspect_ui(&self, ui: &mut redlilium_ecs::egui::Ui) -> Option<Self> {
                 #[allow(unused_imports)]
                 use redlilium_ecs::inspect::InspectFallback as _;
                 #inspect_body

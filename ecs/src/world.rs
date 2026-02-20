@@ -55,12 +55,23 @@ type DeserializeComponentFn = fn(
     &mut crate::serialize::DeserializeContext<'_>,
 ) -> Result<(), crate::serialize::DeserializeError>;
 
+/// Type alias for the return type of an inspector's `inspect_fn`.
+///
+/// The inspector renders the component UI using an immutable reference and
+/// returns a list of [`EditAction`]s if the user made any edits.
+/// The return type of inspector's `inspect_fn`.
+///
+/// `None` means the entity didn't have the component or nothing was edited.
+/// `Some(actions)` contains one or more undoable [`EditAction`]s.
+pub type InspectResult = Option<Vec<Box<dyn redlilium_core::abstract_editor::EditAction<World>>>>;
+
 /// Type-erased inspector operations for a single component type.
 struct InspectorEntry {
     /// Check if an entity has this component.
     has_fn: fn(&World, Entity) -> bool,
-    /// Render the component's inspector UI. Returns true if entity had it.
-    inspect_fn: fn(&mut World, Entity, &mut egui::Ui) -> bool,
+    /// Render the component's inspector UI with an immutable world reference.
+    /// Returns `Some(actions)` if the user edited any fields.
+    inspect_fn: fn(&World, Entity, &mut egui::Ui) -> InspectResult,
     /// Remove this component from an entity. Returns true if removed.
     remove_fn: fn(&mut World, Entity) -> bool,
     /// Insert a default instance on an entity (None if T doesn't impl Default).
@@ -113,6 +124,62 @@ fn deserialize_component_fn<T: Component>(
         }
     })?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// SetComponentAction — undoable component replacement from inspector edits
+// ---------------------------------------------------------------------------
+
+use redlilium_core::abstract_editor::{EditAction, EditActionError, EditActionResult};
+
+/// Reversible action that replaces a component on an entity.
+///
+/// Produced by the inspector when the user edits component fields.
+/// Stores both old and new values for undo/redo.
+struct SetComponentAction<T: Component + Clone> {
+    entity: Entity,
+    old: T,
+    new: T,
+}
+
+impl<T: Component + Clone> std::fmt::Debug for SetComponentAction<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SetComponentAction")
+            .field("component", &T::NAME)
+            .finish()
+    }
+}
+
+impl<T: Component + Clone> EditAction<World> for SetComponentAction<T> {
+    fn apply(&mut self, world: &mut World) -> EditActionResult {
+        if !world.is_alive(self.entity) {
+            return Err(EditActionError::TargetNotFound("entity despawned".into()));
+        }
+        let _ = world.insert(self.entity, self.new.clone());
+        Ok(())
+    }
+
+    fn undo(&mut self, world: &mut World) -> EditActionResult {
+        if !world.is_alive(self.entity) {
+            return Err(EditActionError::TargetNotFound("entity despawned".into()));
+        }
+        let _ = world.insert(self.entity, self.old.clone());
+        Ok(())
+    }
+
+    fn description(&self) -> &str {
+        T::NAME
+    }
+
+    fn merge(&mut self, other: Box<dyn EditAction<World>>) -> Option<Box<dyn EditAction<World>>> {
+        if let Some(other) = other.as_any().downcast_ref::<Self>()
+            && self.entity == other.entity
+        {
+            self.new = other.new.clone();
+            return None; // consumed — keep first old, use latest new
+        }
+        Some(other)
+    }
 }
 
 /// An independent ECS world containing entities, components, and resources.
@@ -280,7 +347,7 @@ impl World {
     /// The component will be visible in the inspector but cannot be added
     /// via the "Add Component" button. Use [`register_inspector_default`](World::register_inspector_default)
     /// for that.
-    pub fn register_inspector<T: Component>(&mut self) {
+    pub fn register_inspector<T: Component + Clone>(&mut self) {
         self.register_component::<T>();
         T::register_required(self);
         self.inspector_entries.insert(
@@ -288,11 +355,14 @@ impl World {
             InspectorEntry {
                 has_fn: |world, entity| world.get::<T>(entity).is_some(),
                 inspect_fn: |world, entity, ui| {
-                    let Some(comp) = world.get_mut::<T>(entity) else {
-                        return false;
-                    };
-                    comp.inspect_ui(ui);
-                    true
+                    let comp = world.get::<T>(entity)?;
+                    let new_comp = comp.inspect_ui(ui)?;
+                    let old_comp = comp.clone();
+                    Some(vec![Box::new(SetComponentAction {
+                        entity,
+                        old: old_comp,
+                        new: new_comp,
+                    })])
                 },
                 remove_fn: |world, entity| world.remove::<T>(entity).is_some(),
                 insert_default_fn: None,
@@ -318,7 +388,7 @@ impl World {
     ///
     /// Like [`register_inspector`](World::register_inspector) but also enables
     /// inserting a default instance via the inspector "Add Component" button.
-    pub fn register_inspector_default<T: Component + Default>(&mut self) {
+    pub fn register_inspector_default<T: Component + Default + Clone>(&mut self) {
         self.register_component::<T>();
         T::register_required(self);
         self.inspector_entries.insert(
@@ -326,11 +396,14 @@ impl World {
             InspectorEntry {
                 has_fn: |world, entity| world.get::<T>(entity).is_some(),
                 inspect_fn: |world, entity, ui| {
-                    let Some(comp) = world.get_mut::<T>(entity) else {
-                        return false;
-                    };
-                    comp.inspect_ui(ui);
-                    true
+                    let comp = world.get::<T>(entity)?;
+                    let new_comp = comp.inspect_ui(ui)?;
+                    let old_comp = comp.clone();
+                    Some(vec![Box::new(SetComponentAction {
+                        entity,
+                        old: old_comp,
+                        new: new_comp,
+                    })])
                 },
                 remove_fn: |world, entity| world.remove::<T>(entity).is_some(),
                 insert_default_fn: Some(|world, entity| {
@@ -1633,15 +1706,11 @@ impl World {
 
     /// Renders the inspector UI for a component by name.
     ///
-    /// Returns `true` if the entity had the component and it was rendered.
-    pub fn inspect_by_name(&mut self, entity: Entity, name: &str, ui: &mut egui::Ui) -> bool {
-        // Copy fn pointer out to release the immutable borrow on self
+    /// Returns `Some(actions)` if the user edited any fields, or `None` if
+    /// nothing changed or the entity doesn't have the component.
+    pub fn inspect_by_name(&self, entity: Entity, name: &str, ui: &mut egui::Ui) -> InspectResult {
         let inspect_fn = self.inspector_entries.get(name).map(|e| e.inspect_fn);
-        if let Some(f) = inspect_fn {
-            f(self, entity, ui)
-        } else {
-            false
-        }
+        inspect_fn.and_then(|f| f(self, entity, ui))
     }
 
     /// Removes a component by name from an entity.

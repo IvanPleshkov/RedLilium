@@ -30,8 +30,9 @@
 /// ```ignore
 /// impl Component for CustomType {
 ///     const NAME: &'static str = "CustomType";
-///     fn inspect_ui(&mut self, ui: &mut egui::Ui) {
-///         // custom inspector layout
+///     fn inspect_ui(&self, ui: &mut egui::Ui) -> Option<Self> {
+///         // custom inspector layout; return Some(new_value) if edited
+///         None
 ///     }
 /// }
 /// ```
@@ -49,9 +50,13 @@ pub trait Component: Send + Sync + 'static {
 
     /// Render an inspector UI for this component's fields.
     ///
-    /// The derive macro generates this by calling
-    /// [`Inspect::show`](crate::inspect::Inspect) for each field.
-    fn inspect_ui(&mut self, ui: &mut egui::Ui);
+    /// Takes an immutable reference and returns `Some(new_component)` if
+    /// the user edited any field, or `None` if nothing changed. The derive
+    /// macro generates this by calling [`Inspect::show`](crate::inspect::Inspect)
+    /// for each field and assembling a new instance from the results.
+    fn inspect_ui(&self, ui: &mut egui::Ui) -> Option<Self>
+    where
+        Self: Sized;
 
     /// Collect all [`Entity`](crate::Entity) references stored in this component.
     ///
@@ -139,9 +144,25 @@ mod tests {
     impl Component for TestComponent {
         const NAME: &'static str = "TestComponent";
 
-        fn inspect_ui(&mut self, ui: &mut egui::Ui) {
-            crate::inspect::Inspect(&mut self.value).show("value", ui);
-            crate::inspect::Inspect(&mut self.count).show("count", ui);
+        fn inspect_ui(&self, ui: &mut egui::Ui) -> Option<Self> {
+            #[allow(unused_imports)]
+            use crate::inspect::InspectFallback as _;
+            let mut _changed = false;
+            let value = match crate::inspect::Inspect(&self.value).show("value", ui) {
+                Some(v) => {
+                    _changed = true;
+                    v
+                }
+                None => self.value,
+            };
+            let count = match crate::inspect::Inspect(&self.count).show("count", ui) {
+                Some(v) => {
+                    _changed = true;
+                    v
+                }
+                None => self.count,
+            };
+            _changed.then_some(Self { value, count })
         }
     }
 
@@ -179,11 +200,25 @@ mod tests {
     impl Component for RichComponent {
         const NAME: &'static str = "RichComponent";
 
-        fn inspect_ui(&mut self, ui: &mut egui::Ui) {
+        fn inspect_ui(&self, ui: &mut egui::Ui) -> Option<Self> {
             #[allow(unused_imports)]
             use crate::inspect::InspectFallback as _;
-            crate::inspect::Inspect(&mut self.label).show("label", ui);
-            crate::inspect::Inspect(&mut self._data).show("data", ui);
+            let mut _changed = false;
+            let label = match crate::inspect::Inspect(&self.label).show("label", ui) {
+                Some(v) => {
+                    _changed = true;
+                    v
+                }
+                None => self.label.clone(),
+            };
+            let _data = match crate::inspect::Inspect(&self._data).show("data", ui) {
+                Some(v) => {
+                    _changed = true;
+                    v
+                }
+                None => self._data.clone(),
+            };
+            _changed.then_some(Self { label, _data })
         }
     }
 

@@ -15,11 +15,14 @@
 //!
 //! ```ignore
 //! impl ComponentField for MyColor {
-//!     fn inspect_field(&mut self, name: &str, ui: &mut egui::Ui) {
-//!         ui.horizontal(|ui| {
+//!     fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+//!         let mut value = *self;
+//!         let changed = ui.horizontal(|ui| {
 //!             ui.label(name);
-//!             // custom color picker widget
-//!         });
+//!             // custom color picker widget; return true if edited
+//!             false
+//!         }).inner;
+//!         changed.then_some(value)
 //!     }
 //!
 //!     fn serialize_field(
@@ -55,7 +58,12 @@ use crate::serialize::{DeserializeContext, DeserializeError, SerializeContext, S
 /// [`DeserializeFieldFallback`](crate::serialize::DeserializeFieldFallback)).
 pub trait ComponentField: Send + Sync + 'static {
     /// Render an inspector UI widget for this field value.
-    fn inspect_field(&mut self, name: &str, ui: &mut egui::Ui);
+    ///
+    /// Takes an immutable reference and returns `Some(new_value)` if the
+    /// user edited the value in the UI, or `None` if unchanged.
+    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self>
+    where
+        Self: Sized;
 
     /// Serialize this field value into the context.
     fn serialize_field(
@@ -78,11 +86,16 @@ pub trait ComponentField: Send + Sync + 'static {
 // ---------------------------------------------------------------------------
 
 impl ComponentField for f32 {
-    fn inspect_field(&mut self, name: &str, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label(name);
-            ui.add(egui::DragValue::new(self).speed(0.01));
-        });
+    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+        let mut value = *self;
+        let changed = ui
+            .horizontal(|ui| {
+                ui.label(name);
+                ui.add(egui::DragValue::new(&mut value).speed(0.01))
+                    .changed()
+            })
+            .inner;
+        changed.then_some(value)
     }
 
     fn serialize_field(
@@ -102,11 +115,16 @@ impl ComponentField for f32 {
 }
 
 impl ComponentField for f64 {
-    fn inspect_field(&mut self, name: &str, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label(name);
-            ui.add(egui::DragValue::new(self).speed(0.01));
-        });
+    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+        let mut value = *self;
+        let changed = ui
+            .horizontal(|ui| {
+                ui.label(name);
+                ui.add(egui::DragValue::new(&mut value).speed(0.01))
+                    .changed()
+            })
+            .inner;
+        changed.then_some(value)
     }
 
     fn serialize_field(
@@ -126,11 +144,15 @@ impl ComponentField for f64 {
 }
 
 impl ComponentField for bool {
-    fn inspect_field(&mut self, name: &str, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label(name);
-            ui.checkbox(self, "");
-        });
+    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+        let mut value = *self;
+        let changed = ui
+            .horizontal(|ui| {
+                ui.label(name);
+                ui.checkbox(&mut value, "").changed()
+            })
+            .inner;
+        changed.then_some(value)
     }
 
     fn serialize_field(
@@ -150,17 +172,16 @@ impl ComponentField for bool {
 }
 
 impl ComponentField for u8 {
-    fn inspect_field(&mut self, name: &str, ui: &mut egui::Ui) {
+    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
         let mut v = *self as i32;
-        ui.horizontal(|ui| {
-            ui.label(name);
-            if ui
-                .add(egui::DragValue::new(&mut v).range(0..=255))
-                .changed()
-            {
-                *self = v as u8;
-            }
-        });
+        let changed = ui
+            .horizontal(|ui| {
+                ui.label(name);
+                ui.add(egui::DragValue::new(&mut v).range(0..=255))
+                    .changed()
+            })
+            .inner;
+        changed.then_some(v as u8)
     }
 
     fn serialize_field(
@@ -180,17 +201,16 @@ impl ComponentField for u8 {
 }
 
 impl ComponentField for u32 {
-    fn inspect_field(&mut self, name: &str, ui: &mut egui::Ui) {
+    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
         let mut v = *self as i64;
-        ui.horizontal(|ui| {
-            ui.label(name);
-            if ui
-                .add(egui::DragValue::new(&mut v).range(0..=u32::MAX as i64))
-                .changed()
-            {
-                *self = v as u32;
-            }
-        });
+        let changed = ui
+            .horizontal(|ui| {
+                ui.label(name);
+                ui.add(egui::DragValue::new(&mut v).range(0..=u32::MAX as i64))
+                    .changed()
+            })
+            .inner;
+        changed.then_some(v as u32)
     }
 
     fn serialize_field(
@@ -210,11 +230,15 @@ impl ComponentField for u32 {
 }
 
 impl ComponentField for i32 {
-    fn inspect_field(&mut self, name: &str, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label(name);
-            ui.add(egui::DragValue::new(self));
-        });
+    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+        let mut value = *self;
+        let changed = ui
+            .horizontal(|ui| {
+                ui.label(name);
+                ui.add(egui::DragValue::new(&mut value)).changed()
+            })
+            .inner;
+        changed.then_some(value)
     }
 
     fn serialize_field(
@@ -234,17 +258,16 @@ impl ComponentField for i32 {
 }
 
 impl ComponentField for u64 {
-    fn inspect_field(&mut self, name: &str, ui: &mut egui::Ui) {
+    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
         let mut v = *self as i64;
-        ui.horizontal(|ui| {
-            ui.label(name);
-            if ui
-                .add(egui::DragValue::new(&mut v).range(0..=i64::MAX))
-                .changed()
-            {
-                *self = v as u64;
-            }
-        });
+        let changed = ui
+            .horizontal(|ui| {
+                ui.label(name);
+                ui.add(egui::DragValue::new(&mut v).range(0..=i64::MAX))
+                    .changed()
+            })
+            .inner;
+        changed.then_some(v as u64)
     }
 
     fn serialize_field(
@@ -264,17 +287,16 @@ impl ComponentField for u64 {
 }
 
 impl ComponentField for usize {
-    fn inspect_field(&mut self, name: &str, ui: &mut egui::Ui) {
+    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
         let mut v = *self as i64;
-        ui.horizontal(|ui| {
-            ui.label(name);
-            if ui
-                .add(egui::DragValue::new(&mut v).range(0..=i64::MAX))
-                .changed()
-            {
-                *self = v as usize;
-            }
-        });
+        let changed = ui
+            .horizontal(|ui| {
+                ui.label(name);
+                ui.add(egui::DragValue::new(&mut v).range(0..=i64::MAX))
+                    .changed()
+            })
+            .inner;
+        changed.then_some(v as usize)
     }
 
     fn serialize_field(
@@ -294,11 +316,15 @@ impl ComponentField for usize {
 }
 
 impl ComponentField for String {
-    fn inspect_field(&mut self, name: &str, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label(name);
-            ui.text_edit_singleline(self);
-        });
+    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+        let mut value = self.clone();
+        let changed = ui
+            .horizontal(|ui| {
+                ui.label(name);
+                ui.text_edit_singleline(&mut value).changed()
+            })
+            .inner;
+        changed.then_some(value)
     }
 
     fn serialize_field(
@@ -322,11 +348,12 @@ impl ComponentField for String {
 // ---------------------------------------------------------------------------
 
 impl ComponentField for crate::Entity {
-    fn inspect_field(&mut self, name: &str, ui: &mut egui::Ui) {
+    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
         ui.horizontal(|ui| {
             ui.label(name);
             ui.label(format!("Entity({}@{})", self.index(), self.spawn_tick()));
         });
+        None // read-only
     }
 
     fn serialize_field(
@@ -346,11 +373,12 @@ impl ComponentField for crate::Entity {
 }
 
 impl ComponentField for Vec<crate::Entity> {
-    fn inspect_field(&mut self, name: &str, ui: &mut egui::Ui) {
+    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
         ui.horizontal(|ui| {
             ui.label(name);
             ui.label(format!("[{} entities]", self.len()));
         });
+        None // read-only
     }
 
     fn serialize_field(
@@ -370,7 +398,7 @@ impl ComponentField for Vec<crate::Entity> {
 }
 
 impl ComponentField for Option<crate::Entity> {
-    fn inspect_field(&mut self, name: &str, ui: &mut egui::Ui) {
+    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
         ui.horizontal(|ui| {
             ui.label(name);
             match self {
@@ -378,6 +406,7 @@ impl ComponentField for Option<crate::Entity> {
                 None => ui.weak("None"),
             };
         });
+        None // read-only
     }
 
     fn serialize_field(
@@ -401,12 +430,21 @@ impl ComponentField for Option<crate::Entity> {
 // ---------------------------------------------------------------------------
 
 impl ComponentField for Vec2 {
-    fn inspect_field(&mut self, name: &str, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label(name);
-            ui.add(egui::DragValue::new(&mut self.x).speed(0.01).prefix("x: "));
-            ui.add(egui::DragValue::new(&mut self.y).speed(0.01).prefix("y: "));
-        });
+    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+        let mut v = *self;
+        let changed = ui
+            .horizontal(|ui| {
+                ui.label(name);
+                let x = ui
+                    .add(egui::DragValue::new(&mut v.x).speed(0.01).prefix("x: "))
+                    .changed();
+                let y = ui
+                    .add(egui::DragValue::new(&mut v.y).speed(0.01).prefix("y: "))
+                    .changed();
+                x || y
+            })
+            .inner;
+        changed.then_some(v)
     }
 
     fn serialize_field(
@@ -426,13 +464,24 @@ impl ComponentField for Vec2 {
 }
 
 impl ComponentField for Vec3 {
-    fn inspect_field(&mut self, name: &str, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label(name);
-            ui.add(egui::DragValue::new(&mut self.x).speed(0.01).prefix("x: "));
-            ui.add(egui::DragValue::new(&mut self.y).speed(0.01).prefix("y: "));
-            ui.add(egui::DragValue::new(&mut self.z).speed(0.01).prefix("z: "));
-        });
+    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+        let mut v = *self;
+        let changed = ui
+            .horizontal(|ui| {
+                ui.label(name);
+                let x = ui
+                    .add(egui::DragValue::new(&mut v.x).speed(0.01).prefix("x: "))
+                    .changed();
+                let y = ui
+                    .add(egui::DragValue::new(&mut v.y).speed(0.01).prefix("y: "))
+                    .changed();
+                let z = ui
+                    .add(egui::DragValue::new(&mut v.z).speed(0.01).prefix("z: "))
+                    .changed();
+                x || y || z
+            })
+            .inner;
+        changed.then_some(v)
     }
 
     fn serialize_field(
@@ -452,14 +501,27 @@ impl ComponentField for Vec3 {
 }
 
 impl ComponentField for Vec4 {
-    fn inspect_field(&mut self, name: &str, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label(name);
-            ui.add(egui::DragValue::new(&mut self.x).speed(0.01).prefix("x: "));
-            ui.add(egui::DragValue::new(&mut self.y).speed(0.01).prefix("y: "));
-            ui.add(egui::DragValue::new(&mut self.z).speed(0.01).prefix("z: "));
-            ui.add(egui::DragValue::new(&mut self.w).speed(0.01).prefix("w: "));
-        });
+    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+        let mut v = *self;
+        let changed = ui
+            .horizontal(|ui| {
+                ui.label(name);
+                let x = ui
+                    .add(egui::DragValue::new(&mut v.x).speed(0.01).prefix("x: "))
+                    .changed();
+                let y = ui
+                    .add(egui::DragValue::new(&mut v.y).speed(0.01).prefix("y: "))
+                    .changed();
+                let z = ui
+                    .add(egui::DragValue::new(&mut v.z).speed(0.01).prefix("z: "))
+                    .changed();
+                let w = ui
+                    .add(egui::DragValue::new(&mut v.w).speed(0.01).prefix("w: "))
+                    .changed();
+                x || y || z || w
+            })
+            .inner;
+        changed.then_some(v)
     }
 
     fn serialize_field(
@@ -479,7 +541,7 @@ impl ComponentField for Vec4 {
 }
 
 impl ComponentField for Quat {
-    fn inspect_field(&mut self, name: &str, ui: &mut egui::Ui) {
+    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
         ui.horizontal(|ui| {
             ui.label(name);
             ui.label(format!(
@@ -487,6 +549,7 @@ impl ComponentField for Quat {
                 self.coords.x, self.coords.y, self.coords.z, self.coords.w
             ));
         });
+        None // read-only display
     }
 
     fn serialize_field(
@@ -506,11 +569,12 @@ impl ComponentField for Quat {
 }
 
 impl ComponentField for Mat4 {
-    fn inspect_field(&mut self, name: &str, ui: &mut egui::Ui) {
+    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
         ui.horizontal(|ui| {
             ui.label(name);
             ui.label("(matrix)");
         });
+        None // read-only display
     }
 
     fn serialize_field(
@@ -536,11 +600,12 @@ impl ComponentField for Mat4 {
 impl<T: serde::Serialize + serde::de::DeserializeOwned + Send + Sync + 'static> ComponentField
     for Arc<T>
 {
-    fn inspect_field(&mut self, name: &str, ui: &mut egui::Ui) {
+    fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
         ui.horizontal(|ui| {
             ui.label(name);
             ui.weak(format!("({})", std::any::type_name::<Self>()));
         });
+        None // opaque, read-only
     }
 
     fn serialize_field(

@@ -1,5 +1,7 @@
 //! Component inspector panel for a selected entity.
 
+use redlilium_core::abstract_editor::{ActionQueue, EditAction};
+
 use crate::World;
 
 use super::InspectorState;
@@ -7,10 +9,13 @@ use super::InspectorState;
 /// Render the component inspector for the currently selected entity.
 ///
 /// Lists all inspector-registered components attached to the entity, with
-/// editable fields via the `Component` trait's `inspect_ui`. Each component
-/// header has a right-click context menu to remove it. An "Add Component"
-/// button at the bottom opens a popup listing components the entity doesn't
-/// have yet.
+/// editable fields rendered from an immutable component reference. Edits
+/// are returned as [`EditAction`]s and pushed to the [`ActionQueue<World>`]
+/// resource (if present) for undo/redo support.
+///
+/// Each component header has a right-click context menu to remove it.
+/// An "Add Component" button at the bottom opens a popup listing components
+/// the entity doesn't have yet.
 ///
 /// The caller is responsible for placing this in whatever container they want
 /// (dock tab, side panel, window, etc.).
@@ -55,6 +60,9 @@ pub fn show_component_inspector(ui: &mut egui::Ui, world: &mut World, state: &mu
     // Track which components to remove after iteration
     let mut to_remove: Vec<&str> = Vec::new();
 
+    // Collect editor actions produced by inspector edits
+    let mut actions: Vec<Box<dyn EditAction<World>>> = Vec::new();
+
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -67,7 +75,10 @@ pub fn show_component_inspector(ui: &mut egui::Ui, world: &mut World, state: &mu
                     .default_open(true);
 
                 let header_resp = header.show(ui, |ui| {
-                    world.inspect_by_name(selected, comp_name, ui);
+                    // Inspect with &World — returns actions if fields were edited
+                    if let Some(mut comp_actions) = world.inspect_by_name(selected, comp_name, ui) {
+                        actions.append(&mut comp_actions);
+                    }
                 });
 
                 header_resp.header_response.context_menu(|ui| {
@@ -107,6 +118,14 @@ pub fn show_component_inspector(ui: &mut egui::Ui, world: &mut World, state: &mu
                 }
             }
         });
+
+    // Push inspector-produced actions to the queue (if present)
+    if !actions.is_empty() && world.has_resource::<ActionQueue<World>>() {
+        let queue = world.resource::<ActionQueue<World>>();
+        for action in actions {
+            queue.push(action);
+        }
+    }
 
     // Apply deferred removals
     for name in to_remove {

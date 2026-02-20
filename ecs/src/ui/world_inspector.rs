@@ -1,10 +1,12 @@
 //! Entity hierarchy tree view with drag-and-drop reparenting.
 
+use redlilium_core::abstract_editor::{ActionQueue, EditAction, EditActionError, EditActionResult};
+
 use crate::{Entity, World};
 
 use crate::std::components::{Children, Name, Parent};
 
-use super::{InspectorState, PendingReparent};
+use super::InspectorState;
 
 /// Render the world inspector — a tree of all entities organized by hierarchy.
 ///
@@ -14,8 +16,9 @@ use super::{InspectorState, PendingReparent};
 /// Entities with a [`Name`] component display their name; others show `Entity(index:gen)`.
 ///
 /// Drag an entity onto another to reparent it. Drop on the zone at the bottom
-/// of the tree to make an entity a root. The actual reparent is deferred until
-/// [`InspectorState::apply_pending_actions`] is called with `&mut World`.
+/// of the tree to make an entity a root. If an [`ActionQueue<World>`] resource is
+/// present, reparent operations are pushed as undoable actions; otherwise they
+/// are applied directly on the next [`InspectorState::apply_pending_actions`] call.
 ///
 /// The caller is responsible for placing this in whatever container they want
 /// (dock tab, side panel, window, etc.).
@@ -64,7 +67,8 @@ pub fn show_world_inspector(ui: &mut egui::Ui, world: &World, state: &mut Inspec
                 if let Some(dragged) = resp.dnd_release_payload::<Entity>()
                     && world.get::<Parent>(*dragged).is_some()
                 {
-                    state.pending_reparent = Some(PendingReparent::MakeRoot { entity: *dragged });
+                    let old_parent = world.get::<Parent>(*dragged).map(|p| p.0);
+                    submit_reparent(world, state, *dragged, old_parent, None);
                 }
             }
         });
@@ -146,8 +150,8 @@ fn show_entity_node(ui: &mut egui::Ui, world: &World, entity: Entity, state: &mu
 
 /// Handle drag-and-drop hover/release on an entity row.
 ///
-/// Shows visual feedback (blue for valid, red for invalid) and records the
-/// pending reparent action on release.
+/// Shows visual feedback (blue for valid, red for invalid) and submits a
+/// reparent action on release.
 fn handle_drop_target(
     ui: &egui::Ui,
     response: &egui::Response,
@@ -172,10 +176,31 @@ fn handle_drop_target(
     if let Some(dragged) = response.dnd_release_payload::<Entity>()
         && is_valid_reparent(world, *dragged, target_entity)
     {
-        state.pending_reparent = Some(PendingReparent::SetParent {
-            entity: *dragged,
-            new_parent: target_entity,
-        });
+        let old_parent = world.get::<Parent>(*dragged).map(|p| p.0);
+        submit_reparent(world, state, *dragged, old_parent, Some(target_entity));
+    }
+}
+
+/// Submit a reparent operation. If an [`ActionQueue`] resource is present, the
+/// action is pushed there for undo/redo support. Otherwise it is stored in
+/// [`InspectorState`] for deferred application.
+fn submit_reparent(
+    world: &World,
+    state: &mut InspectorState,
+    entity: Entity,
+    old_parent: Option<Entity>,
+    new_parent: Option<Entity>,
+) {
+    if world.has_resource::<ActionQueue<World>>() {
+        let queue = world.resource::<ActionQueue<World>>();
+        queue.push(Box::new(ReparentAction {
+            entity,
+            old_parent,
+            new_parent,
+        }));
+    } else {
+        // Fallback: store for deferred application via apply_pending_actions
+        state.pending_reparent = Some(super::PendingReparent { entity, new_parent });
     }
 }
 
@@ -211,4 +236,55 @@ fn entity_label(world: &World, entity: Entity) -> String {
         }
     }
     format!("Entity({}@{})", entity.index(), entity.spawn_tick())
+}
+
+// ---------------------------------------------------------------------------
+// Undoable reparent action
+// ---------------------------------------------------------------------------
+
+/// Reversible reparent action for the editor's undo/redo history.
+///
+/// - `new_parent: Some(e)` → `set_parent(entity, e)`
+/// - `new_parent: None`    → `remove_parent(entity)` (make root)
+#[derive(Debug)]
+struct ReparentAction {
+    entity: Entity,
+    old_parent: Option<Entity>,
+    new_parent: Option<Entity>,
+}
+
+impl EditAction<World> for ReparentAction {
+    fn apply(&mut self, world: &mut World) -> EditActionResult {
+        if !world.is_alive(self.entity) {
+            return Err(EditActionError::TargetNotFound("entity despawned".into()));
+        }
+        apply_parent(world, self.entity, self.new_parent)
+    }
+
+    fn undo(&mut self, world: &mut World) -> EditActionResult {
+        if !world.is_alive(self.entity) {
+            return Err(EditActionError::TargetNotFound("entity despawned".into()));
+        }
+        apply_parent(world, self.entity, self.old_parent)
+    }
+
+    fn description(&self) -> &str {
+        "Reparent entity"
+    }
+}
+
+/// Set or remove parent for an entity.
+fn apply_parent(world: &mut World, entity: Entity, parent: Option<Entity>) -> EditActionResult {
+    match parent {
+        Some(p) => {
+            if !world.is_alive(p) {
+                return Err(EditActionError::TargetNotFound("parent despawned".into()));
+            }
+            crate::std::hierarchy::set_parent(world, entity, p);
+        }
+        None => {
+            crate::std::hierarchy::remove_parent(world, entity);
+        }
+    }
+    Ok(())
 }

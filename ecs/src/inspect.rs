@@ -6,7 +6,7 @@
 //! displays unknown types as opaque.
 //!
 //! The `#[derive(Component)]` macro generates `inspect_ui` by wrapping each
-//! field in `Inspect(&mut self.field).show("field", ui)`.
+//! field in `Inspect(&self.field).show("field", ui)`.
 //!
 //! # Adding a new inspectable type
 //!
@@ -15,12 +15,15 @@
 //!
 //! ```ignore
 //! impl ComponentField for MyVec2 {
-//!     fn inspect_field(&mut self, name: &str, ui: &mut egui::Ui) {
-//!         ui.horizontal(|ui| {
+//!     fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
+//!         let mut v = *self;
+//!         let changed = ui.horizontal(|ui| {
 //!             ui.label(name);
-//!             ui.add(egui::DragValue::new(&mut self.0.x).speed(0.01));
-//!             ui.add(egui::DragValue::new(&mut self.0.y).speed(0.01));
-//!         });
+//!             let x = ui.add(egui::DragValue::new(&mut v.0.x).speed(0.01)).changed();
+//!             let y = ui.add(egui::DragValue::new(&mut v.0.y).speed(0.01)).changed();
+//!             x || y
+//!         }).inner;
+//!         changed.then_some(v)
 //!     }
 //!     // ... serialize_field, deserialize_field
 //! }
@@ -31,24 +34,25 @@
 /// The generic inherent `show()` method for [`ComponentField`](crate::ComponentField)
 /// types takes priority over the [`InspectFallback`] blanket trait impl,
 /// which shows "(opaque)".
-pub struct Inspect<'a, T: ?Sized>(pub &'a mut T);
+pub struct Inspect<'a, T: ?Sized>(pub &'a T);
 
 /// Fallback trait for types without a [`ComponentField`](crate::ComponentField)
 /// implementation.
 ///
-/// The blanket impl displays the field as "(opaque)". Rust's method
-/// resolution ensures this is only used when no inherent `show()` method
-/// exists on `Inspect<'_, T>`.
-pub trait InspectFallback {
-    fn show(&mut self, name: &str, ui: &mut egui::Ui);
+/// The blanket impl displays the field as "(opaque)" and returns `None`
+/// (no edit possible). Rust's method resolution ensures this is only used
+/// when no inherent `show()` method exists on `Inspect<'_, T>`.
+pub trait InspectFallback<T> {
+    fn show(&self, name: &str, ui: &mut egui::Ui) -> Option<T>;
 }
 
-impl<T: 'static> InspectFallback for Inspect<'_, T> {
-    fn show(&mut self, name: &str, ui: &mut egui::Ui) {
+impl<T: Clone + 'static> InspectFallback<T> for Inspect<'_, T> {
+    fn show(&self, name: &str, ui: &mut egui::Ui) -> Option<T> {
         ui.horizontal(|ui| {
             ui.label(name);
             ui.weak(format!("({})", std::any::type_name::<T>()));
         });
+        None
     }
 }
 
@@ -57,7 +61,7 @@ impl<T: 'static> InspectFallback for Inspect<'_, T> {
 // ---------------------------------------------------------------------------
 
 impl<T: crate::component_field::ComponentField> Inspect<'_, T> {
-    pub fn show(&mut self, name: &str, ui: &mut egui::Ui) {
-        self.0.inspect_field(name, ui);
+    pub fn show(&self, name: &str, ui: &mut egui::Ui) -> Option<T> {
+        self.0.inspect_field(name, ui)
     }
 }

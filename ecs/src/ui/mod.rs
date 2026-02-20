@@ -34,14 +34,13 @@ pub use world_inspector::show_world_inspector;
 
 use crate::{Entity, World};
 
-/// A deferred hierarchy action recorded during drag-and-drop in the world
-/// inspector. Applied when `&mut World` becomes available.
+/// Fallback deferred reparent for when no [`ActionQueue`] resource is present.
+/// Used only as a last resort — the preferred path pushes to the action queue.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum PendingReparent {
-    /// Set `entity` as a child of `new_parent`.
-    SetParent { entity: Entity, new_parent: Entity },
-    /// Remove `entity` from its current parent, making it a root.
-    MakeRoot { entity: Entity },
+pub(crate) struct PendingReparent {
+    pub entity: Entity,
+    /// `Some(parent)` to set parent, `None` to make root.
+    pub new_parent: Option<Entity>,
 }
 
 /// Persistent UI state for the inspector panels.
@@ -54,7 +53,7 @@ pub struct InspectorState {
     expanded: std::collections::HashSet<u32>,
     /// Add-component popup state.
     pub(crate) add_component_open: bool,
-    /// Deferred reparent action from drag-and-drop.
+    /// Fallback deferred reparent (only used when no ActionQueue resource exists).
     pub(crate) pending_reparent: Option<PendingReparent>,
 }
 
@@ -71,21 +70,24 @@ impl InspectorState {
 
     /// Applies any deferred hierarchy actions (e.g. drag-and-drop reparenting).
     ///
-    /// Called automatically at the start of [`show_component_inspector`]. Users
-    /// who only render the world inspector should call this manually each frame.
+    /// This is only needed when no [`ActionQueue`](redlilium_core::abstract_editor::ActionQueue)
+    /// resource is present in the World. When the action queue exists,
+    /// reparent operations go through it instead and are handled by the
+    /// editor's undo/redo system.
+    ///
+    /// Called automatically at the start of [`show_component_inspector`].
     pub fn apply_pending_actions(&mut self, world: &mut World) {
-        if let Some(action) = self.pending_reparent.take() {
-            match action {
-                PendingReparent::SetParent { entity, new_parent } => {
-                    if world.is_alive(entity) && world.is_alive(new_parent) {
-                        crate::std::hierarchy::set_parent(world, entity, new_parent);
-                    }
+        if let Some(action) = self.pending_reparent.take()
+            && world.is_alive(action.entity)
+        {
+            match action.new_parent {
+                Some(parent) if world.is_alive(parent) => {
+                    crate::std::hierarchy::set_parent(world, action.entity, parent);
                 }
-                PendingReparent::MakeRoot { entity } => {
-                    if world.is_alive(entity) {
-                        crate::std::hierarchy::remove_parent(world, entity);
-                    }
+                None => {
+                    crate::std::hierarchy::remove_parent(world, action.entity);
                 }
+                _ => {}
             }
         }
     }
