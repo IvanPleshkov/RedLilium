@@ -2,19 +2,17 @@
 //!
 //! Uses the same method-resolution-priority trick as
 //! [`Inspect`](crate::inspect::Inspect) and
-//! [`EntityRef`](crate::map_entities::EntityRef): inherent methods on
-//! wrapper types for known types (Entity, Arc) take precedence over
+//! [`EntityRef`](crate::map_entities::EntityRef): generic inherent methods
+//! bounded on [`ComponentField`](crate::ComponentField) take precedence over
 //! blanket fallback trait impls.
 //!
 //! The `#[derive(Component)]` macro generates `serialize_component` by
 //! wrapping each field in `SerializeField(&self.field).serialize_field(name, ctx)`.
 
 use std::marker::PhantomData;
-use std::sync::Arc;
 
 use super::context::{DeserializeContext, SerializeContext};
 use super::error::{DeserializeError, SerializeError};
-use crate::Entity;
 
 // ---------------------------------------------------------------------------
 // Serialize
@@ -22,8 +20,9 @@ use crate::Entity;
 
 /// Wrapper for serializing a single component field.
 ///
-/// Inherent `serialize_field` methods for known types (Entity, Arc)
-/// take priority over the [`SerializeFieldFallback`] blanket trait impl.
+/// The generic inherent `serialize_field` method for
+/// [`ComponentField`](crate::ComponentField) types takes priority over the
+/// [`SerializeFieldFallback`] blanket trait impl.
 pub struct SerializeField<'a, T: ?Sized>(pub &'a T);
 
 /// Fallback trait for serializing fields of types that implement
@@ -50,47 +49,15 @@ impl<T: serde::Serialize + 'static> SerializeFieldFallback for SerializeField<'_
     }
 }
 
-// --- Entity inherent impls ---
+// --- Generic dispatch to ComponentField trait ---
 
-impl SerializeField<'_, Entity> {
+impl<T: crate::component_field::ComponentField> SerializeField<'_, T> {
     pub fn serialize_field(
         &self,
         name: &str,
         ctx: &mut SerializeContext<'_>,
     ) -> Result<(), SerializeError> {
-        ctx.write_entity(name, self.0)
-    }
-}
-
-impl SerializeField<'_, Vec<Entity>> {
-    pub fn serialize_field(
-        &self,
-        name: &str,
-        ctx: &mut SerializeContext<'_>,
-    ) -> Result<(), SerializeError> {
-        ctx.write_entity_list(name, self.0)
-    }
-}
-
-impl SerializeField<'_, Option<Entity>> {
-    pub fn serialize_field(
-        &self,
-        name: &str,
-        ctx: &mut SerializeContext<'_>,
-    ) -> Result<(), SerializeError> {
-        ctx.write_optional_entity(name, self.0)
-    }
-}
-
-// --- Arc inherent impl (generic, takes priority over fallback for Arc types) ---
-
-impl<T: serde::Serialize + Send + Sync + 'static> SerializeField<'_, Arc<T>> {
-    pub fn serialize_field(
-        &self,
-        name: &str,
-        ctx: &mut SerializeContext<'_>,
-    ) -> Result<(), SerializeError> {
-        ctx.write_arc(name, self.0)
+        self.0.serialize_field(name, ctx)
     }
 }
 
@@ -100,8 +67,9 @@ impl<T: serde::Serialize + Send + Sync + 'static> SerializeField<'_, Arc<T>> {
 
 /// Wrapper for deserializing a single component field.
 ///
-/// Inherent `deserialize_field` methods for known types (Entity, Arc)
-/// take priority over the [`DeserializeFieldFallback`] blanket trait impl.
+/// The generic inherent `deserialize_field` method for
+/// [`ComponentField`](crate::ComponentField) types takes priority over the
+/// [`DeserializeFieldFallback`] blanket trait impl.
 pub struct DeserializeField<T>(pub PhantomData<T>);
 
 /// Fallback trait for deserializing fields of types that implement
@@ -124,43 +92,14 @@ impl<T: serde::de::DeserializeOwned + 'static> DeserializeFieldFallback<T> for D
     }
 }
 
-// --- Entity inherent impls ---
+// --- Generic dispatch to ComponentField trait ---
 
-impl DeserializeField<Entity> {
+impl<T: crate::component_field::ComponentField> DeserializeField<T> {
     pub fn deserialize_field(
         name: &str,
         ctx: &mut DeserializeContext<'_>,
-    ) -> Result<Entity, DeserializeError> {
-        ctx.read_entity(name)
-    }
-}
-
-impl DeserializeField<Vec<Entity>> {
-    pub fn deserialize_field(
-        name: &str,
-        ctx: &mut DeserializeContext<'_>,
-    ) -> Result<Vec<Entity>, DeserializeError> {
-        ctx.read_entity_list(name)
-    }
-}
-
-impl DeserializeField<Option<Entity>> {
-    pub fn deserialize_field(
-        name: &str,
-        ctx: &mut DeserializeContext<'_>,
-    ) -> Result<Option<Entity>, DeserializeError> {
-        ctx.read_optional_entity(name)
-    }
-}
-
-// --- Arc inherent impl ---
-
-impl<T: serde::de::DeserializeOwned + Send + Sync + 'static> DeserializeField<Arc<T>> {
-    pub fn deserialize_field(
-        name: &str,
-        ctx: &mut DeserializeContext<'_>,
-    ) -> Result<Arc<T>, DeserializeError> {
-        ctx.read_arc(name)
+    ) -> Result<T, DeserializeError> {
+        T::deserialize_field(name, ctx)
     }
 }
 
@@ -172,12 +111,13 @@ mod tests {
     use crate::serialize::value::Value;
 
     #[test]
-    fn serialize_f32_via_fallback() {
+    fn serialize_f32_via_component_field() {
         let world = World::new();
         let mut ctx = SerializeContext::new(&world);
         ctx.begin_struct("Test").unwrap();
 
-        use super::SerializeFieldFallback as _;
+        // f32 now implements ComponentField, so the inherent method wins
+        // over SerializeFieldFallback — no fallback import needed.
         SerializeField(&1.5f32)
             .serialize_field("x", &mut ctx)
             .unwrap();
@@ -194,13 +134,13 @@ mod tests {
     }
 
     #[test]
-    fn serialize_entity_via_inherent() {
+    fn serialize_entity_via_component_field() {
         let world = World::new();
         let mut ctx = SerializeContext::new(&world);
         ctx.begin_struct("Test").unwrap();
 
         // Entity inherent method takes priority - no fallback import needed
-        let entity = Entity::new(42, 100);
+        let entity = crate::Entity::new(42, 100);
         SerializeField(&entity)
             .serialize_field("e", &mut ctx)
             .unwrap();
@@ -222,6 +162,8 @@ mod tests {
 
     #[test]
     fn serialize_arc_dedup() {
+        use std::sync::Arc;
+
         let world = World::new();
         let mut ctx = SerializeContext::new(&world);
         ctx.begin_struct("Test").unwrap();

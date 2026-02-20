@@ -42,6 +42,7 @@ mod bundle;
 mod command_collector;
 mod commands;
 pub mod component;
+pub mod component_field;
 mod compute;
 mod compute_context;
 mod condition;
@@ -89,6 +90,7 @@ mod world;
 // Core types
 pub use commands::CommandBuffer;
 pub use component::Component;
+pub use component_field::ComponentField;
 pub use compute::{ComputePool, TaskHandle};
 pub use ecs_macro::{Bundle, Component};
 pub use egui;

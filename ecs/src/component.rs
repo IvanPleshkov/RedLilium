@@ -180,6 +180,7 @@ mod tests {
         const NAME: &'static str = "RichComponent";
 
         fn inspect_ui(&mut self, ui: &mut egui::Ui) {
+            #[allow(unused_imports)]
             use crate::inspect::InspectFallback as _;
             crate::inspect::Inspect(&mut self.label).show("label", ui);
             crate::inspect::Inspect(&mut self._data).show("data", ui);
