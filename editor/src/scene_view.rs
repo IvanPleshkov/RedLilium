@@ -250,24 +250,15 @@ impl SceneViewState {
         Some(pass)
     }
 
+    /// Clear the viewport (e.g. when the SceneView tab is not visible).
+    pub fn clear_viewport(&mut self) {
+        self.viewport = None;
+        self.scissor = None;
+    }
+
     /// Whether the viewport has been set (i.e. the SceneView tab is visible).
     pub fn has_viewport(&self) -> bool {
         self.viewport.is_some()
-    }
-
-    /// Get the current viewport, if set.
-    pub fn viewport(&self) -> Option<Viewport> {
-        self.viewport
-    }
-
-    /// Get the current scissor rect, if set.
-    pub fn scissor(&self) -> Option<ScissorRect> {
-        self.scissor
-    }
-
-    /// Get the depth texture (for sharing with other passes like debug draw).
-    pub fn depth_texture(&self) -> &Arc<redlilium_graphics::Texture> {
-        &self.depth_texture
     }
 
     /// Get the viewport aspect ratio, or 1.0 if no viewport is set.

@@ -162,6 +162,67 @@ impl DebugDrawerRenderer {
             .expect("Failed to write debug draw uniform buffer");
     }
 
+    /// Append debug draw commands to an existing graphics pass.
+    ///
+    /// Call [`update_view_proj`](Self::update_view_proj) before this method.
+    /// Does nothing if `vertices` is empty.
+    pub fn append_to_pass(&mut self, pass: &mut GraphicsPass, vertices: &[DebugVertex]) {
+        if vertices.is_empty() {
+            return;
+        }
+
+        let vertex_count = vertices.len() as u32;
+
+        // Grow vertex buffer if needed (2x strategy)
+        if vertex_count > self.vertex_capacity {
+            let new_capacity = vertex_count
+                .max(self.vertex_capacity.saturating_mul(2))
+                .max(DEFAULT_VERTEX_CAPACITY);
+
+            let vertex_stride = std::mem::size_of::<DebugVertex>() as u64;
+            self.vertex_buffer = self
+                .device
+                .create_buffer(
+                    &BufferDescriptor::new(
+                        new_capacity as u64 * vertex_stride,
+                        BufferUsage::VERTEX | BufferUsage::COPY_DST,
+                    )
+                    .with_label("debug_draw_vertices"),
+                )
+                .expect("Failed to grow debug draw vertex buffer");
+            self.vertex_capacity = new_capacity;
+        }
+
+        // Upload vertex data
+        self.device
+            .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(vertices))
+            .expect("Failed to write debug draw vertex buffer");
+
+        // Construct Mesh (non-indexed, LineList)
+        let gpu_mesh = Arc::new(Mesh::new(
+            Arc::clone(&self.device),
+            self.vertex_layout.clone(),
+            PrimitiveTopology::LineList,
+            vec![self.vertex_buffer.clone()],
+            vertex_count,
+            None,
+            None,
+            0,
+            Some("debug_draw_mesh".into()),
+        ));
+
+        // Binding group and material instance
+        #[allow(clippy::arc_with_non_send_sync)]
+        let uniform_binding =
+            Arc::new(BindingGroup::new().with_buffer(0, self.uniform_buffer.clone()));
+
+        let material_instance = Arc::new(
+            MaterialInstance::new(self.material.clone()).with_binding_group(uniform_binding),
+        );
+
+        pass.add_draw(gpu_mesh, material_instance);
+    }
+
     /// Create a graphics pass for the given debug vertices.
     ///
     /// Typically called with the result of [`DebugDrawer::take_render_data()`](crate::DebugDrawer::take_render_data).

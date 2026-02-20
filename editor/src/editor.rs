@@ -27,6 +27,7 @@ use crate::menu;
 #[cfg(target_os = "macos")]
 use crate::menu::NativeMenu;
 use crate::scene_view::SceneViewState;
+use crate::status_bar;
 use crate::toolbar::{self, PlayState};
 
 /// A minimal EguiApp that does nothing.
@@ -93,6 +94,9 @@ pub struct Editor {
     scene_view_rect_phys: Option<[f32; 4]>,
     /// Current cursor position in physical pixels (for hit-testing).
     cursor_pos: [f32; 2],
+
+    /// Smoothed frames-per-second for the status bar.
+    fps: f32,
 }
 
 impl Editor {
@@ -119,6 +123,7 @@ impl Editor {
             egui_wants_keyboard: false,
             scene_view_rect_phys: None,
             cursor_pos: [0.0, 0.0],
+            fps: 0.0,
         }
     }
 
@@ -440,6 +445,20 @@ impl AppHandler for Editor {
             // Toolbar (below menu bar)
             self.play_state = toolbar::draw_toolbar(&egui_ctx, self.play_state);
 
+            // Update smoothed FPS from frame delta
+            let dt = elapsed as f32;
+            if dt > 0.0 {
+                let instant_fps = 1.0 / dt;
+                if self.fps == 0.0 {
+                    self.fps = instant_fps;
+                } else {
+                    self.fps += (instant_fps - self.fps) * 0.05;
+                }
+            }
+
+            // Status bar (bottom)
+            status_bar::draw_status_bar(&egui_ctx, self.fps);
+
             // Dock area fills remaining space (transparent so scene renders through)
             let panel_frame =
                 egui::Frame::central_panel(&egui_ctx.style()).fill(egui::Color32::TRANSPARENT);
@@ -496,6 +515,12 @@ impl AppHandler for Editor {
                     .unwrap_or(1.0);
                 self.update_camera_projection(aspect);
             }
+        } else {
+            // SceneView tab not visible — clear viewport so scene rendering is skipped.
+            self.scene_view_rect_phys = None;
+            if let Some(sv) = &mut self.scene_view {
+                sv.clear_viewport();
+            }
         }
 
         // Submit scene first (clears swapchain), then egui on top
@@ -506,49 +531,31 @@ impl AppHandler for Editor {
             && !self.worlds.is_empty()
         {
             let ew = self.active_world();
-            if let Some(scene_pass) =
+            if let Some(mut scene_pass) =
                 scene_view.build_scene_pass(&ew.world, ctx.swapchain_texture())
             {
+                // Append debug draw lines into the scene pass if available
+                if let Some(renderer) = &mut self.debug_drawer_renderer {
+                    let ew = &self.worlds[self.active_world];
+                    if let Ok(drawer) = ew.debug_drawer.read() {
+                        let vertices = drawer.take_render_data();
+                        if !vertices.is_empty() {
+                            if let Ok(cameras) = ew.world.read_all::<Camera>()
+                                && let Some((_, camera)) = cameras.iter().next()
+                            {
+                                renderer.update_view_proj(mat4_to_cols_array_2d(
+                                    &camera.view_projection(),
+                                ));
+                            }
+                            renderer.append_to_pass(&mut scene_pass, &vertices);
+                        }
+                    }
+                }
+
                 let mut scene_graph = ctx.acquire_graph();
                 scene_graph.add_graphics_pass(scene_pass);
                 let scene_handle = ctx.submit("scene", scene_graph, &[]);
                 deps.push(scene_handle);
-            }
-        }
-
-        // Debug draw pass (between scene and UI)
-        if let Some(renderer) = &mut self.debug_drawer_renderer
-            && let Some(scene_view) = &self.scene_view
-            && !self.worlds.is_empty()
-        {
-            let ew = &self.worlds[self.active_world];
-            if let Ok(drawer) = ew.debug_drawer.read() {
-                let vertices = drawer.take_render_data();
-                if !vertices.is_empty() {
-                    // Update view-projection matrix from camera
-                    if let Ok(cameras) = ew.world.read_all::<Camera>()
-                        && let Some((_, camera)) = cameras.iter().next()
-                    {
-                        renderer.update_view_proj(mat4_to_cols_array_2d(&camera.view_projection()));
-                    }
-
-                    let render_target = RenderTarget::from_surface(ctx.swapchain_texture());
-                    let depth_tex = scene_view.depth_texture();
-                    if let Some(mut debug_pass) =
-                        renderer.create_graphics_pass(&vertices, &render_target, Some(depth_tex))
-                    {
-                        if let Some(vp) = scene_view.viewport() {
-                            debug_pass.set_viewport(vp);
-                        }
-                        if let Some(scissor) = scene_view.scissor() {
-                            debug_pass.set_scissor_rect(scissor);
-                        }
-                        let mut debug_graph = ctx.acquire_graph();
-                        debug_graph.add_graphics_pass(debug_pass);
-                        let debug_handle = ctx.submit("debug_draw", debug_graph, &deps);
-                        deps = vec![debug_handle];
-                    }
-                }
             }
         }
 

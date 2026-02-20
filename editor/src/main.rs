@@ -6,6 +6,7 @@ mod fs_watcher;
 mod menu;
 mod project;
 mod scene_view;
+mod status_bar;
 mod toolbar;
 
 use redlilium_app::{App, AppArgs, DefaultAppArgs};

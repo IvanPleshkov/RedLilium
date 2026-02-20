@@ -36,7 +36,7 @@
 ///     }
 /// }
 /// ```
-pub trait Component: Send + Sync + 'static {
+pub trait Component: Clone + Send + Sync + 'static {
     /// The struct name as a static string (e.g. `"Transform"`).
     ///
     /// Used by the World's inspector registration to key metadata
@@ -192,6 +192,7 @@ mod tests {
 
     use std::sync::Arc;
 
+    #[derive(Clone)]
     struct RichComponent {
         label: String,
         _data: Arc<Vec<u8>>,

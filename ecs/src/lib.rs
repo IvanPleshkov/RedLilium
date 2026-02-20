@@ -199,19 +199,6 @@ pub fn register_std_components(world: &mut World) {
     // Required components are now declared via #[require(...)] on the component
     // structs and registered automatically by register_inspector / register_inspector_default.
 
-    // Enable clone for all standard Clone components (prefab support)
-    world.enable_clone::<Transform>();
-    world.enable_clone::<GlobalTransform>();
-    world.enable_clone::<Visibility>();
-    world.enable_clone::<Name>();
-    world.enable_clone::<Camera>();
-    world.enable_clone::<FreeFlyCamera>();
-    world.enable_clone::<Parent>();
-    world.enable_clone::<Children>();
-    world.enable_clone::<DirectionalLight>();
-    world.enable_clone::<PointLight>();
-    world.enable_clone::<SpotLight>();
-
     // Physics descriptor + handle components (feature-gated)
     #[cfg(any(feature = "physics-3d", feature = "physics-3d-f32"))]
     {
@@ -220,8 +207,6 @@ pub fn register_std_components(world: &mut World) {
         world.register_inspector::<physics::components3d::ImpulseJoint3D>();
         world.register_component::<physics::physics3d::RigidBody3DHandle>();
         world.register_component::<physics::physics3d::ImpulseJoint3DHandle>();
-        world.enable_clone::<physics::components3d::RigidBody3D>();
-        world.enable_clone::<physics::components3d::Collider3D>();
     }
     #[cfg(any(feature = "physics-2d", feature = "physics-2d-f32"))]
     {
@@ -230,8 +215,6 @@ pub fn register_std_components(world: &mut World) {
         world.register_inspector::<physics::components2d::ImpulseJoint2D>();
         world.register_component::<physics::physics2d::RigidBody2DHandle>();
         world.register_component::<physics::physics2d::ImpulseJoint2DHandle>();
-        world.enable_clone::<physics::components2d::RigidBody2D>();
-        world.enable_clone::<physics::components2d::Collider2D>();
     }
 
     // Rendering components (feature-gated)

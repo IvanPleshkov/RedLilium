@@ -347,7 +347,7 @@ impl World {
     /// The component will be visible in the inspector but cannot be added
     /// via the "Add Component" button. Use [`register_inspector_default`](World::register_inspector_default)
     /// for that.
-    pub fn register_inspector<T: Component + Clone>(&mut self) {
+    pub fn register_inspector<T: Component>(&mut self) {
         self.register_component::<T>();
         T::register_required(self);
         self.inspector_entries.insert(
@@ -376,8 +376,20 @@ impl World {
                         comp.remap_entities(map);
                     }
                 },
-                clone_fn: None,
-                extract_fn: None,
+                clone_fn: Some(|world, src, dst| {
+                    let cloned = world.get::<T>(src).cloned();
+                    if let Some(val) = cloned {
+                        let _ = world.insert(dst, val);
+                        true
+                    } else {
+                        false
+                    }
+                }),
+                extract_fn: Some(|world, entity| {
+                    world.get::<T>(entity).cloned().map(|v| {
+                        Box::new(crate::prefab::TypedBag(v)) as Box<dyn crate::prefab::ComponentBag>
+                    })
+                }),
                 serialize_fn: serialize_component_fn::<T>,
                 deserialize_fn: deserialize_component_fn::<T>,
             },
@@ -388,7 +400,7 @@ impl World {
     ///
     /// Like [`register_inspector`](World::register_inspector) but also enables
     /// inserting a default instance via the inspector "Add Component" button.
-    pub fn register_inspector_default<T: Component + Default + Clone>(&mut self) {
+    pub fn register_inspector_default<T: Component + Default>(&mut self) {
         self.register_component::<T>();
         T::register_required(self);
         self.inspector_entries.insert(
@@ -419,8 +431,20 @@ impl World {
                         comp.remap_entities(map);
                     }
                 },
-                clone_fn: None,
-                extract_fn: None,
+                clone_fn: Some(|world, src, dst| {
+                    let cloned = world.get::<T>(src).cloned();
+                    if let Some(val) = cloned {
+                        let _ = world.insert(dst, val);
+                        true
+                    } else {
+                        false
+                    }
+                }),
+                extract_fn: Some(|world, entity| {
+                    world.get::<T>(entity).cloned().map(|v| {
+                        Box::new(crate::prefab::TypedBag(v)) as Box<dyn crate::prefab::ComponentBag>
+                    })
+                }),
                 serialize_fn: serialize_component_fn::<T>,
                 deserialize_fn: deserialize_component_fn::<T>,
             },
@@ -473,39 +497,6 @@ impl World {
 
     /// Enables type-erased cloning for a component type.
     ///
-    /// After calling this, the component will be included when using
-    /// [`clone_entity`](World::clone_entity) or
-    /// [`clone_entity_tree`](World::clone_entity_tree).
-    ///
-    /// The component must have been previously registered via
-    /// [`register_inspector`](World::register_inspector) or
-    /// [`register_inspector_default`](World::register_inspector_default).
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// world.register_inspector_default::<Transform>();
-    /// world.enable_clone::<Transform>();
-    /// ```
-    pub fn enable_clone<T: Component + Clone>(&mut self) {
-        if let Some(entry) = self.inspector_entries.get_mut(T::NAME) {
-            entry.clone_fn = Some(|world, src, dst| {
-                let cloned = world.get::<T>(src).cloned();
-                if let Some(val) = cloned {
-                    let _ = world.insert(dst, val);
-                    true
-                } else {
-                    false
-                }
-            });
-            entry.extract_fn = Some(|world, entity| {
-                world.get::<T>(entity).cloned().map(|v| {
-                    Box::new(crate::prefab::TypedBag(v)) as Box<dyn crate::prefab::ComponentBag>
-                })
-            });
-        }
-    }
-
     /// Inserts a component on an entity.
     ///
     /// If the entity already has this component, the value is replaced.
@@ -1695,6 +1686,20 @@ impl World {
             .collect()
     }
 
+    /// Returns the type names of ALL components attached to an entity.
+    ///
+    /// Unlike [`inspectable_components_of`](World::inspectable_components_of), this
+    /// includes components that were not registered via
+    /// [`register_inspector`](World::register_inspector). The returned names are
+    /// fully-qualified Rust type paths (from [`std::any::type_name`]).
+    pub fn all_component_names_of(&self, entity: Entity) -> Vec<&'static str> {
+        self.components
+            .values()
+            .filter(|storage| storage.contains_untyped(entity.index()))
+            .map(|storage| storage.type_name())
+            .collect()
+    }
+
     /// Returns component names that the entity does NOT have and that support Default insertion.
     pub fn addable_components_of(&self, entity: Entity) -> Vec<&'static str> {
         self.inspector_entries
@@ -1737,6 +1742,27 @@ impl World {
         if let Some(f) = insert_fn {
             f(self, entity);
         }
+    }
+
+    /// Extracts a type-erased clone of a component by name from an entity.
+    ///
+    /// Returns `None` if the component is not present or the name is unknown.
+    pub(crate) fn extract_by_name(
+        &self,
+        entity: Entity,
+        name: &str,
+    ) -> Option<Box<dyn crate::prefab::ComponentBag>> {
+        let extract_fn = self
+            .inspector_entries
+            .get(name)
+            .and_then(|e| e.extract_fn)?;
+        extract_fn(self, entity)
+    }
+
+    /// Inserts a type-erased component from a [`ComponentBag`](crate::prefab::ComponentBag)
+    /// onto an entity, consuming the bag.
+    pub(crate) fn insert_bag(&mut self, entity: Entity, bag: Box<dyn crate::prefab::ComponentBag>) {
+        bag.consume_into(self, entity);
     }
 
     /// Collects all entity references from a component by name on an entity.
@@ -1797,11 +1823,11 @@ impl World {
         }
     }
 
-    /// Clones all clone-enabled components from one entity to a new entity.
+    /// Clones all inspector-registered components from one entity to a new entity.
     ///
-    /// Spawns a new entity and copies every component that was registered
-    /// with [`enable_clone`](World::enable_clone). Components without clone
-    /// support are silently skipped.
+    /// Spawns a new entity and copies every component registered via
+    /// [`register_inspector`](World::register_inspector) or
+    /// [`register_inspector_default`](World::register_inspector_default).
     ///
     /// Does **not** traverse the hierarchy or remap entity references.
     /// For hierarchy-aware cloning, use [`clone_entity_tree`](World::clone_entity_tree).

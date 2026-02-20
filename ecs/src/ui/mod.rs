@@ -49,6 +49,9 @@ pub struct InspectorState {
     pub selected: Option<Entity>,
     /// Filter text for entity search.
     pub filter: String,
+    /// Whether to show editor-only entities in the world inspector.
+    /// Defaults to `false` — editor entities (camera, grid, gizmos) are hidden.
+    pub show_editor_entities: bool,
     /// Tracks which tree nodes are expanded (by entity index).
     expanded: std::collections::HashSet<u32>,
     /// Add-component popup state.
@@ -62,6 +65,7 @@ impl InspectorState {
         Self {
             selected: None,
             filter: String::new(),
+            show_editor_entities: false,
             expanded: std::collections::HashSet::new(),
             add_component_open: false,
             pending_reparent: None,

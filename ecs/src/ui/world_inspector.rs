@@ -28,6 +28,8 @@ pub fn show_world_inspector(ui: &mut egui::Ui, world: &World, state: &mut Inspec
         ui.label("Filter:");
         ui.text_edit_singleline(&mut state.filter);
     });
+
+    ui.checkbox(&mut state.show_editor_entities, "Show Editor Entities");
     ui.separator();
 
     // Entity count
@@ -40,8 +42,33 @@ pub fn show_world_inspector(ui: &mut egui::Ui, world: &World, state: &mut Inspec
             // Collect root entities (no Parent component)
             let roots = collect_roots(world);
 
-            for entity in &roots {
-                show_entity_node(ui, world, *entity, state);
+            if state.show_editor_entities {
+                // Show editor entities first, separated from scene entities
+                let (editor_roots, scene_roots): (Vec<&Entity>, Vec<&Entity>) =
+                    roots.iter().partition(|e| is_editor_entity(**e));
+
+                if !editor_roots.is_empty() {
+                    ui.label(
+                        egui::RichText::new("Editor Entities")
+                            .weak()
+                            .italics()
+                            .size(11.0),
+                    );
+                    for entity in &editor_roots {
+                        show_entity_node(ui, world, **entity, state);
+                    }
+                    ui.separator();
+                }
+
+                for entity in &scene_roots {
+                    show_entity_node(ui, world, **entity, state);
+                }
+            } else {
+                for entity in &roots {
+                    if !is_editor_entity(*entity) {
+                        show_entity_node(ui, world, *entity, state);
+                    }
+                }
             }
 
             // "Drop here to unparent" zone — only visible while dragging an entity
@@ -74,6 +101,11 @@ pub fn show_world_inspector(ui: &mut egui::Ui, world: &World, state: &mut Inspec
         });
 }
 
+/// Returns `true` if the entity has the EDITOR or INHERITED_EDITOR flag.
+fn is_editor_entity(entity: Entity) -> bool {
+    entity.flags() & (Entity::EDITOR | Entity::INHERITED_EDITOR) != 0
+}
+
 /// Collect entities that have no Parent component (root entities).
 fn collect_roots(world: &World) -> Vec<Entity> {
     let has_parent = world.with::<Parent>();
@@ -87,6 +119,11 @@ fn collect_roots(world: &World) -> Vec<Entity> {
 
 /// Render a single entity node in the tree (recursive for children).
 fn show_entity_node(ui: &mut egui::Ui, world: &World, entity: Entity, state: &mut InspectorState) {
+    // Skip editor entities when the toggle is off
+    if !state.show_editor_entities && is_editor_entity(entity) {
+        return;
+    }
+
     let label = entity_label(world, entity);
 
     // Apply filter
