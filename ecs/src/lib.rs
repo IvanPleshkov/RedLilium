@@ -196,6 +196,13 @@ pub fn register_std_components(world: &mut World) {
     world.register_inspector::<Parent>();
     world.register_inspector_default::<Children>();
 
+    // Inspector display order: Name first, then hierarchy, then transforms
+    world.set_inspector_order::<Name>(0);
+    world.set_inspector_order::<Parent>(10);
+    world.set_inspector_order::<Children>(11);
+    world.set_inspector_order::<Transform>(20);
+    world.set_inspector_order::<GlobalTransform>(21);
+
     // Required components are now declared via #[require(...)] on the component
     // structs and registered automatically by register_inspector / register_inspector_default.
 

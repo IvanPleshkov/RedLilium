@@ -89,6 +89,8 @@ struct InspectorEntry {
     serialize_fn: SerializeComponentFn,
     /// Deserialize and insert this component on an entity.
     deserialize_fn: DeserializeComponentFn,
+    /// Display order in the inspector panel. Lower values appear first.
+    display_order: u32,
 }
 
 /// Type-erased serialize helper: reads `T` from the world and serializes it.
@@ -392,6 +394,7 @@ impl World {
                 }),
                 serialize_fn: serialize_component_fn::<T>,
                 deserialize_fn: deserialize_component_fn::<T>,
+                display_order: 100,
             },
         );
     }
@@ -447,8 +450,19 @@ impl World {
                 }),
                 serialize_fn: serialize_component_fn::<T>,
                 deserialize_fn: deserialize_component_fn::<T>,
+                display_order: 100,
             },
         );
+    }
+
+    /// Sets the display order for a previously registered inspector component.
+    ///
+    /// Lower values appear first in the component inspector panel.
+    /// The default order is `100`.
+    pub fn set_inspector_order<T: Component>(&mut self, order: u32) {
+        if let Some(entry) = self.inspector_entries.get_mut(T::NAME) {
+            entry.display_order = order;
+        }
     }
 
     /// Registers a requirement: inserting component `T` on an entity will
@@ -1679,11 +1693,14 @@ impl World {
     /// Only includes components registered via [`register_inspector`](World::register_inspector)
     /// or [`register_inspector_default`](World::register_inspector_default).
     pub fn inspectable_components_of(&self, entity: Entity) -> Vec<&'static str> {
-        self.inspector_entries
+        let mut entries: Vec<_> = self
+            .inspector_entries
             .iter()
             .filter(|(_, e)| (e.has_fn)(self, entity))
-            .map(|(name, _)| *name)
-            .collect()
+            .map(|(name, e)| (*name, e.display_order))
+            .collect();
+        entries.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
+        entries.into_iter().map(|(name, _)| name).collect()
     }
 
     /// Returns the type names of ALL components attached to an entity.
