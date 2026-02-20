@@ -460,6 +460,7 @@ impl AppHandler for Editor {
                             scene_view_rect: None,
                         };
                         egui_dock::DockArea::new(&mut self.dock_state)
+                            .show_leaf_collapse_buttons(false)
                             .show_inside(ui, &mut tab_viewer);
                         scene_view_rect = tab_viewer.scene_view_rect;
                     }
