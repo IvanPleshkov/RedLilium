@@ -41,14 +41,15 @@ pub fn create_default_layout() -> DockState<Tab> {
     let mut dock_state = DockState::new(vec![Tab::SceneView]);
     let surface = dock_state.main_surface_mut();
 
+    // Bottom: Assets (25% of total height, spanning full width)
+    let [top, _bottom] = surface.split_below(NodeIndex::root(), 0.75, vec![Tab::Assets]);
+
     // Left: World Inspector (20% of total width)
-    let [_left, remainder] = surface.split_left(NodeIndex::root(), 0.20, vec![Tab::WorldInspector]);
+    // split_left returns [old, new] — old (SceneView) stays right, new (WorldInspector) goes left
+    let [scene_area, _left] = surface.split_left(top, 0.20, vec![Tab::WorldInspector]);
 
     // Right: Component Inspector (25% of remaining width => ~20% of total)
-    let [center, _right] = surface.split_right(remainder, 0.75, vec![Tab::ComponentInspector]);
-
-    // Bottom of center: Assets (25% of center height)
-    let [_scene, _assets] = surface.split_below(center, 0.75, vec![Tab::Assets]);
+    let [_center, _right] = surface.split_right(scene_area, 0.75, vec![Tab::ComponentInspector]);
 
     dock_state
 }
