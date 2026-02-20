@@ -73,6 +73,7 @@ pub mod rendering;
 mod resource;
 mod runner;
 mod schedule;
+pub mod serialize;
 mod sparse_set;
 mod state;
 #[allow(clippy::module_inception)]

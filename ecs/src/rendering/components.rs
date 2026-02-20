@@ -9,6 +9,7 @@ use redlilium_graphics::{MaterialInstance, Mesh, Texture};
 /// forward render system and drawn each frame.
 #[derive(Debug, Clone, crate::Component)]
 #[require(crate::Transform, crate::GlobalTransform, crate::Visibility)]
+#[skip_serialization]
 pub struct RenderMesh(pub Arc<Mesh>);
 
 impl RenderMesh {
@@ -28,6 +29,7 @@ impl RenderMesh {
 /// Wraps an `Arc<MaterialInstance>` containing bound shader resources.
 /// Attach alongside [`RenderMesh`] to make an entity renderable.
 #[derive(Debug, Clone, crate::Component)]
+#[skip_serialization]
 pub struct RenderMaterial(pub Arc<MaterialInstance>);
 
 impl RenderMaterial {
@@ -50,6 +52,7 @@ impl RenderMaterial {
 ///
 /// The color and depth textures must be created with `TextureUsage::RENDER_ATTACHMENT`.
 #[derive(Debug, Clone, crate::Component)]
+#[skip_serialization]
 pub struct CameraTarget {
     /// Color texture to render to.
     pub color: Arc<Texture>,

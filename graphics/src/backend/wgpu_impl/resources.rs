@@ -132,14 +132,12 @@ impl WgpuBackend {
         let mut fragment_entry: &str = "fs_main";
 
         for shader in &descriptor.shaders {
-            let source = std::str::from_utf8(&shader.source).map_err(|e| {
-                GraphicsError::ShaderCompilationFailed(format!("Invalid UTF-8 in shader: {e}"))
-            })?;
+            let wgsl_source = self.compile_to_wgsl(shader)?;
             let module = self
                 .device
                 .create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: descriptor.label.as_deref(),
-                    source: wgpu::ShaderSource::Wgsl(source.into()),
+                    source: wgpu::ShaderSource::Wgsl(wgsl_source.into()),
                 });
             match shader.stage {
                 ShaderStage::Vertex => {
@@ -301,14 +299,12 @@ impl WgpuBackend {
 
         for shader in &descriptor.shaders {
             if shader.stage == ShaderStage::Compute {
-                let source = std::str::from_utf8(&shader.source).map_err(|e| {
-                    GraphicsError::ShaderCompilationFailed(format!("Invalid UTF-8 in shader: {e}"))
-                })?;
+                let wgsl_source = self.compile_to_wgsl(shader)?;
                 let module = self
                     .device
                     .create_shader_module(wgpu::ShaderModuleDescriptor {
                         label: descriptor.label.as_deref(),
-                        source: wgpu::ShaderSource::Wgsl(source.into()),
+                        source: wgpu::ShaderSource::Wgsl(wgsl_source.into()),
                     });
                 compute_module = Some(module);
                 compute_entry = &shader.entry_point;
@@ -367,6 +363,65 @@ impl WgpuBackend {
             pipeline,
             bind_group_layouts,
         })
+    }
+
+    /// Compile a ShaderSource to WGSL string for wgpu consumption.
+    ///
+    /// For WGSL sources: returns the source as-is.
+    /// For GLSL sources: parses through naga GLSL frontend, validates, and converts to WGSL.
+    fn compile_to_wgsl(
+        &self,
+        shader: &crate::materials::ShaderSource,
+    ) -> Result<String, GraphicsError> {
+        use crate::materials::ShaderSourceLanguage;
+
+        let source_str = std::str::from_utf8(&shader.source).map_err(|e| {
+            GraphicsError::ShaderCompilationFailed(format!("Invalid UTF-8 in shader: {e}"))
+        })?;
+
+        match shader.language {
+            ShaderSourceLanguage::Wgsl => Ok(source_str.to_string()),
+            ShaderSourceLanguage::Glsl => {
+                // Build naga defines map from shader defines
+                let mut defines = naga::FastHashMap::default();
+                for (name, value) in &shader.defines {
+                    defines.insert(name.clone(), value.clone());
+                }
+
+                let naga_stage = match shader.stage {
+                    crate::materials::ShaderStage::Vertex => naga::ShaderStage::Vertex,
+                    crate::materials::ShaderStage::Fragment => naga::ShaderStage::Fragment,
+                    crate::materials::ShaderStage::Compute => naga::ShaderStage::Compute,
+                };
+
+                let options = naga::front::glsl::Options {
+                    stage: naga_stage,
+                    defines,
+                };
+
+                let mut frontend = naga::front::glsl::Frontend::default();
+                let module = frontend.parse(&options, source_str).map_err(|errors| {
+                    GraphicsError::ShaderCompilationFailed(format!("GLSL parse error:\n{errors}"))
+                })?;
+
+                let mut validator = naga::valid::Validator::new(
+                    naga::valid::ValidationFlags::all(),
+                    naga::valid::Capabilities::all(),
+                );
+                let info = validator.validate(&module).map_err(|e| {
+                    GraphicsError::ShaderCompilationFailed(format!("Validation error: {e}"))
+                })?;
+
+                naga::back::wgsl::write_string(
+                    &module,
+                    &info,
+                    naga::back::wgsl::WriterFlags::empty(),
+                )
+                .map_err(|e| {
+                    GraphicsError::ShaderCompilationFailed(format!("WGSL generation error: {e}"))
+                })
+            }
+        }
     }
 
     /// Create a fence for CPU-GPU synchronization.

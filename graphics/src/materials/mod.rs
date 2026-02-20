@@ -19,5 +19,5 @@ pub use bindings::{BindingLayout, BindingLayoutEntry, BindingType, ShaderStageFl
 pub use instance::{BindingGroup, BoundResource, MaterialInstance};
 pub use material::{
     BlendComponent, BlendFactor, BlendOperation, BlendState, Material, MaterialDescriptor,
-    PolygonMode, ShaderSource, ShaderStage,
+    PolygonMode, ShaderSource, ShaderSourceLanguage, ShaderStage,
 };

@@ -86,6 +86,43 @@ pub trait Component: Send + Sync + 'static {
     ///
     /// The default implementation does nothing.
     fn register_required(_world: &mut crate::World) {}
+
+    /// Serialize this component's fields into a [`Value`](crate::serialize::Value).
+    ///
+    /// The `#[derive(Component)]` macro generates this automatically using
+    /// [`SerializeField`](crate::serialize::SerializeField) wrappers for
+    /// each field. Use `#[skip_serialization]` on the component struct to
+    /// opt out and use this default (which returns `NotSerializable`).
+    ///
+    /// For custom serialization (e.g., GPU resources), override this method
+    /// manually and use `ctx.world()` to access resources.
+    fn serialize_component(
+        &self,
+        _ctx: &mut crate::serialize::SerializeContext<'_>,
+    ) -> Result<crate::serialize::Value, crate::serialize::SerializeError> {
+        Err(crate::serialize::SerializeError::NotSerializable {
+            component: Self::NAME,
+        })
+    }
+
+    /// Deserialize a component from a [`DeserializeContext`](crate::serialize::DeserializeContext).
+    ///
+    /// The `#[derive(Component)]` macro generates this automatically using
+    /// [`DeserializeField`](crate::serialize::DeserializeField) wrappers.
+    /// Use `#[skip_serialization]` to opt out.
+    ///
+    /// For custom deserialization, override this method manually and use
+    /// `ctx.world()` / `ctx.world_mut()` to access resources.
+    fn deserialize_component(
+        _ctx: &mut crate::serialize::DeserializeContext<'_>,
+    ) -> Result<Self, crate::serialize::DeserializeError>
+    where
+        Self: Sized,
+    {
+        Err(crate::serialize::DeserializeError::NotDeserializable {
+            component: Self::NAME.to_string(),
+        })
+    }
 }
 
 #[cfg(test)]

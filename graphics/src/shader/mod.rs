@@ -130,6 +130,48 @@ impl ShaderComposer {
         self.includes.insert(path.to_string(), source.to_string());
     }
 
+    /// Resolve `#include` directives in a GLSL source.
+    ///
+    /// Returns the GLSL with all includes expanded but no further
+    /// processing (no naga parsing, no WGSL conversion).
+    /// The caller is responsible for passing the result to a backend
+    /// compiler (shaderc for Vulkan, naga for wgpu).
+    pub fn resolve_glsl(&self, source: &str) -> Result<String, GraphicsError> {
+        let mut included = HashSet::new();
+        self.resolve_includes(source, &mut included)
+    }
+
+    /// Build the defines list for a given stage and user shader defs.
+    ///
+    /// Returns a `Vec<(name, value)>` suitable for passing to
+    /// [`ShaderSource::glsl()`] or backend compilers directly.
+    /// The stage define (VERTEX, FRAGMENT, COMPUTE) is included automatically.
+    pub fn build_defines(
+        stage: ShaderStage,
+        shader_defs: &[(&str, ShaderDef)],
+    ) -> Vec<(String, String)> {
+        let mut defines = Vec::new();
+
+        // Stage define
+        match stage {
+            ShaderStage::Vertex => defines.push(("VERTEX".into(), String::new())),
+            ShaderStage::Fragment => defines.push(("FRAGMENT".into(), String::new())),
+            ShaderStage::Compute => defines.push(("COMPUTE".into(), String::new())),
+        }
+
+        // User shader defs
+        for (name, def) in shader_defs {
+            match def {
+                ShaderDef::Bool(true) => defines.push((name.to_string(), String::new())),
+                ShaderDef::Bool(false) => { /* omit */ }
+                ShaderDef::Int(v) => defines.push((name.to_string(), v.to_string())),
+                ShaderDef::UInt(v) => defines.push((name.to_string(), v.to_string())),
+            }
+        }
+
+        defines
+    }
+
     /// Compose a GLSL shader, resolving all includes.
     ///
     /// Returns composed WGSL source code ready for GPU backends.

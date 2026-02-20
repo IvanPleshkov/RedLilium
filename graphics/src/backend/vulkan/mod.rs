@@ -816,6 +816,8 @@ impl VulkanBackend {
                 &shader.source,
                 shader.stage,
                 &shader.entry_point,
+                shader.language,
+                &shader.defines,
             )?;
             match shader.stage {
                 ShaderStage::Vertex => {
@@ -891,6 +893,8 @@ impl VulkanBackend {
                     &shader.source,
                     shader.stage,
                     &shader.entry_point,
+                    shader.language,
+                    &shader.defines,
                 )?;
                 compute_module = Some(module);
                 compute_entry = &shader.entry_point;

@@ -42,6 +42,18 @@ impl std::error::Error for ComponentNotRegistered {}
 // ---------------------------------------------------------------------------
 
 type ExtractFn = fn(&World, Entity) -> Option<Box<dyn crate::prefab::ComponentBag>>;
+type SerializeComponentFn =
+    fn(
+        &World,
+        Entity,
+        &mut crate::serialize::SerializeContext<'_>,
+    )
+        -> Result<Option<crate::serialize::SerializedComponent>, crate::serialize::SerializeError>;
+type DeserializeComponentFn = fn(
+    Entity,
+    &crate::serialize::Value,
+    &mut crate::serialize::DeserializeContext<'_>,
+) -> Result<(), crate::serialize::DeserializeError>;
 
 /// Type-erased inspector operations for a single component type.
 struct InspectorEntry {
@@ -61,6 +73,46 @@ struct InspectorEntry {
     clone_fn: Option<fn(&mut World, Entity, Entity) -> bool>,
     /// Extract this component into a type-erased bag. None if T is not Clone.
     extract_fn: Option<ExtractFn>,
+    /// Serialize this component on an entity. Returns None if entity doesn't have it
+    /// or the component doesn't support serialization.
+    serialize_fn: SerializeComponentFn,
+    /// Deserialize and insert this component on an entity.
+    deserialize_fn: DeserializeComponentFn,
+}
+
+/// Type-erased serialize helper: reads `T` from the world and serializes it.
+fn serialize_component_fn<T: Component>(
+    world: &World,
+    entity: Entity,
+    ctx: &mut crate::serialize::SerializeContext<'_>,
+) -> Result<Option<crate::serialize::SerializedComponent>, crate::serialize::SerializeError> {
+    let Some(comp) = world.get::<T>(entity) else {
+        return Ok(None);
+    };
+    match comp.serialize_component(ctx) {
+        Ok(value) => Ok(Some(crate::serialize::SerializedComponent {
+            type_name: T::NAME.to_owned(),
+            data: value,
+        })),
+        Err(crate::serialize::SerializeError::NotSerializable { .. }) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Type-erased deserialize helper: deserializes `T` and inserts it on an entity.
+fn deserialize_component_fn<T: Component>(
+    entity: Entity,
+    data: &crate::serialize::Value,
+    ctx: &mut crate::serialize::DeserializeContext<'_>,
+) -> Result<(), crate::serialize::DeserializeError> {
+    ctx.load_data(data)?;
+    let comp = T::deserialize_component(ctx)?;
+    ctx.world_mut().insert(entity, comp).map_err(|e| {
+        crate::serialize::DeserializeError::UnknownComponent {
+            type_name: e.type_name.to_string(),
+        }
+    })?;
+    Ok(())
 }
 
 /// An independent ECS world containing entities, components, and resources.
@@ -254,6 +306,8 @@ impl World {
                 },
                 clone_fn: None,
                 extract_fn: None,
+                serialize_fn: serialize_component_fn::<T>,
+                deserialize_fn: deserialize_component_fn::<T>,
             },
         );
     }
@@ -292,6 +346,8 @@ impl World {
                 },
                 clone_fn: None,
                 extract_fn: None,
+                serialize_fn: serialize_component_fn::<T>,
+                deserialize_fn: deserialize_component_fn::<T>,
             },
         );
     }
@@ -1815,6 +1871,126 @@ impl World {
             .collect();
 
         crate::prefab::Prefab::new(entities)
+    }
+
+    /// Serializes an entity subtree into a [`SerializedPrefab`](crate::serialize::SerializedPrefab).
+    ///
+    /// Performs a breadth-first walk from `root` through [`Children`](crate::Children)
+    /// components and serializes all serializable components. Components that
+    /// return [`NotSerializable`](crate::serialize::SerializeError::NotSerializable)
+    /// are silently skipped.
+    ///
+    /// The resulting prefab can be encoded to RON or bincode via the
+    /// [`format`](crate::serialize::format) module and deserialized back with
+    /// [`deserialize_prefab`](World::deserialize_prefab).
+    ///
+    /// Returns an empty prefab if `root` is not alive.
+    pub fn serialize_prefab(
+        &self,
+        root: Entity,
+    ) -> Result<crate::serialize::SerializedPrefab, crate::serialize::SerializeError> {
+        if !self.is_alive(root) {
+            return Ok(crate::serialize::SerializedPrefab {
+                entities: Vec::new(),
+            });
+        }
+
+        // 1. BFS walk via Children to collect all entities in subtree
+        let mut old_entities = vec![root];
+        let mut i = 0;
+        while i < old_entities.len() {
+            let entity = old_entities[i];
+            if let Some(children) = self.get::<crate::Children>(entity) {
+                old_entities.extend(children.0.iter().copied());
+            }
+            i += 1;
+        }
+
+        // 2. Collect serialize_fns
+        let serialize_fns: Vec<SerializeComponentFn> = self
+            .inspector_entries
+            .values()
+            .map(|e| e.serialize_fn)
+            .collect();
+
+        // 3. Create context (Arc dedup tracked across all entities)
+        let mut ctx = crate::serialize::SerializeContext::new(self);
+
+        // 4. For each entity, serialize all components
+        let serialized_entities = old_entities
+            .iter()
+            .map(|&entity| {
+                let components: Vec<_> = serialize_fns
+                    .iter()
+                    .filter_map(|f| f(self, entity, &mut ctx).transpose())
+                    .collect::<Result<_, _>>()?;
+                Ok(crate::serialize::SerializedEntity {
+                    entity_index: entity.index(),
+                    entity_spawn_tick: entity.spawn_tick(),
+                    components,
+                })
+            })
+            .collect::<Result<_, crate::serialize::SerializeError>>()?;
+
+        Ok(crate::serialize::SerializedPrefab {
+            entities: serialized_entities,
+        })
+    }
+
+    /// Deserializes a [`SerializedPrefab`](crate::serialize::SerializedPrefab) into new entities.
+    ///
+    /// Spawns new entities, deserializes components, and remaps entity references
+    /// (e.g., [`Parent`](crate::Parent) / [`Children`](crate::Children)) to the
+    /// newly spawned entities. Arc values that were shared during serialization
+    /// are shared again via the deduplication cache.
+    ///
+    /// Returns the list of new entities in BFS order (index 0 = root).
+    ///
+    /// Unknown component types are silently skipped.
+    pub fn deserialize_prefab(
+        &mut self,
+        prefab: &crate::serialize::SerializedPrefab,
+    ) -> Result<Vec<Entity>, crate::serialize::DeserializeError> {
+        // 1. Spawn entities
+        let new_entities: Vec<Entity> = prefab.entities.iter().map(|_| self.spawn()).collect();
+
+        // 2. Build entity remap: (old_index, old_spawn_tick) → new Entity
+        let entity_map: HashMap<(u32, u64), Entity> = prefab
+            .entities
+            .iter()
+            .zip(new_entities.iter())
+            .map(|(se, &new_e)| ((se.entity_index, se.entity_spawn_tick), new_e))
+            .collect();
+
+        // 3. Extract deserialize fns by name (before borrowing self mutably via context)
+        let deserialize_fns: HashMap<&str, DeserializeComponentFn> = self
+            .inspector_entries
+            .iter()
+            .map(|(&name, entry)| (name, entry.deserialize_fn))
+            .collect();
+
+        // 4. Create context with entity remap and Arc dedup cache
+        let mut ctx = crate::serialize::DeserializeContext::new(self);
+        ctx.set_entity_map(entity_map);
+
+        // 5. For each entity, deserialize components
+        for (i, se) in prefab.entities.iter().enumerate() {
+            let entity = new_entities[i];
+            for comp in &se.components {
+                if let Some(&deser_fn) = deserialize_fns.get(comp.type_name.as_str()) {
+                    match deser_fn(entity, &comp.data, &mut ctx) {
+                        Ok(()) => {}
+                        Err(crate::serialize::DeserializeError::NotDeserializable { .. }) => {
+                            // Skip components that don't support deserialization
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                // Skip unknown component types silently
+            }
+        }
+
+        Ok(new_entities)
     }
 
     // ---- Resource management ----

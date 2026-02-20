@@ -82,26 +82,25 @@ impl DebugDrawerRenderer {
                 .with_label("debug_draw_uniform_bindings"),
         );
 
-        // Compose shader (per-stage for GLSL)
+        // Resolve shader includes (backends handle compilation)
         let shader_composer = ShaderComposer::new();
-        let composed_vs = shader_composer
-            .compose(DEBUG_DRAW_SHADER_SOURCE, ShaderStage::Vertex, &[])
-            .expect("Failed to compose debug draw vertex shader");
-        let composed_fs = shader_composer
-            .compose(DEBUG_DRAW_SHADER_SOURCE, ShaderStage::Fragment, &[])
-            .expect("Failed to compose debug draw fragment shader");
+        let resolved_glsl = shader_composer
+            .resolve_glsl(DEBUG_DRAW_SHADER_SOURCE)
+            .expect("Failed to resolve debug draw shader includes");
 
         // Material with LineList topology and alpha blending
         let mut material_desc = MaterialDescriptor::new()
-            .with_shader(ShaderSource::new(
+            .with_shader(ShaderSource::glsl(
                 ShaderStage::Vertex,
-                composed_vs.as_bytes().to_vec(),
+                resolved_glsl.as_bytes().to_vec(),
                 "main",
+                ShaderComposer::build_defines(ShaderStage::Vertex, &[]),
             ))
-            .with_shader(ShaderSource::new(
+            .with_shader(ShaderSource::glsl(
                 ShaderStage::Fragment,
-                composed_fs.as_bytes().to_vec(),
+                resolved_glsl.as_bytes().to_vec(),
                 "main",
+                ShaderComposer::build_defines(ShaderStage::Fragment, &[]),
             ))
             .with_binding_layout(uniform_binding_layout.clone())
             .with_vertex_layout(vertex_layout.clone())

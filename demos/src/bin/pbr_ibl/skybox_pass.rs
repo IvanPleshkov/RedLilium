@@ -51,29 +51,28 @@ impl SkyboxPass {
                 .with_label("skybox_bindings"),
         );
 
-        // Compose skybox shader (separate compilation per stage)
+        // Resolve skybox shader includes (backends handle compilation)
         let shader_composer = ShaderComposer::with_standard_library();
-        let composed_vs = shader_composer
-            .compose(SKYBOX_SHADER_GLSL, ShaderStage::Vertex, &[])
-            .expect("Failed to compose skybox vertex shader");
-        let composed_fs = shader_composer
-            .compose(SKYBOX_SHADER_GLSL, ShaderStage::Fragment, &[])
-            .expect("Failed to compose skybox fragment shader");
-        log::info!("Skybox shader composed with library imports");
+        let resolved_glsl = shader_composer
+            .resolve_glsl(SKYBOX_SHADER_GLSL)
+            .expect("Failed to resolve skybox shader includes");
+        log::info!("Skybox shader resolved with library imports");
 
         // Create skybox material (no vertex layout needed for fullscreen triangle)
         let skybox_material = device
             .create_material(
                 &MaterialDescriptor::new()
-                    .with_shader(ShaderSource::new(
+                    .with_shader(ShaderSource::glsl(
                         ShaderStage::Vertex,
-                        composed_vs.as_bytes().to_vec(),
+                        resolved_glsl.as_bytes().to_vec(),
                         "main",
+                        ShaderComposer::build_defines(ShaderStage::Vertex, &[]),
                     ))
-                    .with_shader(ShaderSource::new(
+                    .with_shader(ShaderSource::glsl(
                         ShaderStage::Fragment,
-                        composed_fs.as_bytes().to_vec(),
+                        resolved_glsl.as_bytes().to_vec(),
                         "main",
+                        ShaderComposer::build_defines(ShaderStage::Fragment, &[]),
                     ))
                     .with_binding_layout(skybox_binding_layout)
                     .with_color_format(surface_format)

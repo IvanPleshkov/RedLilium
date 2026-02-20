@@ -3,14 +3,21 @@ use quote::quote;
 use syn::{Data, DeriveInput, Fields, Meta, parse_macro_input};
 
 /// Derive the `Component` trait with automatic inspector UI, entity collection,
-/// and entity remapping.
+/// entity remapping, and serialization.
 ///
 /// Generates:
 /// - `inspect_ui()` using [`Inspect`](redlilium_ecs::inspect::Inspect) wrappers
 /// - `collect_entities()` using [`EntityRef`](redlilium_ecs::map_entities::EntityRef) wrappers
 /// - `remap_entities()` using [`EntityMut`](redlilium_ecs::map_entities::EntityMut) wrappers
+/// - `serialize_component()` using [`SerializeField`](redlilium_ecs::serialize::SerializeField) wrappers
+/// - `deserialize_component()` using [`DeserializeField`](redlilium_ecs::serialize::DeserializeField) wrappers
 ///
 /// Fields starting with `_` are skipped in all generated methods.
+/// Skipped fields use `Default::default()` during deserialization.
+///
+/// Use `#[skip_serialization]` on the struct to opt out of generated
+/// serialize/deserialize methods (they will use the default "not serializable"
+/// implementations from the trait).
 ///
 /// # Example
 ///
@@ -20,13 +27,24 @@ use syn::{Data, DeriveInput, Fields, Meta, parse_macro_input};
 ///     current: f32,
 ///     max: f32,
 /// }
+///
+/// // Opt out of serialization for GPU resource wrappers:
+/// #[derive(Component)]
+/// #[skip_serialization]
+/// struct RenderMesh(pub Arc<Mesh>);
 /// ```
-#[proc_macro_derive(Component, attributes(require))]
+#[proc_macro_derive(Component, attributes(require, skip_serialization))]
 pub fn derive_component(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
     let name_str = name.to_string();
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    // Check for #[skip_serialization] attribute
+    let skip_serialization = input
+        .attrs
+        .iter()
+        .any(|a| a.path().is_ident("skip_serialization"));
 
     // Collect required component types from #[require(Type1, Type2, ...)]
     let mut required_types = Vec::new();
@@ -44,17 +62,29 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
         }
     }
 
-    let (inspect_body, collect_body, remap_body) = match &input.data {
+    let (inspect_body, collect_body, remap_body, serialize_body, deserialize_body) = match &input
+        .data
+    {
         Data::Struct(data) => match &data.fields {
             Fields::Named(fields) => {
-                let visible_fields: Vec<_> = fields
-                    .named
+                let all_fields: Vec<_> = fields.named.iter().collect();
+                let visible_fields: Vec<_> = all_fields
                     .iter()
                     .filter(|f| {
                         !f.ident
                             .as_ref()
                             .is_some_and(|id| id.to_string().starts_with('_'))
                     })
+                    .copied()
+                    .collect();
+                let skipped_fields: Vec<_> = all_fields
+                    .iter()
+                    .filter(|f| {
+                        f.ident
+                            .as_ref()
+                            .is_some_and(|id| id.to_string().starts_with('_'))
+                    })
+                    .copied()
                     .collect();
 
                 let inspect_stmts = visible_fields.iter().map(|f| {
@@ -65,22 +95,84 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                     }
                 });
                 let collect_stmts = visible_fields.iter().map(|f| {
-                    let fname = f.ident.as_ref().unwrap();
-                    quote! {
-                        redlilium_ecs::map_entities::EntityRef(&self.#fname).collect_entities(collector);
-                    }
-                });
+                        let fname = f.ident.as_ref().unwrap();
+                        quote! {
+                            redlilium_ecs::map_entities::EntityRef(&self.#fname).collect_entities(collector);
+                        }
+                    });
                 let remap_stmts = visible_fields.iter().map(|f| {
-                    let fname = f.ident.as_ref().unwrap();
+                        let fname = f.ident.as_ref().unwrap();
+                        quote! {
+                            redlilium_ecs::map_entities::EntityMut(&mut self.#fname).remap_entities(map);
+                        }
+                    });
+
+                let serialize_body = if skip_serialization {
+                    quote! {}
+                } else {
+                    let ser_stmts = visible_fields.iter().map(|f| {
+                            let fname = f.ident.as_ref().unwrap();
+                            let fname_str = fname.to_string();
+                            quote! {
+                                redlilium_ecs::serialize::SerializeField(&self.#fname).serialize_field(#fname_str, ctx)?;
+                            }
+                        });
                     quote! {
-                        redlilium_ecs::map_entities::EntityMut(&mut self.#fname).remap_entities(map);
+                        fn serialize_component(
+                            &self,
+                            ctx: &mut redlilium_ecs::serialize::SerializeContext<'_>,
+                        ) -> Result<redlilium_ecs::serialize::Value, redlilium_ecs::serialize::SerializeError> {
+                            #[allow(unused_imports)]
+                            use redlilium_ecs::serialize::SerializeFieldFallback as _;
+                            ctx.begin_struct(Self::NAME)?;
+                            #(#ser_stmts)*
+                            ctx.end_struct()
+                        }
                     }
-                });
+                };
+
+                let deserialize_body = if skip_serialization {
+                    quote! {}
+                } else {
+                    let deser_stmts = visible_fields.iter().map(|f| {
+                            let fname = f.ident.as_ref().unwrap();
+                            let fname_str = fname.to_string();
+                            let fty = &f.ty;
+                            quote! {
+                                let #fname = redlilium_ecs::serialize::DeserializeField::<#fty>::deserialize_field(#fname_str, ctx)?;
+                            }
+                        });
+                    let visible_names: Vec<_> = visible_fields
+                        .iter()
+                        .map(|f| f.ident.as_ref().unwrap())
+                        .collect();
+                    let skipped_defaults = skipped_fields.iter().map(|f| {
+                        let fname = f.ident.as_ref().unwrap();
+                        quote! { #fname: Default::default() }
+                    });
+                    quote! {
+                        fn deserialize_component(
+                            ctx: &mut redlilium_ecs::serialize::DeserializeContext<'_>,
+                        ) -> Result<Self, redlilium_ecs::serialize::DeserializeError>
+                        where
+                            Self: Sized,
+                        {
+                            #[allow(unused_imports)]
+                            use redlilium_ecs::serialize::DeserializeFieldFallback as _;
+                            ctx.begin_struct(Self::NAME)?;
+                            #(#deser_stmts)*
+                            ctx.end_struct()?;
+                            Ok(Self { #(#visible_names,)* #(#skipped_defaults,)* })
+                        }
+                    }
+                };
 
                 (
                     quote! { #(#inspect_stmts)* },
                     quote! { #(#collect_stmts)* },
                     quote! { #(#remap_stmts)* },
+                    serialize_body,
+                    deserialize_body,
                 )
             }
             Fields::Unnamed(fields) => {
@@ -93,26 +185,124 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                     }
                 });
                 let collect_stmts = indices.iter().map(|idx| {
-                    quote! {
-                        redlilium_ecs::map_entities::EntityRef(&self.#idx).collect_entities(collector);
-                    }
-                });
+                        quote! {
+                            redlilium_ecs::map_entities::EntityRef(&self.#idx).collect_entities(collector);
+                        }
+                    });
                 let remap_stmts = indices.iter().map(|idx| {
                     quote! {
                         redlilium_ecs::map_entities::EntityMut(&mut self.#idx).remap_entities(map);
                     }
                 });
 
+                let serialize_body = if skip_serialization {
+                    quote! {}
+                } else {
+                    let ser_stmts = indices.iter().zip(fields.unnamed.iter()).map(
+                            |(idx, f)| {
+                                let idx_str = idx.index.to_string();
+                                let _ = &f.ty;
+                                quote! {
+                                    redlilium_ecs::serialize::SerializeField(&self.#idx).serialize_field(#idx_str, ctx)?;
+                                }
+                            },
+                        );
+                    quote! {
+                        fn serialize_component(
+                            &self,
+                            ctx: &mut redlilium_ecs::serialize::SerializeContext<'_>,
+                        ) -> Result<redlilium_ecs::serialize::Value, redlilium_ecs::serialize::SerializeError> {
+                            #[allow(unused_imports)]
+                            use redlilium_ecs::serialize::SerializeFieldFallback as _;
+                            ctx.begin_struct(Self::NAME)?;
+                            #(#ser_stmts)*
+                            ctx.end_struct()
+                        }
+                    }
+                };
+
+                let deserialize_body = if skip_serialization {
+                    quote! {}
+                } else {
+                    let deser_stmts =
+                            indices.iter().zip(fields.unnamed.iter()).map(|(idx, f)| {
+                                let idx_str = idx.index.to_string();
+                                let fty = &f.ty;
+                                let var_name = syn::Ident::new(
+                                    &format!("field_{}", idx.index),
+                                    proc_macro2::Span::call_site(),
+                                );
+                                quote! {
+                                    let #var_name = redlilium_ecs::serialize::DeserializeField::<#fty>::deserialize_field(#idx_str, ctx)?;
+                                }
+                            });
+                    let field_vars: Vec<_> = indices
+                        .iter()
+                        .map(|idx| {
+                            syn::Ident::new(
+                                &format!("field_{}", idx.index),
+                                proc_macro2::Span::call_site(),
+                            )
+                        })
+                        .collect();
+                    quote! {
+                        fn deserialize_component(
+                            ctx: &mut redlilium_ecs::serialize::DeserializeContext<'_>,
+                        ) -> Result<Self, redlilium_ecs::serialize::DeserializeError>
+                        where
+                            Self: Sized,
+                        {
+                            #[allow(unused_imports)]
+                            use redlilium_ecs::serialize::DeserializeFieldFallback as _;
+                            ctx.begin_struct(Self::NAME)?;
+                            #(#deser_stmts)*
+                            ctx.end_struct()?;
+                            Ok(Self(#(#field_vars,)*))
+                        }
+                    }
+                };
+
                 (
                     quote! { #(#inspect_stmts)* },
                     quote! { #(#collect_stmts)* },
                     quote! { #(#remap_stmts)* },
+                    serialize_body,
+                    deserialize_body,
                 )
             }
             Fields::Unit => (
                 quote! { let _ = ui; },
                 quote! { let _ = collector; },
                 quote! { let _ = map; },
+                if skip_serialization {
+                    quote! {}
+                } else {
+                    quote! {
+                        fn serialize_component(
+                            &self,
+                            ctx: &mut redlilium_ecs::serialize::SerializeContext<'_>,
+                        ) -> Result<redlilium_ecs::serialize::Value, redlilium_ecs::serialize::SerializeError> {
+                            ctx.begin_struct(Self::NAME)?;
+                            ctx.end_struct()
+                        }
+                    }
+                },
+                if skip_serialization {
+                    quote! {}
+                } else {
+                    quote! {
+                        fn deserialize_component(
+                            ctx: &mut redlilium_ecs::serialize::DeserializeContext<'_>,
+                        ) -> Result<Self, redlilium_ecs::serialize::DeserializeError>
+                        where
+                            Self: Sized,
+                        {
+                            ctx.begin_struct(Self::NAME)?;
+                            ctx.end_struct()?;
+                            Ok(Self)
+                        }
+                    }
+                },
             ),
         },
         _ => {
@@ -163,6 +353,8 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
             }
 
             #register_required_body
+            #serialize_body
+            #deserialize_body
         }
     };
 

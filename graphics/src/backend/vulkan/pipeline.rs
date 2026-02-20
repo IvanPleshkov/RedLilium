@@ -5,7 +5,7 @@ use std::ffi::CString;
 use ash::vk;
 
 use crate::error::GraphicsError;
-use crate::materials::{BindingLayout, BindingType, ShaderStage};
+use crate::materials::{BindingLayout, BindingType, ShaderSourceLanguage, ShaderStage};
 use crate::mesh::VertexAttributeFormat;
 use crate::types::TextureFormat;
 use redlilium_core::mesh::{PrimitiveTopology, VertexLayout};
@@ -72,14 +72,110 @@ impl PipelineManager {
         })
     }
 
-    /// Compile WGSL shader to SPIR-V and create a shader module.
+    /// Compile shader source to SPIR-V and create a Vulkan shader module.
+    ///
+    /// For GLSL sources: uses shaderc (glslang) for direct GLSL → SPIR-V.
+    /// For WGSL sources: uses naga (WGSL → naga IR → SPIR-V) as fallback.
     pub fn compile_shader(
+        &self,
+        source: &[u8],
+        stage: ShaderStage,
+        entry_point: &str,
+        language: ShaderSourceLanguage,
+        defines: &[(String, String)],
+    ) -> Result<vk::ShaderModule, GraphicsError> {
+        let spv = match language {
+            ShaderSourceLanguage::Glsl => {
+                self.compile_glsl_to_spirv(source, stage, entry_point, defines)?
+            }
+            ShaderSourceLanguage::Wgsl => self.compile_wgsl_to_spirv(source, stage, entry_point)?,
+        };
+
+        // Create Vulkan shader module from SPIR-V
+        let create_info = vk::ShaderModuleCreateInfo::default().code(&spv);
+
+        let shader_module = unsafe { self.device.create_shader_module(&create_info, None) }
+            .map_err(|e| {
+                GraphicsError::ShaderCompilationFailed(format!(
+                    "Failed to create shader module: {:?}",
+                    e
+                ))
+            })?;
+
+        Ok(shader_module)
+    }
+
+    /// Compile GLSL to SPIR-V using shaderc (glslang wrapper).
+    fn compile_glsl_to_spirv(
+        &self,
+        source: &[u8],
+        stage: ShaderStage,
+        entry_point: &str,
+        defines: &[(String, String)],
+    ) -> Result<Vec<u32>, GraphicsError> {
+        let source_str = std::str::from_utf8(source)
+            .map_err(|e| GraphicsError::ShaderCompilationFailed(format!("Invalid UTF-8: {e}")))?;
+
+        let compiler = shaderc::Compiler::new().ok_or_else(|| {
+            GraphicsError::ShaderCompilationFailed("Failed to create shaderc compiler".into())
+        })?;
+
+        let mut options = shaderc::CompileOptions::new().ok_or_else(|| {
+            GraphicsError::ShaderCompilationFailed(
+                "Failed to create shaderc compile options".into(),
+            )
+        })?;
+
+        options.set_target_env(
+            shaderc::TargetEnv::Vulkan,
+            shaderc::EnvVersion::Vulkan1_3 as u32,
+        );
+        options.set_source_language(shaderc::SourceLanguage::GLSL);
+        options.set_target_spirv(shaderc::SpirvVersion::V1_3);
+
+        // Add all defines
+        for (name, value) in defines {
+            if value.is_empty() {
+                options.add_macro_definition(name, None);
+            } else {
+                options.add_macro_definition(name, Some(value));
+            }
+        }
+
+        let shaderc_stage = match stage {
+            ShaderStage::Vertex => shaderc::ShaderKind::Vertex,
+            ShaderStage::Fragment => shaderc::ShaderKind::Fragment,
+            ShaderStage::Compute => shaderc::ShaderKind::Compute,
+        };
+
+        let result = compiler
+            .compile_into_spirv(
+                source_str,
+                shaderc_stage,
+                "shader.glsl",
+                entry_point,
+                Some(&options),
+            )
+            .map_err(|e| {
+                GraphicsError::ShaderCompilationFailed(format!(
+                    "shaderc GLSL compilation error: {e}"
+                ))
+            })?;
+
+        if result.get_num_warnings() > 0 {
+            log::warn!("Shader warnings: {}", result.get_warning_messages());
+        }
+
+        Ok(result.as_binary().to_vec())
+    }
+
+    /// Compile WGSL to SPIR-V using naga (fallback for WGSL-authored shaders).
+    fn compile_wgsl_to_spirv(
         &self,
         wgsl_source: &[u8],
         stage: ShaderStage,
         entry_point: &str,
-    ) -> Result<vk::ShaderModule, GraphicsError> {
-        // Parse WGSL
+    ) -> Result<Vec<u32>, GraphicsError> {
         let source = std::str::from_utf8(wgsl_source)
             .map_err(|e| GraphicsError::ShaderCompilationFailed(format!("Invalid UTF-8: {e}")))?;
 
@@ -87,7 +183,6 @@ impl PipelineManager {
             GraphicsError::ShaderCompilationFailed(format!("WGSL parse error: {e}"))
         })?;
 
-        // Validate the module
         let mut validator = naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),
@@ -96,14 +191,12 @@ impl PipelineManager {
             GraphicsError::ShaderCompilationFailed(format!("Validation error: {e}"))
         })?;
 
-        // Convert to SPIR-V
         let naga_stage = match stage {
             ShaderStage::Vertex => naga::ShaderStage::Vertex,
             ShaderStage::Fragment => naga::ShaderStage::Fragment,
             ShaderStage::Compute => naga::ShaderStage::Compute,
         };
 
-        // Find the entry point (verify it exists)
         let _entry_point_index = module
             .entry_points
             .iter()
@@ -136,18 +229,7 @@ impl PipelineManager {
                 GraphicsError::ShaderCompilationFailed(format!("SPIR-V generation error: {e}"))
             })?;
 
-        // Create Vulkan shader module
-        let create_info = vk::ShaderModuleCreateInfo::default().code(&spv);
-
-        let shader_module = unsafe { self.device.create_shader_module(&create_info, None) }
-            .map_err(|e| {
-                GraphicsError::ShaderCompilationFailed(format!(
-                    "Failed to create shader module: {:?}",
-                    e
-                ))
-            })?;
-
-        Ok(shader_module)
+        Ok(spv)
     }
 
     /// Create a descriptor set layout from a binding layout.

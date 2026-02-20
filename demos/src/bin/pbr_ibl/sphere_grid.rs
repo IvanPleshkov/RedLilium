@@ -48,27 +48,26 @@ impl SphereGrid {
                 .with_label("camera_bindings"),
         );
 
-        // Compose G-buffer shader (separate compilation per stage)
+        // Resolve G-buffer shader includes (backends handle compilation)
         let shader_composer = ShaderComposer::with_standard_library();
-        let composed_vs = shader_composer
-            .compose(GBUFFER_SHADER_GLSL, ShaderStage::Vertex, &[])
-            .expect("Failed to compose G-buffer vertex shader");
-        let composed_fs = shader_composer
-            .compose(GBUFFER_SHADER_GLSL, ShaderStage::Fragment, &[])
-            .expect("Failed to compose G-buffer fragment shader");
-        log::info!("G-buffer shader composed with library imports");
+        let resolved_glsl = shader_composer
+            .resolve_glsl(GBUFFER_SHADER_GLSL)
+            .expect("Failed to resolve G-buffer shader includes");
+        log::info!("G-buffer shader resolved with library imports");
 
         // Build base G-buffer material descriptor (shared between fill and wireframe)
         let base_descriptor = MaterialDescriptor::new()
-            .with_shader(ShaderSource::new(
+            .with_shader(ShaderSource::glsl(
                 ShaderStage::Vertex,
-                composed_vs.as_bytes().to_vec(),
+                resolved_glsl.as_bytes().to_vec(),
                 "main",
+                ShaderComposer::build_defines(ShaderStage::Vertex, &[]),
             ))
-            .with_shader(ShaderSource::new(
+            .with_shader(ShaderSource::glsl(
                 ShaderStage::Fragment,
-                composed_fs.as_bytes().to_vec(),
+                resolved_glsl.as_bytes().to_vec(),
                 "main",
+                ShaderComposer::build_defines(ShaderStage::Fragment, &[]),
             ))
             .with_binding_layout(camera_binding_layout)
             .with_vertex_layout(vertex_layout)

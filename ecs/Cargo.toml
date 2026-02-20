@@ -15,14 +15,19 @@ physics-2d-f32 = ["dep:rapier2d", "redlilium-core/physics-math", "redlilium-core
 physics = ["physics-3d", "physics-2d"]
 rendering = ["dep:redlilium-graphics", "dep:redlilium-debug-drawer", "dep:image"]
 inspector = []
+serialize-ron = ["dep:ron"]
+serialize-bincode = ["dep:bincode"]
 
 [dependencies]
 redlilium-core = { path = "../core" }
 ecs-macro = { path = "../ecs-macro" }
 bytemuck = { workspace = true }
 fixedbitset = { workspace = true }
+serde = { workspace = true }
 log.workspace = true
 egui.workspace = true
+ron = { workspace = true, optional = true }
+bincode = { workspace = true, optional = true }
 rapier3d-f64 = { workspace = true, optional = true }
 rapier3d = { workspace = true, optional = true }
 rapier2d-f64 = { workspace = true, optional = true }

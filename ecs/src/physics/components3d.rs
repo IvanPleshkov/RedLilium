@@ -40,6 +40,7 @@ pub enum RigidBodyType {
 /// [`Transform`](crate::Transform), then call [`build_physics_world_3d`]
 /// to create the corresponding rapier physics objects.
 #[derive(Debug, Clone, PartialEq, crate::Component)]
+#[skip_serialization]
 pub struct RigidBody3D {
     /// Body type.
     pub body_type: RigidBodyType,
@@ -109,6 +110,7 @@ impl Default for RigidBody3D {
 
 /// Describes a 3D collider's shape and material properties.
 #[derive(Debug, Clone, PartialEq, crate::Component)]
+#[skip_serialization]
 pub struct Collider3D {
     /// Collider shape.
     pub shape: ColliderShape3D,
@@ -237,6 +239,7 @@ pub enum JointType3D {
 /// ));
 /// ```
 #[derive(Debug, Clone, PartialEq, crate::Component)]
+#[skip_serialization]
 pub struct ImpulseJoint3D {
     /// First body entity.
     pub body1: crate::Entity,

@@ -28,21 +28,38 @@ pub enum ShaderStage {
     Compute,
 }
 
+/// Source language of the shader code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ShaderSourceLanguage {
+    /// GLSL 450+ source (compiled by backend: naga for wgpu, shaderc for Vulkan).
+    Glsl,
+    /// WGSL source (native for wgpu, naga→SPIR-V for Vulkan). Default for backward compat.
+    #[default]
+    Wgsl,
+}
+
 /// Shader source for a material.
 #[derive(Debug, Clone)]
 pub struct ShaderSource {
     /// The shader stage.
     pub stage: ShaderStage,
 
-    /// Shader source code (WGSL, SPIR-V, etc. - backend dependent).
+    /// Shader source code (UTF-8 text in the given language).
     pub source: Vec<u8>,
 
     /// Entry point function name.
     pub entry_point: String,
+
+    /// Source language.
+    pub language: ShaderSourceLanguage,
+
+    /// Compile-time defines (only used for GLSL sources).
+    /// Each entry is (name, value). Empty value means `#define NAME` without a value.
+    pub defines: Vec<(String, String)>,
 }
 
 impl ShaderSource {
-    /// Create a new shader source.
+    /// Create a new WGSL shader source (backward compatible).
     pub fn new(
         stage: ShaderStage,
         source: impl Into<Vec<u8>>,
@@ -52,20 +69,38 @@ impl ShaderSource {
             stage,
             source: source.into(),
             entry_point: entry_point.into(),
+            language: ShaderSourceLanguage::Wgsl,
+            defines: Vec::new(),
         }
     }
 
-    /// Create a vertex shader source.
+    /// Create a GLSL shader source with compile-time defines.
+    pub fn glsl(
+        stage: ShaderStage,
+        source: impl Into<Vec<u8>>,
+        entry_point: impl Into<String>,
+        defines: Vec<(String, String)>,
+    ) -> Self {
+        Self {
+            stage,
+            source: source.into(),
+            entry_point: entry_point.into(),
+            language: ShaderSourceLanguage::Glsl,
+            defines,
+        }
+    }
+
+    /// Create a vertex shader source (WGSL).
     pub fn vertex(source: impl Into<Vec<u8>>, entry_point: impl Into<String>) -> Self {
         Self::new(ShaderStage::Vertex, source, entry_point)
     }
 
-    /// Create a fragment shader source.
+    /// Create a fragment shader source (WGSL).
     pub fn fragment(source: impl Into<Vec<u8>>, entry_point: impl Into<String>) -> Self {
         Self::new(ShaderStage::Fragment, source, entry_point)
     }
 
-    /// Create a compute shader source.
+    /// Create a compute shader source (WGSL).
     pub fn compute(source: impl Into<Vec<u8>>, entry_point: impl Into<String>) -> Self {
         Self::new(ShaderStage::Compute, source, entry_point)
     }

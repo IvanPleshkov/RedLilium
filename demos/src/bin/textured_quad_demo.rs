@@ -236,28 +236,30 @@ impl TexturedQuadDemo {
                 .with_label("quad_bindings"),
         );
 
-        // Compose GLSL shader per stage
+        // Resolve GLSL shader includes (backends handle compilation)
         let shader_composer = redlilium_graphics::ShaderComposer::new();
-        let composed_vs = shader_composer
-            .compose(QUAD_SHADER_GLSL, ShaderStage::Vertex, &[])
-            .expect("Failed to compose quad vertex shader");
-        let composed_fs = shader_composer
-            .compose(QUAD_SHADER_GLSL, ShaderStage::Fragment, &[])
-            .expect("Failed to compose quad fragment shader");
+        let resolved_glsl = shader_composer
+            .resolve_glsl(QUAD_SHADER_GLSL)
+            .expect("Failed to resolve quad shader includes");
 
         // Create material
         let material = device
             .create_material(
                 &MaterialDescriptor::new()
-                    .with_shader(ShaderSource::new(
+                    .with_shader(ShaderSource::glsl(
                         ShaderStage::Vertex,
-                        composed_vs.as_bytes().to_vec(),
+                        resolved_glsl.as_bytes().to_vec(),
                         "main",
+                        redlilium_graphics::ShaderComposer::build_defines(ShaderStage::Vertex, &[]),
                     ))
-                    .with_shader(ShaderSource::new(
+                    .with_shader(ShaderSource::glsl(
                         ShaderStage::Fragment,
-                        composed_fs.as_bytes().to_vec(),
+                        resolved_glsl.as_bytes().to_vec(),
                         "main",
+                        redlilium_graphics::ShaderComposer::build_defines(
+                            ShaderStage::Fragment,
+                            &[],
+                        ),
                     ))
                     .with_binding_layout(binding_layout)
                     .with_vertex_layout(vertex_layout.clone())

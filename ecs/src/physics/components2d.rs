@@ -38,6 +38,7 @@ pub enum RigidBodyType2D {
 /// [`Transform`](crate::Transform), then call [`build_physics_world_2d`]
 /// to create the corresponding rapier physics objects.
 #[derive(Debug, Clone, PartialEq, crate::Component)]
+#[skip_serialization]
 pub struct RigidBody2D {
     /// Body type.
     pub body_type: RigidBodyType2D,
@@ -107,6 +108,7 @@ impl Default for RigidBody2D {
 
 /// Describes a 2D collider's shape and material properties.
 #[derive(Debug, Clone, PartialEq, crate::Component)]
+#[skip_serialization]
 pub struct Collider2D {
     /// Collider shape.
     pub shape: ColliderShape2D,
@@ -208,6 +210,7 @@ pub enum JointType2D {
 /// Entity references are automatically remapped during prefab instantiation
 /// via the `#[derive(Component)]` macro.
 #[derive(Debug, Clone, PartialEq, crate::Component)]
+#[skip_serialization]
 pub struct ImpulseJoint2D {
     /// First body entity.
     pub body1: crate::Entity,

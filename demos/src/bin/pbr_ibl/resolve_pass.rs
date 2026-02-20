@@ -100,7 +100,7 @@ impl ResolvePass {
                 .with_label("ibl_bindings"),
         );
 
-        // Compose resolve shader with HDR define if active
+        // Resolve shader includes with HDR define if active
         let shader_composer = ShaderComposer::with_standard_library();
 
         let shader_defs: Vec<(&str, ShaderDef)> = if hdr_active {
@@ -111,27 +111,26 @@ impl ResolvePass {
             vec![]
         };
 
-        let composed_vs = shader_composer
-            .compose(RESOLVE_SHADER_GLSL, ShaderStage::Vertex, &shader_defs)
-            .expect("Failed to compose resolve vertex shader");
-        let composed_fs = shader_composer
-            .compose(RESOLVE_SHADER_GLSL, ShaderStage::Fragment, &shader_defs)
-            .expect("Failed to compose resolve fragment shader");
-        log::info!("Resolve shader composed with library imports");
+        let resolved_glsl = shader_composer
+            .resolve_glsl(RESOLVE_SHADER_GLSL)
+            .expect("Failed to resolve resolve shader includes");
+        log::info!("Resolve shader resolved with library imports");
 
         // Create resolve material
         let resolve_material = device
             .create_material(
                 &MaterialDescriptor::new()
-                    .with_shader(ShaderSource::new(
+                    .with_shader(ShaderSource::glsl(
                         ShaderStage::Vertex,
-                        composed_vs.as_bytes().to_vec(),
+                        resolved_glsl.as_bytes().to_vec(),
                         "main",
+                        ShaderComposer::build_defines(ShaderStage::Vertex, &shader_defs),
                     ))
-                    .with_shader(ShaderSource::new(
+                    .with_shader(ShaderSource::glsl(
                         ShaderStage::Fragment,
-                        composed_fs.as_bytes().to_vec(),
+                        resolved_glsl.as_bytes().to_vec(),
                         "main",
+                        ShaderComposer::build_defines(ShaderStage::Fragment, &shader_defs),
                     ))
                     .with_binding_layout(resolve_uniform_layout)
                     .with_binding_layout(gbuffer_layout)
