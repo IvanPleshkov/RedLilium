@@ -3,6 +3,8 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
 
+use tokio::io::AsyncWriteExt;
+
 use crate::error::VfsError;
 use crate::provider::{VfsFuture, VfsProvider};
 
@@ -346,7 +348,21 @@ async fn run_command_loop(
             }
             SftpCommand::Write { path, data, reply } => {
                 let full = format!("{root}/{path}");
-                let result = sftp.write(&full, &data).await.map_err(sftp_err);
+                let result = async {
+                    // Ensure parent directories exist (mkdir -p equivalent).
+                    if let Some(parent_rel) = path.rsplit_once('/').map(|(p, _)| p) {
+                        let mut current = root.to_owned();
+                        for segment in parent_rel.split('/') {
+                            current = format!("{current}/{segment}");
+                            // Ignore errors — directory may already exist.
+                            let _ = sftp.create_dir(&current).await;
+                        }
+                    }
+                    let mut file = sftp.create(&full).await.map_err(sftp_err)?;
+                    file.write_all(&data).await.map_err(sftp_err)?;
+                    Ok(())
+                }
+                .await;
                 let _ = reply.send(result);
             }
             SftpCommand::Delete { path, reply } => {
