@@ -6,11 +6,27 @@
 //! crates can implement concrete editors.
 //!
 //! - [`Editable`] — marker trait for types that can be edited
-//! - [`EditAction`] — a reversible edit operation (Command pattern)
+//! - [`EditAction`] — an edit operation (Command pattern)
 //! - [`EditActionHistory`] — undo/redo stack managing action sequences
+//! - [`ActionQueue`] — thread-safe queue for submitting actions from read-only systems
+//!
+//! # Recorded vs non-recorded actions
+//!
+//! By default, actions are **recorded** in the undo/redo history. Override
+//! [`EditAction::is_recorded`] to return `false` for transient operations
+//! like camera movement or selection highlighting that should not be
+//! undoable.
+//!
+//! Non-recorded actions can optionally **break the merge chain** by
+//! overriding [`EditAction::breaks_merge`] to return `true`. This
+//! prevents the next recorded action from merging with the previous
+//! undo entry — useful when a deliberate interruption (e.g. camera zoom)
+//! should separate two otherwise-mergeable drag sequences.
 
 mod action;
+mod action_queue;
 mod history;
 
 pub use action::{AsAny, EditAction, EditActionError, EditActionResult, Editable};
+pub use action_queue::ActionQueue;
 pub use history::{DEFAULT_MAX_UNDO, EditActionHistory};

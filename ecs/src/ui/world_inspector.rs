@@ -1,10 +1,10 @@
-//! Entity hierarchy tree view.
+//! Entity hierarchy tree view with drag-and-drop reparenting.
 
 use crate::{Entity, World};
 
 use crate::std::components::{Children, Name, Parent};
 
-use super::InspectorState;
+use super::{InspectorState, PendingReparent};
 
 /// Render the world inspector — a tree of all entities organized by hierarchy.
 ///
@@ -12,6 +12,10 @@ use super::InspectorState;
 /// Children appear nested under their parent, expandable via a toggle.
 ///
 /// Entities with a [`Name`] component display their name; others show `Entity(index:gen)`.
+///
+/// Drag an entity onto another to reparent it. Drop on the zone at the bottom
+/// of the tree to make an entity a root. The actual reparent is deferred until
+/// [`InspectorState::apply_pending_actions`] is called with `&mut World`.
 ///
 /// The caller is responsible for placing this in whatever container they want
 /// (dock tab, side panel, window, etc.).
@@ -35,6 +39,33 @@ pub fn show_world_inspector(ui: &mut egui::Ui, world: &World, state: &mut Inspec
 
             for entity in &roots {
                 show_entity_node(ui, world, *entity, state);
+            }
+
+            // "Drop here to unparent" zone — only visible while dragging an entity
+            if egui::DragAndDrop::has_payload_of_type::<Entity>(ui.ctx()) {
+                ui.separator();
+                let resp = ui.label(
+                    egui::RichText::new("  Drop here to unparent (make root)  ")
+                        .italics()
+                        .weak(),
+                );
+
+                if let Some(dragged) = resp.dnd_hover_payload::<Entity>()
+                    && world.get::<Parent>(*dragged).is_some()
+                {
+                    ui.painter().rect_stroke(
+                        resp.rect,
+                        egui::CornerRadius::same(2),
+                        egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 200, 100)),
+                        egui::StrokeKind::Outside,
+                    );
+                }
+
+                if let Some(dragged) = resp.dnd_release_payload::<Entity>()
+                    && world.get::<Parent>(*dragged).is_some()
+                {
+                    state.pending_reparent = Some(PendingReparent::MakeRoot { entity: *dragged });
+                }
             }
         });
 }
@@ -68,20 +99,26 @@ fn show_entity_node(ui: &mut egui::Ui, world: &World, entity: Entity, state: &mu
     let has_children = world.get::<Children>(entity).is_some_and(|c| !c.is_empty());
     let is_selected = state.selected == Some(entity);
 
+    // Button::selectable looks like selectable_label but supports
+    // click_and_drag sense so both selection and drag-and-drop work.
+    let entity_button =
+        egui::Button::selectable(is_selected, &label).sense(egui::Sense::click_and_drag());
+
     if has_children {
         // Expandable node
         let expanded = state.is_expanded(entity);
-        let resp = ui.horizontal(|ui| {
+        ui.horizontal(|ui| {
             let toggle_text = if expanded { "v" } else { ">" };
             if ui.small_button(toggle_text).clicked() {
                 state.toggle_expanded(entity);
             }
-            let resp = ui.selectable_label(is_selected, &label);
+            let resp = ui.add(entity_button);
             if resp.clicked() {
                 state.selected = Some(entity);
             }
+            resp.dnd_set_drag_payload(entity);
+            handle_drop_target(ui, &resp, world, entity, state);
         });
-        let _ = resp;
 
         if expanded || state.is_expanded(entity) {
             ui.indent(egui::Id::new(("entity_tree", entity.index())), |ui| {
@@ -97,12 +134,72 @@ fn show_entity_node(ui: &mut egui::Ui, world: &World, entity: Entity, state: &mu
         // Leaf node
         ui.horizontal(|ui| {
             ui.add_space(20.0); // indent to match toggle button width
-            let resp = ui.selectable_label(is_selected, &label);
+            let resp = ui.add(entity_button);
             if resp.clicked() {
                 state.selected = Some(entity);
             }
+            resp.dnd_set_drag_payload(entity);
+            handle_drop_target(ui, &resp, world, entity, state);
         });
     }
+}
+
+/// Handle drag-and-drop hover/release on an entity row.
+///
+/// Shows visual feedback (blue for valid, red for invalid) and records the
+/// pending reparent action on release.
+fn handle_drop_target(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    world: &World,
+    target_entity: Entity,
+    state: &mut InspectorState,
+) {
+    if let Some(dragged) = response.dnd_hover_payload::<Entity>() {
+        let color = if is_valid_reparent(world, *dragged, target_entity) {
+            egui::Color32::from_rgb(100, 160, 255) // blue — valid
+        } else {
+            egui::Color32::from_rgb(255, 80, 80) // red — invalid
+        };
+        ui.painter().rect_stroke(
+            response.rect,
+            egui::CornerRadius::same(2),
+            egui::Stroke::new(2.0, color),
+            egui::StrokeKind::Outside,
+        );
+    }
+
+    if let Some(dragged) = response.dnd_release_payload::<Entity>()
+        && is_valid_reparent(world, *dragged, target_entity)
+    {
+        state.pending_reparent = Some(PendingReparent::SetParent {
+            entity: *dragged,
+            new_parent: target_entity,
+        });
+    }
+}
+
+/// Returns `true` if reparenting `entity` under `target_parent` is valid.
+///
+/// Invalid cases:
+/// - `entity == target_parent` (self-parenting)
+/// - `target_parent` is a descendant of `entity` (would create a cycle)
+fn is_valid_reparent(world: &World, entity: Entity, target_parent: Entity) -> bool {
+    if entity == target_parent {
+        return false;
+    }
+
+    // Walk up from target_parent through ancestors. If we hit `entity`, the
+    // target is a descendant — reparenting would create a cycle.
+    let mut current = target_parent;
+    while let Some(parent) = world.get::<Parent>(current) {
+        if parent.0 == entity {
+            return false;
+        }
+        current = parent.0;
+    }
+
+    true
 }
 
 /// Generate a display label for an entity.

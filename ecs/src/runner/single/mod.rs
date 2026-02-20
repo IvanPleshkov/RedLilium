@@ -144,18 +144,39 @@ impl EcsRunnerSingleThread {
                         None
                     };
 
-                    let system = systems.get_exclusive_system(idx);
-                    let mut guard = system.write().unwrap();
-                    if let Some(prev_result) = prev_result {
-                        guard.reuse_result_boxed(prev_result);
-                    }
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        guard.run_boxed(world)
-                    })) {
-                        Ok(Ok(result)) => results_store.store(idx, result),
-                        Ok(Err(e)) => errors.push(e),
-                        Err(payload) => {
-                            errors.push(SystemError::Panicked(panic_payload_to_string(&*payload)));
+                    if systems.is_read_only_exclusive(idx) {
+                        let system = systems.get_read_only_exclusive_system(idx);
+                        let guard = system.read().unwrap();
+                        if let Some(prev_result) = prev_result {
+                            guard.reuse_result_boxed(prev_result);
+                        }
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            guard.run_boxed(world)
+                        })) {
+                            Ok(Ok(result)) => results_store.store(idx, result),
+                            Ok(Err(e)) => errors.push(e),
+                            Err(payload) => {
+                                errors.push(SystemError::Panicked(panic_payload_to_string(
+                                    &*payload,
+                                )));
+                            }
+                        }
+                    } else {
+                        let system = systems.get_exclusive_system(idx);
+                        let mut guard = system.write().unwrap();
+                        if let Some(prev_result) = prev_result {
+                            guard.reuse_result_boxed(prev_result);
+                        }
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            guard.run_boxed(world)
+                        })) {
+                            Ok(Ok(result)) => results_store.store(idx, result),
+                            Ok(Err(e)) => errors.push(e),
+                            Err(payload) => {
+                                errors.push(SystemError::Panicked(panic_payload_to_string(
+                                    &*payload,
+                                )));
+                            }
                         }
                     }
 
@@ -168,6 +189,7 @@ impl EcsRunnerSingleThread {
                     }
                 } else {
                     let mut ctx = SystemContext::new(world, &self.compute, &self.io, &commands)
+                        .with_read_only(systems.is_read_only())
                         .with_system_results(&results_store, systems.accessible_results(idx));
                     if let Some(ref rec) = recorder {
                         ctx = ctx.with_access_recorder(rec, idx);
@@ -1040,5 +1062,67 @@ mod tests {
 
         assert_eq!(errors.len(), 1);
         assert!(errors[0].to_string().contains("exclusive boom"));
+    }
+
+    // ---- Read-only exclusive system tests ----
+
+    use crate::system::ReadOnlyExclusiveSystem;
+
+    #[test]
+    fn read_only_exclusive_reads_world() {
+        struct ReadWorldSystem(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
+        impl ReadOnlyExclusiveSystem for ReadWorldSystem {
+            type Result = ();
+            fn run(&self, world: &World) -> Result<(), SystemError> {
+                *self.0.lock().unwrap() = Some(*world.resource::<u32>());
+                Ok(())
+            }
+        }
+
+        let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut container = SystemsContainer::new();
+        container.add_read_only_exclusive(ReadWorldSystem(result.clone()));
+
+        let runner = EcsRunnerSingleThread::new();
+        let mut world = World::new();
+        world.insert_resource(42u32);
+        runner.run(&mut world, &container);
+
+        assert_eq!(*result.lock().unwrap(), Some(42));
+    }
+
+    #[test]
+    fn read_only_exclusive_sees_commands_from_predecessor() {
+        struct RegularSystem;
+        impl System for RegularSystem {
+            type Result = ();
+            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+                ctx.commands(|world| {
+                    world.insert_resource(99u32);
+                });
+                Ok(())
+            }
+        }
+
+        struct ReadSystem(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
+        impl ReadOnlyExclusiveSystem for ReadSystem {
+            type Result = ();
+            fn run(&self, world: &World) -> Result<(), SystemError> {
+                *self.0.lock().unwrap() = Some(*world.resource::<u32>());
+                Ok(())
+            }
+        }
+
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut container = SystemsContainer::new();
+        container.add(RegularSystem);
+        container.add_read_only_exclusive(ReadSystem(observed.clone()));
+        container.add_edge::<RegularSystem, ReadSystem>().unwrap();
+
+        let runner = EcsRunnerSingleThread::new();
+        let mut world = World::new();
+        runner.run(&mut world, &container);
+
+        assert_eq!(*observed.lock().unwrap(), Some(99));
     }
 }

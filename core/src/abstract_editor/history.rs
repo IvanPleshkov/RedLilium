@@ -37,6 +37,7 @@ pub struct EditActionHistory<T: Editable> {
     undo_stack: VecDeque<Box<dyn EditAction<T>>>,
     redo_stack: Vec<Box<dyn EditAction<T>>>,
     max_undo: usize,
+    merge_broken: bool,
 }
 
 impl<T: Editable> EditActionHistory<T> {
@@ -48,18 +49,20 @@ impl<T: Editable> EditActionHistory<T> {
             undo_stack: VecDeque::new(),
             redo_stack: Vec::new(),
             max_undo,
+            merge_broken: false,
         }
     }
 
-    /// Applies an action to the target and pushes it onto the undo stack.
+    /// Applies an action to the target and, if the action is
+    /// [recorded](EditAction::is_recorded), pushes it onto the undo stack.
     ///
-    /// Clears the redo stack — branching from a past state discards the
-    /// future (standard editor behavior).
+    /// **Recorded actions** (the default) clear the redo stack and attempt
+    /// to [merge](EditAction::merge) with the top of the undo stack.
     ///
-    /// If the top of the undo stack can [`merge`](EditAction::merge) the
-    /// new action, the new action is absorbed instead of being pushed
-    /// separately. This coalesces incremental edits (e.g. drag moves)
-    /// into a single undo step.
+    /// **Non-recorded actions** (`is_recorded() == false`) are applied but
+    /// never pushed onto either stack. If such an action also returns
+    /// `true` from [`breaks_merge`](EditAction::breaks_merge), the next
+    /// recorded action will not merge with the previous undo entry.
     ///
     /// If the action fails, it is not pushed onto the stack.
     pub fn execute(
@@ -68,13 +71,24 @@ impl<T: Editable> EditActionHistory<T> {
         target: &mut T,
     ) -> EditActionResult {
         action.apply(target)?;
+
+        if !action.is_recorded() {
+            if action.breaks_merge() {
+                self.merge_broken = true;
+            }
+            return Ok(());
+        }
+
         self.redo_stack.clear();
-        if let Some(last) = self.undo_stack.back_mut() {
+        if !self.merge_broken
+            && let Some(last) = self.undo_stack.back_mut()
+        {
             match last.merge(action) {
                 None => return Ok(()),
                 Some(returned) => action = returned,
             }
         }
+        self.merge_broken = false;
         self.undo_stack.push_back(action);
         if self.undo_stack.len() > self.max_undo {
             self.undo_stack.pop_front();
@@ -146,10 +160,11 @@ impl<T: Editable> EditActionHistory<T> {
         self.max_undo
     }
 
-    /// Clears both undo and redo stacks.
+    /// Clears both undo and redo stacks and resets the merge-broken flag.
     pub fn clear(&mut self) {
         self.undo_stack.clear();
         self.redo_stack.clear();
+        self.merge_broken = false;
     }
 }
 
@@ -159,6 +174,7 @@ impl<T: Editable> fmt::Debug for EditActionHistory<T> {
             .field("undo_count", &self.undo_stack.len())
             .field("redo_count", &self.redo_stack.len())
             .field("max_undo", &self.max_undo)
+            .field("merge_broken", &self.merge_broken)
             .finish()
     }
 }
@@ -244,6 +260,57 @@ mod tests {
 
         fn description(&self) -> &str {
             "Failing"
+        }
+    }
+
+    /// Non-recorded action that does NOT break the merge chain.
+    #[derive(Debug)]
+    struct CameraMove {
+        offset: i32,
+    }
+
+    impl EditAction<Counter> for CameraMove {
+        fn apply(&mut self, target: &mut Counter) -> EditActionResult {
+            target.value += self.offset;
+            Ok(())
+        }
+
+        fn undo(&mut self, _target: &mut Counter) -> EditActionResult {
+            unreachable!("non-recorded actions should never be undone");
+        }
+
+        fn description(&self) -> &str {
+            "Camera move"
+        }
+
+        fn is_recorded(&self) -> bool {
+            false
+        }
+    }
+
+    /// Non-recorded action that DOES break the merge chain.
+    #[derive(Debug)]
+    struct CameraZoom;
+
+    impl EditAction<Counter> for CameraZoom {
+        fn apply(&mut self, _target: &mut Counter) -> EditActionResult {
+            Ok(())
+        }
+
+        fn undo(&mut self, _target: &mut Counter) -> EditActionResult {
+            unreachable!("non-recorded actions should never be undone");
+        }
+
+        fn description(&self) -> &str {
+            "Camera zoom"
+        }
+
+        fn is_recorded(&self) -> bool {
+            false
+        }
+
+        fn breaks_merge(&self) -> bool {
+            true
         }
     }
 
@@ -554,6 +621,191 @@ mod tests {
             )
             .unwrap();
         assert_eq!(history.redo_count(), 0);
+        assert_eq!(history.undo_count(), 1);
+    }
+
+    #[test]
+    fn non_recorded_action_applies_but_not_pushed() {
+        let mut history = EditActionHistory::new(DEFAULT_MAX_UNDO);
+        let mut counter = Counter { value: 0 };
+
+        history
+            .execute(Box::new(CameraMove { offset: 42 }), &mut counter)
+            .unwrap();
+
+        assert_eq!(counter.value, 42); // effect applied
+        assert_eq!(history.undo_count(), 0); // not in history
+        assert_eq!(history.redo_count(), 0);
+    }
+
+    #[test]
+    fn non_recorded_action_does_not_clear_redo() {
+        let mut history = EditActionHistory::new(DEFAULT_MAX_UNDO);
+        let mut counter = Counter { value: 0 };
+
+        // Build a redo entry
+        history
+            .execute(Box::new(Add { amount: 5 }), &mut counter)
+            .unwrap();
+        history.undo(&mut counter).unwrap();
+        assert_eq!(history.redo_count(), 1);
+
+        // Non-recorded action should NOT clear redo
+        history
+            .execute(Box::new(CameraMove { offset: 1 }), &mut counter)
+            .unwrap();
+        assert_eq!(history.redo_count(), 1);
+    }
+
+    #[test]
+    fn non_recorded_without_break_preserves_merge() {
+        let mut history = EditActionHistory::new(DEFAULT_MAX_UNDO);
+        let mut counter = Counter { value: 0 };
+
+        // First drag step
+        history
+            .execute(
+                Box::new(SetValue {
+                    old_value: 0,
+                    new_value: 10,
+                }),
+                &mut counter,
+            )
+            .unwrap();
+
+        // Camera move (non-recorded, does NOT break merge)
+        history
+            .execute(Box::new(CameraMove { offset: 0 }), &mut counter)
+            .unwrap();
+
+        // Second drag step — should still merge with first
+        history
+            .execute(
+                Box::new(SetValue {
+                    old_value: 10,
+                    new_value: 20,
+                }),
+                &mut counter,
+            )
+            .unwrap();
+
+        assert_eq!(counter.value, 20);
+        assert_eq!(history.undo_count(), 1); // merged into one entry
+        history.undo(&mut counter).unwrap();
+        assert_eq!(counter.value, 0); // reverts to original
+    }
+
+    #[test]
+    fn breaks_merge_prevents_coalescing() {
+        let mut history = EditActionHistory::new(DEFAULT_MAX_UNDO);
+        let mut counter = Counter { value: 0 };
+
+        // First drag step
+        history
+            .execute(
+                Box::new(SetValue {
+                    old_value: 0,
+                    new_value: 10,
+                }),
+                &mut counter,
+            )
+            .unwrap();
+
+        // Camera zoom (non-recorded, BREAKS merge)
+        history.execute(Box::new(CameraZoom), &mut counter).unwrap();
+
+        // Second set — should NOT merge with the first
+        history
+            .execute(
+                Box::new(SetValue {
+                    old_value: 10,
+                    new_value: 20,
+                }),
+                &mut counter,
+            )
+            .unwrap();
+
+        assert_eq!(counter.value, 20);
+        assert_eq!(history.undo_count(), 2); // two separate entries
+
+        history.undo(&mut counter).unwrap();
+        assert_eq!(counter.value, 10);
+        history.undo(&mut counter).unwrap();
+        assert_eq!(counter.value, 0);
+    }
+
+    #[test]
+    fn merge_broken_resets_after_recorded_action() {
+        let mut history = EditActionHistory::new(DEFAULT_MAX_UNDO);
+        let mut counter = Counter { value: 0 };
+
+        // Set initial value
+        history
+            .execute(
+                Box::new(SetValue {
+                    old_value: 0,
+                    new_value: 10,
+                }),
+                &mut counter,
+            )
+            .unwrap();
+
+        // Break merge
+        history.execute(Box::new(CameraZoom), &mut counter).unwrap();
+
+        // This recorded action resets the merge_broken flag
+        history
+            .execute(
+                Box::new(SetValue {
+                    old_value: 10,
+                    new_value: 20,
+                }),
+                &mut counter,
+            )
+            .unwrap();
+        assert_eq!(history.undo_count(), 2);
+
+        // Next merge should work again (flag was reset)
+        history
+            .execute(
+                Box::new(SetValue {
+                    old_value: 20,
+                    new_value: 30,
+                }),
+                &mut counter,
+            )
+            .unwrap();
+        assert_eq!(history.undo_count(), 2); // merged with previous
+    }
+
+    #[test]
+    fn failed_non_recorded_action_does_not_break_merge() {
+        let mut history = EditActionHistory::new(DEFAULT_MAX_UNDO);
+        let mut counter = Counter { value: 0 };
+
+        history
+            .execute(
+                Box::new(SetValue {
+                    old_value: 0,
+                    new_value: 10,
+                }),
+                &mut counter,
+            )
+            .unwrap();
+
+        // Failing action — should not affect merge state
+        let _ = history.execute(Box::new(FailingAction), &mut counter);
+
+        // Should still merge
+        history
+            .execute(
+                Box::new(SetValue {
+                    old_value: 10,
+                    new_value: 20,
+                }),
+                &mut counter,
+            )
+            .unwrap();
         assert_eq!(history.undo_count(), 1);
     }
 }

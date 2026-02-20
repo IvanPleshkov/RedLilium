@@ -15,6 +15,9 @@ use super::InspectorState;
 /// The caller is responsible for placing this in whatever container they want
 /// (dock tab, side panel, window, etc.).
 pub fn show_component_inspector(ui: &mut egui::Ui, world: &mut World, state: &mut InspectorState) {
+    // Apply deferred actions from world inspector (e.g. drag-and-drop reparenting)
+    state.apply_pending_actions(world);
+
     let selected = match state.selected {
         Some(e) if world.is_alive(e) => e,
         _ => {

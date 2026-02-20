@@ -10,7 +10,8 @@ use crate::condition::{ConditionMode, ConditionResult, condition_checker};
 type ConditionCheckerFn = fn(&(dyn Any + Send + Sync)) -> bool;
 use crate::function_system::IntoSystem;
 use crate::system::{
-    DynExclusiveSystem, DynSystem, ExclusiveFunctionSystem, ExclusiveSystem, System,
+    DynExclusiveSystem, DynReadOnlyExclusiveSystem, DynSystem, ExclusiveFunctionSystem,
+    ExclusiveSystem, ReadOnlyExclusiveFunctionSystem, ReadOnlyExclusiveSystem, System,
 };
 
 /// Marker trait for system set types.
@@ -77,12 +78,14 @@ impl fmt::Display for CycleError {
 
 impl std::error::Error for CycleError {}
 
-/// A registered system entry — regular, exclusive, or virtual.
+/// A registered system entry — regular, exclusive, read-only exclusive, or virtual.
 pub(crate) enum SystemEntry {
     /// A regular system that borrows `&World` via `SystemContext`.
     Regular(Arc<RwLock<dyn DynSystem>>),
     /// An exclusive system that receives `&mut World` directly.
     Exclusive(Arc<RwLock<dyn DynExclusiveSystem>>),
+    /// A read-only exclusive system that receives `&World` (immutable).
+    ReadOnlyExclusive(Arc<RwLock<dyn DynReadOnlyExclusiveSystem>>),
     /// A virtual sentinel node used for system set barriers.
     /// Not executed by runners — purely participates in the dependency graph.
     Virtual,
@@ -142,6 +145,10 @@ pub struct SystemsContainer {
     set_barriers: HashMap<TypeId, (usize, usize)>,
     /// For each node, whether it is a virtual set barrier.
     is_virtual: Vec<bool>,
+    /// When true, systems in this container may only read the world.
+    /// Exclusive systems, write component access, and deferred commands
+    /// are forbidden at runtime.
+    read_only: bool,
 }
 
 impl SystemsContainer {
@@ -161,7 +168,22 @@ impl SystemsContainer {
             condition_modes: Vec::new(),
             set_barriers: HashMap::new(),
             is_virtual: Vec::new(),
+            read_only: false,
         }
+    }
+
+    /// Marks this container as read-only.
+    ///
+    /// When read-only, systems may only read from the world — write access
+    /// to components, mutable resource access, and deferred commands are
+    /// forbidden at runtime. Exclusive systems cannot be added.
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.read_only = read_only;
+    }
+
+    /// Returns whether this container is marked as read-only.
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     /// Registers a system, wrapping it in `Arc<RwLock<S>>`.
@@ -411,6 +433,12 @@ impl SystemsContainer {
     ///
     /// Panics if a system of the same type is already registered.
     pub fn add_exclusive<S: ExclusiveSystem>(&mut self, system: S) -> Arc<RwLock<S>> {
+        assert!(
+            !self.read_only,
+            "Cannot add exclusive system `{}` to a read-only container",
+            std::any::type_name::<S>()
+        );
+
         let type_id = TypeId::of::<S>();
 
         assert!(
@@ -452,9 +480,75 @@ impl SystemsContainer {
         self.add_exclusive(ExclusiveFunctionSystem::new(func))
     }
 
-    /// Returns whether the system at the given index is exclusive.
+    /// Registers a read-only exclusive system, wrapping it in `Arc<RwLock<S>>`.
+    ///
+    /// Read-only exclusive systems receive `&World` (immutable) and act as
+    /// barriers in the scheduler. Unlike [`add_exclusive()`](Self::add_exclusive),
+    /// they are allowed in read-only containers.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a system of the same type is already registered.
+    pub fn add_read_only_exclusive<S: ReadOnlyExclusiveSystem>(
+        &mut self,
+        system: S,
+    ) -> Arc<RwLock<S>> {
+        let type_id = TypeId::of::<S>();
+
+        assert!(
+            !self.id_to_idx.contains_key(&type_id),
+            "System `{}` is already registered",
+            std::any::type_name::<S>()
+        );
+
+        let arc = Arc::new(RwLock::new(system));
+        let idx = self.systems.len();
+        self.id_to_idx.insert(type_id, idx);
+        self.idx_to_id.push(type_id);
+        self.systems
+            .push(SystemEntry::ReadOnlyExclusive(arc.clone()));
+        self.names.push(std::any::type_name::<S>());
+        self.edges.push(Vec::new());
+        self.in_degrees.push(0);
+        self.accessible_results.push(HashSet::new());
+        self.condition_checkers.push(None);
+        self.condition_edges.push(Vec::new());
+        self.condition_modes.push(ConditionMode::All);
+        self.is_virtual.push(false);
+        self.rebuild_order();
+        arc
+    }
+
+    /// Registers a closure as a read-only exclusive system.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// container.add_read_only_exclusive_fn(|world: &World| {
+    ///     println!("entities: {}", world.entity_count());
+    /// });
+    /// ```
+    pub fn add_read_only_exclusive_fn<F>(
+        &mut self,
+        func: F,
+    ) -> Arc<RwLock<ReadOnlyExclusiveFunctionSystem<F>>>
+    where
+        F: Fn(&crate::world::World) + Send + Sync + 'static,
+    {
+        self.add_read_only_exclusive(ReadOnlyExclusiveFunctionSystem::new(func))
+    }
+
+    /// Returns whether the system at the given index is exclusive (mutable or read-only).
     pub(crate) fn is_exclusive(&self, idx: usize) -> bool {
-        matches!(&self.systems[idx], SystemEntry::Exclusive(_))
+        matches!(
+            &self.systems[idx],
+            SystemEntry::Exclusive(_) | SystemEntry::ReadOnlyExclusive(_)
+        )
+    }
+
+    /// Returns whether the system at the given index is a read-only exclusive system.
+    pub(crate) fn is_read_only_exclusive(&self, idx: usize) -> bool {
+        matches!(&self.systems[idx], SystemEntry::ReadOnlyExclusive(_))
     }
 
     /// Returns the `Arc<RwLock<dyn DynSystem>>` for the regular system at the given index.
@@ -463,19 +557,13 @@ impl SystemsContainer {
     ///
     /// # Panics
     ///
-    /// Panics if the system at `idx` is exclusive.
+    /// Panics if the system at `idx` is not a regular system.
     pub(crate) fn get_system(&self, idx: usize) -> &Arc<RwLock<dyn DynSystem>> {
         match &self.systems[idx] {
             SystemEntry::Regular(sys) => sys,
-            SystemEntry::Exclusive(_) => {
+            _ => {
                 panic!(
-                    "system `{}` at index {} is exclusive, not regular",
-                    self.names[idx], idx
-                )
-            }
-            SystemEntry::Virtual => {
-                panic!(
-                    "node `{}` at index {} is a virtual set barrier, not a regular system",
+                    "system `{}` at index {} is not a regular system",
                     self.names[idx], idx
                 )
             }
@@ -489,19 +577,36 @@ impl SystemsContainer {
     ///
     /// # Panics
     ///
-    /// Panics if the system at `idx` is regular.
+    /// Panics if the system at `idx` is not an exclusive system.
     pub(crate) fn get_exclusive_system(&self, idx: usize) -> &Arc<RwLock<dyn DynExclusiveSystem>> {
         match &self.systems[idx] {
             SystemEntry::Exclusive(sys) => sys,
-            SystemEntry::Regular(_) => {
+            _ => {
                 panic!(
-                    "system `{}` at index {} is regular, not exclusive",
+                    "system `{}` at index {} is not an exclusive system",
                     self.names[idx], idx
                 )
             }
-            SystemEntry::Virtual => {
+        }
+    }
+
+    /// Returns the `Arc<RwLock<dyn DynReadOnlyExclusiveSystem>>` for the read-only
+    /// exclusive system at the given index.
+    ///
+    /// The runner read-locks this to call `run_boxed()`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the system at `idx` is not a read-only exclusive system.
+    pub(crate) fn get_read_only_exclusive_system(
+        &self,
+        idx: usize,
+    ) -> &Arc<RwLock<dyn DynReadOnlyExclusiveSystem>> {
+        match &self.systems[idx] {
+            SystemEntry::ReadOnlyExclusive(sys) => sys,
+            _ => {
                 panic!(
-                    "node `{}` at index {} is a virtual set barrier, not an exclusive system",
+                    "system `{}` at index {} is not a read-only exclusive system",
                     self.names[idx], idx
                 )
             }
@@ -1178,7 +1283,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "is exclusive, not regular")]
+    #[should_panic(expected = "is not a regular system")]
     fn get_system_panics_for_exclusive() {
         let mut container = SystemsContainer::new();
         container.add_exclusive(ExclusiveA);
@@ -1186,7 +1291,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "is regular, not exclusive")]
+    #[should_panic(expected = "is not an exclusive system")]
     fn get_exclusive_system_panics_for_regular() {
         let mut container = SystemsContainer::new();
         container.add(SystemA);
@@ -1475,5 +1580,60 @@ mod tests {
         // Should have 4 virtual nodes (2 per set) + 1 real system
         assert_eq!(container.system_count(), 1);
         assert_eq!(container.node_count(), 5);
+    }
+
+    // ---- Read-only exclusive system tests ----
+
+    use crate::system::ReadOnlyExclusiveSystem;
+
+    struct ReadOnlyExclA;
+    impl ReadOnlyExclusiveSystem for ReadOnlyExclA {
+        type Result = ();
+        fn run(&self, _world: &crate::world::World) -> Result<(), crate::system::SystemError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn add_read_only_exclusive_system() {
+        let mut container = SystemsContainer::new();
+        container.add_read_only_exclusive(ReadOnlyExclA);
+        assert_eq!(container.system_count(), 1);
+        assert!(container.is_exclusive(0));
+        assert!(container.is_read_only_exclusive(0));
+    }
+
+    #[test]
+    fn read_only_exclusive_allowed_in_read_only_container() {
+        let mut container = SystemsContainer::new();
+        container.set_read_only(true);
+        container.add_read_only_exclusive(ReadOnlyExclA);
+        assert_eq!(container.system_count(), 1);
+    }
+
+    #[test]
+    fn read_only_exclusive_fn_system() {
+        let mut container = SystemsContainer::new();
+        container.add_read_only_exclusive_fn(|_world: &crate::world::World| {});
+        assert_eq!(container.system_count(), 1);
+        assert!(container.is_read_only_exclusive(0));
+    }
+
+    #[test]
+    fn edge_regular_to_read_only_exclusive() {
+        let mut container = SystemsContainer::new();
+        container.add(SystemA);
+        container.add_read_only_exclusive(ReadOnlyExclA);
+        container.add_edge::<SystemA, ReadOnlyExclA>().unwrap();
+
+        assert_eq!(container.ready_indices(), vec![0]);
+        assert_eq!(container.dependents_of(0), &[1]);
+    }
+
+    #[test]
+    fn is_read_only_exclusive_false_for_regular() {
+        let mut container = SystemsContainer::new();
+        container.add(SystemA);
+        assert!(!container.is_read_only_exclusive(0));
     }
 }

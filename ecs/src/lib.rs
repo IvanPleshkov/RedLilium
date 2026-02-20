@@ -140,8 +140,10 @@ pub use schedule::{
 };
 pub use state::{ApplyStateTransition, NextState, State, StateTransition, States, init_state};
 pub use system::{
-    ExclusiveFunctionSystem, ExclusiveSystem, System, SystemError, panic_payload_to_string,
-    run_exclusive_system_blocking, run_exclusive_system_once, run_system_blocking, run_system_once,
+    ExclusiveFunctionSystem, ExclusiveSystem, ReadOnlyExclusiveFunctionSystem,
+    ReadOnlyExclusiveSystem, System, SystemError, panic_payload_to_string,
+    run_exclusive_system_blocking, run_exclusive_system_once,
+    run_read_only_exclusive_system_blocking, run_system_blocking, run_system_once,
 };
 pub use system_context::SystemContext;
 pub use systems_container::{CycleError, Edge, SystemSet, SystemsContainer};

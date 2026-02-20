@@ -58,7 +58,14 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
         R: Send,
     {
         // Check + register tracking before acquiring actual locks.
-        let sorted = normalize_access_infos(&A::access_infos());
+        let infos = A::access_infos();
+        if self.ctx.is_read_only() {
+            assert!(
+                !infos.iter().any(|i| i.is_write),
+                "write access requested in a read-only system container"
+            );
+        }
+        let sorted = normalize_access_infos(&infos);
         self.ctx.check_held_locks(&sorted);
         self.ctx.record_access(&sorted);
         self.ctx.register_held_locks(&sorted);

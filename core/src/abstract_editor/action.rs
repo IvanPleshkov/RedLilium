@@ -125,7 +125,7 @@ pub type EditActionResult<T = ()> = Result<T, EditActionError>;
 ///     }
 /// }
 /// ```
-pub trait EditAction<T: Editable>: fmt::Debug + AsAny {
+pub trait EditAction<T: Editable>: fmt::Debug + AsAny + Send {
     /// Applies the action to the target (forward / redo direction).
     ///
     /// Returns `Ok(())` on success, or an [`EditActionError`] if the action
@@ -168,6 +168,29 @@ pub trait EditAction<T: Editable>: fmt::Debug + AsAny {
     /// ```
     fn merge(&mut self, other: Box<dyn EditAction<T>>) -> Option<Box<dyn EditAction<T>>> {
         Some(other)
+    }
+
+    /// Whether this action is recorded in the undo/redo history.
+    ///
+    /// Return `false` for transient operations that should not be undoable,
+    /// such as editor camera movement, selection highlighting, or viewport
+    /// adjustments.
+    ///
+    /// Default: `true`.
+    fn is_recorded(&self) -> bool {
+        true
+    }
+
+    /// Whether executing this action prevents the next recorded action
+    /// from merging with the previous undo entry.
+    ///
+    /// Only meaningful for non-recorded actions (`is_recorded() == false`).
+    /// A camera zoom that interrupts a drag sequence is an example of a
+    /// non-recorded action that should break the merge chain.
+    ///
+    /// Default: `false`.
+    fn breaks_merge(&self) -> bool {
+        false
     }
 }
 
@@ -249,5 +272,78 @@ mod tests {
         assert_eq!(counter.value, 3);
         boxed.undo(&mut counter).unwrap();
         assert_eq!(counter.value, 0);
+    }
+
+    #[test]
+    fn default_is_recorded() {
+        let action = Add { amount: 1 };
+        assert!(action.is_recorded());
+    }
+
+    #[test]
+    fn default_breaks_merge() {
+        let action = Add { amount: 1 };
+        assert!(!action.breaks_merge());
+    }
+
+    #[derive(Debug)]
+    struct TransientAction;
+
+    impl EditAction<Counter> for TransientAction {
+        fn apply(&mut self, target: &mut Counter) -> EditActionResult {
+            target.value += 100;
+            Ok(())
+        }
+
+        fn undo(&mut self, _target: &mut Counter) -> EditActionResult {
+            unreachable!("transient actions should never be undone");
+        }
+
+        fn description(&self) -> &str {
+            "Transient"
+        }
+
+        fn is_recorded(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn transient_action_not_recorded() {
+        let action = TransientAction;
+        assert!(!action.is_recorded());
+        assert!(!action.breaks_merge());
+    }
+
+    #[derive(Debug)]
+    struct MergeBreakingTransient;
+
+    impl EditAction<Counter> for MergeBreakingTransient {
+        fn apply(&mut self, _target: &mut Counter) -> EditActionResult {
+            Ok(())
+        }
+
+        fn undo(&mut self, _target: &mut Counter) -> EditActionResult {
+            unreachable!("transient actions should never be undone");
+        }
+
+        fn description(&self) -> &str {
+            "Merge-breaking transient"
+        }
+
+        fn is_recorded(&self) -> bool {
+            false
+        }
+
+        fn breaks_merge(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn merge_breaking_transient() {
+        let action = MergeBreakingTransient;
+        assert!(!action.is_recorded());
+        assert!(action.breaks_merge());
     }
 }

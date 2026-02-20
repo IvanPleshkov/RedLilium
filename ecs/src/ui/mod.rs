@@ -32,7 +32,17 @@ mod world_inspector;
 pub use component_inspector::show_component_inspector;
 pub use world_inspector::show_world_inspector;
 
-use crate::Entity;
+use crate::{Entity, World};
+
+/// A deferred hierarchy action recorded during drag-and-drop in the world
+/// inspector. Applied when `&mut World` becomes available.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PendingReparent {
+    /// Set `entity` as a child of `new_parent`.
+    SetParent { entity: Entity, new_parent: Entity },
+    /// Remove `entity` from its current parent, making it a root.
+    MakeRoot { entity: Entity },
+}
 
 /// Persistent UI state for the inspector panels.
 pub struct InspectorState {
@@ -44,6 +54,8 @@ pub struct InspectorState {
     expanded: std::collections::HashSet<u32>,
     /// Add-component popup state.
     pub(crate) add_component_open: bool,
+    /// Deferred reparent action from drag-and-drop.
+    pub(crate) pending_reparent: Option<PendingReparent>,
 }
 
 impl InspectorState {
@@ -53,6 +65,28 @@ impl InspectorState {
             filter: String::new(),
             expanded: std::collections::HashSet::new(),
             add_component_open: false,
+            pending_reparent: None,
+        }
+    }
+
+    /// Applies any deferred hierarchy actions (e.g. drag-and-drop reparenting).
+    ///
+    /// Called automatically at the start of [`show_component_inspector`]. Users
+    /// who only render the world inspector should call this manually each frame.
+    pub fn apply_pending_actions(&mut self, world: &mut World) {
+        if let Some(action) = self.pending_reparent.take() {
+            match action {
+                PendingReparent::SetParent { entity, new_parent } => {
+                    if world.is_alive(entity) && world.is_alive(new_parent) {
+                        crate::std::hierarchy::set_parent(world, entity, new_parent);
+                    }
+                }
+                PendingReparent::MakeRoot { entity } => {
+                    if world.is_alive(entity) {
+                        crate::std::hierarchy::remove_parent(world, entity);
+                    }
+                }
+            }
         }
     }
 

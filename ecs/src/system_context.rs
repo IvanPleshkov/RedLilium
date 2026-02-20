@@ -102,6 +102,9 @@ pub struct SystemContext<'a> {
     /// Optional access recorder for ambiguity detection diagnostics.
     /// Tuple of (recorder, system_index).
     access_recorder: Option<(&'a AccessRecorder, usize)>,
+    /// When true, write access to components/resources and deferred
+    /// commands are forbidden. Set by a read-only [`SystemsContainer`].
+    read_only: bool,
 }
 
 impl<'a> SystemContext<'a> {
@@ -125,6 +128,7 @@ impl<'a> SystemContext<'a> {
             system_results: None,
             accessible_results: None,
             access_recorder: None,
+            read_only: false,
         }
     }
 
@@ -149,6 +153,7 @@ impl<'a> SystemContext<'a> {
             system_results: None,
             accessible_results: None,
             access_recorder: None,
+            read_only: false,
         }
     }
 
@@ -177,6 +182,20 @@ impl<'a> SystemContext<'a> {
     ) -> Self {
         self.access_recorder = Some((recorder, system_idx));
         self
+    }
+
+    /// Marks this context as read-only.
+    ///
+    /// When read-only, write access to components/resources and deferred
+    /// commands will panic at runtime.
+    pub(crate) fn with_read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
+    }
+
+    /// Returns `true` if this context is read-only.
+    pub(crate) fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     /// Records access infos into the diagnostics recorder, if one is attached.
@@ -323,6 +342,12 @@ impl<'a> SystemContext<'a> {
         }
 
         let infos = A::access_infos();
+        if self.read_only {
+            assert!(
+                !infos.iter().any(|i| i.is_write),
+                "write access requested in a read-only system container"
+            );
+        }
         let sorted = normalize_access_infos(&infos);
         self.check_held_locks(&sorted);
         self.record_access(&sorted);
@@ -407,16 +432,34 @@ impl<'a> SystemContext<'a> {
         self.io
     }
 
+    /// Asserts that this context is not read-only. Used before any mutation.
+    fn assert_mutable(&self, method: &str) {
+        assert!(
+            !self.read_only,
+            "`{method}()` called in a read-only system container"
+        );
+    }
+
     /// Pushes a deferred command to be applied after all systems complete.
     ///
     /// Commands receive `&mut World` and can perform structural changes
     /// like spawning, despawning, and inserting components.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the system is running in a read-only container.
     pub fn commands(&self, cmd: impl FnOnce(&mut World) + Send + 'static) {
+        self.assert_mutable("commands");
         self.commands.push(cmd);
     }
 
     /// Queues an entity despawn to be applied after all systems complete.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the system is running in a read-only container.
     pub fn despawn(&self, entity: Entity) {
+        self.assert_mutable("despawn");
         self.commands.despawn(entity);
     }
 
@@ -425,12 +468,19 @@ impl<'a> SystemContext<'a> {
     /// # Panics
     ///
     /// Panics when applied if the component type has not been registered.
+    /// Panics if the system is running in a read-only container.
     pub fn insert<T: Send + Sync + 'static>(&self, entity: Entity, component: T) {
+        self.assert_mutable("insert");
         self.commands.insert(entity, component);
     }
 
     /// Queues a component removal to be applied after all systems complete.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the system is running in a read-only container.
     pub fn remove<T: Send + Sync + 'static>(&self, entity: Entity) {
+        self.assert_mutable("remove");
         self.commands.remove::<T>(entity);
     }
 
@@ -447,7 +497,12 @@ impl<'a> SystemContext<'a> {
     ///     .with(Visibility::VISIBLE)
     ///     .build();
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if the system is running in a read-only container.
     pub fn spawn_entity(&self) -> SpawnBuilder<'_> {
+        self.assert_mutable("spawn_entity");
         self.commands.spawn_entity()
     }
 
@@ -456,7 +511,9 @@ impl<'a> SystemContext<'a> {
     /// # Panics
     ///
     /// Panics when applied if any component type has not been registered.
+    /// Panics if the system is running in a read-only container.
     pub fn insert_bundle(&self, entity: Entity, bundle: impl Bundle) {
+        self.assert_mutable("insert_bundle");
         self.commands.insert_bundle(entity, bundle);
     }
 
@@ -465,7 +522,9 @@ impl<'a> SystemContext<'a> {
     /// # Panics
     ///
     /// Panics when applied if any component type has not been registered.
+    /// Panics if the system is running in a read-only container.
     pub fn spawn_with(&self, bundle: impl Bundle) {
+        self.assert_mutable("spawn_with");
         self.commands.spawn_with(bundle);
     }
 

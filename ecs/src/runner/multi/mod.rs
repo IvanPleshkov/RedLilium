@@ -250,18 +250,39 @@ impl EcsRunnerMultiThread {
                         None
                     };
 
-                    let system = systems.get_exclusive_system(exc_idx);
-                    let mut guard = system.write().unwrap();
-                    if let Some(prev_result) = prev_result {
-                        guard.reuse_result_boxed(prev_result);
-                    }
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        guard.run_boxed(world)
-                    })) {
-                        Ok(Ok(result)) => results_store.store(exc_idx, result),
-                        Ok(Err(e)) => errors.push(e),
-                        Err(payload) => {
-                            errors.push(SystemError::Panicked(panic_payload_to_string(&*payload)));
+                    if systems.is_read_only_exclusive(exc_idx) {
+                        let system = systems.get_read_only_exclusive_system(exc_idx);
+                        let guard = system.read().unwrap();
+                        if let Some(prev_result) = prev_result {
+                            guard.reuse_result_boxed(prev_result);
+                        }
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            guard.run_boxed(world)
+                        })) {
+                            Ok(Ok(result)) => results_store.store(exc_idx, result),
+                            Ok(Err(e)) => errors.push(e),
+                            Err(payload) => {
+                                errors.push(SystemError::Panicked(panic_payload_to_string(
+                                    &*payload,
+                                )));
+                            }
+                        }
+                    } else {
+                        let system = systems.get_exclusive_system(exc_idx);
+                        let mut guard = system.write().unwrap();
+                        if let Some(prev_result) = prev_result {
+                            guard.reuse_result_boxed(prev_result);
+                        }
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            guard.run_boxed(world)
+                        })) {
+                            Ok(Ok(result)) => results_store.store(exc_idx, result),
+                            Ok(Err(e)) => errors.push(e),
+                            Err(payload) => {
+                                errors.push(SystemError::Panicked(panic_payload_to_string(
+                                    &*payload,
+                                )));
+                            }
                         }
                     }
 
@@ -401,6 +422,7 @@ impl EcsRunnerMultiThread {
                     let recorder_ref = recorder;
                     let timing_ref = timing_out;
                     let do_timings = collect_timings;
+                    let ro = systems.is_read_only();
                     scope.spawn(move || {
                         redlilium_core::set_thread_name!("ecs: worker");
                         redlilium_core::profile_scope_dynamic!(system_name);
@@ -412,6 +434,7 @@ impl EcsRunnerMultiThread {
                             commands_ref,
                             dispatcher_ref,
                         )
+                        .with_read_only(ro)
                         .with_system_results(results_ref, accessible);
                         if let Some(rec) = recorder_ref {
                             ctx = ctx.with_access_recorder(rec, idx);
@@ -1383,5 +1406,32 @@ mod tests {
 
         assert_eq!(errors.len(), 1);
         assert!(errors[0].to_string().contains("exclusive boom"));
+    }
+
+    // ---- Read-only exclusive system tests ----
+
+    use crate::system::ReadOnlyExclusiveSystem;
+
+    #[test]
+    fn read_only_exclusive_multi_thread() {
+        struct ReadWorldSystem(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
+        impl ReadOnlyExclusiveSystem for ReadWorldSystem {
+            type Result = ();
+            fn run(&self, world: &World) -> Result<(), crate::system::SystemError> {
+                *self.0.lock().unwrap() = Some(*world.resource::<u32>());
+                Ok(())
+            }
+        }
+
+        let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let mut container = SystemsContainer::new();
+        container.add_read_only_exclusive(ReadWorldSystem(result.clone()));
+
+        let runner = EcsRunnerMultiThread::new(2);
+        let mut world = World::new();
+        world.insert_resource(42u32);
+        runner.run(&mut world, &container);
+
+        assert_eq!(*result.lock().unwrap(), Some(42));
     }
 }

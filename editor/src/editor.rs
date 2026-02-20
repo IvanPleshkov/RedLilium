@@ -3,6 +3,7 @@ use std::sync::{Arc, RwLock};
 
 use egui_dock::DockState;
 use redlilium_app::{AppContext, AppHandler, DrawContext};
+use redlilium_core::abstract_editor::{ActionQueue, DEFAULT_MAX_UNDO, EditActionHistory};
 use redlilium_core::math::{Vec3, mat4_to_cols_array_2d};
 use redlilium_core::mesh::generators;
 use redlilium_debug_drawer::{DebugDrawer, DebugDrawerRenderer};
@@ -49,6 +50,8 @@ impl EguiApp for NullEguiApp {
 pub struct EditorWorld {
     pub world: World,
     pub schedules: Schedules,
+    /// Undo/redo history for editor actions.
+    pub history: EditActionHistory<World>,
     /// The editor camera entity (flagged as EDITOR).
     pub editor_camera: Entity,
     /// Handle to the WindowInput resource for updating from app events.
@@ -199,18 +202,30 @@ impl Editor {
             entity_buffers.push((entity, buffer));
         }
 
+        // Insert ActionQueue for editor action dispatch
+        world.insert_resource(ActionQueue::<World>::new());
+
         // --- Setup schedules ---
         let mut schedules = Schedules::new();
 
-        // Update: camera input + debug grid
-        schedules.get_mut::<Update>().add(UpdateFreeFlyCamera);
+        // Update: read-only editor systems (debug grid, future interaction systems).
+        // Systems here cannot mutate the world directly — they must push actions
+        // through the ActionQueue resource.
         schedules.get_mut::<Update>().add(DrawGrid);
+        schedules.get_mut::<Update>().set_read_only(true);
 
-        // PostUpdate: transform propagation -> camera matrices
+        // PostUpdate: camera input -> transform propagation -> camera matrices.
+        // Camera movement is viewport navigation, not a scene mutation, so it
+        // lives in the non-read-only PostUpdate schedule.
+        schedules.get_mut::<PostUpdate>().add(UpdateFreeFlyCamera);
         schedules
             .get_mut::<PostUpdate>()
             .add(UpdateGlobalTransforms);
         schedules.get_mut::<PostUpdate>().add(UpdateCameraMatrices);
+        schedules
+            .get_mut::<PostUpdate>()
+            .add_edge::<UpdateFreeFlyCamera, UpdateGlobalTransforms>()
+            .expect("No cycle");
         schedules
             .get_mut::<PostUpdate>()
             .add_edge::<UpdateGlobalTransforms, UpdateCameraMatrices>()
@@ -219,6 +234,7 @@ impl Editor {
         EditorWorld {
             world,
             schedules,
+            history: EditActionHistory::new(DEFAULT_MAX_UNDO),
             editor_camera,
             window_input: window_input_handle,
             entity_buffers,
@@ -330,7 +346,21 @@ impl AppHandler for Editor {
         if let Some(menu) = &self.native_menu
             && let Some(action) = menu.poll_event()
         {
-            log::info!("Menu action: {:?}", action);
+            use crate::menu::MenuAction;
+            let ew = &mut self.worlds[self.active_world];
+            match action {
+                MenuAction::Undo => {
+                    if let Err(e) = ew.history.undo(&mut ew.world) {
+                        log::warn!("Undo failed: {e}");
+                    }
+                }
+                MenuAction::Redo => {
+                    if let Err(e) = ew.history.redo(&mut ew.world) {
+                        log::warn!("Redo failed: {e}");
+                    }
+                }
+                _ => log::info!("Menu action: {action:?}"),
+            }
         }
 
         // Sync ui_wants_input flag from previous frame's egui state
@@ -358,6 +388,17 @@ impl AppHandler for Editor {
             let ew = &mut worlds[*active_world];
             ew.schedules
                 .run_frame(&mut ew.world, runner, ctx.delta_time() as f64);
+        }
+
+        // Drain action queue and execute through history
+        {
+            let ew = &mut self.worlds[self.active_world];
+            let actions = ew.world.resource::<ActionQueue<World>>().drain();
+            for action in actions {
+                if let Err(e) = ew.history.execute(action, &mut ew.world) {
+                    log::warn!("Action failed: {e}");
+                }
+            }
         }
 
         // Clear per-frame deltas *after* systems have consumed them

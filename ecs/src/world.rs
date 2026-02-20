@@ -160,6 +160,8 @@ pub struct World {
     trigger_swap_fns: Vec<fn(&mut World)>,
 }
 
+impl redlilium_core::abstract_editor::Editable for World {}
+
 impl World {
     /// Creates a new empty world.
     pub fn new() -> Self {

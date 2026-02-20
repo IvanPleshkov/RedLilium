@@ -233,6 +233,69 @@ impl<S: ExclusiveSystem> DynExclusiveSystem for S {
     }
 }
 
+/// A system that receives exclusive `&World` (immutable) access.
+///
+/// Like [`ExclusiveSystem`], read-only exclusive systems act as **barriers** —
+/// no other system runs concurrently. However, they only receive a shared
+/// reference to the world, which makes them safe to use in read-only
+/// [`SystemsContainer`](crate::SystemsContainer)s.
+///
+/// Because the world reference is immutable, `run` takes `&self` (not
+/// `&mut self`), so the runner only needs a read-lock on the system.
+///
+/// # When to use
+///
+/// Use `ReadOnlyExclusiveSystem` when you need to inspect the entire world
+/// without the lock-execute pattern — for example, serialization, validation,
+/// or building an editor snapshot.
+///
+/// # Example
+///
+/// ```ignore
+/// struct WorldValidator;
+///
+/// impl ReadOnlyExclusiveSystem for WorldValidator {
+///     type Result = ();
+///     fn run(&self, world: &World) -> Result<(), SystemError> {
+///         // inspect entities, resources, etc.
+///         Ok(())
+///     }
+/// }
+/// ```
+pub trait ReadOnlyExclusiveSystem: Send + Sync + 'static {
+    /// The value returned by this system after execution.
+    type Result: Send + Sync + 'static;
+
+    /// Execute the system with immutable world access.
+    fn run(&self, world: &World) -> Result<Self::Result, SystemError>;
+
+    /// Receive the previous tick's result so allocated memory can be reused.
+    ///
+    /// Called by the runner before [`run()`](Self::run) each tick.
+    /// The default implementation drops the value.
+    #[allow(unused_variables)]
+    fn reuse_result(&self, prev: Self::Result) {}
+}
+
+/// Object-safe version of [`ReadOnlyExclusiveSystem`] used internally for type erasure.
+pub(crate) trait DynReadOnlyExclusiveSystem: Send + Sync {
+    fn run_boxed(&self, world: &World) -> Result<Box<dyn Any + Send + Sync>, SystemError>;
+    fn reuse_result_boxed(&self, prev: Box<dyn Any + Send + Sync>);
+}
+
+impl<S: ReadOnlyExclusiveSystem> DynReadOnlyExclusiveSystem for S {
+    fn run_boxed(&self, world: &World) -> Result<Box<dyn Any + Send + Sync>, SystemError> {
+        let result = self.run(world)?;
+        Ok(Box::new(result) as Box<dyn Any + Send + Sync>)
+    }
+
+    fn reuse_result_boxed(&self, prev: Box<dyn Any + Send + Sync>) {
+        if let Ok(typed) = prev.downcast::<S::Result>() {
+            self.reuse_result(*typed);
+        }
+    }
+}
+
 /// An exclusive system built from a closure.
 ///
 /// Wraps a `FnMut(&mut World)` as an [`ExclusiveSystem`]. Created via
@@ -263,6 +326,32 @@ where
 {
     type Result = ();
     fn run(&mut self, world: &mut World) -> Result<(), SystemError> {
+        (self.func)(world);
+        Ok(())
+    }
+}
+
+/// A read-only exclusive system built from a closure.
+///
+/// Wraps a `Fn(&World)` as a [`ReadOnlyExclusiveSystem`]. Created via
+/// [`SystemsContainer::add_read_only_exclusive_fn`](crate::SystemsContainer::add_read_only_exclusive_fn).
+pub struct ReadOnlyExclusiveFunctionSystem<F> {
+    func: F,
+}
+
+impl<F> ReadOnlyExclusiveFunctionSystem<F> {
+    /// Creates a new read-only exclusive function system from a closure.
+    pub fn new(func: F) -> Self {
+        Self { func }
+    }
+}
+
+impl<F> ReadOnlyExclusiveSystem for ReadOnlyExclusiveFunctionSystem<F>
+where
+    F: Fn(&World) + Send + Sync + 'static,
+{
+    type Result = ();
+    fn run(&self, world: &World) -> Result<(), SystemError> {
         (self.func)(world);
         Ok(())
     }
@@ -335,6 +424,17 @@ pub fn run_exclusive_system_once<S: ExclusiveSystem>(
     let result = system.run(world)?;
     world.flush_observers();
     Ok(result)
+}
+
+/// Runs a read-only exclusive system synchronously, returning its result.
+///
+/// The system receives `&World` directly. Useful for tests and
+/// one-off invocations outside a runner.
+pub fn run_read_only_exclusive_system_blocking<S: ReadOnlyExclusiveSystem>(
+    system: &S,
+    world: &World,
+) -> Result<S::Result, SystemError> {
+    system.run(world)
 }
 
 #[cfg(test)]
@@ -595,5 +695,37 @@ mod tests {
         let io = IoRuntime::new();
         run_system_blocking(&sys, &world, &compute, &io).unwrap();
         assert_eq!(*result.lock().unwrap(), Some(99));
+    }
+
+    // ---- ReadOnlyExclusiveSystem tests ----
+
+    struct CountEntities;
+    impl ReadOnlyExclusiveSystem for CountEntities {
+        type Result = u32;
+        fn run(&self, world: &World) -> Result<u32, SystemError> {
+            Ok(world.entity_count())
+        }
+    }
+
+    #[test]
+    fn read_only_exclusive_system_runs() {
+        let mut world = World::new();
+        world.spawn();
+        world.spawn();
+
+        let sys = CountEntities;
+        let count = run_read_only_exclusive_system_blocking(&sys, &world).unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn read_only_exclusive_function_system_runs() {
+        let mut world = World::new();
+        world.insert_resource(42u32);
+
+        let sys = ReadOnlyExclusiveFunctionSystem::new(|world: &World| {
+            assert_eq!(*world.resource::<u32>(), 42);
+        });
+        run_read_only_exclusive_system_blocking(&sys, &world).unwrap();
     }
 }
