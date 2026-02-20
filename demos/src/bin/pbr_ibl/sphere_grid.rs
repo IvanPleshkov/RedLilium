@@ -14,7 +14,7 @@ use redlilium_graphics::{
 use crate::GRID_SIZE;
 use crate::uniforms::{CameraUniforms, SphereInstance};
 
-const GBUFFER_SHADER_WGSL: &str = include_str!("../../../shaders/deferred_gbuffer.wgsl");
+const GBUFFER_SHADER_GLSL: &str = include_str!("../../../shaders/deferred_gbuffer.glsl");
 
 /// Sphere grid with G-buffer material, instanced mesh, and camera/instance buffers.
 pub struct SphereGrid {
@@ -48,25 +48,27 @@ impl SphereGrid {
                 .with_label("camera_bindings"),
         );
 
-        // Compose G-buffer shader
-        let mut shader_composer =
-            ShaderComposer::with_standard_library().expect("Failed to create shader composer");
-        let composed_gbuffer_shader = shader_composer
-            .compose(GBUFFER_SHADER_WGSL, &[])
-            .expect("Failed to compose G-buffer shader");
+        // Compose G-buffer shader (separate compilation per stage)
+        let shader_composer = ShaderComposer::with_standard_library();
+        let composed_vs = shader_composer
+            .compose(GBUFFER_SHADER_GLSL, ShaderStage::Vertex, &[])
+            .expect("Failed to compose G-buffer vertex shader");
+        let composed_fs = shader_composer
+            .compose(GBUFFER_SHADER_GLSL, ShaderStage::Fragment, &[])
+            .expect("Failed to compose G-buffer fragment shader");
         log::info!("G-buffer shader composed with library imports");
 
         // Build base G-buffer material descriptor (shared between fill and wireframe)
         let base_descriptor = MaterialDescriptor::new()
             .with_shader(ShaderSource::new(
                 ShaderStage::Vertex,
-                composed_gbuffer_shader.as_bytes().to_vec(),
-                "vs_main",
+                composed_vs.as_bytes().to_vec(),
+                "main",
             ))
             .with_shader(ShaderSource::new(
                 ShaderStage::Fragment,
-                composed_gbuffer_shader.as_bytes().to_vec(),
-                "fs_main",
+                composed_fs.as_bytes().to_vec(),
+                "main",
             ))
             .with_binding_layout(camera_binding_layout)
             .with_vertex_layout(vertex_layout)

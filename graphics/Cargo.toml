@@ -9,7 +9,7 @@ description = "RedLilium engine graphics"
 default = ["dummy", "wgpu-backend", "vulkan-backend"]
 dummy = []
 wgpu-backend = ["dep:wgpu", "dep:pollster"]
-vulkan-backend = ["dep:ash", "dep:ash-window", "dep:gpu-allocator", "dep:parking_lot", "dep:naga"]
+vulkan-backend = ["dep:ash", "dep:ash-window", "dep:gpu-allocator", "dep:parking_lot"]
 profiling = ["dep:tracy-client", "redlilium-core/profiling"]
 
 [dependencies]
@@ -21,8 +21,8 @@ winit = "0.30"
 raw-window-handle = "0.6"
 bytemuck = { version = "1.18", features = ["derive"] }
 
-# Shader composition
-naga_oil.workspace = true
+# Shader parsing and composition
+naga.workspace = true
 
 # UI
 egui = "0.33.3"
@@ -38,7 +38,6 @@ ash-window = { version = "0.13", optional = true }
 gpu-allocator = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
 pollster = { workspace = true, optional = true }
-naga = { workspace = true, optional = true }
 
 # Profiling (optional)
 tracy-client = { workspace = true, optional = true }

@@ -25,41 +25,42 @@ use redlilium_graphics::{
     resize::{ResizeManager, ResizeStrategy},
 };
 
-// === WGSL Shader ===
+// === GLSL Shader ===
 
 /// Simple textured quad shader with MVP matrix
-const QUAD_SHADER_WGSL: &str = r#"
-// Camera uniforms with MVP matrix
-struct Uniforms {
-    mvp: mat4x4<f32>,
+const QUAD_SHADER_GLSL: &str = r#"#version 450
+
+#ifdef VERTEX
+
+layout(set = 0, binding = 0) uniform Uniforms {
+    mat4 mvp;
 };
 
-@group(0) @binding(0) var<uniform> uniforms: Uniforms;
-@group(0) @binding(1) var texture_sampler: sampler;
-@group(0) @binding(2) var texture_image: texture_2d<f32>;
+layout(location = 0) in vec3 position;
+layout(location = 3) in vec2 uv;
 
-struct VertexInput {
-    @location(0) position: vec3<f32>,
-    @location(3) uv: vec2<f32>,  // TexCoord0 maps to location 3
-};
+layout(location = 0) out vec2 v_uv;
 
-struct VertexOutput {
-    @builtin(position) clip_position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-};
-
-@vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
-    out.clip_position = uniforms.mvp * vec4<f32>(in.position, 1.0);
-    out.uv = in.uv;
-    return out;
+void main() {
+    gl_Position = mvp * vec4(position, 1.0);
+    v_uv = uv;
 }
 
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return textureSample(texture_image, texture_sampler, in.uv);
+#endif
+
+#ifdef FRAGMENT
+
+layout(set = 0, binding = 1) uniform texture2D quad_texture;
+layout(set = 0, binding = 2) uniform sampler quad_sampler;
+
+layout(location = 0) in vec2 v_uv;
+layout(location = 0) out vec4 out_color;
+
+void main() {
+    out_color = texture(sampler2D(quad_texture, quad_sampler), v_uv);
 }
+
+#endif
 "#;
 
 // === Uniform Data ===
@@ -217,7 +218,7 @@ impl TexturedQuadDemo {
             })
             .expect("Failed to create sampler");
 
-        // Create binding layout
+        // Create binding layout (separate texture + sampler for naga GLSL)
         let binding_layout = Arc::new(
             BindingLayout::new()
                 .with_entry(
@@ -225,15 +226,24 @@ impl TexturedQuadDemo {
                         .with_visibility(ShaderStageFlags::VERTEX),
                 )
                 .with_entry(
-                    BindingLayoutEntry::new(1, BindingType::Sampler)
+                    BindingLayoutEntry::new(1, BindingType::Texture)
                         .with_visibility(ShaderStageFlags::FRAGMENT),
                 )
                 .with_entry(
-                    BindingLayoutEntry::new(2, BindingType::Texture)
+                    BindingLayoutEntry::new(2, BindingType::Sampler)
                         .with_visibility(ShaderStageFlags::FRAGMENT),
                 )
                 .with_label("quad_bindings"),
         );
+
+        // Compose GLSL shader per stage
+        let shader_composer = redlilium_graphics::ShaderComposer::new();
+        let composed_vs = shader_composer
+            .compose(QUAD_SHADER_GLSL, ShaderStage::Vertex, &[])
+            .expect("Failed to compose quad vertex shader");
+        let composed_fs = shader_composer
+            .compose(QUAD_SHADER_GLSL, ShaderStage::Fragment, &[])
+            .expect("Failed to compose quad fragment shader");
 
         // Create material
         let material = device
@@ -241,13 +251,13 @@ impl TexturedQuadDemo {
                 &MaterialDescriptor::new()
                     .with_shader(ShaderSource::new(
                         ShaderStage::Vertex,
-                        QUAD_SHADER_WGSL.as_bytes().to_vec(),
-                        "vs_main",
+                        composed_vs.as_bytes().to_vec(),
+                        "main",
                     ))
                     .with_shader(ShaderSource::new(
                         ShaderStage::Fragment,
-                        QUAD_SHADER_WGSL.as_bytes().to_vec(),
-                        "fs_main",
+                        composed_fs.as_bytes().to_vec(),
+                        "main",
                     ))
                     .with_binding_layout(binding_layout)
                     .with_vertex_layout(vertex_layout.clone())
@@ -272,8 +282,8 @@ impl TexturedQuadDemo {
         let binding_group = Arc::new(
             BindingGroup::new()
                 .with_buffer(0, uniform_buffer)
-                .with_sampler(1, sampler)
-                .with_texture(2, self.texture.clone().unwrap()),
+                .with_texture(1, self.texture.clone().unwrap())
+                .with_sampler(2, sampler),
         );
 
         let material_instance =

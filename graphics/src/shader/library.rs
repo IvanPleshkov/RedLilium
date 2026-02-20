@@ -5,33 +5,34 @@
 //!
 //! # Shader Files
 //!
-//! The library modules are stored as `.wgsl` files in `shaders/library/`:
-//! - `math.wgsl` - Mathematical constants and utilities
-//! - `color.wgsl` - Color space conversions and tone mapping
-//! - `brdf.wgsl` - PBR BRDF functions (Cook-Torrance)
-//! - `ibl.wgsl` - Image-based lighting utilities
-//! - `egui.wgsl` - Complete egui shader with types, utilities, and entry points
+//! The library modules are stored as `.glsl` files in `shaders/library/`:
+//! - `math.glsl` - Mathematical constants and utilities
+//! - `color.glsl` - Color space conversions and tone mapping
+//! - `brdf.glsl` - PBR BRDF functions (Cook-Torrance)
+//! - `ibl.glsl` - Image-based lighting utilities
+//! - `egui.glsl` - Complete egui shader with types, utilities, and entry points
 //!
 //! # Available Modules
 //!
-//! | Import Path | Description |
+//! | Include Path | Description |
 //! |-------------|-------------|
-//! | `redlilium::math` | Mathematical constants and utilities |
-//! | `redlilium::color` | Color space conversions and tone mapping |
-//! | `redlilium::brdf` | PBR BRDF functions (Cook-Torrance) |
-//! | `redlilium::ibl` | Image-based lighting utilities |
-//! | `redlilium::egui` | Egui UI rendering utilities |
+//! | `redlilium/math.glsl` | Mathematical constants and utilities |
+//! | `redlilium/color.glsl` | Color space conversions and tone mapping |
+//! | `redlilium/brdf.glsl` | PBR BRDF functions (Cook-Torrance) |
+//! | `redlilium/ibl.glsl` | Image-based lighting utilities |
 //!
 //! # Example
 //!
-//! ```wgsl
-//! #import redlilium::math::{PI, saturate}
-//! #import redlilium::brdf::{fresnel_schlick, distribution_ggx}
+//! ```glsl
+//! #version 450
+//! #include "redlilium/math.glsl"
+//! #include "redlilium/brdf.glsl"
 //!
-//! @fragment
-//! fn fs_main() -> @location(0) vec4<f32> {
-//!     let f = fresnel_schlick(n_dot_v, f0);
-//!     let d = distribution_ggx(n, h, roughness);
+//! layout(location = 0) out vec4 out_color;
+//!
+//! void main() {
+//!     vec3 f = fresnel_schlick(n_dot_v, f0);
+//!     float d = distribution_ggx(n, h, roughness);
 //!     // ...
 //! }
 //! ```
@@ -41,21 +42,21 @@
 // =============================================================================
 
 /// Mathematical constants and utility functions.
-const MATH_MODULE: &str = include_str!("../../../shaders/library/math.wgsl");
+const MATH_MODULE: &str = include_str!("../../../shaders/library/math.glsl");
 
 /// Color space conversions and tone mapping functions.
-const COLOR_MODULE: &str = include_str!("../../../shaders/library/color.wgsl");
+const COLOR_MODULE: &str = include_str!("../../../shaders/library/color.glsl");
 
 /// PBR BRDF functions (Cook-Torrance microfacet model).
-const BRDF_MODULE: &str = include_str!("../../../shaders/library/brdf.wgsl");
+const BRDF_MODULE: &str = include_str!("../../../shaders/library/brdf.glsl");
 
 /// Image-based lighting utilities.
-const IBL_MODULE: &str = include_str!("../../../shaders/library/ibl.wgsl");
+const IBL_MODULE: &str = include_str!("../../../shaders/library/ibl.glsl");
 
 /// Complete egui shader with types, utilities, and entry points.
-/// This shader includes both the importable module (`redlilium::egui`) and the entry points.
+/// This shader includes both vertex and fragment stages via `#ifdef VERTEX` / `#ifdef FRAGMENT`.
 /// Use `EGUI_SHADER_SOURCE` to access the full shader for rendering.
-const EGUI_MODULE: &str = include_str!("../../../shaders/library/egui.wgsl");
+const EGUI_MODULE: &str = include_str!("../../../shaders/library/egui.glsl");
 
 /// Complete egui shader source with vertex and fragment entry points.
 /// This is the same as `EGUI_MODULE` but exported for use by the egui renderer.
@@ -65,7 +66,7 @@ pub const EGUI_SHADER_SOURCE: &str = EGUI_MODULE;
 // ShaderLibrary
 // =============================================================================
 
-/// Collection of shader modules that can be imported.
+/// Collection of shader modules that can be included via `#include`.
 pub struct ShaderLibrary {
     modules: Vec<(&'static str, &'static str)>,
 }
@@ -74,19 +75,17 @@ impl ShaderLibrary {
     /// Create the standard RedLilium shader library.
     ///
     /// This includes all built-in modules:
-    /// - `redlilium::math` - Mathematical utilities
-    /// - `redlilium::color` - Color processing
-    /// - `redlilium::brdf` - PBR BRDF functions
-    /// - `redlilium::ibl` - Image-based lighting
-    /// - `redlilium::egui` - Egui UI rendering utilities
+    /// - `redlilium/math.glsl` - Mathematical utilities
+    /// - `redlilium/color.glsl` - Color processing
+    /// - `redlilium/brdf.glsl` - PBR BRDF functions
+    /// - `redlilium/ibl.glsl` - Image-based lighting
     pub fn standard() -> Self {
         Self {
             modules: vec![
-                ("redlilium::math", MATH_MODULE),
-                ("redlilium::color", COLOR_MODULE),
-                ("redlilium::brdf", BRDF_MODULE),
-                ("redlilium::ibl", IBL_MODULE),
-                ("redlilium::egui", EGUI_MODULE),
+                ("redlilium/math.glsl", MATH_MODULE),
+                ("redlilium/color.glsl", COLOR_MODULE),
+                ("redlilium/brdf.glsl", BRDF_MODULE),
+                ("redlilium/ibl.glsl", IBL_MODULE),
             ],
         }
     }
@@ -98,14 +97,14 @@ impl ShaderLibrary {
         }
     }
 
-    /// Get an iterator over all modules (name, source).
+    /// Get an iterator over all modules (include_path, source).
     pub fn modules(&self) -> impl Iterator<Item = (&'static str, &'static str)> + '_ {
         self.modules.iter().copied()
     }
 
     /// Add a custom module to the library.
-    pub fn with_module(mut self, name: &'static str, source: &'static str) -> Self {
-        self.modules.push((name, source));
+    pub fn with_module(mut self, path: &'static str, source: &'static str) -> Self {
+        self.modules.push((path, source));
         self
     }
 }
@@ -119,12 +118,27 @@ mod tests {
         let library = ShaderLibrary::standard();
         let modules: Vec<_> = library.modules().collect();
 
-        assert_eq!(modules.len(), 5);
-        assert!(modules.iter().any(|(name, _)| *name == "redlilium::math"));
-        assert!(modules.iter().any(|(name, _)| *name == "redlilium::color"));
-        assert!(modules.iter().any(|(name, _)| *name == "redlilium::brdf"));
-        assert!(modules.iter().any(|(name, _)| *name == "redlilium::ibl"));
-        assert!(modules.iter().any(|(name, _)| *name == "redlilium::egui"));
+        assert_eq!(modules.len(), 4);
+        assert!(
+            modules
+                .iter()
+                .any(|(name, _)| *name == "redlilium/math.glsl")
+        );
+        assert!(
+            modules
+                .iter()
+                .any(|(name, _)| *name == "redlilium/color.glsl")
+        );
+        assert!(
+            modules
+                .iter()
+                .any(|(name, _)| *name == "redlilium/brdf.glsl")
+        );
+        assert!(
+            modules
+                .iter()
+                .any(|(name, _)| *name == "redlilium/ibl.glsl")
+        );
     }
 
     #[test]
@@ -135,36 +149,27 @@ mod tests {
 
     #[test]
     fn test_custom_module() {
-        let library = ShaderLibrary::empty().with_module(
-            "custom::module",
-            "#define_import_path custom::module\nfn foo() -> f32 { return 1.0; }",
-        );
+        let library =
+            ShaderLibrary::empty().with_module("custom/module.glsl", "float foo() { return 1.0; }");
         assert_eq!(library.modules().count(), 1);
     }
 
     #[test]
     fn test_module_contents() {
-        // Verify that included files contain expected content
-        assert!(MATH_MODULE.contains("#define_import_path redlilium::math"));
-        assert!(MATH_MODULE.contains("const PI"));
-        assert!(MATH_MODULE.contains("fn saturate"));
+        // Verify that included files contain expected GLSL content
+        assert!(MATH_MODULE.contains("const float PI"));
+        assert!(MATH_MODULE.contains("float saturate_f"));
 
-        assert!(COLOR_MODULE.contains("#define_import_path redlilium::color"));
-        assert!(COLOR_MODULE.contains("fn tonemap_reinhard"));
-        assert!(COLOR_MODULE.contains("fn gamma_correct"));
+        assert!(COLOR_MODULE.contains("vec3 tonemap_reinhard"));
+        assert!(COLOR_MODULE.contains("vec3 gamma_correct"));
 
-        assert!(BRDF_MODULE.contains("#define_import_path redlilium::brdf"));
-        assert!(BRDF_MODULE.contains("fn distribution_ggx"));
-        assert!(BRDF_MODULE.contains("fn fresnel_schlick"));
+        assert!(BRDF_MODULE.contains("float distribution_ggx"));
+        assert!(BRDF_MODULE.contains("vec3 fresnel_schlick"));
 
-        assert!(IBL_MODULE.contains("#define_import_path redlilium::ibl"));
-        assert!(IBL_MODULE.contains("fn ibl_ambient"));
+        assert!(IBL_MODULE.contains("vec3 ibl_ambient"));
 
-        assert!(EGUI_MODULE.contains("#define_import_path redlilium::egui"));
-        assert!(EGUI_MODULE.contains("struct EguiUniforms"));
-        assert!(EGUI_MODULE.contains("fn srgb_to_linear"));
-        // Verify egui shader contains entry points (now in same file)
-        assert!(EGUI_SHADER_SOURCE.contains("fn vs_main"));
-        assert!(EGUI_SHADER_SOURCE.contains("fn fs_main"));
+        assert!(EGUI_MODULE.contains("void main()"));
+        assert!(EGUI_MODULE.contains("#ifdef VERTEX"));
+        assert!(EGUI_MODULE.contains("#ifdef FRAGMENT"));
     }
 }

@@ -1,34 +1,35 @@
-/// Debug draw shader source (WGSL).
+/// Debug draw shader source (GLSL).
 ///
 /// Simple unlit line shader: transforms position by a view-projection matrix
 /// and passes through vertex color.
-pub const DEBUG_DRAW_SHADER_SOURCE: &str = r#"
-struct DebugUniforms {
-    view_proj: mat4x4<f32>,
+pub const DEBUG_DRAW_SHADER_SOURCE: &str = r#"#version 450
+
+#ifdef VERTEX
+
+layout(set = 0, binding = 0) uniform DebugUniforms {
+    mat4 view_proj;
+};
+
+layout(location = 0) in vec3 position;
+layout(location = 5) in vec4 color;
+
+layout(location = 0) out vec4 v_color;
+
+void main() {
+    gl_Position = view_proj * vec4(position, 1.0);
+    v_color = color;
 }
 
-struct VertexInput {
-    @location(0) position: vec3<f32>,
-    @location(5) color: vec4<f32>,
+#endif
+
+#ifdef FRAGMENT
+
+layout(location = 0) in vec4 v_color;
+layout(location = 0) out vec4 out_color;
+
+void main() {
+    out_color = v_color;
 }
 
-struct VertexOutput {
-    @builtin(position) clip_position: vec4<f32>,
-    @location(0) color: vec4<f32>,
-}
-
-@group(0) @binding(0) var<uniform> uniforms: DebugUniforms;
-
-@vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
-    out.clip_position = uniforms.view_proj * vec4<f32>(in.position, 1.0);
-    out.color = in.color;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return in.color;
-}
+#endif
 "#;

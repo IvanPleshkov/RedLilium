@@ -330,27 +330,12 @@ dependencies = [
 
 [[package]]
 name = "bit-set"
-version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0700ddab506f33b20a03b13996eccd309a48e5ff77d0d95926aa0210fb4e95f1"
-dependencies = [
- "bit-vec 0.6.3",
-]
-
-[[package]]
-name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08807e080ed7f9d5433fa9b275196cfc35414f66a0c79d864dc51a0d825231a3"
 dependencies = [
- "bit-vec 0.8.0",
+ "bit-vec",
 ]
-
-[[package]]
-name = "bit-vec"
-version = "0.6.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "349f9b6a179ed607305526ca489b34ad0a41aed5f7980fa90eb03160b69598fb"
 
 [[package]]
 name = "bit-vec"
@@ -2777,7 +2762,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e380993072e52eef724eddfcde0ed013b0c023c3f0417336ed041aa9f076994e"
 dependencies = [
  "arrayvec",
- "bit-set 0.8.0",
+ "bit-set",
  "bitflags 2.10.0",
  "cfg_aliases",
  "codespan-reporting 0.11.1",
@@ -2800,7 +2785,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "618f667225063219ddfc61251087db8a9aec3c3f0950c916b614e403486f1135"
 dependencies = [
  "arrayvec",
- "bit-set 0.8.0",
+ "bit-set",
  "bitflags 2.10.0",
  "cfg-if",
  "cfg_aliases",
@@ -2816,26 +2801,6 @@ dependencies = [
  "rustc-hash 1.1.0",
  "spirv",
  "thiserror 2.0.18",
- "unicode-ident",
-]
-
-[[package]]
-name = "naga_oil"
-version = "0.17.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2464f7395decfd16bb4c33fb0cb3b2c645cc60d051bc7fb652d3720bfb20f18"
-dependencies = [
- "bit-set 0.5.3",
- "codespan-reporting 0.11.1",
- "data-encoding",
- "indexmap",
- "naga 24.0.0",
- "once_cell",
- "regex",
- "regex-syntax",
- "rustc-hash 1.1.0",
- "thiserror 1.0.69",
- "tracing",
  "unicode-ident",
 ]
 
@@ -4091,7 +4056,7 @@ checksum = "73edcbebd2c2a9eb0041e40b046b5136da32990fcd2ac76b9414ebff45908e18"
 dependencies = [
  "approx",
  "arrayvec",
- "bit-vec 0.8.0",
+ "bit-vec",
  "bitflags 2.10.0",
  "downcast-rs 2.0.2",
  "glamx",
@@ -4118,7 +4083,7 @@ checksum = "faca9bd58ab61858b3ec6497a9aa6dfd87f48a302481f18db934cfd979c430f1"
 dependencies = [
  "approx",
  "arrayvec",
- "bit-vec 0.8.0",
+ "bit-vec",
  "bitflags 2.10.0",
  "downcast-rs 2.0.2",
  "glamx",
@@ -4144,7 +4109,7 @@ checksum = "a576251c9dc2d6aff08470b7433096a04019c8b7bea9bbb7087f092c180feaea"
 dependencies = [
  "approx",
  "arrayvec",
- "bit-vec 0.8.0",
+ "bit-vec",
  "bitflags 2.10.0",
  "downcast-rs 2.0.2",
  "glamx",
@@ -4171,7 +4136,7 @@ checksum = "d27cfdde4915e866a008d520328b1236ad199990370965f944589d006140e6db"
 dependencies = [
  "approx",
  "arrayvec",
- "bit-vec 0.8.0",
+ "bit-vec",
  "bitflags 2.10.0",
  "downcast-rs 2.0.2",
  "glamx",
@@ -4356,7 +4321,6 @@ dependencies = [
  "gpu-allocator",
  "log",
  "naga 24.0.0",
- "naga_oil",
  "parking_lot",
  "pollster",
  "raw-window-handle",
@@ -5495,19 +5459,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
 dependencies = [
  "pin-project-lite",
- "tracing-attributes",
  "tracing-core",
-]
-
-[[package]]
-name = "tracing-attributes"
-version = "0.1.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7490cfa5ec963746568740651ac6781f701c9c5ea257c58e057f3ba8cf69e8da"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.114",
 ]
 
 [[package]]
@@ -5972,8 +5924,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8bb4c8b5db5f00e56f1f08869d870a0dff7c8bc7ebc01091fec140b0cf0211a9"
 dependencies = [
  "arrayvec",
- "bit-set 0.8.0",
- "bit-vec 0.8.0",
+ "bit-set",
+ "bit-vec",
  "bitflags 2.10.0",
  "bytemuck",
  "cfg_aliases",
@@ -6033,7 +5985,7 @@ dependencies = [
  "android_system_properties",
  "arrayvec",
  "ash",
- "bit-set 0.8.0",
+ "bit-set",
  "bitflags 2.10.0",
  "block",
  "bytemuck",

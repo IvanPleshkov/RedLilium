@@ -15,7 +15,7 @@ use crate::gbuffer::GBuffer;
 use crate::ibl_textures::IblTextures;
 use crate::uniforms::ResolveUniforms;
 
-const RESOLVE_SHADER_WGSL: &str = include_str!("../../../shaders/deferred_resolve.wgsl");
+const RESOLVE_SHADER_GLSL: &str = include_str!("../../../shaders/deferred_resolve.glsl");
 
 /// Deferred resolve/lighting pass: reads G-buffer + IBL textures, outputs lit pixels.
 pub struct ResolvePass {
@@ -101,8 +101,7 @@ impl ResolvePass {
         );
 
         // Compose resolve shader with HDR define if active
-        let mut shader_composer =
-            ShaderComposer::with_standard_library().expect("Failed to create shader composer");
+        let shader_composer = ShaderComposer::with_standard_library();
 
         let shader_defs: Vec<(&str, ShaderDef)> = if hdr_active {
             log::info!("Compiling resolve shader with HDR_OUTPUT define");
@@ -112,9 +111,12 @@ impl ResolvePass {
             vec![]
         };
 
-        let composed_resolve_shader = shader_composer
-            .compose(RESOLVE_SHADER_WGSL, &shader_defs)
-            .expect("Failed to compose resolve shader");
+        let composed_vs = shader_composer
+            .compose(RESOLVE_SHADER_GLSL, ShaderStage::Vertex, &shader_defs)
+            .expect("Failed to compose resolve vertex shader");
+        let composed_fs = shader_composer
+            .compose(RESOLVE_SHADER_GLSL, ShaderStage::Fragment, &shader_defs)
+            .expect("Failed to compose resolve fragment shader");
         log::info!("Resolve shader composed with library imports");
 
         // Create resolve material
@@ -123,13 +125,13 @@ impl ResolvePass {
                 &MaterialDescriptor::new()
                     .with_shader(ShaderSource::new(
                         ShaderStage::Vertex,
-                        composed_resolve_shader.as_bytes().to_vec(),
-                        "vs_main",
+                        composed_vs.as_bytes().to_vec(),
+                        "main",
                     ))
                     .with_shader(ShaderSource::new(
                         ShaderStage::Fragment,
-                        composed_resolve_shader.as_bytes().to_vec(),
-                        "fs_main",
+                        composed_fs.as_bytes().to_vec(),
+                        "main",
                     ))
                     .with_binding_layout(resolve_uniform_layout)
                     .with_binding_layout(gbuffer_layout)

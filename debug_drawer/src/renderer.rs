@@ -82,24 +82,26 @@ impl DebugDrawerRenderer {
                 .with_label("debug_draw_uniform_bindings"),
         );
 
-        // Compose shader
-        let mut shader_composer = ShaderComposer::new();
-        let composed_shader = shader_composer
-            .compose(DEBUG_DRAW_SHADER_SOURCE, &[])
-            .expect("Failed to compose debug draw shader");
-        let shader_bytes = composed_shader.as_bytes().to_vec();
+        // Compose shader (per-stage for GLSL)
+        let shader_composer = ShaderComposer::new();
+        let composed_vs = shader_composer
+            .compose(DEBUG_DRAW_SHADER_SOURCE, ShaderStage::Vertex, &[])
+            .expect("Failed to compose debug draw vertex shader");
+        let composed_fs = shader_composer
+            .compose(DEBUG_DRAW_SHADER_SOURCE, ShaderStage::Fragment, &[])
+            .expect("Failed to compose debug draw fragment shader");
 
         // Material with LineList topology and alpha blending
         let mut material_desc = MaterialDescriptor::new()
             .with_shader(ShaderSource::new(
                 ShaderStage::Vertex,
-                shader_bytes.clone(),
-                "vs_main",
+                composed_vs.as_bytes().to_vec(),
+                "main",
             ))
             .with_shader(ShaderSource::new(
                 ShaderStage::Fragment,
-                shader_bytes,
-                "fs_main",
+                composed_fs.as_bytes().to_vec(),
+                "main",
             ))
             .with_binding_layout(uniform_binding_layout.clone())
             .with_vertex_layout(vertex_layout.clone())

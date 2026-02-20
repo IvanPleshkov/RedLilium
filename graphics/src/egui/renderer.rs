@@ -161,12 +161,14 @@ impl EguiRenderer {
                 .with_label("egui_texture_bindings"),
         );
 
-        // Compose shader with library imports
-        let mut shader_composer =
-            ShaderComposer::with_standard_library().expect("Failed to create shader composer");
-        let composed_shader = shader_composer
-            .compose(EGUI_SHADER_SOURCE, &[])
-            .expect("Failed to compose egui shader");
+        // Compose shader (separate compilation per stage for GLSL)
+        let shader_composer = ShaderComposer::with_standard_library();
+        let composed_vs = shader_composer
+            .compose(EGUI_SHADER_SOURCE, ShaderStage::Vertex, &[])
+            .expect("Failed to compose egui vertex shader");
+        let composed_fs = shader_composer
+            .compose(EGUI_SHADER_SOURCE, ShaderStage::Fragment, &[])
+            .expect("Failed to compose egui fragment shader");
 
         // Create material
         let material = device
@@ -174,13 +176,13 @@ impl EguiRenderer {
                 &MaterialDescriptor::new()
                     .with_shader(ShaderSource::new(
                         ShaderStage::Vertex,
-                        composed_shader.as_bytes().to_vec(),
-                        "vs_main",
+                        composed_vs.as_bytes().to_vec(),
+                        "main",
                     ))
                     .with_shader(ShaderSource::new(
                         ShaderStage::Fragment,
-                        composed_shader.as_bytes().to_vec(),
-                        "fs_main",
+                        composed_fs.as_bytes().to_vec(),
+                        "main",
                     ))
                     .with_binding_layout(uniform_binding_layout.clone())
                     .with_binding_layout(texture_binding_layout.clone())

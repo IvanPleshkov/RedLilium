@@ -14,7 +14,7 @@ use redlilium_core::math::{Mat4, Vec3, mat4_to_cols_array_2d};
 use crate::ibl_textures::IblTextures;
 use crate::uniforms::SkyboxUniforms;
 
-const SKYBOX_SHADER_WGSL: &str = include_str!("../../../shaders/skybox.wgsl");
+const SKYBOX_SHADER_GLSL: &str = include_str!("../../../shaders/skybox.glsl");
 
 /// Skybox rendering resources: material, fullscreen triangle mesh, and uniforms.
 pub struct SkyboxPass {
@@ -51,12 +51,14 @@ impl SkyboxPass {
                 .with_label("skybox_bindings"),
         );
 
-        // Compose skybox shader
-        let mut shader_composer =
-            ShaderComposer::with_standard_library().expect("Failed to create shader composer");
-        let composed_skybox_shader = shader_composer
-            .compose(SKYBOX_SHADER_WGSL, &[])
-            .expect("Failed to compose skybox shader");
+        // Compose skybox shader (separate compilation per stage)
+        let shader_composer = ShaderComposer::with_standard_library();
+        let composed_vs = shader_composer
+            .compose(SKYBOX_SHADER_GLSL, ShaderStage::Vertex, &[])
+            .expect("Failed to compose skybox vertex shader");
+        let composed_fs = shader_composer
+            .compose(SKYBOX_SHADER_GLSL, ShaderStage::Fragment, &[])
+            .expect("Failed to compose skybox fragment shader");
         log::info!("Skybox shader composed with library imports");
 
         // Create skybox material (no vertex layout needed for fullscreen triangle)
@@ -65,13 +67,13 @@ impl SkyboxPass {
                 &MaterialDescriptor::new()
                     .with_shader(ShaderSource::new(
                         ShaderStage::Vertex,
-                        composed_skybox_shader.as_bytes().to_vec(),
-                        "vs_main",
+                        composed_vs.as_bytes().to_vec(),
+                        "main",
                     ))
                     .with_shader(ShaderSource::new(
                         ShaderStage::Fragment,
-                        composed_skybox_shader.as_bytes().to_vec(),
-                        "fs_main",
+                        composed_fs.as_bytes().to_vec(),
+                        "main",
                     ))
                     .with_binding_layout(skybox_binding_layout)
                     .with_color_format(surface_format)
