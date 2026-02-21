@@ -28,7 +28,10 @@ mod resources;
 mod systems;
 
 pub use components::{CameraTarget, RenderMaterial, RenderMesh};
-pub use resources::{MeshManager, RenderSchedule, TextureManager, TextureManagerError};
+pub use resources::{
+    MaterialManager, MaterialManagerError, MeshManager, RenderSchedule, TextureManager,
+    TextureManagerError,
+};
 pub use systems::ForwardRenderSystem;
 
 use crate::World;

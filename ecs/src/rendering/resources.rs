@@ -3,8 +3,12 @@ use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 
+use redlilium_core::material::{
+    CpuMaterial, CpuMaterialInstance, MaterialValue, MaterialValueType, TextureRef, TextureSource,
+};
 use redlilium_graphics::{
-    CpuMesh, CpuSampler, CpuTexture, FrameSchedule, GraphicsDevice, GraphicsError, Mesh, Sampler,
+    BindingGroup, Buffer, BufferDescriptor, BufferUsage, CpuMesh, CpuSampler, CpuTexture,
+    FrameSchedule, GraphicsDevice, GraphicsError, Material, MaterialInstance, Mesh, Sampler,
     Texture, TextureFormat,
 };
 
@@ -225,6 +229,24 @@ impl TextureManager {
         self.samplers.len()
     }
 
+    // --- Reverse lookup ---
+
+    /// Find the registered name for a texture by Arc pointer identity.
+    pub fn find_texture_name(&self, texture: &Arc<Texture>) -> Option<&str> {
+        self.textures
+            .iter()
+            .find(|(_, v)| Arc::ptr_eq(v, texture))
+            .map(|(k, _)| k.as_str())
+    }
+
+    /// Find the registered name for a sampler by Arc pointer identity.
+    pub fn find_sampler_name(&self, sampler: &Arc<Sampler>) -> Option<&str> {
+        self.samplers
+            .iter()
+            .find(|(_, v)| Arc::ptr_eq(v, sampler))
+            .map(|(k, _)| k.as_str())
+    }
+
     // --- Default textures ---
 
     /// Get or create a 1x1 white texture `[255, 255, 255, 255]`.
@@ -346,6 +368,348 @@ impl MeshManager {
     /// Returns the number of cached meshes.
     pub fn mesh_count(&self) -> usize {
         self.meshes.len()
+    }
+}
+
+/// Errors that can occur in [`MaterialManager`] operations.
+#[derive(Debug)]
+pub enum MaterialManagerError {
+    /// GPU resource creation error.
+    Graphics(GraphicsError),
+    /// Material not found by name.
+    MaterialNotFound(String),
+    /// Texture not found in [`TextureManager`].
+    TextureNotFound(String),
+    /// Sampler not found in [`TextureManager`].
+    SamplerNotFound(String),
+    /// Value count doesn't match binding count.
+    BindingMismatch {
+        /// Number of bindings defined.
+        expected: usize,
+        /// Number of values provided.
+        got: usize,
+    },
+}
+
+impl fmt::Display for MaterialManagerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Graphics(err) => write!(f, "graphics error: {err}"),
+            Self::MaterialNotFound(name) => write!(f, "material '{name}' not found"),
+            Self::TextureNotFound(name) => write!(f, "texture '{name}' not found"),
+            Self::SamplerNotFound(name) => write!(f, "sampler '{name}' not found"),
+            Self::BindingMismatch { expected, got } => {
+                write!(f, "binding mismatch: expected {expected} values, got {got}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for MaterialManagerError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Graphics(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+impl From<GraphicsError> for MaterialManagerError {
+    fn from(err: GraphicsError) -> Self {
+        Self::Graphics(err)
+    }
+}
+
+/// Resource for managing GPU materials and converting between CPU and GPU representations.
+///
+/// Stores registered material definitions (`CpuMaterial` + `Material` pairs) by name,
+/// and tracks the CPU-side source data for each GPU `MaterialInstance` to enable
+/// serialization and deserialization.
+///
+/// # Example
+///
+/// ```ignore
+/// let mut manager = MaterialManager::new(device.clone());
+/// manager.register_material("pbr", cpu_mat, gpu_mat);
+///
+/// let gpu_instance = manager.create_instance(&cpu_instance, &textures)?;
+/// ```
+pub struct MaterialManager {
+    device: Arc<GraphicsDevice>,
+    /// Registered materials: name → (cpu declaration, gpu pipeline).
+    materials: HashMap<String, (Arc<CpuMaterial>, Arc<Material>)>,
+    /// CPU instance data keyed by GPU MaterialInstance Arc pointer.
+    cpu_instances: HashMap<usize, Arc<CpuMaterialInstance>>,
+}
+
+impl MaterialManager {
+    /// Create a new material manager for the given device.
+    pub fn new(device: Arc<GraphicsDevice>) -> Self {
+        Self {
+            device,
+            materials: HashMap::new(),
+            cpu_instances: HashMap::new(),
+        }
+    }
+
+    /// Get the graphics device.
+    pub fn device(&self) -> &Arc<GraphicsDevice> {
+        &self.device
+    }
+
+    // --- Material registration ---
+
+    /// Register a material definition under the given name.
+    ///
+    /// Both the CPU declaration (binding layout) and GPU material (pipeline)
+    /// are stored together for later instance creation.
+    pub fn register_material(
+        &mut self,
+        name: impl Into<String>,
+        cpu_material: Arc<CpuMaterial>,
+        gpu_material: Arc<Material>,
+    ) {
+        self.materials
+            .insert(name.into(), (cpu_material, gpu_material));
+    }
+
+    /// Look up a registered GPU material by name.
+    pub fn get_material(&self, name: &str) -> Option<&Arc<Material>> {
+        self.materials.get(name).map(|(_, gpu)| gpu)
+    }
+
+    /// Look up a registered CPU material by name.
+    pub fn get_cpu_material(&self, name: &str) -> Option<&Arc<CpuMaterial>> {
+        self.materials.get(name).map(|(cpu, _)| cpu)
+    }
+
+    /// Find the registered name for a GPU material by Arc pointer identity.
+    pub fn find_material_name(&self, material: &Arc<Material>) -> Option<&str> {
+        self.materials
+            .iter()
+            .find(|(_, (_, gpu))| Arc::ptr_eq(gpu, material))
+            .map(|(k, _)| k.as_str())
+    }
+
+    /// Remove a registered material by name.
+    pub fn remove_material(&mut self, name: &str) -> Option<(Arc<CpuMaterial>, Arc<Material>)> {
+        self.materials.remove(name)
+    }
+
+    // --- Instance creation ---
+
+    /// Create a GPU [`MaterialInstance`] from a [`CpuMaterialInstance`].
+    ///
+    /// This resolves textures and samplers from the [`TextureManager`], packs
+    /// uniform values into a GPU buffer, and builds the binding group.
+    ///
+    /// The resulting instance is tracked so that [`get_cpu_instance`](Self::get_cpu_instance)
+    /// can retrieve the CPU source data for serialization.
+    pub fn create_instance(
+        &mut self,
+        cpu_instance: &CpuMaterialInstance,
+        textures: &mut TextureManager,
+    ) -> Result<Arc<MaterialInstance>, MaterialManagerError> {
+        let cpu_mat = &cpu_instance.material;
+
+        // Find the registered GPU material matching this CPU material
+        let gpu_material = self
+            .materials
+            .values()
+            .find(|(cpu, _)| Arc::ptr_eq(cpu, cpu_mat))
+            .map(|(_, gpu)| Arc::clone(gpu))
+            .or_else(|| {
+                // Try by name
+                cpu_mat
+                    .name
+                    .as_ref()
+                    .and_then(|n| self.materials.get(n.as_str()))
+                    .map(|(_, gpu)| Arc::clone(gpu))
+            })
+            .ok_or_else(|| {
+                MaterialManagerError::MaterialNotFound(
+                    cpu_mat
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| "<unnamed>".to_owned()),
+                )
+            })?;
+
+        if cpu_instance.values.len() != cpu_mat.bindings.len() {
+            return Err(MaterialManagerError::BindingMismatch {
+                expected: cpu_mat.bindings.len(),
+                got: cpu_instance.values.len(),
+            });
+        }
+
+        // Pack uniform values (Float/Vec3/Vec4) into a byte buffer for binding 0
+        let uniform_buffer = self.pack_uniforms(cpu_mat, &cpu_instance.values)?;
+
+        // Build the binding group
+        let mut binding_group = BindingGroup::new();
+
+        // Add uniform buffer at binding 0 if we have any uniform values
+        if let Some(buf) = uniform_buffer {
+            binding_group = binding_group.with_buffer(0, buf);
+        }
+
+        // Add texture+sampler bindings
+        for (i, value) in cpu_instance.values.iter().enumerate() {
+            let binding_def = &cpu_mat.bindings[i];
+            if binding_def.value_type != MaterialValueType::Texture {
+                continue;
+            }
+            if let MaterialValue::Texture(tex_ref) = value {
+                let (texture, sampler) = self.resolve_texture_ref(tex_ref, textures)?;
+                binding_group = binding_group.with_combined(binding_def.binding, texture, sampler);
+            }
+        }
+
+        let mut instance =
+            MaterialInstance::new(gpu_material).with_binding_group(Arc::new(binding_group));
+        if let Some(name) = &cpu_instance.name {
+            instance = instance.with_label(name.clone());
+        }
+
+        let instance = Arc::new(instance);
+
+        // Track the CPU instance for serialization
+        let cpu_arc = Arc::new(cpu_instance.clone());
+        let ptr = Arc::as_ptr(&instance) as usize;
+        self.cpu_instances.insert(ptr, cpu_arc);
+
+        Ok(instance)
+    }
+
+    /// Register an externally-created GPU instance with its CPU source data.
+    ///
+    /// Use this when the instance was created outside MaterialManager but
+    /// you still want serialization support.
+    pub fn register_instance(
+        &mut self,
+        gpu_instance: &Arc<MaterialInstance>,
+        cpu_instance: Arc<CpuMaterialInstance>,
+    ) {
+        let ptr = Arc::as_ptr(gpu_instance) as usize;
+        self.cpu_instances.insert(ptr, cpu_instance);
+    }
+
+    /// Get the CPU source data for a GPU material instance (for serialization).
+    pub fn get_cpu_instance(
+        &self,
+        gpu_instance: &Arc<MaterialInstance>,
+    ) -> Option<&Arc<CpuMaterialInstance>> {
+        let ptr = Arc::as_ptr(gpu_instance) as usize;
+        self.cpu_instances.get(&ptr)
+    }
+
+    // --- Iteration ---
+
+    /// Get a reference to all registered materials.
+    pub fn materials(&self) -> &HashMap<String, (Arc<CpuMaterial>, Arc<Material>)> {
+        &self.materials
+    }
+
+    /// Iterate over all registered material names.
+    pub fn material_names(&self) -> impl Iterator<Item = &str> {
+        self.materials.keys().map(|s| s.as_str())
+    }
+
+    /// Returns the number of registered materials.
+    pub fn material_count(&self) -> usize {
+        self.materials.len()
+    }
+
+    /// Returns the number of tracked instances.
+    pub fn instance_count(&self) -> usize {
+        self.cpu_instances.len()
+    }
+
+    // --- Internal helpers ---
+
+    /// Pack uniform (Float/Vec3/Vec4) values into a GPU buffer at binding 0.
+    fn pack_uniforms(
+        &self,
+        cpu_mat: &CpuMaterial,
+        values: &[MaterialValue],
+    ) -> Result<Option<Arc<Buffer>>, MaterialManagerError> {
+        // Collect uniform values that share binding 0
+        let mut uniform_data: Vec<u8> = Vec::new();
+        for (i, value) in values.iter().enumerate() {
+            let binding_def = &cpu_mat.bindings[i];
+            if binding_def.value_type == MaterialValueType::Texture {
+                continue;
+            }
+            match value {
+                MaterialValue::Float(v) => {
+                    uniform_data.extend_from_slice(&v.to_le_bytes());
+                }
+                MaterialValue::Vec3(v) => {
+                    for f in v {
+                        uniform_data.extend_from_slice(&f.to_le_bytes());
+                    }
+                }
+                MaterialValue::Vec4(v) => {
+                    for f in v {
+                        uniform_data.extend_from_slice(&f.to_le_bytes());
+                    }
+                }
+                MaterialValue::Texture(_) => {}
+            }
+        }
+
+        if uniform_data.is_empty() {
+            return Ok(None);
+        }
+
+        let buffer = self.device.create_buffer(
+            &BufferDescriptor::new(
+                uniform_data.len() as u64,
+                BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+            )
+            .with_label("material_uniforms"),
+        )?;
+        self.device.write_buffer(&buffer, 0, &uniform_data)?;
+        Ok(Some(buffer))
+    }
+
+    /// Resolve a [`TextureRef`] to GPU texture + sampler Arcs.
+    fn resolve_texture_ref(
+        &self,
+        tex_ref: &TextureRef,
+        textures: &mut TextureManager,
+    ) -> Result<(Arc<Texture>, Arc<Sampler>), MaterialManagerError> {
+        // Resolve texture
+        let texture = match &tex_ref.texture {
+            TextureSource::Named(name) => textures
+                .get_texture(name)
+                .cloned()
+                .ok_or_else(|| MaterialManagerError::TextureNotFound(name.clone()))?,
+            TextureSource::Cpu(cpu_tex) => textures.create_texture(cpu_tex)?,
+        };
+
+        // Resolve sampler (use default linear if none specified)
+        let sampler = if let Some(cpu_sampler) = &tex_ref.sampler {
+            if let Some(name) = &cpu_sampler.name {
+                if let Some(s) = textures.get_sampler(name) {
+                    Arc::clone(s)
+                } else {
+                    textures.create_sampler(cpu_sampler)?
+                }
+            } else {
+                textures.create_sampler(cpu_sampler)?
+            }
+        } else {
+            // Create/get a default linear sampler
+            let default_sampler = CpuSampler::linear().with_name("__default_linear");
+            if let Some(s) = textures.get_sampler("__default_linear") {
+                Arc::clone(s)
+            } else {
+                textures.create_sampler(&default_sampler)?
+            }
+        };
+
+        Ok((texture, sampler))
     }
 }
 
