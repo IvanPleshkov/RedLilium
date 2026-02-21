@@ -30,7 +30,7 @@ mod component_inspector;
 mod world_inspector;
 
 pub use component_inspector::{ImportComponentAction, show_component_inspector};
-pub use world_inspector::{SpawnPrefabAction, show_world_inspector};
+pub use world_inspector::{DeleteEntityAction, SpawnPrefabAction, show_world_inspector};
 
 use crate::{Entity, World};
 
@@ -87,6 +87,8 @@ pub struct InspectorState {
     /// Set when a `.prefab` file is dropped on the world inspector.
     /// Tuple: (vfs_path, parent_entity_or_none). Consumed by the editor.
     pub pending_prefab_import: Option<(String, Option<Entity>)>,
+    /// Fallback deferred delete (only used when no ActionQueue resource exists).
+    pub(crate) pending_delete: Option<Entity>,
 }
 
 impl InspectorState {
@@ -100,6 +102,7 @@ impl InspectorState {
             pending_reparent: None,
             pending_component_import: None,
             pending_prefab_import: None,
+            pending_delete: None,
         }
     }
 
@@ -124,6 +127,12 @@ impl InspectorState {
                 }
                 _ => {}
             }
+        }
+
+        if let Some(entity) = self.pending_delete.take()
+            && world.is_alive(entity)
+        {
+            crate::std::hierarchy::despawn_recursive(world, entity);
         }
     }
 

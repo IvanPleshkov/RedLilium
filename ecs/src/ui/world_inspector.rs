@@ -182,6 +182,7 @@ fn show_entity_node(ui: &mut egui::Ui, world: &World, entity: Entity, state: &mu
             }
             resp.dnd_set_drag_payload(entity);
             handle_drop_target(ui, &resp, world, entity, state);
+            show_entity_context_menu(&resp, world, entity, state);
         });
 
         if expanded || state.is_expanded(entity) {
@@ -204,6 +205,7 @@ fn show_entity_node(ui: &mut egui::Ui, world: &World, entity: Entity, state: &mu
             }
             resp.dnd_set_drag_payload(entity);
             handle_drop_target(ui, &resp, world, entity, state);
+            show_entity_context_menu(&resp, world, entity, state);
         });
     }
 }
@@ -317,6 +319,109 @@ fn entity_label(world: &World, entity: Entity) -> String {
         }
     }
     format!("Entity({}@{})", entity.index(), entity.spawn_tick())
+}
+
+/// Show right-click context menu for an entity node.
+fn show_entity_context_menu(
+    response: &egui::Response,
+    world: &World,
+    entity: Entity,
+    state: &mut InspectorState,
+) {
+    response.context_menu(|ui| {
+        if ui.button("Delete Entity").clicked() {
+            submit_delete(world, state, entity);
+            // Clear selection if we're deleting the selected entity
+            if state.selected == Some(entity) {
+                state.selected = None;
+            }
+            ui.close();
+        }
+    });
+}
+
+/// Submit a delete-entity operation. If an [`ActionQueue`] resource is present,
+/// the action is pushed there for undo/redo support. Otherwise the deletion is
+/// stored in [`InspectorState`] for deferred application.
+fn submit_delete(world: &World, state: &mut InspectorState, entity: Entity) {
+    let parent = world.get::<Parent>(entity).map(|p| p.0);
+    if world.has_resource::<ActionQueue<World>>() {
+        let queue = world.resource::<ActionQueue<World>>();
+        queue.push(Box::new(DeleteEntityAction {
+            entity,
+            parent,
+            serialized: None,
+        }));
+    } else {
+        state.pending_delete = Some(entity);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Undoable delete-entity action
+// ---------------------------------------------------------------------------
+
+/// Reversible action that deletes an entity and its entire subtree.
+///
+/// - `apply()`: serializes the entity tree as a prefab (for undo), then despawns recursively.
+/// - `undo()`: deserializes the saved prefab to restore the entity tree, re-parents under
+///   the original parent if it still exists.
+pub struct DeleteEntityAction {
+    entity: Entity,
+    parent: Option<Entity>,
+    serialized: Option<crate::serialize::SerializedPrefab>,
+}
+
+impl std::fmt::Debug for DeleteEntityAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeleteEntityAction")
+            .field("entity", &self.entity)
+            .field("parent", &self.parent)
+            .field("has_backup", &self.serialized.is_some())
+            .finish()
+    }
+}
+
+impl EditAction<World> for DeleteEntityAction {
+    fn apply(&mut self, world: &mut World) -> EditActionResult {
+        if !world.is_alive(self.entity) {
+            return Err(EditActionError::TargetNotFound("entity despawned".into()));
+        }
+        // Serialize the entity subtree before despawning so we can restore on undo.
+        self.serialized = Some(
+            world
+                .serialize_prefab(self.entity)
+                .map_err(|e| EditActionError::Custom(e.to_string()))?,
+        );
+        crate::std::hierarchy::despawn_recursive(world, self.entity);
+        Ok(())
+    }
+
+    fn undo(&mut self, world: &mut World) -> EditActionResult {
+        let serialized = self
+            .serialized
+            .as_ref()
+            .ok_or_else(|| EditActionError::Custom("no backup to restore".into()))?;
+        let entities = world
+            .deserialize_prefab(serialized)
+            .map_err(|e| EditActionError::Custom(e.to_string()))?;
+        // Re-parent the root under the original parent if it's still alive.
+        if let Some(parent) = self.parent
+            && world.is_alive(parent)
+            && !entities.is_empty()
+        {
+            crate::std::hierarchy::set_parent(world, entities[0], parent);
+        }
+        // Update stored entity to the newly spawned root so repeated undo/redo works.
+        if let Some(&root) = entities.first() {
+            self.entity = root;
+        }
+        Ok(())
+    }
+
+    fn description(&self) -> &str {
+        "Delete entity"
+    }
 }
 
 // ---------------------------------------------------------------------------
