@@ -4,8 +4,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use redlilium_graphics::{
-    CpuSampler, CpuTexture, FrameSchedule, GraphicsDevice, GraphicsError, Sampler, Texture,
-    TextureFormat,
+    CpuMesh, CpuSampler, CpuTexture, FrameSchedule, GraphicsDevice, GraphicsError, Mesh, Sampler,
+    Texture, TextureFormat,
 };
 
 /// Errors that can occur in [`TextureManager`] operations.
@@ -255,6 +255,97 @@ impl TextureManager {
         let cpu = CpuTexture::new(1, 1, TextureFormat::Rgba8Unorm, vec![128, 128, 255, 255])
             .with_name(DEFAULT_NORMAL);
         self.create_texture(&cpu)
+    }
+}
+
+/// Resource for managing GPU meshes by name.
+///
+/// Holds a reference to the [`GraphicsDevice`] and caches created meshes
+/// by name for reuse. Also enables serialization of `Arc<Mesh>` references
+/// by mapping between mesh names and GPU mesh handles.
+///
+/// # Example
+///
+/// ```ignore
+/// let manager = MeshManager::new(device.clone());
+/// world.insert_resource(manager);
+///
+/// // In a system:
+/// ctx.lock::<(ResMut<MeshManager>,)>()
+///     .execute(|(mut meshes,)| {
+///         let mesh = meshes.create_mesh(&cpu_mesh).unwrap();
+///     });
+/// ```
+pub struct MeshManager {
+    device: Arc<GraphicsDevice>,
+    meshes: HashMap<String, Arc<Mesh>>,
+}
+
+impl MeshManager {
+    /// Create a new mesh manager for the given device.
+    pub fn new(device: Arc<GraphicsDevice>) -> Self {
+        Self {
+            device,
+            meshes: HashMap::new(),
+        }
+    }
+
+    /// Get the graphics device.
+    pub fn device(&self) -> &Arc<GraphicsDevice> {
+        &self.device
+    }
+
+    // --- Mesh creation & lookup ---
+
+    /// Create a GPU mesh from CPU data.
+    ///
+    /// If the mesh has a label, it is cached for future lookups via [`get_mesh`](Self::get_mesh).
+    pub fn create_mesh(&mut self, cpu_mesh: &CpuMesh) -> Result<Arc<Mesh>, GraphicsError> {
+        let mesh = self.device.create_mesh_from_cpu(cpu_mesh)?;
+        if let Some(label) = mesh.label() {
+            self.meshes.insert(label.to_owned(), Arc::clone(&mesh));
+        }
+        Ok(mesh)
+    }
+
+    /// Look up a previously created mesh by name.
+    pub fn get_mesh(&self, name: &str) -> Option<&Arc<Mesh>> {
+        self.meshes.get(name)
+    }
+
+    /// Insert a mesh into the cache under a given name.
+    pub fn insert_mesh(&mut self, name: impl Into<String>, mesh: Arc<Mesh>) {
+        self.meshes.insert(name.into(), mesh);
+    }
+
+    /// Remove a mesh from the cache by name, returning it if present.
+    pub fn remove_mesh(&mut self, name: &str) -> Option<Arc<Mesh>> {
+        self.meshes.remove(name)
+    }
+
+    /// Find the registered name for a mesh by Arc pointer identity.
+    pub fn find_name(&self, mesh: &Arc<Mesh>) -> Option<&str> {
+        self.meshes
+            .iter()
+            .find(|(_, v)| Arc::ptr_eq(v, mesh))
+            .map(|(k, _)| k.as_str())
+    }
+
+    // --- Iteration ---
+
+    /// Get a reference to all cached meshes.
+    pub fn meshes(&self) -> &HashMap<String, Arc<Mesh>> {
+        &self.meshes
+    }
+
+    /// Iterate over all cached mesh names.
+    pub fn mesh_names(&self) -> impl Iterator<Item = &str> {
+        self.meshes.keys().map(|s| s.as_str())
+    }
+
+    /// Returns the number of cached meshes.
+    pub fn mesh_count(&self) -> usize {
+        self.meshes.len()
     }
 }
 
