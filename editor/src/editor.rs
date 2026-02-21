@@ -624,7 +624,23 @@ impl AppHandler for Editor {
                             history: &ew.history,
                             scene_view_rect: None,
                         };
+                        let mut dock_style = egui_dock::Style::from_egui(ui.style().as_ref());
+                        dock_style.tab_bar.corner_radius = egui::CornerRadius::ZERO;
+                        dock_style.tab.active.corner_radius = egui::CornerRadius::ZERO;
+                        dock_style.tab.inactive.corner_radius = egui::CornerRadius::ZERO;
+                        dock_style.tab.focused.corner_radius = egui::CornerRadius::ZERO;
+                        dock_style.tab.hovered.corner_radius = egui::CornerRadius::ZERO;
+                        dock_style.tab.inactive_with_kb_focus.corner_radius =
+                            egui::CornerRadius::ZERO;
+                        dock_style.tab.active_with_kb_focus.corner_radius =
+                            egui::CornerRadius::ZERO;
+                        dock_style.tab.focused_with_kb_focus.corner_radius =
+                            egui::CornerRadius::ZERO;
+                        dock_style.tab.tab_body.corner_radius = egui::CornerRadius::ZERO;
+                        dock_style.main_surface_border_rounding = egui::CornerRadius::ZERO;
+
                         egui_dock::DockArea::new(&mut self.dock_state)
+                            .style(dock_style)
                             .show_leaf_collapse_buttons(false)
                             .show_inside(ui, &mut tab_viewer);
                         scene_view_rect = tab_viewer.scene_view_rect;
