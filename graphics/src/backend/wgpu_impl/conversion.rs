@@ -387,6 +387,28 @@ pub fn convert_step_mode(mode: VertexStepMode) -> wgpu::VertexStepMode {
     }
 }
 
+/// Convert wgpu texture format to RedLilium format.
+///
+/// Returns `None` for formats not supported by RedLilium.
+/// Only covers formats commonly used for surface/swapchain.
+pub fn from_wgpu_texture_format(format: wgpu::TextureFormat) -> Option<TextureFormat> {
+    Some(match format {
+        wgpu::TextureFormat::Bgra8Unorm => TextureFormat::Bgra8Unorm,
+        wgpu::TextureFormat::Bgra8UnormSrgb => TextureFormat::Bgra8UnormSrgb,
+        wgpu::TextureFormat::Rgba8Unorm => TextureFormat::Rgba8Unorm,
+        wgpu::TextureFormat::Rgba8UnormSrgb => TextureFormat::Rgba8UnormSrgb,
+        wgpu::TextureFormat::Rgb10a2Unorm => TextureFormat::Rgba10a2Unorm,
+        wgpu::TextureFormat::Rgba16Float => TextureFormat::Rgba16Float,
+        wgpu::TextureFormat::R8Unorm => TextureFormat::R8Unorm,
+        wgpu::TextureFormat::R16Float => TextureFormat::R16Float,
+        wgpu::TextureFormat::Rg8Unorm => TextureFormat::Rg8Unorm,
+        wgpu::TextureFormat::Rg16Float => TextureFormat::Rg16Float,
+        wgpu::TextureFormat::R32Float => TextureFormat::R32Float,
+        wgpu::TextureFormat::Rgba32Float => TextureFormat::Rgba32Float,
+        _ => return None,
+    })
+}
+
 /// Convert PresentMode to wgpu present mode.
 pub fn convert_present_mode(mode: crate::swapchain::PresentMode) -> wgpu::PresentMode {
     match mode {

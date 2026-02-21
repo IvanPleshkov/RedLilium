@@ -19,7 +19,7 @@ use crate::mesh::{
     VertexAttributeSemantic, VertexBufferLayout, VertexLayout,
 };
 use crate::resources::{Buffer, Sampler, Texture};
-use crate::shader::{EGUI_SHADER_SOURCE, ShaderComposer};
+use crate::shader::{EGUI_SHADER_SOURCE, ShaderComposer, ShaderDef};
 use crate::types::{
     AddressMode, BufferDescriptor, BufferUsage, FilterMode, SamplerDescriptor, TextureDescriptor,
     TextureFormat, TextureUsage,
@@ -167,6 +167,14 @@ impl EguiRenderer {
             .resolve_glsl(EGUI_SHADER_SOURCE)
             .expect("Failed to resolve egui shader includes");
 
+        // Pass surface-type defines so the shader handles color space correctly
+        let mut shader_defs: Vec<(&str, ShaderDef)> = vec![];
+        if surface_format.is_hdr() {
+            shader_defs.push(("HDR_OUTPUT", ShaderDef::Bool(true)));
+        } else if surface_format.is_srgb() {
+            shader_defs.push(("SRGB_FRAMEBUFFER", ShaderDef::Bool(true)));
+        }
+
         // Create material
         let material = device
             .create_material(
@@ -175,13 +183,13 @@ impl EguiRenderer {
                         ShaderStage::Vertex,
                         resolved_glsl.as_bytes().to_vec(),
                         "main",
-                        ShaderComposer::build_defines(ShaderStage::Vertex, &[]),
+                        ShaderComposer::build_defines(ShaderStage::Vertex, &shader_defs),
                     ))
                     .with_shader(ShaderSource::glsl(
                         ShaderStage::Fragment,
                         resolved_glsl.as_bytes().to_vec(),
                         "main",
-                        ShaderComposer::build_defines(ShaderStage::Fragment, &[]),
+                        ShaderComposer::build_defines(ShaderStage::Fragment, &shader_defs),
                     ))
                     .with_binding_layout(uniform_binding_layout.clone())
                     .with_binding_layout(texture_binding_layout.clone())

@@ -604,9 +604,8 @@ impl AppHandler for Editor {
             // Status bar (bottom)
             status_bar::draw_status_bar(&egui_ctx, self.fps);
 
-            // Dock area fills remaining space (transparent so scene renders through)
-            let panel_frame =
-                egui::Frame::central_panel(&egui_ctx.style()).fill(egui::Color32::TRANSPARENT);
+            // Dock area fills remaining space (transparent, no margin so it spans edge-to-edge)
+            let panel_frame = egui::Frame::NONE.fill(egui::Color32::TRANSPARENT);
             egui::CentralPanel::default()
                 .frame(panel_frame)
                 .show(&egui_ctx, |ui| {

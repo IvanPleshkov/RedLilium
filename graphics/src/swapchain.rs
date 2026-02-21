@@ -162,36 +162,39 @@ impl Surface {
 
     /// Get the preferred texture format for this surface.
     ///
-    /// This format is guaranteed to be supported and is typically the most efficient.
+    /// Returns the GPU's preferred format from the actual hardware capabilities.
+    /// This may be an sRGB format (e.g. `Bgra8UnormSrgb` on macOS/Metal) or
+    /// a non-sRGB format depending on the platform. Shaders must handle both
+    /// via appropriate defines (`SRGB_FRAMEBUFFER`, `HDR_OUTPUT`).
     pub fn preferred_format(&self) -> TextureFormat {
-        // Most platforms prefer BGRA8 for swapchain
-        TextureFormat::Bgra8Unorm
+        let formats = self.supported_formats();
+        formats
+            .first()
+            .copied()
+            .unwrap_or(TextureFormat::Bgra8Unorm)
     }
 
     /// Get the supported texture formats for this surface.
     ///
-    /// This includes both standard SDR formats and HDR formats.
-    /// HDR formats (like `Rgba10a2Unorm` and `Rgba16Float`) enable
-    /// High Dynamic Range rendering when the display supports it.
+    /// Queries actual GPU capabilities for supported surface formats.
+    /// This includes both standard SDR formats and HDR formats when
+    /// the display supports them.
     pub fn supported_formats(&self) -> Vec<TextureFormat> {
-        vec![
-            // Standard SDR formats
-            TextureFormat::Bgra8Unorm,
-            TextureFormat::Bgra8UnormSrgb,
-            TextureFormat::Rgba8Unorm,
-            TextureFormat::Rgba8UnormSrgb,
-            // HDR formats (10-bit)
-            TextureFormat::Rgba10a2Unorm,
-            TextureFormat::Bgra10a2Unorm,
-            // HDR formats (16-bit float)
-            TextureFormat::Rgba16Float,
-        ]
+        let formats = self
+            .gpu_surface
+            .get_supported_formats(&self.instance.backend());
+        if formats.is_empty() {
+            // Fallback if query returns nothing
+            vec![TextureFormat::Bgra8Unorm]
+        } else {
+            formats
+        }
     }
 
     /// Get the supported HDR texture formats for this surface.
     ///
-    /// Returns only HDR-capable formats. Use these when HDR output is desired
-    /// and the display supports it.
+    /// Returns only HDR-capable formats from the actual GPU capabilities.
+    /// An empty result means HDR is not supported by this display.
     pub fn supported_hdr_formats(&self) -> Vec<TextureFormat> {
         self.supported_formats()
             .into_iter()
@@ -201,10 +204,22 @@ impl Surface {
 
     /// Get the preferred HDR format for this surface.
     ///
-    /// Returns `Rgba10a2Unorm` as the preferred HDR10 format, which is
-    /// widely supported and efficient for HDR content.
+    /// Returns the first available HDR format from the GPU capabilities,
+    /// preferring `Rgba16Float` for maximum precision, then `Rgba10a2Unorm` (HDR10).
+    /// Falls back to `Rgba16Float` if no HDR formats are available.
     pub fn preferred_hdr_format(&self) -> TextureFormat {
-        TextureFormat::Rgba10a2Unorm
+        let hdr_formats = self.supported_hdr_formats();
+        // Prefer Rgba16Float for highest precision, then Rgba10a2Unorm
+        if hdr_formats.contains(&TextureFormat::Rgba16Float) {
+            TextureFormat::Rgba16Float
+        } else if hdr_formats.contains(&TextureFormat::Rgba10a2Unorm) {
+            TextureFormat::Rgba10a2Unorm
+        } else {
+            hdr_formats
+                .first()
+                .copied()
+                .unwrap_or(TextureFormat::Rgba16Float)
+        }
     }
 
     /// Get the supported present modes for this surface.

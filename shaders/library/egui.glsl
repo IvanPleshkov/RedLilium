@@ -3,7 +3,12 @@
 // Handles vertex positions, texture coordinates, and vertex colors with alpha blending.
 //
 // Based on egui-wgpu's shader approach for proper alpha blending.
-// Uses gamma framebuffer output since our surface format is Bgra8Unorm (non-sRGB).
+//
+// Defines:
+//   HDR_OUTPUT        - Outputs linear-space values for HDR surfaces (Rgba16Float etc.)
+//   SRGB_FRAMEBUFFER  - Outputs linear-space values for sRGB surfaces (Bgra8UnormSrgb)
+//                       where hardware applies the linear→sRGB conversion automatically
+//   (default)         - Outputs gamma-space values for non-sRGB SDR surfaces (Bgra8Unorm)
 
 #version 450
 
@@ -79,18 +84,20 @@ void main() {
         texture_color_linear.a
     );
 
-    // Convert premultiplied texture to gamma/sRGB space
+#if defined(HDR_OUTPUT) || defined(SRGB_FRAMEBUFFER)
+    // Linear output: for HDR surfaces or sRGB framebuffers (hardware does linear→sRGB).
+    // Convert vertex colors from sRGB to linear, then multiply in linear space.
+    vec4 vertex_color_linear = vec4(srgb_to_linear(v_color.rgb), v_color.a);
+    out_color = texture_color_linear_premultiplied * vertex_color_linear;
+#else
+    // Gamma output: for non-sRGB SDR framebuffer (Bgra8Unorm).
+    // Convert texture from linear to gamma, multiply with sRGB vertex colors.
     vec4 texture_color_gamma_premultiplied = vec4(
         linear_to_srgb(texture_color_linear_premultiplied.rgb),
         texture_color_linear_premultiplied.a
     );
-
-    // Multiply with vertex color in GAMMA space (vertex colors are already in sRGB)
-    vec4 color_gamma = texture_color_gamma_premultiplied * v_color;
-
-    // Output in gamma space directly (framebuffer is Bgra8Unorm, not sRGB)
-    // This matches egui-wgpu's fs_main_gamma_framebuffer
-    out_color = color_gamma;
+    out_color = texture_color_gamma_premultiplied * v_color;
+#endif
 }
 
 #endif

@@ -242,6 +242,40 @@ impl TextureFormat {
         matches!(self, Self::Depth24PlusStencil8 | Self::Depth32FloatStencil8)
     }
 
+    /// Returns true if this is an sRGB format (hardware applies linear→sRGB on write).
+    ///
+    /// sRGB formats automatically convert linear color values to sRGB gamma space
+    /// when writing to the framebuffer. Shaders should output linear values when
+    /// rendering to an sRGB surface.
+    pub fn is_srgb(&self) -> bool {
+        matches!(
+            self,
+            Self::Rgba8UnormSrgb
+                | Self::Bgra8UnormSrgb
+                | Self::Bc1RgbaUnormSrgb
+                | Self::Bc2RgbaUnormSrgb
+                | Self::Bc3RgbaUnormSrgb
+                | Self::Bc7RgbaUnormSrgb
+                | Self::Etc2Rgb8UnormSrgb
+                | Self::Etc2Rgb8A1UnormSrgb
+                | Self::Etc2Rgba8UnormSrgb
+                | Self::Astc4x4UnormSrgb
+                | Self::Astc5x4UnormSrgb
+                | Self::Astc5x5UnormSrgb
+                | Self::Astc6x5UnormSrgb
+                | Self::Astc6x6UnormSrgb
+                | Self::Astc8x5UnormSrgb
+                | Self::Astc8x6UnormSrgb
+                | Self::Astc8x8UnormSrgb
+                | Self::Astc10x5UnormSrgb
+                | Self::Astc10x6UnormSrgb
+                | Self::Astc10x8UnormSrgb
+                | Self::Astc10x10UnormSrgb
+                | Self::Astc12x10UnormSrgb
+                | Self::Astc12x12UnormSrgb
+        )
+    }
+
     /// Returns true if this is an HDR (High Dynamic Range) format.
     ///
     /// HDR formats have higher precision or wider color gamut than standard 8-bit formats.

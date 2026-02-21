@@ -138,6 +138,24 @@ pub fn convert_texture_format(format: TextureFormat) -> vk::Format {
     }
 }
 
+/// Convert Vulkan format to RedLilium texture format.
+///
+/// Returns `None` for formats not supported by RedLilium.
+/// Only covers formats commonly used for surface/swapchain.
+pub fn from_vulkan_format(format: vk::Format) -> Option<TextureFormat> {
+    Some(match format {
+        vk::Format::B8G8R8A8_UNORM => TextureFormat::Bgra8Unorm,
+        vk::Format::B8G8R8A8_SRGB => TextureFormat::Bgra8UnormSrgb,
+        vk::Format::R8G8B8A8_UNORM => TextureFormat::Rgba8Unorm,
+        vk::Format::R8G8B8A8_SRGB => TextureFormat::Rgba8UnormSrgb,
+        vk::Format::A2B10G10R10_UNORM_PACK32 => TextureFormat::Rgba10a2Unorm,
+        vk::Format::A2R10G10B10_UNORM_PACK32 => TextureFormat::Bgra10a2Unorm,
+        vk::Format::R16G16B16A16_SFLOAT => TextureFormat::Rgba16Float,
+        vk::Format::R32G32B32A32_SFLOAT => TextureFormat::Rgba32Float,
+        _ => return None,
+    })
+}
+
 /// Convert TextureUsage flags to Vulkan image usage flags.
 ///
 /// The format is needed to determine whether RENDER_ATTACHMENT should map to

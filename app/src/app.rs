@@ -229,17 +229,16 @@ where
 
     /// Select the surface format based on HDR preference and availability.
     ///
+    /// HDR is only used when explicitly requested via `args.hdr()` and the
+    /// display actually supports HDR formats.
     /// Returns (format, hdr_active) tuple.
     fn select_surface_format(&self, surface: &Surface) -> (TextureFormat, bool) {
         if self.args.hdr() {
-            // Try to use HDR format
-            let supported = surface.supported_formats();
             let hdr_formats = surface.supported_hdr_formats();
 
             if !hdr_formats.is_empty() {
-                // Prefer Rgba10a2Unorm (HDR10) as it's widely supported
                 let preferred = surface.preferred_hdr_format();
-                if supported.contains(&preferred) {
+                if hdr_formats.contains(&preferred) {
                     log::info!("HDR enabled: using {:?}", preferred);
                     return (preferred, true);
                 }

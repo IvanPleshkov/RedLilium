@@ -488,6 +488,49 @@ unsafe impl Send for GpuSurface {}
 unsafe impl Sync for GpuSurface {}
 
 impl GpuSurface {
+    /// Query the formats actually supported by this surface from the GPU.
+    ///
+    /// Returns the list of texture formats the surface can use for presentation,
+    /// as reported by the GPU driver.
+    pub fn get_supported_formats(&self, backend: &GpuBackend) -> Vec<crate::types::TextureFormat> {
+        match (self, backend) {
+            (Self::Dummy, _) => {
+                vec![
+                    crate::types::TextureFormat::Bgra8Unorm,
+                    crate::types::TextureFormat::Rgba8Unorm,
+                ]
+            }
+
+            #[cfg(feature = "wgpu-backend")]
+            (Self::Wgpu { surface }, GpuBackend::Wgpu(wgpu_backend)) => {
+                let caps = surface.get_capabilities(wgpu_backend.adapter());
+                caps.formats
+                    .iter()
+                    .filter_map(|f| wgpu_impl::conversion::from_wgpu_texture_format(*f))
+                    .collect()
+            }
+
+            #[cfg(feature = "vulkan-backend")]
+            (Self::Vulkan { surface, .. }, GpuBackend::Vulkan(vulkan_backend)) => {
+                match vulkan_backend.get_surface_formats(*surface) {
+                    Ok(formats) => formats
+                        .iter()
+                        .filter_map(|sf| vulkan::conversion::from_vulkan_format(sf.format))
+                        .collect(),
+                    Err(e) => {
+                        log::warn!("Failed to query Vulkan surface formats: {}", e);
+                        vec![crate::types::TextureFormat::Bgra8Unorm]
+                    }
+                }
+            }
+
+            #[allow(unreachable_patterns)]
+            _ => {
+                vec![crate::types::TextureFormat::Bgra8Unorm]
+            }
+        }
+    }
+
     /// Configure the surface for rendering.
     ///
     /// This must be called before acquiring textures. It should also be called
