@@ -29,10 +29,33 @@
 mod component_inspector;
 mod world_inspector;
 
-pub use component_inspector::show_component_inspector;
-pub use world_inspector::show_world_inspector;
+pub use component_inspector::{ImportComponentAction, show_component_inspector};
+pub use world_inspector::{SpawnPrefabAction, show_world_inspector};
 
 use crate::{Entity, World};
+
+// ---------------------------------------------------------------------------
+// Drag-and-drop payloads (shared between inspector and editor)
+// ---------------------------------------------------------------------------
+
+/// Payload for dragging a component from the Component Inspector.
+#[derive(Clone, Debug)]
+pub struct ComponentDragPayload {
+    pub entity: Entity,
+    pub name: &'static str,
+}
+
+/// Payload for dragging a `.component` file from the Asset Browser.
+#[derive(Clone, Debug)]
+pub struct ComponentFileDragPayload {
+    pub vfs_path: String,
+}
+
+/// Payload for dragging a `.prefab` file from the Asset Browser.
+#[derive(Clone, Debug)]
+pub struct PrefabFileDragPayload {
+    pub vfs_path: String,
+}
 
 /// Fallback deferred reparent for when no [`ActionQueue`] resource is present.
 /// Used only as a last resort — the preferred path pushes to the action queue.
@@ -58,6 +81,12 @@ pub struct InspectorState {
     pub(crate) add_component_open: bool,
     /// Fallback deferred reparent (only used when no ActionQueue resource exists).
     pub(crate) pending_reparent: Option<PendingReparent>,
+    /// Set when a `.component` file is dropped on the component inspector.
+    /// Tuple: (vfs_path, target_entity). Consumed by the editor.
+    pub pending_component_import: Option<(String, Entity)>,
+    /// Set when a `.prefab` file is dropped on the world inspector.
+    /// Tuple: (vfs_path, parent_entity_or_none). Consumed by the editor.
+    pub pending_prefab_import: Option<(String, Option<Entity>)>,
 }
 
 impl InspectorState {
@@ -69,6 +98,8 @@ impl InspectorState {
             expanded: std::collections::HashSet::new(),
             add_component_open: false,
             pending_reparent: None,
+            pending_component_import: None,
+            pending_prefab_import: None,
         }
     }
 

@@ -1782,6 +1782,42 @@ impl World {
         bag.consume_into(self, entity);
     }
 
+    /// Serializes a single component by name from an entity.
+    ///
+    /// Returns `Ok(None)` if the component is not present, the name is unknown,
+    /// or the component doesn't support serialization.
+    pub fn serialize_component_by_name(
+        &self,
+        entity: Entity,
+        name: &str,
+    ) -> Result<Option<crate::serialize::SerializedComponent>, crate::serialize::SerializeError>
+    {
+        let Some(entry) = self.inspector_entries.get(name) else {
+            return Ok(None);
+        };
+        let mut ctx = crate::serialize::SerializeContext::new(self);
+        (entry.serialize_fn)(self, entity, &mut ctx)
+    }
+
+    /// Deserializes a single component by name and inserts it onto an entity.
+    ///
+    /// Returns `Err` if the component type is unknown or deserialization fails.
+    pub fn deserialize_component_by_name(
+        &mut self,
+        entity: Entity,
+        serialized: &crate::serialize::SerializedComponent,
+    ) -> Result<(), crate::serialize::DeserializeError> {
+        let deser_fn = self
+            .inspector_entries
+            .get(serialized.type_name.as_str())
+            .map(|e| e.deserialize_fn)
+            .ok_or_else(|| crate::serialize::DeserializeError::UnknownComponent {
+                type_name: serialized.type_name.clone(),
+            })?;
+        let mut ctx = crate::serialize::DeserializeContext::new(self);
+        deser_fn(entity, &serialized.data, &mut ctx)
+    }
+
     /// Collects all entity references from a component by name on an entity.
     ///
     /// Appends referenced entities to `collector`. Does nothing if the

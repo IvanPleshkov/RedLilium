@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use redlilium_ecs::Entity;
+use redlilium_ecs::ui::{ComponentDragPayload, ComponentFileDragPayload, PrefabFileDragPayload};
 use redlilium_vfs::Vfs;
 
 use crate::background_vfs::{BackgroundVfs, VfsRequestId, VfsResult};
@@ -33,8 +35,18 @@ pub struct AssetBrowser {
     pending_requests: HashMap<String, VfsRequestId>,
     /// In-flight write requests: vfs_path -> request_id.
     pending_writes: HashMap<String, VfsRequestId>,
+    /// In-flight read requests: request_id -> vfs_path.
+    pending_reads: HashMap<VfsRequestId, String>,
+    /// Completed reads waiting to be consumed by the editor.
+    pub completed_reads: Vec<(String, Vec<u8>)>,
     /// Watches local filesystem mounts for external changes.
     fs_watcher: Option<FsWatcher>,
+    /// Pending component export: (entity, comp_name, target_vfs_dir).
+    /// Set when a component is dropped from inspector onto the file list.
+    pub pending_component_export: Option<(Entity, &'static str, String)>,
+    /// Pending prefab export: (root_entity, target_vfs_dir).
+    /// Set when an entity is dropped from world inspector onto the file list.
+    pub pending_prefab_export: Option<(Entity, String)>,
 }
 
 impl AssetBrowser {
@@ -50,7 +62,11 @@ impl AssetBrowser {
             dir_cache: HashMap::new(),
             pending_requests: HashMap::new(),
             pending_writes: HashMap::new(),
+            pending_reads: HashMap::new(),
+            completed_reads: Vec::new(),
             fs_watcher: FsWatcher::new(config),
+            pending_component_export: None,
+            pending_prefab_export: None,
         }
     }
 
@@ -97,6 +113,15 @@ impl AssetBrowser {
                     log::error!("VFS write failed: {e}");
                     self.pending_writes.retain(|_, rid| *rid != id);
                 }
+                VfsResult::Read(Ok(data)) => {
+                    if let Some(path) = self.pending_reads.remove(&id) {
+                        self.completed_reads.push((path, data));
+                    }
+                }
+                VfsResult::Read(Err(e)) => {
+                    log::error!("VFS read failed: {e}");
+                    self.pending_reads.remove(&id);
+                }
             }
         }
     }
@@ -112,6 +137,19 @@ impl AssetBrowser {
             self.pending_requests.insert(vfs_path.to_owned(), id);
         }
         None
+    }
+
+    /// Dispatch an async VFS read. The result will appear in `completed_reads` on a future poll.
+    pub fn dispatch_read(&mut self, vfs: &Vfs, vfs_path: &str) -> VfsRequestId {
+        let id = self.bg_vfs.read(vfs, vfs_path);
+        self.pending_reads.insert(id, vfs_path.to_owned());
+        id
+    }
+
+    /// Dispatch an async VFS write (e.g. for component export).
+    pub fn dispatch_write(&mut self, vfs: &Vfs, vfs_path: &str, data: Vec<u8>) {
+        let id = self.bg_vfs.write(vfs, vfs_path, data);
+        self.pending_writes.insert(vfs_path.to_owned(), id);
     }
 
     /// Draw the asset browser UI.
@@ -337,7 +375,33 @@ impl AssetBrowser {
             };
             let label = format!("{icon} {}", entry.name);
 
-            let response = ui.selectable_label(false, &label);
+            // Use Button with click_and_drag sense so file entries can
+            // initiate drag-and-drop (selectable_label only has click sense).
+            let response = ui.add(
+                egui::Button::new(&label)
+                    .frame(false)
+                    .sense(egui::Sense::click_and_drag()),
+            );
+
+            // Make .component files draggable for import into inspector
+            if !entry.is_dir && entry.name.ends_with(".component") {
+                let vfs_path = if dir_path.is_empty() {
+                    format!("{source}/{}", entry.name)
+                } else {
+                    format!("{source}/{dir_path}/{}", entry.name)
+                };
+                response.dnd_set_drag_payload(ComponentFileDragPayload { vfs_path });
+            }
+
+            // Make .prefab files draggable for import into world inspector
+            if !entry.is_dir && entry.name.ends_with(".prefab") {
+                let vfs_path = if dir_path.is_empty() {
+                    format!("{source}/{}", entry.name)
+                } else {
+                    format!("{source}/{dir_path}/{}", entry.name)
+                };
+                response.dnd_set_drag_payload(PrefabFileDragPayload { vfs_path });
+            }
 
             if response.double_clicked() && entry.is_dir {
                 let new_dir = if dir_path.is_empty() {
@@ -351,6 +415,50 @@ impl AssetBrowser {
                 self.cached_key = None;
                 break;
             }
+        }
+
+        // Drop target: accept payloads dragged from inspector or world inspector.
+        //
+        // IMPORTANT: Check payload type with dnd_hover_payload (non-destructive)
+        // BEFORE calling dnd_release_payload (destructive — removes payload from
+        // egui context regardless of downcast success). Only call release for the
+        // matching type.
+        let drop_resp = ui.interact(
+            ui.max_rect(),
+            ui.id().with("comp_export_drop"),
+            egui::Sense::hover(),
+        );
+        let hovering_component = drop_resp
+            .dnd_hover_payload::<ComponentDragPayload>()
+            .is_some();
+        let hovering_entity = drop_resp.dnd_hover_payload::<Entity>().is_some();
+
+        if hovering_component
+            && let Some(payload) = drop_resp.dnd_release_payload::<ComponentDragPayload>()
+        {
+            let vfs_dir = if dir_path.is_empty() {
+                source.clone()
+            } else {
+                format!("{source}/{dir_path}")
+            };
+            self.pending_component_export = Some((payload.entity, payload.name, vfs_dir));
+        } else if hovering_entity && let Some(payload) = drop_resp.dnd_release_payload::<Entity>() {
+            let vfs_dir = if dir_path.is_empty() {
+                source.clone()
+            } else {
+                format!("{source}/{dir_path}")
+            };
+            self.pending_prefab_export = Some((*payload, vfs_dir));
+        }
+
+        // Visual hover feedback for any droppable payload
+        if hovering_component || hovering_entity {
+            ui.painter().rect_stroke(
+                drop_resp.rect,
+                4.0,
+                egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
+                egui::StrokeKind::Outside,
+            );
         }
     }
 }

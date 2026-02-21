@@ -6,7 +6,7 @@ use crate::{Entity, World};
 
 use crate::std::components::{Children, Name, Parent};
 
-use super::InspectorState;
+use super::{InspectorState, PrefabFileDragPayload};
 
 /// Render the world inspector — a tree of all entities organized by hierarchy.
 ///
@@ -96,6 +96,29 @@ pub fn show_world_inspector(ui: &mut egui::Ui, world: &World, state: &mut Inspec
                 {
                     let old_parent = world.get::<Parent>(*dragged).map(|p| p.0);
                     submit_reparent(world, state, *dragged, old_parent, None);
+                }
+            }
+
+            // "Drop here to spawn prefab" zone — visible while dragging a .prefab file
+            if egui::DragAndDrop::has_payload_of_type::<PrefabFileDragPayload>(ui.ctx()) {
+                ui.separator();
+                let resp = ui.label(
+                    egui::RichText::new("  Drop here to spawn as root  ")
+                        .italics()
+                        .weak(),
+                );
+
+                if resp.dnd_hover_payload::<PrefabFileDragPayload>().is_some() {
+                    ui.painter().rect_stroke(
+                        resp.rect,
+                        egui::CornerRadius::same(2),
+                        egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 200, 100)),
+                        egui::StrokeKind::Outside,
+                    );
+                }
+
+                if let Some(payload) = resp.dnd_release_payload::<PrefabFileDragPayload>() {
+                    state.pending_prefab_import = Some((payload.vfs_path.clone(), None));
                 }
             }
         });
@@ -196,7 +219,16 @@ fn handle_drop_target(
     target_entity: Entity,
     state: &mut InspectorState,
 ) {
-    if let Some(dragged) = response.dnd_hover_payload::<Entity>() {
+    // Check payload type with dnd_hover_payload (non-destructive) BEFORE calling
+    // dnd_release_payload (destructive — removes payload from egui context
+    // regardless of downcast success). Only call release for the matching type.
+    let hovering_entity = response.dnd_hover_payload::<Entity>().is_some();
+    let hovering_prefab = response
+        .dnd_hover_payload::<PrefabFileDragPayload>()
+        .is_some();
+
+    if hovering_entity {
+        let dragged = response.dnd_hover_payload::<Entity>().unwrap();
         let color = if is_valid_reparent(world, *dragged, target_entity) {
             egui::Color32::from_rgb(100, 160, 255) // blue — valid
         } else {
@@ -208,13 +240,25 @@ fn handle_drop_target(
             egui::Stroke::new(2.0, color),
             egui::StrokeKind::Outside,
         );
-    }
 
-    if let Some(dragged) = response.dnd_release_payload::<Entity>()
-        && is_valid_reparent(world, *dragged, target_entity)
-    {
-        let old_parent = world.get::<Parent>(*dragged).map(|p| p.0);
-        submit_reparent(world, state, *dragged, old_parent, Some(target_entity));
+        if let Some(dragged) = response.dnd_release_payload::<Entity>()
+            && is_valid_reparent(world, *dragged, target_entity)
+        {
+            let old_parent = world.get::<Parent>(*dragged).map(|p| p.0);
+            submit_reparent(world, state, *dragged, old_parent, Some(target_entity));
+        }
+    } else if hovering_prefab {
+        // Accept .prefab file drops — spawn as child of this entity
+        ui.painter().rect_stroke(
+            response.rect,
+            egui::CornerRadius::same(2),
+            egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 200, 100)),
+            egui::StrokeKind::Outside,
+        );
+
+        if let Some(payload) = response.dnd_release_payload::<PrefabFileDragPayload>() {
+            state.pending_prefab_import = Some((payload.vfs_path.clone(), Some(target_entity)));
+        }
     }
 }
 
@@ -324,4 +368,68 @@ fn apply_parent(world: &mut World, entity: Entity, parent: Option<Entity>) -> Ed
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Undoable spawn-prefab action
+// ---------------------------------------------------------------------------
+
+/// Reversible action that spawns entities from a serialized prefab.
+///
+/// - `apply()`: deserializes the prefab into new entities, optionally parenting
+///   the root under `parent`.
+/// - `undo()`: despawns the root (and all children recursively).
+pub struct SpawnPrefabAction {
+    serialized: crate::serialize::SerializedPrefab,
+    parent: Option<Entity>,
+    spawned_entities: Vec<Entity>,
+}
+
+impl SpawnPrefabAction {
+    pub fn new(serialized: crate::serialize::SerializedPrefab, parent: Option<Entity>) -> Self {
+        Self {
+            serialized,
+            parent,
+            spawned_entities: Vec::new(),
+        }
+    }
+}
+
+impl std::fmt::Debug for SpawnPrefabAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpawnPrefabAction")
+            .field("parent", &self.parent)
+            .field("spawned_count", &self.spawned_entities.len())
+            .finish()
+    }
+}
+
+impl EditAction<World> for SpawnPrefabAction {
+    fn apply(&mut self, world: &mut World) -> EditActionResult {
+        let entities = world
+            .deserialize_prefab(&self.serialized)
+            .map_err(|e| EditActionError::Custom(e.to_string()))?;
+        if let Some(parent) = self.parent
+            && world.is_alive(parent)
+            && !entities.is_empty()
+        {
+            crate::std::hierarchy::set_parent(world, entities[0], parent);
+        }
+        self.spawned_entities = entities;
+        Ok(())
+    }
+
+    fn undo(&mut self, world: &mut World) -> EditActionResult {
+        if let Some(&root) = self.spawned_entities.first()
+            && world.is_alive(root)
+        {
+            crate::std::hierarchy::despawn_recursive(world, root);
+        }
+        self.spawned_entities.clear();
+        Ok(())
+    }
+
+    fn description(&self) -> &str {
+        "Spawn prefab"
+    }
 }

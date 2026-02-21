@@ -1,9 +1,11 @@
 use egui_dock::{DockState, NodeIndex, TabViewer};
+use redlilium_core::abstract_editor::EditActionHistory;
 use redlilium_ecs::World;
 use redlilium_ecs::ui::InspectorState;
 use redlilium_vfs::Vfs;
 
 use crate::asset_browser::AssetBrowser;
+use crate::console::ConsolePanel;
 
 /// Identifiers for editor dock tabs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,6 +14,8 @@ pub enum Tab {
     SceneView,
     ComponentInspector,
     Assets,
+    Console,
+    History,
 }
 
 impl Tab {
@@ -21,6 +25,8 @@ impl Tab {
             Tab::SceneView => "Scene View",
             Tab::ComponentInspector => "Component Inspector",
             Tab::Assets => "Assets",
+            Tab::Console => "Console",
+            Tab::History => "History",
         }
     }
 }
@@ -41,8 +47,12 @@ pub fn create_default_layout() -> DockState<Tab> {
     let mut dock_state = DockState::new(vec![Tab::SceneView]);
     let surface = dock_state.main_surface_mut();
 
-    // Bottom: Assets (25% of total height, spanning full width)
-    let [top, _bottom] = surface.split_below(NodeIndex::root(), 0.75, vec![Tab::Assets]);
+    // Bottom: Assets + Console tabs (25% of total height, spanning full width)
+    let [top, _bottom] = surface.split_below(
+        NodeIndex::root(),
+        0.75,
+        vec![Tab::Assets, Tab::Console, Tab::History],
+    );
 
     // Left: World Inspector (20% of total width)
     // split_left returns [old, new] — old (SceneView) stays right, new (WorldInspector) goes left
@@ -60,6 +70,8 @@ pub struct EditorTabViewer<'a> {
     pub inspector_state: &'a mut InspectorState,
     pub vfs: &'a Vfs,
     pub asset_browser: &'a mut AssetBrowser,
+    pub console: &'a mut ConsolePanel,
+    pub history: &'a EditActionHistory<World>,
     /// Output: the SceneView panel rect from this frame (egui logical points).
     pub scene_view_rect: Option<egui::Rect>,
 }
@@ -86,6 +98,12 @@ impl TabViewer for EditorTabViewer<'_> {
             }
             Tab::Assets => {
                 self.asset_browser.show(ui, self.vfs);
+            }
+            Tab::Console => {
+                self.console.show(ui);
+            }
+            Tab::History => {
+                crate::history_panel::show_history(ui, self.history);
             }
         }
     }

@@ -7,10 +7,10 @@ use redlilium_core::abstract_editor::{ActionQueue, DEFAULT_MAX_UNDO, EditActionH
 use redlilium_core::math::{Vec3, mat4_to_cols_array_2d};
 use redlilium_core::mesh::generators;
 use redlilium_debug_drawer::{DebugDrawer, DebugDrawerRenderer};
-use redlilium_ecs::ui::InspectorState;
+use redlilium_ecs::ui::{ImportComponentAction, InspectorState, SpawnPrefabAction};
 use redlilium_ecs::{
-    Camera, DrawGrid, EcsRunner, Entity, FreeFlyCamera, GlobalTransform, GridConfig, PostUpdate,
-    RenderMaterial, RenderMesh, Schedules, Transform, Update, UpdateCameraMatrices,
+    Camera, DrawGrid, EcsRunner, Entity, FreeFlyCamera, GlobalTransform, GridConfig, Name,
+    PostUpdate, RenderMaterial, RenderMesh, Schedules, Transform, Update, UpdateCameraMatrices,
     UpdateFreeFlyCamera, UpdateGlobalTransforms, Visibility, WindowInput, World,
     register_std_components,
 };
@@ -21,6 +21,7 @@ use winit::event::{KeyEvent, MouseButton, MouseScrollDelta};
 use winit::keyboard::PhysicalKey;
 
 use crate::asset_browser::AssetBrowser;
+use crate::console::ConsolePanel;
 use crate::dock::{self, EditorTabViewer, Tab};
 #[cfg(not(target_os = "macos"))]
 use crate::menu;
@@ -72,6 +73,7 @@ pub struct Editor {
     // VFS and asset browser
     vfs: Vfs,
     asset_browser: AssetBrowser,
+    console: ConsolePanel,
 
     // UI
     egui_controller: Option<EguiController>,
@@ -97,6 +99,23 @@ pub struct Editor {
 
     /// Smoothed frames-per-second for the status bar.
     fps: f32,
+
+    /// Pending component import from asset browser (VFS read in progress).
+    pending_import: Option<PendingImport>,
+    /// Pending prefab import from asset browser (VFS read in progress).
+    pending_prefab_import: Option<PendingPrefabImport>,
+}
+
+/// Tracks an in-flight VFS read for component import.
+struct PendingImport {
+    vfs_path: String,
+    entity: Entity,
+}
+
+/// Tracks an in-flight VFS read for prefab import.
+struct PendingPrefabImport {
+    vfs_path: String,
+    parent: Option<Entity>,
 }
 
 impl Editor {
@@ -104,6 +123,7 @@ impl Editor {
         let project_path = std::path::Path::new("project.toml");
         let (config, vfs) = crate::project::load_or_default(project_path);
         let asset_browser = AssetBrowser::new(&config);
+        let console = ConsolePanel::new(crate::log_capture::log_buffer());
 
         Self {
             worlds: Vec::new(),
@@ -111,6 +131,7 @@ impl Editor {
             runner: EcsRunner::single_thread(),
             vfs,
             asset_browser,
+            console,
             egui_controller: None,
             dock_state: dock::create_default_layout(),
             inspector_state: InspectorState::new(),
@@ -124,6 +145,8 @@ impl Editor {
             scene_view_rect_phys: None,
             cursor_pos: [0.0, 0.0],
             fps: 0.0,
+            pending_import: None,
+            pending_prefab_import: None,
         }
     }
 
@@ -406,6 +429,128 @@ impl AppHandler for Editor {
             }
         }
 
+        // Process component export (inspector → asset browser)
+        if let Some((entity, comp_name, vfs_dir)) =
+            self.asset_browser.pending_component_export.take()
+        {
+            let ew = &self.worlds[self.active_world];
+            match ew.world.serialize_component_by_name(entity, comp_name) {
+                Ok(Some(serialized)) => {
+                    match redlilium_ecs::serialize::encode(
+                        &serialized,
+                        redlilium_ecs::serialize::Format::Ron,
+                    ) {
+                        Ok(data) => {
+                            let vfs_path = format!("{vfs_dir}/{comp_name}.component");
+                            log::info!("Exporting component to: {vfs_path}");
+                            self.asset_browser
+                                .dispatch_write(&self.vfs, &vfs_path, data);
+                        }
+                        Err(e) => log::error!("Failed to encode component: {e}"),
+                    }
+                }
+                Ok(None) => log::warn!("Component '{comp_name}' not found or not serializable"),
+                Err(e) => log::error!("Failed to serialize component: {e}"),
+            }
+        }
+
+        // Process component import (asset browser → inspector): dispatch read
+        if let Some((vfs_path, entity)) = self.inspector_state.pending_component_import.take() {
+            self.asset_browser.dispatch_read(&self.vfs, &vfs_path);
+            self.pending_import = Some(PendingImport { vfs_path, entity });
+        }
+
+        // Process completed VFS reads for component import
+        if let Some(pending) = &self.pending_import
+            && let Some(idx) = self
+                .asset_browser
+                .completed_reads
+                .iter()
+                .position(|(path, _)| path == &pending.vfs_path)
+        {
+            let entity = pending.entity;
+            let (path, data) = self.asset_browser.completed_reads.remove(idx);
+            log::info!("Importing component from: {path}");
+            self.pending_import = None;
+
+            match redlilium_ecs::serialize::decode::<redlilium_ecs::serialize::SerializedComponent>(
+                &data,
+                redlilium_ecs::serialize::Format::Ron,
+            ) {
+                Ok(serialized) => {
+                    let action = ImportComponentAction::new(entity, serialized);
+                    let ew = &mut self.worlds[self.active_world];
+                    if let Err(e) = ew.history.execute(Box::new(action), &mut ew.world) {
+                        log::warn!("Import action failed: {e}");
+                    }
+                }
+                Err(e) => log::error!("Failed to decode .component file: {e}"),
+            }
+        }
+
+        // Process prefab export (world inspector → asset browser)
+        if let Some((root_entity, vfs_dir)) = self.asset_browser.pending_prefab_export.take() {
+            let ew = &self.worlds[self.active_world];
+            if ew.world.is_alive(root_entity) {
+                match ew.world.serialize_prefab(root_entity) {
+                    Ok(serialized) => {
+                        match redlilium_ecs::serialize::encode(
+                            &serialized,
+                            redlilium_ecs::serialize::Format::Ron,
+                        ) {
+                            Ok(data) => {
+                                let name = ew
+                                    .world
+                                    .get::<Name>(root_entity)
+                                    .map(|n| n.as_str().to_owned())
+                                    .unwrap_or_else(|| format!("Entity_{}", root_entity.index()));
+                                let vfs_path = format!("{vfs_dir}/{name}.prefab");
+                                log::info!("Exporting prefab to: {vfs_path}");
+                                self.asset_browser
+                                    .dispatch_write(&self.vfs, &vfs_path, data);
+                            }
+                            Err(e) => log::error!("Failed to encode prefab: {e}"),
+                        }
+                    }
+                    Err(e) => log::error!("Failed to serialize prefab: {e}"),
+                }
+            }
+        }
+
+        // Process prefab import (asset browser → world inspector): dispatch read
+        if let Some((vfs_path, parent)) = self.inspector_state.pending_prefab_import.take() {
+            self.asset_browser.dispatch_read(&self.vfs, &vfs_path);
+            self.pending_prefab_import = Some(PendingPrefabImport { vfs_path, parent });
+        }
+
+        // Process completed VFS reads for prefab import
+        if let Some(pending) = &self.pending_prefab_import
+            && let Some(idx) = self
+                .asset_browser
+                .completed_reads
+                .iter()
+                .position(|(path, _)| path == &pending.vfs_path)
+        {
+            let parent = pending.parent;
+            let (path, data) = self.asset_browser.completed_reads.remove(idx);
+            log::info!("Importing prefab from: {path}");
+            self.pending_prefab_import = None;
+
+            match redlilium_ecs::serialize::decode::<redlilium_ecs::serialize::SerializedPrefab>(
+                &data,
+                redlilium_ecs::serialize::Format::Ron,
+            ) {
+                Ok(serialized) => {
+                    let action = SpawnPrefabAction::new(serialized, parent);
+                    let ew = &mut self.worlds[self.active_world];
+                    if let Err(e) = ew.history.execute(Box::new(action), &mut ew.world) {
+                        log::warn!("Prefab spawn action failed: {e}");
+                    }
+                }
+                Err(e) => log::error!("Failed to decode .prefab file: {e}"),
+            }
+        }
+
         // Clear per-frame deltas *after* systems have consumed them
         {
             let ew = self.active_world();
@@ -465,17 +610,19 @@ impl AppHandler for Editor {
             egui::CentralPanel::default()
                 .frame(panel_frame)
                 .show(&egui_ctx, |ui| {
-                    let active_world = if self.worlds.is_empty() {
+                    let ew = if self.worlds.is_empty() {
                         None
                     } else {
-                        Some(&mut self.worlds[self.active_world].world)
+                        Some(&mut self.worlds[self.active_world])
                     };
-                    if let Some(world) = active_world {
+                    if let Some(ew) = ew {
                         let mut tab_viewer = EditorTabViewer {
-                            world,
+                            world: &mut ew.world,
                             inspector_state: &mut self.inspector_state,
                             vfs: &self.vfs,
                             asset_browser: &mut self.asset_browser,
+                            console: &mut self.console,
+                            history: &ew.history,
                             scene_view_rect: None,
                         };
                         egui_dock::DockArea::new(&mut self.dock_state)

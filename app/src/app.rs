@@ -88,7 +88,9 @@ where
     #[cfg(not(target_arch = "wasm32"))]
     pub fn run(handler: H, args: A) {
         // Initialize logging
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+        // Use try_init so callers can set a custom logger before App::run.
+        let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+            .try_init();
 
         redlilium_core::init();
         redlilium_graphics::init();

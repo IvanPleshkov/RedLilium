@@ -4320,6 +4320,7 @@ dependencies = [
  "bytemuck",
  "egui",
  "egui_dock",
+ "env_logger",
  "log",
  "muda",
  "notify",

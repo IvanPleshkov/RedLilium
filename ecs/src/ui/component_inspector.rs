@@ -4,7 +4,7 @@ use redlilium_core::abstract_editor::{ActionQueue, EditAction, EditActionError, 
 
 use crate::{Entity, World};
 
-use super::InspectorState;
+use super::{ComponentDragPayload, ComponentFileDragPayload, InspectorState};
 
 // ---------------------------------------------------------------------------
 // Editor actions
@@ -166,6 +166,69 @@ impl EditAction<World> for RemoveComponentAction {
     }
 }
 
+/// Reversible action that imports a serialized component onto an entity.
+///
+/// On apply, extracts the previous component (if any) into `saved_previous`,
+/// then deserializes the imported component and inserts it.
+/// On undo, removes the imported component and restores the previous value.
+pub struct ImportComponentAction {
+    entity: Entity,
+    serialized: crate::serialize::SerializedComponent,
+    saved_previous: Option<Box<dyn crate::prefab::ComponentBag>>,
+}
+
+impl ImportComponentAction {
+    pub fn new(entity: Entity, serialized: crate::serialize::SerializedComponent) -> Self {
+        Self {
+            entity,
+            serialized,
+            saved_previous: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for ImportComponentAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImportComponentAction")
+            .field("type_name", &self.serialized.type_name)
+            .finish()
+    }
+}
+
+impl EditAction<World> for ImportComponentAction {
+    fn apply(&mut self, world: &mut World) -> EditActionResult {
+        if !world.is_alive(self.entity) {
+            return Err(EditActionError::TargetNotFound("entity despawned".into()));
+        }
+        // Save the previous component value (if entity already has one with this name)
+        self.saved_previous = world.extract_by_name(self.entity, &self.serialized.type_name);
+        // Deserialize and insert the new component
+        world
+            .deserialize_component_by_name(self.entity, &self.serialized)
+            .map_err(|e| EditActionError::Custom(e.to_string()))?;
+        Ok(())
+    }
+
+    fn undo(&mut self, world: &mut World) -> EditActionResult {
+        if !world.is_alive(self.entity) {
+            return Err(EditActionError::TargetNotFound("entity despawned".into()));
+        }
+        // Remove the imported component
+        world.remove_by_name(self.entity, &self.serialized.type_name);
+        // Restore the previous component if there was one
+        if let Some(bag) = self.saved_previous.take() {
+            let restore = bag.clone_box();
+            self.saved_previous = Some(bag);
+            world.insert_bag(self.entity, restore);
+        }
+        Ok(())
+    }
+
+    fn description(&self) -> &str {
+        "Import component"
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Component inspector UI
 // ---------------------------------------------------------------------------
@@ -265,6 +328,19 @@ pub fn show_component_inspector(ui: &mut egui::Ui, world: &mut World, state: &mu
                     }
                 });
 
+                // Make header draggable for export to asset browser.
+                // CollapsingHeader only has click sense, so layer a drag
+                // interaction on top of the header rect.
+                let drag_resp = ui.interact(
+                    header_resp.header_response.rect,
+                    egui::Id::new(("comp_drag", comp_name)),
+                    egui::Sense::drag(),
+                );
+                drag_resp.dnd_set_drag_payload(ComponentDragPayload {
+                    entity: selected,
+                    name: comp_name,
+                });
+
                 header_resp.header_response.context_menu(|ui| {
                     if ui.button("Remove Component").clicked() {
                         actions.push(Box::new(RemoveComponentAction {
@@ -324,6 +400,27 @@ pub fn show_component_inspector(ui: &mut egui::Ui, world: &mut World, state: &mu
                 }
             }
         });
+
+    // Drop target: accept .component files dragged from the asset browser
+    let drop_resp = ui.interact(
+        ui.min_rect(),
+        ui.id().with("comp_file_drop"),
+        egui::Sense::hover(),
+    );
+    if let Some(payload) = drop_resp.dnd_release_payload::<ComponentFileDragPayload>() {
+        state.pending_component_import = Some((payload.vfs_path.clone(), selected));
+    }
+    if drop_resp
+        .dnd_hover_payload::<ComponentFileDragPayload>()
+        .is_some()
+    {
+        ui.painter().rect_stroke(
+            drop_resp.rect,
+            4.0,
+            egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
+            egui::StrokeKind::Outside,
+        );
+    }
 
     // Dispatch actions: push to ActionQueue if present, otherwise apply directly
     if !actions.is_empty() {
