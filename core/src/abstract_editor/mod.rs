@@ -14,8 +14,13 @@
 //!
 //! By default, actions are **recorded** in the undo/redo history. Override
 //! [`EditAction::is_recorded`] to return `false` for transient operations
-//! like camera movement or selection highlighting that should not be
-//! undoable.
+//! like camera movement that should not be undoable.
+//!
+//! Recorded actions can optionally return `false` from
+//! [`EditAction::modifies_content`] to indicate they represent UI state
+//! changes (such as entity selection) rather than document edits. These
+//! actions are fully undoable but do not affect the save-distance tracker,
+//! so [`EditActionHistory::has_unsaved_changes`] ignores them.
 //!
 //! Non-recorded actions can optionally **break the merge chain** by
 //! overriding [`EditAction::breaks_merge`] to return `true`. This

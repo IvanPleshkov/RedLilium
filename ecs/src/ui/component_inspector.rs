@@ -252,14 +252,26 @@ pub fn show_component_inspector(ui: &mut egui::Ui, world: &mut World, state: &mu
     // Apply deferred actions from world inspector (e.g. drag-and-drop reparenting)
     state.apply_pending_actions(world);
 
-    let selected = match state.selected {
-        Some(e) if world.is_alive(e) => e,
-        _ => {
-            ui.label("No entity selected.");
-            ui.small("Select an entity in the World Inspector.");
-            return;
-        }
-    };
+    let selection = super::read_selection(world);
+
+    if selection.is_empty() {
+        ui.label("No entity selected.");
+        ui.small("Select an entity in the World Inspector.");
+        return;
+    }
+
+    // Multi-selection: show count only
+    if selection.len() > 1 {
+        ui.heading(format!("{} entities selected", selection.len()));
+        return;
+    }
+
+    let selected = selection[0];
+    if !world.is_alive(selected) {
+        ui.label("No entity selected.");
+        ui.small("Select an entity in the World Inspector.");
+        return;
+    }
 
     ui.heading(format!(
         "Entity({}@{})",

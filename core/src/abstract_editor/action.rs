@@ -192,6 +192,21 @@ pub trait EditAction<T: Editable>: fmt::Debug + AsAny + Send {
     fn breaks_merge(&self) -> bool {
         false
     }
+
+    /// Whether this action modifies persistent content (document state).
+    ///
+    /// Return `false` for actions that change transient UI state — such as
+    /// entity selection or viewport focus — which should be undoable but
+    /// should **not** count as unsaved changes.
+    ///
+    /// Only meaningful for recorded actions (`is_recorded() == true`).
+    /// Non-recorded actions never touch the undo/redo stacks, so this
+    /// method has no effect on them.
+    ///
+    /// Default: `true`.
+    fn modifies_content(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -286,6 +301,12 @@ mod tests {
         assert!(!action.breaks_merge());
     }
 
+    #[test]
+    fn default_modifies_content() {
+        let action = Add { amount: 1 };
+        assert!(action.modifies_content());
+    }
+
     #[derive(Debug)]
     struct TransientAction;
 
@@ -345,5 +366,41 @@ mod tests {
         let action = MergeBreakingTransient;
         assert!(!action.is_recorded());
         assert!(action.breaks_merge());
+    }
+
+    #[derive(Debug)]
+    struct UiStateAction {
+        old_value: i32,
+        new_value: i32,
+    }
+
+    impl EditAction<Counter> for UiStateAction {
+        fn apply(&mut self, target: &mut Counter) -> EditActionResult {
+            target.value = self.new_value;
+            Ok(())
+        }
+
+        fn undo(&mut self, target: &mut Counter) -> EditActionResult {
+            target.value = self.old_value;
+            Ok(())
+        }
+
+        fn description(&self) -> &str {
+            "UI state change"
+        }
+
+        fn modifies_content(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn ui_state_action_is_recorded_but_not_content() {
+        let action = UiStateAction {
+            old_value: 0,
+            new_value: 1,
+        };
+        assert!(action.is_recorded());
+        assert!(!action.modifies_content());
     }
 }

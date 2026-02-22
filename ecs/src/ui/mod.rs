@@ -32,7 +32,130 @@ mod world_inspector;
 pub use component_inspector::{ImportComponentAction, show_component_inspector};
 pub use world_inspector::{DeleteEntityAction, SpawnPrefabAction, show_world_inspector};
 
+use redlilium_core::abstract_editor::{ActionQueue, EditAction, EditActionResult};
+
 use crate::{Entity, World};
+
+// ---------------------------------------------------------------------------
+// Selection resource
+// ---------------------------------------------------------------------------
+
+/// ECS resource tracking which entities are currently selected in the editor.
+///
+/// Stored as a resource in [`World`]. The world inspector writes to it via
+/// [`SelectAction`], and the component inspector reads from it to decide
+/// what to display.
+#[derive(Debug, Default, Clone)]
+pub struct Selection {
+    entities: Vec<Entity>,
+}
+
+impl Selection {
+    pub fn new() -> Self {
+        Self {
+            entities: Vec::new(),
+        }
+    }
+
+    /// The list of currently selected entities.
+    pub fn entities(&self) -> &[Entity] {
+        &self.entities
+    }
+
+    /// Returns the single selected entity, or `None` if zero or multiple are selected.
+    pub fn single(&self) -> Option<Entity> {
+        if self.entities.len() == 1 {
+            Some(self.entities[0])
+        } else {
+            None
+        }
+    }
+
+    pub fn is_selected(&self, entity: Entity) -> bool {
+        self.entities.contains(&entity)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entities.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.entities.len()
+    }
+
+    pub fn set(&mut self, entities: Vec<Entity>) {
+        self.entities = entities;
+    }
+
+    pub fn clear(&mut self) {
+        self.entities.clear();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Select action (non-recorded — selection is not undoable)
+// ---------------------------------------------------------------------------
+
+/// Undoable editor action that changes the current entity selection.
+///
+/// Pushed to the [`ActionQueue`] by the world inspector on click.
+/// Returns `false` from [`modifies_content()`](EditAction::modifies_content)
+/// so that selection changes are undoable but do not count as unsaved
+/// document changes.
+#[derive(Debug)]
+pub struct SelectAction {
+    new_selection: Vec<Entity>,
+    old_selection: Vec<Entity>,
+}
+
+impl SelectAction {
+    /// Select a single entity (replaces any existing selection).
+    pub fn single(entity: Entity) -> Self {
+        Self {
+            new_selection: vec![entity],
+            old_selection: Vec::new(),
+        }
+    }
+
+    /// Set selection to a specific list of entities.
+    pub fn set(entities: Vec<Entity>) -> Self {
+        Self {
+            new_selection: entities,
+            old_selection: Vec::new(),
+        }
+    }
+
+    /// Clear selection entirely.
+    pub fn clear() -> Self {
+        Self {
+            new_selection: Vec::new(),
+            old_selection: Vec::new(),
+        }
+    }
+}
+
+impl EditAction<World> for SelectAction {
+    fn apply(&mut self, world: &mut World) -> EditActionResult {
+        let mut sel = world.resource_mut::<Selection>();
+        self.old_selection = sel.entities().to_vec();
+        sel.set(self.new_selection.clone());
+        Ok(())
+    }
+
+    fn undo(&mut self, world: &mut World) -> EditActionResult {
+        let mut sel = world.resource_mut::<Selection>();
+        sel.set(self.old_selection.clone());
+        Ok(())
+    }
+
+    fn description(&self) -> &str {
+        "Select"
+    }
+
+    fn modifies_content(&self) -> bool {
+        false
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Drag-and-drop payloads (shared between inspector and editor)
@@ -68,8 +191,6 @@ pub(crate) struct PendingReparent {
 
 /// Persistent UI state for the inspector panels.
 pub struct InspectorState {
-    /// Currently selected entity (if any).
-    pub selected: Option<Entity>,
     /// Filter text for entity search.
     pub filter: String,
     /// Whether to show editor-only entities in the world inspector.
@@ -89,12 +210,13 @@ pub struct InspectorState {
     pub pending_prefab_import: Option<(String, Option<Entity>)>,
     /// Fallback deferred delete (only used when no ActionQueue resource exists).
     pub(crate) pending_delete: Option<Entity>,
+    /// Fallback deferred selection (only used when no ActionQueue resource exists).
+    pub(crate) pending_selection: Option<Vec<Entity>>,
 }
 
 impl InspectorState {
     pub fn new() -> Self {
         Self {
-            selected: None,
             filter: String::new(),
             show_editor_entities: false,
             expanded: std::collections::HashSet::new(),
@@ -103,6 +225,7 @@ impl InspectorState {
             pending_component_import: None,
             pending_prefab_import: None,
             pending_delete: None,
+            pending_selection: None,
         }
     }
 
@@ -134,6 +257,12 @@ impl InspectorState {
         {
             crate::std::hierarchy::despawn_recursive(world, entity);
         }
+
+        if let Some(entities) = self.pending_selection.take() {
+            ensure_selection_resource(world);
+            let mut sel = world.resource_mut::<Selection>();
+            sel.set(entities);
+        }
     }
 
     pub(crate) fn is_expanded(&self, entity: Entity) -> bool {
@@ -153,5 +282,43 @@ impl InspectorState {
 impl Default for InspectorState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Ensure a [`Selection`] resource exists in the world, inserting a default if needed.
+fn ensure_selection_resource(world: &mut World) {
+    if !world.has_resource::<Selection>() {
+        world.insert_resource(Selection::new());
+    }
+}
+
+/// Read the current selection from the [`Selection`] resource.
+/// Returns an empty slice if the resource doesn't exist.
+fn read_selection(world: &World) -> Vec<Entity> {
+    if world.has_resource::<Selection>() {
+        world.resource::<Selection>().entities().to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Check if an entity is currently selected.
+fn is_entity_selected(world: &World, entity: Entity) -> bool {
+    if world.has_resource::<Selection>() {
+        world.resource::<Selection>().is_selected(entity)
+    } else {
+        false
+    }
+}
+
+/// Submit a selection change. If an [`ActionQueue`] resource is present,
+/// pushes a [`SelectAction`]. Otherwise stores in [`InspectorState`] for
+/// deferred application.
+fn submit_selection(world: &World, state: &mut InspectorState, entities: Vec<Entity>) {
+    if world.has_resource::<ActionQueue<World>>() {
+        let queue = world.resource::<ActionQueue<World>>();
+        queue.push(Box::new(SelectAction::set(entities)));
+    } else {
+        state.pending_selection = Some(entities);
     }
 }

@@ -88,9 +88,12 @@ impl<T: Editable> EditActionHistory<T> {
             return Ok(());
         }
 
+        let is_content = action.modifies_content();
+
         // Clearing the redo stack invalidates a save point that was in redo.
         self.redo_stack.clear();
-        if let Some(d) = self.save_distance
+        if is_content
+            && let Some(d) = self.save_distance
             && d < 0
         {
             self.save_distance = None;
@@ -103,7 +106,7 @@ impl<T: Editable> EditActionHistory<T> {
                 None => {
                     // Merged into the top entry — if that entry was the save
                     // point, the save is now invalidated (content changed).
-                    if self.save_distance == Some(0) {
+                    if is_content && self.save_distance == Some(0) {
                         self.save_distance = None;
                     }
                     return Ok(());
@@ -114,7 +117,9 @@ impl<T: Editable> EditActionHistory<T> {
         self.merge_broken = false;
 
         // New entry pushed — save point moves one step further away.
-        if let Some(d) = &mut self.save_distance {
+        if is_content
+            && let Some(d) = &mut self.save_distance
+        {
             *d += 1;
         }
 
@@ -140,8 +145,11 @@ impl<T: Editable> EditActionHistory<T> {
             .pop_back()
             .ok_or_else(|| EditActionError::Custom("nothing to undo".into()))?;
         action.undo(target)?;
+        let is_content = action.modifies_content();
         self.redo_stack.push(action);
-        if let Some(d) = &mut self.save_distance {
+        if is_content
+            && let Some(d) = &mut self.save_distance
+        {
             *d -= 1;
         }
         Ok(())
@@ -156,8 +164,11 @@ impl<T: Editable> EditActionHistory<T> {
             .pop()
             .ok_or_else(|| EditActionError::Custom("nothing to redo".into()))?;
         action.apply(target)?;
+        let is_content = action.modifies_content();
         self.undo_stack.push_back(action);
-        if let Some(d) = &mut self.save_distance {
+        if is_content
+            && let Some(d) = &mut self.save_distance
+        {
             *d += 1;
         }
         if self.undo_stack.len() > self.max_undo {
@@ -1069,6 +1080,210 @@ mod tests {
         history.clear();
         // Target state differs from save, and history is gone
         assert!(history.has_unsaved_changes());
+    }
+
+    // --- Non-content (UI-state) action tests ---
+
+    /// Recorded action that does NOT modify content (UI state only).
+    #[derive(Debug)]
+    struct SelectionAction {
+        old_value: i32,
+        new_value: i32,
+    }
+
+    impl EditAction<Counter> for SelectionAction {
+        fn apply(&mut self, target: &mut Counter) -> EditActionResult {
+            target.value = self.new_value;
+            Ok(())
+        }
+
+        fn undo(&mut self, target: &mut Counter) -> EditActionResult {
+            target.value = self.old_value;
+            Ok(())
+        }
+
+        fn description(&self) -> &str {
+            "Select"
+        }
+
+        fn modifies_content(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn non_content_action_is_recorded_but_no_save_change() {
+        let mut history = EditActionHistory::new(DEFAULT_MAX_UNDO);
+        let mut counter = Counter { value: 0 };
+
+        history.mark_saved();
+        history
+            .execute(
+                Box::new(SelectionAction {
+                    old_value: 0,
+                    new_value: 42,
+                }),
+                &mut counter,
+            )
+            .unwrap();
+        assert_eq!(counter.value, 42);
+        assert_eq!(history.undo_count(), 1); // recorded in undo stack
+        assert!(!history.has_unsaved_changes()); // but no save distance change
+    }
+
+    #[test]
+    fn non_content_action_is_undoable() {
+        let mut history = EditActionHistory::new(DEFAULT_MAX_UNDO);
+        let mut counter = Counter { value: 0 };
+
+        history
+            .execute(
+                Box::new(SelectionAction {
+                    old_value: 0,
+                    new_value: 42,
+                }),
+                &mut counter,
+            )
+            .unwrap();
+        assert_eq!(counter.value, 42);
+        history.undo(&mut counter).unwrap();
+        assert_eq!(counter.value, 0);
+    }
+
+    #[test]
+    fn non_content_action_undo_does_not_affect_save() {
+        let mut history = EditActionHistory::new(DEFAULT_MAX_UNDO);
+        let mut counter = Counter { value: 0 };
+
+        // Execute content action, mark saved
+        history
+            .execute(Box::new(Add { amount: 5 }), &mut counter)
+            .unwrap();
+        history.mark_saved();
+        assert!(!history.has_unsaved_changes());
+
+        // Execute non-content action
+        history
+            .execute(
+                Box::new(SelectionAction {
+                    old_value: 5,
+                    new_value: 99,
+                }),
+                &mut counter,
+            )
+            .unwrap();
+        assert!(!history.has_unsaved_changes()); // still saved
+
+        // Undo the non-content action
+        history.undo(&mut counter).unwrap();
+        assert!(!history.has_unsaved_changes()); // still saved
+    }
+
+    #[test]
+    fn non_content_action_redo_does_not_affect_save() {
+        let mut history = EditActionHistory::new(DEFAULT_MAX_UNDO);
+        let mut counter = Counter { value: 0 };
+
+        history.mark_saved();
+
+        // Execute + undo non-content action
+        history
+            .execute(
+                Box::new(SelectionAction {
+                    old_value: 0,
+                    new_value: 42,
+                }),
+                &mut counter,
+            )
+            .unwrap();
+        history.undo(&mut counter).unwrap();
+        assert!(!history.has_unsaved_changes());
+
+        // Redo the non-content action
+        history.redo(&mut counter).unwrap();
+        assert!(!history.has_unsaved_changes());
+    }
+
+    #[test]
+    fn mixed_content_and_non_content_save_tracking() {
+        let mut history = EditActionHistory::new(DEFAULT_MAX_UNDO);
+        let mut counter = Counter { value: 0 };
+
+        history.mark_saved();
+
+        // Content action: save_distance becomes 1
+        history
+            .execute(Box::new(Add { amount: 10 }), &mut counter)
+            .unwrap();
+        assert!(history.has_unsaved_changes());
+
+        // Non-content action: save_distance stays 1
+        history
+            .execute(
+                Box::new(SelectionAction {
+                    old_value: 10,
+                    new_value: 99,
+                }),
+                &mut counter,
+            )
+            .unwrap();
+        assert!(history.has_unsaved_changes());
+
+        // Undo non-content: save_distance stays 1
+        history.undo(&mut counter).unwrap();
+        assert!(history.has_unsaved_changes());
+
+        // Undo content: save_distance becomes 0
+        history.undo(&mut counter).unwrap();
+        assert!(!history.has_unsaved_changes());
+    }
+
+    #[test]
+    fn non_content_action_clears_redo_stack() {
+        let mut history = EditActionHistory::new(DEFAULT_MAX_UNDO);
+        let mut counter = Counter { value: 0 };
+
+        // Execute content action, then undo to put it in redo
+        history
+            .execute(Box::new(Add { amount: 5 }), &mut counter)
+            .unwrap();
+        history.undo(&mut counter).unwrap();
+        assert_eq!(history.redo_count(), 1);
+
+        // Execute non-content action — still clears redo (linear history)
+        history
+            .execute(
+                Box::new(SelectionAction {
+                    old_value: 0,
+                    new_value: 42,
+                }),
+                &mut counter,
+            )
+            .unwrap();
+        assert_eq!(history.redo_count(), 0);
+    }
+
+    #[test]
+    fn non_content_at_save_point_does_not_invalidate() {
+        let mut history = EditActionHistory::new(DEFAULT_MAX_UNDO);
+        let mut counter = Counter { value: 0 };
+
+        history
+            .execute(Box::new(Add { amount: 5 }), &mut counter)
+            .unwrap();
+        history.mark_saved();
+
+        // Non-content action at save point — should not invalidate
+        history
+            .execute(
+                Box::new(SelectionAction {
+                    old_value: 5,
+                    new_value: 99,
+                }),
+                &mut counter,
+            )
+            .unwrap();
+        assert!(!history.has_unsaved_changes());
     }
 
     #[test]

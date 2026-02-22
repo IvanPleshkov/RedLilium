@@ -34,6 +34,7 @@ pub fn show_world_inspector(ui: &mut egui::Ui, world: &World, state: &mut Inspec
 
     // Entity count
     ui.label(format!("Entities: {}", world.entity_count()));
+
     ui.separator();
 
     egui::ScrollArea::vertical()
@@ -161,10 +162,8 @@ fn show_entity_node(ui: &mut egui::Ui, world: &World, entity: Entity, state: &mu
     }
 
     let has_children = world.get::<Children>(entity).is_some_and(|c| !c.is_empty());
-    let is_selected = state.selected == Some(entity);
+    let is_selected = super::is_entity_selected(world, entity);
 
-    // Button::selectable looks like selectable_label but supports
-    // click_and_drag sense so both selection and drag-and-drop work.
     let entity_button =
         egui::Button::selectable(is_selected, &label).sense(egui::Sense::click_and_drag());
 
@@ -177,8 +176,11 @@ fn show_entity_node(ui: &mut egui::Ui, world: &World, entity: Entity, state: &mu
                 state.toggle_expanded(entity);
             }
             let resp = ui.add(entity_button);
+            // Detect clicks from raw pointer state: resp.clicked() can fail
+            // on macOS when modifier keys (Cmd/Ctrl) are held together with
+            // Sense::click_and_drag().
             if resp.clicked() {
-                state.selected = Some(entity);
+                handle_entity_click(ui, world, state, entity);
             }
             resp.dnd_set_drag_payload(entity);
             handle_drop_target(ui, &resp, world, entity, state);
@@ -201,7 +203,7 @@ fn show_entity_node(ui: &mut egui::Ui, world: &World, entity: Entity, state: &mu
             ui.add_space(20.0); // indent to match toggle button width
             let resp = ui.add(entity_button);
             if resp.clicked() {
-                state.selected = Some(entity);
+                handle_entity_click(ui, world, state, entity);
             }
             resp.dnd_set_drag_payload(entity);
             handle_drop_target(ui, &resp, world, entity, state);
@@ -310,6 +312,27 @@ fn is_valid_reparent(world: &World, entity: Entity, target_parent: Entity) -> bo
     true
 }
 
+/// Handle click on an entity row.
+///
+/// - Plain click: select only this entity (replaces selection).
+/// - Ctrl/Cmd + click: toggle this entity in the current selection.
+fn handle_entity_click(ui: &egui::Ui, world: &World, state: &mut InspectorState, entity: Entity) {
+    let modifiers = ui.input(|i| i.modifiers);
+    if modifiers.mac_cmd || modifiers.ctrl {
+        // Ctrl/Cmd+click: toggle entity in selection
+        let mut current = super::read_selection(world);
+        if let Some(pos) = current.iter().position(|&e| e == entity) {
+            current.remove(pos);
+        } else {
+            current.push(entity);
+        }
+        super::submit_selection(world, state, current);
+    } else {
+        // Plain click: select only this entity
+        super::submit_selection(world, state, vec![entity]);
+    }
+}
+
 /// Generate a display label for an entity.
 fn entity_label(world: &World, entity: Entity) -> String {
     if let Some(name) = world.get::<Name>(entity) {
@@ -331,9 +354,13 @@ fn show_entity_context_menu(
     response.context_menu(|ui| {
         if ui.button("Delete Entity").clicked() {
             submit_delete(world, state, entity);
-            // Clear selection if we're deleting the selected entity
-            if state.selected == Some(entity) {
-                state.selected = None;
+            // Clear selection if we're deleting a selected entity
+            if super::is_entity_selected(world, entity) {
+                let remaining: Vec<Entity> = super::read_selection(world)
+                    .into_iter()
+                    .filter(|&e| e != entity)
+                    .collect();
+                super::submit_selection(world, state, remaining);
             }
             ui.close();
         }

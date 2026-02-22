@@ -237,6 +237,9 @@ impl Editor {
         // Insert ActionQueue for editor action dispatch
         world.insert_resource(ActionQueue::<World>::new());
 
+        // Insert Selection resource for tracking selected entities
+        world.insert_resource(redlilium_ecs::ui::Selection::new());
+
         // --- Setup schedules ---
         let mut schedules = Schedules::new();
 
@@ -939,6 +942,16 @@ impl AppHandler for Editor {
     fn on_file_hover_cancelled(&mut self, _ctx: &mut AppContext) {
         if let Some(egui) = &mut self.egui_controller {
             egui.on_file_hover_cancelled();
+        }
+    }
+
+    fn on_modifiers_changed(
+        &mut self,
+        _ctx: &mut AppContext,
+        modifiers: winit::keyboard::ModifiersState,
+    ) {
+        if let Some(egui) = &mut self.egui_controller {
+            egui.on_modifiers_changed(modifiers);
         }
     }
 

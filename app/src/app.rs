@@ -569,6 +569,12 @@ where
                 }
             }
 
+            WindowEvent::ModifiersChanged(modifiers) => {
+                if let Some(ctx) = &mut self.context {
+                    self.handler.on_modifiers_changed(ctx, modifiers.state());
+                }
+            }
+
             WindowEvent::DroppedFile(path) => {
                 if let Some(ctx) = &mut self.context {
                     self.handler.on_file_dropped(ctx, path);

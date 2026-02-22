@@ -161,7 +161,9 @@ impl PhysicsDemoApp {
         self.update_ui_stats(&world, dim);
 
         // Reset inspector selection since entities changed
-        self.inspector_state.selected = None;
+        if world.has_resource::<redlilium_ecs::ui::Selection>() {
+            world.resource_mut::<redlilium_ecs::ui::Selection>().clear();
+        }
 
         self.world = Some(world);
         self.systems = Some(systems);

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use crate::context::{AppContext, DrawContext};
 use redlilium_graphics::FrameSchedule;
 use winit::event::{KeyEvent, MouseButton};
+use winit::keyboard::ModifiersState;
 
 /// Trait for handling application events and draw requests.
 ///
@@ -77,6 +78,9 @@ pub trait AppHandler {
 
     /// Called when the mouse wheel is scrolled.
     fn on_mouse_scroll(&mut self, _ctx: &mut AppContext, _delta_x: f32, _delta_y: f32) {}
+
+    /// Called when modifier keys (Ctrl, Shift, Alt, Cmd) change state.
+    fn on_modifiers_changed(&mut self, _ctx: &mut AppContext, _modifiers: ModifiersState) {}
 
     /// Called when a file is dropped onto the window.
     fn on_file_dropped(&mut self, _ctx: &mut AppContext, _path: PathBuf) {}
