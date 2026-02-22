@@ -104,6 +104,11 @@ pub struct Editor {
     pending_import: Option<PendingImport>,
     /// Pending prefab import from asset browser (VFS read in progress).
     pending_prefab_import: Option<PendingPrefabImport>,
+
+    /// Whether the "unsaved changes" dialog is currently shown.
+    show_close_dialog: bool,
+    /// Set to `true` when the user confirms closing (with or without saving).
+    should_close: bool,
 }
 
 /// Tracks an in-flight VFS read for component import.
@@ -147,6 +152,8 @@ impl Editor {
             fps: 0.0,
             pending_import: None,
             pending_prefab_import: None,
+            show_close_dialog: false,
+            should_close: false,
         }
     }
 
@@ -275,6 +282,13 @@ impl Editor {
         &self.worlds[self.active_world]
     }
 
+    /// Returns `true` if any editor world has unsaved changes.
+    fn has_unsaved_changes(&self) -> bool {
+        self.worlds
+            .iter()
+            .any(|ew| ew.history.has_unsaved_changes())
+    }
+
     /// Whether the cursor is currently inside the scene view panel.
     fn cursor_in_scene_view(&self) -> bool {
         if let Some([x, y, w, h]) = self.scene_view_rect_phys {
@@ -364,7 +378,19 @@ impl AppHandler for Editor {
         }
     }
 
+    fn on_close_requested(&mut self, _ctx: &mut AppContext) -> bool {
+        if self.has_unsaved_changes() {
+            self.show_close_dialog = true;
+            return false; // don't close yet — show dialog first
+        }
+        true
+    }
+
     fn on_update(&mut self, ctx: &mut AppContext) -> bool {
+        if self.should_close {
+            return false;
+        }
+
         if self.worlds.is_empty() {
             return true;
         }
@@ -377,6 +403,10 @@ impl AppHandler for Editor {
             use crate::menu::MenuAction;
             let ew = &mut self.worlds[self.active_world];
             match action {
+                MenuAction::Save => {
+                    ew.history.mark_saved();
+                    log::info!("Saved");
+                }
                 MenuAction::Undo => {
                     if let Err(e) = ew.history.undo(&mut ew.world) {
                         log::warn!("Undo failed: {e}");
@@ -585,7 +615,29 @@ impl AppHandler for Editor {
 
             // Menu bar (egui fallback for non-macOS platforms)
             #[cfg(not(target_os = "macos"))]
-            menu::draw_menu_bar(&egui_ctx);
+            if let Some(action) = menu::draw_menu_bar(&egui_ctx) {
+                use crate::menu::MenuAction;
+                if !self.worlds.is_empty() {
+                    let ew = &mut self.worlds[self.active_world];
+                    match action {
+                        MenuAction::Save => {
+                            ew.history.mark_saved();
+                            log::info!("Saved");
+                        }
+                        MenuAction::Undo => {
+                            if let Err(e) = ew.history.undo(&mut ew.world) {
+                                log::warn!("Undo failed: {e}");
+                            }
+                        }
+                        MenuAction::Redo => {
+                            if let Err(e) = ew.history.redo(&mut ew.world) {
+                                log::warn!("Redo failed: {e}");
+                            }
+                        }
+                        _ => log::info!("Menu action: {action:?}"),
+                    }
+                }
+            }
 
             // Toolbar (below menu bar)
             self.play_state = toolbar::draw_toolbar(&egui_ctx, self.play_state);
@@ -646,6 +698,51 @@ impl AppHandler for Editor {
                         scene_view_rect = tab_viewer.scene_view_rect;
                     }
                 });
+
+            // Modal "Unsaved Changes" dialog
+            if self.show_close_dialog {
+                // Full-screen dimming overlay that captures all interaction.
+                egui::Area::new("close_dialog_overlay".into())
+                    .fixed_pos(egui::pos2(0.0, 0.0))
+                    .order(egui::Order::Foreground)
+                    .interactable(true)
+                    .show(&egui_ctx, |ui| {
+                        let screen = ui.ctx().input(|i| i.viewport_rect());
+                        ui.allocate_rect(screen, egui::Sense::click());
+                        ui.painter().rect_filled(
+                            screen,
+                            egui::CornerRadius::ZERO,
+                            egui::Color32::from_black_alpha(128),
+                        );
+                    });
+
+                // Dialog window, centered, above the overlay.
+                egui::Window::new("Unsaved Changes")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                    .order(egui::Order::Foreground)
+                    .show(&egui_ctx, |ui| {
+                        ui.label("You have unsaved changes. What would you like to do?");
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Save").clicked() {
+                                for ew in &mut self.worlds {
+                                    ew.history.mark_saved();
+                                }
+                                self.show_close_dialog = false;
+                                self.should_close = true;
+                            }
+                            if ui.button("Don't Save").clicked() {
+                                self.show_close_dialog = false;
+                                self.should_close = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                self.show_close_dialog = false;
+                            }
+                        });
+                    });
+            }
 
             // Store egui input state for next frame
             pixels_per_point = egui_ctx.pixels_per_point();

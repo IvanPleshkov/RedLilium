@@ -472,19 +472,28 @@ where
         match event {
             WindowEvent::CloseRequested => {
                 log::info!("Close requested");
-                self.running = false;
 
-                // Shutdown handler
-                if let Some(ctx) = &mut self.context {
-                    self.handler.on_shutdown(ctx);
+                // Let the handler decide whether to close immediately.
+                let allow_close = self
+                    .context
+                    .as_mut()
+                    .is_none_or(|ctx| self.handler.on_close_requested(ctx));
+
+                if allow_close {
+                    self.running = false;
+
+                    // Shutdown handler
+                    if let Some(ctx) = &mut self.context {
+                        self.handler.on_shutdown(ctx);
+                    }
+
+                    // Wait for GPU before exiting
+                    if let Some(ctx) = &self.context {
+                        ctx.pipeline.wait_idle();
+                    }
+
+                    event_loop.exit();
                 }
-
-                // Wait for GPU before exiting
-                if let Some(ctx) = &self.context {
-                    ctx.pipeline.wait_idle();
-                }
-
-                event_loop.exit();
             }
 
             WindowEvent::Resized(size) => {

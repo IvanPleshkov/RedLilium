@@ -87,6 +87,17 @@ pub trait AppHandler {
     /// Called when a file drag leaves the window without dropping.
     fn on_file_hover_cancelled(&mut self, _ctx: &mut AppContext) {}
 
+    /// Called when the user requests to close the window (e.g. clicking the
+    /// close button or pressing Alt+F4).
+    ///
+    /// Return `true` to allow the window to close immediately (the default).
+    /// Return `false` to cancel the close — for example to show an "unsaved
+    /// changes" dialog first. The handler can later close the application by
+    /// returning `false` from [`on_update`](Self::on_update).
+    fn on_close_requested(&mut self, _ctx: &mut AppContext) -> bool {
+        true
+    }
+
     /// Called when the application is closing.
     ///
     /// Use this to clean up resources.

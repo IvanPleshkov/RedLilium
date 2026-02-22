@@ -2,6 +2,7 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuAction {
     About,
+    Save,
     Undo,
     Redo,
 }
@@ -19,6 +20,7 @@ mod native {
         #[allow(dead_code)]
         menu: muda::Menu,
         about_id: MenuId,
+        save_id: MenuId,
         undo_id: MenuId,
         redo_id: MenuId,
     }
@@ -45,6 +47,20 @@ mod native {
             )
             .expect("failed to create app submenu");
 
+            // File submenu
+            let save_item = MenuItem::new(
+                "Save",
+                true,
+                Some(Accelerator::new(
+                    Some(muda::accelerator::Modifiers::META),
+                    muda::accelerator::Code::KeyS,
+                )),
+            );
+            let save_id = save_item.id().clone();
+
+            let file_submenu = Submenu::with_items("File", true, &[&save_item])
+                .expect("failed to create file submenu");
+
             // Edit submenu
             let undo_item = MenuItem::new(
                 "Undo",
@@ -70,6 +86,8 @@ mod native {
 
             menu.append(&app_submenu)
                 .expect("failed to append app submenu");
+            menu.append(&file_submenu)
+                .expect("failed to append file submenu");
             menu.append(&edit_submenu)
                 .expect("failed to append edit submenu");
 
@@ -78,6 +96,7 @@ mod native {
             NativeMenu {
                 menu,
                 about_id,
+                save_id,
                 undo_id,
                 redo_id,
             }
@@ -88,6 +107,8 @@ mod native {
             if let Ok(event) = MenuEvent::receiver().try_recv() {
                 if event.id == self.about_id {
                     return Some(MenuAction::About);
+                } else if event.id == self.save_id {
+                    return Some(MenuAction::Save);
                 } else if event.id == self.undo_id {
                     return Some(MenuAction::Undo);
                 } else if event.id == self.redo_id {
@@ -105,11 +126,21 @@ pub use native::NativeMenu;
 // --- egui fallback for non-macOS ---
 
 #[cfg(not(target_os = "macos"))]
-pub fn draw_menu_bar(ctx: &egui::Context) {
+pub fn draw_menu_bar(ctx: &egui::Context) -> Option<MenuAction> {
+    let mut action = None;
     egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("RedLilium", |ui| {
                 if ui.button("About RedLilium Editor").clicked() {
+                    ui.close();
+                }
+            });
+            ui.menu_button("File", |ui| {
+                if ui
+                    .add(egui::Button::new("Save").shortcut_text("Ctrl+S"))
+                    .clicked()
+                {
+                    action = Some(MenuAction::Save);
                     ui.close();
                 }
             });
@@ -118,15 +149,18 @@ pub fn draw_menu_bar(ctx: &egui::Context) {
                     .add(egui::Button::new("Undo").shortcut_text("Ctrl+Z"))
                     .clicked()
                 {
+                    action = Some(MenuAction::Undo);
                     ui.close();
                 }
                 if ui
                     .add(egui::Button::new("Redo").shortcut_text("Ctrl+Shift+Z"))
                     .clicked()
                 {
+                    action = Some(MenuAction::Redo);
                     ui.close();
                 }
             });
         });
     });
+    action
 }

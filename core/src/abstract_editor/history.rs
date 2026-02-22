@@ -38,6 +38,14 @@ pub struct EditActionHistory<T: Editable> {
     redo_stack: Vec<Box<dyn EditAction<T>>>,
     max_undo: usize,
     merge_broken: bool,
+    /// Tracks distance from the saved state.
+    ///
+    /// - `Some(0)` — the current state matches the last save.
+    /// - `Some(n)` where `n > 0` — `n` undos needed to reach the saved state.
+    /// - `Some(n)` where `n < 0` — `|n|` redos needed to reach the saved state.
+    /// - `None` — never saved, or the save point is permanently unreachable
+    ///   (e.g. after capacity overflow dropped it, or the redo branch was discarded).
+    save_distance: Option<i64>,
 }
 
 impl<T: Editable> EditActionHistory<T> {
@@ -50,6 +58,7 @@ impl<T: Editable> EditActionHistory<T> {
             redo_stack: Vec::new(),
             max_undo,
             merge_broken: false,
+            save_distance: None,
         }
     }
 
@@ -79,19 +88,45 @@ impl<T: Editable> EditActionHistory<T> {
             return Ok(());
         }
 
+        // Clearing the redo stack invalidates a save point that was in redo.
         self.redo_stack.clear();
+        if let Some(d) = self.save_distance
+            && d < 0
+        {
+            self.save_distance = None;
+        }
+
         if !self.merge_broken
             && let Some(last) = self.undo_stack.back_mut()
         {
             match last.merge(action) {
-                None => return Ok(()),
+                None => {
+                    // Merged into the top entry — if that entry was the save
+                    // point, the save is now invalidated (content changed).
+                    if self.save_distance == Some(0) {
+                        self.save_distance = None;
+                    }
+                    return Ok(());
+                }
                 Some(returned) => action = returned,
             }
         }
         self.merge_broken = false;
+
+        // New entry pushed — save point moves one step further away.
+        if let Some(d) = &mut self.save_distance {
+            *d += 1;
+        }
+
         self.undo_stack.push_back(action);
         if self.undo_stack.len() > self.max_undo {
             self.undo_stack.pop_front();
+            // If the save point was beyond the oldest surviving entry, it's gone.
+            if let Some(d) = self.save_distance
+                && d > self.undo_stack.len() as i64
+            {
+                self.save_distance = None;
+            }
         }
         Ok(())
     }
@@ -106,6 +141,9 @@ impl<T: Editable> EditActionHistory<T> {
             .ok_or_else(|| EditActionError::Custom("nothing to undo".into()))?;
         action.undo(target)?;
         self.redo_stack.push(action);
+        if let Some(d) = &mut self.save_distance {
+            *d -= 1;
+        }
         Ok(())
     }
 
@@ -119,8 +157,16 @@ impl<T: Editable> EditActionHistory<T> {
             .ok_or_else(|| EditActionError::Custom("nothing to redo".into()))?;
         action.apply(target)?;
         self.undo_stack.push_back(action);
+        if let Some(d) = &mut self.save_distance {
+            *d += 1;
+        }
         if self.undo_stack.len() > self.max_undo {
             self.undo_stack.pop_front();
+            if let Some(d) = self.save_distance
+                && d > self.undo_stack.len() as i64
+            {
+                self.save_distance = None;
+            }
         }
         Ok(())
     }
@@ -160,11 +206,39 @@ impl<T: Editable> EditActionHistory<T> {
         self.max_undo
     }
 
+    /// Records the current state as the saved state.
+    ///
+    /// After calling this, [`has_unsaved_changes`](Self::has_unsaved_changes)
+    /// returns `false` until the history is modified by execute, undo, or redo.
+    pub fn mark_saved(&mut self) {
+        self.save_distance = Some(0);
+    }
+
+    /// Returns `true` if the current state differs from the last saved state.
+    ///
+    /// Returns `true` if [`mark_saved`](Self::mark_saved) has never been called,
+    /// or if the history has been modified since the last save, or if the save
+    /// point is permanently unreachable (e.g. dropped by capacity overflow or
+    /// the redo branch was discarded).
+    pub fn has_unsaved_changes(&self) -> bool {
+        self.save_distance != Some(0)
+    }
+
     /// Clears both undo and redo stacks and resets the merge-broken flag.
+    ///
+    /// If the current state was the saved state (`has_unsaved_changes` was
+    /// `false`), it remains so after clearing. Otherwise the save point is
+    /// permanently lost.
     pub fn clear(&mut self) {
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.merge_broken = false;
+        // If we were at the save point, clearing history doesn't change
+        // the target — we're still at the saved state. Otherwise the
+        // save point is unreachable.
+        if self.save_distance != Some(0) {
+            self.save_distance = None;
+        }
     }
 }
 
@@ -175,6 +249,7 @@ impl<T: Editable> fmt::Debug for EditActionHistory<T> {
             .field("redo_count", &self.redo_stack.len())
             .field("max_undo", &self.max_undo)
             .field("merge_broken", &self.merge_broken)
+            .field("save_distance", &self.save_distance)
             .finish()
     }
 }
@@ -807,5 +882,220 @@ mod tests {
             )
             .unwrap();
         assert_eq!(history.undo_count(), 1);
+    }
+
+    // --- Save tracking tests ---
+
+    #[test]
+    fn unsaved_before_mark_saved() {
+        let history = EditActionHistory::<Counter>::new(DEFAULT_MAX_UNDO);
+        assert!(history.has_unsaved_changes());
+    }
+
+    #[test]
+    fn not_unsaved_after_mark_saved() {
+        let mut history = EditActionHistory::<Counter>::new(DEFAULT_MAX_UNDO);
+        history.mark_saved();
+        assert!(!history.has_unsaved_changes());
+    }
+
+    #[test]
+    fn unsaved_after_execute() {
+        let mut history = EditActionHistory::new(DEFAULT_MAX_UNDO);
+        let mut counter = Counter { value: 0 };
+
+        history.mark_saved();
+        history
+            .execute(Box::new(Add { amount: 1 }), &mut counter)
+            .unwrap();
+        assert!(history.has_unsaved_changes());
+    }
+
+    #[test]
+    fn not_unsaved_after_undo_to_save_point() {
+        let mut history = EditActionHistory::new(DEFAULT_MAX_UNDO);
+        let mut counter = Counter { value: 0 };
+
+        history.mark_saved();
+        history
+            .execute(Box::new(Add { amount: 1 }), &mut counter)
+            .unwrap();
+        history.undo(&mut counter).unwrap();
+        assert!(!history.has_unsaved_changes());
+    }
+
+    #[test]
+    fn not_unsaved_after_undo_then_redo_to_save_point() {
+        let mut history = EditActionHistory::new(DEFAULT_MAX_UNDO);
+        let mut counter = Counter { value: 0 };
+
+        history
+            .execute(Box::new(Add { amount: 1 }), &mut counter)
+            .unwrap();
+        history.mark_saved();
+        history.undo(&mut counter).unwrap();
+        assert!(history.has_unsaved_changes());
+        history.redo(&mut counter).unwrap();
+        assert!(!history.has_unsaved_changes());
+    }
+
+    #[test]
+    fn unsaved_after_undo_past_save_point() {
+        let mut history = EditActionHistory::new(DEFAULT_MAX_UNDO);
+        let mut counter = Counter { value: 0 };
+
+        history
+            .execute(Box::new(Add { amount: 1 }), &mut counter)
+            .unwrap();
+        history.mark_saved();
+        history.undo(&mut counter).unwrap();
+        assert!(history.has_unsaved_changes());
+    }
+
+    #[test]
+    fn save_lost_when_new_branch_after_undo() {
+        let mut history = EditActionHistory::new(DEFAULT_MAX_UNDO);
+        let mut counter = Counter { value: 0 };
+
+        history
+            .execute(Box::new(Add { amount: 1 }), &mut counter)
+            .unwrap();
+        history.mark_saved();
+        // Undo to before save, then execute new action (clears redo with save)
+        history.undo(&mut counter).unwrap();
+        history
+            .execute(Box::new(Add { amount: 2 }), &mut counter)
+            .unwrap();
+        // Save was in the redo branch that was discarded
+        assert!(history.has_unsaved_changes());
+        // Can't get back to saved state
+        history.undo(&mut counter).unwrap();
+        assert!(history.has_unsaved_changes());
+    }
+
+    #[test]
+    fn save_lost_when_capacity_overflow() {
+        let mut history = EditActionHistory::new(2);
+        let mut counter = Counter { value: 0 };
+
+        history.mark_saved();
+        history
+            .execute(Box::new(Add { amount: 1 }), &mut counter)
+            .unwrap();
+        history
+            .execute(Box::new(Add { amount: 2 }), &mut counter)
+            .unwrap();
+        // Still reachable (2 undos, stack has 2 entries)
+        assert!(history.has_unsaved_changes());
+        history.undo(&mut counter).unwrap();
+        history.undo(&mut counter).unwrap();
+        assert!(!history.has_unsaved_changes());
+
+        // Now overflow: push a third, dropping the oldest
+        history.redo(&mut counter).unwrap();
+        history.redo(&mut counter).unwrap();
+        history
+            .execute(Box::new(Add { amount: 3 }), &mut counter)
+            .unwrap();
+        // save_distance was 3 but stack has 2 entries → lost
+        assert!(history.has_unsaved_changes());
+    }
+
+    #[test]
+    fn merge_at_save_point_invalidates() {
+        let mut history = EditActionHistory::new(DEFAULT_MAX_UNDO);
+        let mut counter = Counter { value: 0 };
+
+        history
+            .execute(
+                Box::new(SetValue {
+                    old_value: 0,
+                    new_value: 10,
+                }),
+                &mut counter,
+            )
+            .unwrap();
+        history.mark_saved();
+        // Merge into the save point entry
+        history
+            .execute(
+                Box::new(SetValue {
+                    old_value: 10,
+                    new_value: 20,
+                }),
+                &mut counter,
+            )
+            .unwrap();
+        // The save entry was modified by merge → save lost
+        assert!(history.has_unsaved_changes());
+    }
+
+    #[test]
+    fn non_recorded_action_does_not_affect_save() {
+        let mut history = EditActionHistory::new(DEFAULT_MAX_UNDO);
+        let mut counter = Counter { value: 0 };
+
+        history.mark_saved();
+        history
+            .execute(Box::new(CameraMove { offset: 42 }), &mut counter)
+            .unwrap();
+        // Non-recorded action doesn't change save state
+        assert!(!history.has_unsaved_changes());
+    }
+
+    #[test]
+    fn clear_preserves_save_at_current_state() {
+        let mut history = EditActionHistory::new(DEFAULT_MAX_UNDO);
+        let mut counter = Counter { value: 0 };
+
+        history
+            .execute(Box::new(Add { amount: 1 }), &mut counter)
+            .unwrap();
+        history.mark_saved();
+        history.clear();
+        // Target state unchanged, still at save point
+        assert!(!history.has_unsaved_changes());
+    }
+
+    #[test]
+    fn clear_loses_unreachable_save() {
+        let mut history = EditActionHistory::new(DEFAULT_MAX_UNDO);
+        let mut counter = Counter { value: 0 };
+
+        history.mark_saved();
+        history
+            .execute(Box::new(Add { amount: 1 }), &mut counter)
+            .unwrap();
+        history.clear();
+        // Target state differs from save, and history is gone
+        assert!(history.has_unsaved_changes());
+    }
+
+    #[test]
+    fn mark_saved_after_execute_and_undo_round_trip() {
+        let mut history = EditActionHistory::new(DEFAULT_MAX_UNDO);
+        let mut counter = Counter { value: 0 };
+
+        history
+            .execute(Box::new(Add { amount: 5 }), &mut counter)
+            .unwrap();
+        history
+            .execute(Box::new(Add { amount: 3 }), &mut counter)
+            .unwrap();
+        history.undo(&mut counter).unwrap();
+        history.mark_saved(); // saved in the middle
+        assert!(!history.has_unsaved_changes());
+
+        // Undo further → unsaved
+        history.undo(&mut counter).unwrap();
+        assert!(history.has_unsaved_changes());
+
+        // Redo back → saved again
+        history.redo(&mut counter).unwrap();
+        assert!(!history.has_unsaved_changes());
+
+        // Redo past save → unsaved
+        history.redo(&mut counter).unwrap();
+        assert!(history.has_unsaved_changes());
     }
 }
