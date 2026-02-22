@@ -17,6 +17,8 @@ use redlilium_app::{App, AppArgs, DefaultAppArgs};
 
 fn main() {
     log_capture::install();
-    let args = DefaultAppArgs::parse().with_title_str("RedLilium Editor");
+    let args = DefaultAppArgs::parse()
+        .with_title_str("RedLilium Editor")
+        .with_custom_titlebar(true);
     App::run(editor::Editor::new(), args);
 }

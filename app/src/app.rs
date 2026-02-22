@@ -1,10 +1,13 @@
 //! Main application struct and event loop.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
+#[cfg(target_os = "macos")]
+use winit::platform::macos::WindowAttributesExtMacOS;
 #[cfg(target_os = "windows")]
 use winit::platform::windows::EventLoopBuilderExtWindows;
 use winit::window::{Window, WindowId};
@@ -50,7 +53,7 @@ where
 {
     handler: H,
     args: A,
-    window: Option<Window>,
+    window: Option<Arc<Window>>,
     context: Option<AppContext>,
     start_time: Instant,
     last_frame_time: Instant,
@@ -209,6 +212,8 @@ where
         );
 
         self.context = Some(AppContext {
+            window: self.window.as_ref().unwrap().clone(),
+            custom_titlebar: self.args.custom_titlebar(),
             instance,
             device,
             surface,
@@ -424,6 +429,22 @@ where
                     self.args.window_height(),
                 ));
 
+            // Apply custom titlebar
+            if self.args.custom_titlebar() {
+                #[cfg(target_os = "macos")]
+                {
+                    window_attributes = window_attributes
+                        .with_titlebar_transparent(true)
+                        .with_title_hidden(true)
+                        .with_fullsize_content_view(true);
+                }
+
+                #[cfg(not(target_os = "macos"))]
+                {
+                    window_attributes = window_attributes.with_decorations(false);
+                }
+            }
+
             // Apply window mode
             match self.args.window_mode() {
                 WindowMode::Windowed => {}
@@ -446,7 +467,7 @@ where
             match event_loop.create_window(window_attributes) {
                 Ok(window) => {
                     log::info!("Window created");
-                    self.window = Some(window);
+                    self.window = Some(Arc::new(window));
 
                     if !self.init_graphics() {
                         log::error!("Failed to initialize graphics");

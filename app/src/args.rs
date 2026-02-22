@@ -135,6 +135,19 @@ pub trait AppArgs: Sized {
         false
     }
 
+    /// Whether to use a custom titlebar (frameless window with custom controls).
+    ///
+    /// When enabled:
+    /// - **macOS**: Uses transparent titlebar with fullsize content view.
+    ///   Native traffic light buttons remain visible.
+    /// - **Windows/Linux**: Removes OS decorations entirely.
+    ///   The application must draw custom window controls.
+    ///
+    /// Default: false
+    fn custom_titlebar(&self) -> bool {
+        false
+    }
+
     /// Get the resize debounce time in milliseconds.
     ///
     /// During continuous window resizing, the application buffers resize events
@@ -275,6 +288,7 @@ pub struct DefaultAppArgs {
     max_frames: Option<u64>,
     validation: bool,
     hdr: bool,
+    custom_titlebar: bool,
 }
 
 impl Default for DefaultAppArgs {
@@ -290,6 +304,7 @@ impl Default for DefaultAppArgs {
             max_frames: None,
             validation: cfg!(debug_assertions),
             hdr: false,
+            custom_titlebar: false,
         }
     }
 }
@@ -301,6 +316,12 @@ impl DefaultAppArgs {
             title: title.into(),
             ..Default::default()
         }
+    }
+
+    /// Enable or disable custom titlebar (frameless window with custom controls).
+    pub fn with_custom_titlebar(mut self, custom_titlebar: bool) -> Self {
+        self.custom_titlebar = custom_titlebar;
+        self
     }
 
     /// Set the window size.
@@ -461,6 +482,7 @@ mod native {
                 max_frames: args.max_frames,
                 validation,
                 hdr: args.hdr,
+                custom_titlebar: false,
             }
         }
     }
@@ -520,6 +542,10 @@ impl AppArgs for DefaultAppArgs {
 
     fn hdr(&self) -> bool {
         self.hdr
+    }
+
+    fn custom_titlebar(&self) -> bool {
+        self.custom_titlebar
     }
 }
 

@@ -596,6 +596,9 @@ impl AppHandler for Editor {
     }
 
     fn on_draw(&mut self, mut ctx: DrawContext) -> FrameSchedule {
+        #[allow(unused_variables)]
+        let window = ctx.window().clone();
+        let custom_titlebar = ctx.custom_titlebar();
         let mut ui_graph = ctx.acquire_graph();
         let mut scene_view_rect = None;
         let mut pixels_per_point = 1.0;
@@ -610,34 +613,78 @@ impl AppHandler for Editor {
 
             let egui_ctx = egui.context().clone();
 
-            // Menu bar (egui fallback for non-macOS platforms)
+            // macOS: reserve space for the native titlebar area (traffic lights)
+            // Contains centered play controls. Double-click toggles maximize.
+            #[cfg(target_os = "macos")]
+            if custom_titlebar {
+                egui::TopBottomPanel::top("macos_titlebar_spacer")
+                    .exact_height(28.0)
+                    .show_separator_line(false)
+                    .show(&egui_ctx, |ui| {
+                        ui.horizontal_centered(|ui| {
+                            // Traffic lights occupy ~70px on the left
+                            let available = ui.available_width();
+                            ui.add_space((available / 2.0 - 40.0).max(0.0));
+                            self.play_state = toolbar::draw_play_controls(ui, self.play_state);
+                        });
+
+                        // Double-click on background toggles maximize
+                        let bar_rect = ui.min_rect();
+                        let pointer_in_bar = ui
+                            .input(|i| i.pointer.interact_pos())
+                            .is_some_and(|pos| bar_rect.contains(pos));
+                        if pointer_in_bar
+                            && !ui.ctx().is_using_pointer()
+                            && ui.input(|i| {
+                                i.pointer
+                                    .button_double_clicked(egui::PointerButton::Primary)
+                            })
+                        {
+                            window.set_maximized(!window.is_maximized());
+                        }
+                    });
+            }
+
+            // Menu bar with play controls (egui fallback for non-macOS platforms)
             #[cfg(not(target_os = "macos"))]
-            if let Some(action) = menu::draw_menu_bar(&egui_ctx) {
-                use crate::menu::MenuAction;
-                if !self.worlds.is_empty() {
-                    let ew = &mut self.worlds[self.active_world];
+            {
+                let result =
+                    menu::draw_menu_bar(&egui_ctx, &window, custom_titlebar, self.play_state);
+                self.play_state = result.play_state;
+                if let Some(action) = result.action {
+                    use crate::menu::MenuAction;
                     match action {
-                        MenuAction::Save => {
-                            ew.history.mark_saved();
-                            log::info!("Saved");
-                        }
-                        MenuAction::Undo => {
-                            if let Err(e) = ew.history.undo(&mut ew.world) {
-                                log::warn!("Undo failed: {e}");
+                        MenuAction::CloseWindow => {
+                            if self.has_unsaved_changes() {
+                                self.show_close_dialog = true;
+                            } else {
+                                self.should_close = true;
                             }
                         }
-                        MenuAction::Redo => {
-                            if let Err(e) = ew.history.redo(&mut ew.world) {
-                                log::warn!("Redo failed: {e}");
+                        _ if !self.worlds.is_empty() => {
+                            let ew = &mut self.worlds[self.active_world];
+                            match action {
+                                MenuAction::Save => {
+                                    ew.history.mark_saved();
+                                    log::info!("Saved");
+                                }
+                                MenuAction::Undo => {
+                                    if let Err(e) = ew.history.undo(&mut ew.world) {
+                                        log::warn!("Undo failed: {e}");
+                                    }
+                                }
+                                MenuAction::Redo => {
+                                    if let Err(e) = ew.history.redo(&mut ew.world) {
+                                        log::warn!("Redo failed: {e}");
+                                    }
+                                }
+                                _ => log::info!("Menu action: {action:?}"),
                             }
                         }
-                        _ => log::info!("Menu action: {action:?}"),
+                        _ => {}
                     }
                 }
             }
-
-            // Toolbar (below menu bar)
-            self.play_state = toolbar::draw_toolbar(&egui_ctx, self.play_state);
 
             // Update smoothed FPS from frame delta
             let dt = elapsed as f32;

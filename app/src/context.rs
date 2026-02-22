@@ -6,12 +6,17 @@ use redlilium_graphics::{
     FramePipeline, FrameSchedule, GraphicsDevice, GraphicsInstance, RenderGraph, ResizeManager,
     RingAllocation, RingBuffer, Surface, SurfaceTexture, TextureFormat,
 };
+use winit::window::Window;
 
 /// Application context providing access to graphics resources.
 ///
 /// This context is available during all application callbacks and provides
 /// access to the graphics device, window dimensions, and frame timing.
 pub struct AppContext {
+    /// The window.
+    pub(crate) window: Arc<Window>,
+    /// Whether custom titlebar mode is active.
+    pub(crate) custom_titlebar: bool,
     /// The graphics instance.
     pub(crate) instance: Arc<GraphicsInstance>,
     /// The graphics device.
@@ -41,6 +46,16 @@ pub struct AppContext {
 }
 
 impl AppContext {
+    /// Get the window.
+    pub fn window(&self) -> &Arc<Window> {
+        &self.window
+    }
+
+    /// Whether custom titlebar mode is active.
+    pub fn custom_titlebar(&self) -> bool {
+        self.custom_titlebar
+    }
+
     /// Get the graphics instance.
     pub fn instance(&self) -> &Arc<GraphicsInstance> {
         &self.instance
@@ -156,6 +171,16 @@ pub struct DrawContext<'a> {
 }
 
 impl<'a> DrawContext<'a> {
+    /// Get the window.
+    pub fn window(&self) -> &Arc<Window> {
+        &self.app.window
+    }
+
+    /// Whether custom titlebar mode is active.
+    pub fn custom_titlebar(&self) -> bool {
+        self.app.custom_titlebar
+    }
+
     /// Get the graphics instance.
     pub fn instance(&self) -> &Arc<GraphicsInstance> {
         &self.app.instance
