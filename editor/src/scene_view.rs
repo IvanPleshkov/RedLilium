@@ -220,7 +220,7 @@ impl SceneViewState {
             RenderTargetConfig::new()
                 .with_color(
                     ColorAttachment::from_surface(swapchain)
-                        .with_clear_color(0.15, 0.15, 0.15, 1.0),
+                        .with_clear_color(0.055, 0.063, 0.078, 1.0),
                 )
                 .with_depth_stencil(
                     DepthStencilAttachment::from_texture(self.depth_texture.clone())

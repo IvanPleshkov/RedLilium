@@ -41,10 +41,7 @@ impl EguiApp for NullEguiApp {
     fn update(&mut self, _ctx: &egui::Context) {}
 
     fn setup(&mut self, ctx: &egui::Context) {
-        let mut style = (*ctx.style()).clone();
-        style.visuals = egui::Visuals::dark();
-        style.visuals.window_corner_radius = egui::CornerRadius::same(4);
-        ctx.set_style(style);
+        crate::theme::apply(ctx);
     }
 }
 
@@ -678,10 +675,19 @@ impl AppHandler for Editor {
                         };
                         let mut dock_style = egui_dock::Style::from_egui(ui.style().as_ref());
                         dock_style.tab_bar.corner_radius = egui::CornerRadius::ZERO;
+                        dock_style.tab_bar.bg_fill = crate::theme::BG;
                         dock_style.tab.active.corner_radius = egui::CornerRadius::ZERO;
+                        dock_style.tab.active.bg_fill = crate::theme::SURFACE1;
+                        dock_style.tab.active.text_color = crate::theme::TEXT_PRIMARY;
                         dock_style.tab.inactive.corner_radius = egui::CornerRadius::ZERO;
+                        dock_style.tab.inactive.bg_fill = crate::theme::BG;
+                        dock_style.tab.inactive.text_color = crate::theme::TEXT_MUTED;
                         dock_style.tab.focused.corner_radius = egui::CornerRadius::ZERO;
+                        dock_style.tab.focused.bg_fill = crate::theme::SURFACE1;
+                        dock_style.tab.focused.text_color = crate::theme::TEXT_PRIMARY;
                         dock_style.tab.hovered.corner_radius = egui::CornerRadius::ZERO;
+                        dock_style.tab.hovered.bg_fill = crate::theme::SURFACE3;
+                        dock_style.tab.hovered.text_color = crate::theme::TEXT_PRIMARY;
                         dock_style.tab.inactive_with_kb_focus.corner_radius =
                             egui::CornerRadius::ZERO;
                         dock_style.tab.active_with_kb_focus.corner_radius =
@@ -690,6 +696,9 @@ impl AppHandler for Editor {
                             egui::CornerRadius::ZERO;
                         dock_style.tab.tab_body.corner_radius = egui::CornerRadius::ZERO;
                         dock_style.main_surface_border_rounding = egui::CornerRadius::ZERO;
+                        dock_style.separator.color_idle = crate::theme::BORDER;
+                        dock_style.separator.color_hovered = crate::theme::ACCENT_HOVER;
+                        dock_style.separator.color_dragged = crate::theme::ACCENT;
 
                         egui_dock::DockArea::new(&mut self.dock_state)
                             .style(dock_style)

@@ -103,7 +103,7 @@ impl ConsolePanel {
                         let millis = elapsed.subsec_millis();
                         let time_str = format!("{secs:>5}.{millis:03}");
                         let time_text = egui::RichText::new(time_str)
-                            .color(egui::Color32::from_gray(100))
+                            .color(crate::theme::TEXT_MUTED)
                             .monospace();
                         ui.label(time_text);
 
@@ -115,7 +115,7 @@ impl ConsolePanel {
 
                         // Target in subdued color
                         let target_text = egui::RichText::new(&entry.target)
-                            .color(egui::Color32::from_gray(120))
+                            .color(crate::theme::TEXT_SECONDARY)
                             .monospace();
                         ui.label(target_text);
 
@@ -145,10 +145,10 @@ fn level_label(level: log::Level) -> &'static str {
 
 fn level_color(level: log::Level) -> egui::Color32 {
     match level {
-        log::Level::Error => egui::Color32::from_rgb(255, 80, 80),
-        log::Level::Warn => egui::Color32::from_rgb(255, 200, 60),
-        log::Level::Info => egui::Color32::from_rgb(120, 220, 120),
-        log::Level::Debug => egui::Color32::from_rgb(100, 180, 255),
-        log::Level::Trace => egui::Color32::from_gray(140),
+        log::Level::Error => crate::theme::ERROR,
+        log::Level::Warn => crate::theme::WARNING,
+        log::Level::Info => crate::theme::SUCCESS,
+        log::Level::Debug => crate::theme::INFO,
+        log::Level::Trace => crate::theme::TEXT_MUTED,
     }
 }

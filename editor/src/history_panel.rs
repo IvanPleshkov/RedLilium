@@ -11,9 +11,9 @@ pub fn show_history(ui: &mut egui::Ui, history: &EditActionHistory<World>) {
             egui::RichText::new(format!("Undo: {undo_count}"))
                 .monospace()
                 .color(if history.can_undo() {
-                    egui::Color32::from_rgb(120, 220, 120)
+                    crate::theme::SUCCESS
                 } else {
-                    egui::Color32::from_gray(100)
+                    crate::theme::TEXT_MUTED
                 }),
         );
         ui.separator();
@@ -21,9 +21,9 @@ pub fn show_history(ui: &mut egui::Ui, history: &EditActionHistory<World>) {
             egui::RichText::new(format!("Redo: {redo_count}"))
                 .monospace()
                 .color(if history.can_redo() {
-                    egui::Color32::from_rgb(100, 180, 255)
+                    crate::theme::INFO
                 } else {
-                    egui::Color32::from_gray(100)
+                    crate::theme::TEXT_MUTED
                 }),
         );
     });
@@ -43,12 +43,12 @@ pub fn show_history(ui: &mut egui::Ui, history: &EditActionHistory<World>) {
                         ui.label(
                             egui::RichText::new("REDO")
                                 .monospace()
-                                .color(egui::Color32::from_rgb(100, 180, 255)),
+                                .color(crate::theme::INFO),
                         );
                         ui.label(
                             egui::RichText::new(*desc)
                                 .monospace()
-                                .color(egui::Color32::from_gray(120)),
+                                .color(crate::theme::TEXT_SECONDARY),
                         );
                     });
                 }
@@ -59,7 +59,7 @@ pub fn show_history(ui: &mut egui::Ui, history: &EditActionHistory<World>) {
                 ui.label(
                     egui::RichText::new("▸ current")
                         .monospace()
-                        .color(egui::Color32::from_rgb(255, 200, 60)),
+                        .color(crate::theme::WARNING),
                 );
             });
 
@@ -70,7 +70,7 @@ pub fn show_history(ui: &mut egui::Ui, history: &EditActionHistory<World>) {
                     ui.label(
                         egui::RichText::new("UNDO")
                             .monospace()
-                            .color(egui::Color32::from_rgb(120, 220, 120)),
+                            .color(crate::theme::SUCCESS),
                     );
                     ui.label(egui::RichText::new(desc).monospace());
                 });

@@ -10,6 +10,7 @@ mod menu;
 mod project;
 mod scene_view;
 mod status_bar;
+mod theme;
 mod toolbar;
 
 use redlilium_app::{App, AppArgs, DefaultAppArgs};
