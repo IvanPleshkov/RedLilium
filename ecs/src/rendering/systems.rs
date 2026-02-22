@@ -96,7 +96,10 @@ impl crate::System for ForwardRenderSystem {
                             continue;
                         }
 
-                        pass.add_draw(Arc::clone(&render_mesh.0), Arc::clone(&render_material.0));
+                        pass.add_draw(
+                            Arc::clone(&render_mesh.mesh),
+                            Arc::clone(&render_material.0),
+                        );
                     }
 
                     // Submit the graph
@@ -190,7 +193,10 @@ impl crate::System for EditorForwardRenderSystem {
                             continue;
                         }
 
-                        pass.add_draw(Arc::clone(&render_mesh.0), Arc::clone(&render_material.0));
+                        pass.add_draw(
+                            Arc::clone(&render_mesh.mesh),
+                            Arc::clone(&render_material.0),
+                        );
                     }
 
                     // Submit the graph

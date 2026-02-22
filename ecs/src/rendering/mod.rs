@@ -41,7 +41,7 @@ use crate::World;
 /// Call this after [`register_std_components`](crate::register_std_components)
 /// to enable rendering support.
 pub fn register_rendering_components(world: &mut World) {
-    world.register_component::<RenderMesh>();
-    world.register_component::<RenderMaterial>();
+    world.register_inspector::<RenderMesh>();
+    world.register_inspector::<RenderMaterial>();
     world.register_component::<CameraTarget>();
 }

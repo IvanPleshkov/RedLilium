@@ -244,7 +244,7 @@ impl SceneViewState {
             {
                 continue;
             }
-            pass.add_draw(render_mesh.0.clone(), render_material.0.clone());
+            pass.add_draw(render_mesh.mesh.clone(), render_material.0.clone());
         }
 
         Some(pass)

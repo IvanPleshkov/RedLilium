@@ -149,6 +149,40 @@ pub fn to_scale_rotation_translation(m: &Mat4) -> (Vec3, Quat, Vec3) {
     (scale, rotation, translation)
 }
 
+// ===== Axis-Aligned Bounding Box =====
+
+/// Axis-aligned bounding box defined by minimum and maximum corners.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Aabb {
+    /// Minimum corner (smallest x, y, z).
+    pub min: [f32; 3],
+    /// Maximum corner (largest x, y, z).
+    pub max: [f32; 3],
+}
+
+impl Aabb {
+    /// Create a new AABB from min and max corners.
+    pub fn new(min: [f32; 3], max: [f32; 3]) -> Self {
+        Self { min, max }
+    }
+
+    /// Compute the union of two AABBs (smallest box containing both).
+    pub fn union(&self, other: &Aabb) -> Aabb {
+        Aabb {
+            min: [
+                self.min[0].min(other.min[0]),
+                self.min[1].min(other.min[1]),
+                self.min[2].min(other.min[2]),
+            ],
+            max: [
+                self.max[0].max(other.max[0]),
+                self.max[1].max(other.max[1]),
+                self.max[2].max(other.max[2]),
+            ],
+        }
+    }
+}
+
 // ===== Physics math (precision-aware) =====
 
 /// Physics scalar type. `f64` by default, `f32` with `physics-f32` feature.

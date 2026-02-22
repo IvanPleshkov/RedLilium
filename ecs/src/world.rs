@@ -89,6 +89,8 @@ struct InspectorEntry {
     serialize_fn: SerializeComponentFn,
     /// Deserialize and insert this component on an entity.
     deserialize_fn: DeserializeComponentFn,
+    /// Get the axis-aligned bounding box contributed by this component on an entity.
+    aabb_fn: fn(&World, Entity) -> Option<redlilium_core::math::Aabb>,
     /// Display order in the inspector panel. Lower values appear first.
     display_order: u32,
 }
@@ -392,6 +394,10 @@ impl World {
                         Box::new(crate::prefab::TypedBag(v)) as Box<dyn crate::prefab::ComponentBag>
                     })
                 }),
+                aabb_fn: |world, entity| {
+                    let comp = world.get::<T>(entity)?;
+                    comp.aabb(world)
+                },
                 serialize_fn: serialize_component_fn::<T>,
                 deserialize_fn: deserialize_component_fn::<T>,
                 display_order: 100,
@@ -448,6 +454,10 @@ impl World {
                         Box::new(crate::prefab::TypedBag(v)) as Box<dyn crate::prefab::ComponentBag>
                     })
                 }),
+                aabb_fn: |world, entity| {
+                    let comp = world.get::<T>(entity)?;
+                    comp.aabb(world)
+                },
                 serialize_fn: serialize_component_fn::<T>,
                 deserialize_fn: deserialize_component_fn::<T>,
                 display_order: 100,
@@ -1849,6 +1859,38 @@ impl World {
         if let Some(f) = remap_fn {
             f(self, entity, map);
         }
+    }
+
+    /// Computes the combined AABB for an entity by unioning AABBs from all its components.
+    ///
+    /// Iterates every inspector-registered component type and unions any
+    /// AABBs returned by their [`Component::aabb`] implementations.
+    /// Returns `None` if no component contributes an AABB.
+    pub fn entity_aabb(&self, entity: Entity) -> Option<redlilium_core::math::Aabb> {
+        let mut result: Option<redlilium_core::math::Aabb> = None;
+        for entry in self.inspector_entries.values() {
+            if let Some(aabb) = (entry.aabb_fn)(self, entity) {
+                result = Some(match result {
+                    Some(current) => current.union(&aabb),
+                    None => aabb,
+                });
+            }
+        }
+        result
+    }
+
+    /// Returns individual AABBs from each component on an entity.
+    ///
+    /// Unlike [`entity_aabb`](Self::entity_aabb) which unions all AABBs,
+    /// this returns each component's AABB separately.
+    pub fn entity_aabbs(&self, entity: Entity) -> Vec<redlilium_core::math::Aabb> {
+        let mut result = Vec::new();
+        for entry in self.inspector_entries.values() {
+            if let Some(aabb) = (entry.aabb_fn)(self, entity) {
+                result.push(aabb);
+            }
+        }
+        result
     }
 
     /// Collects all entity references from all registered components on an entity.

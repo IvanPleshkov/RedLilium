@@ -301,6 +301,8 @@ impl TextureManager {
 pub struct MeshManager {
     device: Arc<GraphicsDevice>,
     meshes: HashMap<String, Arc<Mesh>>,
+    /// Cached local-space AABBs keyed by mesh name.
+    aabbs: HashMap<String, redlilium_core::math::Aabb>,
 }
 
 impl MeshManager {
@@ -309,6 +311,7 @@ impl MeshManager {
         Self {
             device,
             meshes: HashMap::new(),
+            aabbs: HashMap::new(),
         }
     }
 
@@ -323,9 +326,13 @@ impl MeshManager {
     ///
     /// If the mesh has a label, it is cached for future lookups via [`get_mesh`](Self::get_mesh).
     pub fn create_mesh(&mut self, cpu_mesh: &CpuMesh) -> Result<Arc<Mesh>, GraphicsError> {
+        let aabb = cpu_mesh.compute_aabb();
         let mesh = self.device.create_mesh_from_cpu(cpu_mesh)?;
         if let Some(label) = mesh.label() {
             self.meshes.insert(label.to_owned(), Arc::clone(&mesh));
+            if let Some(aabb) = aabb {
+                self.aabbs.insert(label.to_owned(), aabb);
+            }
         }
         Ok(mesh)
     }
@@ -351,6 +358,14 @@ impl MeshManager {
             .iter()
             .find(|(_, v)| Arc::ptr_eq(v, mesh))
             .map(|(k, _)| k.as_str())
+    }
+
+    // --- AABB ---
+
+    /// Look up the cached local-space AABB for a mesh by Arc pointer identity.
+    pub fn get_aabb_by_mesh(&self, mesh: &Arc<Mesh>) -> Option<redlilium_core::math::Aabb> {
+        let name = self.find_name(mesh)?;
+        self.aabbs.get(name).copied()
     }
 
     // --- Iteration ---

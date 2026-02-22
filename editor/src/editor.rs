@@ -9,10 +9,10 @@ use redlilium_core::mesh::generators;
 use redlilium_debug_drawer::{DebugDrawer, DebugDrawerRenderer};
 use redlilium_ecs::ui::{ImportComponentAction, InspectorState, SpawnPrefabAction};
 use redlilium_ecs::{
-    Camera, DrawGrid, EcsRunner, Entity, FreeFlyCamera, GlobalTransform, GridConfig, Name,
-    PostUpdate, RenderMaterial, RenderMesh, Schedules, Transform, Update, UpdateCameraMatrices,
-    UpdateFreeFlyCamera, UpdateGlobalTransforms, Visibility, WindowInput, World,
-    register_std_components,
+    Camera, DrawGrid, DrawSelectionAabb, EcsRunner, Entity, FreeFlyCamera, GlobalTransform,
+    GridConfig, Name, PostUpdate, RenderMaterial, RenderMesh, Schedules, Transform, Update,
+    UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms, Visibility, WindowInput,
+    World, register_std_components,
 };
 use redlilium_graphics::egui::{EguiApp, EguiController};
 use redlilium_graphics::{Buffer, FrameSchedule, RenderTarget, TextureFormat};
@@ -190,6 +190,7 @@ impl Editor {
 
         // --- Demo scene entities ---
         let cpu_cube = generators::generate_cube(0.5);
+        let cube_aabb = cpu_cube.compute_aabb();
         let mut entity_buffers = Vec::new();
 
         // Ground plane (scaled flat cube)
@@ -207,7 +208,11 @@ impl Editor {
             world.insert(entity, Visibility::VISIBLE).unwrap();
 
             let (buffer, mesh, mat_inst) = scene_view.create_entity_resources(&cpu_cube);
-            world.insert(entity, RenderMesh::new(mesh)).unwrap();
+            let render_mesh = match cube_aabb {
+                Some(aabb) => RenderMesh::with_aabb(mesh, aabb),
+                None => RenderMesh::new(mesh),
+            };
+            world.insert(entity, render_mesh).unwrap();
             world.insert(entity, RenderMaterial::new(mat_inst)).unwrap();
             entity_buffers.push((entity, buffer));
         }
@@ -228,7 +233,11 @@ impl Editor {
             world.insert(entity, Visibility::VISIBLE).unwrap();
 
             let (buffer, mesh, mat_inst) = scene_view.create_entity_resources(&cpu_cube);
-            world.insert(entity, RenderMesh::new(mesh)).unwrap();
+            let render_mesh = match cube_aabb {
+                Some(aabb) => RenderMesh::with_aabb(mesh, aabb),
+                None => RenderMesh::new(mesh),
+            };
+            world.insert(entity, render_mesh).unwrap();
             world.insert(entity, RenderMaterial::new(mat_inst)).unwrap();
             entity_buffers.push((entity, buffer));
         }
@@ -246,6 +255,9 @@ impl Editor {
         // Systems here cannot mutate the world directly — they must push actions
         // through the ActionQueue resource.
         schedules.get_mut::<Update>().add(DrawGrid);
+        schedules
+            .get_mut::<Update>()
+            .add(DrawSelectionAabb::default());
         schedules.get_mut::<Update>().set_read_only(true);
 
         // PostUpdate: camera input -> transform propagation -> camera matrices.

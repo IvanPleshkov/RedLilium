@@ -11,7 +11,12 @@ use crate::serialize::Value;
 /// Entities with both `RenderMesh` and [`RenderMaterial`] are collected by the
 /// forward render system and drawn each frame.
 #[derive(Debug, Clone)]
-pub struct RenderMesh(pub Arc<Mesh>);
+pub struct RenderMesh {
+    /// The GPU mesh handle.
+    pub mesh: Arc<Mesh>,
+    /// Cached local-space AABB (computed from CPU mesh data at creation time).
+    pub aabb: Option<redlilium_core::math::Aabb>,
+}
 
 impl crate::Component for RenderMesh {
     const NAME: &'static str = "RenderMesh";
@@ -19,7 +24,7 @@ impl crate::Component for RenderMesh {
     fn inspect_ui(&self, ui: &mut crate::egui::Ui) -> Option<Self> {
         ui.horizontal(|ui| {
             ui.label("mesh");
-            match self.0.label() {
+            match self.mesh.label() {
                 Some(label) => ui.label(format!("Mesh: {label}")),
                 None => ui.weak("Mesh (unnamed)"),
             };
@@ -37,6 +42,10 @@ impl crate::Component for RenderMesh {
         world.register_required::<Self, crate::Visibility>();
     }
 
+    fn aabb(&self, _world: &crate::World) -> Option<redlilium_core::math::Aabb> {
+        self.aabb
+    }
+
     fn serialize_component(
         &self,
         ctx: &mut crate::serialize::SerializeContext<'_>,
@@ -45,22 +54,22 @@ impl crate::Component for RenderMesh {
             let world = ctx.world();
             if !world.has_resource::<super::MeshManager>() {
                 return Err(crate::serialize::SerializeError::FieldError {
-                    field: "0".to_owned(),
+                    field: "mesh".to_owned(),
                     message: "MeshManager resource not found".into(),
                 });
             }
             let manager = world.resource::<super::MeshManager>();
             manager
-                .find_name(&self.0)
-                .or_else(|| self.0.label())
+                .find_name(&self.mesh)
+                .or_else(|| self.mesh.label())
                 .ok_or_else(|| crate::serialize::SerializeError::FieldError {
-                    field: "0".to_owned(),
+                    field: "mesh".to_owned(),
                     message: "mesh has no registered name and no label".into(),
                 })?
                 .to_owned()
         };
         ctx.begin_struct(Self::NAME)?;
-        ctx.write_serde("0", &mesh_name)?;
+        ctx.write_serde("mesh", &mesh_name)?;
         ctx.end_struct()
     }
 
@@ -68,35 +77,46 @@ impl crate::Component for RenderMesh {
         ctx: &mut crate::serialize::DeserializeContext<'_>,
     ) -> Result<Self, crate::serialize::DeserializeError> {
         ctx.begin_struct(Self::NAME)?;
-        let mesh_name: String = ctx.read_serde("0")?;
-        let world = ctx.world();
-        if !world.has_resource::<super::MeshManager>() {
-            return Err(crate::serialize::DeserializeError::FormatError(
-                "MeshManager resource not found".into(),
-            ));
-        }
-        let manager = world.resource::<super::MeshManager>();
-        let mesh = manager.get_mesh(&mesh_name).ok_or_else(|| {
-            crate::serialize::DeserializeError::FormatError(format!(
-                "mesh '{mesh_name}' not found in MeshManager"
-            ))
-        })?;
-        let mesh = Arc::clone(mesh);
-        drop(manager);
+        let mesh_name: String = ctx.read_serde("mesh")?;
+        let (mesh, aabb) = {
+            let world = ctx.world();
+            if !world.has_resource::<super::MeshManager>() {
+                return Err(crate::serialize::DeserializeError::FormatError(
+                    "MeshManager resource not found".into(),
+                ));
+            }
+            let manager = world.resource::<super::MeshManager>();
+            let mesh = manager.get_mesh(&mesh_name).ok_or_else(|| {
+                crate::serialize::DeserializeError::FormatError(format!(
+                    "mesh '{mesh_name}' not found in MeshManager"
+                ))
+            })?;
+            let mesh = Arc::clone(mesh);
+            let aabb = manager.get_aabb_by_mesh(&mesh);
+            (mesh, aabb)
+        };
         ctx.end_struct()?;
-        Ok(Self(mesh))
+        Ok(Self { mesh, aabb })
     }
 }
 
 impl RenderMesh {
-    /// Create a new render mesh component.
+    /// Create a new render mesh component from a GPU mesh (no AABB).
     pub fn new(mesh: Arc<Mesh>) -> Self {
-        Self(mesh)
+        Self { mesh, aabb: None }
+    }
+
+    /// Create a new render mesh component with a precomputed local-space AABB.
+    pub fn with_aabb(mesh: Arc<Mesh>, aabb: redlilium_core::math::Aabb) -> Self {
+        Self {
+            mesh,
+            aabb: Some(aabb),
+        }
     }
 
     /// Get the inner GPU mesh.
     pub fn mesh(&self) -> &Arc<Mesh> {
-        &self.0
+        &self.mesh
     }
 }
 
