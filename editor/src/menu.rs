@@ -186,14 +186,26 @@ pub fn draw_menu_bar(
                 });
             });
 
-            // Center: play controls
-            // Estimate right-side width (window controls or nothing)
+            // Center play controls between the menu (left) and window
+            // controls (right).  We use max_rect which is the full
+            // horizontal region allocated for this row.
+            let full_rect = ui.max_rect();
             let right_width = if custom_titlebar { 3.0 * 36.0 } else { 0.0 };
-            let menu_end = ui.min_rect().right();
-            let total = ui.available_width();
-            let center_offset = ((total - right_width) / 2.0).max(0.0);
-            ui.add_space(center_offset - (menu_end - ui.min_rect().left()));
-            new_play_state = crate::toolbar::draw_play_controls(ui, play_state);
+            let usable_center = (full_rect.left() + full_rect.right() - right_width) / 2.0;
+
+            // Lay out play controls at the computed center using an
+            // absolute-position child UI so they don't steal space from
+            // the window controls.
+            let play_rect = egui::Rect::from_min_size(
+                egui::pos2(usable_center - 40.0, full_rect.top()),
+                egui::vec2(120.0, full_rect.height()),
+            );
+            let mut play_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(play_rect)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+            new_play_state = crate::toolbar::draw_play_controls(&mut play_ui, play_state);
 
             // Right: window control buttons (custom titlebar only)
             if custom_titlebar {

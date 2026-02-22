@@ -29,7 +29,7 @@ use crate::menu;
 use crate::menu::NativeMenu;
 use crate::scene_view::SceneViewState;
 use crate::status_bar;
-use crate::toolbar::{self, PlayState};
+use crate::toolbar::PlayState;
 
 /// A minimal EguiApp that does nothing.
 ///
@@ -639,7 +639,8 @@ impl AppHandler for Editor {
                             // Traffic lights occupy ~70px on the left
                             let available = ui.available_width();
                             ui.add_space((available / 2.0 - 40.0).max(0.0));
-                            self.play_state = toolbar::draw_play_controls(ui, self.play_state);
+                            self.play_state =
+                                crate::toolbar::draw_play_controls(ui, self.play_state);
                         });
 
                         // Double-click on background toggles maximize
@@ -669,7 +670,11 @@ impl AppHandler for Editor {
                     use crate::menu::MenuAction;
                     match action {
                         MenuAction::CloseWindow => {
-                            if self.has_unsaved_changes() {
+                            if self
+                                .worlds
+                                .iter()
+                                .any(|ew| ew.history.has_unsaved_changes())
+                            {
                                 self.show_close_dialog = true;
                             } else {
                                 self.should_close = true;
