@@ -16,7 +16,7 @@ pub struct UpdateCameraMatrices;
 impl crate::System for UpdateCameraMatrices {
     type Result = ();
     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), crate::system::SystemError> {
-        ctx.lock::<(crate::Read<GlobalTransform>, crate::Write<Camera>)>()
+        ctx.lock::<(crate::ReadAll<GlobalTransform>, crate::WriteAll<Camera>)>()
             .execute(|(globals, mut cameras)| {
                 update_camera_matrices(&globals, &mut cameras);
             });

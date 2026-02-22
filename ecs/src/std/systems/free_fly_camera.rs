@@ -28,8 +28,8 @@ impl crate::System for UpdateFreeFlyCamera {
     ) -> Result<(), crate::system::SystemError> {
         ctx.lock::<(
             crate::Res<WindowInput>,
-            crate::Write<FreeFlyCamera>,
-            crate::Write<crate::Transform>,
+            crate::WriteAll<FreeFlyCamera>,
+            crate::WriteAll<crate::Transform>,
         )>()
         .execute(|(input, mut cameras, mut transforms)| {
             if input.ui_wants_input {

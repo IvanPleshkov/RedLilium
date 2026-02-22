@@ -19,10 +19,10 @@ impl crate::System for UpdateGlobalTransforms {
     type Result = ();
     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), crate::system::SystemError> {
         ctx.lock::<(
-            crate::Read<Transform>,
-            crate::Write<GlobalTransform>,
-            crate::Read<Children>,
-            crate::Read<Parent>,
+            crate::ReadAll<Transform>,
+            crate::WriteAll<GlobalTransform>,
+            crate::ReadAll<Children>,
+            crate::ReadAll<Parent>,
         )>()
         .execute(|(transforms, mut globals, children_storage, parents)| {
             update_global_transforms(&transforms, &mut globals, &children_storage, &parents);

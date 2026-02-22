@@ -117,9 +117,7 @@ impl<T: Editable> EditActionHistory<T> {
         self.merge_broken = false;
 
         // New entry pushed — save point moves one step further away.
-        if is_content
-            && let Some(d) = &mut self.save_distance
-        {
+        if is_content && let Some(d) = &mut self.save_distance {
             *d += 1;
         }
 
@@ -147,9 +145,7 @@ impl<T: Editable> EditActionHistory<T> {
         action.undo(target)?;
         let is_content = action.modifies_content();
         self.redo_stack.push(action);
-        if is_content
-            && let Some(d) = &mut self.save_distance
-        {
+        if is_content && let Some(d) = &mut self.save_distance {
             *d -= 1;
         }
         Ok(())
@@ -166,9 +162,7 @@ impl<T: Editable> EditActionHistory<T> {
         action.apply(target)?;
         let is_content = action.modifies_content();
         self.undo_stack.push_back(action);
-        if is_content
-            && let Some(d) = &mut self.save_distance
-        {
+        if is_content && let Some(d) = &mut self.save_distance {
             *d += 1;
         }
         if self.undo_stack.len() > self.max_undo {

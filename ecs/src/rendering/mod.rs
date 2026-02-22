@@ -32,7 +32,7 @@ pub use resources::{
     MaterialManager, MaterialManagerError, MeshManager, RenderSchedule, TextureManager,
     TextureManagerError,
 };
-pub use systems::ForwardRenderSystem;
+pub use systems::{EditorForwardRenderSystem, ForwardRenderSystem};
 
 use crate::World;
 

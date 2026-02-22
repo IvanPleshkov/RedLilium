@@ -184,10 +184,9 @@ impl Editor {
             .unwrap();
         world.insert(editor_camera, Visibility::VISIBLE).unwrap();
 
-        // NOTE: We intentionally do NOT mark the editor camera as EDITOR here.
-        // Standard systems (UpdateFreeFlyCamera, UpdateGlobalTransforms,
-        // UpdateCameraMatrices) use Read/Write which skip editor-flagged entities.
-        // Since this is an isolated editor world, the flag is unnecessary.
+        // Mark the editor camera as an editor-only entity so it is hidden
+        // from game queries and the world inspector by default.
+        redlilium_ecs::mark_editor(&mut world, editor_camera);
 
         // --- Demo scene entities ---
         let cpu_cube = generators::generate_cube(0.5);
