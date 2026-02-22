@@ -58,7 +58,7 @@ impl<T: Editable> EditActionHistory<T> {
             redo_stack: Vec::new(),
             max_undo,
             merge_broken: false,
-            save_distance: None,
+            save_distance: Some(0),
         }
     }
 
@@ -887,9 +887,9 @@ mod tests {
     // --- Save tracking tests ---
 
     #[test]
-    fn unsaved_before_mark_saved() {
+    fn no_unsaved_changes_on_fresh_history() {
         let history = EditActionHistory::<Counter>::new(DEFAULT_MAX_UNDO);
-        assert!(history.has_unsaved_changes());
+        assert!(!history.has_unsaved_changes());
     }
 
     #[test]

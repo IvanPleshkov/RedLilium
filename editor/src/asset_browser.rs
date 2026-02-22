@@ -160,38 +160,26 @@ impl AssetBrowser {
         // Show drop target overlay when files are being hovered
         let hovering = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
 
-        ui.horizontal(|ui| {
-            // Left panel: directory tree (fixed width)
-            let tree_width = ui.available_width() * 0.3;
-            ui.allocate_ui_with_layout(
-                egui::vec2(tree_width, ui.available_height()),
-                egui::Layout::top_down(egui::Align::LEFT),
-                |ui| {
-                    egui::ScrollArea::both()
-                        .id_salt("asset_tree")
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            self.draw_tree(ui, vfs);
-                        });
-                },
-            );
+        // Left panel: resizable directory tree (fills full height)
+        egui::SidePanel::left(ui.id().with("asset_tree_panel"))
+            .resizable(true)
+            .default_width(ui.available_width() * 0.3)
+            .show_inside(ui, |ui| {
+                egui::ScrollArea::both()
+                    .id_salt("asset_tree")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        self.draw_tree(ui, vfs);
+                    });
+            });
 
-            ui.separator();
-
-            // Right panel: file listing
-            ui.allocate_ui_with_layout(
-                egui::vec2(ui.available_width(), ui.available_height()),
-                egui::Layout::top_down(egui::Align::LEFT),
-                |ui| {
-                    egui::ScrollArea::both()
-                        .id_salt("asset_files")
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            self.draw_file_list(ui, vfs);
-                        });
-                },
-            );
-        });
+        // Right panel: file listing (fills remaining space)
+        egui::ScrollArea::both()
+            .id_salt("asset_files")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                self.draw_file_list(ui, vfs);
+            });
 
         if hovering && self.selected.is_some() {
             let rect = ui.min_rect();
