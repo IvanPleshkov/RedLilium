@@ -6,68 +6,20 @@
 
 use std::sync::Arc;
 
-use redlilium_core::math::{Mat4, mat4_to_cols_array_2d};
 use redlilium_ecs::{
-    Camera, Entity, GlobalTransform, MaterialBundle, RenderMaterial, RenderMesh, RenderPassType,
-    Visibility, World,
+    Entity, MaterialBundle, RenderMaterial, RenderMesh, RenderPassType, Visibility, World, shaders,
 };
 use redlilium_graphics::{
-    BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, Buffer, BufferDescriptor,
-    BufferUsage, ColorAttachment, DepthStencilAttachment, GraphicsDevice, GraphicsPass, Material,
-    MaterialDescriptor, MaterialInstance, Mesh, RenderTargetConfig, ScissorRect, ShaderSource,
-    ShaderStage, ShaderStageFlags, SurfaceTexture, TextureDescriptor, TextureFormat, TextureUsage,
-    Viewport,
+    Buffer, ColorAttachment, DepthStencilAttachment, GraphicsDevice, GraphicsPass, Material,
+    RenderTargetConfig, ScissorRect, SurfaceTexture, TextureDescriptor, TextureFormat,
+    TextureUsage, Viewport,
 };
-
-/// WGSL shader for lit scene rendering with camera VP + model matrix uniforms.
-const SCENE_SHADER_WGSL: &str = r#"
-struct Uniforms {
-    view_projection: mat4x4<f32>,
-    model: mat4x4<f32>,
-};
-
-@group(0) @binding(0) var<uniform> uniforms: Uniforms;
-
-struct VertexOutput {
-    @builtin(position) clip_position: vec4<f32>,
-    @location(0) world_normal: vec3<f32>,
-};
-
-@vertex
-fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>) -> VertexOutput {
-    var out: VertexOutput;
-    let world_pos = uniforms.model * vec4<f32>(position, 1.0);
-    out.clip_position = uniforms.view_projection * world_pos;
-    out.world_normal = (uniforms.model * vec4<f32>(normal, 0.0)).xyz;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.3));
-    let n = normalize(in.world_normal);
-    let ndotl = max(dot(n, light_dir), 0.0);
-    let base_color = vec3<f32>(0.6, 0.6, 0.65);
-    let ambient = vec3<f32>(0.15, 0.15, 0.18);
-    let color = ambient + base_color * ndotl;
-    return vec4<f32>(color, 1.0);
-}
-"#;
-
-/// Per-entity uniform data: VP + model matrix.
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct SceneUniforms {
-    view_projection: [[f32; 4]; 4],
-    model: [[f32; 4]; 4],
-}
 
 /// Manages GPU resources and rendering for the editor's SceneView panel.
 pub struct SceneViewState {
     device: Arc<GraphicsDevice>,
     depth_texture: Arc<redlilium_graphics::Texture>,
-    scene_material: Arc<Material>,
-    _binding_layout: Arc<BindingLayout>,
+    opaque_material: Arc<Material>,
     viewport: Option<Viewport>,
     scissor: Option<ScissorRect>,
     last_size: (u32, u32),
@@ -76,75 +28,37 @@ pub struct SceneViewState {
 impl SceneViewState {
     /// Create scene view resources.
     pub fn new(device: Arc<GraphicsDevice>, surface_format: TextureFormat) -> Self {
-        // Binding layout: slot 0 = uniform buffer (vertex + fragment)
-        let binding_layout = Arc::new(
-            BindingLayout::new().with_entry(
-                BindingLayoutEntry::new(0, BindingType::UniformBuffer)
-                    .with_visibility(ShaderStageFlags::VERTEX | ShaderStageFlags::FRAGMENT),
-            ),
+        let (opaque_material, _layout) = shaders::create_opaque_color_material(
+            &device,
+            surface_format,
+            TextureFormat::Depth32Float,
         );
-
-        let scene_material = device
-            .create_material(
-                &MaterialDescriptor::new()
-                    .with_shader(ShaderSource::new(
-                        ShaderStage::Vertex,
-                        SCENE_SHADER_WGSL.as_bytes().to_vec(),
-                        "vs_main",
-                    ))
-                    .with_shader(ShaderSource::new(
-                        ShaderStage::Fragment,
-                        SCENE_SHADER_WGSL.as_bytes().to_vec(),
-                        "fs_main",
-                    ))
-                    .with_binding_layout(binding_layout.clone())
-                    .with_vertex_layout(redlilium_graphics::VertexLayout::position_normal())
-                    .with_color_format(surface_format)
-                    .with_depth_format(TextureFormat::Depth32Float)
-                    .with_label("editor_scene_material"),
-            )
-            .expect("Failed to create editor scene material");
 
         let depth_texture = Self::create_depth_texture(&device, 256, 256);
 
         Self {
             device,
             depth_texture,
-            scene_material,
-            _binding_layout: binding_layout,
+            opaque_material,
             viewport: None,
             scissor: None,
             last_size: (256, 256),
         }
     }
 
-    /// Create GPU resources for a renderable entity: uniform buffer + MaterialInstance.
+    /// Create GPU resources for a renderable entity: uniform buffer + MaterialBundle.
     ///
-    /// Returns `(uniform_buffer, gpu_mesh, material_instance)`.
+    /// Returns `(uniform_buffer, gpu_mesh, material_bundle)`.
     pub fn create_entity_resources(
         &self,
         cpu_mesh: &redlilium_core::mesh::CpuMesh,
-    ) -> (Arc<Buffer>, Arc<Mesh>, Arc<MaterialBundle>) {
-        let uniform_buffer = self
-            .device
-            .create_buffer(&BufferDescriptor::new(
-                std::mem::size_of::<SceneUniforms>() as u64,
-                BufferUsage::UNIFORM | BufferUsage::COPY_DST,
-            ))
-            .expect("Failed to create entity uniform buffer");
-
-        let binding_group = Arc::new(BindingGroup::new().with_buffer(0, uniform_buffer.clone()));
-
-        let material_instance = Arc::new(
-            MaterialInstance::new(self.scene_material.clone())
-                .with_binding_group(Arc::clone(&binding_group)),
-        );
-
-        let bundle = Arc::new(
-            MaterialBundle::new()
-                .with_pass(RenderPassType::Forward, material_instance)
-                .with_shared_bindings(vec![binding_group]),
-        );
+    ) -> (
+        Arc<Buffer>,
+        Arc<redlilium_graphics::Mesh>,
+        Arc<MaterialBundle>,
+    ) {
+        let (uniform_buffer, bundle) =
+            shaders::create_opaque_color_entity(&self.device, &self.opaque_material);
 
         let gpu_mesh = self
             .device
@@ -181,34 +95,7 @@ impl SceneViewState {
 
     /// Update per-entity uniform buffers with current camera VP and model matrices.
     pub fn update_uniforms(&self, world: &World, entity_buffers: &[(Entity, Arc<Buffer>)]) {
-        // Get camera view-projection matrix (use read_all to include editor-flagged camera)
-        let Ok(cameras) = world.read_all::<Camera>() else {
-            return;
-        };
-        let Some((_, camera)) = cameras.iter().next() else {
-            return;
-        };
-        let vp = camera.view_projection();
-
-        // Update each entity's uniform buffer
-        let Ok(globals) = world.read::<GlobalTransform>() else {
-            return;
-        };
-        for (entity, buffer) in entity_buffers {
-            let model = globals
-                .get(entity.index())
-                .map(|g| g.0)
-                .unwrap_or_else(Mat4::identity);
-
-            let uniforms = SceneUniforms {
-                view_projection: mat4_to_cols_array_2d(&vp),
-                model: mat4_to_cols_array_2d(&model),
-            };
-
-            let _ = self
-                .device
-                .write_buffer(buffer, 0, bytemuck::bytes_of(&uniforms));
-        }
+        shaders::update_opaque_color_uniforms(&self.device, world, entity_buffers);
     }
 
     /// Build a graphics pass that renders ECS entities to the swapchain

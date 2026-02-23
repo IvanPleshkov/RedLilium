@@ -25,6 +25,7 @@
 
 mod components;
 mod resources;
+pub mod shaders;
 mod systems;
 
 pub use components::{CameraTarget, MaterialBundle, RenderMaterial, RenderMesh, RenderPassType};

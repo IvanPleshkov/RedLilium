@@ -173,7 +173,7 @@ pub use redlilium_debug_drawer::{DebugDrawer, DebugDrawerRenderer};
 pub use rendering::{
     CameraTarget, CpuBundleInfo, EditorForwardRenderSystem, ForwardRenderSystem, MaterialBundle,
     MaterialManager, MaterialManagerError, MeshManager, RenderMaterial, RenderMesh, RenderPassType,
-    RenderSchedule, TextureManager, register_rendering_components,
+    RenderSchedule, TextureManager, register_rendering_components, shaders,
 };
 
 /// Register all standard component types with the world.
