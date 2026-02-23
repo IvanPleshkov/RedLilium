@@ -15,8 +15,10 @@ use super::conversion::{convert_blend_state, convert_texture_format};
 /// Manages Vulkan pipeline creation and descriptor pool resources.
 pub struct PipelineManager {
     device: ash::Device,
-    /// Descriptor pool for allocating descriptor sets.
-    descriptor_pool: vk::DescriptorPool,
+    /// Per-slot descriptor pools — one per frame in flight.
+    /// Each slot's pool is only reset after its fence signals,
+    /// preventing resets while another slot's descriptors are in use.
+    descriptor_pools: [vk::DescriptorPool; super::MAX_FRAMES_IN_FLIGHT],
     /// Whether resources have been explicitly destroyed.
     destroyed: bool,
 }
@@ -24,7 +26,6 @@ pub struct PipelineManager {
 impl PipelineManager {
     /// Create a new pipeline manager.
     pub fn new(device: ash::Device) -> Result<Self, GraphicsError> {
-        // Create a descriptor pool with reasonable defaults
         let pool_sizes = [
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
@@ -57,17 +58,20 @@ impl PipelineManager {
             .max_sets(1000)
             .pool_sizes(&pool_sizes);
 
-        let descriptor_pool =
-            unsafe { device.create_descriptor_pool(&pool_info, None) }.map_err(|e| {
+        // Create one descriptor pool per frame slot so each can be reset independently
+        let mut descriptor_pools = [vk::DescriptorPool::null(); super::MAX_FRAMES_IN_FLIGHT];
+        for pool in &mut descriptor_pools {
+            *pool = unsafe { device.create_descriptor_pool(&pool_info, None) }.map_err(|e| {
                 GraphicsError::ResourceCreationFailed(format!(
                     "Failed to create descriptor pool: {:?}",
                     e
                 ))
             })?;
+        }
 
         Ok(Self {
             device,
-            descriptor_pool,
+            descriptor_pools,
             destroyed: false,
         })
     }
@@ -295,14 +299,15 @@ impl PipelineManager {
         Ok(layout)
     }
 
-    /// Allocate a descriptor set.
+    /// Allocate a descriptor set from the pool for the given frame slot.
     pub fn allocate_descriptor_set(
         &self,
+        slot: usize,
         layout: vk::DescriptorSetLayout,
     ) -> Result<vk::DescriptorSet, GraphicsError> {
         let layouts = [layout];
         let alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(self.descriptor_pool)
+            .descriptor_pool(self.descriptor_pools[slot])
             .set_layouts(&layouts);
 
         let sets = unsafe { self.device.allocate_descriptor_sets(&alloc_info) }.map_err(|e| {
@@ -534,20 +539,22 @@ impl PipelineManager {
         Ok(pipelines[0])
     }
 
-    /// Get the descriptor pool.
+    /// Get the descriptor pool for a given frame slot.
     #[allow(dead_code)]
-    pub fn descriptor_pool(&self) -> vk::DescriptorPool {
-        self.descriptor_pool
+    pub fn descriptor_pool(&self, slot: usize) -> vk::DescriptorPool {
+        self.descriptor_pools[slot]
     }
 
-    /// Reset the descriptor pool, freeing all allocated descriptor sets.
+    /// Reset the descriptor pool for a given frame slot, freeing all its descriptor sets.
     ///
-    /// This should only be called when no descriptor sets from this pool
-    /// are in use by the GPU (i.e., after waiting for the GPU to idle).
-    pub fn reset_descriptor_pool(&self) -> Result<(), GraphicsError> {
+    /// This should only be called after the slot's fence has signaled,
+    /// ensuring no descriptor sets from this pool are in use by the GPU.
+    pub fn reset_descriptor_pool(&self, slot: usize) -> Result<(), GraphicsError> {
         unsafe {
-            self.device
-                .reset_descriptor_pool(self.descriptor_pool, vk::DescriptorPoolResetFlags::empty())
+            self.device.reset_descriptor_pool(
+                self.descriptor_pools[slot],
+                vk::DescriptorPoolResetFlags::empty(),
+            )
         }
         .map_err(|e| {
             GraphicsError::Internal(format!("Failed to reset descriptor pool: {:?}", e))
@@ -573,14 +580,15 @@ impl PipelineManager {
         }
 
         // Pipelines are owned by Materials and destroyed when their last Arc is dropped.
-        // We only need to destroy the descriptor pool here.
+        // We only need to destroy the descriptor pools here.
 
-        // Destroy descriptor pool
+        // Destroy all per-slot descriptor pools
         // SAFETY: Caller guarantees GPU is idle and device is valid
-        unsafe {
-            self.device
-                .destroy_descriptor_pool(self.descriptor_pool, None)
-        };
+        for pool in &self.descriptor_pools {
+            unsafe {
+                self.device.destroy_descriptor_pool(*pool, None);
+            }
+        }
 
         self.destroyed = true;
     }

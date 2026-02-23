@@ -332,9 +332,9 @@ impl VulkanBackend {
         // Advance layout tracker to new frame (resets layout state)
         self.layout_tracker.lock().advance_frame();
 
-        // Reset descriptor pool — safe because the fence wait guarantees
-        // the GPU is done with all descriptor sets from this frame slot.
-        let _ = self.pipeline_manager.reset_descriptor_pool();
+        // Reset the oldest slot's descriptor pool — safe because the fence wait
+        // guarantees the GPU is done with all descriptor sets from this slot.
+        let _ = self.pipeline_manager.reset_descriptor_pool(oldest);
     }
 
     /// Get the layout tracker for direct access (for testing).
@@ -1957,7 +1957,10 @@ impl VulkanBackend {
             .zip(scratch_ds_layouts.iter())
             .enumerate()
         {
-            let descriptor_set = self.pipeline_manager.allocate_descriptor_set(*ds_layout)?;
+            let slot = self.current_slot.load(Ordering::Relaxed);
+            let descriptor_set = self
+                .pipeline_manager
+                .allocate_descriptor_set(slot, *ds_layout)?;
 
             // Get the corresponding binding layout to look up binding types
             let binding_layout = material_arc.binding_layouts().get(group_idx);
@@ -2556,7 +2559,10 @@ impl VulkanBackend {
                 .zip(scratch_ds_layouts.iter())
                 .enumerate()
             {
-                let descriptor_set = self.pipeline_manager.allocate_descriptor_set(*ds_layout)?;
+                let slot = self.current_slot.load(Ordering::Relaxed);
+                let descriptor_set = self
+                    .pipeline_manager
+                    .allocate_descriptor_set(slot, *ds_layout)?;
 
                 let binding_layout = material_arc.binding_layouts().get(group_idx);
 
