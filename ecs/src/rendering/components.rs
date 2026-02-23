@@ -1,9 +1,135 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use redlilium_core::material::{CpuMaterialInstance, MaterialValue, TextureRef, TextureSource};
-use redlilium_graphics::{MaterialInstance, Mesh, Texture};
+use redlilium_graphics::{BindingGroup, MaterialInstance, Mesh, Texture};
 
 use crate::serialize::Value;
+
+/// Identifies which render pass a material instance is intended for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RenderPassType {
+    /// Main forward color pass.
+    Forward,
+    /// Depth-only prepass (for early-Z or screen-space effects).
+    DepthPrepass,
+    /// Shadow map pass.
+    Shadow,
+    /// Deferred G-buffer pass.
+    Deferred,
+}
+
+impl RenderPassType {
+    /// All known render pass types.
+    pub const ALL: &[Self] = &[
+        Self::Forward,
+        Self::DepthPrepass,
+        Self::Shadow,
+        Self::Deferred,
+    ];
+
+    /// Serialize to a string key.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Forward => "Forward",
+            Self::DepthPrepass => "DepthPrepass",
+            Self::Shadow => "Shadow",
+            Self::Deferred => "Deferred",
+        }
+    }
+
+    /// Parse from a string key.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "Forward" => Some(Self::Forward),
+            "DepthPrepass" => Some(Self::DepthPrepass),
+            "Shadow" => Some(Self::Shadow),
+            "Deferred" => Some(Self::Deferred),
+            _ => None,
+        }
+    }
+}
+
+/// A collection of [`MaterialInstance`]s for different render passes.
+///
+/// All instances in a bundle share the same binding groups (textures, uniform
+/// buffers) but reference different GPU [`Material`](redlilium_graphics::Material)
+/// pipelines — one per pass type. This allows a single logical material to be
+/// used across forward, shadow, depth-prepass, and deferred passes without
+/// duplicating GPU resources.
+///
+/// # Example
+///
+/// ```ignore
+/// let bundle = MaterialBundle::new()
+///     .with_pass(RenderPassType::Forward, forward_instance)
+///     .with_pass(RenderPassType::Shadow, shadow_instance)
+///     .with_label("pbr_metal");
+/// ```
+#[derive(Debug, Clone)]
+pub struct MaterialBundle {
+    /// Material instance per pass type.
+    passes: HashMap<RenderPassType, Arc<MaterialInstance>>,
+    /// Shared binding groups referenced by each instance.
+    shared_bindings: Vec<Arc<BindingGroup>>,
+    /// Optional debug label.
+    label: Option<String>,
+}
+
+impl MaterialBundle {
+    /// Create an empty material bundle.
+    pub fn new() -> Self {
+        Self {
+            passes: HashMap::new(),
+            shared_bindings: Vec::new(),
+            label: None,
+        }
+    }
+
+    /// Add a material instance for a specific render pass.
+    pub fn with_pass(mut self, pass_type: RenderPassType, instance: Arc<MaterialInstance>) -> Self {
+        self.passes.insert(pass_type, instance);
+        self
+    }
+
+    /// Set the shared binding groups.
+    pub fn with_shared_bindings(mut self, bindings: Vec<Arc<BindingGroup>>) -> Self {
+        self.shared_bindings = bindings;
+        self
+    }
+
+    /// Set a debug label.
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    /// Get the material instance for a specific pass type.
+    pub fn get(&self, pass_type: RenderPassType) -> Option<&Arc<MaterialInstance>> {
+        self.passes.get(&pass_type)
+    }
+
+    /// Get all pass entries.
+    pub fn passes(&self) -> &HashMap<RenderPassType, Arc<MaterialInstance>> {
+        &self.passes
+    }
+
+    /// Get the shared binding groups.
+    pub fn shared_bindings(&self) -> &[Arc<BindingGroup>] {
+        &self.shared_bindings
+    }
+
+    /// Get the bundle label, if set.
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+}
+
+impl Default for MaterialBundle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// GPU mesh component.
 ///
@@ -120,12 +246,15 @@ impl RenderMesh {
     }
 }
 
-/// GPU material instance component.
+/// GPU material component.
 ///
-/// Wraps an `Arc<MaterialInstance>` containing bound shader resources.
+/// Wraps an `Arc<MaterialBundle>` containing material instances for each
+/// render pass type (forward, shadow, depth-prepass, deferred). All instances
+/// in the bundle share the same bindings but use different shader pipelines.
+///
 /// Attach alongside [`RenderMesh`] to make an entity renderable.
 #[derive(Debug, Clone)]
-pub struct RenderMaterial(pub Arc<MaterialInstance>);
+pub struct RenderMaterial(pub Arc<MaterialBundle>);
 
 impl crate::Component for RenderMaterial {
     const NAME: &'static str = "RenderMaterial";
@@ -151,8 +280,7 @@ impl crate::Component for RenderMaterial {
         &self,
         ctx: &mut crate::serialize::SerializeContext<'_>,
     ) -> Result<Value, crate::serialize::SerializeError> {
-        // Extract all data from world resources in a scoped borrow
-        let (material_name, instance_name, values) = {
+        let (passes_map, instance_name, values) = {
             let world = ctx.world();
             if !world.has_resource::<super::MaterialManager>() {
                 return Err(crate::serialize::SerializeError::FieldError {
@@ -170,37 +298,34 @@ impl crate::Component for RenderMaterial {
             let mat_manager = world.resource::<super::MaterialManager>();
             let tex_manager = world.resource::<super::TextureManager>();
 
-            let cpu_instance = mat_manager.get_cpu_instance(&self.0).ok_or_else(|| {
+            let cpu_bundle = mat_manager.get_cpu_bundle(&self.0).ok_or_else(|| {
                 crate::serialize::SerializeError::FieldError {
                     field: "0".to_owned(),
-                    message: "material instance not tracked in MaterialManager".into(),
+                    message: "material bundle not tracked in MaterialManager".into(),
                 }
             })?;
 
-            let material_name = cpu_instance
-                .material
-                .name
-                .as_deref()
-                .or_else(|| mat_manager.find_material_name(self.0.material()))
-                .ok_or_else(|| crate::serialize::SerializeError::FieldError {
-                    field: "material".to_owned(),
-                    message: "material has no registered name".into(),
-                })?
-                .to_owned();
+            // Serialize pass → material-name map
+            let passes_map: Vec<(String, Value)> = cpu_bundle
+                .pass_materials
+                .iter()
+                .map(|(pass, name)| (pass.as_str().to_owned(), Value::String(name.clone())))
+                .collect();
 
-            let values: Vec<Value> = cpu_instance
+            let values: Vec<Value> = cpu_bundle
+                .cpu_instance
                 .values
                 .iter()
                 .map(|v| serialize_material_value(v, &tex_manager))
                 .collect::<Result<_, _>>()?;
 
-            let instance_name = cpu_instance.name.clone();
+            let instance_name = cpu_bundle.cpu_instance.name.clone();
 
-            (material_name, instance_name, values)
+            (passes_map, instance_name, values)
         };
 
         ctx.begin_struct(Self::NAME)?;
-        ctx.write_serde("material", &material_name)?;
+        ctx.write_field("passes", Value::Map(passes_map))?;
         if let Some(name) = &instance_name {
             ctx.write_serde("name", name)?;
         } else {
@@ -215,7 +340,39 @@ impl crate::Component for RenderMaterial {
     ) -> Result<Self, crate::serialize::DeserializeError> {
         ctx.begin_struct(Self::NAME)?;
 
-        let material_name: String = ctx.read_serde("material")?;
+        // Read passes map: { "Forward": "pbr", "Shadow": "pbr_shadow", ... }
+        let passes_val = ctx.read_field("passes")?;
+        let pass_entries = match passes_val {
+            Value::Map(entries) => entries,
+            // Backward compat: single "material" field → Forward only
+            _ => {
+                return Err(crate::serialize::DeserializeError::TypeMismatch {
+                    field: "passes".to_owned(),
+                    expected: "Map".into(),
+                    found: format!("{passes_val:?}"),
+                });
+            }
+        };
+        let mut pass_materials: Vec<(RenderPassType, String)> = Vec::new();
+        for (key, val) in pass_entries {
+            let pass_type = RenderPassType::parse(&key).ok_or_else(|| {
+                crate::serialize::DeserializeError::FormatError(format!(
+                    "unknown render pass type: '{key}'"
+                ))
+            })?;
+            let mat_name = match val {
+                Value::String(s) => s,
+                _ => {
+                    return Err(crate::serialize::DeserializeError::TypeMismatch {
+                        field: key,
+                        expected: "String".into(),
+                        found: format!("{val:?}"),
+                    });
+                }
+            };
+            pass_materials.push((pass_type, mat_name));
+        }
+
         let instance_name: Option<String> = {
             let val = ctx.read_field("name")?;
             match val {
@@ -242,14 +399,20 @@ impl crate::Component for RenderMaterial {
             }
         };
 
-        // Deserialize values (no world access needed)
         let values: Vec<MaterialValue> = value_list
             .into_iter()
             .map(deserialize_material_value)
             .collect::<Result<_, _>>()?;
 
-        // Create GPU instance from world resources (scoped to release ctx borrow)
-        let gpu_instance = {
+        // Need the CPU material to build the instance. Use the first pass's material name.
+        let first_mat_name = pass_materials
+            .first()
+            .map(|(_, n)| n.clone())
+            .ok_or_else(|| {
+                crate::serialize::DeserializeError::FormatError("passes map is empty".into())
+            })?;
+
+        let bundle = {
             let world = ctx.world_mut();
             if !world.has_resource::<super::MaterialManager>() {
                 return Err(crate::serialize::DeserializeError::FormatError(
@@ -262,50 +425,57 @@ impl crate::Component for RenderMaterial {
                 ));
             }
 
-            // Get CPU material declaration
             let cpu_material = {
                 let mat_manager = world.resource::<super::MaterialManager>();
                 let cpu = mat_manager
-                    .get_cpu_material(&material_name)
+                    .get_cpu_material(&first_mat_name)
                     .ok_or_else(|| {
                         crate::serialize::DeserializeError::FormatError(format!(
-                            "material '{material_name}' not found in MaterialManager"
+                            "material '{first_mat_name}' not found in MaterialManager"
                         ))
                     })?;
                 Arc::clone(cpu)
             };
 
-            // Build CpuMaterialInstance
             let mut cpu_instance = CpuMaterialInstance::new(cpu_material);
             cpu_instance.name = instance_name;
             cpu_instance.values = values;
 
-            // Create GPU instance
+            let pass_refs: Vec<(RenderPassType, &str)> = pass_materials
+                .iter()
+                .map(|(p, n)| (*p, n.as_str()))
+                .collect();
+
             let mut mat_manager = world.resource_mut::<super::MaterialManager>();
             let mut tex_manager = world.resource_mut::<super::TextureManager>();
             mat_manager
-                .create_instance(&cpu_instance, &mut tex_manager)
+                .create_bundle(&cpu_instance, &pass_refs, &mut tex_manager)
                 .map_err(|e| {
                     crate::serialize::DeserializeError::FormatError(format!(
-                        "failed to create material instance: {e}"
+                        "failed to create material bundle: {e}"
                     ))
                 })?
         };
 
         ctx.end_struct()?;
-        Ok(Self(gpu_instance))
+        Ok(Self(bundle))
     }
 }
 
 impl RenderMaterial {
-    /// Create a new render material component.
-    pub fn new(material: Arc<MaterialInstance>) -> Self {
-        Self(material)
+    /// Create a new render material component from a material bundle.
+    pub fn new(bundle: Arc<MaterialBundle>) -> Self {
+        Self(bundle)
     }
 
-    /// Get the inner material instance.
-    pub fn material(&self) -> &Arc<MaterialInstance> {
+    /// Get the inner material bundle.
+    pub fn bundle(&self) -> &Arc<MaterialBundle> {
         &self.0
+    }
+
+    /// Get the material instance for a specific render pass.
+    pub fn pass(&self, pass_type: RenderPassType) -> Option<&Arc<MaterialInstance>> {
+        self.0.get(pass_type)
     }
 }
 

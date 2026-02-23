@@ -8,7 +8,7 @@ use redlilium_graphics::{
 use crate::SystemContext;
 use crate::std::components::{Camera, GlobalTransform, Visibility};
 
-use super::components::{CameraTarget, RenderMaterial, RenderMesh};
+use super::components::{CameraTarget, RenderMaterial, RenderMesh, RenderPassType};
 use super::resources::RenderSchedule;
 
 /// Simple forward render system.
@@ -96,10 +96,9 @@ impl crate::System for ForwardRenderSystem {
                             continue;
                         }
 
-                        pass.add_draw(
-                            Arc::clone(&render_mesh.mesh),
-                            Arc::clone(&render_material.0),
-                        );
+                        if let Some(instance) = render_material.pass(RenderPassType::Forward) {
+                            pass.add_draw(Arc::clone(&render_mesh.mesh), Arc::clone(instance));
+                        }
                     }
 
                     // Submit the graph
@@ -193,10 +192,9 @@ impl crate::System for EditorForwardRenderSystem {
                             continue;
                         }
 
-                        pass.add_draw(
-                            Arc::clone(&render_mesh.mesh),
-                            Arc::clone(&render_material.0),
-                        );
+                        if let Some(instance) = render_material.pass(RenderPassType::Forward) {
+                            pass.add_draw(Arc::clone(&render_mesh.mesh), Arc::clone(instance));
+                        }
                     }
 
                     // Submit the graph

@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use redlilium_core::math::{Mat4, mat4_to_cols_array_2d};
 use redlilium_ecs::{
-    Camera, Entity, GlobalTransform, RenderMaterial, RenderMesh, Visibility, World,
+    Camera, Entity, GlobalTransform, MaterialBundle, RenderMaterial, RenderMesh, RenderPassType,
+    Visibility, World,
 };
 use redlilium_graphics::{
     BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, Buffer, BufferDescriptor,
@@ -123,7 +124,7 @@ impl SceneViewState {
     pub fn create_entity_resources(
         &self,
         cpu_mesh: &redlilium_core::mesh::CpuMesh,
-    ) -> (Arc<Buffer>, Arc<Mesh>, Arc<MaterialInstance>) {
+    ) -> (Arc<Buffer>, Arc<Mesh>, Arc<MaterialBundle>) {
         let uniform_buffer = self
             .device
             .create_buffer(&BufferDescriptor::new(
@@ -135,7 +136,14 @@ impl SceneViewState {
         let binding_group = Arc::new(BindingGroup::new().with_buffer(0, uniform_buffer.clone()));
 
         let material_instance = Arc::new(
-            MaterialInstance::new(self.scene_material.clone()).with_binding_group(binding_group),
+            MaterialInstance::new(self.scene_material.clone())
+                .with_binding_group(Arc::clone(&binding_group)),
+        );
+
+        let bundle = Arc::new(
+            MaterialBundle::new()
+                .with_pass(RenderPassType::Forward, material_instance)
+                .with_shared_bindings(vec![binding_group]),
         );
 
         let gpu_mesh = self
@@ -143,7 +151,7 @@ impl SceneViewState {
             .create_mesh_from_cpu(cpu_mesh)
             .expect("Failed to create entity GPU mesh");
 
-        (uniform_buffer, gpu_mesh, material_instance)
+        (uniform_buffer, gpu_mesh, bundle)
     }
 
     /// Update the viewport and scissor from an egui panel rect.
@@ -244,7 +252,9 @@ impl SceneViewState {
             {
                 continue;
             }
-            pass.add_draw(render_mesh.mesh.clone(), render_material.0.clone());
+            if let Some(instance) = render_material.pass(RenderPassType::Forward) {
+                pass.add_draw(render_mesh.mesh.clone(), Arc::clone(instance));
+            }
         }
 
         Some(pass)

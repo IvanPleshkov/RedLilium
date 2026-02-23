@@ -27,10 +27,10 @@ mod components;
 mod resources;
 mod systems;
 
-pub use components::{CameraTarget, RenderMaterial, RenderMesh};
+pub use components::{CameraTarget, MaterialBundle, RenderMaterial, RenderMesh, RenderPassType};
 pub use resources::{
-    MaterialManager, MaterialManagerError, MeshManager, RenderSchedule, TextureManager,
-    TextureManagerError,
+    CpuBundleInfo, MaterialManager, MaterialManagerError, MeshManager, RenderSchedule,
+    TextureManager, TextureManagerError,
 };
 pub use systems::{EditorForwardRenderSystem, ForwardRenderSystem};
 

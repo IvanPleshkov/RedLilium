@@ -12,6 +12,8 @@ use redlilium_graphics::{
     Texture, TextureFormat,
 };
 
+use super::components::{MaterialBundle, RenderPassType};
+
 /// Errors that can occur in [`TextureManager`] operations.
 #[derive(Debug)]
 pub enum TextureManagerError {
@@ -435,10 +437,18 @@ impl From<GraphicsError> for MaterialManagerError {
     }
 }
 
+/// Tracks the CPU-side source data for a [`MaterialBundle`] to enable serialization.
+pub struct CpuBundleInfo {
+    /// The CPU material instance (binding values).
+    pub cpu_instance: Arc<CpuMaterialInstance>,
+    /// Pass type → registered material name mapping.
+    pub pass_materials: Vec<(RenderPassType, String)>,
+}
+
 /// Resource for managing GPU materials and converting between CPU and GPU representations.
 ///
 /// Stores registered material definitions (`CpuMaterial` + `Material` pairs) by name,
-/// and tracks the CPU-side source data for each GPU `MaterialInstance` to enable
+/// and tracks the CPU-side source data for each [`MaterialBundle`] to enable
 /// serialization and deserialization.
 ///
 /// # Example
@@ -447,14 +457,14 @@ impl From<GraphicsError> for MaterialManagerError {
 /// let mut manager = MaterialManager::new(device.clone());
 /// manager.register_material("pbr", cpu_mat, gpu_mat);
 ///
-/// let gpu_instance = manager.create_instance(&cpu_instance, &textures)?;
+/// let bundle = manager.create_instance(&cpu_instance, &textures)?;
 /// ```
 pub struct MaterialManager {
     device: Arc<GraphicsDevice>,
     /// Registered materials: name → (cpu declaration, gpu pipeline).
     materials: HashMap<String, (Arc<CpuMaterial>, Arc<Material>)>,
-    /// CPU instance data keyed by GPU MaterialInstance Arc pointer.
-    cpu_instances: HashMap<usize, Arc<CpuMaterialInstance>>,
+    /// CPU bundle info keyed by MaterialBundle Arc pointer.
+    cpu_bundles: HashMap<usize, CpuBundleInfo>,
 }
 
 impl MaterialManager {
@@ -463,7 +473,7 @@ impl MaterialManager {
         Self {
             device,
             materials: HashMap::new(),
-            cpu_instances: HashMap::new(),
+            cpu_bundles: HashMap::new(),
         }
     }
 
@@ -511,35 +521,99 @@ impl MaterialManager {
         self.materials.remove(name)
     }
 
-    // --- Instance creation ---
+    // --- Bundle creation ---
 
-    /// Create a GPU [`MaterialInstance`] from a [`CpuMaterialInstance`].
+    /// Create a [`MaterialBundle`] from a [`CpuMaterialInstance`] and a set of
+    /// pass type → material name mappings.
     ///
-    /// This resolves textures and samplers from the [`TextureManager`], packs
-    /// uniform values into a GPU buffer, and builds the binding group.
+    /// Shared binding groups (uniform buffer, textures) are built once from the
+    /// CPU instance values, then each pass gets its own [`MaterialInstance`]
+    /// referencing a different GPU [`Material`] pipeline but sharing the same
+    /// bindings.
     ///
-    /// The resulting instance is tracked so that [`get_cpu_instance`](Self::get_cpu_instance)
-    /// can retrieve the CPU source data for serialization.
+    /// The resulting bundle is tracked for serialization via
+    /// [`get_cpu_bundle`](Self::get_cpu_bundle).
+    pub fn create_bundle(
+        &mut self,
+        cpu_instance: &CpuMaterialInstance,
+        pass_materials: &[(RenderPassType, &str)],
+        textures: &mut TextureManager,
+    ) -> Result<Arc<MaterialBundle>, MaterialManagerError> {
+        let cpu_mat = &cpu_instance.material;
+
+        if cpu_instance.values.len() != cpu_mat.bindings.len() {
+            return Err(MaterialManagerError::BindingMismatch {
+                expected: cpu_mat.bindings.len(),
+                got: cpu_instance.values.len(),
+            });
+        }
+
+        // Build shared binding group once
+        let shared_binding = Arc::new(self.build_binding_group(cpu_instance, textures)?);
+        let shared_bindings = vec![Arc::clone(&shared_binding)];
+
+        // Create a MaterialInstance per pass
+        let mut bundle = MaterialBundle::new().with_shared_bindings(shared_bindings);
+
+        for (pass_type, mat_name) in pass_materials {
+            let gpu_material = self
+                .get_material(mat_name)
+                .cloned()
+                .ok_or_else(|| MaterialManagerError::MaterialNotFound(mat_name.to_string()))?;
+
+            let mut instance =
+                MaterialInstance::new(gpu_material).with_binding_group(Arc::clone(&shared_binding));
+            if let Some(name) = &cpu_instance.name {
+                instance = instance.with_label(format!("{name}_{}", pass_type.as_str()));
+            }
+
+            bundle = bundle.with_pass(*pass_type, Arc::new(instance));
+        }
+
+        if let Some(name) = &cpu_instance.name {
+            bundle = bundle.with_label(name.clone());
+        }
+
+        let bundle = Arc::new(bundle);
+
+        // Track for serialization
+        let info = CpuBundleInfo {
+            cpu_instance: Arc::new(cpu_instance.clone()),
+            pass_materials: pass_materials
+                .iter()
+                .map(|(p, n)| (*p, n.to_string()))
+                .collect(),
+        };
+        let ptr = Arc::as_ptr(&bundle) as usize;
+        self.cpu_bundles.insert(ptr, info);
+
+        Ok(bundle)
+    }
+
+    /// Create a single-pass [`MaterialBundle`] (Forward only) from a [`CpuMaterialInstance`].
+    ///
+    /// This is a convenience method equivalent to calling [`create_bundle`](Self::create_bundle)
+    /// with a single `(Forward, material_name)` pair. The material is resolved by
+    /// matching the CPU material's Arc pointer or name.
     pub fn create_instance(
         &mut self,
         cpu_instance: &CpuMaterialInstance,
         textures: &mut TextureManager,
-    ) -> Result<Arc<MaterialInstance>, MaterialManagerError> {
+    ) -> Result<Arc<MaterialBundle>, MaterialManagerError> {
         let cpu_mat = &cpu_instance.material;
 
-        // Find the registered GPU material matching this CPU material
-        let gpu_material = self
+        // Find the registered material name
+        let mat_name = self
             .materials
-            .values()
-            .find(|(cpu, _)| Arc::ptr_eq(cpu, cpu_mat))
-            .map(|(_, gpu)| Arc::clone(gpu))
+            .iter()
+            .find(|(_, (cpu, _))| Arc::ptr_eq(cpu, cpu_mat))
+            .map(|(k, _)| k.clone())
             .or_else(|| {
-                // Try by name
                 cpu_mat
                     .name
                     .as_ref()
-                    .and_then(|n| self.materials.get(n.as_str()))
-                    .map(|(_, gpu)| Arc::clone(gpu))
+                    .filter(|n| self.materials.contains_key(n.as_str()))
+                    .cloned()
             })
             .ok_or_else(|| {
                 MaterialManagerError::MaterialNotFound(
@@ -550,72 +624,37 @@ impl MaterialManager {
                 )
             })?;
 
-        if cpu_instance.values.len() != cpu_mat.bindings.len() {
-            return Err(MaterialManagerError::BindingMismatch {
-                expected: cpu_mat.bindings.len(),
-                got: cpu_instance.values.len(),
-            });
-        }
-
-        // Pack uniform values (Float/Vec3/Vec4) into a byte buffer for binding 0
-        let uniform_buffer = self.pack_uniforms(cpu_mat, &cpu_instance.values)?;
-
-        // Build the binding group
-        let mut binding_group = BindingGroup::new();
-
-        // Add uniform buffer at binding 0 if we have any uniform values
-        if let Some(buf) = uniform_buffer {
-            binding_group = binding_group.with_buffer(0, buf);
-        }
-
-        // Add texture+sampler bindings
-        for (i, value) in cpu_instance.values.iter().enumerate() {
-            let binding_def = &cpu_mat.bindings[i];
-            if binding_def.value_type != MaterialValueType::Texture {
-                continue;
-            }
-            if let MaterialValue::Texture(tex_ref) = value {
-                let (texture, sampler) = self.resolve_texture_ref(tex_ref, textures)?;
-                binding_group = binding_group.with_combined(binding_def.binding, texture, sampler);
-            }
-        }
-
-        let mut instance =
-            MaterialInstance::new(gpu_material).with_binding_group(Arc::new(binding_group));
-        if let Some(name) = &cpu_instance.name {
-            instance = instance.with_label(name.clone());
-        }
-
-        let instance = Arc::new(instance);
-
-        // Track the CPU instance for serialization
-        let cpu_arc = Arc::new(cpu_instance.clone());
-        let ptr = Arc::as_ptr(&instance) as usize;
-        self.cpu_instances.insert(ptr, cpu_arc);
-
-        Ok(instance)
+        self.create_bundle(
+            cpu_instance,
+            &[(RenderPassType::Forward, mat_name.as_str())],
+            textures,
+        )
     }
 
-    /// Register an externally-created GPU instance with its CPU source data.
+    /// Register an externally-created bundle with its CPU source data.
     ///
-    /// Use this when the instance was created outside MaterialManager but
+    /// Use this when the bundle was created outside MaterialManager but
     /// you still want serialization support.
-    pub fn register_instance(
+    pub fn register_bundle(
         &mut self,
-        gpu_instance: &Arc<MaterialInstance>,
+        bundle: &Arc<MaterialBundle>,
         cpu_instance: Arc<CpuMaterialInstance>,
+        pass_materials: Vec<(RenderPassType, String)>,
     ) {
-        let ptr = Arc::as_ptr(gpu_instance) as usize;
-        self.cpu_instances.insert(ptr, cpu_instance);
+        let ptr = Arc::as_ptr(bundle) as usize;
+        self.cpu_bundles.insert(
+            ptr,
+            CpuBundleInfo {
+                cpu_instance,
+                pass_materials,
+            },
+        );
     }
 
-    /// Get the CPU source data for a GPU material instance (for serialization).
-    pub fn get_cpu_instance(
-        &self,
-        gpu_instance: &Arc<MaterialInstance>,
-    ) -> Option<&Arc<CpuMaterialInstance>> {
-        let ptr = Arc::as_ptr(gpu_instance) as usize;
-        self.cpu_instances.get(&ptr)
+    /// Get the CPU source data for a material bundle (for serialization).
+    pub fn get_cpu_bundle(&self, bundle: &Arc<MaterialBundle>) -> Option<&CpuBundleInfo> {
+        let ptr = Arc::as_ptr(bundle) as usize;
+        self.cpu_bundles.get(&ptr)
     }
 
     // --- Iteration ---
@@ -635,12 +674,44 @@ impl MaterialManager {
         self.materials.len()
     }
 
-    /// Returns the number of tracked instances.
-    pub fn instance_count(&self) -> usize {
-        self.cpu_instances.len()
+    /// Returns the number of tracked bundles.
+    pub fn bundle_count(&self) -> usize {
+        self.cpu_bundles.len()
     }
 
     // --- Internal helpers ---
+
+    /// Build a [`BindingGroup`] from a CPU material instance's values.
+    fn build_binding_group(
+        &self,
+        cpu_instance: &CpuMaterialInstance,
+        textures: &mut TextureManager,
+    ) -> Result<BindingGroup, MaterialManagerError> {
+        let cpu_mat = &cpu_instance.material;
+
+        // Pack uniform values (Float/Vec3/Vec4) into a byte buffer for binding 0
+        let uniform_buffer = self.pack_uniforms(cpu_mat, &cpu_instance.values)?;
+
+        let mut binding_group = BindingGroup::new();
+
+        if let Some(buf) = uniform_buffer {
+            binding_group = binding_group.with_buffer(0, buf);
+        }
+
+        // Add texture+sampler bindings
+        for (i, value) in cpu_instance.values.iter().enumerate() {
+            let binding_def = &cpu_mat.bindings[i];
+            if binding_def.value_type != MaterialValueType::Texture {
+                continue;
+            }
+            if let MaterialValue::Texture(tex_ref) = value {
+                let (texture, sampler) = self.resolve_texture_ref(tex_ref, textures)?;
+                binding_group = binding_group.with_combined(binding_def.binding, texture, sampler);
+            }
+        }
+
+        Ok(binding_group)
+    }
 
     /// Pack uniform (Float/Vec3/Vec4) values into a GPU buffer at binding 0.
     fn pack_uniforms(
@@ -648,7 +719,6 @@ impl MaterialManager {
         cpu_mat: &CpuMaterial,
         values: &[MaterialValue],
     ) -> Result<Option<Arc<Buffer>>, MaterialManagerError> {
-        // Collect uniform values that share binding 0
         let mut uniform_data: Vec<u8> = Vec::new();
         for (i, value) in values.iter().enumerate() {
             let binding_def = &cpu_mat.bindings[i];
@@ -694,7 +764,6 @@ impl MaterialManager {
         tex_ref: &TextureRef,
         textures: &mut TextureManager,
     ) -> Result<(Arc<Texture>, Arc<Sampler>), MaterialManagerError> {
-        // Resolve texture
         let texture = match &tex_ref.texture {
             TextureSource::Named(name) => textures
                 .get_texture(name)
@@ -703,7 +772,6 @@ impl MaterialManager {
             TextureSource::Cpu(cpu_tex) => textures.create_texture(cpu_tex)?,
         };
 
-        // Resolve sampler (use default linear if none specified)
         let sampler = if let Some(cpu_sampler) = &tex_ref.sampler {
             if let Some(name) = &cpu_sampler.name {
                 if let Some(s) = textures.get_sampler(name) {
@@ -715,7 +783,6 @@ impl MaterialManager {
                 textures.create_sampler(cpu_sampler)?
             }
         } else {
-            // Create/get a default linear sampler
             let default_sampler = CpuSampler::linear().with_name("__default_linear");
             if let Some(s) = textures.get_sampler("__default_linear") {
                 Arc::clone(s)
