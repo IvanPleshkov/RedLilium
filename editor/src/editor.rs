@@ -7,7 +7,10 @@ use redlilium_core::abstract_editor::{ActionQueue, DEFAULT_MAX_UNDO, EditActionH
 use redlilium_core::math::{Vec3, mat4_to_cols_array_2d};
 use redlilium_core::mesh::generators;
 use redlilium_debug_drawer::{DebugDrawer, DebugDrawerRenderer};
-use redlilium_ecs::ui::{ImportComponentAction, InspectorState, SpawnPrefabAction};
+use redlilium_ecs::ui::{
+    ComponentDragPayload, ComponentFileDragPayload, ImportComponentAction, InspectorState,
+    PrefabFileDragPayload, SpawnPrefabAction,
+};
 use redlilium_ecs::{
     Camera, DrawGrid, DrawSelectionAabb, EcsRunner, Entity, FreeFlyCamera, GlobalTransform,
     GridConfig, Name, PostUpdate, RenderMaterial, RenderMesh, Schedules, Transform, Update,
@@ -771,6 +774,9 @@ impl AppHandler for Editor {
                             .show_leaf_collapse_buttons(false)
                             .show_inside(ui, &mut tab_viewer);
                         scene_view_rect = tab_viewer.scene_view_rect;
+
+                        // Floating label near cursor while dragging
+                        show_drag_overlay(ui.ctx(), tab_viewer.world);
                     }
                 });
 
@@ -991,5 +997,49 @@ impl AppHandler for Editor {
                 }
             }
         }
+    }
+}
+
+/// Show a floating label near the cursor for any active drag payload.
+fn show_drag_overlay(ctx: &egui::Context, world: &World) {
+    let label = if let Some(entity) = egui::DragAndDrop::payload::<Entity>(ctx) {
+        let name = world
+            .get::<Name>(*entity)
+            .map(|n| n.as_str().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("Entity({})", entity.index()));
+        Some(name)
+    } else if let Some(comp) = egui::DragAndDrop::payload::<ComponentDragPayload>(ctx) {
+        Some(comp.name.to_string())
+    } else if let Some(file) = egui::DragAndDrop::payload::<ComponentFileDragPayload>(ctx) {
+        Some(
+            file.vfs_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&file.vfs_path)
+                .to_string(),
+        )
+    } else {
+        egui::DragAndDrop::payload::<PrefabFileDragPayload>(ctx).map(|file| {
+            file.vfs_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&file.vfs_path)
+                .to_string()
+        })
+    };
+
+    if let Some(label) = label
+        && let Some(pos) = ctx.input(|i| i.pointer.hover_pos())
+    {
+        egui::Area::new(egui::Id::new("drag_overlay"))
+            .fixed_pos(pos + egui::vec2(12.0, 4.0))
+            .order(egui::Order::Tooltip)
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label(label);
+                });
+            });
     }
 }
