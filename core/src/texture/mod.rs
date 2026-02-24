@@ -242,6 +242,11 @@ impl TextureFormat {
         matches!(self, Self::Depth24PlusStencil8 | Self::Depth32FloatStencil8)
     }
 
+    /// Returns true if this is an integer (non-blendable) format.
+    pub fn is_integer(&self) -> bool {
+        matches!(self, Self::R8Uint | Self::R8Sint | Self::R32Uint)
+    }
+
     /// Returns true if this is an sRGB format (hardware applies linear→sRGB on write).
     ///
     /// sRGB formats automatically convert linear color values to sRGB gamma space

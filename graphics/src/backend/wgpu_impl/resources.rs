@@ -217,9 +217,15 @@ impl WgpuBackend {
             .color_formats
             .iter()
             .map(|format| {
+                // Integer formats (e.g. R32Uint) are not blendable — blend must be None.
+                let blend = if format.is_integer() {
+                    None
+                } else {
+                    Some(wgpu_blend_state)
+                };
                 Some(wgpu::ColorTargetState {
                     format: convert_texture_format(*format),
-                    blend: Some(wgpu_blend_state),
+                    blend,
                     write_mask: wgpu::ColorWrites::ALL,
                 })
             })
