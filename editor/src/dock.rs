@@ -74,6 +74,8 @@ pub struct EditorTabViewer<'a> {
     pub history: &'a EditActionHistory<World>,
     /// Output: the SceneView panel rect from this frame (egui logical points).
     pub scene_view_rect: Option<egui::Rect>,
+    /// Optional drag selection rectangle to draw over the SceneView (egui logical points).
+    pub drag_rect: Option<egui::Rect>,
 }
 
 impl TabViewer for EditorTabViewer<'_> {
@@ -95,6 +97,21 @@ impl TabViewer for EditorTabViewer<'_> {
                 // Record the available rect; the scene pass renders directly
                 // to the swapchain in this area.
                 self.scene_view_rect = Some(ui.available_rect_before_wrap());
+
+                // Draw box selection rectangle overlay if dragging.
+                if let Some(rect) = self.drag_rect {
+                    ui.painter().rect_filled(
+                        rect,
+                        egui::CornerRadius::ZERO,
+                        egui::Color32::from_rgba_unmultiplied(70, 130, 230, 30),
+                    );
+                    ui.painter().rect_stroke(
+                        rect,
+                        egui::CornerRadius::ZERO,
+                        egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 130, 230)),
+                        egui::StrokeKind::Outside,
+                    );
+                }
             }
             Tab::Assets => {
                 self.asset_browser.show(ui, self.vfs);

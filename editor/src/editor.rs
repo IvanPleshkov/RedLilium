@@ -99,6 +99,12 @@ pub struct Editor {
     /// Current cursor position in physical pixels (for hit-testing).
     cursor_pos: [f32; 2],
 
+    // Box selection drag state
+    /// Physical pixel position where LMB was pressed (drag origin).
+    drag_start: Option<[f32; 2]>,
+    /// Whether the drag has exceeded the threshold and is now a box selection.
+    dragging_box: bool,
+
     /// Smoothed frames-per-second for the status bar.
     fps: f32,
 
@@ -151,6 +157,8 @@ impl Editor {
             egui_wants_keyboard: false,
             scene_view_rect_phys: None,
             cursor_pos: [0.0, 0.0],
+            drag_start: None,
+            dragging_box: false,
             fps: 0.0,
             pending_import: None,
             pending_prefab_import: None,
@@ -319,6 +327,25 @@ impl Editor {
         }
     }
 
+    /// Request a pixel-perfect box selection by reading from the entity index
+    /// texture. The actual selection is deferred until the GPU readback completes
+    /// (resolved in `on_update` via `resolve_rect_pick`).
+    fn perform_box_selection(&mut self, start: [f32; 2], end: [f32; 2]) {
+        let Some(scene_view) = &mut self.scene_view else {
+            return;
+        };
+
+        // Build the drag rectangle in physical pixels (normalize min/max).
+        let x = start[0].min(end[0]).max(0.0) as u32;
+        let y = start[1].min(end[1]).max(0.0) as u32;
+        let x2 = start[0].max(end[0]).max(0.0) as u32;
+        let y2 = start[1].max(end[1]).max(0.0) as u32;
+        let w = x2.saturating_sub(x).max(1);
+        let h = y2.saturating_sub(y).max(1);
+
+        scene_view.request_rect_pick(x, y, w, h);
+    }
+
     /// Update WindowInput's ui_wants_input flag from egui state.
     fn sync_input_flags(&self) {
         let ew = self.active_world();
@@ -441,6 +468,32 @@ impl AppHandler for Editor {
                 };
             if let Err(e) = ew.history.execute(action, &mut ew.world) {
                 log::warn!("Pick selection failed: {e}");
+            }
+        }
+
+        // Resolve GPU rect pick from the previous frame's readback
+        if let Some(scene_view) = &mut self.scene_view
+            && let Some(entity_indices) = scene_view.resolve_rect_pick()
+        {
+            let ew = &mut self.worlds[self.active_world];
+            let selected: Vec<Entity> = entity_indices
+                .iter()
+                .filter_map(|&idx| {
+                    ew.entity_index_buffers
+                        .iter()
+                        .find(|(e, _)| e.index() == idx)
+                        .map(|(e, _)| *e)
+                })
+                .collect();
+
+            let action: Box<dyn redlilium_core::abstract_editor::EditAction<World>> =
+                if selected.is_empty() {
+                    Box::new(SelectAction::clear())
+                } else {
+                    Box::new(SelectAction::set(selected))
+                };
+            if let Err(e) = ew.history.execute(action, &mut ew.world) {
+                log::warn!("Rect selection failed: {e}");
             }
         }
 
@@ -665,6 +718,7 @@ impl AppHandler for Editor {
             egui.begin_frame(elapsed);
 
             let egui_ctx = egui.context().clone();
+            pixels_per_point = egui_ctx.pixels_per_point();
 
             // macOS: reserve space for the native titlebar area (traffic lights)
             // Contains centered play controls. Double-click toggles maximize.
@@ -769,6 +823,22 @@ impl AppHandler for Editor {
                         Some(&mut self.worlds[self.active_world])
                     };
                     if let Some(ew) = ew {
+                        // Compute drag selection rect in egui logical points.
+                        let drag_rect = if self.dragging_box
+                            && let Some(start) = self.drag_start
+                        {
+                            let inv = 1.0 / pixels_per_point;
+                            let x0 = start[0] * inv;
+                            let y0 = start[1] * inv;
+                            let x1 = self.cursor_pos[0] * inv;
+                            let y1 = self.cursor_pos[1] * inv;
+                            Some(egui::Rect::from_two_pos(
+                                egui::pos2(x0, y0),
+                                egui::pos2(x1, y1),
+                            ))
+                        } else {
+                            None
+                        };
                         let mut tab_viewer = EditorTabViewer {
                             world: &mut ew.world,
                             inspector_state: &mut self.inspector_state,
@@ -777,6 +847,7 @@ impl AppHandler for Editor {
                             console: &mut self.console,
                             history: &ew.history,
                             scene_view_rect: None,
+                            drag_rect,
                         };
                         let mut dock_style = egui_dock::Style::from_egui(ui.style().as_ref());
                         dock_style.tab_bar.corner_radius = egui::CornerRadius::ZERO;
@@ -862,7 +933,6 @@ impl AppHandler for Editor {
             }
 
             // Store egui input state for next frame
-            pixels_per_point = egui_ctx.pixels_per_point();
             self.egui_wants_pointer = egui_ctx.wants_pointer_input();
             self.egui_wants_keyboard = egui_ctx.wants_keyboard_input();
 
@@ -902,11 +972,15 @@ impl AppHandler for Editor {
         // Submit scene first (clears swapchain), then egui on top
         let mut deps = Vec::new();
 
-        // Take pending pick coordinates before the immutable borrow of scene_view.
+        // Take pending pick/rect coordinates before the immutable borrow of scene_view.
         let pending_pick = self
             .scene_view
             .as_mut()
             .and_then(|sv| sv.take_pending_pick());
+        let pending_rect = self
+            .scene_view
+            .as_mut()
+            .and_then(|sv| sv.take_pending_rect_pick());
 
         if let Some(scene_view) = &self.scene_view
             && scene_view.has_viewport()
@@ -941,13 +1015,19 @@ impl AppHandler for Editor {
                     let ei_handle = scene_graph.add_graphics_pass(ei_pass);
                     scene_graph.add_dependency(ei_handle, scene_pass_handle);
 
-                    // Readback transfer: same graph, depends on entity index pass.
-                    // Keeping it in the same graph avoids inter-graph semaphore issues.
+                    // Single-pixel readback transfer.
                     if let Some([px, py]) = pending_pick {
                         log::info!("Submitting pick readback at ({px}, {py})");
                         let readback_pass = scene_view.build_pick_readback(px, py);
                         let readback_handle = scene_graph.add_transfer_pass(readback_pass);
                         scene_graph.add_dependency(readback_handle, ei_handle);
+                    }
+
+                    // Rect selection readback transfer.
+                    if let Some([rx, ry, rw, rh]) = pending_rect {
+                        let rect_readback_pass = scene_view.build_rect_readback(rx, ry, rw, rh);
+                        let rect_rb_handle = scene_graph.add_transfer_pass(rect_readback_pass);
+                        scene_graph.add_dependency(rect_rb_handle, ei_handle);
                     }
                 }
 
@@ -956,11 +1036,16 @@ impl AppHandler for Editor {
             }
         }
 
-        // Mark pick in flight after the immutable borrow is released.
+        // Mark picks in flight after the immutable borrow is released.
         if pending_pick.is_some()
             && let Some(scene_view) = &mut self.scene_view
         {
             scene_view.set_pick_in_flight();
+        }
+        if let Some([_, _, rw, rh]) = pending_rect
+            && let Some(scene_view) = &mut self.scene_view
+        {
+            scene_view.set_rect_pick_in_flight(rw, rh);
         }
 
         let _ui_handle = ctx.submit("editor_ui", ui_graph, &deps);
@@ -977,6 +1062,17 @@ impl AppHandler for Editor {
             let ew = self.active_world();
             if let Ok(mut input) = ew.window_input.write() {
                 input.on_mouse_move(x, y);
+            }
+        }
+
+        // Detect drag threshold for box selection
+        if let Some(start) = self.drag_start
+            && !self.dragging_box
+        {
+            let dx = self.cursor_pos[0] - start[0];
+            let dy = self.cursor_pos[1] - start[1];
+            if (dx * dx + dy * dy).sqrt() > 5.0 {
+                self.dragging_box = true;
             }
         }
     }
@@ -999,20 +1095,39 @@ impl AppHandler for Editor {
                 input.on_mouse_button(idx, pressed);
             }
 
-            // LMB click in scene view → request GPU pick
-            // Note: no `egui_wants_pointer` check here — the outer `if` already
-            // ensures the cursor is in the scene view (which is an egui panel,
-            // so egui always claims the pointer there).
-            if button == MouseButton::Left
-                && pressed
-                && let Some(scene_view) = &mut self.scene_view
-                && self.scene_view_rect_phys.is_some()
-            {
-                // Use absolute cursor position — the entity index texture is
-                // window-sized and the viewport offsets rendering within it.
-                let px = self.cursor_pos[0].max(0.0) as u32;
-                let py = self.cursor_pos[1].max(0.0) as u32;
-                scene_view.request_pick(px, py);
+            // LMB press: start potential drag for box selection.
+            // LMB release: if it was a small movement → single-click GPU pick,
+            // otherwise → box selection of all entities in the rectangle.
+            if button == MouseButton::Left && self.scene_view_rect_phys.is_some() {
+                if pressed && self.cursor_in_scene_view() {
+                    self.drag_start = Some(self.cursor_pos);
+                    self.dragging_box = false;
+                    // Clear selection immediately on click; the GPU pick or
+                    // box selection will re-select if anything is hit.
+                    if !self.worlds.is_empty() {
+                        let ew = &mut self.worlds[self.active_world];
+                        let action: Box<dyn redlilium_core::abstract_editor::EditAction<World>> =
+                            Box::new(SelectAction::clear());
+                        let _ = ew.history.execute(action, &mut ew.world);
+                    }
+                } else if !pressed {
+                    if self.dragging_box {
+                        // Box selection: select entities whose screen AABBs
+                        // intersect the drag rectangle.
+                        if let Some(start) = self.drag_start {
+                            self.perform_box_selection(start, self.cursor_pos);
+                        }
+                    } else if let Some(scene_view) = &mut self.scene_view
+                        && self.drag_start.is_some()
+                    {
+                        // Single click: GPU pick at cursor position.
+                        let px = self.cursor_pos[0].max(0.0) as u32;
+                        let py = self.cursor_pos[1].max(0.0) as u32;
+                        scene_view.request_pick(px, py);
+                    }
+                    self.drag_start = None;
+                    self.dragging_box = false;
+                }
             }
         }
     }

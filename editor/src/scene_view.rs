@@ -38,6 +38,13 @@ pub struct SceneViewState {
     /// Set to 2 when a readback is submitted (GPU needs at least one full
     /// frame to finish the transfer). Decremented each frame; read at 0.
     pick_frames_remaining: u32,
+
+    // --- Rect selection readback ---
+    pending_rect_pick: Option<[u32; 4]>,
+    rect_readback_buffer: Arc<Buffer>,
+    rect_pick_frames_remaining: u32,
+    /// Dimensions [w, h] and padded bytes_per_row of the in-flight rect readback.
+    rect_pick_layout: [u32; 3],
 }
 
 impl SceneViewState {
@@ -62,6 +69,15 @@ impl SceneViewState {
             ))
             .expect("Failed to create picking readback buffer");
 
+        // Default rect readback buffer: 256×256 × 4 bytes with 256-byte row alignment.
+        let default_rect_size = 256u64 * 256 * 4;
+        let rect_readback_buffer = device
+            .create_buffer(&BufferDescriptor::new(
+                default_rect_size,
+                BufferUsage::COPY_DST | BufferUsage::MAP_READ,
+            ))
+            .expect("Failed to create rect readback buffer");
+
         Self {
             device,
             depth_texture,
@@ -74,6 +90,10 @@ impl SceneViewState {
             readback_buffer,
             pending_pick: None,
             pick_frames_remaining: 0,
+            pending_rect_pick: None,
+            rect_readback_buffer,
+            rect_pick_frames_remaining: 0,
+            rect_pick_layout: [0; 3],
         }
     }
 
@@ -331,6 +351,114 @@ impl SceneViewState {
         } else {
             Some(value - 1) // shader wrote entity_index + 1
         }
+    }
+
+    // ---- Rect selection readback ----
+
+    /// Request a rect readback at the given physical-pixel rectangle.
+    ///
+    /// Resizes the readback buffer if needed. The result will be available
+    /// after 2 frames via [`resolve_rect_pick`].
+    pub fn request_rect_pick(&mut self, x: u32, y: u32, w: u32, h: u32) {
+        let (tex_w, tex_h) = self.last_size;
+        let x = x.min(tex_w.saturating_sub(1));
+        let y = y.min(tex_h.saturating_sub(1));
+        let w = w.min(tex_w - x).max(1);
+        let h = h.min(tex_h - y).max(1);
+
+        // Padded bytes_per_row (aligned to 256 for GPU transfer requirements).
+        let bytes_per_row = (w * 4).div_ceil(256) * 256;
+        let required_size = bytes_per_row as u64 * h as u64;
+
+        if required_size > self.rect_readback_buffer.size() {
+            self.rect_readback_buffer = self
+                .device
+                .create_buffer(&BufferDescriptor::new(
+                    required_size,
+                    BufferUsage::COPY_DST | BufferUsage::MAP_READ,
+                ))
+                .expect("Failed to resize rect readback buffer");
+        }
+
+        self.pending_rect_pick = Some([x, y, w, h]);
+    }
+
+    /// Take the pending rect pick coordinates (consumed to build the readback pass).
+    pub fn take_pending_rect_pick(&mut self) -> Option<[u32; 4]> {
+        self.pending_rect_pick.take()
+    }
+
+    /// Build a transfer pass that copies a rectangular region from the
+    /// entity-index texture into the rect readback buffer.
+    pub fn build_rect_readback(&self, x: u32, y: u32, w: u32, h: u32) -> TransferPass {
+        let bytes_per_row = (w * 4).div_ceil(256) * 256;
+
+        let region = BufferTextureCopyRegion::new(
+            BufferTextureLayout::new(0, Some(bytes_per_row), Some(h)),
+            TextureCopyLocation::new(0, TextureOrigin::new(x, y, 0)),
+            redlilium_graphics::Extent3d {
+                width: w,
+                height: h,
+                depth: 1,
+            },
+        );
+
+        let mut pass = TransferPass::new("rect_pick_readback".into());
+        pass.set_transfer_config(TransferConfig::new().with_operation(
+            TransferOperation::readback_texture(
+                self.entity_index_texture.clone(),
+                self.rect_readback_buffer.clone(),
+                vec![region],
+            ),
+        ));
+        pass
+    }
+
+    /// Mark that a rect readback was submitted with the given dimensions.
+    pub fn set_rect_pick_in_flight(&mut self, w: u32, h: u32) {
+        let bytes_per_row = (w * 4).div_ceil(256) * 256;
+        self.rect_pick_frames_remaining = 2;
+        self.rect_pick_layout = [w, h, bytes_per_row];
+    }
+
+    /// Read rect pick results from the readback buffer.
+    ///
+    /// Returns `Some(entity_indices)` with unique entity indices found in the
+    /// rectangle, or `None` if still waiting for the GPU.
+    pub fn resolve_rect_pick(&mut self) -> Option<Vec<u32>> {
+        if self.rect_pick_frames_remaining == 0 {
+            return None;
+        }
+        self.rect_pick_frames_remaining -= 1;
+        if self.rect_pick_frames_remaining > 0 {
+            return None;
+        }
+
+        let [w, h, bytes_per_row] = self.rect_pick_layout;
+        let total_bytes = bytes_per_row as u64 * h as u64;
+        let data = self
+            .device
+            .read_buffer(&self.rect_readback_buffer, 0, total_bytes);
+
+        let mut unique = std::collections::HashSet::new();
+        let pixel_bytes = (w * 4) as usize;
+        let row_stride = bytes_per_row as usize;
+
+        for row in 0..h as usize {
+            let row_start = row * row_stride;
+            let row_end = row_start + pixel_bytes;
+            if row_end > data.len() {
+                break;
+            }
+            for pixel in data[row_start..row_end].chunks_exact(4) {
+                let value = u32::from_le_bytes([pixel[0], pixel[1], pixel[2], pixel[3]]);
+                if value != 0 {
+                    unique.insert(value - 1); // shader wrote entity_index + 1
+                }
+            }
+        }
+
+        Some(unique.into_iter().collect())
     }
 
     /// Clear the viewport (e.g. when the SceneView tab is not visible).
