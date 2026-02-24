@@ -34,8 +34,10 @@ pub struct SceneViewState {
     readback_buffer: Arc<Buffer>,
     /// Pixel coordinates (physical) of a pending pick request, resolved next frame.
     pending_pick: Option<[u32; 2]>,
-    /// Whether a readback was submitted last frame and is ready to read.
-    pick_in_flight: bool,
+    /// Frames remaining until the readback buffer is ready to read.
+    /// Set to 2 when a readback is submitted (GPU needs at least one full
+    /// frame to finish the transfer). Decremented each frame; read at 0.
+    pick_frames_remaining: u32,
 }
 
 impl SceneViewState {
@@ -71,7 +73,7 @@ impl SceneViewState {
             entity_index_texture,
             readback_buffer,
             pending_pick: None,
-            pick_in_flight: false,
+            pick_frames_remaining: 0,
         }
     }
 
@@ -288,19 +290,24 @@ impl SceneViewState {
         self.pending_pick.take()
     }
 
-    /// Mark that a readback was submitted and is in flight.
+    /// Mark that a readback was submitted. The result will be ready after
+    /// `pick_frames_remaining` frames have elapsed (typically 2).
     pub fn set_pick_in_flight(&mut self) {
-        self.pick_in_flight = true;
+        self.pick_frames_remaining = 2;
     }
 
     /// Read the pick result from the readback buffer (call after GPU has finished).
     ///
     /// Returns `Some(entity_index)` if an entity was hit, `None` if empty space.
+    /// Returns `None` while still waiting for the GPU to finish the readback.
     pub fn resolve_pick(&mut self) -> Option<u32> {
-        if !self.pick_in_flight {
+        if self.pick_frames_remaining == 0 {
             return None;
         }
-        self.pick_in_flight = false;
+        self.pick_frames_remaining -= 1;
+        if self.pick_frames_remaining > 0 {
+            return None; // still waiting for GPU
+        }
 
         let data = self.device.read_buffer(&self.readback_buffer, 0, 4);
         if data.len() < 4 {

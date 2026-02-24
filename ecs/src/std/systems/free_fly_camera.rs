@@ -37,7 +37,7 @@ impl crate::System for UpdateFreeFlyCamera {
             }
 
             for (idx, cam) in cameras.iter_mut() {
-                let dragging = input.mouse_left || input.mouse_right;
+                let dragging = input.mouse_right;
 
                 if dragging {
                     let dx = input.cursor_delta[0] * cam.rotate_sensitivity;
