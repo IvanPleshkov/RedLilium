@@ -162,12 +162,16 @@ impl Surface {
 
     /// Get the preferred texture format for this surface.
     ///
-    /// Returns the GPU's preferred format from the actual hardware capabilities.
-    /// This may be an sRGB format (e.g. `Bgra8UnormSrgb` on macOS/Metal) or
-    /// a non-sRGB format depending on the platform. Shaders must handle both
-    /// via appropriate defines (`SRGB_FRAMEBUFFER`, `HDR_OUTPUT`).
+    /// Prefers sRGB formats (e.g. `Bgra8UnormSrgb`) when available so that
+    /// shaders can output linear values and the hardware applies the
+    /// linear-to-sRGB conversion automatically. Falls back to the first
+    /// supported format if no sRGB variant is available.
     pub fn preferred_format(&self) -> TextureFormat {
         let formats = self.supported_formats();
+        // Prefer sRGB so both Vulkan and wgpu get consistent gamma handling
+        if let Some(&srgb) = formats.iter().find(|f| f.is_srgb()) {
+            return srgb;
+        }
         formats
             .first()
             .copied()
