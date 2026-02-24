@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! # RedLilium ECS
 //!
 //! Custom Entity-Component-System with integrated async compute support.

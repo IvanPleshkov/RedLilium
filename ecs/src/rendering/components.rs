@@ -17,6 +17,8 @@ pub enum RenderPassType {
     Shadow,
     /// Deferred G-buffer pass.
     Deferred,
+    /// Entity index pass — renders entity ID to an R32Uint target for picking.
+    EntityIndex,
 }
 
 impl RenderPassType {
@@ -26,6 +28,7 @@ impl RenderPassType {
         Self::DepthPrepass,
         Self::Shadow,
         Self::Deferred,
+        Self::EntityIndex,
     ];
 
     /// Serialize to a string key.
@@ -35,6 +38,7 @@ impl RenderPassType {
             Self::DepthPrepass => "DepthPrepass",
             Self::Shadow => "Shadow",
             Self::Deferred => "Deferred",
+            Self::EntityIndex => "EntityIndex",
         }
     }
 
@@ -45,6 +49,7 @@ impl RenderPassType {
             "DepthPrepass" => Some(Self::DepthPrepass),
             "Shadow" => Some(Self::Shadow),
             "Deferred" => Some(Self::Deferred),
+            "EntityIndex" => Some(Self::EntityIndex),
             _ => None,
         }
     }

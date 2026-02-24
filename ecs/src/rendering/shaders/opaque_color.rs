@@ -88,6 +88,11 @@ pub fn create_opaque_color_material(
 /// Returns `(uniform_buffer, material_bundle)`. The uniform buffer should
 /// be kept alongside the entity for per-frame updates via
 /// [`update_opaque_color_uniforms`].
+///
+/// If `entity_index_material` is provided, the bundle will also include an
+/// [`EntityIndex`](RenderPassType::EntityIndex) pass for object picking.
+/// In that case the returned buffer list contains two buffers: the forward
+/// uniform buffer **and** the entity-index uniform buffer (in that order).
 pub fn create_opaque_color_entity(
     device: &Arc<GraphicsDevice>,
     material: &Arc<Material>,
@@ -112,6 +117,45 @@ pub fn create_opaque_color_entity(
     );
 
     (uniform_buffer, bundle)
+}
+
+/// Extended version of [`create_opaque_color_entity`] that also adds an
+/// [`EntityIndex`](RenderPassType::EntityIndex) pass for picking.
+///
+/// Returns `(forward_buffer, entity_index_buffer, material_bundle)`.
+/// Both buffers must be updated each frame — forward via
+/// [`update_opaque_color_uniforms`] and entity-index via
+/// [`super::entity_index::update_entity_index_uniforms`].
+pub fn create_opaque_color_entity_with_picking(
+    device: &Arc<GraphicsDevice>,
+    forward_material: &Arc<Material>,
+    entity_index_material: &Arc<Material>,
+) -> (Arc<Buffer>, Arc<Buffer>, Arc<MaterialBundle>) {
+    let uniform_buffer = device
+        .create_buffer(&BufferDescriptor::new(
+            std::mem::size_of::<OpaqueColorUniforms>() as u64,
+            BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+        ))
+        .expect("Failed to create opaque color uniform buffer");
+
+    let binding_group = Arc::new(BindingGroup::new().with_buffer(0, uniform_buffer.clone()));
+
+    let forward_instance = Arc::new(
+        MaterialInstance::new(Arc::clone(forward_material))
+            .with_binding_group(Arc::clone(&binding_group)),
+    );
+
+    let (ei_buffer, ei_instance) =
+        super::entity_index::create_entity_index_instance(device, entity_index_material);
+
+    let bundle = Arc::new(
+        MaterialBundle::new()
+            .with_pass(RenderPassType::Forward, forward_instance)
+            .with_pass(RenderPassType::EntityIndex, ei_instance)
+            .with_shared_bindings(vec![binding_group]),
+    );
+
+    (uniform_buffer, ei_buffer, bundle)
 }
 
 /// Update per-entity uniform buffers with the current camera VP and model matrices.
