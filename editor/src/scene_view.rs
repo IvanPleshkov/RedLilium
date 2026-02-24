@@ -3,6 +3,8 @@
 //! Reads Camera, GlobalTransform, RenderMesh, RenderMaterial, and Visibility
 //! from the ECS World and builds a forward rendering pass targeting the
 //! swapchain with viewport/scissor matching the egui panel rect.
+//!
+//! Also maintains an R32Uint entity-index texture for GPU-based object picking.
 
 use std::sync::Arc;
 
@@ -10,9 +12,11 @@ use redlilium_ecs::{
     Entity, MaterialBundle, RenderMaterial, RenderMesh, RenderPassType, Visibility, World, shaders,
 };
 use redlilium_graphics::{
-    Buffer, ColorAttachment, DepthStencilAttachment, GraphicsDevice, GraphicsPass, Material,
-    RenderTargetConfig, ScissorRect, SurfaceTexture, TextureDescriptor, TextureFormat,
-    TextureUsage, Viewport,
+    Buffer, BufferDescriptor, BufferTextureCopyRegion, BufferTextureLayout, BufferUsage,
+    ColorAttachment, DepthStencilAttachment, GraphicsDevice, GraphicsPass, LoadOp, Material,
+    RenderTarget, RenderTargetConfig, ScissorRect, StoreOp, SurfaceTexture, TextureCopyLocation,
+    TextureDescriptor, TextureFormat, TextureOrigin, TextureUsage, TransferConfig,
+    TransferOperation, TransferPass, Viewport,
 };
 
 /// Manages GPU resources and rendering for the editor's SceneView panel.
@@ -23,6 +27,15 @@ pub struct SceneViewState {
     viewport: Option<Viewport>,
     scissor: Option<ScissorRect>,
     last_size: (u32, u32),
+
+    // --- Picking ---
+    entity_index_material: Arc<Material>,
+    entity_index_texture: Arc<redlilium_graphics::Texture>,
+    readback_buffer: Arc<Buffer>,
+    /// Pixel coordinates (physical) of a pending pick request, resolved next frame.
+    pending_pick: Option<[u32; 2]>,
+    /// Whether a readback was submitted last frame and is ready to read.
+    pick_in_flight: bool,
 }
 
 impl SceneViewState {
@@ -34,7 +47,18 @@ impl SceneViewState {
             TextureFormat::Depth32Float,
         );
 
+        let (entity_index_material, _ei_layout) =
+            shaders::create_entity_index_material(&device, TextureFormat::Depth32Float);
+
         let depth_texture = Self::create_depth_texture(&device, 256, 256);
+        let entity_index_texture = Self::create_entity_index_texture(&device, 256, 256);
+
+        let readback_buffer = device
+            .create_buffer(&BufferDescriptor::new(
+                4,
+                BufferUsage::COPY_DST | BufferUsage::MAP_READ,
+            ))
+            .expect("Failed to create picking readback buffer");
 
         Self {
             device,
@@ -43,29 +67,38 @@ impl SceneViewState {
             viewport: None,
             scissor: None,
             last_size: (256, 256),
+            entity_index_material,
+            entity_index_texture,
+            readback_buffer,
+            pending_pick: None,
+            pick_in_flight: false,
         }
     }
 
-    /// Create GPU resources for a renderable entity: uniform buffer + MaterialBundle.
+    /// Create GPU resources for a renderable entity with picking support.
     ///
-    /// Returns `(uniform_buffer, gpu_mesh, material_bundle)`.
+    /// Returns `(forward_buffer, entity_index_buffer, gpu_mesh, material_bundle)`.
     pub fn create_entity_resources(
         &self,
         cpu_mesh: &redlilium_core::mesh::CpuMesh,
     ) -> (
         Arc<Buffer>,
+        Arc<Buffer>,
         Arc<redlilium_graphics::Mesh>,
         Arc<MaterialBundle>,
     ) {
-        let (uniform_buffer, bundle) =
-            shaders::create_opaque_color_entity(&self.device, &self.opaque_material);
+        let (forward_buffer, ei_buffer, bundle) = shaders::create_opaque_color_entity_with_picking(
+            &self.device,
+            &self.opaque_material,
+            &self.entity_index_material,
+        );
 
         let gpu_mesh = self
             .device
             .create_mesh_from_cpu(cpu_mesh)
             .expect("Failed to create entity GPU mesh");
 
-        (uniform_buffer, gpu_mesh, bundle)
+        (forward_buffer, ei_buffer, gpu_mesh, bundle)
     }
 
     /// Update the viewport and scissor from an egui panel rect.
@@ -79,7 +112,7 @@ impl SceneViewState {
         self.scissor = Some(ScissorRect::new(x as i32, y as i32, w as u32, h as u32));
     }
 
-    /// Recreate the depth texture if the window size changed.
+    /// Recreate the depth and entity-index textures if the window size changed.
     pub fn resize_if_needed(&mut self, width: u32, height: u32) -> bool {
         let width = width.max(1);
         let height = height.max(1);
@@ -89,6 +122,7 @@ impl SceneViewState {
         }
 
         self.depth_texture = Self::create_depth_texture(&self.device, width, height);
+        self.entity_index_texture = Self::create_entity_index_texture(&self.device, width, height);
         self.last_size = (width, height);
         true
     }
@@ -96,6 +130,15 @@ impl SceneViewState {
     /// Update per-entity uniform buffers with current camera VP and model matrices.
     pub fn update_uniforms(&self, world: &World, entity_buffers: &[(Entity, Arc<Buffer>)]) {
         shaders::update_opaque_color_uniforms(&self.device, world, entity_buffers);
+    }
+
+    /// Update per-entity entity-index uniform buffers.
+    pub fn update_entity_index_uniforms(
+        &self,
+        world: &World,
+        entity_buffers: &[(Entity, Arc<Buffer>)],
+    ) {
+        shaders::update_entity_index_uniforms(&self.device, world, entity_buffers);
     }
 
     /// Build a graphics pass that renders ECS entities to the swapchain
@@ -147,6 +190,142 @@ impl SceneViewState {
         Some(pass)
     }
 
+    /// Build a graphics pass that renders entity indices to the entity-index
+    /// texture (R32Uint). Uses the same depth buffer as the scene pass.
+    pub fn build_entity_index_pass(&self, world: &World) -> Option<GraphicsPass> {
+        let meshes = world.read::<RenderMesh>().ok()?;
+        let materials = world.read::<RenderMaterial>().ok()?;
+        let visibilities = world.read::<Visibility>().ok()?;
+
+        let mut pass = GraphicsPass::new("entity_index".into());
+
+        pass.set_render_targets(
+            RenderTargetConfig::new()
+                .with_color(
+                    ColorAttachment::new(RenderTarget::from_texture(
+                        self.entity_index_texture.clone(),
+                    ))
+                    .with_load_op(LoadOp::clear_color(0.0, 0.0, 0.0, 0.0))
+                    .with_store_op(StoreOp::Store),
+                )
+                .with_depth_stencil(
+                    DepthStencilAttachment::from_texture(self.depth_texture.clone())
+                        .with_clear_depth(1.0),
+                ),
+        );
+
+        if let Some(viewport) = &self.viewport {
+            pass.set_viewport(*viewport);
+        }
+        if let Some(scissor) = &self.scissor {
+            pass.set_scissor_rect(*scissor);
+        }
+
+        let mut draw_count = 0u32;
+        for (entity_idx, render_mesh) in meshes.iter() {
+            let Some(render_material) = materials.get(entity_idx) else {
+                continue;
+            };
+            if let Some(vis) = visibilities.get(entity_idx)
+                && !vis.is_visible()
+            {
+                continue;
+            }
+            if let Some(instance) = render_material.pass(RenderPassType::EntityIndex) {
+                pass.add_draw(render_mesh.mesh.clone(), Arc::clone(instance));
+                draw_count += 1;
+            }
+        }
+
+        if draw_count == 0 {
+            log::warn!("Entity index pass has 0 draws — no EntityIndex pass on any material");
+        }
+
+        Some(pass)
+    }
+
+    /// Build a transfer pass that copies a single pixel from the entity-index
+    /// texture into the readback buffer.
+    pub fn build_pick_readback(&self, px: u32, py: u32) -> TransferPass {
+        let (w, h) = self.last_size;
+        let px = px.min(w.saturating_sub(1));
+        let py = py.min(h.saturating_sub(1));
+
+        let region = BufferTextureCopyRegion::new(
+            BufferTextureLayout::packed(),
+            TextureCopyLocation::new(0, TextureOrigin::new(px, py, 0)),
+            redlilium_graphics::Extent3d {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+        );
+
+        let mut pass = TransferPass::new("pick_readback".into());
+        pass.set_transfer_config(TransferConfig::new().with_operation(
+            TransferOperation::readback_texture(
+                self.entity_index_texture.clone(),
+                self.readback_buffer.clone(),
+                vec![region],
+            ),
+        ));
+        pass
+    }
+
+    /// Request a pick at the given physical pixel coordinates.
+    ///
+    /// The result will be available next frame via [`resolve_pick`].
+    pub fn request_pick(&mut self, px: u32, py: u32) {
+        log::info!(
+            "Pick requested at pixel ({px}, {py}), texture size = {:?}",
+            self.last_size
+        );
+        self.pending_pick = Some([px, py]);
+    }
+
+    /// Take the pending pick coordinates (consumed once to build the readback pass).
+    pub fn take_pending_pick(&mut self) -> Option<[u32; 2]> {
+        self.pending_pick.take()
+    }
+
+    /// Mark that a readback was submitted and is in flight.
+    pub fn set_pick_in_flight(&mut self) {
+        self.pick_in_flight = true;
+    }
+
+    /// Read the pick result from the readback buffer (call after GPU has finished).
+    ///
+    /// Returns `Some(entity_index)` if an entity was hit, `None` if empty space.
+    pub fn resolve_pick(&mut self) -> Option<u32> {
+        if !self.pick_in_flight {
+            return None;
+        }
+        self.pick_in_flight = false;
+
+        let data = self.device.read_buffer(&self.readback_buffer, 0, 4);
+        if data.len() < 4 {
+            log::warn!(
+                "Pick readback: buffer returned {} bytes (expected 4)",
+                data.len()
+            );
+            return None;
+        }
+        let value = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        log::info!(
+            "Pick readback: raw value = {value}, decoded = {}",
+            if value == 0 {
+                "None (background)".to_string()
+            } else {
+                format!("Some({})", value - 1)
+            }
+        );
+        if value == 0 {
+            None // cleared background — no entity
+        } else {
+            Some(value - 1) // shader wrote entity_index + 1
+        }
+    }
+
     /// Clear the viewport (e.g. when the SceneView tab is not visible).
     pub fn clear_viewport(&mut self) {
         self.viewport = None;
@@ -184,5 +363,23 @@ impl SceneViewState {
                 .with_label("scene_view_depth"),
             )
             .expect("Failed to create scene view depth texture")
+    }
+
+    fn create_entity_index_texture(
+        device: &Arc<GraphicsDevice>,
+        width: u32,
+        height: u32,
+    ) -> Arc<redlilium_graphics::Texture> {
+        device
+            .create_texture(
+                &TextureDescriptor::new_2d(
+                    width,
+                    height,
+                    TextureFormat::R32Uint,
+                    TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
+                )
+                .with_label("scene_view_entity_index"),
+            )
+            .expect("Failed to create scene view entity index texture")
     }
 }

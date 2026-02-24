@@ -9,7 +9,7 @@ use redlilium_core::mesh::generators;
 use redlilium_debug_drawer::{DebugDrawer, DebugDrawerRenderer};
 use redlilium_ecs::ui::{
     ComponentDragPayload, ComponentFileDragPayload, ImportComponentAction, InspectorState,
-    PrefabFileDragPayload, SpawnPrefabAction,
+    PrefabFileDragPayload, SelectAction, SpawnPrefabAction,
 };
 use redlilium_ecs::{
     Camera, DrawGrid, DrawSelectionAabb, EcsRunner, Entity, FreeFlyCamera, GlobalTransform,
@@ -58,8 +58,10 @@ pub struct EditorWorld {
     pub editor_camera: Entity,
     /// Handle to the WindowInput resource for updating from app events.
     pub window_input: Arc<RwLock<WindowInput>>,
-    /// Per-entity uniform buffers for scene rendering.
+    /// Per-entity forward uniform buffers for scene rendering.
     pub entity_buffers: Vec<(Entity, Arc<Buffer>)>,
+    /// Per-entity entity-index uniform buffers for picking.
+    pub entity_index_buffers: Vec<(Entity, Arc<Buffer>)>,
     /// Handle to the DebugDrawer resource for advance_tick / take_render_data.
     pub debug_drawer: Arc<RwLock<DebugDrawer>>,
 }
@@ -195,6 +197,7 @@ impl Editor {
         let cpu_cube = generators::generate_cube(0.5);
         let cube_aabb = cpu_cube.compute_aabb();
         let mut entity_buffers = Vec::new();
+        let mut entity_index_buffers = Vec::new();
 
         // Ground plane (scaled flat cube)
         {
@@ -210,7 +213,7 @@ impl Editor {
                 .unwrap();
             world.insert(entity, Visibility::VISIBLE).unwrap();
 
-            let (buffer, mesh, mat_inst) = scene_view.create_entity_resources(&cpu_cube);
+            let (buffer, ei_buffer, mesh, mat_inst) = scene_view.create_entity_resources(&cpu_cube);
             let render_mesh = match cube_aabb {
                 Some(aabb) => RenderMesh::with_aabb(mesh, aabb),
                 None => RenderMesh::new(mesh),
@@ -218,6 +221,7 @@ impl Editor {
             world.insert(entity, render_mesh).unwrap();
             world.insert(entity, RenderMaterial::new(mat_inst)).unwrap();
             entity_buffers.push((entity, buffer));
+            entity_index_buffers.push((entity, ei_buffer));
         }
 
         // 3 cubes at different positions
@@ -235,7 +239,7 @@ impl Editor {
                 .unwrap();
             world.insert(entity, Visibility::VISIBLE).unwrap();
 
-            let (buffer, mesh, mat_inst) = scene_view.create_entity_resources(&cpu_cube);
+            let (buffer, ei_buffer, mesh, mat_inst) = scene_view.create_entity_resources(&cpu_cube);
             let render_mesh = match cube_aabb {
                 Some(aabb) => RenderMesh::with_aabb(mesh, aabb),
                 None => RenderMesh::new(mesh),
@@ -243,6 +247,7 @@ impl Editor {
             world.insert(entity, render_mesh).unwrap();
             world.insert(entity, RenderMaterial::new(mat_inst)).unwrap();
             entity_buffers.push((entity, buffer));
+            entity_index_buffers.push((entity, ei_buffer));
         }
 
         // Insert ActionQueue for editor action dispatch
@@ -287,6 +292,7 @@ impl Editor {
             editor_camera,
             window_input: window_input_handle,
             entity_buffers,
+            entity_index_buffers,
             debug_drawer: debug_drawer_handle,
         }
     }
@@ -407,6 +413,35 @@ impl AppHandler for Editor {
 
         if self.worlds.is_empty() {
             return true;
+        }
+
+        // Resolve GPU pick from the previous frame's readback
+        if let Some(scene_view) = &mut self.scene_view
+            && let Some(entity_index) = scene_view.resolve_pick()
+        {
+            let ew = &mut self.worlds[self.active_world];
+            log::info!(
+                "Pick resolved entity_index={entity_index}, entity_buffers: {:?}",
+                ew.entity_buffers
+                    .iter()
+                    .map(|(e, _)| e.index())
+                    .collect::<Vec<_>>()
+            );
+            // Find the entity with this index
+            let target = ew
+                .entity_buffers
+                .iter()
+                .find(|(e, _)| e.index() == entity_index)
+                .map(|(e, _)| *e);
+            let action: Box<dyn redlilium_core::abstract_editor::EditAction<World>> =
+                if let Some(entity) = target {
+                    Box::new(SelectAction::single(entity))
+                } else {
+                    Box::new(SelectAction::clear())
+                };
+            if let Err(e) = ew.history.execute(action, &mut ew.world) {
+                log::warn!("Pick selection failed: {e}");
+            }
         }
 
         // Poll native menu events (macOS only)
@@ -607,6 +642,7 @@ impl AppHandler for Editor {
         if let Some(scene_view) = &self.scene_view {
             let ew = self.active_world();
             scene_view.update_uniforms(&ew.world, &ew.entity_buffers);
+            scene_view.update_entity_index_uniforms(&ew.world, &ew.entity_index_buffers);
         }
 
         true
@@ -866,37 +902,65 @@ impl AppHandler for Editor {
         // Submit scene first (clears swapchain), then egui on top
         let mut deps = Vec::new();
 
+        // Take pending pick coordinates before the immutable borrow of scene_view.
+        let pending_pick = self
+            .scene_view
+            .as_mut()
+            .and_then(|sv| sv.take_pending_pick());
+
         if let Some(scene_view) = &self.scene_view
             && scene_view.has_viewport()
             && !self.worlds.is_empty()
         {
-            let ew = self.active_world();
+            let ew = &self.worlds[self.active_world];
             if let Some(mut scene_pass) =
                 scene_view.build_scene_pass(&ew.world, ctx.swapchain_texture())
             {
                 // Append debug draw lines into the scene pass if available
-                if let Some(renderer) = &mut self.debug_drawer_renderer {
-                    let ew = &self.worlds[self.active_world];
-                    if let Ok(drawer) = ew.debug_drawer.read() {
-                        let vertices = drawer.take_render_data();
-                        if !vertices.is_empty() {
-                            if let Ok(cameras) = ew.world.read_all::<Camera>()
-                                && let Some((_, camera)) = cameras.iter().next()
-                            {
-                                renderer.update_view_proj(mat4_to_cols_array_2d(
-                                    &camera.view_projection(),
-                                ));
-                            }
-                            renderer.append_to_pass(&mut scene_pass, &vertices);
+                if let Some(renderer) = &mut self.debug_drawer_renderer
+                    && let Ok(drawer) = ew.debug_drawer.read()
+                {
+                    let vertices = drawer.take_render_data();
+                    if !vertices.is_empty() {
+                        if let Ok(cameras) = ew.world.read_all::<Camera>()
+                            && let Some((_, camera)) = cameras.iter().next()
+                        {
+                            renderer
+                                .update_view_proj(mat4_to_cols_array_2d(&camera.view_projection()));
                         }
+                        renderer.append_to_pass(&mut scene_pass, &vertices);
                     }
                 }
 
                 let mut scene_graph = ctx.acquire_graph();
-                scene_graph.add_graphics_pass(scene_pass);
+                let scene_pass_handle = scene_graph.add_graphics_pass(scene_pass);
+
+                // Entity index pass (for picking) — renders to R32Uint texture
+                // Depends on scene pass because both write to the shared depth texture.
+                if let Some(ei_pass) = scene_view.build_entity_index_pass(&ew.world) {
+                    let ei_handle = scene_graph.add_graphics_pass(ei_pass);
+                    scene_graph.add_dependency(ei_handle, scene_pass_handle);
+
+                    // Readback transfer: same graph, depends on entity index pass.
+                    // Keeping it in the same graph avoids inter-graph semaphore issues.
+                    if let Some([px, py]) = pending_pick {
+                        log::info!("Submitting pick readback at ({px}, {py})");
+                        let readback_pass = scene_view.build_pick_readback(px, py);
+                        let readback_handle = scene_graph.add_transfer_pass(readback_pass);
+                        scene_graph.add_dependency(readback_handle, ei_handle);
+                    }
+                }
+
                 let scene_handle = ctx.submit("scene", scene_graph, &[]);
                 deps.push(scene_handle);
             }
+        }
+
+        // Mark pick in flight after the immutable borrow is released.
+        if pending_pick.is_some()
+            && let Some(scene_view) = &mut self.scene_view
+        {
+            scene_view.set_pick_in_flight();
         }
 
         let _ui_handle = ctx.submit("editor_ui", ui_graph, &deps);
@@ -933,6 +997,22 @@ impl AppHandler for Editor {
             let ew = self.active_world();
             if let Ok(mut input) = ew.window_input.write() {
                 input.on_mouse_button(idx, pressed);
+            }
+
+            // LMB click in scene view → request GPU pick
+            // Note: no `egui_wants_pointer` check here — the outer `if` already
+            // ensures the cursor is in the scene view (which is an egui panel,
+            // so egui always claims the pointer there).
+            if button == MouseButton::Left
+                && pressed
+                && let Some(scene_view) = &mut self.scene_view
+                && self.scene_view_rect_phys.is_some()
+            {
+                // Use absolute cursor position — the entity index texture is
+                // window-sized and the viewport offsets rendering within it.
+                let px = self.cursor_pos[0].max(0.0) as u32;
+                let py = self.cursor_pos[1].max(0.0) as u32;
+                scene_view.request_pick(px, py);
             }
         }
     }
