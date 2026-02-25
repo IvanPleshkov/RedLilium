@@ -30,12 +30,16 @@ mod resources;
 pub mod shaders;
 mod systems;
 
-pub use components::{CameraTarget, MaterialBundle, RenderMaterial, RenderMesh, RenderPassType};
+pub use components::{
+    CameraTarget, MaterialBundle, PerEntityBuffers, RenderMaterial, RenderMesh, RenderPassType,
+};
 pub use resources::{
     CpuBundleInfo, MaterialManager, MaterialManagerError, MeshManager, RenderSchedule,
-    TextureManager, TextureManagerError,
+    TextureManager, TextureManagerError, pack_uniform_bytes,
 };
-pub use systems::{EditorForwardRenderSystem, ForwardRenderSystem};
+pub use systems::{
+    EditorForwardRenderSystem, ForwardRenderSystem, SyncMaterialUniforms, UpdatePerEntityUniforms,
+};
 
 use crate::World;
 
@@ -47,4 +51,5 @@ pub fn register_rendering_components(world: &mut World) {
     world.register_inspector::<RenderMesh>();
     world.register_inspector::<RenderMaterial>();
     world.register_component::<CameraTarget>();
+    world.register_component::<PerEntityBuffers>();
 }

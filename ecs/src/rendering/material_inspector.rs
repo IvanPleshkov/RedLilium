@@ -33,18 +33,18 @@ pub(crate) fn inspect_material_ui(
     // Show label
     ui.horizontal(|ui| {
         ui.label("material");
-        match comp.bundle.label() {
+        match comp.bundle().label() {
             Some(label) => ui.label(label),
             None => ui.weak("(unnamed)"),
         };
     });
 
     // Need CPU data for property editing
-    let cpu_instance = comp.cpu_instance.as_ref()?;
-    let pass_materials = comp.pass_materials.as_ref()?;
+    let cpu_instance = comp.cpu_instance()?;
+    let pass_materials = comp.pass_materials()?;
 
     let cpu_instance = Arc::clone(cpu_instance);
-    let pass_materials = pass_materials.clone();
+    let pass_materials = pass_materials.to_vec();
     let cpu_mat = Arc::clone(&cpu_instance.material);
 
     // Show pipeline state (read-only, collapsed)
@@ -271,12 +271,33 @@ impl std::fmt::Debug for SetMaterialValuesAction {
 }
 
 impl SetMaterialValuesAction {
-    /// Rebuild the GPU material bundle from the given values and set it on the entity.
-    fn rebuild_and_set(&self, world: &mut World, values: &[MaterialValue]) -> EditActionResult {
+    /// Apply new material values to the entity's `RenderMaterial`.
+    ///
+    /// For scalar/vector-only changes the values are set directly and the
+    /// `SyncMaterialUniforms` system handles GPU upload. If any texture
+    /// bindings differ, a full GPU bundle rebuild is performed.
+    fn apply_values(&self, world: &mut World, values: &[MaterialValue]) -> EditActionResult {
         if !world.is_alive(self.entity) {
             return Err(EditActionError::TargetNotFound("entity despawned".into()));
         }
 
+        let needs_rebuild = has_texture_change(&self.old_values, values);
+
+        if needs_rebuild {
+            self.rebuild_and_set(world, values)
+        } else {
+            let mat = world
+                .get_mut::<RenderMaterial>(self.entity)
+                .ok_or_else(|| {
+                    EditActionError::TargetNotFound("entity has no RenderMaterial".into())
+                })?;
+            mat.set_values(values.to_vec());
+            Ok(())
+        }
+    }
+
+    /// Full GPU bundle rebuild (needed when texture bindings change).
+    fn rebuild_and_set(&self, world: &mut World, values: &[MaterialValue]) -> EditActionResult {
         let mut cpu_instance = CpuMaterialInstance::new(Arc::clone(&self.cpu_material));
         cpu_instance.name = self.instance_name.clone();
         cpu_instance.values = values.to_vec();
@@ -295,25 +316,39 @@ impl SetMaterialValuesAction {
                 .map_err(|e| EditActionError::Custom(format!("material rebuild failed: {e}")))?
         };
 
-        let new_comp = RenderMaterial::with_cpu_data(
+        let mat = world
+            .get_mut::<RenderMaterial>(self.entity)
+            .ok_or_else(|| {
+                EditActionError::TargetNotFound("entity has no RenderMaterial".into())
+            })?;
+        mat.set_bundle(
             bundle,
-            Arc::new(cpu_instance),
-            self.pass_materials.clone(),
+            Some(Arc::new(cpu_instance)),
+            Some(self.pass_materials.clone()),
         );
-        let _ = world.insert(self.entity, new_comp);
         Ok(())
     }
+}
+
+/// Check if any texture bindings differ between two value slices.
+fn has_texture_change(old: &[MaterialValue], new: &[MaterialValue]) -> bool {
+    if old.len() != new.len() {
+        return true;
+    }
+    old.iter().zip(new.iter()).any(|(o, n)| {
+        matches!(o, MaterialValue::Texture(_)) || matches!(n, MaterialValue::Texture(_))
+    })
 }
 
 impl EditAction<World> for SetMaterialValuesAction {
     fn apply(&mut self, world: &mut World) -> EditActionResult {
         let values = self.new_values.clone();
-        self.rebuild_and_set(world, &values)
+        self.apply_values(world, &values)
     }
 
     fn undo(&mut self, world: &mut World) -> EditActionResult {
         let values = self.old_values.clone();
-        self.rebuild_and_set(world, &values)
+        self.apply_values(world, &values)
     }
 
     fn description(&self) -> &str {

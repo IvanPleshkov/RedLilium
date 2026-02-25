@@ -682,7 +682,7 @@ impl MaterialManager {
     // --- Internal helpers ---
 
     /// Build a [`BindingGroup`] from a CPU material instance's values.
-    fn build_binding_group(
+    pub(super) fn build_binding_group(
         &self,
         cpu_instance: &CpuMaterialInstance,
         textures: &mut TextureManager,
@@ -719,29 +719,7 @@ impl MaterialManager {
         cpu_mat: &CpuMaterial,
         values: &[MaterialValue],
     ) -> Result<Option<Arc<Buffer>>, MaterialManagerError> {
-        let mut uniform_data: Vec<u8> = Vec::new();
-        for (i, value) in values.iter().enumerate() {
-            let binding_def = &cpu_mat.bindings[i];
-            if binding_def.value_type == MaterialValueType::Texture {
-                continue;
-            }
-            match value {
-                MaterialValue::Float(v) => {
-                    uniform_data.extend_from_slice(&v.to_le_bytes());
-                }
-                MaterialValue::Vec3(v) => {
-                    for f in v {
-                        uniform_data.extend_from_slice(&f.to_le_bytes());
-                    }
-                }
-                MaterialValue::Vec4(v) => {
-                    for f in v {
-                        uniform_data.extend_from_slice(&f.to_le_bytes());
-                    }
-                }
-                MaterialValue::Texture(_) => {}
-            }
-        }
+        let uniform_data = pack_uniform_bytes(cpu_mat, values);
 
         if uniform_data.is_empty() {
             return Ok(None);
@@ -793,6 +771,43 @@ impl MaterialManager {
 
         Ok((texture, sampler))
     }
+}
+
+/// Pack uniform (Float/Vec3/Vec4) values from a [`CpuMaterial`]'s binding
+/// definitions into a contiguous byte vector suitable for GPU upload.
+///
+/// Texture bindings are skipped — only scalar/vector values are packed.
+/// Returns an empty `Vec` if there are no uniform values to pack.
+pub fn pack_uniform_bytes(
+    cpu_mat: &redlilium_core::material::CpuMaterial,
+    values: &[MaterialValue],
+) -> Vec<u8> {
+    let mut data = Vec::new();
+    for (i, value) in values.iter().enumerate() {
+        if i >= cpu_mat.bindings.len() {
+            break;
+        }
+        if cpu_mat.bindings[i].value_type == MaterialValueType::Texture {
+            continue;
+        }
+        match value {
+            MaterialValue::Float(v) => {
+                data.extend_from_slice(&v.to_le_bytes());
+            }
+            MaterialValue::Vec3(v) => {
+                for f in v {
+                    data.extend_from_slice(&f.to_le_bytes());
+                }
+            }
+            MaterialValue::Vec4(v) => {
+                for f in v {
+                    data.extend_from_slice(&f.to_le_bytes());
+                }
+            }
+            MaterialValue::Texture(_) => {}
+        }
+    }
+    data
 }
 
 /// Resource wrapping a [`FrameSchedule`] for the current frame.

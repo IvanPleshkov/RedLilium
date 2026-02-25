@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use redlilium_core::material::{CpuMaterialInstance, MaterialValue, TextureRef, TextureSource};
-use redlilium_graphics::{BindingGroup, MaterialInstance, Mesh, Texture};
+use redlilium_graphics::{BindingGroup, Buffer, MaterialInstance, Mesh, Texture};
 
 use crate::serialize::Value;
 
@@ -256,6 +256,44 @@ impl RenderMesh {
     }
 }
 
+/// Per-entity GPU uniform buffers for transform data (VP + model matrix).
+///
+/// Holds the forward-pass uniform buffer and an optional entity-index pass
+/// buffer. The [`UpdatePerEntityUniforms`](super::UpdatePerEntityUniforms)
+/// system writes camera and transform data into these buffers each frame.
+///
+/// This replaces the previous pattern of storing `Vec<(Entity, Arc<Buffer>)>`
+/// lists outside the ECS.
+#[derive(Debug, Clone, crate::Component)]
+#[skip_serialization]
+pub struct PerEntityBuffers {
+    /// Forward pass uniform buffer (VP + model matrices).
+    pub forward_buffer: Arc<Buffer>,
+    /// Entity-index pass uniform buffer (VP + model + entity index), if present.
+    pub entity_index_buffer: Option<Arc<Buffer>>,
+}
+
+impl PerEntityBuffers {
+    /// Create per-entity buffers with forward pass only.
+    pub fn new(forward_buffer: Arc<Buffer>) -> Self {
+        Self {
+            forward_buffer,
+            entity_index_buffer: None,
+        }
+    }
+
+    /// Create per-entity buffers with forward and entity-index passes.
+    pub fn with_entity_index(
+        forward_buffer: Arc<Buffer>,
+        entity_index_buffer: Arc<Buffer>,
+    ) -> Self {
+        Self {
+            forward_buffer,
+            entity_index_buffer: Some(entity_index_buffer),
+        }
+    }
+}
+
 /// GPU material component.
 ///
 /// Wraps an `Arc<MaterialBundle>` containing material instances for each
@@ -270,11 +308,17 @@ impl RenderMesh {
 #[derive(Debug, Clone)]
 pub struct RenderMaterial {
     /// The GPU material bundle.
-    pub bundle: Arc<MaterialBundle>,
+    bundle: Arc<MaterialBundle>,
     /// CPU-side material data for inspector and serialization (optional).
-    pub cpu_instance: Option<Arc<CpuMaterialInstance>>,
+    cpu_instance: Option<Arc<CpuMaterialInstance>>,
     /// Pass type → material name mapping for bundle recreation.
-    pub pass_materials: Option<Vec<(RenderPassType, String)>>,
+    pass_materials: Option<Vec<(RenderPassType, String)>>,
+    /// The GPU buffer holding packed material property uniforms (binding 0).
+    material_uniform_buffer: Option<Arc<Buffer>>,
+    /// CPU mutation counter. Incremented on every value change.
+    cpu_tick: u64,
+    /// GPU sync counter. Set to `cpu_tick` after `write_buffer` completes.
+    gpu_tick: u64,
 }
 
 impl crate::Component for RenderMaterial {
@@ -295,11 +339,23 @@ impl crate::Component for RenderMaterial {
             let _ = (world, entity);
             ui.horizontal(|ui| {
                 ui.label("material");
-                match self.bundle.label() {
+                match self.bundle().label() {
                     Some(label) => ui.label(format!("Material: {label}")),
                     None => ui.weak("Material (unnamed)"),
                 };
             });
+
+            // Show CPU-side material properties (read-only)
+            if let Some(cpu_inst) = &self.cpu_instance {
+                let cpu_mat = &cpu_inst.material;
+                for (i, binding_def) in cpu_mat.bindings.iter().enumerate() {
+                    if i >= cpu_inst.values.len() {
+                        break;
+                    }
+                    show_material_value_readonly(ui, &binding_def.name, &cpu_inst.values[i]);
+                }
+            }
+
             None
         }
     }
@@ -493,11 +549,7 @@ impl crate::Component for RenderMaterial {
         };
 
         ctx.end_struct()?;
-        Ok(Self {
-            bundle,
-            cpu_instance: Some(cpu_instance),
-            pass_materials: Some(pass_materials),
-        })
+        Ok(Self::with_cpu_data(bundle, cpu_instance, pass_materials))
     }
 }
 
@@ -508,6 +560,9 @@ impl RenderMaterial {
             bundle,
             cpu_instance: None,
             pass_materials: None,
+            material_uniform_buffer: None,
+            cpu_tick: 0,
+            gpu_tick: 0,
         }
     }
 
@@ -521,8 +576,19 @@ impl RenderMaterial {
             bundle,
             cpu_instance: Some(cpu_instance),
             pass_materials: Some(pass_materials),
+            material_uniform_buffer: None,
+            cpu_tick: 0,
+            gpu_tick: 0,
         }
     }
+
+    /// Set the GPU buffer for material property uniforms (binding 0).
+    pub fn with_material_uniform_buffer(mut self, buffer: Arc<Buffer>) -> Self {
+        self.material_uniform_buffer = Some(buffer);
+        self
+    }
+
+    // --- Immutable accessors ---
 
     /// Get the inner material bundle.
     pub fn bundle(&self) -> &Arc<MaterialBundle> {
@@ -532,6 +598,73 @@ impl RenderMaterial {
     /// Get the material instance for a specific render pass.
     pub fn pass(&self, pass_type: RenderPassType) -> Option<&Arc<MaterialInstance>> {
         self.bundle.get(pass_type)
+    }
+
+    /// Get the CPU-side material instance, if present.
+    pub fn cpu_instance(&self) -> Option<&Arc<CpuMaterialInstance>> {
+        self.cpu_instance.as_ref()
+    }
+
+    /// Get the pass type → material name mapping, if present.
+    pub fn pass_materials(&self) -> Option<&[(RenderPassType, String)]> {
+        self.pass_materials.as_deref()
+    }
+
+    /// Get the material uniform buffer, if any.
+    pub fn material_uniform_buffer(&self) -> Option<&Arc<Buffer>> {
+        self.material_uniform_buffer.as_ref()
+    }
+
+    // --- Tick-based mutation ---
+
+    /// Replace all material property values. Bumps `cpu_tick` so the
+    /// [`SyncMaterialUniforms`](super::SyncMaterialUniforms) system will
+    /// re-upload the uniform buffer on the next frame.
+    pub fn set_values(&mut self, values: Vec<MaterialValue>) {
+        if let Some(cpu_inst) = &mut self.cpu_instance {
+            Arc::make_mut(cpu_inst).values = values;
+            self.cpu_tick += 1;
+        }
+    }
+
+    /// Get a mutable reference to the CPU material values.
+    /// Bumps `cpu_tick` so the sync system will re-upload.
+    pub fn values_mut(&mut self) -> Option<&mut Vec<MaterialValue>> {
+        self.cpu_tick += 1;
+        self.cpu_instance
+            .as_mut()
+            .map(|arc| &mut Arc::make_mut(arc).values)
+    }
+
+    /// Whether CPU values have been modified since last GPU sync.
+    pub fn is_dirty(&self) -> bool {
+        self.cpu_tick != self.gpu_tick
+    }
+
+    /// Mark as synced after GPU upload. Called by `SyncMaterialUniforms`.
+    pub(crate) fn mark_synced(&mut self) {
+        self.gpu_tick = self.cpu_tick;
+    }
+
+    // --- Bundle replacement (for texture changes that need full rebuild) ---
+
+    /// Replace the bundle and optionally the CPU instance (full rebuild).
+    pub fn set_bundle(
+        &mut self,
+        bundle: Arc<MaterialBundle>,
+        cpu_instance: Option<Arc<CpuMaterialInstance>>,
+        pass_materials: Option<Vec<(RenderPassType, String)>>,
+    ) {
+        self.bundle = bundle;
+        if cpu_instance.is_some() {
+            self.cpu_instance = cpu_instance;
+        }
+        if pass_materials.is_some() {
+            self.pass_materials = pass_materials;
+        }
+        // After a full rebuild, GPU is already up-to-date
+        self.cpu_tick += 1;
+        self.gpu_tick = self.cpu_tick;
     }
 }
 
@@ -714,6 +847,39 @@ fn extract_f32_list(
             "expected List for '{key}'"
         ))),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Read-only material value display (non-inspector builds)
+// ---------------------------------------------------------------------------
+
+/// Display a single material property value as a read-only label row.
+#[cfg(not(feature = "inspector"))]
+fn show_material_value_readonly(ui: &mut crate::egui::Ui, name: &str, value: &MaterialValue) {
+    ui.horizontal(|ui| {
+        ui.label(name);
+        match value {
+            MaterialValue::Float(v) => {
+                ui.weak(format!("{v:.3}"));
+            }
+            MaterialValue::Vec3(v) => {
+                ui.weak(format!("[{:.3}, {:.3}, {:.3}]", v[0], v[1], v[2]));
+            }
+            MaterialValue::Vec4(v) => {
+                ui.weak(format!(
+                    "[{:.3}, {:.3}, {:.3}, {:.3}]",
+                    v[0], v[1], v[2], v[3]
+                ));
+            }
+            MaterialValue::Texture(tex_ref) => {
+                let tex_name = match &tex_ref.texture {
+                    TextureSource::Named(n) => n.as_str(),
+                    TextureSource::Cpu(cpu_tex) => cpu_tex.name.as_deref().unwrap_or("<embedded>"),
+                };
+                ui.weak(tex_name);
+            }
+        }
+    });
 }
 
 /// Render target for a camera entity.

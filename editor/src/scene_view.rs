@@ -8,8 +8,9 @@
 
 use std::sync::Arc;
 
+use redlilium_core::material::CpuMaterial;
 use redlilium_ecs::{
-    Entity, MaterialBundle, RenderMaterial, RenderMesh, RenderPassType, Visibility, World, shaders,
+    PerEntityBuffers, RenderMaterial, RenderMesh, RenderPassType, Visibility, World, shaders,
 };
 use redlilium_graphics::{
     Buffer, BufferDescriptor, BufferTextureCopyRegion, BufferTextureLayout, BufferUsage,
@@ -24,6 +25,7 @@ pub struct SceneViewState {
     device: Arc<GraphicsDevice>,
     depth_texture: Arc<redlilium_graphics::Texture>,
     opaque_material: Arc<Material>,
+    cpu_material: Arc<CpuMaterial>,
     viewport: Option<Viewport>,
     scissor: Option<ScissorRect>,
     last_size: (u32, u32),
@@ -55,6 +57,7 @@ impl SceneViewState {
             surface_format,
             TextureFormat::Depth32Float,
         );
+        let cpu_material = shaders::create_opaque_color_cpu_material();
 
         let (entity_index_material, _ei_layout) =
             shaders::create_entity_index_material(&device, TextureFormat::Depth32Float);
@@ -82,6 +85,7 @@ impl SceneViewState {
             device,
             depth_texture,
             opaque_material,
+            cpu_material,
             viewport: None,
             scissor: None,
             last_size: (256, 256),
@@ -99,20 +103,20 @@ impl SceneViewState {
 
     /// Create GPU resources for a renderable entity with picking support.
     ///
-    /// Returns `(forward_buffer, entity_index_buffer, gpu_mesh, material_bundle)`.
+    /// Returns `(per_entity_buffers, render_material, gpu_mesh)`.
     pub fn create_entity_resources(
         &self,
         cpu_mesh: &redlilium_core::mesh::CpuMesh,
     ) -> (
-        Arc<Buffer>,
-        Arc<Buffer>,
+        PerEntityBuffers,
+        RenderMaterial,
         Arc<redlilium_graphics::Mesh>,
-        Arc<MaterialBundle>,
     ) {
-        let (forward_buffer, ei_buffer, bundle) = shaders::create_opaque_color_entity_with_picking(
+        let (per_entity, render_material, _bundle) = shaders::create_opaque_color_entity_full(
             &self.device,
             &self.opaque_material,
             &self.entity_index_material,
+            &self.cpu_material,
         );
 
         let gpu_mesh = self
@@ -120,7 +124,7 @@ impl SceneViewState {
             .create_mesh_from_cpu(cpu_mesh)
             .expect("Failed to create entity GPU mesh");
 
-        (forward_buffer, ei_buffer, gpu_mesh, bundle)
+        (per_entity, render_material, gpu_mesh)
     }
 
     /// Update the viewport and scissor from an egui panel rect.
@@ -147,20 +151,6 @@ impl SceneViewState {
         self.entity_index_texture = Self::create_entity_index_texture(&self.device, width, height);
         self.last_size = (width, height);
         true
-    }
-
-    /// Update per-entity uniform buffers with current camera VP and model matrices.
-    pub fn update_uniforms(&self, world: &World, entity_buffers: &[(Entity, Arc<Buffer>)]) {
-        shaders::update_opaque_color_uniforms(&self.device, world, entity_buffers);
-    }
-
-    /// Update per-entity entity-index uniform buffers.
-    pub fn update_entity_index_uniforms(
-        &self,
-        world: &World,
-        entity_buffers: &[(Entity, Arc<Buffer>)],
-    ) {
-        shaders::update_entity_index_uniforms(&self.device, world, entity_buffers);
     }
 
     /// Build a graphics pass that renders ECS entities to the swapchain
@@ -480,6 +470,11 @@ impl SceneViewState {
             let (w, h) = self.last_size;
             w as f32 / h.max(1) as f32
         }
+    }
+
+    /// The graphics device used by this scene view.
+    pub fn device(&self) -> &Arc<GraphicsDevice> {
+        &self.device
     }
 
     fn create_depth_texture(

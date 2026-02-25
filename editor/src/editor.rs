@@ -13,12 +13,13 @@ use redlilium_ecs::ui::{
 };
 use redlilium_ecs::{
     Camera, DrawGrid, DrawSelectionAabb, EcsRunner, Entity, FreeFlyCamera, GlobalTransform,
-    GridConfig, Name, PostUpdate, RenderMaterial, RenderMesh, Schedules, Transform, Update,
-    UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms, Visibility, WindowInput,
-    World, register_std_components,
+    GridConfig, MaterialManager, Name, PerEntityBuffers, PostUpdate, RenderMesh, Schedules,
+    SyncMaterialUniforms, Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera,
+    UpdateGlobalTransforms, UpdatePerEntityUniforms, Visibility, WindowInput, World,
+    register_std_components,
 };
 use redlilium_graphics::egui::{EguiApp, EguiController};
-use redlilium_graphics::{Buffer, FrameSchedule, RenderTarget, TextureFormat};
+use redlilium_graphics::{FrameSchedule, RenderTarget, TextureFormat};
 use redlilium_vfs::Vfs;
 use winit::event::{KeyEvent, MouseButton, MouseScrollDelta};
 use winit::keyboard::PhysicalKey;
@@ -58,10 +59,6 @@ pub struct EditorWorld {
     pub editor_camera: Entity,
     /// Handle to the WindowInput resource for updating from app events.
     pub window_input: Arc<RwLock<WindowInput>>,
-    /// Per-entity forward uniform buffers for scene rendering.
-    pub entity_buffers: Vec<(Entity, Arc<Buffer>)>,
-    /// Per-entity entity-index uniform buffers for picking.
-    pub entity_index_buffers: Vec<(Entity, Arc<Buffer>)>,
     /// Handle to the DebugDrawer resource for advance_tick / take_render_data.
     pub debug_drawer: Arc<RwLock<DebugDrawer>>,
 }
@@ -173,6 +170,9 @@ impl Editor {
         register_std_components(&mut world);
         redlilium_ecs::register_rendering_components(&mut world);
 
+        // Insert MaterialManager resource (provides GraphicsDevice to GPU sync systems)
+        world.insert_resource(MaterialManager::new(scene_view.device().clone()));
+
         // Insert WindowInput resource
         let window_input_handle = world.insert_resource(WindowInput::default());
 
@@ -204,8 +204,6 @@ impl Editor {
         // --- Demo scene entities ---
         let cpu_cube = generators::generate_cube(0.5);
         let cube_aabb = cpu_cube.compute_aabb();
-        let mut entity_buffers = Vec::new();
-        let mut entity_index_buffers = Vec::new();
 
         // Ground plane (scaled flat cube)
         {
@@ -221,15 +219,14 @@ impl Editor {
                 .unwrap();
             world.insert(entity, Visibility::VISIBLE).unwrap();
 
-            let (buffer, ei_buffer, mesh, mat_inst) = scene_view.create_entity_resources(&cpu_cube);
+            let (per_entity, render_mat, mesh) = scene_view.create_entity_resources(&cpu_cube);
             let render_mesh = match cube_aabb {
                 Some(aabb) => RenderMesh::with_aabb(mesh, aabb),
                 None => RenderMesh::new(mesh),
             };
             world.insert(entity, render_mesh).unwrap();
-            world.insert(entity, RenderMaterial::new(mat_inst)).unwrap();
-            entity_buffers.push((entity, buffer));
-            entity_index_buffers.push((entity, ei_buffer));
+            world.insert(entity, render_mat).unwrap();
+            world.insert(entity, per_entity).unwrap();
         }
 
         // 3 cubes at different positions
@@ -247,15 +244,14 @@ impl Editor {
                 .unwrap();
             world.insert(entity, Visibility::VISIBLE).unwrap();
 
-            let (buffer, ei_buffer, mesh, mat_inst) = scene_view.create_entity_resources(&cpu_cube);
+            let (per_entity, render_mat, mesh) = scene_view.create_entity_resources(&cpu_cube);
             let render_mesh = match cube_aabb {
                 Some(aabb) => RenderMesh::with_aabb(mesh, aabb),
                 None => RenderMesh::new(mesh),
             };
             world.insert(entity, render_mesh).unwrap();
-            world.insert(entity, RenderMaterial::new(mat_inst)).unwrap();
-            entity_buffers.push((entity, buffer));
-            entity_index_buffers.push((entity, ei_buffer));
+            world.insert(entity, render_mat).unwrap();
+            world.insert(entity, per_entity).unwrap();
         }
 
         // Insert ActionQueue for editor action dispatch
@@ -293,14 +289,26 @@ impl Editor {
             .add_edge::<UpdateGlobalTransforms, UpdateCameraMatrices>()
             .expect("No cycle");
 
+        // Automatic GPU sync systems — run after camera matrices are computed.
+        schedules
+            .get_mut::<PostUpdate>()
+            .add(UpdatePerEntityUniforms);
+        schedules.get_mut::<PostUpdate>().add(SyncMaterialUniforms);
+        schedules
+            .get_mut::<PostUpdate>()
+            .add_edge::<UpdateCameraMatrices, UpdatePerEntityUniforms>()
+            .expect("No cycle");
+        schedules
+            .get_mut::<PostUpdate>()
+            .add_edge::<UpdateCameraMatrices, SyncMaterialUniforms>()
+            .expect("No cycle");
+
         EditorWorld {
             world,
             schedules,
             history: EditActionHistory::new(DEFAULT_MAX_UNDO),
             editor_camera,
             window_input: window_input_handle,
-            entity_buffers,
-            entity_index_buffers,
             debug_drawer: debug_drawer_handle,
         }
     }
@@ -447,21 +455,25 @@ impl AppHandler for Editor {
             && let Some(entity_index) = scene_view.resolve_pick()
         {
             let ew = &mut self.worlds[self.active_world];
-            log::info!(
-                "Pick resolved entity_index={entity_index}, entity_buffers: {:?}",
-                ew.entity_buffers
-                    .iter()
-                    .map(|(e, _)| e.index())
-                    .collect::<Vec<_>>()
-            );
-            // Find the entity with this index
+            // Find entity whose sparse-set index matches the picked index
             let target = ew
-                .entity_buffers
-                .iter()
-                .find(|(e, _)| e.index() == entity_index)
-                .map(|(e, _)| *e);
+                .world
+                .read::<PerEntityBuffers>()
+                .ok()
+                .and_then(|buffers| {
+                    buffers
+                        .iter()
+                        .find(|(idx, _)| *idx == entity_index)
+                        .map(|(_, _)| ())
+                });
+            // Reconstruct full Entity from world (need spawn_tick etc.)
+            let target_entity = if target.is_some() {
+                ew.world.entity_at_index(entity_index)
+            } else {
+                None
+            };
             let action: Box<dyn redlilium_core::abstract_editor::EditAction<World>> =
-                if let Some(entity) = target {
+                if let Some(entity) = target_entity {
                     Box::new(SelectAction::single(entity))
                 } else {
                     Box::new(SelectAction::clear())
@@ -476,15 +488,21 @@ impl AppHandler for Editor {
             && let Some(entity_indices) = scene_view.resolve_rect_pick()
         {
             let ew = &mut self.worlds[self.active_world];
-            let selected: Vec<Entity> = entity_indices
-                .iter()
-                .filter_map(|&idx| {
-                    ew.entity_index_buffers
-                        .iter()
-                        .find(|(e, _)| e.index() == idx)
-                        .map(|(e, _)| *e)
-                })
-                .collect();
+            let selected: Vec<Entity> = if let Ok(buffers) = ew.world.read::<PerEntityBuffers>() {
+                entity_indices
+                    .iter()
+                    .filter_map(|&idx| {
+                        // Verify the index has a PerEntityBuffers component
+                        if buffers.get(idx).is_some() {
+                            ew.world.entity_at_index(idx)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
             let action: Box<dyn redlilium_core::abstract_editor::EditAction<World>> =
                 if selected.is_empty() {
@@ -691,12 +709,8 @@ impl AppHandler for Editor {
             }
         }
 
-        // Update GPU uniform buffers from ECS data
-        if let Some(scene_view) = &self.scene_view {
-            let ew = self.active_world();
-            scene_view.update_uniforms(&ew.world, &ew.entity_buffers);
-            scene_view.update_entity_index_uniforms(&ew.world, &ew.entity_index_buffers);
-        }
+        // GPU uniform buffers are now updated automatically by the
+        // UpdatePerEntityUniforms and SyncMaterialUniforms systems.
 
         true
     }

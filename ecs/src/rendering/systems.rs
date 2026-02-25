@@ -8,8 +8,10 @@ use redlilium_graphics::{
 use crate::SystemContext;
 use crate::std::components::{Camera, GlobalTransform, Visibility};
 
-use super::components::{CameraTarget, RenderMaterial, RenderMesh, RenderPassType};
-use super::resources::RenderSchedule;
+use super::components::{
+    CameraTarget, PerEntityBuffers, RenderMaterial, RenderMesh, RenderPassType,
+};
+use super::resources::{MaterialManager, RenderSchedule};
 
 /// Simple forward render system.
 ///
@@ -204,6 +206,110 @@ impl crate::System for EditorForwardRenderSystem {
                 }
             },
         );
+        Ok(())
+    }
+}
+
+/// Syncs dirty material property uniforms from CPU to GPU.
+///
+/// Iterates all [`RenderMaterial`] components and, for any whose CPU tick
+/// doesn't match its GPU tick, repacks the uniform values and uploads them
+/// via [`GraphicsDevice::write_buffer`](redlilium_graphics::GraphicsDevice::write_buffer).
+///
+/// # Access
+///
+/// - Write: `RenderMaterial`
+/// - Resources: `Res<MaterialManager>`
+pub struct SyncMaterialUniforms;
+
+impl crate::System for SyncMaterialUniforms {
+    type Result = ();
+
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), crate::system::SystemError> {
+        ctx.lock::<(crate::Write<RenderMaterial>, crate::Res<MaterialManager>)>()
+            .execute(|(mut materials, mat_manager)| {
+                let device = mat_manager.device();
+                for (_idx, mat) in materials.iter_mut() {
+                    if !mat.is_dirty() {
+                        continue;
+                    }
+                    if let Some(buffer) = mat.material_uniform_buffer()
+                        && let Some(cpu_inst) = mat.cpu_instance()
+                    {
+                        let bytes = super::resources::pack_uniform_bytes(
+                            &cpu_inst.material,
+                            &cpu_inst.values,
+                        );
+                        if !bytes.is_empty() {
+                            let buffer = Arc::clone(buffer);
+                            let _ = device.write_buffer(&buffer, 0, &bytes);
+                        }
+                    }
+                    mat.mark_synced();
+                }
+            });
+        Ok(())
+    }
+}
+
+/// Updates per-entity transform uniform buffers each frame.
+///
+/// Reads the first camera's view-projection matrix and writes it together
+/// with each entity's model matrix (from [`GlobalTransform`]) into the
+/// entity's [`PerEntityBuffers`]. Also writes entity-index uniforms when
+/// a buffer is present.
+///
+/// # Access
+///
+/// - ReadAll: `Camera`
+/// - Read: `GlobalTransform`, `PerEntityBuffers`
+/// - Resources: `Res<MaterialManager>`
+pub struct UpdatePerEntityUniforms;
+
+impl crate::System for UpdatePerEntityUniforms {
+    type Result = ();
+
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), crate::system::SystemError> {
+        ctx.lock::<(
+            crate::ReadAll<Camera>,
+            crate::Read<GlobalTransform>,
+            crate::Read<PerEntityBuffers>,
+            crate::Res<MaterialManager>,
+        )>()
+        .execute(|(cameras, globals, buffers, mat_manager)| {
+            let Some((_, camera)) = cameras.iter().next() else {
+                return;
+            };
+            let vp = camera.view_projection();
+            let device = mat_manager.device();
+
+            for (entity_idx, per_entity) in buffers.iter() {
+                let model = globals
+                    .get(entity_idx)
+                    .map(|g| g.0)
+                    .unwrap_or_else(redlilium_core::math::Mat4::identity);
+
+                let uniforms = super::shaders::OpaqueColorUniforms {
+                    view_projection: redlilium_core::math::mat4_to_cols_array_2d(&vp),
+                    model: redlilium_core::math::mat4_to_cols_array_2d(&model),
+                };
+                let _ = device.write_buffer(
+                    &per_entity.forward_buffer,
+                    0,
+                    bytemuck::bytes_of(&uniforms),
+                );
+
+                if let Some(ei_buffer) = &per_entity.entity_index_buffer {
+                    let ei_uniforms = super::shaders::EntityIndexUniforms {
+                        view_projection: redlilium_core::math::mat4_to_cols_array_2d(&vp),
+                        model: redlilium_core::math::mat4_to_cols_array_2d(&model),
+                        entity_index: entity_idx,
+                        _padding: [0; 3],
+                    };
+                    let _ = device.write_buffer(ei_buffer, 0, bytemuck::bytes_of(&ei_uniforms));
+                }
+            }
+        });
         Ok(())
     }
 }
