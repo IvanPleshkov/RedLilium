@@ -946,8 +946,19 @@ impl AppHandler for Editor {
                     });
             }
 
-            // Store egui input state for next frame
-            self.egui_wants_pointer = egui_ctx.wants_pointer_input();
+            // Store egui input state for next frame.
+            // `wants_pointer_input()` is too broad — it returns true for ALL egui
+            // areas including dock panels that contain the scene view. Instead,
+            // check if a popup/foreground/tooltip layer is at the pointer position.
+            self.egui_wants_pointer = egui_ctx
+                .pointer_latest_pos()
+                .and_then(|pos| egui_ctx.layer_id_at(pos))
+                .is_some_and(|layer| {
+                    matches!(
+                        layer.order,
+                        egui::Order::Foreground | egui::Order::Tooltip | egui::Order::Debug
+                    )
+                });
             self.egui_wants_keyboard = egui_ctx.wants_keyboard_input();
 
             if let Some(egui_pass) = egui.end_frame(&render_target, width, height) {
@@ -1095,9 +1106,12 @@ impl AppHandler for Editor {
         if let Some(egui) = &mut self.egui_controller {
             egui.on_mouse_button(button, pressed);
         }
-        // Only forward presses when cursor is in scene view; always forward
-        // releases so buttons don't get stuck.
-        if !self.worlds.is_empty() && (!pressed || self.cursor_in_scene_view()) {
+        // Only forward presses when cursor is in scene view and egui doesn't
+        // want the pointer (e.g. color picker popup over scene view).
+        // Always forward releases so buttons don't get stuck.
+        if !self.worlds.is_empty()
+            && (!pressed || (self.cursor_in_scene_view() && !self.egui_wants_pointer))
+        {
             let idx = match button {
                 MouseButton::Left => 0,
                 MouseButton::Right => 1,
@@ -1113,7 +1127,7 @@ impl AppHandler for Editor {
             // LMB release: if it was a small movement → single-click GPU pick,
             // otherwise → box selection of all entities in the rectangle.
             if button == MouseButton::Left && self.scene_view_rect_phys.is_some() {
-                if pressed && self.cursor_in_scene_view() {
+                if pressed && self.cursor_in_scene_view() && !self.egui_wants_pointer {
                     self.drag_start = Some(self.cursor_pos);
                     self.dragging_box = false;
                     // Clear selection immediately on click; the GPU pick or
@@ -1150,7 +1164,7 @@ impl AppHandler for Editor {
         if let Some(egui) = &mut self.egui_controller {
             egui.on_mouse_scroll(MouseScrollDelta::LineDelta(dx, dy));
         }
-        if !self.worlds.is_empty() && self.cursor_in_scene_view() {
+        if !self.worlds.is_empty() && self.cursor_in_scene_view() && !self.egui_wants_pointer {
             let ew = self.active_world();
             if let Ok(mut input) = ew.window_input.write() {
                 input.on_scroll(dx, dy);
