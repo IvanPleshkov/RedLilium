@@ -152,7 +152,12 @@ pub struct RenderMesh {
 impl crate::Component for RenderMesh {
     const NAME: &'static str = "RenderMesh";
 
-    fn inspect_ui(&self, ui: &mut crate::egui::Ui) -> Option<Self> {
+    fn inspect_ui(
+        &self,
+        ui: &mut crate::egui::Ui,
+        _world: &crate::World,
+        _entity: crate::Entity,
+    ) -> crate::InspectResult {
         ui.horizontal(|ui| {
             ui.label("mesh");
             match self.mesh.label() {
@@ -258,21 +263,45 @@ impl RenderMesh {
 /// in the bundle share the same bindings but use different shader pipelines.
 ///
 /// Attach alongside [`RenderMesh`] to make an entity renderable.
+///
+/// Optionally holds a [`CpuMaterialInstance`] for inspector editing and
+/// serialization. When present, the component inspector displays editable
+/// material properties (color pickers, sliders, etc.).
 #[derive(Debug, Clone)]
-pub struct RenderMaterial(pub Arc<MaterialBundle>);
+pub struct RenderMaterial {
+    /// The GPU material bundle.
+    pub bundle: Arc<MaterialBundle>,
+    /// CPU-side material data for inspector and serialization (optional).
+    pub cpu_instance: Option<Arc<CpuMaterialInstance>>,
+    /// Pass type → material name mapping for bundle recreation.
+    pub pass_materials: Option<Vec<(RenderPassType, String)>>,
+}
 
 impl crate::Component for RenderMaterial {
     const NAME: &'static str = "RenderMaterial";
 
-    fn inspect_ui(&self, ui: &mut crate::egui::Ui) -> Option<Self> {
-        ui.horizontal(|ui| {
-            ui.label("material");
-            match self.0.label() {
-                Some(label) => ui.label(format!("Material: {label}")),
-                None => ui.weak("Material (unnamed)"),
-            };
-        });
-        None
+    fn inspect_ui(
+        &self,
+        ui: &mut crate::egui::Ui,
+        world: &crate::World,
+        entity: crate::Entity,
+    ) -> crate::InspectResult {
+        #[cfg(feature = "inspector")]
+        {
+            super::material_inspector::inspect_material_ui(world, entity, ui)
+        }
+        #[cfg(not(feature = "inspector"))]
+        {
+            let _ = (world, entity);
+            ui.horizontal(|ui| {
+                ui.label("material");
+                match self.bundle.label() {
+                    Some(label) => ui.label(format!("Material: {label}")),
+                    None => ui.weak("Material (unnamed)"),
+                };
+            });
+            None
+        }
     }
 
     fn collect_entities(&self, _collector: &mut Vec<crate::Entity>) {}
@@ -303,7 +332,7 @@ impl crate::Component for RenderMaterial {
             let mat_manager = world.resource::<super::MaterialManager>();
             let tex_manager = world.resource::<super::TextureManager>();
 
-            let cpu_bundle = mat_manager.get_cpu_bundle(&self.0).ok_or_else(|| {
+            let cpu_bundle = mat_manager.get_cpu_bundle(&self.bundle).ok_or_else(|| {
                 crate::serialize::SerializeError::FieldError {
                     field: "0".to_owned(),
                     message: "material bundle not tracked in MaterialManager".into(),
@@ -417,7 +446,7 @@ impl crate::Component for RenderMaterial {
                 crate::serialize::DeserializeError::FormatError("passes map is empty".into())
             })?;
 
-        let bundle = {
+        let (bundle, cpu_instance) = {
             let world = ctx.world_mut();
             if !world.has_resource::<super::MaterialManager>() {
                 return Err(crate::serialize::DeserializeError::FormatError(
@@ -453,34 +482,56 @@ impl crate::Component for RenderMaterial {
 
             let mut mat_manager = world.resource_mut::<super::MaterialManager>();
             let mut tex_manager = world.resource_mut::<super::TextureManager>();
-            mat_manager
+            let bundle = mat_manager
                 .create_bundle(&cpu_instance, &pass_refs, &mut tex_manager)
                 .map_err(|e| {
                     crate::serialize::DeserializeError::FormatError(format!(
                         "failed to create material bundle: {e}"
                     ))
-                })?
+                })?;
+            (bundle, Arc::new(cpu_instance))
         };
 
         ctx.end_struct()?;
-        Ok(Self(bundle))
+        Ok(Self {
+            bundle,
+            cpu_instance: Some(cpu_instance),
+            pass_materials: Some(pass_materials),
+        })
     }
 }
 
 impl RenderMaterial {
-    /// Create a new render material component from a material bundle.
+    /// Create a new render material component from a material bundle (no CPU data).
     pub fn new(bundle: Arc<MaterialBundle>) -> Self {
-        Self(bundle)
+        Self {
+            bundle,
+            cpu_instance: None,
+            pass_materials: None,
+        }
+    }
+
+    /// Create a render material with CPU-side data for inspector editing.
+    pub fn with_cpu_data(
+        bundle: Arc<MaterialBundle>,
+        cpu_instance: Arc<CpuMaterialInstance>,
+        pass_materials: Vec<(RenderPassType, String)>,
+    ) -> Self {
+        Self {
+            bundle,
+            cpu_instance: Some(cpu_instance),
+            pass_materials: Some(pass_materials),
+        }
     }
 
     /// Get the inner material bundle.
     pub fn bundle(&self) -> &Arc<MaterialBundle> {
-        &self.0
+        &self.bundle
     }
 
     /// Get the material instance for a specific render pass.
     pub fn pass(&self, pass_type: RenderPassType) -> Option<&Arc<MaterialInstance>> {
-        self.0.get(pass_type)
+        self.bundle.get(pass_type)
     }
 }
 

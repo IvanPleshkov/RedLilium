@@ -24,6 +24,8 @@
 //! This module is only available when the `rendering` feature is enabled.
 
 mod components;
+#[cfg(feature = "inspector")]
+mod material_inspector;
 mod resources;
 pub mod shaders;
 mod systems;

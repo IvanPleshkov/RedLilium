@@ -114,7 +114,7 @@ pub use redlilium_core::compute::{
 };
 pub use resource::{Resource, ResourceRef, ResourceRefMut};
 pub use sparse_set::{Ref, RefMut, SparseSetInner};
-pub use world::{ComponentNotRegistered, InspectResult, World};
+pub use world::{ComponentNotRegistered, InspectResult, World, set_component_actions};
 
 pub use compute_context::EcsComputeContext;
 

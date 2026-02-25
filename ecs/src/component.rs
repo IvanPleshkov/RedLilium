@@ -30,8 +30,8 @@
 /// ```ignore
 /// impl Component for CustomType {
 ///     const NAME: &'static str = "CustomType";
-///     fn inspect_ui(&self, ui: &mut egui::Ui) -> Option<Self> {
-///         // custom inspector layout; return Some(new_value) if edited
+///     fn inspect_ui(&self, ui: &mut egui::Ui, world: &World, entity: Entity) -> InspectResult {
+///         // custom inspector layout; return edit actions if changed
 ///         None
 ///     }
 /// }
@@ -50,13 +50,22 @@ pub trait Component: Clone + Send + Sync + 'static {
 
     /// Render an inspector UI for this component's fields.
     ///
-    /// Takes an immutable reference and returns `Some(new_component)` if
-    /// the user edited any field, or `None` if nothing changed. The derive
-    /// macro generates this by calling [`Inspect::show`](crate::inspect::Inspect)
-    /// for each field and assembling a new instance from the results.
-    fn inspect_ui(&self, ui: &mut egui::Ui) -> Option<Self>
-    where
-        Self: Sized;
+    /// Returns `Some(actions)` if the user edited any field, or `None` if
+    /// nothing changed. The `world` parameter provides read access to ECS
+    /// resources. Use [`set_component_actions`](crate::set_component_actions)
+    /// to create the standard "replace component" action.
+    ///
+    /// The derive macro generates this by calling
+    /// [`Inspect::show`](crate::inspect::Inspect) for each field and
+    /// wrapping the result with [`set_component_actions`](crate::set_component_actions).
+    ///
+    /// Override manually for custom undo/redo actions (e.g., GPU resource rebuild).
+    fn inspect_ui(
+        &self,
+        ui: &mut egui::Ui,
+        world: &crate::World,
+        entity: crate::Entity,
+    ) -> crate::InspectResult;
 
     /// Collect all [`Entity`](crate::Entity) references stored in this component.
     ///
@@ -153,7 +162,12 @@ mod tests {
     impl Component for TestComponent {
         const NAME: &'static str = "TestComponent";
 
-        fn inspect_ui(&self, ui: &mut egui::Ui) -> Option<Self> {
+        fn inspect_ui(
+            &self,
+            ui: &mut egui::Ui,
+            _world: &crate::World,
+            entity: crate::Entity,
+        ) -> crate::InspectResult {
             #[allow(unused_imports)]
             use crate::inspect::InspectFallback as _;
             let mut _changed = false;
@@ -171,7 +185,11 @@ mod tests {
                 }
                 None => self.count,
             };
-            _changed.then_some(Self { value, count })
+            if _changed {
+                crate::set_component_actions(entity, *self, Self { value, count })
+            } else {
+                None
+            }
         }
     }
 
@@ -210,7 +228,12 @@ mod tests {
     impl Component for RichComponent {
         const NAME: &'static str = "RichComponent";
 
-        fn inspect_ui(&self, ui: &mut egui::Ui) -> Option<Self> {
+        fn inspect_ui(
+            &self,
+            ui: &mut egui::Ui,
+            _world: &crate::World,
+            entity: crate::Entity,
+        ) -> crate::InspectResult {
             #[allow(unused_imports)]
             use crate::inspect::InspectFallback as _;
             let mut _changed = false;
@@ -228,7 +251,11 @@ mod tests {
                 }
                 None => self._data.clone(),
             };
-            _changed.then_some(Self { label, _data })
+            if _changed {
+                crate::set_component_actions(entity, self.clone(), Self { label, _data })
+            } else {
+                None
+            }
         }
     }
 

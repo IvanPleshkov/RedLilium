@@ -182,7 +182,15 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                     quote! {
                         let mut _changed = false;
                         #(#inspect_stmts)*
-                        if _changed { Some(Self { #(#visible_names,)* #(#skipped_clone,)* }) } else { None }
+                        if _changed {
+                            redlilium_ecs::set_component_actions(
+                                _entity,
+                                self.clone(),
+                                Self { #(#visible_names,)* #(#skipped_clone,)* },
+                            )
+                        } else {
+                            None
+                        }
                     },
                     quote! { #(#collect_stmts)* },
                     quote! { #(#remap_stmts)* },
@@ -293,7 +301,15 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                     quote! {
                         let mut _changed = false;
                         #(#inspect_stmts)*
-                        if _changed { Some(Self(#(#inspect_field_vars,)*)) } else { None }
+                        if _changed {
+                            redlilium_ecs::set_component_actions(
+                                _entity,
+                                self.clone(),
+                                Self(#(#inspect_field_vars,)*),
+                            )
+                        } else {
+                            None
+                        }
                     },
                     quote! { #(#collect_stmts)* },
                     quote! { #(#remap_stmts)* },
@@ -302,7 +318,7 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                 )
             }
             Fields::Unit => (
-                quote! { let _ = ui; None },
+                quote! { let _ = (ui, _entity); None },
                 quote! { let _ = collector; },
                 quote! { let _ = map; },
                 if skip_serialization {
@@ -365,7 +381,7 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
         impl #impl_generics redlilium_ecs::Component for #name #ty_generics #where_clause {
             const NAME: &'static str = #name_str;
 
-            fn inspect_ui(&self, ui: &mut redlilium_ecs::egui::Ui) -> Option<Self> {
+            fn inspect_ui(&self, ui: &mut redlilium_ecs::egui::Ui, _world: &redlilium_ecs::World, _entity: redlilium_ecs::Entity) -> redlilium_ecs::InspectResult {
                 #[allow(unused_imports)]
                 use redlilium_ecs::inspect::InspectFallback as _;
                 #inspect_body

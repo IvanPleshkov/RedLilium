@@ -186,6 +186,22 @@ impl<T: Component + Clone> EditAction<World> for SetComponentAction<T> {
     }
 }
 
+/// Creates an [`InspectResult`] that replaces a component value on an entity.
+///
+/// This is the standard way for [`Component::inspect_ui`] implementations to
+/// report an edit. The derive macro calls this automatically. Manual impls
+/// should call it when the user edits a field value:
+///
+/// ```ignore
+/// fn inspect_ui(&self, ui: &mut egui::Ui, world: &World, entity: Entity) -> InspectResult {
+///     // ... show widgets, compute new_value ...
+///     set_component_actions(entity, self.clone(), new_value)
+/// }
+/// ```
+pub fn set_component_actions<T: Component>(entity: Entity, old: T, new: T) -> InspectResult {
+    Some(vec![Box::new(SetComponentAction { entity, old, new })])
+}
+
 /// An independent ECS world containing entities, components, and resources.
 ///
 /// Each World is fully self-contained. Multiple worlds can coexist
@@ -360,13 +376,7 @@ impl World {
                 has_fn: |world, entity| world.get::<T>(entity).is_some(),
                 inspect_fn: |world, entity, ui| {
                     let comp = world.get::<T>(entity)?;
-                    let new_comp = comp.inspect_ui(ui)?;
-                    let old_comp = comp.clone();
-                    Some(vec![Box::new(SetComponentAction {
-                        entity,
-                        old: old_comp,
-                        new: new_comp,
-                    })])
+                    comp.inspect_ui(ui, world, entity)
                 },
                 remove_fn: |world, entity| world.remove::<T>(entity).is_some(),
                 insert_default_fn: None,
@@ -418,13 +428,7 @@ impl World {
                 has_fn: |world, entity| world.get::<T>(entity).is_some(),
                 inspect_fn: |world, entity, ui| {
                     let comp = world.get::<T>(entity)?;
-                    let new_comp = comp.inspect_ui(ui)?;
-                    let old_comp = comp.clone();
-                    Some(vec![Box::new(SetComponentAction {
-                        entity,
-                        old: old_comp,
-                        new: new_comp,
-                    })])
+                    comp.inspect_ui(ui, world, entity)
                 },
                 remove_fn: |world, entity| world.remove::<T>(entity).is_some(),
                 insert_default_fn: Some(|world, entity| {
