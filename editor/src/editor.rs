@@ -13,10 +13,10 @@ use redlilium_ecs::ui::{
 };
 use redlilium_ecs::{
     Camera, DrawGrid, DrawSelectionAabb, EcsRunner, Entity, FreeFlyCamera, GlobalTransform,
-    GridConfig, MaterialManager, Name, PerEntityBuffers, PostUpdate, RenderMesh, Schedules,
-    SyncMaterialUniforms, Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera,
-    UpdateGlobalTransforms, UpdatePerEntityUniforms, Visibility, WindowInput, World,
-    register_std_components,
+    GridConfig, MaterialManager, MeshManager, Name, PerEntityBuffers, PostUpdate, RenderMesh,
+    Schedules, SyncMaterialUniforms, TextureManager, Transform, Update, UpdateCameraMatrices,
+    UpdateFreeFlyCamera, UpdateGlobalTransforms, UpdatePerEntityUniforms, Visibility, WindowInput,
+    World, register_std_components,
 };
 use redlilium_graphics::egui::{EguiApp, EguiController};
 use redlilium_graphics::{FrameSchedule, RenderTarget, TextureFormat};
@@ -170,8 +170,25 @@ impl Editor {
         register_std_components(&mut world);
         redlilium_ecs::register_rendering_components(&mut world);
 
-        // Insert MaterialManager resource (provides GraphicsDevice to GPU sync systems)
+        // Insert rendering manager resources
         world.insert_resource(MaterialManager::new(scene_view.device().clone()));
+        world.insert_resource(TextureManager::new(scene_view.device().clone()));
+        world.insert_resource(MeshManager::new(scene_view.device().clone()));
+
+        // Register materials so prefab deserialization can find them
+        {
+            let mut mat_manager = world.resource_mut::<MaterialManager>();
+            mat_manager.register_material(
+                "opaque_color",
+                Arc::clone(scene_view.cpu_material()),
+                Arc::clone(scene_view.opaque_material()),
+            );
+            mat_manager.register_material(
+                "entity_index",
+                Arc::new(redlilium_core::material::CpuMaterial::new()),
+                Arc::clone(scene_view.entity_index_material()),
+            );
+        }
 
         // Insert WindowInput resource
         let window_input_handle = world.insert_resource(WindowInput::default());
@@ -205,6 +222,12 @@ impl Editor {
         let cpu_cube = generators::generate_cube(0.5);
         let cube_aabb = cpu_cube.compute_aabb();
 
+        // Register the cube mesh in MeshManager so prefab deserialization can find it
+        world
+            .resource_mut::<MeshManager>()
+            .create_mesh(&cpu_cube)
+            .expect("Failed to register cube mesh");
+
         // Ground plane (scaled flat cube)
         {
             let entity = world.spawn();
@@ -224,6 +247,7 @@ impl Editor {
                 Some(aabb) => RenderMesh::with_aabb(mesh, aabb),
                 None => RenderMesh::new(mesh),
             };
+            register_render_material(&world, &render_mat);
             world.insert(entity, render_mesh).unwrap();
             world.insert(entity, render_mat).unwrap();
             world.insert(entity, per_entity).unwrap();
@@ -249,6 +273,7 @@ impl Editor {
                 Some(aabb) => RenderMesh::with_aabb(mesh, aabb),
                 None => RenderMesh::new(mesh),
             };
+            register_render_material(&world, &render_mat);
             world.insert(entity, render_mesh).unwrap();
             world.insert(entity, render_mat).unwrap();
             world.insert(entity, per_entity).unwrap();
@@ -1264,5 +1289,20 @@ fn show_drag_overlay(ctx: &egui::Context, world: &World) {
                     ui.label(label);
                 });
             });
+    }
+}
+
+/// Register a [`RenderMaterial`]'s bundle in the world's [`MaterialManager`]
+/// so that prefab serialization can look up its CPU source data.
+fn register_render_material(world: &World, render_mat: &redlilium_ecs::RenderMaterial) {
+    if let (Some(cpu_instance), Some(pass_materials)) =
+        (render_mat.cpu_instance(), render_mat.pass_materials())
+    {
+        let mut mat_manager = world.resource_mut::<MaterialManager>();
+        mat_manager.register_bundle(
+            render_mat.bundle(),
+            Arc::clone(cpu_instance),
+            pass_materials.to_vec(),
+        );
     }
 }

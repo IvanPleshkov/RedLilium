@@ -146,6 +146,14 @@ pub trait Component: Clone + Send + Sync + 'static {
             component: Self::NAME.to_string(),
         })
     }
+
+    /// Called after a deserialized component has been inserted into the world.
+    ///
+    /// Use this for post-deserialization setup that requires the entity and
+    /// world (e.g., creating GPU resources for sibling components).
+    ///
+    /// The default implementation does nothing.
+    fn post_deserialize(_entity: crate::Entity, _world: &mut crate::World) {}
 }
 
 #[cfg(test)]

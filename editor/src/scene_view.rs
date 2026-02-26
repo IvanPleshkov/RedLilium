@@ -477,6 +477,21 @@ impl SceneViewState {
         &self.device
     }
 
+    /// Get the GPU material for the opaque color shader.
+    pub fn opaque_material(&self) -> &Arc<Material> {
+        &self.opaque_material
+    }
+
+    /// Get the CPU material definition for the opaque color shader.
+    pub fn cpu_material(&self) -> &Arc<CpuMaterial> {
+        &self.cpu_material
+    }
+
+    /// Get the GPU material for the entity-index picking shader.
+    pub fn entity_index_material(&self) -> &Arc<Material> {
+        &self.entity_index_material
+    }
+
     fn create_depth_texture(
         device: &Arc<GraphicsDevice>,
         width: u32,

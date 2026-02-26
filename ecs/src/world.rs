@@ -127,6 +127,7 @@ fn deserialize_component_fn<T: Component>(
             type_name: e.type_name.to_string(),
         }
     })?;
+    T::post_deserialize(entity, ctx.world_mut());
     Ok(())
 }
 
