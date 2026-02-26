@@ -315,10 +315,8 @@ pub struct RenderMaterial {
     pass_materials: Option<Vec<(RenderPassType, String)>>,
     /// The GPU buffer holding packed material property uniforms (binding 0).
     material_uniform_buffer: Option<Arc<Buffer>>,
-    /// CPU mutation counter. Incremented on every value change.
-    cpu_tick: u64,
-    /// GPU sync counter. Set to `cpu_tick` after `write_buffer` completes.
-    gpu_tick: u64,
+    /// Whether CPU-side values have been modified since the last GPU upload.
+    dirty: bool,
 }
 
 impl crate::Component for RenderMaterial {
@@ -642,8 +640,7 @@ impl RenderMaterial {
             cpu_instance: None,
             pass_materials: None,
             material_uniform_buffer: None,
-            cpu_tick: 0,
-            gpu_tick: 0,
+            dirty: false,
         }
     }
 
@@ -658,8 +655,7 @@ impl RenderMaterial {
             cpu_instance: Some(cpu_instance),
             pass_materials: Some(pass_materials),
             material_uniform_buffer: None,
-            cpu_tick: 0,
-            gpu_tick: 0,
+            dirty: false,
         }
     }
 
@@ -698,20 +694,20 @@ impl RenderMaterial {
 
     // --- Tick-based mutation ---
 
-    /// Replace all material property values. Bumps `cpu_tick` so the
+    /// Replace all material property values. Marks the component dirty so the
     /// [`SyncMaterialUniforms`](super::SyncMaterialUniforms) system will
     /// re-upload the uniform buffer on the next frame.
     pub fn set_values(&mut self, values: Vec<MaterialValue>) {
         if let Some(cpu_inst) = &mut self.cpu_instance {
             Arc::make_mut(cpu_inst).values = values;
-            self.cpu_tick += 1;
+            self.dirty = true;
         }
     }
 
     /// Get a mutable reference to the CPU material values.
-    /// Bumps `cpu_tick` so the sync system will re-upload.
+    /// Marks the component dirty so the sync system will re-upload.
     pub fn values_mut(&mut self) -> Option<&mut Vec<MaterialValue>> {
-        self.cpu_tick += 1;
+        self.dirty = true;
         self.cpu_instance
             .as_mut()
             .map(|arc| &mut Arc::make_mut(arc).values)
@@ -719,12 +715,12 @@ impl RenderMaterial {
 
     /// Whether CPU values have been modified since last GPU sync.
     pub fn is_dirty(&self) -> bool {
-        self.cpu_tick != self.gpu_tick
+        self.dirty
     }
 
     /// Mark as synced after GPU upload. Called by `SyncMaterialUniforms`.
     pub(crate) fn mark_synced(&mut self) {
-        self.gpu_tick = self.cpu_tick;
+        self.dirty = false;
     }
 
     // --- Bundle replacement (for texture changes that need full rebuild) ---
@@ -744,8 +740,7 @@ impl RenderMaterial {
             self.pass_materials = pass_materials;
         }
         // After a full rebuild, GPU is already up-to-date
-        self.cpu_tick += 1;
-        self.gpu_tick = self.cpu_tick;
+        self.dirty = false;
     }
 }
 
