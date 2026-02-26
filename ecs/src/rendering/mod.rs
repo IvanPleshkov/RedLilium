@@ -38,7 +38,8 @@ pub use resources::{
     TextureManager, TextureManagerError, pack_uniform_bytes,
 };
 pub use systems::{
-    EditorForwardRenderSystem, ForwardRenderSystem, SyncMaterialUniforms, UpdatePerEntityUniforms,
+    EditorForwardRenderSystem, ForwardRenderSystem, InitializeRenderEntities, SyncMaterialUniforms,
+    UpdatePerEntityUniforms,
 };
 
 use crate::World;

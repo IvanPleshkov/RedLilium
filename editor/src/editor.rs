@@ -13,10 +13,10 @@ use redlilium_ecs::ui::{
 };
 use redlilium_ecs::{
     Camera, DrawGrid, DrawSelectionAabb, EcsRunner, Entity, FreeFlyCamera, GlobalTransform,
-    GridConfig, MaterialManager, MeshManager, Name, PerEntityBuffers, PostUpdate, RenderMesh,
-    Schedules, SyncMaterialUniforms, TextureManager, Transform, Update, UpdateCameraMatrices,
-    UpdateFreeFlyCamera, UpdateGlobalTransforms, UpdatePerEntityUniforms, Visibility, WindowInput,
-    World, register_std_components,
+    GridConfig, InitializeRenderEntities, MaterialManager, MeshManager, Name, PerEntityBuffers,
+    PostUpdate, RenderMesh, Schedules, SyncMaterialUniforms, TextureManager, Transform, Update,
+    UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms, UpdatePerEntityUniforms,
+    Visibility, WindowInput, World, register_std_components,
 };
 use redlilium_graphics::egui::{EguiApp, EguiController};
 use redlilium_graphics::{FrameSchedule, RenderTarget, TextureFormat};
@@ -313,6 +313,11 @@ impl Editor {
             .get_mut::<PostUpdate>()
             .add_edge::<UpdateGlobalTransforms, UpdateCameraMatrices>()
             .expect("No cycle");
+
+        // Initialize GPU resources for newly deserialized render entities.
+        schedules
+            .get_mut::<PostUpdate>()
+            .add_exclusive(InitializeRenderEntities);
 
         // Automatic GPU sync systems — run after camera matrices are computed.
         schedules

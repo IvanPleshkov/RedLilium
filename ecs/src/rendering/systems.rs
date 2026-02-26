@@ -22,12 +22,13 @@ use super::resources::{MaterialManager, RenderSchedule};
 /// # Access
 ///
 /// - Reads: `Camera`, `GlobalTransform`, `CameraTarget`, `RenderMesh`,
-///   `RenderMaterial`, `Visibility`
+///   `RenderMaterial`, `PerEntityBuffers`, `Visibility`
 /// - Resources: `ResMut<RenderSchedule>`
 ///
 /// # Notes
 ///
-/// - Only entities with `Visibility(true)` are rendered.
+/// - Only entities with both `Visibility(true)` and [`PerEntityBuffers`] are
+///   rendered. Entities without `PerEntityBuffers` are not yet GPU-initialized.
 /// - Cameras without a `CameraTarget` are skipped.
 /// - Swapchain presentation is NOT handled here — that is the app layer's job.
 pub struct ForwardRenderSystem;
@@ -42,11 +43,21 @@ impl crate::System for ForwardRenderSystem {
             crate::Read<CameraTarget>,
             crate::Read<RenderMesh>,
             crate::Read<RenderMaterial>,
+            crate::Read<PerEntityBuffers>,
             crate::Read<Visibility>,
             crate::ResMut<RenderSchedule>,
         )>()
         .execute(
-            |(cameras, globals, targets, meshes, materials, visibilities, mut schedule_res)| {
+            |(
+                cameras,
+                globals,
+                targets,
+                meshes,
+                materials,
+                per_entity,
+                visibilities,
+                mut schedule_res,
+            )| {
                 let Some(schedule) = schedule_res.schedule_mut() else {
                     return;
                 };
@@ -86,8 +97,11 @@ impl crate::System for ForwardRenderSystem {
                     let mut pass = GraphicsPass::new(format!("forward_{cam_idx}"));
                     pass.set_render_targets(render_target_config);
 
-                    // Collect visible renderable entities
+                    // Collect visible renderable entities (skip uninitialized ones)
                     for (entity_idx, render_mesh) in meshes.iter() {
+                        if !per_entity.contains(entity_idx) {
+                            continue;
+                        }
                         let Some(render_material) = materials.get(entity_idx) else {
                             continue;
                         };
@@ -124,7 +138,7 @@ impl crate::System for ForwardRenderSystem {
 /// # Access
 ///
 /// - ReadAll: `Camera`, `GlobalTransform`, `CameraTarget`
-/// - Read: `RenderMesh`, `RenderMaterial`, `Visibility`
+/// - Read: `RenderMesh`, `RenderMaterial`, `PerEntityBuffers`, `Visibility`
 /// - Resources: `ResMut<RenderSchedule>`
 pub struct EditorForwardRenderSystem;
 
@@ -138,11 +152,21 @@ impl crate::System for EditorForwardRenderSystem {
             crate::ReadAll<CameraTarget>,
             crate::Read<RenderMesh>,
             crate::Read<RenderMaterial>,
+            crate::Read<PerEntityBuffers>,
             crate::Read<Visibility>,
             crate::ResMut<RenderSchedule>,
         )>()
         .execute(
-            |(cameras, globals, targets, meshes, materials, visibilities, mut schedule_res)| {
+            |(
+                cameras,
+                globals,
+                targets,
+                meshes,
+                materials,
+                per_entity,
+                visibilities,
+                mut schedule_res,
+            )| {
                 let Some(schedule) = schedule_res.schedule_mut() else {
                     return;
                 };
@@ -182,8 +206,11 @@ impl crate::System for EditorForwardRenderSystem {
                     let mut pass = GraphicsPass::new(format!("editor_forward_{cam_idx}"));
                     pass.set_render_targets(render_target_config);
 
-                    // Collect visible renderable entities (game entities only)
+                    // Collect visible renderable entities (skip uninitialized ones)
                     for (entity_idx, render_mesh) in meshes.iter() {
+                        if !per_entity.contains(entity_idx) {
+                            continue;
+                        }
                         let Some(render_material) = materials.get(entity_idx) else {
                             continue;
                         };
@@ -212,9 +239,9 @@ impl crate::System for EditorForwardRenderSystem {
 
 /// Syncs dirty material property uniforms from CPU to GPU.
 ///
-/// Iterates all [`RenderMaterial`] components and, for any whose CPU tick
-/// doesn't match its GPU tick, repacks the uniform values and uploads them
-/// via [`GraphicsDevice::write_buffer`](redlilium_graphics::GraphicsDevice::write_buffer).
+/// Iterates all [`RenderMaterial`] components and, for any marked dirty,
+/// repacks the uniform values and uploads them via
+/// [`GraphicsDevice::write_buffer`](redlilium_graphics::GraphicsDevice::write_buffer).
 ///
 /// # Access
 ///
@@ -244,8 +271,8 @@ impl crate::System for SyncMaterialUniforms {
                             let buffer = Arc::clone(buffer);
                             let _ = device.write_buffer(&buffer, 0, &bytes);
                         }
+                        mat.mark_synced();
                     }
-                    mat.mark_synced();
                 }
             });
         Ok(())
@@ -310,6 +337,110 @@ impl crate::System for UpdatePerEntityUniforms {
                 }
             }
         });
+        Ok(())
+    }
+}
+
+/// Initializes GPU resources for entities that have a [`RenderMaterial`] but
+/// no [`PerEntityBuffers`] yet (e.g. freshly deserialized entities).
+///
+/// Rebuilds the material bundle with the correct two-group binding layout
+/// required by the opaque_color shader and creates [`PerEntityBuffers`].
+///
+/// This is an [`ExclusiveSystem`](crate::ExclusiveSystem) because it needs
+/// `&mut World` to insert components on entities.
+pub struct InitializeRenderEntities;
+
+impl crate::ExclusiveSystem for InitializeRenderEntities {
+    type Result = ();
+
+    fn run(&mut self, world: &mut crate::World) -> Result<(), crate::system::SystemError> {
+        if !world.has_resource::<MaterialManager>() {
+            return Ok(());
+        }
+
+        // Find entities with RenderMaterial (having cpu_instance + pass_materials)
+        // but no PerEntityBuffers — these need GPU initialization.
+        let uninit: Vec<_> = world
+            .iter_entities()
+            .filter(|e| !world.is_disabled(*e))
+            .filter_map(|entity| {
+                if world.get::<PerEntityBuffers>(entity).is_some() {
+                    return None;
+                }
+                let mat = world.get::<RenderMaterial>(entity)?;
+                let cpu_instance = mat.cpu_instance()?.clone();
+                let pass_materials = mat.pass_materials()?.to_vec();
+                Some((entity, cpu_instance, pass_materials))
+            })
+            .collect();
+
+        if uninit.is_empty() {
+            return Ok(());
+        }
+
+        for (entity, cpu_instance, pass_materials) in uninit {
+            let first_mat_name = pass_materials
+                .first()
+                .map(|(_, n)| n.as_str())
+                .unwrap_or("");
+
+            let mat_manager = world.resource::<MaterialManager>();
+            let Some(forward_gpu) = mat_manager.get_material(first_mat_name).cloned() else {
+                continue;
+            };
+            let ei_gpu = mat_manager.get_material("entity_index").cloned();
+            let device = mat_manager.device().clone();
+            drop(mat_manager);
+
+            let cpu_material = cpu_instance.material.clone();
+
+            let (per_entity, mut new_render_mat, bundle) = if let Some(ei_material) = &ei_gpu {
+                super::shaders::create_opaque_color_entity_full(
+                    &device,
+                    &forward_gpu,
+                    ei_material,
+                    &cpu_material,
+                )
+            } else {
+                let (fwd_buf, bundle) =
+                    super::shaders::create_opaque_color_entity(&device, &forward_gpu);
+                let per_entity = PerEntityBuffers::new(fwd_buf);
+                let rm = RenderMaterial::with_cpu_data(
+                    Arc::clone(&bundle),
+                    Arc::new(redlilium_core::material::CpuMaterialInstance::new(
+                        cpu_material,
+                    )),
+                    pass_materials.clone(),
+                );
+                (per_entity, rm, bundle)
+            };
+
+            // Apply the deserialized values
+            new_render_mat.set_values(cpu_instance.values.clone());
+
+            // Write values to GPU buffer
+            if let Some(buf) = new_render_mat.material_uniform_buffer() {
+                let bytes = super::resources::pack_uniform_bytes(
+                    &cpu_instance.material,
+                    &cpu_instance.values,
+                );
+                if !bytes.is_empty() {
+                    let _ = device.write_buffer(buf, 0, &bytes);
+                }
+                new_render_mat.mark_synced();
+            }
+
+            // Register bundle in MaterialManager for serialization
+            {
+                let mut mat_manager = world.resource_mut::<MaterialManager>();
+                mat_manager.register_bundle(&bundle, Arc::clone(&cpu_instance), pass_materials);
+            }
+
+            let _ = world.insert(entity, new_render_mat);
+            let _ = world.insert(entity, per_entity);
+        }
+
         Ok(())
     }
 }

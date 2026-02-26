@@ -368,53 +368,43 @@ impl crate::Component for RenderMaterial {
         &self,
         ctx: &mut crate::serialize::SerializeContext<'_>,
     ) -> Result<Value, crate::serialize::SerializeError> {
-        let (passes_map, instance_name, values) = {
-            let world = ctx.world();
-            if !world.has_resource::<super::MaterialManager>() {
-                return Err(crate::serialize::SerializeError::FieldError {
-                    field: "0".to_owned(),
-                    message: "MaterialManager resource not found".into(),
-                });
+        let cpu_inst = self.cpu_instance.as_ref().ok_or_else(|| {
+            crate::serialize::SerializeError::FieldError {
+                field: "0".to_owned(),
+                message: "no cpu_instance on RenderMaterial".into(),
             }
+        })?;
+        let pass_materials = self.pass_materials.as_ref().ok_or_else(|| {
+            crate::serialize::SerializeError::FieldError {
+                field: "0".to_owned(),
+                message: "no pass_materials on RenderMaterial".into(),
+            }
+        })?;
+
+        let values = {
+            let world = ctx.world();
             if !world.has_resource::<super::TextureManager>() {
                 return Err(crate::serialize::SerializeError::FieldError {
                     field: "0".to_owned(),
                     message: "TextureManager resource not found".into(),
                 });
             }
-
-            let mat_manager = world.resource::<super::MaterialManager>();
             let tex_manager = world.resource::<super::TextureManager>();
-
-            let cpu_bundle = mat_manager.get_cpu_bundle(&self.bundle).ok_or_else(|| {
-                crate::serialize::SerializeError::FieldError {
-                    field: "0".to_owned(),
-                    message: "material bundle not tracked in MaterialManager".into(),
-                }
-            })?;
-
-            // Serialize pass → material-name map
-            let passes_map: Vec<(String, Value)> = cpu_bundle
-                .pass_materials
-                .iter()
-                .map(|(pass, name)| (pass.as_str().to_owned(), Value::String(name.clone())))
-                .collect();
-
-            let values: Vec<Value> = cpu_bundle
-                .cpu_instance
+            cpu_inst
                 .values
                 .iter()
                 .map(|v| serialize_material_value(v, &tex_manager))
-                .collect::<Result<_, _>>()?;
-
-            let instance_name = cpu_bundle.cpu_instance.name.clone();
-
-            (passes_map, instance_name, values)
+                .collect::<Result<Vec<_>, _>>()?
         };
+
+        let passes_map: Vec<(String, Value)> = pass_materials
+            .iter()
+            .map(|(pass, name)| (pass.as_str().to_owned(), Value::String(name.clone())))
+            .collect();
 
         ctx.begin_struct(Self::NAME)?;
         ctx.write_field("passes", Value::Map(passes_map))?;
-        if let Some(name) = &instance_name {
+        if let Some(name) = &cpu_inst.name {
             ctx.write_serde("name", name)?;
         } else {
             ctx.write_field("name", Value::Null)?;
@@ -547,88 +537,9 @@ impl crate::Component for RenderMaterial {
         };
 
         ctx.end_struct()?;
-        Ok(Self::with_cpu_data(bundle, cpu_instance, pass_materials))
-    }
-
-    fn post_deserialize(entity: crate::Entity, world: &mut crate::World) {
-        // The deserialized RenderMaterial has a bundle created by
-        // MaterialManager::create_bundle which only has material bindings at
-        // group 0. The opaque_color shader expects per-entity transforms at
-        // group 0 and material props at group 1. Rebuild with the correct
-        // layout and create PerEntityBuffers.
-        let Some(render_mat) = world.get::<Self>(entity) else {
-            return;
-        };
-        let Some(cpu_instance) = render_mat.cpu_instance.clone() else {
-            return;
-        };
-        let Some(pass_materials) = render_mat.pass_materials.clone() else {
-            return;
-        };
-
-        if !world.has_resource::<super::MaterialManager>() {
-            return;
-        }
-
-        let first_mat_name = pass_materials
-            .first()
-            .map(|(_, n)| n.as_str())
-            .unwrap_or("");
-
-        // Look up the entity-index GPU material for picking support
-        let mat_manager = world.resource::<super::MaterialManager>();
-        let Some(forward_gpu) = mat_manager.get_material(first_mat_name).cloned() else {
-            return;
-        };
-        let ei_gpu = mat_manager.get_material("entity_index").cloned();
-        let device = mat_manager.device().clone();
-        drop(mat_manager);
-
-        // Create the proper two-group bundle using the shader factory
-        let cpu_material = cpu_instance.material.clone();
-
-        let (per_entity, mut new_render_mat, bundle) = if let Some(ei_material) = &ei_gpu {
-            super::shaders::create_opaque_color_entity_full(
-                &device,
-                &forward_gpu,
-                ei_material,
-                &cpu_material,
-            )
-        } else {
-            // Fallback: forward-only (no picking)
-            let (fwd_buf, bundle) =
-                super::shaders::create_opaque_color_entity(&device, &forward_gpu);
-            let per_entity = PerEntityBuffers::new(fwd_buf);
-            let rm = Self::with_cpu_data(
-                Arc::clone(&bundle),
-                Arc::new(CpuMaterialInstance::new(cpu_material)),
-                pass_materials.clone(),
-            );
-            (per_entity, rm, bundle)
-        };
-
-        // Apply the deserialized values
-        new_render_mat.set_values(cpu_instance.values.clone());
-
-        // Write deserialized values to the material props GPU buffer
-        if let Some(buf) = new_render_mat.material_uniform_buffer() {
-            let bytes = super::pack_uniform_bytes(&cpu_instance.material, &cpu_instance.values);
-            if !bytes.is_empty() {
-                let _ = device.write_buffer(buf, 0, &bytes);
-            }
-            // Mark as synced so the sync system doesn't overwrite with stale data
-            new_render_mat.mark_synced();
-        }
-
-        // Register the new bundle for serialization
-        {
-            let mut mat_manager = world.resource_mut::<super::MaterialManager>();
-            mat_manager.register_bundle(&bundle, Arc::clone(&cpu_instance), pass_materials);
-        }
-
-        // Replace the component and add PerEntityBuffers
-        let _ = world.insert(entity, new_render_mat);
-        let _ = world.insert(entity, per_entity);
+        let mut mat = Self::with_cpu_data(bundle, cpu_instance, pass_materials);
+        mat.dirty = true;
+        Ok(mat)
     }
 }
 
