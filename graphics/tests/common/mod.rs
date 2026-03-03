@@ -606,7 +606,7 @@ pub fn generate_solid_color(width: u32, height: u32, color: ExpectedPixel) -> Ve
 pub const TEXTURE_SAMPLE_SHADER: &str = r#"
 struct VertexInput {
     @location(0) position: vec3<f32>,
-    @location(3) uv: vec2<f32>,
+    @location(1) uv: vec2<f32>,
 }
 
 struct VertexOutput {
@@ -636,7 +636,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 pub const SOLID_RED_SHADER: &str = r#"
 struct VertexInput {
     @location(0) position: vec3<f32>,
-    @location(3) uv: vec2<f32>,
+    @location(1) uv: vec2<f32>,
 }
 
 struct VertexOutput {

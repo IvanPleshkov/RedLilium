@@ -9,20 +9,19 @@ use std::sync::Arc;
 
 use redlilium_core::math::{Mat4, mat4_to_cols_array_2d};
 use redlilium_graphics::{
-    BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, Buffer, BufferDescriptor,
-    BufferUsage, GraphicsDevice, Material, MaterialDescriptor, MaterialInstance, ShaderSource,
-    ShaderStage, ShaderStageFlags, TextureFormat, VertexLayout,
+    BindingGroup, Buffer, BufferDescriptor, BufferUsage, GraphicsDevice, Material,
+    MaterialDescriptor, MaterialInstance, ShaderSource, ShaderStage, TextureFormat, VertexLayout,
 };
 
 use crate::Entity;
 use crate::std::components::{Camera, GlobalTransform};
 
-/// WGSL shader that outputs entity index as `u32` to an R32Uint color target.
-const SHADER_WGSL: &str = include_str!("../../../../shaders/standard/entity_index.wgsl");
+/// Slang shader that outputs entity index as `u32` to an R32Uint color target.
+const SHADER_SLANG: &str = include_str!("../../../../shaders/standard/entity_index.slang");
 
 /// Per-entity uniform data: view-projection, model matrix, and entity index.
 ///
-/// Layout must match the WGSL `Uniforms` struct. The `_padding` fields ensure
+/// Layout must match the Slang `Uniforms` cbuffer. The `_padding` fields ensure
 /// 16-byte alignment after the `u32` entity index.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -36,40 +35,32 @@ pub struct EntityIndexUniforms {
 /// Create the GPU [`Material`] for the entity index shader.
 ///
 /// The material renders to an `R32Uint` color target (no blending) with the
-/// given depth format. Returns `(material, binding_layout)`.
+/// given depth format. Binding layout is auto-reflected from the Slang shader.
 pub fn create_entity_index_material(
     device: &Arc<GraphicsDevice>,
     depth_format: TextureFormat,
-) -> (Arc<Material>, Arc<BindingLayout>) {
-    let binding_layout = Arc::new(
-        BindingLayout::new().with_entry(
-            BindingLayoutEntry::new(0, BindingType::UniformBuffer)
-                .with_visibility(ShaderStageFlags::VERTEX | ShaderStageFlags::FRAGMENT),
-        ),
-    );
-
-    let material = device
+) -> Arc<Material> {
+    device
         .create_material(
             &MaterialDescriptor::new()
-                .with_shader(ShaderSource::new(
+                .with_shader(ShaderSource::slang(
                     ShaderStage::Vertex,
-                    SHADER_WGSL.as_bytes().to_vec(),
+                    SHADER_SLANG.as_bytes().to_vec(),
                     "vs_main",
+                    vec![],
                 ))
-                .with_shader(ShaderSource::new(
+                .with_shader(ShaderSource::slang(
                     ShaderStage::Fragment,
-                    SHADER_WGSL.as_bytes().to_vec(),
+                    SHADER_SLANG.as_bytes().to_vec(),
                     "fs_main",
+                    vec![],
                 ))
-                .with_binding_layout(binding_layout.clone())
                 .with_vertex_layout(VertexLayout::position_normal())
                 .with_color_format(TextureFormat::R32Uint)
                 .with_depth_format(depth_format)
                 .with_label("std_entity_index"),
         )
-        .expect("Failed to create entity index material");
-
-    (material, binding_layout)
+        .expect("Failed to create entity index material")
 }
 
 /// Create per-entity GPU resources for the entity index material.

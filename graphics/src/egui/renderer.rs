@@ -11,15 +11,14 @@ use egui::{ClippedPrimitive, TextureId, TexturesDelta};
 use crate::GraphicsDevice;
 use crate::graph::{ColorAttachment, GraphicsPass, LoadOp, RenderTarget, RenderTargetConfig};
 use crate::materials::{
-    BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, Material, MaterialDescriptor,
-    MaterialInstance, ShaderSource, ShaderStage, ShaderStageFlags,
+    BindingGroup, Material, MaterialDescriptor, MaterialInstance, ShaderSource, ShaderStage,
 };
 use crate::mesh::{
     IndexFormat, Mesh, PrimitiveTopology, VertexAttribute, VertexAttributeFormat,
     VertexAttributeSemantic, VertexBufferLayout, VertexLayout,
 };
 use crate::resources::{Buffer, Sampler, Texture};
-use crate::shader::{EGUI_SHADER_SOURCE, ShaderComposer, ShaderDef};
+use crate::shader::EGUI_SHADER_SOURCE;
 use crate::types::{
     AddressMode, BufferDescriptor, BufferUsage, FilterMode, SamplerDescriptor, TextureDescriptor,
     TextureFormat, TextureUsage,
@@ -98,10 +97,6 @@ pub struct EguiRenderer {
     textures: HashMap<TextureId, Arc<Texture>>,
     /// CPU-side texture data for partial update support.
     texture_data: HashMap<TextureId, TextureData>,
-    #[allow(dead_code)]
-    uniform_binding_layout: Arc<BindingLayout>,
-    #[allow(dead_code)]
-    texture_binding_layout: Arc<BindingLayout>,
     /// Counter for generating unique user texture IDs.
     next_user_texture_id: u64,
     /// Pool of GPU mesh buffers reused across frames.
@@ -138,61 +133,30 @@ impl EguiRenderer {
                 .with_label("egui_vertex_layout"),
         );
 
-        // Create binding layouts
-        let uniform_binding_layout = Arc::new(
-            BindingLayout::new()
-                .with_entry(
-                    BindingLayoutEntry::new(0, BindingType::UniformBuffer)
-                        .with_visibility(ShaderStageFlags::VERTEX),
-                )
-                .with_label("egui_uniform_bindings"),
-        );
-
-        let texture_binding_layout = Arc::new(
-            BindingLayout::new()
-                .with_entry(
-                    BindingLayoutEntry::new(0, BindingType::Texture)
-                        .with_visibility(ShaderStageFlags::FRAGMENT),
-                )
-                .with_entry(
-                    BindingLayoutEntry::new(1, BindingType::Sampler)
-                        .with_visibility(ShaderStageFlags::FRAGMENT),
-                )
-                .with_label("egui_texture_bindings"),
-        );
-
-        // Resolve shader includes (backends handle compilation)
-        let shader_composer = ShaderComposer::with_standard_library();
-        let resolved_glsl = shader_composer
-            .resolve_glsl(EGUI_SHADER_SOURCE)
-            .expect("Failed to resolve egui shader includes");
-
         // Pass surface-type defines so the shader handles color space correctly
-        let mut shader_defs: Vec<(&str, ShaderDef)> = vec![];
+        let mut defines = Vec::new();
         if surface_format.is_hdr() {
-            shader_defs.push(("HDR_OUTPUT", ShaderDef::Bool(true)));
+            defines.push(("HDR_OUTPUT".to_string(), String::new()));
         } else if surface_format.is_srgb() {
-            shader_defs.push(("SRGB_FRAMEBUFFER", ShaderDef::Bool(true)));
+            defines.push(("SRGB_FRAMEBUFFER".to_string(), String::new()));
         }
 
-        // Create material
+        // Create material using Slang shader source
         let material = device
             .create_material(
                 &MaterialDescriptor::new()
-                    .with_shader(ShaderSource::glsl(
+                    .with_shader(ShaderSource::slang(
                         ShaderStage::Vertex,
-                        resolved_glsl.as_bytes().to_vec(),
-                        "main",
-                        ShaderComposer::build_defines(ShaderStage::Vertex, &shader_defs),
+                        EGUI_SHADER_SOURCE.as_bytes().to_vec(),
+                        "vs_main",
+                        defines.clone(),
                     ))
-                    .with_shader(ShaderSource::glsl(
+                    .with_shader(ShaderSource::slang(
                         ShaderStage::Fragment,
-                        resolved_glsl.as_bytes().to_vec(),
-                        "main",
-                        ShaderComposer::build_defines(ShaderStage::Fragment, &shader_defs),
+                        EGUI_SHADER_SOURCE.as_bytes().to_vec(),
+                        "fs_main",
+                        defines,
                     ))
-                    .with_binding_layout(uniform_binding_layout.clone())
-                    .with_binding_layout(texture_binding_layout.clone())
                     .with_vertex_layout(vertex_layout.clone())
                     .with_blend_state(crate::materials::BlendState::premultiplied_alpha())
                     .with_color_format(surface_format)
@@ -230,8 +194,6 @@ impl EguiRenderer {
             sampler,
             textures: HashMap::new(),
             texture_data: HashMap::new(),
-            uniform_binding_layout,
-            texture_binding_layout,
             next_user_texture_id: 0,
             mesh_pool: EguiMeshPool {
                 entries: Vec::new(),

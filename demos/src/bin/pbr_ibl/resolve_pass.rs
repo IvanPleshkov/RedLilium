@@ -5,17 +5,16 @@ use std::sync::Arc;
 use redlilium_core::math::Vec3;
 use redlilium_core::profiling::profile_scope;
 use redlilium_graphics::{
-    BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferDescriptor, BufferUsage,
-    CpuSampler, GraphicsDevice, MaterialDescriptor, MaterialInstance, MeshDescriptor,
-    ShaderComposer, ShaderDef, ShaderSource, ShaderStage, ShaderStageFlags, TextureFormat,
-    VertexBufferLayout, VertexLayout,
+    BindingGroup, BufferDescriptor, BufferUsage, CpuSampler, GraphicsDevice, MaterialDescriptor,
+    MaterialInstance, MeshDescriptor, ShaderSource, ShaderStage, TextureFormat, VertexBufferLayout,
+    VertexLayout,
 };
 
 use crate::gbuffer::GBuffer;
 use crate::ibl_textures::IblTextures;
 use crate::uniforms::ResolveUniforms;
 
-const RESOLVE_SHADER_GLSL: &str = include_str!("../../../shaders/deferred_resolve.glsl");
+const RESOLVE_SHADER_SLANG: &str = include_str!("../../../shaders/deferred_resolve.slang");
 
 /// Deferred resolve/lighting pass: reads G-buffer + IBL textures, outputs lit pixels.
 pub struct ResolvePass {
@@ -48,93 +47,31 @@ impl ResolvePass {
             ))
             .expect("Failed to create resolve uniform buffer");
 
-        // Binding layouts
-        let resolve_uniform_layout = Arc::new(
-            BindingLayout::new()
-                .with_entry(
-                    BindingLayoutEntry::new(0, BindingType::UniformBuffer)
-                        .with_visibility(ShaderStageFlags::VERTEX | ShaderStageFlags::FRAGMENT),
-                )
-                .with_label("resolve_uniform_bindings"),
-        );
-
-        let gbuffer_layout = Arc::new(
-            BindingLayout::new()
-                .with_entry(
-                    BindingLayoutEntry::new(0, BindingType::Texture)
-                        .with_visibility(ShaderStageFlags::FRAGMENT),
-                )
-                .with_entry(
-                    BindingLayoutEntry::new(1, BindingType::Texture)
-                        .with_visibility(ShaderStageFlags::FRAGMENT),
-                )
-                .with_entry(
-                    BindingLayoutEntry::new(2, BindingType::Texture)
-                        .with_visibility(ShaderStageFlags::FRAGMENT),
-                )
-                .with_entry(
-                    BindingLayoutEntry::new(3, BindingType::Sampler)
-                        .with_visibility(ShaderStageFlags::FRAGMENT),
-                )
-                .with_label("gbuffer_bindings"),
-        );
-
-        let ibl_layout = Arc::new(
-            BindingLayout::new()
-                .with_entry(
-                    BindingLayoutEntry::new(0, BindingType::TextureCube)
-                        .with_visibility(ShaderStageFlags::FRAGMENT),
-                )
-                .with_entry(
-                    BindingLayoutEntry::new(1, BindingType::TextureCube)
-                        .with_visibility(ShaderStageFlags::FRAGMENT),
-                )
-                .with_entry(
-                    BindingLayoutEntry::new(2, BindingType::Texture)
-                        .with_visibility(ShaderStageFlags::FRAGMENT),
-                )
-                .with_entry(
-                    BindingLayoutEntry::new(3, BindingType::Sampler)
-                        .with_visibility(ShaderStageFlags::FRAGMENT),
-                )
-                .with_label("ibl_bindings"),
-        );
-
-        // Resolve shader includes with HDR define if active
-        let shader_composer = ShaderComposer::with_standard_library();
-
-        let shader_defs: Vec<(&str, ShaderDef)> = if hdr_active {
+        // Build Slang defines based on HDR mode
+        let defines = if hdr_active {
             log::info!("Compiling resolve shader with HDR_OUTPUT define");
-            vec![("HDR_OUTPUT", ShaderDef::Bool(true))]
+            vec![("HDR_OUTPUT".to_string(), String::new())]
         } else {
             log::info!("Compiling resolve shader for SDR output");
             vec![]
         };
 
-        let resolved_glsl = shader_composer
-            .resolve_glsl(RESOLVE_SHADER_GLSL)
-            .expect("Failed to resolve resolve shader includes");
-        log::info!("Resolve shader resolved with library imports");
-
-        // Create resolve material
+        // Create resolve material using Slang shader
         let resolve_material = device
             .create_material(
                 &MaterialDescriptor::new()
-                    .with_shader(ShaderSource::glsl(
+                    .with_shader(ShaderSource::slang(
                         ShaderStage::Vertex,
-                        resolved_glsl.as_bytes().to_vec(),
-                        "main",
-                        ShaderComposer::build_defines(ShaderStage::Vertex, &shader_defs),
+                        RESOLVE_SHADER_SLANG.as_bytes().to_vec(),
+                        "vs_main",
+                        defines.clone(),
                     ))
-                    .with_shader(ShaderSource::glsl(
+                    .with_shader(ShaderSource::slang(
                         ShaderStage::Fragment,
-                        resolved_glsl.as_bytes().to_vec(),
-                        "main",
-                        ShaderComposer::build_defines(ShaderStage::Fragment, &shader_defs),
+                        RESOLVE_SHADER_SLANG.as_bytes().to_vec(),
+                        "fs_main",
+                        defines,
                     ))
-                    .with_binding_layout(resolve_uniform_layout)
-                    .with_binding_layout(gbuffer_layout)
-                    .with_binding_layout(ibl_layout)
                     .with_color_format(surface_format)
                     .with_label("resolve_material"),
             )

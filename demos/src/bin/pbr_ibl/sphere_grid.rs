@@ -6,15 +6,14 @@ use redlilium_core::math::{Mat4, Vec3, mat4_from_translation, mat4_to_cols_array
 use redlilium_core::mesh::generators;
 use redlilium_core::profiling::{profile_function, profile_scope};
 use redlilium_graphics::{
-    BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferDescriptor, BufferUsage,
-    GraphicsDevice, MaterialDescriptor, MaterialInstance, PolygonMode, ShaderComposer,
-    ShaderSource, ShaderStage, ShaderStageFlags, TextureFormat,
+    BindingGroup, BufferDescriptor, BufferUsage, GraphicsDevice, MaterialDescriptor,
+    MaterialInstance, PolygonMode, ShaderSource, ShaderStage, TextureFormat,
 };
 
 use crate::GRID_SIZE;
 use crate::uniforms::{CameraUniforms, SphereInstance};
 
-const GBUFFER_SHADER_GLSL: &str = include_str!("../../../shaders/deferred_gbuffer.glsl");
+const GBUFFER_SHADER_SLANG: &str = include_str!("../../../shaders/deferred_gbuffer.slang");
 
 /// Sphere grid with G-buffer material, instanced mesh, and camera/instance buffers.
 pub struct SphereGrid {
@@ -34,42 +33,20 @@ impl SphereGrid {
         let sphere_cpu = generators::generate_sphere(0.5, 32, 16);
         let vertex_layout = sphere_cpu.layout().clone();
 
-        // Create camera binding layout
-        let camera_binding_layout = Arc::new(
-            BindingLayout::new()
-                .with_entry(
-                    BindingLayoutEntry::new(0, BindingType::UniformBuffer)
-                        .with_visibility(ShaderStageFlags::VERTEX | ShaderStageFlags::FRAGMENT),
-                )
-                .with_entry(
-                    BindingLayoutEntry::new(1, BindingType::StorageBuffer)
-                        .with_visibility(ShaderStageFlags::VERTEX),
-                )
-                .with_label("camera_bindings"),
-        );
-
-        // Resolve G-buffer shader includes (backends handle compilation)
-        let shader_composer = ShaderComposer::with_standard_library();
-        let resolved_glsl = shader_composer
-            .resolve_glsl(GBUFFER_SHADER_GLSL)
-            .expect("Failed to resolve G-buffer shader includes");
-        log::info!("G-buffer shader resolved with library imports");
-
         // Build base G-buffer material descriptor (shared between fill and wireframe)
         let base_descriptor = MaterialDescriptor::new()
-            .with_shader(ShaderSource::glsl(
+            .with_shader(ShaderSource::slang(
                 ShaderStage::Vertex,
-                resolved_glsl.as_bytes().to_vec(),
-                "main",
-                ShaderComposer::build_defines(ShaderStage::Vertex, &[]),
+                GBUFFER_SHADER_SLANG.as_bytes().to_vec(),
+                "vs_main",
+                vec![],
             ))
-            .with_shader(ShaderSource::glsl(
+            .with_shader(ShaderSource::slang(
                 ShaderStage::Fragment,
-                resolved_glsl.as_bytes().to_vec(),
-                "main",
-                ShaderComposer::build_defines(ShaderStage::Fragment, &[]),
+                GBUFFER_SHADER_SLANG.as_bytes().to_vec(),
+                "fs_main",
+                vec![],
             ))
-            .with_binding_layout(camera_binding_layout)
             .with_vertex_layout(vertex_layout)
             .with_color_format(TextureFormat::Rgba8UnormSrgb)
             .with_color_format(TextureFormat::Rgba16Float)

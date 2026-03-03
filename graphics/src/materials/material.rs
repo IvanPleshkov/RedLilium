@@ -31,11 +31,11 @@ pub enum ShaderStage {
 /// Source language of the shader code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ShaderSourceLanguage {
-    /// GLSL 450+ source (compiled by backend: naga for wgpu, shaderc for Vulkan).
-    Glsl,
-    /// WGSL source (native for wgpu, naga→SPIR-V for Vulkan). Default for backward compat.
+    /// WGSL source (native for wgpu, naga→SPIR-V for Vulkan).
     #[default]
     Wgsl,
+    /// Slang source (compiled to WGSL for wgpu, SPIR-V for Vulkan via Slang compiler).
+    Slang,
 }
 
 /// Shader source for a material.
@@ -53,7 +53,7 @@ pub struct ShaderSource {
     /// Source language.
     pub language: ShaderSourceLanguage,
 
-    /// Compile-time defines (only used for GLSL sources).
+    /// Compile-time defines (only used for Slang sources).
     /// Each entry is (name, value). Empty value means `#define NAME` without a value.
     pub defines: Vec<(String, String)>,
 }
@@ -74,8 +74,8 @@ impl ShaderSource {
         }
     }
 
-    /// Create a GLSL shader source with compile-time defines.
-    pub fn glsl(
+    /// Create a Slang shader source with optional compile-time defines.
+    pub fn slang(
         stage: ShaderStage,
         source: impl Into<Vec<u8>>,
         entry_point: impl Into<String>,
@@ -85,7 +85,7 @@ impl ShaderSource {
             stage,
             source: source.into(),
             entry_point: entry_point.into(),
-            language: ShaderSourceLanguage::Glsl,
+            language: ShaderSourceLanguage::Slang,
             defines,
         }
     }

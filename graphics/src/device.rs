@@ -315,6 +315,57 @@ impl GraphicsDevice {
     ) -> Result<Arc<Material>, GraphicsError> {
         profile_scope!("create_material");
 
+        // Auto-reflect binding layouts from Slang shaders when none are specified
+        #[cfg(feature = "slang-shaders")]
+        let descriptor = &{
+            let mut desc = descriptor.clone();
+            if desc.binding_layouts.is_empty()
+                && !desc.shaders.is_empty()
+                && desc
+                    .shaders
+                    .iter()
+                    .all(|s| s.language == crate::materials::ShaderSourceLanguage::Slang)
+            {
+                let compiler = crate::shader::SlangCompiler::new()?;
+                compiler.write_library_modules(&crate::shader::ShaderLibrary::standard_slang())?;
+
+                // Pre-compute owned data (source strings and define refs)
+                let sources: Vec<String> = desc
+                    .shaders
+                    .iter()
+                    .map(|s| String::from_utf8_lossy(&s.source).into_owned())
+                    .collect();
+                let defines: Vec<Vec<(&str, &str)>> = desc
+                    .shaders
+                    .iter()
+                    .map(|s| {
+                        s.defines
+                            .iter()
+                            .map(|(k, v)| (k.as_str(), v.as_str()))
+                            .collect()
+                    })
+                    .collect();
+
+                let shaders_for_reflect: Vec<crate::shader::ShaderReflectInput<'_>> = desc
+                    .shaders
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        (
+                            sources[i].as_str(),
+                            s.entry_point.as_str(),
+                            s.stage,
+                            defines[i].as_slice(),
+                        )
+                    })
+                    .collect();
+
+                let layouts = compiler.reflect_all_bindings(&shaders_for_reflect)?;
+                desc.binding_layouts = layouts.into_iter().map(std::sync::Arc::new).collect();
+            }
+            desc
+        };
+
         // Create the GPU pipeline via backend
         let gpu_handle = self.instance.backend().create_pipeline(descriptor)?;
 

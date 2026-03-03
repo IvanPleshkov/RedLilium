@@ -1,0 +1,9 @@
+# Slang shader compiler configuration.
+# SLANG_DIR tells shader-slang-sys build script where to find headers and libs.
+
+[env]
+SLANG_DIR = { value = ".slang", relative = true }
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-rpath,/Users/pleshkov/github/vibeengine/.slang/lib"]
+rustdocflags = ["-C", "link-arg=-Wl,-rpath,/Users/pleshkov/github/vibeengine/.slang/lib"]

@@ -50,8 +50,8 @@ ash = "0.38.0"
 gpu-allocator = "0.28"
 parking_lot = "0.12"
 pollster = "0.4"
-naga = { version = "24.0", features = ["wgsl-in", "wgsl-out", "spv-out", "glsl-in"] }
-shaderc = "0.8"
+naga = { version = "24.0", features = ["wgsl-in", "wgsl-out", "spv-out"] }
+shader-slang = "0.1"
 
 # Math and data
 bytemuck = { version = "1.21", features = ["derive"] }

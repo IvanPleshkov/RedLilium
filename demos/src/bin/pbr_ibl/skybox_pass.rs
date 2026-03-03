@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use redlilium_core::profiling::profile_scope;
 use redlilium_graphics::{
-    BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferDescriptor, BufferUsage,
-    GraphicsDevice, MaterialDescriptor, MaterialInstance, MeshDescriptor, ShaderComposer,
-    ShaderSource, ShaderStage, ShaderStageFlags, TextureFormat, VertexBufferLayout, VertexLayout,
+    BindingGroup, BufferDescriptor, BufferUsage, GraphicsDevice, MaterialDescriptor,
+    MaterialInstance, MeshDescriptor, ShaderSource, ShaderStage, TextureFormat, VertexBufferLayout,
+    VertexLayout,
 };
 
 use redlilium_core::math::{Mat4, Vec3, mat4_to_cols_array_2d};
@@ -14,7 +14,7 @@ use redlilium_core::math::{Mat4, Vec3, mat4_to_cols_array_2d};
 use crate::ibl_textures::IblTextures;
 use crate::uniforms::SkyboxUniforms;
 
-const SKYBOX_SHADER_GLSL: &str = include_str!("../../../shaders/skybox.glsl");
+const SKYBOX_SHADER_SLANG: &str = include_str!("../../../shaders/skybox.slang");
 
 /// Skybox rendering resources: material, fullscreen triangle mesh, and uniforms.
 pub struct SkyboxPass {
@@ -33,48 +33,22 @@ impl SkyboxPass {
     ) -> Self {
         profile_scope!("SkyboxPass::create");
 
-        // Create skybox binding layout
-        let skybox_binding_layout = Arc::new(
-            BindingLayout::new()
-                .with_entry(
-                    BindingLayoutEntry::new(0, BindingType::UniformBuffer)
-                        .with_visibility(ShaderStageFlags::VERTEX | ShaderStageFlags::FRAGMENT),
-                )
-                .with_entry(
-                    BindingLayoutEntry::new(1, BindingType::TextureCube)
-                        .with_visibility(ShaderStageFlags::FRAGMENT),
-                )
-                .with_entry(
-                    BindingLayoutEntry::new(2, BindingType::Sampler)
-                        .with_visibility(ShaderStageFlags::FRAGMENT),
-                )
-                .with_label("skybox_bindings"),
-        );
-
-        // Resolve skybox shader includes (backends handle compilation)
-        let shader_composer = ShaderComposer::with_standard_library();
-        let resolved_glsl = shader_composer
-            .resolve_glsl(SKYBOX_SHADER_GLSL)
-            .expect("Failed to resolve skybox shader includes");
-        log::info!("Skybox shader resolved with library imports");
-
-        // Create skybox material (no vertex layout needed for fullscreen triangle)
+        // Create skybox material using Slang shader (no vertex layout needed for fullscreen triangle)
         let skybox_material = device
             .create_material(
                 &MaterialDescriptor::new()
-                    .with_shader(ShaderSource::glsl(
+                    .with_shader(ShaderSource::slang(
                         ShaderStage::Vertex,
-                        resolved_glsl.as_bytes().to_vec(),
-                        "main",
-                        ShaderComposer::build_defines(ShaderStage::Vertex, &[]),
+                        SKYBOX_SHADER_SLANG.as_bytes().to_vec(),
+                        "vs_main",
+                        vec![],
                     ))
-                    .with_shader(ShaderSource::glsl(
+                    .with_shader(ShaderSource::slang(
                         ShaderStage::Fragment,
-                        resolved_glsl.as_bytes().to_vec(),
-                        "main",
-                        ShaderComposer::build_defines(ShaderStage::Fragment, &[]),
+                        SKYBOX_SHADER_SLANG.as_bytes().to_vec(),
+                        "fs_main",
+                        vec![],
                     ))
-                    .with_binding_layout(skybox_binding_layout)
                     .with_color_format(surface_format)
                     .with_label("skybox_material"),
             )

@@ -25,9 +25,8 @@ use redlilium_core::material::{
 };
 use redlilium_core::math::{Mat4, mat4_to_cols_array_2d};
 use redlilium_graphics::{
-    BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, Buffer, BufferDescriptor,
-    BufferUsage, GraphicsDevice, Material, MaterialDescriptor, MaterialInstance, ShaderSource,
-    ShaderStage, ShaderStageFlags, TextureFormat, VertexLayout,
+    BindingGroup, Buffer, BufferDescriptor, BufferUsage, GraphicsDevice, Material,
+    MaterialDescriptor, MaterialInstance, ShaderSource, ShaderStage, TextureFormat, VertexLayout,
 };
 
 use crate::Entity;
@@ -36,8 +35,8 @@ use crate::std::components::{Camera, GlobalTransform};
 
 use super::super::components::{MaterialBundle, PerEntityBuffers, RenderPassType};
 
-/// WGSL shader for opaque color rendering with camera VP + model matrix uniforms.
-const SHADER_WGSL: &str = include_str!("../../../../shaders/standard/opaque_color.wgsl");
+/// Slang shader for opaque color rendering with camera VP + model matrix uniforms.
+const SHADER_SLANG: &str = include_str!("../../../../shaders/standard/opaque_color.slang");
 
 /// Default base color: light gray matching the original hardcoded value.
 const DEFAULT_BASE_COLOR: [f32; 4] = [0.6, 0.6, 0.65, 1.0];
@@ -52,53 +51,35 @@ pub struct OpaqueColorUniforms {
 
 /// Create the GPU [`Material`] for the opaque color shader.
 ///
-/// Returns `(material, binding_layout)`. The material has two binding layouts:
+/// The material has two binding groups auto-reflected from the Slang shader:
 /// - Group 0: per-entity transform uniforms (VP + model)
 /// - Group 1: material property uniforms (base_color)
 pub fn create_opaque_color_material(
     device: &Arc<GraphicsDevice>,
     color_format: TextureFormat,
     depth_format: TextureFormat,
-) -> (Arc<Material>, Arc<BindingLayout>) {
-    // Group 0: per-entity transform uniforms
-    let binding_layout = Arc::new(
-        BindingLayout::new().with_entry(
-            BindingLayoutEntry::new(0, BindingType::UniformBuffer)
-                .with_visibility(ShaderStageFlags::VERTEX | ShaderStageFlags::FRAGMENT),
-        ),
-    );
-
-    // Group 1: material property uniforms (base_color)
-    let material_binding_layout = Arc::new(
-        BindingLayout::new().with_entry(
-            BindingLayoutEntry::new(0, BindingType::UniformBuffer)
-                .with_visibility(ShaderStageFlags::VERTEX | ShaderStageFlags::FRAGMENT),
-        ),
-    );
-
-    let material = device
+) -> Arc<Material> {
+    device
         .create_material(
             &MaterialDescriptor::new()
-                .with_shader(ShaderSource::new(
+                .with_shader(ShaderSource::slang(
                     ShaderStage::Vertex,
-                    SHADER_WGSL.as_bytes().to_vec(),
+                    SHADER_SLANG.as_bytes().to_vec(),
                     "vs_main",
+                    vec![],
                 ))
-                .with_shader(ShaderSource::new(
+                .with_shader(ShaderSource::slang(
                     ShaderStage::Fragment,
-                    SHADER_WGSL.as_bytes().to_vec(),
+                    SHADER_SLANG.as_bytes().to_vec(),
                     "fs_main",
+                    vec![],
                 ))
-                .with_binding_layout(binding_layout.clone()) // group 0
-                .with_binding_layout(material_binding_layout) // group 1
                 .with_vertex_layout(VertexLayout::position_normal())
                 .with_color_format(color_format)
                 .with_depth_format(depth_format)
                 .with_label("std_opaque_color"),
         )
-        .expect("Failed to create opaque color material");
-
-    (material, binding_layout)
+        .expect("Failed to create opaque color material")
 }
 
 /// Create the CPU-side material definition for the opaque color shader.

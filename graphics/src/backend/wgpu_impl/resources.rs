@@ -160,16 +160,19 @@ impl WgpuBackend {
 
         let layout = &descriptor.vertex_layout;
 
-        // Vertex attributes per buffer
+        // Vertex attributes per buffer.
+        // Use sequential shader_location values (0, 1, 2, ...) to match Slang's WGSL output,
+        // which ignores [[vk::location(N)]] annotations on vertex inputs and assigns sequential
+        // @location values in struct declaration order.
         let buffer_count = layout.buffers.len();
         let mut vertex_attrs: Vec<Vec<wgpu::VertexAttribute>> = vec![Vec::new(); buffer_count];
-        for attr in &layout.attributes {
+        for (location, attr) in layout.attributes.iter().enumerate() {
             let idx = attr.buffer_index as usize;
             if idx < buffer_count {
                 vertex_attrs[idx].push(wgpu::VertexAttribute {
                     format: convert_vertex_format(attr.format),
                     offset: attr.offset as u64,
-                    shader_location: attr.semantic.index(),
+                    shader_location: location as u32,
                 });
             }
         }
@@ -375,6 +378,7 @@ impl WgpuBackend {
     ///
     /// For WGSL sources: returns the source as-is.
     /// For GLSL sources: parses through naga GLSL frontend, validates, and converts to WGSL.
+    /// For Slang sources: compiles through the Slang compiler to WGSL.
     fn compile_to_wgsl(
         &self,
         shader: &crate::materials::ShaderSource,
@@ -387,46 +391,22 @@ impl WgpuBackend {
 
         match shader.language {
             ShaderSourceLanguage::Wgsl => Ok(source_str.to_string()),
-            ShaderSourceLanguage::Glsl => {
-                // Build naga defines map from shader defines
-                let mut defines = naga::FastHashMap::default();
-                for (name, value) in &shader.defines {
-                    defines.insert(name.clone(), value.clone());
-                }
-
-                let naga_stage = match shader.stage {
-                    crate::materials::ShaderStage::Vertex => naga::ShaderStage::Vertex,
-                    crate::materials::ShaderStage::Fragment => naga::ShaderStage::Fragment,
-                    crate::materials::ShaderStage::Compute => naga::ShaderStage::Compute,
-                };
-
-                let options = naga::front::glsl::Options {
-                    stage: naga_stage,
-                    defines,
-                };
-
-                let mut frontend = naga::front::glsl::Frontend::default();
-                let module = frontend.parse(&options, source_str).map_err(|errors| {
-                    GraphicsError::ShaderCompilationFailed(format!("GLSL parse error:\n{errors}"))
-                })?;
-
-                let mut validator = naga::valid::Validator::new(
-                    naga::valid::ValidationFlags::all(),
-                    naga::valid::Capabilities::all(),
-                );
-                let info = validator.validate(&module).map_err(|e| {
-                    GraphicsError::ShaderCompilationFailed(format!("Validation error: {e}"))
-                })?;
-
-                naga::back::wgsl::write_string(
-                    &module,
-                    &info,
-                    naga::back::wgsl::WriterFlags::empty(),
-                )
-                .map_err(|e| {
-                    GraphicsError::ShaderCompilationFailed(format!("WGSL generation error: {e}"))
-                })
+            #[cfg(feature = "slang-shaders")]
+            ShaderSourceLanguage::Slang => {
+                let compiler = crate::shader::SlangCompiler::new()?;
+                // Write standard library modules so `import math;` etc. resolve
+                compiler.write_library_modules(&crate::shader::ShaderLibrary::standard_slang())?;
+                let defines: Vec<(&str, &str)> = shader
+                    .defines
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect();
+                compiler.compile_to_wgsl(source_str, &shader.entry_point, &[], &defines)
             }
+            #[cfg(not(feature = "slang-shaders"))]
+            ShaderSourceLanguage::Slang => Err(GraphicsError::FeatureNotSupported(
+                "Slang shaders require the 'slang-shaders' feature".into(),
+            )),
         }
     }
 

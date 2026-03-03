@@ -52,14 +52,14 @@ pub struct SceneViewState {
 impl SceneViewState {
     /// Create scene view resources.
     pub fn new(device: Arc<GraphicsDevice>, surface_format: TextureFormat) -> Self {
-        let (opaque_material, _layout) = shaders::create_opaque_color_material(
+        let opaque_material = shaders::create_opaque_color_material(
             &device,
             surface_format,
             TextureFormat::Depth32Float,
         );
         let cpu_material = shaders::create_opaque_color_cpu_material();
 
-        let (entity_index_material, _ei_layout) =
+        let entity_index_material =
             shaders::create_entity_index_material(&device, TextureFormat::Depth32Float);
 
         let depth_texture = Self::create_depth_texture(&device, 256, 256);

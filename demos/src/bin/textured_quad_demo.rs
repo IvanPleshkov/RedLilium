@@ -16,51 +16,50 @@ use redlilium_app::{App, AppArgs, AppContext, AppHandler, DefaultAppArgs, DrawCo
 use redlilium_core::math::{Mat4, Vec3, look_at_rh, mat4_to_cols_array_2d, orthographic_rh};
 use redlilium_core::mesh::generators;
 use redlilium_graphics::{
-    AddressMode, BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferDescriptor,
-    BufferTextureCopyRegion, BufferTextureLayout, BufferUsage, ColorAttachment,
-    DepthStencilAttachment, Extent3d, FilterMode, FrameSchedule, GraphicsPass, Material,
-    MaterialDescriptor, MaterialInstance, Mesh, RenderTargetConfig, SamplerDescriptor,
-    ShaderSource, ShaderStage, ShaderStageFlags, TextureCopyLocation, TextureDescriptor,
+    AddressMode, BindingGroup, BufferDescriptor, BufferTextureCopyRegion, BufferTextureLayout,
+    BufferUsage, ColorAttachment, DepthStencilAttachment, Extent3d, FilterMode, FrameSchedule,
+    GraphicsPass, Material, MaterialDescriptor, MaterialInstance, Mesh, RenderTargetConfig,
+    SamplerDescriptor, ShaderSource, ShaderStage, TextureCopyLocation, TextureDescriptor,
     TextureFormat, TextureUsage, TransferConfig, TransferOperation, TransferPass, VertexLayout,
     resize::{ResizeManager, ResizeStrategy},
 };
 
-// === GLSL Shader ===
+// === Slang Shader ===
 
-/// Simple textured quad shader with MVP matrix
-const QUAD_SHADER_GLSL: &str = r#"#version 450
-
-#ifdef VERTEX
-
-layout(set = 0, binding = 0) uniform Uniforms {
-    mat4 mvp;
+/// Simple textured quad shader with MVP matrix (Slang)
+const QUAD_SHADER_SLANG: &str = r#"
+[[vk::binding(0, 0)]]
+cbuffer Uniforms {
+    float4x4 mvp;
 };
 
-layout(location = 0) in vec3 position;
-layout(location = 3) in vec2 uv;
+[[vk::binding(1, 0)]]
+Texture2D quad_texture;
+[[vk::binding(2, 0)]]
+SamplerState quad_sampler;
 
-layout(location = 0) out vec2 v_uv;
+struct VsInput {
+    [[vk::location(0)]] float3 position : POSITION;
+    [[vk::location(3)]] float2 uv : TEXCOORD0;
+};
 
-void main() {
-    gl_Position = mvp * vec4(position, 1.0);
-    v_uv = uv;
+struct VsOutput {
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+};
+
+[shader("vertex")]
+VsOutput vs_main(VsInput input) {
+    VsOutput output;
+    output.position = mul(mvp, float4(input.position, 1.0));
+    output.uv = input.uv;
+    return output;
 }
 
-#endif
-
-#ifdef FRAGMENT
-
-layout(set = 0, binding = 1) uniform texture2D quad_texture;
-layout(set = 0, binding = 2) uniform sampler quad_sampler;
-
-layout(location = 0) in vec2 v_uv;
-layout(location = 0) out vec4 out_color;
-
-void main() {
-    out_color = texture(sampler2D(quad_texture, quad_sampler), v_uv);
+[shader("fragment")]
+float4 fs_main(VsOutput input) : SV_Target {
+    return quad_texture.Sample(quad_sampler, input.uv);
 }
-
-#endif
 "#;
 
 // === Uniform Data ===
@@ -218,50 +217,22 @@ impl TexturedQuadDemo {
             })
             .expect("Failed to create sampler");
 
-        // Create binding layout (separate texture + sampler for naga GLSL)
-        let binding_layout = Arc::new(
-            BindingLayout::new()
-                .with_entry(
-                    BindingLayoutEntry::new(0, BindingType::UniformBuffer)
-                        .with_visibility(ShaderStageFlags::VERTEX),
-                )
-                .with_entry(
-                    BindingLayoutEntry::new(1, BindingType::Texture)
-                        .with_visibility(ShaderStageFlags::FRAGMENT),
-                )
-                .with_entry(
-                    BindingLayoutEntry::new(2, BindingType::Sampler)
-                        .with_visibility(ShaderStageFlags::FRAGMENT),
-                )
-                .with_label("quad_bindings"),
-        );
-
-        // Resolve GLSL shader includes (backends handle compilation)
-        let shader_composer = redlilium_graphics::ShaderComposer::new();
-        let resolved_glsl = shader_composer
-            .resolve_glsl(QUAD_SHADER_GLSL)
-            .expect("Failed to resolve quad shader includes");
-
-        // Create material
+        // Create material using Slang shader source
         let material = device
             .create_material(
                 &MaterialDescriptor::new()
-                    .with_shader(ShaderSource::glsl(
+                    .with_shader(ShaderSource::slang(
                         ShaderStage::Vertex,
-                        resolved_glsl.as_bytes().to_vec(),
-                        "main",
-                        redlilium_graphics::ShaderComposer::build_defines(ShaderStage::Vertex, &[]),
+                        QUAD_SHADER_SLANG.as_bytes().to_vec(),
+                        "vs_main",
+                        vec![],
                     ))
-                    .with_shader(ShaderSource::glsl(
+                    .with_shader(ShaderSource::slang(
                         ShaderStage::Fragment,
-                        resolved_glsl.as_bytes().to_vec(),
-                        "main",
-                        redlilium_graphics::ShaderComposer::build_defines(
-                            ShaderStage::Fragment,
-                            &[],
-                        ),
+                        QUAD_SHADER_SLANG.as_bytes().to_vec(),
+                        "fs_main",
+                        vec![],
                     ))
-                    .with_binding_layout(binding_layout)
                     .with_vertex_layout(vertex_layout.clone())
                     .with_color_format(ctx.surface_format())
                     .with_depth_format(TextureFormat::Depth32Float)

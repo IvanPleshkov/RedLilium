@@ -18,6 +18,9 @@ Thumbs.db
 # WASM build output
 demos/web/pkg/
 
+# Slang SDK (local installation)
+.slang/
+
 # Environment
 .env
 .env.local

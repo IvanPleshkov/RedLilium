@@ -78,8 +78,12 @@ impl PipelineManager {
 
     /// Compile shader source to SPIR-V and create a Vulkan shader module.
     ///
-    /// For GLSL sources: uses shaderc (glslang) for direct GLSL → SPIR-V.
-    /// For WGSL sources: uses naga (WGSL → naga IR → SPIR-V) as fallback.
+    /// Returns `(shader_module, actual_entry_point)` where `actual_entry_point` is the
+    /// entry point name as it appears in the compiled SPIR-V (may differ from the source
+    /// function name — e.g. Slang with GLSL-compatible SPIR-V output uses `"main"`).
+    ///
+    /// For WGSL sources: uses naga (WGSL → naga IR → SPIR-V); preserves the original name.
+    /// For Slang sources: uses the Slang compiler (Slang → SPIR-V); reads actual name from SPIR-V.
     pub fn compile_shader(
         &self,
         source: &[u8],
@@ -87,12 +91,25 @@ impl PipelineManager {
         entry_point: &str,
         language: ShaderSourceLanguage,
         defines: &[(String, String)],
-    ) -> Result<vk::ShaderModule, GraphicsError> {
-        let spv = match language {
-            ShaderSourceLanguage::Glsl => {
-                self.compile_glsl_to_spirv(source, stage, entry_point, defines)?
+    ) -> Result<(vk::ShaderModule, String), GraphicsError> {
+        let (spv, actual_entry) = match language {
+            ShaderSourceLanguage::Wgsl => {
+                let spv = self.compile_wgsl_to_spirv(source, stage, entry_point)?;
+                (spv, entry_point.to_string())
             }
-            ShaderSourceLanguage::Wgsl => self.compile_wgsl_to_spirv(source, stage, entry_point)?,
+            #[cfg(feature = "slang-shaders")]
+            ShaderSourceLanguage::Slang => {
+                let spv = self.compile_slang_to_spirv(source, entry_point, defines)?;
+                let actual =
+                    spirv_entry_point_name(&spv).unwrap_or_else(|| entry_point.to_string());
+                (spv, actual)
+            }
+            #[cfg(not(feature = "slang-shaders"))]
+            ShaderSourceLanguage::Slang => {
+                return Err(GraphicsError::FeatureNotSupported(
+                    "Slang shaders require the 'slang-shaders' feature".into(),
+                ));
+            }
         };
 
         // Create Vulkan shader module from SPIR-V
@@ -106,71 +123,7 @@ impl PipelineManager {
                 ))
             })?;
 
-        Ok(shader_module)
-    }
-
-    /// Compile GLSL to SPIR-V using shaderc (glslang wrapper).
-    fn compile_glsl_to_spirv(
-        &self,
-        source: &[u8],
-        stage: ShaderStage,
-        entry_point: &str,
-        defines: &[(String, String)],
-    ) -> Result<Vec<u32>, GraphicsError> {
-        let source_str = std::str::from_utf8(source)
-            .map_err(|e| GraphicsError::ShaderCompilationFailed(format!("Invalid UTF-8: {e}")))?;
-
-        let compiler = shaderc::Compiler::new().ok_or_else(|| {
-            GraphicsError::ShaderCompilationFailed("Failed to create shaderc compiler".into())
-        })?;
-
-        let mut options = shaderc::CompileOptions::new().ok_or_else(|| {
-            GraphicsError::ShaderCompilationFailed(
-                "Failed to create shaderc compile options".into(),
-            )
-        })?;
-
-        options.set_target_env(
-            shaderc::TargetEnv::Vulkan,
-            shaderc::EnvVersion::Vulkan1_3 as u32,
-        );
-        options.set_source_language(shaderc::SourceLanguage::GLSL);
-        options.set_target_spirv(shaderc::SpirvVersion::V1_3);
-
-        // Add all defines
-        for (name, value) in defines {
-            if value.is_empty() {
-                options.add_macro_definition(name, None);
-            } else {
-                options.add_macro_definition(name, Some(value));
-            }
-        }
-
-        let shaderc_stage = match stage {
-            ShaderStage::Vertex => shaderc::ShaderKind::Vertex,
-            ShaderStage::Fragment => shaderc::ShaderKind::Fragment,
-            ShaderStage::Compute => shaderc::ShaderKind::Compute,
-        };
-
-        let result = compiler
-            .compile_into_spirv(
-                source_str,
-                shaderc_stage,
-                "shader.glsl",
-                entry_point,
-                Some(&options),
-            )
-            .map_err(|e| {
-                GraphicsError::ShaderCompilationFailed(format!(
-                    "shaderc GLSL compilation error: {e}"
-                ))
-            })?;
-
-        if result.get_num_warnings() > 0 {
-            log::warn!("Shader warnings: {}", result.get_warning_messages());
-        }
-
-        Ok(result.as_binary().to_vec())
+        Ok((shader_module, actual_entry))
     }
 
     /// Compile WGSL to SPIR-V using naga (fallback for WGSL-authored shaders).
@@ -232,6 +185,40 @@ impl PipelineManager {
             .map_err(|e| {
                 GraphicsError::ShaderCompilationFailed(format!("SPIR-V generation error: {e}"))
             })?;
+
+        Ok(spv)
+    }
+
+    /// Compile Slang source to SPIR-V using the Slang compiler.
+    #[cfg(feature = "slang-shaders")]
+    fn compile_slang_to_spirv(
+        &self,
+        source: &[u8],
+        entry_point: &str,
+        defines: &[(String, String)],
+    ) -> Result<Vec<u32>, GraphicsError> {
+        let source_str = std::str::from_utf8(source)
+            .map_err(|e| GraphicsError::ShaderCompilationFailed(format!("Invalid UTF-8: {e}")))?;
+
+        let compiler = crate::shader::SlangCompiler::new()?;
+        // Write standard library modules so `import math;` etc. resolve
+        compiler.write_library_modules(&crate::shader::ShaderLibrary::standard_slang())?;
+        let defines: Vec<(&str, &str)> = defines
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let spirv_bytes = compiler.compile_to_spirv(source_str, entry_point, &[], &defines)?;
+
+        // Convert byte slice to u32 slice
+        if spirv_bytes.len() % 4 != 0 {
+            return Err(GraphicsError::ShaderCompilationFailed(
+                "Slang SPIR-V output is not aligned to u32".into(),
+            ));
+        }
+        let spv: Vec<u32> = spirv_bytes
+            .chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect();
 
         Ok(spv)
     }
@@ -623,6 +610,45 @@ fn convert_shader_stage_flags(flags: crate::materials::ShaderStageFlags) -> vk::
         result |= vk::ShaderStageFlags::COMPUTE;
     }
     result
+}
+
+/// Extract the first `OpEntryPoint` name from a SPIR-V word slice.
+///
+/// Slang's SPIR-V output names entry points `"main"` (GLSL convention) rather than
+/// preserving the original function name. This function reads the actual name so the
+/// Vulkan pipeline can use the correct `pName`.
+fn spirv_entry_point_name(spirv: &[u32]) -> Option<String> {
+    const SPIRV_MAGIC: u32 = 0x0723_0203;
+    const OP_ENTRY_POINT: u32 = 15;
+
+    if spirv.len() < 5 || spirv[0] != SPIRV_MAGIC {
+        return None;
+    }
+
+    let mut i = 5; // skip the 5-word SPIR-V header
+    while i < spirv.len() {
+        let word = spirv[i];
+        let opcode = word & 0xFFFF;
+        let word_count = (word >> 16) as usize;
+        if word_count == 0 {
+            break;
+        }
+        // OpEntryPoint: | ExecutionModel | Id | Name (packed u32s) | interface vars |
+        if opcode == OP_ENTRY_POINT && word_count >= 4 && i + word_count <= spirv.len() {
+            let mut bytes = Vec::new();
+            'name: for &word in &spirv[(i + 3)..(i + word_count)] {
+                for byte in word.to_le_bytes() {
+                    if byte == 0 {
+                        break 'name;
+                    }
+                    bytes.push(byte);
+                }
+            }
+            return String::from_utf8(bytes).ok();
+        }
+        i += word_count;
+    }
+    None
 }
 
 /// Convert vertex attribute format to Vulkan format.

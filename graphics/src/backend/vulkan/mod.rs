@@ -808,11 +808,11 @@ impl VulkanBackend {
 
         let mut vertex_module = None;
         let mut fragment_module = None;
-        let mut vertex_entry: &str = "vs_main";
-        let mut fragment_entry: &str = "fs_main";
+        let mut vertex_entry = String::from("vs_main");
+        let mut fragment_entry = String::from("fs_main");
 
         for shader in &descriptor.shaders {
-            let module = self.pipeline_manager.compile_shader(
+            let (module, actual_entry) = self.pipeline_manager.compile_shader(
                 &shader.source,
                 shader.stage,
                 &shader.entry_point,
@@ -822,11 +822,11 @@ impl VulkanBackend {
             match shader.stage {
                 ShaderStage::Vertex => {
                     vertex_module = Some(module);
-                    vertex_entry = &shader.entry_point;
+                    vertex_entry = actual_entry;
                 }
                 ShaderStage::Fragment => {
                     fragment_module = Some(module);
-                    fragment_entry = &shader.entry_point;
+                    fragment_entry = actual_entry;
                 }
                 ShaderStage::Compute => {}
             }
@@ -850,8 +850,8 @@ impl VulkanBackend {
         let pipeline = self.pipeline_manager.create_graphics_pipeline(
             vertex_module,
             fragment_module,
-            vertex_entry,
-            fragment_entry,
+            &vertex_entry,
+            &fragment_entry,
             &descriptor.vertex_layout,
             descriptor.topology,
             pipeline_layout,
@@ -885,11 +885,11 @@ impl VulkanBackend {
         use crate::materials::ShaderStage;
 
         let mut compute_module = None;
-        let mut compute_entry: &str = "main";
+        let mut compute_entry = String::from("main");
 
         for shader in &descriptor.shaders {
             if shader.stage == ShaderStage::Compute {
-                let module = self.pipeline_manager.compile_shader(
+                let (module, actual_entry) = self.pipeline_manager.compile_shader(
                     &shader.source,
                     shader.stage,
                     &shader.entry_point,
@@ -897,7 +897,7 @@ impl VulkanBackend {
                     &shader.defines,
                 )?;
                 compute_module = Some(module);
-                compute_entry = &shader.entry_point;
+                compute_entry = actual_entry;
             }
         }
 
@@ -917,7 +917,7 @@ impl VulkanBackend {
 
         let pipeline = self.pipeline_manager.create_compute_pipeline(
             compute_module,
-            compute_entry,
+            &compute_entry,
             pipeline_layout,
         )?;
 

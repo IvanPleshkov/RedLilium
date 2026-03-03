@@ -5,15 +5,13 @@ use redlilium_graphics::graph::{
     ColorAttachment, DepthStencilAttachment, GraphicsPass, LoadOp, RenderTarget, RenderTargetConfig,
 };
 use redlilium_graphics::materials::{
-    BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, MaterialDescriptor,
-    MaterialInstance, ShaderSource, ShaderStage, ShaderStageFlags,
+    BindingGroup, MaterialDescriptor, MaterialInstance, ShaderSource, ShaderStage,
 };
 use redlilium_graphics::mesh::{
     Mesh, PrimitiveTopology, VertexAttribute, VertexAttributeFormat, VertexAttributeSemantic,
     VertexBufferLayout, VertexLayout,
 };
 use redlilium_graphics::resources::{Buffer, Texture};
-use redlilium_graphics::shader::ShaderComposer;
 use redlilium_graphics::types::{BufferDescriptor, BufferUsage, TextureFormat};
 
 use redlilium_graphics::materials::{BlendState, Material};
@@ -35,8 +33,6 @@ pub struct DebugDrawerRenderer {
     uniform_buffer: Arc<Buffer>,
     vertex_buffer: Arc<Buffer>,
     vertex_capacity: u32,
-    #[allow(dead_code)]
-    uniform_binding_layout: Arc<BindingLayout>,
 }
 
 impl DebugDrawerRenderer {
@@ -72,37 +68,20 @@ impl DebugDrawerRenderer {
                 .with_label("debug_draw_vertex_layout"),
         );
 
-        // Binding layout: uniform buffer at group 0, binding 0 (vertex stage)
-        let uniform_binding_layout = Arc::new(
-            BindingLayout::new()
-                .with_entry(
-                    BindingLayoutEntry::new(0, BindingType::UniformBuffer)
-                        .with_visibility(ShaderStageFlags::VERTEX),
-                )
-                .with_label("debug_draw_uniform_bindings"),
-        );
-
-        // Resolve shader includes (backends handle compilation)
-        let shader_composer = ShaderComposer::new();
-        let resolved_glsl = shader_composer
-            .resolve_glsl(DEBUG_DRAW_SHADER_SOURCE)
-            .expect("Failed to resolve debug draw shader includes");
-
-        // Material with LineList topology and alpha blending
+        // Material with LineList topology and alpha blending (Slang shader)
         let mut material_desc = MaterialDescriptor::new()
-            .with_shader(ShaderSource::glsl(
+            .with_shader(ShaderSource::slang(
                 ShaderStage::Vertex,
-                resolved_glsl.as_bytes().to_vec(),
-                "main",
-                ShaderComposer::build_defines(ShaderStage::Vertex, &[]),
+                DEBUG_DRAW_SHADER_SOURCE.as_bytes().to_vec(),
+                "vs_main",
+                vec![],
             ))
-            .with_shader(ShaderSource::glsl(
+            .with_shader(ShaderSource::slang(
                 ShaderStage::Fragment,
-                resolved_glsl.as_bytes().to_vec(),
-                "main",
-                ShaderComposer::build_defines(ShaderStage::Fragment, &[]),
+                DEBUG_DRAW_SHADER_SOURCE.as_bytes().to_vec(),
+                "fs_main",
+                vec![],
             ))
-            .with_binding_layout(uniform_binding_layout.clone())
             .with_vertex_layout(vertex_layout.clone())
             .with_topology(PrimitiveTopology::LineList)
             .with_blend_state(BlendState::alpha_blending())
@@ -147,7 +126,6 @@ impl DebugDrawerRenderer {
             uniform_buffer,
             vertex_buffer,
             vertex_capacity: DEFAULT_VERTEX_CAPACITY,
-            uniform_binding_layout,
         }
     }
 

@@ -6,10 +6,11 @@ license.workspace = true
 description = "RedLilium engine graphics"
 
 [features]
-default = ["dummy", "wgpu-backend", "vulkan-backend"]
+default = ["dummy", "wgpu-backend", "vulkan-backend", "slang-shaders"]
 dummy = []
 wgpu-backend = ["dep:wgpu", "dep:pollster"]
-vulkan-backend = ["dep:ash", "dep:ash-window", "dep:gpu-allocator", "dep:parking_lot", "dep:shaderc"]
+vulkan-backend = ["dep:ash", "dep:ash-window", "dep:gpu-allocator", "dep:parking_lot"]
+slang-shaders = ["dep:shader-slang"]
 profiling = ["dep:tracy-client", "redlilium-core/profiling"]
 
 [dependencies]
@@ -23,6 +24,7 @@ bytemuck = { version = "1.18", features = ["derive"] }
 
 # Shader parsing and composition
 naga.workspace = true
+shader-slang = { workspace = true, optional = true }
 
 # UI
 egui = "0.33.3"
@@ -37,7 +39,6 @@ ash = { workspace = true, optional = true }
 ash-window = { version = "0.13", optional = true }
 gpu-allocator = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
-shaderc = { workspace = true, optional = true }
 pollster = { workspace = true, optional = true }
 
 # Profiling (optional)
