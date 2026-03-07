@@ -15,7 +15,7 @@ use crate::sparse_set::{
     ComponentHookFn, ComponentMeta, ComponentStorage, DeserializeComponentFn, LockGuard, Mut, Ref,
     RefMut, SerializeComponentFn,
 };
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 /// Error returned when a component type has not been registered in the [`World`].
 ///
@@ -181,7 +181,7 @@ pub fn set_component_actions<T: Component>(entity: Entity, old: T, new: T) -> In
 /// ```
 pub struct World {
     entities: EntityAllocator,
-    components: HashMap<TypeId, ComponentStorage>,
+    components: HashMap<TypeId, parking_lot::RwLock<ComponentStorage>>,
     resources: Resources,
     /// Global tick counter for change detection.
     tick: u64,
@@ -209,6 +209,33 @@ impl World {
         }
     }
 
+    // ---- Component lock helpers ----
+
+    /// Returns a reference to the component storage without locking.
+    ///
+    /// # Safety
+    ///
+    /// Safe when called from `&mut self` methods (exclusive access via borrow
+    /// checker) or during system execution where structural changes don't occur.
+    /// Filters use this to read containment data (sparse array) while write
+    /// locks may be held on the same storage — safe because filters only read
+    /// the sparse array while writers only modify the dense array (separate
+    /// `Vec` allocations).
+    #[allow(dead_code)]
+    unsafe fn storage_ref(&self, type_id: &TypeId) -> Option<&ComponentStorage> {
+        self.components
+            .get(type_id)
+            .map(|lock| unsafe { &*lock.data_ptr() })
+    }
+
+    /// Returns a mutable reference to the component storage.
+    ///
+    /// Uses `RwLock::get_mut()` which bypasses locking via the borrow checker
+    /// (`&mut RwLock` guarantees no other references exist).
+    fn storage_mut(&mut self, type_id: &TypeId) -> Option<&mut ComponentStorage> {
+        self.components.get_mut(type_id).map(|lock| lock.get_mut())
+    }
+
     // ---- Entity management ----
 
     /// Spawns a new entity and returns its ID.
@@ -233,7 +260,8 @@ impl World {
         // Pass 1: collect on_remove hooks for components this entity has
         let hooks: Vec<ComponentHookFn> = self
             .components
-            .values()
+            .values_mut()
+            .map(|lock| lock.get_mut())
             .filter(|s| s.contains_untyped(index))
             .filter_map(|s| s.on_remove)
             .collect();
@@ -248,13 +276,14 @@ impl World {
         let observer_triggers: Vec<TypeId> = self
             .components
             .iter()
-            .filter(|(_, storage)| storage.contains_untyped(index))
+            .filter(|(_, lock)| unsafe { &*lock.data_ptr() }.contains_untyped(index))
             .filter_map(|(type_id, _)| self.observers.remove_trigger_key(type_id))
             .collect();
 
         // Deallocate entity and remove all components (including any added by hooks)
         self.entities.deallocate(entity);
-        for storage in self.components.values_mut() {
+        for lock in self.components.values_mut() {
+            let storage = lock.get_mut();
             if storage.remove_untyped(index) {
                 storage.record_removal(index, tick);
             }
@@ -300,7 +329,7 @@ impl World {
     pub fn register_component<T: Send + Sync + 'static>(&mut self) {
         self.components
             .entry(TypeId::of::<T>())
-            .or_insert_with(ComponentStorage::new::<T>);
+            .or_insert_with(|| parking_lot::RwLock::new(ComponentStorage::new::<T>()));
     }
 
     /// Registers a component type with inspector support.
@@ -315,7 +344,11 @@ impl World {
         self.register_component::<T>();
         T::register_required(self);
         self.name_index.insert(T::NAME, TypeId::of::<T>());
-        let storage = self.components.get_mut(&TypeId::of::<T>()).unwrap();
+        let storage = self
+            .components
+            .get_mut(&TypeId::of::<T>())
+            .unwrap()
+            .get_mut();
         storage.meta = Some(ComponentMeta {
             name: T::NAME,
             has_fn: |world, entity| world.get::<T>(entity).is_some(),
@@ -367,7 +400,11 @@ impl World {
         self.register_component::<T>();
         T::register_required(self);
         self.name_index.insert(T::NAME, TypeId::of::<T>());
-        let storage = self.components.get_mut(&TypeId::of::<T>()).unwrap();
+        let storage = self
+            .components
+            .get_mut(&TypeId::of::<T>())
+            .unwrap()
+            .get_mut();
         storage.meta = Some(ComponentMeta {
             name: T::NAME,
             has_fn: |world, entity| world.get::<T>(entity).is_some(),
@@ -418,7 +455,10 @@ impl World {
     /// Lower values appear first in the component inspector panel.
     /// The default order is `100`.
     pub fn set_inspector_order<T: Component>(&mut self, order: u32) {
-        if let Some(storage) = self.components.get_mut(&TypeId::of::<T>())
+        if let Some(storage) = self
+            .components
+            .get_mut(&TypeId::of::<T>())
+            .map(|l| l.get_mut())
             && let Some(meta) = storage.meta_mut()
         {
             meta.display_order = order;
@@ -458,7 +498,8 @@ impl World {
         let storage = self
             .components
             .get_mut(&TypeId::of::<T>())
-            .expect("Component T not registered — call register_component::<T>() first");
+            .expect("Component T not registered — call register_component::<T>() first")
+            .get_mut();
 
         storage.required_components.push(|world, entity| {
             if world.get::<R>(entity).is_none() {
@@ -501,7 +542,8 @@ impl World {
         let (had_component, on_add, on_insert, on_replace, required) = {
             let storage = self
                 .components
-                .get(&type_id)
+                .get_mut(&type_id)
+                .map(|l| l.get_mut())
                 .ok_or(ComponentNotRegistered {
                     type_name: std::any::type_name::<T>(),
                 })?;
@@ -520,8 +562,7 @@ impl World {
         }
 
         // Perform the actual insert
-        self.components
-            .get_mut(&type_id)
+        self.storage_mut(&type_id)
             .unwrap()
             .typed_mut::<T>()
             .insert(entity.index(), component);
@@ -578,7 +619,8 @@ impl World {
         let (had_component, on_add, on_insert, on_replace, required) = {
             let storage = self
                 .components
-                .get(&type_id)
+                .get_mut(&type_id)
+                .map(|l| l.get_mut())
                 .ok_or(ComponentNotRegistered {
                     type_name: std::any::type_name::<T>(),
                 })?;
@@ -595,8 +637,7 @@ impl World {
             hook(self, entity);
         }
 
-        self.components
-            .get_mut(&type_id)
+        self.storage_mut(&type_id)
             .unwrap()
             .typed_mut::<T>()
             .insert_with_tick(entity.index(), component, tick);
@@ -770,7 +811,8 @@ impl World {
         let (on_add, on_insert, on_replace, has_required) = {
             let storage = self
                 .components
-                .get(&type_id)
+                .get_mut(&type_id)
+                .map(|l| l.get_mut())
                 .ok_or(ComponentNotRegistered {
                     type_name: std::any::type_name::<T>(),
                 })?;
@@ -784,8 +826,7 @@ impl World {
         let has_hooks = on_add.is_some() || on_insert.is_some() || on_replace.is_some();
 
         // Reserve capacity upfront
-        self.components
-            .get_mut(&type_id)
+        self.storage_mut(&type_id)
             .unwrap()
             .typed_mut::<T>()
             .reserve(components.len());
@@ -797,8 +838,7 @@ impl World {
                     "Cannot insert component on dead entity {entity}"
                 );
                 let had = self
-                    .components
-                    .get(&type_id)
+                    .storage_mut(&type_id)
                     .unwrap()
                     .contains_untyped(entity.index());
 
@@ -806,8 +846,7 @@ impl World {
                     hook(self, *entity);
                 }
 
-                self.components
-                    .get_mut(&type_id)
+                self.storage_mut(&type_id)
                     .unwrap()
                     .typed_mut::<T>()
                     .insert(entity.index(), component);
@@ -822,8 +861,7 @@ impl World {
                 // Apply required components (only on first add)
                 if !had {
                     let required = self
-                        .components
-                        .get(&type_id)
+                        .storage_mut(&type_id)
                         .unwrap()
                         .required_components
                         .clone();
@@ -840,7 +878,7 @@ impl World {
             }
         } else {
             // Fast path: no hooks and no required components, direct sparse set insert
-            let storage = self.components.get_mut(&type_id).unwrap();
+            let storage = self.components.get_mut(&type_id).unwrap().get_mut();
             let set = storage.typed_mut::<T>();
             for (entity, component) in entities.iter().zip(components) {
                 assert!(
@@ -890,7 +928,8 @@ impl World {
         let (on_add, on_insert, on_replace, has_required) = {
             let storage = self
                 .components
-                .get(&type_id)
+                .get_mut(&type_id)
+                .map(|l| l.get_mut())
                 .ok_or(ComponentNotRegistered {
                     type_name: std::any::type_name::<T>(),
                 })?;
@@ -904,8 +943,7 @@ impl World {
         let has_hooks = on_add.is_some() || on_insert.is_some() || on_replace.is_some();
 
         // Reserve capacity upfront
-        self.components
-            .get_mut(&type_id)
+        self.storage_mut(&type_id)
             .unwrap()
             .typed_mut::<T>()
             .reserve(components.len());
@@ -917,8 +955,7 @@ impl World {
                     "Cannot insert component on dead entity {entity}"
                 );
                 let had = self
-                    .components
-                    .get(&type_id)
+                    .storage_mut(&type_id)
                     .unwrap()
                     .contains_untyped(entity.index());
 
@@ -926,8 +963,7 @@ impl World {
                     hook(self, *entity);
                 }
 
-                self.components
-                    .get_mut(&type_id)
+                self.storage_mut(&type_id)
                     .unwrap()
                     .typed_mut::<T>()
                     .insert_with_tick(entity.index(), component, tick);
@@ -942,8 +978,7 @@ impl World {
                 // Apply required components (only on first add)
                 if !had {
                     let required = self
-                        .components
-                        .get(&type_id)
+                        .storage_mut(&type_id)
                         .unwrap()
                         .required_components
                         .clone();
@@ -960,7 +995,7 @@ impl World {
             }
         } else {
             // Fast path: no hooks and no required components, direct sparse set insert
-            let storage = self.components.get_mut(&type_id).unwrap();
+            let storage = self.components.get_mut(&type_id).unwrap().get_mut();
             let set = storage.typed_mut::<T>();
             for (entity, component) in entities.iter().zip(components) {
                 assert!(
@@ -991,7 +1026,7 @@ impl World {
 
         // Extract on_remove hook
         let on_remove = {
-            let Some(storage) = self.components.get(&type_id) else {
+            let Some(storage) = self.storage_mut(&type_id) else {
                 return;
             };
             storage.on_remove
@@ -1003,8 +1038,7 @@ impl World {
                 .iter()
                 .copied()
                 .filter(|e| {
-                    self.components
-                        .get(&type_id)
+                    self.storage_mut(&type_id)
                         .is_some_and(|s| s.contains_untyped(e.index()))
                 })
                 .collect();
@@ -1014,7 +1048,7 @@ impl World {
         }
 
         // Perform removals
-        let Some(storage) = self.components.get_mut(&type_id) else {
+        let Some(storage) = self.storage_mut(&type_id) else {
             return;
         };
         let mut removed_entities = Vec::new();
@@ -1047,7 +1081,7 @@ impl World {
 
         // Check presence and extract hook
         let on_remove = {
-            let storage = self.components.get(&type_id)?;
+            let storage = self.storage_mut(&type_id)?;
             if !storage.contains_untyped(entity.index()) {
                 return None;
             }
@@ -1060,7 +1094,7 @@ impl World {
         }
 
         // Perform removal
-        let storage = self.components.get_mut(&type_id)?;
+        let storage = self.storage_mut(&type_id)?;
         let result = storage.typed_mut::<T>().remove(entity.index());
         if result.is_some() {
             storage.record_removal(entity.index(), tick);
@@ -1072,7 +1106,8 @@ impl World {
 
     /// Returns a reference to a component on an entity.
     pub fn get<T: 'static>(&self, entity: Entity) -> Option<&T> {
-        let storage = self.components.get(&TypeId::of::<T>())?;
+        let lock = self.components.get(&TypeId::of::<T>())?;
+        let storage = unsafe { &*lock.data_ptr() };
         storage.typed::<T>().get(entity.index())
     }
 
@@ -1081,7 +1116,10 @@ impl World {
     /// The component is marked as changed only when [`DerefMut`] is invoked.
     pub fn get_mut<T: 'static>(&mut self, entity: Entity) -> Option<Mut<'_, T>> {
         let tick = self.tick;
-        let storage = self.components.get_mut(&TypeId::of::<T>())?;
+        let storage = self
+            .components
+            .get_mut(&TypeId::of::<T>())
+            .map(|l| l.get_mut())?;
         storage
             .typed_mut::<T>()
             .get_mut_tracked(entity.index(), tick)
@@ -1276,12 +1314,13 @@ impl World {
     ///
     /// The caller must ensure the read lock is already held externally.
     pub(crate) fn read_unlocked<T: 'static>(&self) -> Result<Ref<'_, T>, ComponentNotRegistered> {
-        let storage = self
+        let lock = self
             .components
             .get(&TypeId::of::<T>())
             .ok_or(ComponentNotRegistered {
                 type_name: std::any::type_name::<T>(),
             })?;
+        let storage = unsafe { &*lock.data_ptr() };
         Ok(Ref::new_unlocked(storage, self.entity_flags()))
     }
 
@@ -1291,14 +1330,14 @@ impl World {
     pub(crate) fn write_unlocked<T: 'static>(
         &self,
     ) -> Result<RefMut<'_, T>, ComponentNotRegistered> {
-        let storage = self
+        let lock = self
             .components
             .get(&TypeId::of::<T>())
             .ok_or(ComponentNotRegistered {
                 type_name: std::any::type_name::<T>(),
             })?;
         Ok(RefMut::new_unlocked(
-            storage,
+            lock.data_ptr(),
             self.entity_flags(),
             self.tick,
         ))
@@ -1306,15 +1345,16 @@ impl World {
 
     /// Gets optional shared read access without acquiring a lock.
     pub(crate) fn try_read_unlocked<T: 'static>(&self) -> Option<Ref<'_, T>> {
-        let storage = self.components.get(&TypeId::of::<T>())?;
+        let lock = self.components.get(&TypeId::of::<T>())?;
+        let storage = unsafe { &*lock.data_ptr() };
         Some(Ref::new_unlocked(storage, self.entity_flags()))
     }
 
     /// Gets optional exclusive write access without acquiring a lock.
     pub(crate) fn try_write_unlocked<T: 'static>(&self) -> Option<RefMut<'_, T>> {
-        let storage = self.components.get(&TypeId::of::<T>())?;
+        let lock = self.components.get(&TypeId::of::<T>())?;
         Some(RefMut::new_unlocked(
-            storage,
+            lock.data_ptr(),
             self.entity_flags(),
             self.tick,
         ))
@@ -1324,12 +1364,13 @@ impl World {
     pub(crate) fn read_all_unlocked<T: 'static>(
         &self,
     ) -> Result<Ref<'_, T>, ComponentNotRegistered> {
-        let storage = self
+        let lock = self
             .components
             .get(&TypeId::of::<T>())
             .ok_or(ComponentNotRegistered {
                 type_name: std::any::type_name::<T>(),
             })?;
+        let storage = unsafe { &*lock.data_ptr() };
         Ok(Ref::new_unlocked_with_mask(
             storage,
             self.entity_flags(),
@@ -1342,14 +1383,14 @@ impl World {
     pub(crate) fn write_all_unlocked<T: 'static>(
         &self,
     ) -> Result<RefMut<'_, T>, ComponentNotRegistered> {
-        let storage = self
+        let lock = self
             .components
             .get(&TypeId::of::<T>())
             .ok_or(ComponentNotRegistered {
                 type_name: std::any::type_name::<T>(),
             })?;
         Ok(RefMut::new_unlocked_with_mask(
-            storage,
+            lock.data_ptr(),
             self.entity_flags(),
             Entity::DISABLED,
             self.tick,
@@ -1379,12 +1420,11 @@ impl World {
             .iter()
             .filter_map(|info| {
                 // Only component storages — resources self-lock via Arc<RwLock<T>>
-                let storage = self.components.get(&info.type_id)?;
-                let lock = storage.rw_lock();
+                let lock = self.components.get(&info.type_id)?;
                 Some(if info.is_write {
-                    LockGuard::Write(lock.write().unwrap())
+                    LockGuard::Write(lock.write())
                 } else {
-                    LockGuard::Read(lock.read().unwrap())
+                    LockGuard::Read(lock.read())
                 })
             })
             .collect()
@@ -1394,7 +1434,9 @@ impl World {
     ///
     /// Returns the human-readable type name for a component TypeId, if registered.
     pub(crate) fn component_type_name(&self, type_id: TypeId) -> Option<&'static str> {
-        self.components.get(&type_id).map(|s| s.type_name())
+        let lock = self.components.get(&type_id)?;
+        let storage = unsafe { &*lock.data_ptr() };
+        Some(storage.type_name())
     }
 
     /// Returns whether a component type has been registered.
@@ -1421,6 +1463,7 @@ impl World {
         self.components
             .get_mut(&TypeId::of::<T>())
             .expect("Component not registered")
+            .get_mut()
             .on_add = Some(hook);
         self
     }
@@ -1437,6 +1480,7 @@ impl World {
         self.components
             .get_mut(&TypeId::of::<T>())
             .expect("Component not registered")
+            .get_mut()
             .on_insert = Some(hook);
         self
     }
@@ -1454,6 +1498,7 @@ impl World {
         self.components
             .get_mut(&TypeId::of::<T>())
             .expect("Component not registered")
+            .get_mut()
             .on_replace = Some(hook);
         self
     }
@@ -1471,6 +1516,7 @@ impl World {
         self.components
             .get_mut(&TypeId::of::<T>())
             .expect("Component not registered")
+            .get_mut()
             .on_remove = Some(hook);
         self
     }
@@ -1616,7 +1662,10 @@ impl World {
     /// Returns a [`ContainsChecker`] that does not borrow component data.
     /// If T has never been registered, the filter matches nothing.
     pub fn with<T: 'static>(&self) -> ContainsChecker<'_> {
-        let storage = self.components.get(&TypeId::of::<T>());
+        let storage = self
+            .components
+            .get(&TypeId::of::<T>())
+            .map(|lock| unsafe { &*lock.data_ptr() });
         ContainsChecker::with(storage)
     }
 
@@ -1625,7 +1674,10 @@ impl World {
     /// Returns a [`ContainsChecker`] that does not borrow component data.
     /// If T has never been registered, the filter matches everything.
     pub fn without<T: 'static>(&self) -> ContainsChecker<'_> {
-        let storage = self.components.get(&TypeId::of::<T>());
+        let storage = self
+            .components
+            .get(&TypeId::of::<T>())
+            .map(|lock| unsafe { &*lock.data_ptr() });
         ContainsChecker::without(storage)
     }
 
@@ -1635,7 +1687,10 @@ impl World {
     /// Does not borrow component data. If T has never been registered,
     /// the filter matches nothing.
     pub fn changed<T: 'static>(&self, since_tick: u64) -> ChangedFilter<'_> {
-        let storage = self.components.get(&TypeId::of::<T>());
+        let storage = self
+            .components
+            .get(&TypeId::of::<T>())
+            .map(|lock| unsafe { &*lock.data_ptr() });
         ChangedFilter::new(storage, since_tick)
     }
 
@@ -1645,7 +1700,10 @@ impl World {
     /// Does not borrow component data. If T has never been registered,
     /// the filter matches nothing.
     pub fn added<T: 'static>(&self, since_tick: u64) -> AddedFilter<'_> {
-        let storage = self.components.get(&TypeId::of::<T>());
+        let storage = self
+            .components
+            .get(&TypeId::of::<T>())
+            .map(|lock| unsafe { &*lock.data_ptr() });
         AddedFilter::new(storage, since_tick)
     }
 
@@ -1658,7 +1716,10 @@ impl World {
     /// Removal records are accumulated across frames. Call
     /// [`clear_removed_tracking`](World::clear_removed_tracking) to reset them.
     pub fn removed<T: 'static>(&self, since_tick: u64) -> RemovedFilter<'_> {
-        let storage = self.components.get(&TypeId::of::<T>());
+        let storage = self
+            .components
+            .get(&TypeId::of::<T>())
+            .map(|lock| unsafe { &*lock.data_ptr() });
         RemovedFilter::new(storage, since_tick)
     }
 
@@ -1667,14 +1728,17 @@ impl World {
     /// Looks up component meta by name.
     fn meta_by_name(&self, name: &str) -> Option<&ComponentMeta> {
         let type_id = self.name_index.get(name)?;
-        self.components.get(type_id)?.meta()
+        let lock = self.components.get(type_id)?;
+        let storage = unsafe { &*lock.data_ptr() };
+        storage.meta()
     }
 
     /// Iterates over all registered component metas.
     fn iter_meta(&self) -> impl Iterator<Item = &ComponentMeta> {
-        self.components
-            .values()
-            .filter_map(|storage| storage.meta())
+        self.components.values().filter_map(|lock| {
+            let storage = unsafe { &*lock.data_ptr() };
+            storage.meta()
+        })
     }
 
     // ---- Inspector ----
@@ -1702,8 +1766,14 @@ impl World {
     pub fn all_component_names_of(&self, entity: Entity) -> Vec<&'static str> {
         self.components
             .values()
-            .filter(|storage| storage.contains_untyped(entity.index()))
-            .map(|storage| storage.type_name())
+            .filter_map(|lock| {
+                let storage = unsafe { &*lock.data_ptr() };
+                if storage.contains_untyped(entity.index()) {
+                    Some(storage.type_name())
+                } else {
+                    None
+                }
+            })
             .collect()
     }
 
@@ -2143,7 +2213,7 @@ impl World {
     /// Returns the typed `Arc` handle for external access (e.g. inspector,
     /// editor). The world stores a coerced `Arc<RwLock<dyn Resource>>` that
     /// shares the same underlying data and lock.
-    pub fn insert_resource<T: Resource>(&mut self, value: T) -> Arc<RwLock<T>> {
+    pub fn insert_resource<T: Resource>(&mut self, value: T) -> Arc<std::sync::RwLock<T>> {
         self.resources.insert(value)
     }
 
@@ -2151,12 +2221,12 @@ impl World {
     ///
     /// The Arc is coerced to `Arc<RwLock<dyn Resource>>` for storage;
     /// both the caller's clone and the stored clone share the same lock.
-    pub fn insert_resource_shared<T: Resource>(&mut self, resource: Arc<RwLock<T>>) {
+    pub fn insert_resource_shared<T: Resource>(&mut self, resource: Arc<std::sync::RwLock<T>>) {
         self.resources.insert_shared(resource);
     }
 
     /// Removes a resource, returning the `Arc<RwLock<dyn Resource>>` if present.
-    pub fn remove_resource<T: 'static>(&mut self) -> Option<Arc<RwLock<dyn Resource>>> {
+    pub fn remove_resource<T: 'static>(&mut self) -> Option<Arc<std::sync::RwLock<dyn Resource>>> {
         self.resources.remove::<T>()
     }
 
@@ -2173,7 +2243,7 @@ impl World {
     /// # Panics
     ///
     /// Panics if the resource does not exist.
-    pub fn resource_handle<T: 'static>(&self) -> Arc<RwLock<dyn Resource>> {
+    pub fn resource_handle<T: 'static>(&self) -> Arc<std::sync::RwLock<dyn Resource>> {
         self.resources.get_handle::<T>()
     }
 
@@ -2264,8 +2334,8 @@ impl World {
     /// to observe removals via [`removed`](World::removed)) to prevent
     /// unbounded growth of removal records.
     pub fn clear_removed_tracking(&mut self) {
-        for storage in self.components.values_mut() {
-            storage.clear_removed();
+        for lock in self.components.values_mut() {
+            lock.get_mut().clear_removed();
         }
     }
 

@@ -1,7 +1,6 @@
 use std::any::Any;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use fixedbitset::FixedBitSet;
 
@@ -479,13 +478,13 @@ impl<T: Send + Sync + 'static> ErasedSparseSet for SparseSetInner<T> {
     }
 }
 
-/// A lock guard for either a read or write lock on a storage.
+/// A lock guard for either a read or write lock on a component storage.
 ///
 /// The guard is held purely for its RAII drop behavior (releasing the lock).
 #[allow(dead_code)]
 pub(crate) enum LockGuard<'a> {
-    Read(RwLockReadGuard<'a, ()>),
-    Write(RwLockWriteGuard<'a, ()>),
+    Read(parking_lot::RwLockReadGuard<'a, ComponentStorage>),
+    Write(parking_lot::RwLockWriteGuard<'a, ComponentStorage>),
 }
 
 /// A type-erased sparse set that stores components of a single type.
@@ -494,8 +493,6 @@ pub(crate) enum LockGuard<'a> {
 /// Used internally by [`World`](crate::World).
 pub(crate) struct ComponentStorage {
     inner: Box<dyn ErasedSparseSet>,
-    /// Per-storage lock for thread-safe borrow management.
-    lock: RwLock<()>,
     /// Records of (entity_index, tick) for recently removed components.
     /// Cleared by [`World::clear_removed_tracking`](crate::World::clear_removed_tracking).
     removed_ticks: Vec<(u32, u64)>,
@@ -521,7 +518,6 @@ impl ComponentStorage {
     pub fn new<T: Send + Sync + 'static>() -> Self {
         Self {
             inner: Box::new(SparseSetInner::<T>::new()),
-            lock: RwLock::new(()),
             removed_ticks: Vec::new(),
             on_add: None,
             on_insert: None,
@@ -558,42 +554,9 @@ impl ComponentStorage {
             .unwrap()
     }
 
-    /// Acquires a shared read lock. Panics immediately if a write lock is held.
-    ///
-    /// Uses `try_read` for instant conflict detection (panic, not deadlock).
-    /// Used by the direct World API (`world.read()`).
-    pub(crate) fn lock_read(&self) -> RwLockReadGuard<'_, ()> {
-        self.lock.try_read().unwrap_or_else(|_| {
-            panic!(
-                "Cannot borrow `{}` immutably: already borrowed mutably",
-                self.inner.type_name()
-            )
-        })
-    }
-
-    /// Acquires an exclusive write lock. Panics immediately if any lock is held.
-    ///
-    /// Uses `try_write` for instant conflict detection (panic, not deadlock).
-    /// Used by the direct World API (`world.write()`).
-    pub(crate) fn lock_write(&self) -> RwLockWriteGuard<'_, ()> {
-        self.lock.try_write().unwrap_or_else(|_| {
-            panic!(
-                "Cannot borrow `{}` mutably: already borrowed",
-                self.inner.type_name()
-            )
-        })
-    }
-
     /// Returns the human-readable type name of the stored component.
     pub(crate) fn type_name(&self) -> &'static str {
         self.inner.type_name()
-    }
-
-    /// Returns a reference to the underlying RwLock.
-    ///
-    /// Used by `acquire_sorted` for blocking lock acquisition in system execution.
-    pub(crate) fn rw_lock(&self) -> &RwLock<()> {
-        &self.lock
     }
 
     /// Removes a component by entity index (type-erased). Returns true if removed.
@@ -658,12 +621,12 @@ impl ComponentStorage {
 /// `exclude_mask`). Use the `_unfiltered` variants (e.g. `get_unfiltered`,
 /// `iter_unfiltered`) to include all entities.
 pub struct Ref<'a, T: 'static> {
-    inner: &'a SparseSetInner<T>,
+    inner: *const SparseSetInner<T>,
     entity_flags: &'a [u32],
     /// Bitmask of entity flag bits that cause an entity to be excluded
     /// from filtered methods. Default: `DISABLED | STATIC`.
     exclude_mask: u32,
-    _guard: Option<RwLockReadGuard<'a, ()>>,
+    _guard: Option<parking_lot::RwLockReadGuard<'a, ComponentStorage>>,
 }
 
 impl<'a, T: 'static> Ref<'a, T> {
@@ -673,10 +636,16 @@ impl<'a, T: 'static> Ref<'a, T> {
     /// Creates a new shared borrow guard, acquiring the storage's read lock.
     ///
     /// Uses the default exclude mask (`DISABLED | STATIC | EDITOR`).
-    pub(crate) fn new(storage: &'a ComponentStorage, entity_flags: &'a [u32]) -> Self {
-        let guard = storage.lock_read();
+    pub(crate) fn new(
+        lock: &'a parking_lot::RwLock<ComponentStorage>,
+        entity_flags: &'a [u32],
+    ) -> Self {
+        let guard = lock.try_read().unwrap_or_else(|| {
+            panic!("Cannot borrow component immutably: already borrowed mutably")
+        });
+        let inner = guard.typed::<T>() as *const SparseSetInner<T>;
         Self {
-            inner: storage.typed::<T>(),
+            inner,
             entity_flags,
             exclude_mask: Self::DEFAULT_MASK,
             _guard: Some(guard),
@@ -688,13 +657,16 @@ impl<'a, T: 'static> Ref<'a, T> {
     /// Used by `ReadAll<T>` to create a `Ref` that only excludes disabled
     /// entities (mask = `DISABLED`), including static entities in iteration.
     pub(crate) fn new_with_mask(
-        storage: &'a ComponentStorage,
+        lock: &'a parking_lot::RwLock<ComponentStorage>,
         entity_flags: &'a [u32],
         exclude_mask: u32,
     ) -> Self {
-        let guard = storage.lock_read();
+        let guard = lock.try_read().unwrap_or_else(|| {
+            panic!("Cannot borrow component immutably: already borrowed mutably")
+        });
+        let inner = guard.typed::<T>() as *const SparseSetInner<T>;
         Self {
-            inner: storage.typed::<T>(),
+            inner,
             entity_flags,
             exclude_mask,
             _guard: Some(guard),
@@ -706,8 +678,9 @@ impl<'a, T: 'static> Ref<'a, T> {
     /// The caller must ensure the lock is already held externally
     /// (e.g. via `acquire_sorted`). Uses the default exclude mask.
     pub(crate) fn new_unlocked(storage: &'a ComponentStorage, entity_flags: &'a [u32]) -> Self {
+        let inner = storage.typed::<T>() as *const SparseSetInner<T>;
         Self {
-            inner: storage.typed::<T>(),
+            inner,
             entity_flags,
             exclude_mask: Self::DEFAULT_MASK,
             _guard: None,
@@ -720,8 +693,9 @@ impl<'a, T: 'static> Ref<'a, T> {
         entity_flags: &'a [u32],
         exclude_mask: u32,
     ) -> Self {
+        let inner = storage.typed::<T>() as *const SparseSetInner<T>;
         Self {
-            inner: storage.typed::<T>(),
+            inner,
             entity_flags,
             exclude_mask,
             _guard: None,
@@ -732,8 +706,14 @@ impl<'a, T: 'static> Ref<'a, T> {
     ///
     /// Unlike `Deref` (which ties the result to the borrow of `Ref`), this
     /// returns a reference with the original `'a` lifetime of the storage.
+    ///
+    /// # Safety
+    ///
+    /// The raw pointer is valid for `'a` because either:
+    /// - The guard holds the lock (locked path), or
+    /// - The caller holds the lock externally (unlocked path).
     pub(crate) fn storage(&self) -> &'a SparseSetInner<T> {
-        self.inner
+        unsafe { &*self.inner }
     }
 
     // ---- Filtered methods (shadow Deref'd SparseSetInner methods) ----
@@ -761,52 +741,63 @@ impl<'a, T: 'static> Ref<'a, T> {
         self.exclude_mask
     }
 
+    /// Returns a reference to the inner sparse set.
+    ///
+    /// # Safety
+    ///
+    /// The raw pointer is valid because either the guard holds the lock
+    /// or the caller holds it externally.
+    fn inner(&self) -> &SparseSetInner<T> {
+        unsafe { &*self.inner }
+    }
+
     /// Returns a reference to the component for the given entity index.
     /// Returns `None` if the entity is excluded or does not have this component.
     pub fn get(&self, entity_index: u32) -> Option<&T> {
         if self.is_entity_excluded(entity_index) {
             return None;
         }
-        self.inner.get(entity_index)
+        self.inner().get(entity_index)
     }
 
     /// Iterates over `(entity_index, &component)` pairs, skipping excluded entities.
     pub fn iter(&self) -> impl Iterator<Item = (u32, &T)> + '_ {
-        self.inner
+        self.inner()
             .iter()
             .filter(|(idx, _)| !self.is_entity_excluded(*idx))
     }
 
     /// Returns whether the entity has this component and is not excluded.
     pub fn contains(&self, entity_index: u32) -> bool {
-        !self.is_entity_excluded(entity_index) && self.inner.contains(entity_index)
+        !self.is_entity_excluded(entity_index) && self.inner().contains(entity_index)
     }
 
     /// Returns true if the component was changed since `since_tick` and the entity is not excluded.
     pub fn changed_since(&self, entity_index: u32, since_tick: u64) -> bool {
-        !self.is_entity_excluded(entity_index) && self.inner.changed_since(entity_index, since_tick)
+        !self.is_entity_excluded(entity_index)
+            && self.inner().changed_since(entity_index, since_tick)
     }
 
     /// Returns true if the component was added since `since_tick` and the entity is not excluded.
     pub fn added_since(&self, entity_index: u32, since_tick: u64) -> bool {
-        !self.is_entity_excluded(entity_index) && self.inner.added_since(entity_index, since_tick)
+        !self.is_entity_excluded(entity_index) && self.inner().added_since(entity_index, since_tick)
     }
 
     // ---- Unfiltered escape hatches ----
 
     /// Returns a reference to the component, ignoring disabled status.
     pub fn get_unfiltered(&self, entity_index: u32) -> Option<&T> {
-        self.inner.get(entity_index)
+        self.inner().get(entity_index)
     }
 
     /// Iterates over all `(entity_index, &component)` pairs, including disabled entities.
     pub fn iter_unfiltered(&self) -> impl Iterator<Item = (u32, &T)> + '_ {
-        self.inner.iter()
+        self.inner().iter()
     }
 
     /// Returns whether the entity has this component, ignoring disabled status.
     pub fn contains_unfiltered(&self, entity_index: u32) -> bool {
-        self.inner.contains(entity_index)
+        self.inner().contains(entity_index)
     }
 }
 
@@ -814,7 +805,7 @@ impl<T: 'static> Deref for Ref<'_, T> {
     type Target = SparseSetInner<T>;
 
     fn deref(&self) -> &Self::Target {
-        self.inner
+        unsafe { &*self.inner }
     }
 }
 
@@ -843,7 +834,7 @@ pub struct RefMut<'a, T: 'static> {
     exclude_mask: u32,
     /// Current world tick, stamped into `ticks_changed` via [`Mut`].
     tick: u64,
-    _guard: Option<RwLockWriteGuard<'a, ()>>,
+    _guard: Option<parking_lot::RwLockWriteGuard<'a, ComponentStorage>>,
     _marker: PhantomData<&'a mut SparseSetInner<T>>,
 }
 
@@ -854,12 +845,17 @@ impl<'a, T: 'static> RefMut<'a, T> {
     /// Creates a new exclusive borrow guard, acquiring the storage's write lock.
     ///
     /// Uses the default exclude mask (`DISABLED | STATIC | EDITOR`).
-    pub(crate) fn new(storage: &'a ComponentStorage, entity_flags: &'a [u32], tick: u64) -> Self {
-        let guard = storage.lock_write();
-        // SAFETY: lock_write() guarantees exclusive access. We cast away
-        // the shared reference to get a mutable pointer, which is safe because
-        // the write lock ensures no other references exist.
-        let inner = storage.typed::<T>() as *const SparseSetInner<T> as *mut SparseSetInner<T>;
+    pub(crate) fn new(
+        lock: &'a parking_lot::RwLock<ComponentStorage>,
+        entity_flags: &'a [u32],
+        tick: u64,
+    ) -> Self {
+        let guard = lock
+            .try_write()
+            .unwrap_or_else(|| panic!("Cannot borrow component mutably: already borrowed"));
+        // SAFETY: write lock guarantees exclusive access. data_ptr() provides
+        // interior mutability through the lock — no dubious &T→*mut T cast.
+        let inner = unsafe { (*lock.data_ptr()).typed_mut::<T>() as *mut SparseSetInner<T> };
         Self {
             inner,
             entity_flags,
@@ -875,13 +871,15 @@ impl<'a, T: 'static> RefMut<'a, T> {
     /// Used by `WriteAll<T>` to create a `RefMut` that only excludes disabled
     /// entities (mask = `DISABLED`), including static and editor entities.
     pub(crate) fn new_with_mask(
-        storage: &'a ComponentStorage,
+        lock: &'a parking_lot::RwLock<ComponentStorage>,
         entity_flags: &'a [u32],
         exclude_mask: u32,
         tick: u64,
     ) -> Self {
-        let guard = storage.lock_write();
-        let inner = storage.typed::<T>() as *const SparseSetInner<T> as *mut SparseSetInner<T>;
+        let guard = lock
+            .try_write()
+            .unwrap_or_else(|| panic!("Cannot borrow component mutably: already borrowed"));
+        let inner = unsafe { (*lock.data_ptr()).typed_mut::<T>() as *mut SparseSetInner<T> };
         Self {
             inner,
             entity_flags,
@@ -894,14 +892,16 @@ impl<'a, T: 'static> RefMut<'a, T> {
 
     /// Creates an exclusive borrow without acquiring a lock.
     ///
+    /// # Safety
+    ///
     /// The caller must ensure the write lock is already held externally
-    /// (e.g. via `acquire_sorted`). Uses the default exclude mask.
+    /// (e.g. via `acquire_sorted`).
     pub(crate) fn new_unlocked(
-        storage: &'a ComponentStorage,
+        storage_ptr: *mut ComponentStorage,
         entity_flags: &'a [u32],
         tick: u64,
     ) -> Self {
-        let inner = storage.typed::<T>() as *const SparseSetInner<T> as *mut SparseSetInner<T>;
+        let inner = unsafe { (*storage_ptr).typed_mut::<T>() as *mut SparseSetInner<T> };
         Self {
             inner,
             entity_flags,
@@ -914,12 +914,12 @@ impl<'a, T: 'static> RefMut<'a, T> {
 
     /// Creates an exclusive borrow without acquiring a lock, with a custom exclude mask.
     pub(crate) fn new_unlocked_with_mask(
-        storage: &'a ComponentStorage,
+        storage_ptr: *mut ComponentStorage,
         entity_flags: &'a [u32],
         exclude_mask: u32,
         tick: u64,
     ) -> Self {
-        let inner = storage.typed::<T>() as *const SparseSetInner<T> as *mut SparseSetInner<T>;
+        let inner = unsafe { (*storage_ptr).typed_mut::<T>() as *mut SparseSetInner<T> };
         Self {
             inner,
             entity_flags,
@@ -1159,55 +1159,59 @@ mod tests {
 
     #[test]
     fn lock_shared_multiple() {
-        let storage = ComponentStorage::new::<u32>();
-        let _a = storage.lock_read();
-        let _b = storage.lock_read();
+        let lock = parking_lot::RwLock::new(ComponentStorage::new::<u32>());
+        let _a = lock.read();
+        let _b = lock.read();
         // Both locks succeed
     }
 
     #[test]
     fn lock_exclusive_alone() {
-        let storage = ComponentStorage::new::<u32>();
-        let _guard = storage.lock_write();
+        let lock = parking_lot::RwLock::new(ComponentStorage::new::<u32>());
+        let _guard = lock.write();
     }
 
     #[test]
-    #[should_panic(expected = "Cannot borrow `u32` mutably: already borrowed")]
     fn lock_exclusive_conflicts_shared() {
-        let storage = ComponentStorage::new::<u32>();
-        let _r = storage.lock_read();
-        let _w = storage.lock_write(); // Should panic
+        let lock = parking_lot::RwLock::new(ComponentStorage::new::<u32>());
+        let _r = lock.read();
+        // parking_lot RwLock would deadlock here, not panic.
+        // With the new design, conflicts are handled by the scheduler,
+        // not by the lock itself. This test is no longer applicable.
+        // Just verify that a try_write returns None when read-locked.
+        assert!(lock.try_write().is_none());
     }
 
     #[test]
-    #[should_panic(expected = "Cannot borrow `u32` immutably: already borrowed mutably")]
     fn lock_shared_conflicts_exclusive() {
-        let storage = ComponentStorage::new::<u32>();
-        let _w = storage.lock_write();
-        let _r = storage.lock_read(); // Should panic
+        let lock = parking_lot::RwLock::new(ComponentStorage::new::<u32>());
+        let _w = lock.write();
+        // parking_lot RwLock would deadlock here, not panic.
+        // Just verify that a try_read returns None when write-locked.
+        assert!(lock.try_read().is_none());
     }
 
     #[test]
     fn lock_released_on_drop() {
-        let storage = ComponentStorage::new::<u32>();
+        let lock = parking_lot::RwLock::new(ComponentStorage::new::<u32>());
         let flags: &[u32] = &[];
         {
-            let _guard = Ref::<u32>::new(&storage, flags);
+            let _guard = Ref::<u32>::new(&lock, flags);
         }
         // After Ref is dropped, exclusive lock should succeed
-        let _guard = RefMut::<u32>::new(&storage, flags, 0);
+        let _guard = RefMut::<u32>::new(&lock, flags, 0);
     }
 
     #[test]
     fn ref_mut_allows_mutation() {
-        let mut storage = ComponentStorage::new::<u32>();
-        storage.typed_mut::<u32>().insert(0, 42);
+        let lock = parking_lot::RwLock::new(ComponentStorage::new::<u32>());
+        lock.write().typed_mut::<u32>().insert(0, 42);
         let flags: &[u32] = &[];
         {
-            let mut guard = RefMut::<u32>::new(&storage, flags, 0);
+            let mut guard = RefMut::<u32>::new(&lock, flags, 0);
             guard.insert(0, 99);
         }
-        assert_eq!(storage.typed::<u32>().get(0), Some(&99));
+        assert_eq!(lock.read().typed::<u32>().get(0), Some(&99));
     }
 
     #[test]

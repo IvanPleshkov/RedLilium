@@ -83,7 +83,8 @@
       "Bash(DYLD_LIBRARY_PATH=/Users/pleshkov/github/vibeengine/.slang/lib cargo test --workspace)",
       "WebFetch(domain:docs.shader-slang.org)",
       "Bash(mv ecs/src/physics ecs/src/std/physics)",
-      "Bash(mv ecs/src/rendering ecs/src/std/rendering)"
+      "Bash(mv ecs/src/rendering ecs/src/std/rendering)",
+      "Bash(sort -t: -k2 -n)"
     ],
     "deny": [
       "Read(target/**)"

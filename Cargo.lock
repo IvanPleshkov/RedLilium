@@ -4347,6 +4347,7 @@ dependencies = [
  "fixedbitset",
  "image",
  "log",
+ "parking_lot",
  "rapier2d",
  "rapier2d-f64",
  "rapier3d",
