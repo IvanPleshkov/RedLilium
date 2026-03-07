@@ -1,5 +1,5 @@
+use parking_lot::Mutex;
 use std::any::Any;
-use std::sync::Mutex;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -131,7 +131,7 @@ impl EcsRunnerMultiThread {
         let mut completed_count = 0usize;
 
         // Take previous-tick results (if the system count matches).
-        let prev = std::mem::take(&mut *self.prev_results.lock().unwrap());
+        let prev = std::mem::take(&mut *self.prev_results.lock());
         let prev = Mutex::new(if prev.len() == n { prev } else { Vec::new() });
 
         while completed_count < n {
@@ -236,7 +236,7 @@ impl EcsRunnerMultiThread {
                     redlilium_core::profile_scope_dynamic!(system_name);
 
                     let prev_result = {
-                        let mut prev_guard = prev.lock().unwrap();
+                        let mut prev_guard = prev.lock();
                         if exc_idx < prev_guard.len() {
                             prev_guard[exc_idx].take()
                         } else {
@@ -252,7 +252,7 @@ impl EcsRunnerMultiThread {
 
                     if systems.is_read_only_exclusive(exc_idx) {
                         let system = systems.get_read_only_exclusive_system(exc_idx);
-                        let guard = system.read().unwrap();
+                        let guard = system.read();
                         if let Some(prev_result) = prev_result {
                             guard.reuse_result_boxed(prev_result);
                         }
@@ -269,7 +269,7 @@ impl EcsRunnerMultiThread {
                         }
                     } else {
                         let system = systems.get_exclusive_system(exc_idx);
-                        let mut guard = system.write().unwrap();
+                        let mut guard = system.write();
                         if let Some(prev_result) = prev_result {
                             guard.reuse_result_boxed(prev_result);
                         }
@@ -287,7 +287,7 @@ impl EcsRunnerMultiThread {
                     }
 
                     if let Some(start) = sys_start {
-                        system_timings.lock().unwrap().push(SystemTiming {
+                        system_timings.lock().push(SystemTiming {
                             name: system_name,
                             duration: start.elapsed(),
                         });
@@ -334,7 +334,7 @@ impl EcsRunnerMultiThread {
         }
 
         // Save this tick's results for next tick's reuse.
-        *self.prev_results.lock().unwrap() = results_store.into_prev_results();
+        *self.prev_results.lock() = results_store.into_prev_results();
 
         // Opportunistically tick remaining compute tasks (time-budgeted).
         if self.compute.pending_count() > 0 {
@@ -355,7 +355,7 @@ impl EcsRunnerMultiThread {
 
         let timings = if let Some(start) = run_start {
             let wall_time = start.elapsed();
-            let collected = system_timings.into_inner().unwrap();
+            let collected = system_timings.into_inner();
             let total_cpu_time = collected.iter().map(|t| t.duration).sum();
             Some(TimingReport {
                 wall_time,
@@ -400,7 +400,7 @@ impl EcsRunnerMultiThread {
         let (event_tx, event_rx) = mpsc::channel::<RunnerEvent>();
         let dispatcher = MainThreadDispatcher::new(event_tx.clone());
         let mut active_count = 0usize;
-        let thread_errors = std::sync::Mutex::new(Vec::<SystemError>::new());
+        let thread_errors = Mutex::new(Vec::<SystemError>::new());
 
         std::thread::scope(|scope| {
             macro_rules! spawn_system {
@@ -441,7 +441,7 @@ impl EcsRunnerMultiThread {
                         }
 
                         let prev_result = {
-                            let mut prev_guard = prev_ref.lock().unwrap();
+                            let mut prev_guard = prev_ref.lock();
                             if idx < prev_guard.len() {
                                 prev_guard[idx].take()
                             } else {
@@ -456,7 +456,7 @@ impl EcsRunnerMultiThread {
                         };
 
                         let system = systems.get_system(idx);
-                        let guard = system.read().unwrap();
+                        let guard = system.read();
                         if let Some(prev_result) = prev_result {
                             guard.reuse_result_boxed(prev_result);
                         }
@@ -464,16 +464,16 @@ impl EcsRunnerMultiThread {
                             guard.run_boxed(&ctx)
                         })) {
                             Ok(Ok(result)) => results_ref.store(idx, result),
-                            Ok(Err(e)) => errors_ref.lock().unwrap().push(e),
+                            Ok(Err(e)) => errors_ref.lock().push(e),
                             Err(payload) => {
-                                errors_ref.lock().unwrap().push(SystemError::Panicked(
+                                errors_ref.lock().push(SystemError::Panicked(
                                     panic_payload_to_string(&*payload),
                                 ));
                             }
                         }
 
                         if let Some(start) = sys_start {
-                            timing_ref.lock().unwrap().push(SystemTiming {
+                            timing_ref.lock().push(SystemTiming {
                                 name: system_name,
                                 duration: start.elapsed(),
                             });
@@ -541,7 +541,7 @@ impl EcsRunnerMultiThread {
             drop(event_tx);
         });
 
-        thread_errors.into_inner().unwrap()
+        thread_errors.into_inner()
     }
 
     /// Cancels all pending compute tasks and ticks until drained or timeout.
@@ -767,17 +767,17 @@ mod tests {
             }
         }
 
-        struct ExclSystem(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
+        struct ExclSystem(std::sync::Arc<Mutex<Option<u32>>>);
         impl ExclusiveSystem for ExclSystem {
             type Result = ();
             fn run(&mut self, world: &mut World) -> Result<(), crate::system::SystemError> {
                 let val = *world.resource::<u32>();
-                *self.0.lock().unwrap() = Some(val);
+                *self.0.lock() = Some(val);
                 Ok(())
             }
         }
 
-        let observed = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let observed = std::sync::Arc::new(Mutex::new(None));
         let mut container = SystemsContainer::new();
         container.add(RegularSystem);
         container.add_exclusive(ExclSystem(observed.clone()));
@@ -787,7 +787,7 @@ mod tests {
         let mut world = World::new();
         runner.run(&mut world, &container);
 
-        assert_eq!(*observed.lock().unwrap(), Some(42));
+        assert_eq!(*observed.lock(), Some(42));
     }
 
     #[test]
@@ -856,7 +856,7 @@ mod tests {
             }
         }
 
-        struct Consumer(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
+        struct Consumer(std::sync::Arc<Mutex<Option<u32>>>);
         impl System for Consumer {
             type Result = ();
             fn run<'a>(
@@ -864,12 +864,12 @@ mod tests {
                 ctx: &'a SystemContext<'a>,
             ) -> Result<(), crate::system::SystemError> {
                 let val = *ctx.exclusive_system_result::<ExclProducer>();
-                *self.0.lock().unwrap() = Some(val);
+                *self.0.lock() = Some(val);
                 Ok(())
             }
         }
 
-        let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let result = std::sync::Arc::new(Mutex::new(None));
         let mut container = SystemsContainer::new();
         container.add_exclusive(ExclProducer);
         container.add(Consumer(result.clone()));
@@ -879,7 +879,7 @@ mod tests {
         let mut world = World::new();
         runner.run(&mut world, &container);
 
-        assert_eq!(*result.lock().unwrap(), Some(42));
+        assert_eq!(*result.lock(), Some(42));
     }
 
     #[test]
@@ -1414,16 +1414,16 @@ mod tests {
 
     #[test]
     fn read_only_exclusive_multi_thread() {
-        struct ReadWorldSystem(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
+        struct ReadWorldSystem(std::sync::Arc<Mutex<Option<u32>>>);
         impl ReadOnlyExclusiveSystem for ReadWorldSystem {
             type Result = ();
             fn run(&self, world: &World) -> Result<(), crate::system::SystemError> {
-                *self.0.lock().unwrap() = Some(*world.resource::<u32>());
+                *self.0.lock() = Some(*world.resource::<u32>());
                 Ok(())
             }
         }
 
-        let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let result = std::sync::Arc::new(Mutex::new(None));
         let mut container = SystemsContainer::new();
         container.add_read_only_exclusive(ReadWorldSystem(result.clone()));
 
@@ -1432,6 +1432,6 @@ mod tests {
         world.insert_resource(42u32);
         runner.run(&mut world, &container);
 
-        assert_eq!(*result.lock().unwrap(), Some(42));
+        assert_eq!(*result.lock(), Some(42));
     }
 }

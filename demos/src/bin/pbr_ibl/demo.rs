@@ -1,6 +1,8 @@
 //! PBR IBL Demo application.
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 
 use redlilium_app::{AppContext, AppHandler, DrawContext};
 use redlilium_core::profiling::{
@@ -158,7 +160,8 @@ impl AppHandler for PbrIblDemo {
         gbuffer.register_with_egui(&mut egui_controller);
 
         // Pass texture IDs to UI
-        if let Ok(mut ui) = self.egui_ui.write() {
+        {
+            let mut ui = self.egui_ui.write();
             ui.set_gbuffer_texture_ids(
                 gbuffer.albedo_egui_id,
                 gbuffer.normal_egui_id,
@@ -213,7 +216,8 @@ impl AppHandler for PbrIblDemo {
         profile_scope!("on_update");
 
         // Process UI state changes
-        if let Ok(mut ui) = self.egui_ui.write() {
+        {
+            let mut ui = self.egui_ui.write();
             if ui.take_state_changed() {
                 let state = ui.state().clone();
 
@@ -240,9 +244,8 @@ impl AppHandler for PbrIblDemo {
             scene.update_camera_transform(self.camera.position(), self.camera.target);
 
             // Update sphere properties if UI changed
-            if self.needs_instance_update
-                && let Ok(ui) = self.egui_ui.read()
-            {
+            if self.needs_instance_update {
+                let ui = self.egui_ui.read();
                 let state = ui.state();
                 let base_color = [
                     state.base_color[0],
@@ -342,11 +345,7 @@ impl AppHandler for PbrIblDemo {
         }
 
         if let Some(spheres) = &self.spheres {
-            let show_wireframe = self
-                .egui_ui
-                .read()
-                .map(|ui| ui.state().show_wireframe)
-                .unwrap_or(false);
+            let show_wireframe = self.egui_ui.read().state().show_wireframe;
             let material = if show_wireframe {
                 spheres.wireframe_material_instance.clone()
             } else {
@@ -473,9 +472,7 @@ impl AppHandler for PbrIblDemo {
 
         // H key toggles UI visibility
         if let PhysicalKey::Code(KeyCode::KeyH) = event.physical_key {
-            if let Ok(mut ui) = self.egui_ui.write() {
-                ui.toggle_visibility();
-            }
+            self.egui_ui.write().toggle_visibility();
             return;
         }
 

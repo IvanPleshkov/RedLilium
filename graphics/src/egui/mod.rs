@@ -103,4 +103,4 @@ pub trait EguiApp: Send + Sync {
 }
 
 /// Type alias for an Arc-wrapped EguiApp with interior mutability.
-pub type ArcEguiApp = Arc<std::sync::RwLock<dyn EguiApp>>;
+pub type ArcEguiApp = Arc<parking_lot::RwLock<dyn EguiApp>>;

@@ -2213,7 +2213,7 @@ impl World {
     /// Returns the typed `Arc` handle for external access (e.g. inspector,
     /// editor). The world stores a coerced `Arc<RwLock<dyn Resource>>` that
     /// shares the same underlying data and lock.
-    pub fn insert_resource<T: Resource>(&mut self, value: T) -> Arc<std::sync::RwLock<T>> {
+    pub fn insert_resource<T: Resource>(&mut self, value: T) -> Arc<parking_lot::RwLock<T>> {
         self.resources.insert(value)
     }
 
@@ -2221,12 +2221,14 @@ impl World {
     ///
     /// The Arc is coerced to `Arc<RwLock<dyn Resource>>` for storage;
     /// both the caller's clone and the stored clone share the same lock.
-    pub fn insert_resource_shared<T: Resource>(&mut self, resource: Arc<std::sync::RwLock<T>>) {
+    pub fn insert_resource_shared<T: Resource>(&mut self, resource: Arc<parking_lot::RwLock<T>>) {
         self.resources.insert_shared(resource);
     }
 
     /// Removes a resource, returning the `Arc<RwLock<dyn Resource>>` if present.
-    pub fn remove_resource<T: 'static>(&mut self) -> Option<Arc<std::sync::RwLock<dyn Resource>>> {
+    pub fn remove_resource<T: 'static>(
+        &mut self,
+    ) -> Option<Arc<parking_lot::RwLock<dyn Resource>>> {
         self.resources.remove::<T>()
     }
 
@@ -2243,7 +2245,7 @@ impl World {
     /// # Panics
     ///
     /// Panics if the resource does not exist.
-    pub fn resource_handle<T: 'static>(&self) -> Arc<std::sync::RwLock<dyn Resource>> {
+    pub fn resource_handle<T: 'static>(&self) -> Arc<parking_lot::RwLock<dyn Resource>> {
         self.resources.get_handle::<T>()
     }
 

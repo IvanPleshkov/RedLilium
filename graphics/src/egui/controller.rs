@@ -174,7 +174,8 @@ impl EguiController {
     pub fn begin_frame(&mut self, elapsed_time: f64) {
         // Run setup once
         if !self.setup_done {
-            if let Ok(mut app) = self.app.write() {
+            {
+                let mut app = self.app.write();
                 app.setup(&self.ctx);
             }
             self.setup_done = true;
@@ -187,7 +188,8 @@ impl EguiController {
         self.ctx.begin_pass(raw_input);
 
         // Run the user's UI code
-        if let Ok(mut app) = self.app.write() {
+        {
+            let mut app = self.app.write();
             app.update(&self.ctx);
         }
     }

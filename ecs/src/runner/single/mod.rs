@@ -1,5 +1,5 @@
+use parking_lot::Mutex;
 use std::any::Any;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::command_collector::CommandCollector;
@@ -105,7 +105,7 @@ impl EcsRunnerSingleThread {
         world.update_triggers();
 
         // Take previous-tick results (if the system count matches).
-        let prev = std::mem::take(&mut *self.prev_results.lock().unwrap());
+        let prev = std::mem::take(&mut *self.prev_results.lock());
         let mut prev = if prev.len() == n { prev } else { Vec::new() };
 
         {
@@ -146,7 +146,7 @@ impl EcsRunnerSingleThread {
 
                     if systems.is_read_only_exclusive(idx) {
                         let system = systems.get_read_only_exclusive_system(idx);
-                        let guard = system.read().unwrap();
+                        let guard = system.read();
                         if let Some(prev_result) = prev_result {
                             guard.reuse_result_boxed(prev_result);
                         }
@@ -163,7 +163,7 @@ impl EcsRunnerSingleThread {
                         }
                     } else {
                         let system = systems.get_exclusive_system(idx);
-                        let mut guard = system.write().unwrap();
+                        let mut guard = system.write();
                         if let Some(prev_result) = prev_result {
                             guard.reuse_result_boxed(prev_result);
                         }
@@ -203,7 +203,7 @@ impl EcsRunnerSingleThread {
                     };
 
                     let system = systems.get_system(idx);
-                    let guard = system.read().unwrap();
+                    let guard = system.read();
                     if let Some(prev_result) = prev_result {
                         guard.reuse_result_boxed(prev_result);
                     }
@@ -249,7 +249,7 @@ impl EcsRunnerSingleThread {
         }
 
         // Save this tick's results for next tick's reuse.
-        *self.prev_results.lock().unwrap() = results_store.into_prev_results();
+        *self.prev_results.lock() = results_store.into_prev_results();
 
         // Build diagnostic report
         let ambiguities = if diagnostics.detect_ambiguities {
@@ -446,17 +446,17 @@ mod tests {
             }
         }
 
-        struct ConsumerSystem(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
+        struct ConsumerSystem(std::sync::Arc<Mutex<Option<u32>>>);
         impl System for ConsumerSystem {
             type Result = ();
             fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
                 let value = *ctx.system_result::<ProducerSystem>();
-                *self.0.lock().unwrap() = Some(value);
+                *self.0.lock() = Some(value);
                 Ok(())
             }
         }
 
-        let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let result = std::sync::Arc::new(Mutex::new(None));
         let mut container = SystemsContainer::new();
         container.add(ProducerSystem);
         container.add(ConsumerSystem(result.clone()));
@@ -468,7 +468,7 @@ mod tests {
         let mut world = World::new();
         runner.run(&mut world, &container);
 
-        assert_eq!(*result.lock().unwrap(), Some(42));
+        assert_eq!(*result.lock(), Some(42));
     }
 
     #[test]
@@ -522,17 +522,17 @@ mod tests {
         }
 
         // C depends on B depends on A, so C should be able to read A's result
-        struct SystemC(std::sync::Arc<std::sync::Mutex<Option<String>>>);
+        struct SystemC(std::sync::Arc<Mutex<Option<String>>>);
         impl System for SystemC {
             type Result = ();
             fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
                 let value = ctx.system_result::<SystemA>().clone();
-                *self.0.lock().unwrap() = Some(value);
+                *self.0.lock() = Some(value);
                 Ok(())
             }
         }
 
-        let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let result = std::sync::Arc::new(Mutex::new(None));
         let mut container = SystemsContainer::new();
         container.add(SystemA);
         container.add(SystemB);
@@ -544,7 +544,7 @@ mod tests {
         let mut world = World::new();
         runner.run(&mut world, &container);
 
-        assert_eq!(*result.lock().unwrap(), Some("hello".to_string()));
+        assert_eq!(*result.lock(), Some("hello".to_string()));
     }
 
     // ---- Exclusive system tests ----
@@ -585,17 +585,17 @@ mod tests {
             }
         }
 
-        struct ExclSystem(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
+        struct ExclSystem(std::sync::Arc<Mutex<Option<u32>>>);
         impl ExclusiveSystem for ExclSystem {
             type Result = ();
             fn run(&mut self, world: &mut World) -> Result<(), SystemError> {
                 let val = *world.resource::<u32>();
-                *self.0.lock().unwrap() = Some(val);
+                *self.0.lock() = Some(val);
                 Ok(())
             }
         }
 
-        let observed = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let observed = std::sync::Arc::new(Mutex::new(None));
         let mut container = SystemsContainer::new();
         container.add(RegularSystem);
         container.add_exclusive(ExclSystem(observed.clone()));
@@ -605,7 +605,7 @@ mod tests {
         let mut world = World::new();
         runner.run(&mut world, &container);
 
-        assert_eq!(*observed.lock().unwrap(), Some(42));
+        assert_eq!(*observed.lock(), Some(42));
     }
 
     #[test]
@@ -668,17 +668,17 @@ mod tests {
             }
         }
 
-        struct Consumer(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
+        struct Consumer(std::sync::Arc<Mutex<Option<u32>>>);
         impl System for Consumer {
             type Result = ();
             fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
                 let val = *ctx.exclusive_system_result::<ExclProducer>();
-                *self.0.lock().unwrap() = Some(val);
+                *self.0.lock() = Some(val);
                 Ok(())
             }
         }
 
-        let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let result = std::sync::Arc::new(Mutex::new(None));
         let mut container = SystemsContainer::new();
         container.add_exclusive(ExclProducer);
         container.add(Consumer(result.clone()));
@@ -688,7 +688,7 @@ mod tests {
         let mut world = World::new();
         runner.run(&mut world, &container);
 
-        assert_eq!(*result.lock().unwrap(), Some(42));
+        assert_eq!(*result.lock(), Some(42));
     }
 
     // ---- Run condition tests ----
@@ -906,17 +906,17 @@ mod tests {
             }
         }
 
-        struct Reader(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
+        struct Reader(std::sync::Arc<Mutex<Option<u32>>>);
         impl System for Reader {
             type Result = ();
             fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
                 let cond = ctx.system_result::<ConfigCondition>();
-                *self.0.lock().unwrap() = cond.value().copied();
+                *self.0.lock() = cond.value().copied();
                 Ok(())
             }
         }
 
-        let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let result = std::sync::Arc::new(Mutex::new(None));
         let mut container = SystemsContainer::new();
         container.add_condition(ConfigCondition);
         container.add(Reader(result.clone()));
@@ -926,7 +926,7 @@ mod tests {
         let mut world = World::new();
         runner.run(&mut world, &container);
 
-        assert_eq!(*result.lock().unwrap(), Some(42));
+        assert_eq!(*result.lock(), Some(42));
     }
 
     // ---- System set tests ----
@@ -1070,16 +1070,16 @@ mod tests {
 
     #[test]
     fn read_only_exclusive_reads_world() {
-        struct ReadWorldSystem(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
+        struct ReadWorldSystem(std::sync::Arc<Mutex<Option<u32>>>);
         impl ReadOnlyExclusiveSystem for ReadWorldSystem {
             type Result = ();
             fn run(&self, world: &World) -> Result<(), SystemError> {
-                *self.0.lock().unwrap() = Some(*world.resource::<u32>());
+                *self.0.lock() = Some(*world.resource::<u32>());
                 Ok(())
             }
         }
 
-        let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let result = std::sync::Arc::new(Mutex::new(None));
         let mut container = SystemsContainer::new();
         container.add_read_only_exclusive(ReadWorldSystem(result.clone()));
 
@@ -1088,7 +1088,7 @@ mod tests {
         world.insert_resource(42u32);
         runner.run(&mut world, &container);
 
-        assert_eq!(*result.lock().unwrap(), Some(42));
+        assert_eq!(*result.lock(), Some(42));
     }
 
     #[test]
@@ -1104,16 +1104,16 @@ mod tests {
             }
         }
 
-        struct ReadSystem(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
+        struct ReadSystem(std::sync::Arc<Mutex<Option<u32>>>);
         impl ReadOnlyExclusiveSystem for ReadSystem {
             type Result = ();
             fn run(&self, world: &World) -> Result<(), SystemError> {
-                *self.0.lock().unwrap() = Some(*world.resource::<u32>());
+                *self.0.lock() = Some(*world.resource::<u32>());
                 Ok(())
             }
         }
 
-        let observed = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let observed = std::sync::Arc::new(Mutex::new(None));
         let mut container = SystemsContainer::new();
         container.add(RegularSystem);
         container.add_read_only_exclusive(ReadSystem(observed.clone()));
@@ -1123,6 +1123,6 @@ mod tests {
         let mut world = World::new();
         runner.run(&mut world, &container);
 
-        assert_eq!(*observed.lock().unwrap(), Some(99));
+        assert_eq!(*observed.lock(), Some(99));
     }
 }

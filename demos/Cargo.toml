@@ -18,6 +18,7 @@ redlilium-graphics = { path = "../graphics" }
 redlilium-app = { path = "../app" }
 redlilium-ecs = { path = "../ecs", features = ["physics", "inspector", "rendering"] }
 winit.workspace = true
+parking_lot = { workspace = true }
 log.workspace = true
 bytemuck = { workspace = true }
 

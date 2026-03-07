@@ -1,7 +1,9 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+
+use parking_lot::Mutex;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::time::{Duration, Instant};
 
@@ -33,7 +35,7 @@ impl TaskState {
     }
 
     fn set_panicked(&self, msg: String) {
-        *self.panicked.lock().unwrap() = Some(msg);
+        *self.panicked.lock() = Some(msg);
     }
 }
 
@@ -93,12 +95,12 @@ impl<T> TaskHandle<T> {
     /// and [`panic_message()`](TaskHandle::panic_message) contains the
     /// panic payload.
     pub fn is_panicked(&self) -> bool {
-        self.state.panicked.lock().unwrap().is_some()
+        self.state.panicked.lock().is_some()
     }
 
     /// Returns the panic message if the task panicked, `None` otherwise.
     pub fn panic_message(&self) -> Option<String> {
-        self.state.panicked.lock().unwrap().clone()
+        self.state.panicked.lock().clone()
     }
 
     /// Requests cancellation of the task.
@@ -237,7 +239,7 @@ impl ComputePool {
         };
 
         let id = {
-            let mut next_id = self.next_id.lock().unwrap();
+            let mut next_id = self.next_id.lock();
             let id = *next_id;
             *next_id += 1;
             id
@@ -250,7 +252,7 @@ impl ComputePool {
             state: state.clone(),
         };
 
-        self.tasks.lock().unwrap().push(task);
+        self.tasks.lock().push(task);
 
         TaskHandle { receiver, state }
     }
@@ -287,7 +289,7 @@ impl ComputePool {
     /// poll it is dropped.
     pub fn tick(&self) -> usize {
         redlilium_core::profile_scope!("ecs: compute tick");
-        let mut tasks = self.tasks.lock().unwrap();
+        let mut tasks = self.tasks.lock();
 
         if tasks.is_empty() {
             return 0;
@@ -320,7 +322,7 @@ impl ComputePool {
     /// Cancelled tasks receive one final poll so checkpoints can fire.
     pub fn tick_all(&self) -> usize {
         redlilium_core::profile_scope!("ecs: compute tick_all");
-        let mut tasks = self.tasks.lock().unwrap();
+        let mut tasks = self.tasks.lock();
 
         let count = tasks.len();
         if count == 0 {
@@ -354,7 +356,7 @@ impl ComputePool {
     pub fn tick_with_budget(&self, budget: Duration) -> usize {
         redlilium_core::profile_scope!("ecs: compute tick_budget");
         let start = Instant::now();
-        let mut tasks = self.tasks.lock().unwrap();
+        let mut tasks = self.tasks.lock();
 
         if tasks.is_empty() {
             return 0;
@@ -394,7 +396,7 @@ impl ComputePool {
         redlilium_core::profile_scope!("ecs: compute tick_extract");
 
         let mut task = {
-            let mut tasks = self.tasks.lock().unwrap();
+            let mut tasks = self.tasks.lock();
 
             if tasks.is_empty() {
                 return 0;
@@ -417,7 +419,7 @@ impl ComputePool {
 
         if !Self::poll_task_guarded(&mut task, &mut cx) {
             // Task still pending — put it back
-            self.tasks.lock().unwrap().push(task);
+            self.tasks.lock().push(task);
         }
 
         1
@@ -450,7 +452,7 @@ impl ComputePool {
 
     /// Returns the number of pending (incomplete) tasks.
     pub fn pending_count(&self) -> usize {
-        self.tasks.lock().unwrap().len()
+        self.tasks.lock().len()
     }
 }
 
@@ -492,17 +494,17 @@ mod tests {
 
         let r1 = results.clone();
         pool.spawn(Priority::Low, |_ctx| async move {
-            r1.lock().unwrap().push("low");
+            r1.lock().push("low");
         });
 
         let r2 = results.clone();
         pool.spawn(Priority::High, |_ctx| async move {
-            r2.lock().unwrap().push("high");
+            r2.lock().push("high");
         });
 
         let r3 = results.clone();
         pool.spawn(Priority::Critical, |_ctx| async move {
-            r3.lock().unwrap().push("critical");
+            r3.lock().push("critical");
         });
 
         // Tick one at a time — highest priority first
@@ -510,7 +512,7 @@ mod tests {
         pool.tick();
         pool.tick();
 
-        let order = results.lock().unwrap();
+        let order = results.lock();
         assert_eq!(*order, vec!["critical", "high", "low"]);
     }
 

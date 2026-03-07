@@ -1,6 +1,8 @@
 //! Physics demo application — AppHandler implementation.
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 
 use redlilium_app::{AppContext, AppHandler, DrawContext};
 use redlilium_core::math::{Vec3, perspective_rh};
@@ -60,7 +62,8 @@ impl PhysicsDemoApp {
         let ui = Arc::new(RwLock::new(PhysicsUi::new()));
 
         // Populate scene names in UI
-        if let Ok(mut ui) = ui.write() {
+        {
+            let mut ui = ui.write();
             ui.scene_names_3d = scenes_3d.iter().map(|s| s.name().to_string()).collect();
             ui.scene_names_2d = scenes_2d.iter().map(|s| s.name().to_string()).collect();
         }
@@ -82,10 +85,9 @@ impl PhysicsDemoApp {
 
     /// Create a fresh ECS world and populate it with the active scene.
     fn setup_active_scene(&mut self, ctx: &AppContext) {
-        let (dim, index) = if let Ok(ui) = self.ui.read() {
+        let (dim, index) = {
+            let ui = self.ui.read();
             (ui.active_dim, ui.active_index)
-        } else {
-            (Dimension::ThreeD, 0)
         };
 
         let mut world = World::new();
@@ -170,7 +172,8 @@ impl PhysicsDemoApp {
     }
 
     fn update_ui_stats(&self, world: &World, dim: Dimension) {
-        if let Ok(mut ui) = self.ui.write() {
+        {
+            let mut ui = self.ui.write();
             match dim {
                 Dimension::ThreeD => {
                     if world.has_resource::<redlilium_ecs::physics::physics3d::PhysicsWorld3D>() {
@@ -195,11 +198,7 @@ impl PhysicsDemoApp {
     /// Set physics timestep to zero (freeze) or restore default.
     fn set_physics_paused(&self, paused: bool) {
         let Some(world) = &self.world else { return };
-        let dim = self
-            .ui
-            .read()
-            .map(|ui| ui.active_dim)
-            .unwrap_or(Dimension::ThreeD);
+        let dim = self.ui.read().active_dim;
 
         match dim {
             Dimension::ThreeD => {
@@ -268,9 +267,8 @@ impl AppHandler for PhysicsDemoApp {
         }
 
         // Update WindowInput dimensions
-        if let Some(handle) = &self.window_input
-            && let Ok(mut input) = handle.write()
-        {
+        if let Some(handle) = &self.window_input {
+            let mut input = handle.write();
             input.window_width = ctx.width() as f32;
             input.window_height = ctx.height() as f32;
         }
@@ -289,10 +287,9 @@ impl AppHandler for PhysicsDemoApp {
         profile_scope!("on_update");
 
         // Check for scene change or reset
-        let (scene_changed, reset) = if let Ok(mut ui) = self.ui.write() {
+        let (scene_changed, reset) = {
+            let mut ui = self.ui.write();
             (ui.take_scene_changed(), ui.take_reset_requested())
-        } else {
-            (false, false)
         };
 
         if scene_changed || reset {
@@ -301,7 +298,7 @@ impl AppHandler for PhysicsDemoApp {
 
         // Freeze physics when paused (dt=0), but still run all systems
         // so orbit camera + transforms + camera matrices update
-        let paused = self.ui.read().map(|ui| ui.paused).unwrap_or(false);
+        let paused = self.ui.read().paused;
         self.set_physics_paused(paused);
 
         if let (Some(world), Some(systems), Some(runner)) =
@@ -311,18 +308,15 @@ impl AppHandler for PhysicsDemoApp {
         }
 
         // Read camera data from ECS
-        let dim = self
-            .ui
-            .read()
-            .map(|ui| ui.active_dim)
-            .unwrap_or(Dimension::ThreeD);
+        let dim = self.ui.read().active_dim;
 
         let camera_pos = if let (Some(world), Some(cam_entity)) = (&self.world, self.camera_entity)
         {
             let fly_cams = world.read::<FreeFlyCamera>().unwrap();
             if let Some(cam) = fly_cams.get(cam_entity.index()) {
                 // Update camera debug info in UI
-                if let Ok(mut ui) = self.ui.write() {
+                {
+                    let mut ui = self.ui.write();
                     ui.camera_distance = cam.distance;
                     ui.camera_speed = cam.move_speed * cam.speed_multiplier;
                 }
@@ -367,9 +361,8 @@ impl AppHandler for PhysicsDemoApp {
 
         // Clear per-frame deltas after systems have consumed them,
         // so next frame's events accumulate fresh deltas.
-        if let Some(handle) = &self.window_input
-            && let Ok(mut input) = handle.write()
-        {
+        if let Some(handle) = &self.window_input {
+            let mut input = handle.write();
             input.begin_frame();
         }
 
@@ -409,7 +402,7 @@ impl AppHandler for PhysicsDemoApp {
             egui.begin_frame(elapsed);
 
             // Draw inspector UI between begin_frame and end_frame
-            let show_inspector = self.ui.read().map(|ui| ui.show_inspector).unwrap_or(false);
+            let show_inspector = self.ui.read().show_inspector;
             if show_inspector {
                 let egui_ctx = egui.context().clone();
                 if let Some(world) = &self.world {
@@ -458,9 +451,8 @@ impl AppHandler for PhysicsDemoApp {
             false
         };
 
-        if let Some(handle) = &self.window_input
-            && let Ok(mut input) = handle.write()
-        {
+        if let Some(handle) = &self.window_input {
+            let mut input = handle.write();
             input.on_mouse_move(x, y);
             input.ui_wants_input = egui_wants;
         }
@@ -478,9 +470,8 @@ impl AppHandler for PhysicsDemoApp {
             false
         };
 
-        if let Some(handle) = &self.window_input
-            && let Ok(mut input) = handle.write()
-        {
+        if let Some(handle) = &self.window_input {
+            let mut input = handle.write();
             let idx = match button {
                 winit::event::MouseButton::Left => 0,
                 winit::event::MouseButton::Right => 1,
@@ -499,9 +490,8 @@ impl AppHandler for PhysicsDemoApp {
             false
         };
 
-        if let Some(handle) = &self.window_input
-            && let Ok(mut input) = handle.write()
-        {
+        if let Some(handle) = &self.window_input {
+            let mut input = handle.write();
             input.on_scroll(0.0, dy);
             input.ui_wants_input = egui_wants;
         }
@@ -518,8 +508,8 @@ impl AppHandler for PhysicsDemoApp {
         if let PhysicalKey::Code(winit_key) = event.physical_key
             && let Some(key) = redlilium_app::input::map_winit_key(winit_key)
             && let Some(handle) = &self.window_input
-            && let Ok(mut input) = handle.write()
         {
+            let mut input = handle.write();
             if pressed {
                 input.on_key_pressed(key);
             } else {
@@ -535,15 +525,12 @@ impl AppHandler for PhysicsDemoApp {
         match event.physical_key {
             // H: Toggle UI
             PhysicalKey::Code(KeyCode::KeyH) => {
-                if let Ok(mut ui) = self.ui.write() {
-                    ui.toggle_visibility();
-                }
+                self.ui.write().toggle_visibility();
             }
             // Space: Toggle pause
             PhysicalKey::Code(KeyCode::Space) => {
-                if let Ok(mut ui) = self.ui.write() {
-                    ui.paused = !ui.paused;
-                }
+                let mut ui = self.ui.write();
+                ui.paused = !ui.paused;
             }
             _ => {}
         }

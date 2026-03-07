@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 use crate::bundle::Bundle;
 use crate::entity::Entity;
@@ -33,7 +33,7 @@ impl CommandCollector {
     ///
     /// The command will receive `&mut World` when applied after all systems complete.
     pub fn push(&self, cmd: impl FnOnce(&mut World) + Send + 'static) {
-        self.commands.lock().unwrap().push(Box::new(cmd));
+        self.commands.lock().push(Box::new(cmd));
     }
 
     /// Queues an entity despawn.
@@ -149,7 +149,7 @@ impl CommandCollector {
 
     /// Drains all collected commands, returning them in push order.
     pub fn drain(&self) -> Vec<Command> {
-        let mut commands = self.commands.lock().unwrap();
+        let mut commands = self.commands.lock();
         std::mem::take(&mut *commands)
     }
 }

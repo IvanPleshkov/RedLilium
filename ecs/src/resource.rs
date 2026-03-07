@@ -3,7 +3,9 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::Arc;
+
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::main_thread_resource::MainThreadResources;
 
@@ -137,7 +139,7 @@ impl Resources {
             .get(&TypeId::of::<T>())
             .unwrap_or_else(|| panic!("Resource `{}` does not exist", type_name::<T>()));
 
-        let guard = entry.handle.try_read().unwrap_or_else(|_| {
+        let guard = entry.handle.try_read().unwrap_or_else(|| {
             panic!(
                 "Cannot borrow resource `{}` immutably: already borrowed mutably",
                 entry.type_name
@@ -162,7 +164,7 @@ impl Resources {
             .get(&TypeId::of::<T>())
             .unwrap_or_else(|| panic!("Resource `{}` does not exist", type_name::<T>()));
 
-        let guard = entry.handle.try_write().unwrap_or_else(|_| {
+        let guard = entry.handle.try_write().unwrap_or_else(|| {
             panic!(
                 "Cannot borrow resource `{}` mutably: already borrowed",
                 entry.type_name
@@ -375,10 +377,10 @@ mod tests {
         let handle = resources.insert(42u32);
 
         // External access via typed handle
-        assert_eq!(*handle.read().unwrap(), 42);
+        assert_eq!(*handle.read(), 42);
 
         // Modify through typed handle
-        *handle.write().unwrap() = 99;
+        *handle.write() = 99;
 
         // World sees the change (same underlying Arc)
         let val = resources.borrow::<u32>();
@@ -392,7 +394,7 @@ mod tests {
         resources.insert_shared(handle.clone());
 
         // Modify through external handle
-        *handle.write().unwrap() = 99;
+        *handle.write() = 99;
 
         // World sees the change
         let val = resources.borrow::<u32>();
@@ -405,7 +407,7 @@ mod tests {
         resources.insert(42u32);
 
         let dyn_handle = resources.get_handle::<u32>();
-        let guard = dyn_handle.read().unwrap();
+        let guard = dyn_handle.read();
         assert_eq!(*guard.as_any().downcast_ref::<u32>().unwrap(), 42);
     }
 }

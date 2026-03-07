@@ -1,5 +1,7 @@
 use std::f32::consts::FRAC_PI_4;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 
 use egui_dock::DockState;
 use redlilium_app::{AppContext, AppHandler, DrawContext};
@@ -387,7 +389,8 @@ impl Editor {
     /// Update WindowInput's ui_wants_input flag from egui state.
     fn sync_input_flags(&self) {
         let ew = self.active_world();
-        if let Ok(mut input) = ew.window_input.write() {
+        {
+            let mut input = ew.window_input.write();
             input.ui_wants_input = !self.cursor_in_scene_view();
         }
     }
@@ -580,7 +583,8 @@ impl AppHandler for Editor {
         // Advance debug drawer tick (systems will write to the new tick)
         {
             let ew = self.active_world();
-            if let Ok(drawer) = ew.debug_drawer.read() {
+            {
+                let drawer = ew.debug_drawer.read();
                 drawer.advance_tick();
             }
         }
@@ -735,7 +739,8 @@ impl AppHandler for Editor {
         // Clear per-frame deltas *after* systems have consumed them
         {
             let ew = self.active_world();
-            if let Ok(mut input) = ew.window_input.write() {
+            {
+                let mut input = ew.window_input.write();
                 input.begin_frame();
             }
         }
@@ -1047,9 +1052,8 @@ impl AppHandler for Editor {
                 scene_view.build_scene_pass(&ew.world, ctx.swapchain_texture())
             {
                 // Append debug draw lines into the scene pass if available
-                if let Some(renderer) = &mut self.debug_drawer_renderer
-                    && let Ok(drawer) = ew.debug_drawer.read()
-                {
+                if let Some(renderer) = &mut self.debug_drawer_renderer {
+                    let drawer = ew.debug_drawer.read();
                     let vertices = drawer.take_render_data();
                     if !vertices.is_empty() {
                         if let Ok(cameras) = ew.world.read_all::<Camera>()
@@ -1116,7 +1120,8 @@ impl AppHandler for Editor {
         }
         if !self.worlds.is_empty() {
             let ew = self.active_world();
-            if let Ok(mut input) = ew.window_input.write() {
+            {
+                let mut input = ew.window_input.write();
                 input.on_mouse_move(x, y);
             }
         }
@@ -1150,7 +1155,8 @@ impl AppHandler for Editor {
                 _ => return,
             };
             let ew = self.active_world();
-            if let Ok(mut input) = ew.window_input.write() {
+            {
+                let mut input = ew.window_input.write();
                 input.on_mouse_button(idx, pressed);
             }
 
@@ -1197,7 +1203,8 @@ impl AppHandler for Editor {
         }
         if !self.worlds.is_empty() && self.cursor_in_scene_view() && !self.egui_wants_pointer {
             let ew = self.active_world();
-            if let Ok(mut input) = ew.window_input.write() {
+            {
+                let mut input = ew.window_input.write();
                 input.on_scroll(dx, dy);
             }
         }
@@ -1243,7 +1250,8 @@ impl AppHandler for Editor {
             && let Some(key) = redlilium_app::input::map_winit_key(winit_key)
         {
             let ew = self.active_world();
-            if let Ok(mut input) = ew.window_input.write() {
+            {
+                let mut input = ew.window_input.write();
                 if event.state.is_pressed() {
                     input.on_key_pressed(key);
                 } else {

@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 use crate::bundle::Bundle;
 use crate::entity::Entity;
@@ -50,7 +50,7 @@ impl CommandBuffer {
     ///
     /// The closure will receive `&mut World` when `apply_commands` is called.
     pub fn push(&self, cmd: impl FnOnce(&mut World) + Send + 'static) {
-        self.commands.lock().unwrap().push(Box::new(cmd));
+        self.commands.lock().push(Box::new(cmd));
     }
 
     /// Queues an entity despawn.
@@ -144,17 +144,17 @@ impl CommandBuffer {
     ///
     /// After this call, the buffer is empty and ready for new commands.
     pub fn drain(&self) -> Vec<Command> {
-        std::mem::take(&mut *self.commands.lock().unwrap())
+        std::mem::take(&mut *self.commands.lock())
     }
 
     /// Returns the number of queued commands.
     pub fn len(&self) -> usize {
-        self.commands.lock().unwrap().len()
+        self.commands.lock().len()
     }
 
     /// Returns whether the buffer is empty.
     pub fn is_empty(&self) -> bool {
-        self.commands.lock().unwrap().is_empty()
+        self.commands.lock().is_empty()
     }
 }
 

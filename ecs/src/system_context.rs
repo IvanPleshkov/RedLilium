@@ -1,7 +1,7 @@
+use parking_lot::Mutex;
 use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
-use std::sync::Mutex;
 
 use crate::access_set::{AccessInfo, AccessSet, normalize_access_infos};
 use crate::bundle::Bundle;
@@ -39,7 +39,7 @@ pub(crate) struct LockTracking<'a> {
 
 impl Drop for LockTracking<'_> {
     fn drop(&mut self) {
-        let mut held = self.held_locks.lock().unwrap();
+        let mut held = self.held_locks.lock();
         for info in &self.infos {
             if info.is_write {
                 held.remove(&info.type_id);
@@ -219,7 +219,7 @@ impl<'a> SystemContext<'a> {
     /// - Read held + new write lock → deadlock
     /// - Read held + new read lock → OK
     pub(crate) fn check_held_locks(&self, sorted: &[AccessInfo]) {
-        let held = self.held_locks.lock().unwrap();
+        let held = self.held_locks.lock();
         for info in sorted {
             if let Some(&state) = held.get(&info.type_id) {
                 let conflict = match state {
@@ -236,7 +236,6 @@ impl<'a> SystemContext<'a> {
                         HeldLock::Read(_) => "read",
                     };
                     let want_mode = if info.is_write { "write" } else { "read" };
-                    // Drop the lock before panicking to avoid poison
                     drop(held);
                     panic!(
                         "ECS deadlock detected: component `{type_name}` is already locked \
@@ -251,7 +250,7 @@ impl<'a> SystemContext<'a> {
 
     /// Registers component locks as held. Called after successful lock acquisition.
     pub(crate) fn register_held_locks(&self, sorted: &[AccessInfo]) {
-        let mut held = self.held_locks.lock().unwrap();
+        let mut held = self.held_locks.lock();
         for info in sorted {
             // Only track component TypeIds (resources self-lock via their own RwLock)
             if self.world.component_type_name(info.type_id).is_none() {

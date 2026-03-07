@@ -4,9 +4,9 @@
 //! without compile-time feature flags. Pass [`RunDiagnostics`] to
 //! [`run_with()`](crate::EcsRunner::run_with) to control what is collected.
 
+use parking_lot::Mutex;
 use std::any::TypeId;
 use std::fmt;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::access_set::{AccessInfo, normalize_access_infos};
@@ -181,18 +181,12 @@ impl AccessRecorder {
     ///
     /// Called from `SystemContext::record_access()` during lock/query.
     pub fn record(&self, system_idx: usize, infos: &[AccessInfo]) {
-        self.records[system_idx]
-            .lock()
-            .unwrap()
-            .extend_from_slice(infos);
+        self.records[system_idx].lock().extend_from_slice(infos);
     }
 
     /// Consumes the recorder and returns per-system access records.
     pub fn into_records(self) -> Vec<Vec<AccessInfo>> {
-        self.records
-            .into_iter()
-            .map(|m| m.into_inner().unwrap())
-            .collect()
+        self.records.into_iter().map(|m| m.into_inner()).collect()
     }
 }
 
