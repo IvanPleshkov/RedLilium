@@ -339,11 +339,73 @@ impl<T: 'static> Default for SparseSetInner<T> {
     }
 }
 
-// Type-erased operation function signatures
-type RemoveFn = fn(&mut dyn Any, u32) -> bool;
-type ContainsFn = fn(&dyn Any, u32) -> bool;
-type ChangedSinceFn = fn(&dyn Any, u32, u64) -> bool;
-type AddedSinceFn = fn(&dyn Any, u32, u64) -> bool;
+// ---------------------------------------------------------------------------
+// ErasedSparseSet — trait for type-erased sparse set operations
+// ---------------------------------------------------------------------------
+
+/// Type-erased interface for sparse set operations.
+///
+/// Implemented by [`SparseSetInner<T>`] and used as the inner storage of
+/// [`ComponentStorage`] via `Box<dyn ErasedSparseSet>`.
+pub(crate) trait ErasedSparseSet: Send + Sync {
+    /// Returns the human-readable type name of the stored component.
+    fn type_name(&self) -> &'static str;
+
+    /// Removes a component by entity index. Returns true if removed.
+    fn remove(&mut self, entity_index: u32) -> bool;
+
+    /// Checks if the entity has this component.
+    fn contains(&self, entity_index: u32) -> bool;
+
+    /// Checks if the component was changed since (strictly after) `since_tick`.
+    fn changed_since(&self, entity_index: u32, since_tick: u64) -> bool;
+
+    /// Checks if the component was added since (strictly after) `since_tick`.
+    fn added_since(&self, entity_index: u32, since_tick: u64) -> bool;
+
+    /// Returns the membership bitset.
+    fn membership(&self) -> &FixedBitSet;
+
+    /// Downcast to `&dyn Any` for typed access.
+    fn as_any(&self) -> &dyn Any;
+
+    /// Downcast to `&mut dyn Any` for typed access.
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+
+impl<T: Send + Sync + 'static> ErasedSparseSet for SparseSetInner<T> {
+    fn type_name(&self) -> &'static str {
+        std::any::type_name::<T>()
+    }
+
+    fn remove(&mut self, entity_index: u32) -> bool {
+        SparseSetInner::remove(self, entity_index).is_some()
+    }
+
+    fn contains(&self, entity_index: u32) -> bool {
+        SparseSetInner::contains(self, entity_index)
+    }
+
+    fn changed_since(&self, entity_index: u32, since_tick: u64) -> bool {
+        SparseSetInner::changed_since(self, entity_index, since_tick)
+    }
+
+    fn added_since(&self, entity_index: u32, since_tick: u64) -> bool {
+        SparseSetInner::added_since(self, entity_index, since_tick)
+    }
+
+    fn membership(&self) -> &FixedBitSet {
+        SparseSetInner::membership(self)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
 
 /// A lock guard for either a read or write lock on a storage.
 ///
@@ -359,19 +421,9 @@ pub(crate) enum LockGuard<'a> {
 /// Provides per-storage RwLock synchronization for thread-safe access.
 /// Used internally by [`World`](crate::World).
 pub(crate) struct ComponentStorage {
-    inner: Box<dyn Any + Send + Sync>,
+    inner: Box<dyn ErasedSparseSet>,
     /// Per-storage lock for thread-safe borrow management.
     lock: RwLock<()>,
-    /// Human-readable type name for error messages.
-    type_name: &'static str,
-    /// Type-erased remove operation for despawn.
-    remove_fn: RemoveFn,
-    /// Type-erased contains check.
-    contains_fn: ContainsFn,
-    /// Type-erased changed_since check.
-    changed_since_fn: ChangedSinceFn,
-    /// Type-erased added_since check.
-    added_since_fn: AddedSinceFn,
     /// Records of (entity_index, tick) for recently removed components.
     /// Cleared by [`World::clear_removed_tracking`](crate::World::clear_removed_tracking).
     removed_ticks: Vec<(u32, u64)>,
@@ -398,23 +450,6 @@ impl ComponentStorage {
         Self {
             inner: Box::new(SparseSetInner::<T>::new()),
             lock: RwLock::new(()),
-            type_name: std::any::type_name::<T>(),
-            remove_fn: |any, entity_index| {
-                let set = any.downcast_mut::<SparseSetInner<T>>().unwrap();
-                set.remove(entity_index).is_some()
-            },
-            contains_fn: |any, entity_index| {
-                let set = any.downcast_ref::<SparseSetInner<T>>().unwrap();
-                set.contains(entity_index)
-            },
-            changed_since_fn: |any, entity_index, since_tick| {
-                let set = any.downcast_ref::<SparseSetInner<T>>().unwrap();
-                set.changed_since(entity_index, since_tick)
-            },
-            added_since_fn: |any, entity_index, since_tick| {
-                let set = any.downcast_ref::<SparseSetInner<T>>().unwrap();
-                set.added_since(entity_index, since_tick)
-            },
             removed_ticks: Vec::new(),
             on_add: None,
             on_insert: None,
@@ -437,12 +472,18 @@ impl ComponentStorage {
 
     /// Downcasts to the typed sparse set.
     pub fn typed<T: 'static>(&self) -> &SparseSetInner<T> {
-        self.inner.downcast_ref::<SparseSetInner<T>>().unwrap()
+        self.inner
+            .as_any()
+            .downcast_ref::<SparseSetInner<T>>()
+            .unwrap()
     }
 
     /// Downcasts to the typed sparse set (mutable).
     pub fn typed_mut<T: 'static>(&mut self) -> &mut SparseSetInner<T> {
-        self.inner.downcast_mut::<SparseSetInner<T>>().unwrap()
+        self.inner
+            .as_any_mut()
+            .downcast_mut::<SparseSetInner<T>>()
+            .unwrap()
     }
 
     /// Acquires a shared read lock. Panics immediately if a write lock is held.
@@ -453,7 +494,7 @@ impl ComponentStorage {
         self.lock.try_read().unwrap_or_else(|_| {
             panic!(
                 "Cannot borrow `{}` immutably: already borrowed mutably",
-                self.type_name
+                self.inner.type_name()
             )
         })
     }
@@ -466,14 +507,14 @@ impl ComponentStorage {
         self.lock.try_write().unwrap_or_else(|_| {
             panic!(
                 "Cannot borrow `{}` mutably: already borrowed",
-                self.type_name
+                self.inner.type_name()
             )
         })
     }
 
     /// Returns the human-readable type name of the stored component.
     pub(crate) fn type_name(&self) -> &'static str {
-        self.type_name
+        self.inner.type_name()
     }
 
     /// Returns a reference to the underlying RwLock.
@@ -485,7 +526,7 @@ impl ComponentStorage {
 
     /// Removes a component by entity index (type-erased). Returns true if removed.
     pub fn remove_untyped(&mut self, entity_index: u32) -> bool {
-        (self.remove_fn)(self.inner.as_mut(), entity_index)
+        self.inner.remove(entity_index)
     }
 
     /// Returns true if this component has any required components registered.
@@ -493,19 +534,25 @@ impl ComponentStorage {
         !self.required_components.is_empty()
     }
 
+    /// Returns the membership bitset for this component storage (type-erased).
+    #[allow(dead_code)]
+    pub fn membership(&self) -> &FixedBitSet {
+        self.inner.membership()
+    }
+
     /// Checks if the entity has this component (type-erased).
     pub fn contains_untyped(&self, entity_index: u32) -> bool {
-        (self.contains_fn)(self.inner.as_ref(), entity_index)
+        self.inner.contains(entity_index)
     }
 
     /// Checks if the component was changed since `since_tick` (type-erased).
     pub fn changed_since_untyped(&self, entity_index: u32, since_tick: u64) -> bool {
-        (self.changed_since_fn)(self.inner.as_ref(), entity_index, since_tick)
+        self.inner.changed_since(entity_index, since_tick)
     }
 
     /// Checks if the component was added since `since_tick` (type-erased).
     pub fn added_since_untyped(&self, entity_index: u32, since_tick: u64) -> bool {
-        (self.added_since_fn)(self.inner.as_ref(), entity_index, since_tick)
+        self.inner.added_since(entity_index, since_tick)
     }
 
     /// Records that a component was removed from the given entity at the given tick.
