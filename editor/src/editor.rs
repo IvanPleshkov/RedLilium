@@ -585,6 +585,18 @@ impl AppHandler for Editor {
             }
         }
 
+        // Drain action queue and execute through history (before systems so
+        // that Changed<T> filters can detect the mutations this frame).
+        {
+            let ew = &mut self.worlds[self.active_world];
+            let actions = ew.world.resource::<ActionQueue<World>>().drain();
+            for action in actions {
+                if let Err(e) = ew.history.execute(action, &mut ew.world) {
+                    log::warn!("Action failed: {e}");
+                }
+            }
+        }
+
         // Run ECS schedules (always run in editing mode for camera/transforms)
         {
             let Editor {
@@ -596,17 +608,6 @@ impl AppHandler for Editor {
             let ew = &mut worlds[*active_world];
             ew.schedules
                 .run_frame(&mut ew.world, runner, ctx.delta_time() as f64);
-        }
-
-        // Drain action queue and execute through history
-        {
-            let ew = &mut self.worlds[self.active_world];
-            let actions = ew.world.resource::<ActionQueue<World>>().drain();
-            for action in actions {
-                if let Err(e) = ew.history.execute(action, &mut ew.world) {
-                    log::warn!("Action failed: {e}");
-                }
-            }
         }
 
         // Process component export (inspector → asset browser)

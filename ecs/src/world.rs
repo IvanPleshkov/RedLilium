@@ -69,7 +69,7 @@ fn deserialize_component_fn<T: Component>(
 ) -> Result<(), crate::serialize::DeserializeError> {
     ctx.load_data(data)?;
     let comp = T::deserialize_component(ctx)?;
-    ctx.world_mut().insert(entity, comp).map_err(|e| {
+    ctx.world_mut().insert_tracked(entity, comp).map_err(|e| {
         crate::serialize::DeserializeError::UnknownComponent {
             type_name: e.type_name.to_string(),
         }

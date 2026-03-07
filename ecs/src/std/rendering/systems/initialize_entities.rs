@@ -94,7 +94,6 @@ impl crate::ExclusiveSystem for InitializeRenderEntities {
                 if !bytes.is_empty() {
                     let _ = device.write_buffer(buf, 0, &bytes);
                 }
-                new_render_mat.mark_synced();
             }
 
             // Register bundle in MaterialManager for serialization

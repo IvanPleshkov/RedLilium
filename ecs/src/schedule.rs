@@ -409,6 +409,11 @@ impl Schedules {
         if let Some(schedule) = self.schedules.get(&ScheduleId::of::<PostUpdate>()) {
             runner.run(world, schedule);
         }
+
+        // 7. Advance change-detection tick (after all systems, so that
+        //    mutations applied before the next run_frame use the new tick
+        //    and are visible to Changed<T> filters in the next frame).
+        world.advance_tick();
     }
 
     /// Runs a specific schedule by label.
