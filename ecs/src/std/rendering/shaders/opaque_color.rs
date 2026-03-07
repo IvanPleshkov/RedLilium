@@ -30,13 +30,13 @@ use redlilium_graphics::{
 };
 
 use crate::Entity;
-use crate::rendering::RenderMaterial;
 use crate::std::components::{Camera, GlobalTransform};
-
-use super::super::components::{MaterialBundle, PerEntityBuffers, RenderPassType};
+use crate::std::rendering::components::{
+    MaterialBundle, PerEntityBuffers, RenderMaterial, RenderPassType,
+};
 
 /// Slang shader for opaque color rendering with camera VP + model matrix uniforms.
-const SHADER_SLANG: &str = include_str!("../../../../shaders/standard/opaque_color.slang");
+const SHADER_SLANG: &str = include_str!("../../../../../shaders/standard/opaque_color.slang");
 
 /// Default base color: light gray matching the original hardcoded value.
 const DEFAULT_BASE_COLOR: [f32; 4] = [0.6, 0.6, 0.65, 1.0];

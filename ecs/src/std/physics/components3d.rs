@@ -316,8 +316,8 @@ impl ImpulseJoint3D {
 // Build function — materializes descriptors into rapier objects
 // ---------------------------------------------------------------------------
 
-use super::physics3d::{PhysicsWorld3D, RigidBody3DHandle};
 use super::rapier3d::prelude::*;
+use super::world3d::{PhysicsWorld3D, RigidBody3DHandle};
 
 impl ImpulseJoint3D {
     /// Convert this descriptor into a rapier `GenericJoint`.

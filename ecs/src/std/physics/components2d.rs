@@ -268,8 +268,8 @@ impl ImpulseJoint2D {
 // Build function — materializes descriptors into rapier objects
 // ---------------------------------------------------------------------------
 
-use super::physics2d::{PhysicsWorld2D, RigidBody2DHandle};
 use super::rapier2d::prelude::*;
+use super::world2d::{PhysicsWorld2D, RigidBody2DHandle};
 
 impl RigidBody2D {
     /// Convert this descriptor + transform into a rapier 2D `RigidBody`.

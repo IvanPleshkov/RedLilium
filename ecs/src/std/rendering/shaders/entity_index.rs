@@ -17,7 +17,7 @@ use crate::Entity;
 use crate::std::components::{Camera, GlobalTransform};
 
 /// Slang shader that outputs entity index as `u32` to an R32Uint color target.
-const SHADER_SLANG: &str = include_str!("../../../../shaders/standard/entity_index.slang");
+const SHADER_SLANG: &str = include_str!("../../../../../shaders/standard/entity_index.slang");
 
 /// Per-entity uniform data: view-projection, model matrix, and entity index.
 ///

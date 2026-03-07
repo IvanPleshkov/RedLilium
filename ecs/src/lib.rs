@@ -65,13 +65,13 @@ mod par_for_each;
     feature = "physics-2d",
     feature = "physics-2d-f32"
 ))]
-pub mod physics;
+pub use self::std::physics;
 pub mod prefab;
 mod query;
 mod query_guard;
 mod reactive;
 #[cfg(feature = "rendering")]
-pub mod rendering;
+pub use self::std::rendering;
 mod resource;
 mod runner;
 mod schedule;

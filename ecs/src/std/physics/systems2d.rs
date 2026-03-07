@@ -1,186 +1,10 @@
-//! 2D physics resources, systems, and handle components.
+//! 2D physics ECS systems.
 //!
-//! Uses rapier2d (f64 by default, f32 with `physics-2d-f32` feature).
-
-use std::collections::HashMap;
+//! Systems that step the 2D physics simulation, sync transforms,
+//! and manage rigid body / joint creation and removal.
 
 use super::rapier2d::prelude::*;
-
-// ---- Handle components ----
-
-/// ECS component holding a rapier 2D rigid body handle.
-#[derive(Debug, Clone, Copy)]
-pub struct RigidBody2DHandle(pub RigidBodyHandle);
-
-/// ECS component holding a rapier 2D collider handle.
-#[derive(Debug, Clone, Copy)]
-pub struct Collider2DHandle(pub ColliderHandle);
-
-/// ECS component holding a rapier 2D impulse joint handle.
-#[derive(Debug, Clone, Copy)]
-pub struct ImpulseJoint2DHandle(pub ImpulseJointHandle);
-
-// ---- PhysicsWorld2D resource ----
-
-/// Single ECS resource holding all rapier 2D physics state plus entity mapping.
-///
-/// The entity mapping (`entity_to_body`, `body_to_entity`, `entity_to_joint`)
-/// allows any system to look up the correspondence between ECS entities and
-/// rapier handles — useful for raycasting, contact queries, etc.
-pub struct PhysicsWorld2D {
-    pub gravity: Vector,
-    pub integration_parameters: IntegrationParameters,
-    pub pipeline: PhysicsPipeline,
-    pub island_manager: IslandManager,
-    pub broad_phase: DefaultBroadPhase,
-    pub narrow_phase: NarrowPhase,
-    pub bodies: RigidBodySet,
-    pub colliders: ColliderSet,
-    pub impulse_joints: ImpulseJointSet,
-    pub multibody_joints: MultibodyJointSet,
-    pub ccd_solver: CCDSolver,
-
-    /// Maps ECS entity → rapier body handle.
-    pub entity_to_body: HashMap<crate::Entity, RigidBodyHandle>,
-    /// Maps rapier body handle → ECS entity (reverse lookup for raycasts).
-    pub body_to_entity: HashMap<RigidBodyHandle, crate::Entity>,
-    /// Maps ECS entity → rapier impulse joint handle.
-    pub entity_to_joint: HashMap<crate::Entity, ImpulseJointHandle>,
-}
-
-impl Default for PhysicsWorld2D {
-    fn default() -> Self {
-        Self {
-            gravity: Vector::new(0.0, -9.81),
-            integration_parameters: IntegrationParameters::default(),
-            pipeline: PhysicsPipeline::new(),
-            island_manager: IslandManager::new(),
-            broad_phase: DefaultBroadPhase::new(),
-            narrow_phase: NarrowPhase::new(),
-            bodies: RigidBodySet::new(),
-            colliders: ColliderSet::new(),
-            impulse_joints: ImpulseJointSet::new(),
-            multibody_joints: MultibodyJointSet::new(),
-            ccd_solver: CCDSolver::new(),
-            entity_to_body: HashMap::new(),
-            body_to_entity: HashMap::new(),
-            entity_to_joint: HashMap::new(),
-        }
-    }
-}
-
-impl PhysicsWorld2D {
-    /// Creates a new physics world with the given gravity.
-    pub fn with_gravity(gravity: Vector) -> Self {
-        Self {
-            gravity,
-            ..Default::default()
-        }
-    }
-
-    /// Steps the physics simulation by one timestep.
-    pub fn step(&mut self) {
-        redlilium_core::profile_scope!("rapier2d: step");
-        self.pipeline.step(
-            self.gravity,
-            &self.integration_parameters,
-            &mut self.island_manager,
-            &mut self.broad_phase,
-            &mut self.narrow_phase,
-            &mut self.bodies,
-            &mut self.colliders,
-            &mut self.impulse_joints,
-            &mut self.multibody_joints,
-            &mut self.ccd_solver,
-            &(),
-            &(),
-        );
-    }
-
-    /// Adds a rigid body and returns its handle.
-    pub fn add_body(&mut self, body: RigidBody) -> RigidBodyHandle {
-        self.bodies.insert(body)
-    }
-
-    /// Adds a collider attached to a rigid body and returns its handle.
-    pub fn add_collider(&mut self, collider: Collider, parent: RigidBodyHandle) -> ColliderHandle {
-        self.colliders
-            .insert_with_parent(collider, parent, &mut self.bodies)
-    }
-
-    /// Adds a free collider (not attached to any body) and returns its handle.
-    pub fn add_free_collider(&mut self, collider: Collider) -> ColliderHandle {
-        self.colliders.insert(collider)
-    }
-
-    /// Adds an impulse joint between two bodies and returns its handle.
-    pub fn add_impulse_joint(
-        &mut self,
-        body1: RigidBodyHandle,
-        body2: RigidBodyHandle,
-        joint: impl Into<GenericJoint>,
-    ) -> ImpulseJointHandle {
-        self.impulse_joints.insert(body1, body2, joint, true)
-    }
-
-    /// Removes a rigid body and all its attached colliders and joints.
-    pub fn remove_body(&mut self, handle: RigidBodyHandle) {
-        self.bodies.remove(
-            handle,
-            &mut self.island_manager,
-            &mut self.colliders,
-            &mut self.impulse_joints,
-            &mut self.multibody_joints,
-            true,
-        );
-    }
-
-    /// Removes an impulse joint.
-    pub fn remove_impulse_joint(&mut self, handle: ImpulseJointHandle, wake_up: bool) {
-        self.impulse_joints.remove(handle, wake_up);
-    }
-
-    /// Returns the ECS entity that owns the given body handle.
-    pub fn entity_for_body(&self, handle: RigidBodyHandle) -> Option<crate::Entity> {
-        self.body_to_entity.get(&handle).copied()
-    }
-
-    /// Returns the rapier body handle for the given ECS entity.
-    pub fn body_for_entity(&self, entity: crate::Entity) -> Option<RigidBodyHandle> {
-        self.entity_to_body.get(&entity).copied()
-    }
-
-    /// Casts a ray and returns the first hit as `(entity, toi)`.
-    ///
-    /// Returns `None` if no collider was hit within `max_toi`.
-    pub fn cast_ray(
-        &self,
-        origin: redlilium_core::math::Vec2,
-        dir: redlilium_core::math::Vec2,
-        max_toi: f32,
-    ) -> Option<(crate::Entity, f32)> {
-        use redlilium_core::math::Real;
-
-        let ray = Ray::new(
-            Vector::new(origin.x as Real, origin.y as Real),
-            Vector::new(dir.x as Real, dir.y as Real),
-        );
-
-        let query_pipeline = self.broad_phase.as_query_pipeline(
-            self.narrow_phase.query_dispatcher(),
-            &self.bodies,
-            &self.colliders,
-            QueryFilter::default(),
-        );
-
-        let (collider_handle, toi) = query_pipeline.cast_ray(&ray, max_toi as Real, true)?;
-
-        let collider = self.colliders.get(collider_handle)?;
-        let body_handle = collider.parent()?;
-        let entity = self.body_to_entity.get(&body_handle)?;
-        Some((*entity, toi as f32))
-    }
-}
+use super::world2d::{ImpulseJoint2DHandle, PhysicsWorld2D, RigidBody2DHandle};
 
 // ---- StepPhysics2D system ----
 
@@ -231,8 +55,8 @@ impl crate::System for StepPhysics2D {
 
 /// Exclusive system that creates/removes rapier bodies from ECS descriptor components.
 ///
-/// Detects entities with [`RigidBody2D`](super::components2d::RigidBody2D) +
-/// [`Collider2D`](super::components2d::Collider2D) +
+/// Detects entities with [`RigidBody2D`](crate::std::physics::components2d::RigidBody2D) +
+/// [`Collider2D`](crate::std::physics::components2d::Collider2D) +
 /// [`Transform`](crate::Transform) and creates corresponding rapier objects.
 /// Also detects removed/despawned entities and cleans up.
 pub struct SyncPhysicsBodies2D;
@@ -257,7 +81,9 @@ impl crate::ExclusiveSystem for SyncPhysicsBodies2D {
                 .filter(|e| {
                     !world.is_alive(**e)
                         || world.is_disabled(**e)
-                        || world.get::<super::components2d::RigidBody2D>(**e).is_none()
+                        || world
+                            .get::<crate::std::physics::components2d::RigidBody2D>(**e)
+                            .is_none()
                 })
                 .copied()
                 .collect()
@@ -273,7 +99,7 @@ impl crate::ExclusiveSystem for SyncPhysicsBodies2D {
                     .keys()
                     .filter(|je| {
                         if let Some(joint_desc) =
-                            world.get::<super::components2d::ImpulseJoint2D>(**je)
+                            world.get::<crate::std::physics::components2d::ImpulseJoint2D>(**je)
                         {
                             stale.contains(&joint_desc.body1) || stale.contains(&joint_desc.body2)
                         } else {
@@ -314,8 +140,8 @@ impl crate::ExclusiveSystem for SyncPhysicsBodies2D {
         // Phase 2: Find new bodies (have descriptors, not in mapping, not disabled)
         let new_entities: Vec<(
             crate::Entity,
-            super::components2d::RigidBody2D,
-            super::components2d::Collider2D,
+            crate::std::physics::components2d::RigidBody2D,
+            crate::std::physics::components2d::Collider2D,
             crate::Transform,
         )> = {
             let physics = world.resource::<PhysicsWorld2D>();
@@ -324,10 +150,10 @@ impl crate::ExclusiveSystem for SyncPhysicsBodies2D {
                 .filter(|e| !physics.entity_to_body.contains_key(e) && !world.is_disabled(*e))
                 .filter_map(|entity| {
                     let body = world
-                        .get::<super::components2d::RigidBody2D>(entity)?
+                        .get::<crate::std::physics::components2d::RigidBody2D>(entity)?
                         .clone();
                     let collider = world
-                        .get::<super::components2d::Collider2D>(entity)?
+                        .get::<crate::std::physics::components2d::Collider2D>(entity)?
                         .clone();
                     let transform = *world.get::<crate::Transform>(entity)?;
                     Some((entity, body, collider, transform))
@@ -362,7 +188,7 @@ impl crate::ExclusiveSystem for SyncPhysicsBodies2D {
 
 /// Exclusive system that creates/removes rapier joints from ECS descriptor components.
 ///
-/// Detects entities with [`ImpulseJoint2D`](super::components2d::ImpulseJoint2D)
+/// Detects entities with [`ImpulseJoint2D`](crate::std::physics::components2d::ImpulseJoint2D)
 /// and creates corresponding rapier joints. Also detects removed/despawned joints.
 ///
 /// Must run after [`SyncPhysicsBodies2D`] so that body handles are available.
@@ -388,7 +214,7 @@ impl crate::ExclusiveSystem for SyncPhysicsJoints2D {
                     !world.is_alive(**e)
                         || world.is_disabled(**e)
                         || world
-                            .get::<super::components2d::ImpulseJoint2D>(**e)
+                            .get::<crate::std::physics::components2d::ImpulseJoint2D>(**e)
                             .is_none()
                 })
                 .copied()
@@ -412,14 +238,17 @@ impl crate::ExclusiveSystem for SyncPhysicsJoints2D {
         }
 
         // Phase 2: Find new joints (not in mapping, not disabled)
-        let new_joints: Vec<(crate::Entity, super::components2d::ImpulseJoint2D)> = {
+        let new_joints: Vec<(
+            crate::Entity,
+            crate::std::physics::components2d::ImpulseJoint2D,
+        )> = {
             let physics = world.resource::<PhysicsWorld2D>();
             world
                 .iter_entities()
                 .filter(|e| !physics.entity_to_joint.contains_key(e) && !world.is_disabled(*e))
                 .filter_map(|entity| {
                     let joint = world
-                        .get::<super::components2d::ImpulseJoint2D>(entity)?
+                        .get::<crate::std::physics::components2d::ImpulseJoint2D>(entity)?
                         .clone();
                     Some((entity, joint))
                 })
@@ -474,8 +303,8 @@ impl crate::System for SyncPhysicsBodiesSystem2D {
         let (new_indices, stale_entities) = ctx
             .lock::<(
                 crate::ResMut<PhysicsWorld2D>,
-                crate::Read<super::components2d::RigidBody2D>,
-                crate::Read<super::components2d::Collider2D>,
+                crate::Read<crate::std::physics::components2d::RigidBody2D>,
+                crate::Read<crate::std::physics::components2d::Collider2D>,
                 crate::Read<crate::Transform>,
             )>()
             .execute(|(mut physics, bodies, colliders, transforms)| {
@@ -555,7 +384,7 @@ impl crate::System for SyncPhysicsJointsSystem2D {
         let (new_indices, stale_entities) = ctx
             .lock::<(
                 crate::ResMut<PhysicsWorld2D>,
-                crate::Read<super::components2d::ImpulseJoint2D>,
+                crate::Read<crate::std::physics::components2d::ImpulseJoint2D>,
             )>()
             .execute(|(mut physics, joints)| {
                 // Remove stale
@@ -623,64 +452,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn physics_world_2d_default() {
-        let world = PhysicsWorld2D::default();
-        assert!((world.gravity.y - (-9.81)).abs() < 1e-10);
-        assert_eq!(world.bodies.len(), 0);
-        assert_eq!(world.colliders.len(), 0);
-    }
-
-    #[test]
-    fn add_body_and_collider_2d() {
-        let mut physics = PhysicsWorld2D::default();
-
-        let body_handle = physics.add_body(
-            RigidBodyBuilder::dynamic()
-                .translation(Vector::new(0.0, 10.0))
-                .build(),
-        );
-        let _collider_handle =
-            physics.add_collider(ColliderBuilder::ball(0.5).build(), body_handle);
-
-        assert_eq!(physics.bodies.len(), 1);
-        assert_eq!(physics.colliders.len(), 1);
-    }
-
-    #[test]
-    fn step_moves_dynamic_body_2d() {
-        let mut physics = PhysicsWorld2D::default();
-
-        let body_handle = physics.add_body(
-            RigidBodyBuilder::dynamic()
-                .translation(Vector::new(0.0, 10.0))
-                .build(),
-        );
-        physics.add_collider(ColliderBuilder::ball(0.5).build(), body_handle);
-
-        let initial_y = physics.bodies[body_handle].position().translation.y;
-
-        for _ in 0..10 {
-            physics.step();
-        }
-
-        let final_y = physics.bodies[body_handle].position().translation.y;
-        assert!(final_y < initial_y);
-    }
-
-    #[test]
-    fn entity_mapping_roundtrip_2d() {
-        let mut physics = PhysicsWorld2D::default();
-        let entity = crate::Entity::new(42, 0);
-        let bh = physics.add_body(RigidBodyBuilder::dynamic().build());
-
-        physics.entity_to_body.insert(entity, bh);
-        physics.body_to_entity.insert(bh, entity);
-
-        assert_eq!(physics.entity_for_body(bh), Some(entity));
-        assert_eq!(physics.body_for_entity(entity), Some(bh));
-    }
-
-    #[test]
     fn sync_bodies_creates_and_removes_2d() {
         use crate::system::run_exclusive_system_once;
         use redlilium_core::math::Vec3;
@@ -690,8 +461,8 @@ mod tests {
 
         // Spawn a dynamic ball
         let e = world.spawn();
-        let _ = world.insert(e, super::super::components2d::RigidBody2D::dynamic());
-        let _ = world.insert(e, super::super::components2d::Collider2D::ball(0.5));
+        let _ = world.insert(e, crate::std::physics::components2d::RigidBody2D::dynamic());
+        let _ = world.insert(e, crate::std::physics::components2d::Collider2D::ball(0.5));
         let _ = world.insert(
             e,
             crate::Transform::from_translation(Vec3::new(0.0, 10.0, 0.0)),
@@ -709,7 +480,7 @@ mod tests {
         }
 
         // Now remove the descriptor
-        world.remove::<super::super::components2d::RigidBody2D>(e);
+        world.remove::<crate::std::physics::components2d::RigidBody2D>(e);
 
         // Run sync again
         run_exclusive_system_once(&mut SyncPhysicsBodies2D, &mut world).unwrap();

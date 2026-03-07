@@ -13,16 +13,30 @@
 pub mod conversions;
 
 #[cfg(any(feature = "physics-3d", feature = "physics-3d-f32"))]
-pub mod physics3d;
-
-#[cfg(any(feature = "physics-3d", feature = "physics-3d-f32"))]
 pub mod components3d;
 
-#[cfg(any(feature = "physics-2d", feature = "physics-2d-f32"))]
-pub mod physics2d;
+#[cfg(any(feature = "physics-3d", feature = "physics-3d-f32"))]
+pub mod world3d;
+
+#[cfg(any(feature = "physics-3d", feature = "physics-3d-f32"))]
+pub mod systems3d;
+
+/// Backward-compatible alias: `physics3d` re-exports `world3d`.
+#[cfg(any(feature = "physics-3d", feature = "physics-3d-f32"))]
+pub use world3d as physics3d;
 
 #[cfg(any(feature = "physics-2d", feature = "physics-2d-f32"))]
 pub mod components2d;
+
+#[cfg(any(feature = "physics-2d", feature = "physics-2d-f32"))]
+pub mod world2d;
+
+#[cfg(any(feature = "physics-2d", feature = "physics-2d-f32"))]
+pub mod systems2d;
+
+/// Backward-compatible alias: `physics2d` re-exports `world2d`.
+#[cfg(any(feature = "physics-2d", feature = "physics-2d-f32"))]
+pub use world2d as physics2d;
 
 // Re-export the active rapier crate under a unified name.
 

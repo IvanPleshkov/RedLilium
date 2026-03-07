@@ -14,7 +14,7 @@ use redlilium_core::material::{
 
 use super::components::RenderPassType;
 use super::resources::{MaterialManager, TextureManager};
-use crate::rendering::RenderMaterial;
+use crate::std::rendering::RenderMaterial;
 use crate::{Entity, InspectResult, World};
 
 // ---------------------------------------------------------------------------

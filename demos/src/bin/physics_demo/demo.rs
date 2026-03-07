@@ -106,7 +106,7 @@ impl PhysicsDemoApp {
 
         match dim {
             Dimension::ThreeD => {
-                use redlilium_ecs::physics::physics3d::*;
+                use redlilium_ecs::physics::systems3d::*;
                 systems.add_exclusive(SyncPhysicsBodies3D);
                 systems.add_exclusive(SyncPhysicsJoints3D);
                 systems.add(StepPhysics3D);
@@ -124,7 +124,7 @@ impl PhysicsDemoApp {
                 }
             }
             Dimension::TwoD => {
-                use redlilium_ecs::physics::physics2d::*;
+                use redlilium_ecs::physics::systems2d::*;
                 systems.add_exclusive(SyncPhysicsBodies2D);
                 systems.add_exclusive(SyncPhysicsJoints2D);
                 systems.add(StepPhysics2D);
