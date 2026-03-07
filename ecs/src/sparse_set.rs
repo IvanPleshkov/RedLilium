@@ -344,7 +344,6 @@ type RemoveFn = fn(&mut dyn Any, u32) -> bool;
 type ContainsFn = fn(&dyn Any, u32) -> bool;
 type ChangedSinceFn = fn(&dyn Any, u32, u64) -> bool;
 type AddedSinceFn = fn(&dyn Any, u32, u64) -> bool;
-type MembershipFn = fn(&dyn Any) -> &FixedBitSet;
 
 /// A lock guard for either a read or write lock on a storage.
 ///
@@ -373,9 +372,6 @@ pub(crate) struct ComponentStorage {
     changed_since_fn: ChangedSinceFn,
     /// Type-erased added_since check.
     added_since_fn: AddedSinceFn,
-    /// Type-erased membership bitset accessor.
-    #[allow(dead_code)]
-    membership_fn: MembershipFn,
     /// Records of (entity_index, tick) for recently removed components.
     /// Cleared by [`World::clear_removed_tracking`](crate::World::clear_removed_tracking).
     removed_ticks: Vec<(u32, u64)>,
@@ -418,10 +414,6 @@ impl ComponentStorage {
             added_since_fn: |any, entity_index, since_tick| {
                 let set = any.downcast_ref::<SparseSetInner<T>>().unwrap();
                 set.added_since(entity_index, since_tick)
-            },
-            membership_fn: |any| {
-                let set = any.downcast_ref::<SparseSetInner<T>>().unwrap();
-                set.membership()
             },
             removed_ticks: Vec::new(),
             on_add: None,
@@ -499,12 +491,6 @@ impl ComponentStorage {
     /// Returns true if this component has any required components registered.
     pub fn has_required_components(&self) -> bool {
         !self.required_components.is_empty()
-    }
-
-    /// Returns the membership bitset for this component storage (type-erased).
-    #[allow(dead_code)]
-    pub fn membership(&self) -> &FixedBitSet {
-        (self.membership_fn)(self.inner.as_ref())
     }
 
     /// Checks if the entity has this component (type-erased).
