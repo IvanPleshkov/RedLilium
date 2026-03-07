@@ -499,7 +499,7 @@ mod tests {
     }
 
     #[test]
-    fn insert_tracked_fires_triggers() {
+    fn insert_fires_triggers() {
         let counter = Arc::new(AtomicU32::new(0));
         let counter_clone = counter.clone();
 
@@ -510,7 +510,7 @@ mod tests {
         });
 
         let entity = world.spawn();
-        world.insert_tracked(entity, Health(100)).unwrap();
+        world.insert(entity, Health(100)).unwrap();
 
         world.flush_observers();
         assert_eq!(counter.load(Ordering::SeqCst), 1);

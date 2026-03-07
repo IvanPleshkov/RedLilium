@@ -932,7 +932,7 @@ mod tests {
 
         world.advance_tick(); // tick = 1
         let e = world.spawn();
-        world.insert_tracked(e, Health(100)).unwrap();
+        world.insert(e, Health(100)).unwrap();
 
         let (filter,) = <(Added<Health>,)>::fetch(&world);
         assert!(filter.matches(e.index()));
@@ -944,7 +944,7 @@ mod tests {
         world.register_component::<Health>();
 
         let e = world.spawn();
-        world.insert_tracked(e, Health(100)).unwrap(); // tick 0
+        world.insert(e, Health(100)).unwrap(); // tick 0
 
         world.advance_tick(); // tick = 1
         world.advance_tick(); // tick = 2
@@ -1029,7 +1029,7 @@ mod tests {
 
         world.advance_tick(); // tick = 1
         let e = world.spawn();
-        world.insert_tracked(e, Health(50)).unwrap();
+        world.insert(e, Health(50)).unwrap();
 
         let (filter,) = <(MaybeAdded<Health>,)>::fetch(&world);
         assert!(filter.matches(e.index()));

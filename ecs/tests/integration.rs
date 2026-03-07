@@ -17,6 +17,10 @@ fn full_frame_pipeline() {
     let mut world = World::new();
     register_std_components(&mut world);
 
+    // Advance tick so that insert stamps ticks_changed > 0,
+    // allowing Changed<Transform> to detect them (since_tick=0, tick>0).
+    world.advance_tick();
+
     // Spawn a camera at (0, 5, 10) looking toward origin
     let cam_entity = world.spawn();
     world
@@ -93,6 +97,9 @@ fn multi_thread_execution() {
     let mut world = World::new();
     register_std_components(&mut world);
 
+    // Advance tick so that insert stamps ticks_changed > 0.
+    world.advance_tick();
+
     // Spawn 100 entities with transforms
     for i in 0..100 {
         let e = world.spawn();
@@ -164,6 +171,9 @@ fn spawn_scene_and_run_systems() {
                 ]),
         ]);
 
+    // Advance tick so that insert stamps ticks_changed > 0.
+    world.advance_tick();
+
     let roots = spawn_scene(&mut world, &scene);
 
     assert_eq!(roots.len(), 1);
@@ -208,6 +218,9 @@ fn spawn_scene_and_run_systems() {
 fn visibility_filtering_with_systems() {
     let mut world = World::new();
     register_std_components(&mut world);
+
+    // Advance tick so that insert stamps ticks_changed > 0.
+    world.advance_tick();
 
     // Spawn 5 entities, hide every other one
     let mut entities = Vec::new();
@@ -263,6 +276,9 @@ fn multiple_frame_simulation() {
     let mut world = World::new();
     register_std_components(&mut world);
 
+    // Advance tick so that insert stamps ticks_changed > 0.
+    world.advance_tick();
+
     let entity = world.spawn();
     world
         .insert(entity, Transform::from_translation(Vec3::zeros()))
@@ -305,6 +321,9 @@ fn multiple_frame_simulation() {
 fn light_direction_from_transform() {
     let mut world = World::new();
     register_std_components(&mut world);
+
+    // Advance tick so that insert stamps ticks_changed > 0.
+    world.advance_tick();
 
     // Create a directional light pointing down (-Y rotation)
     let sun = world.spawn();

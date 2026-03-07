@@ -1,3 +1,4 @@
+use crate::query::ChangedFilter;
 use crate::{Ref, RefMut, SystemContext};
 use redlilium_core::math::Mat4;
 
@@ -6,12 +7,13 @@ use crate::std::components::{Children, GlobalTransform, Parent, Transform};
 /// System that updates all [`GlobalTransform`] components from local [`Transform`],
 /// respecting the parent-child hierarchy.
 ///
-/// Root entities get `GlobalTransform` directly from `Transform`. Children
-/// have their parent's world matrix multiplied with their local matrix.
+/// Uses [`Changed<Transform>`](crate::Changed) to skip unchanged subtrees —
+/// only entities whose local `Transform` was modified (or whose ancestor was
+/// modified) get their `GlobalTransform` rewritten.
 ///
 /// # Access
 ///
-/// - Reads: `Transform`, `Parent`, `Children`
+/// - Reads: `Transform`, `Parent`, `Children`, `Changed<Transform>`
 /// - Writes: `GlobalTransform`
 pub struct UpdateGlobalTransforms;
 
@@ -23,10 +25,19 @@ impl crate::System for UpdateGlobalTransforms {
             crate::WriteAll<GlobalTransform>,
             crate::ReadAll<Children>,
             crate::ReadAll<Parent>,
+            crate::MaybeChanged<Transform>,
         )>()
-        .execute(|(transforms, mut globals, children_storage, parents)| {
-            update_global_transforms(&transforms, &mut globals, &children_storage, &parents);
-        });
+        .execute(
+            |(transforms, mut globals, children_storage, parents, changed)| {
+                update_global_transforms(
+                    &transforms,
+                    &mut globals,
+                    &children_storage,
+                    &parents,
+                    &changed,
+                );
+            },
+        );
         Ok(())
     }
 }
@@ -36,50 +47,99 @@ fn update_global_transforms(
     globals: &mut RefMut<GlobalTransform>,
     children_storage: &Ref<Children>,
     parents: &Ref<Parent>,
+    changed: &ChangedFilter<'_>,
 ) {
     redlilium_core::profile_scope!("update_global_transforms");
 
     // Process root entities (no Parent component)
     for (idx, transform) in transforms.iter() {
         if parents.get(idx).is_none() {
-            let local_matrix = transform.to_matrix();
-            if let Some(mut gt) = globals.get_mut(idx) {
-                gt.0 = local_matrix;
+            if changed.matches(idx) {
+                let local_matrix = transform.to_matrix();
+                if let Some(mut gt) = globals.get_mut(idx) {
+                    gt.0 = local_matrix;
+                }
+                propagate_children(
+                    idx,
+                    local_matrix,
+                    transforms,
+                    globals,
+                    children_storage,
+                    changed,
+                    true,
+                );
+            } else {
+                // Root unchanged — read existing GlobalTransform, still check children
+                let parent_world = globals.get(idx).map(|gt| gt.0).unwrap_or(Mat4::identity());
+                propagate_children(
+                    idx,
+                    parent_world,
+                    transforms,
+                    globals,
+                    children_storage,
+                    changed,
+                    false,
+                );
             }
-            // Recursively propagate to children
-            propagate_children(idx, local_matrix, transforms, globals, children_storage);
         }
     }
 }
 
 /// Recursively propagates world transforms from parent to children.
+///
+/// When `parent_changed` is `true`, all descendants are recomputed.
+/// When `false`, only descendants with a changed `Transform` are updated;
+/// unchanged nodes reuse their existing `GlobalTransform`.
 fn propagate_children(
     parent_idx: u32,
     parent_world: Mat4,
     transforms: &Ref<Transform>,
     globals: &mut RefMut<GlobalTransform>,
     children_storage: &Ref<Children>,
+    changed: &ChangedFilter<'_>,
+    parent_changed: bool,
 ) {
     let Some(children) = children_storage.get(parent_idx) else {
         return;
     };
     for &child in children.0.iter() {
         let child_idx = child.index();
-        let child_world = if let Some(local) = transforms.get(child_idx) {
-            parent_world * local.to_matrix()
+        let needs_update = parent_changed || changed.matches(child_idx);
+
+        if needs_update {
+            let child_world = if let Some(local) = transforms.get(child_idx) {
+                parent_world * local.to_matrix()
+            } else {
+                parent_world
+            };
+            if let Some(mut gt) = globals.get_mut(child_idx) {
+                gt.0 = child_world;
+            }
+            propagate_children(
+                child_idx,
+                child_world,
+                transforms,
+                globals,
+                children_storage,
+                changed,
+                true,
+            );
         } else {
-            parent_world
-        };
-        if let Some(mut gt) = globals.get_mut(child_idx) {
-            gt.0 = child_world;
+            // Neither parent nor this child changed — reuse existing GlobalTransform
+            let child_world = globals
+                .get(child_idx)
+                .map(|gt| gt.0)
+                .unwrap_or(parent_world);
+            propagate_children(
+                child_idx,
+                child_world,
+                transforms,
+                globals,
+                children_storage,
+                changed,
+                false,
+            );
         }
-        propagate_children(
-            child_idx,
-            child_world,
-            transforms,
-            globals,
-            children_storage,
-        );
     }
 }
 
@@ -96,6 +156,9 @@ mod tests {
         world.register_component::<GlobalTransform>();
         world.register_component::<Parent>();
         world.register_component::<Children>();
+        // Advance tick so insert stamps ticks_changed = 1,
+        // allowing Changed<Transform> to detect them (since_tick = 0, 1 > 0 = true).
+        world.advance_tick();
     }
 
     /// Helper: get component borrows and run update.
@@ -104,7 +167,15 @@ mod tests {
         let mut globals = world.write::<GlobalTransform>().unwrap();
         let children_storage = world.read::<Children>().unwrap();
         let parents = world.read::<Parent>().unwrap();
-        update_global_transforms(&transforms, &mut globals, &children_storage, &parents);
+        let since_tick = world.current_tick().saturating_sub(1);
+        let changed = world.changed::<Transform>(since_tick);
+        update_global_transforms(
+            &transforms,
+            &mut globals,
+            &children_storage,
+            &parents,
+            &changed,
+        );
     }
 
     #[test]

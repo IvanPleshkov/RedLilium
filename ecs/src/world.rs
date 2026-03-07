@@ -69,7 +69,7 @@ fn deserialize_component_fn<T: Component>(
 ) -> Result<(), crate::serialize::DeserializeError> {
     ctx.load_data(data)?;
     let comp = T::deserialize_component(ctx)?;
-    ctx.world_mut().insert_tracked(entity, comp).map_err(|e| {
+    ctx.world_mut().insert(entity, comp).map_err(|e| {
         crate::serialize::DeserializeError::UnknownComponent {
             type_name: e.type_name.to_string(),
         }
@@ -515,8 +515,8 @@ impl World {
     /// Inserts a component on an entity.
     ///
     /// If the entity already has this component, the value is replaced.
-    /// Uses tick 0 (untracked). For change-tracked insertion, use
-    /// [`insert_tracked`](World::insert_tracked).
+    /// Records the current world tick for change detection — the component
+    /// will be visible to [`Changed<T>`](crate::Changed) filters.
     ///
     /// # Errors
     ///
@@ -561,87 +561,14 @@ impl World {
             hook(self, entity);
         }
 
-        // Perform the actual insert
-        self.storage_mut(&type_id)
-            .unwrap()
-            .typed_mut::<T>()
-            .insert(entity.index(), component);
-
-        // Fire on_add / on_insert AFTER insertion
-        if !had_component && let Some(hook) = on_add {
-            hook(self, entity);
-        }
-        if let Some(hook) = on_insert {
-            hook(self, entity);
-        }
-
-        // Apply required components (only on first add)
-        if !had_component {
-            for req_fn in required {
-                req_fn(self, entity);
-            }
-        }
-
-        // Queue deferred observer triggers
-        if !had_component {
-            self.observers.push_typed_trigger::<OnAdd<T>>(entity);
-        }
-        self.observers.push_typed_trigger::<OnInsert<T>>(entity);
-
-        Ok(())
-    }
-
-    /// Inserts a component with change tracking at the current world tick.
-    ///
-    /// Like [`insert`](World::insert) but records the current tick for
-    /// change detection queries.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ComponentNotRegistered`] if `T` has never been registered.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the entity is not alive.
-    pub fn insert_tracked<T: Send + Sync + 'static>(
-        &mut self,
-        entity: Entity,
-        component: T,
-    ) -> Result<(), ComponentNotRegistered> {
-        assert!(
-            self.entities.is_alive(entity),
-            "Cannot insert component on dead entity {entity}"
-        );
-
-        let type_id = TypeId::of::<T>();
+        // Perform the actual insert (always tracked at current tick)
         let tick = self.tick;
-
-        let (had_component, on_add, on_insert, on_replace, required) = {
-            let storage = self
-                .components
-                .get_mut(&type_id)
-                .map(|l| l.get_mut())
-                .ok_or(ComponentNotRegistered {
-                    type_name: std::any::type_name::<T>(),
-                })?;
-            (
-                storage.contains_untyped(entity.index()),
-                storage.on_add,
-                storage.on_insert,
-                storage.on_replace,
-                storage.required_components.clone(),
-            )
-        };
-
-        if had_component && let Some(hook) = on_replace {
-            hook(self, entity);
-        }
-
         self.storage_mut(&type_id)
             .unwrap()
             .typed_mut::<T>()
             .insert_with_tick(entity.index(), component, tick);
 
+        // Fire on_add / on_insert AFTER insertion
         if !had_component && let Some(hook) = on_add {
             hook(self, entity);
         }
