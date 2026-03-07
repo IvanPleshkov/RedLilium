@@ -11,7 +11,10 @@ use crate::observer::{Observers, OnAdd, OnInsert, OnRemove};
 use crate::query::{AddedFilter, ChangedFilter, ContainsChecker, RemovedFilter};
 use crate::reactive::Triggers;
 use crate::resource::{Resource, ResourceRef, ResourceRefMut, Resources};
-use crate::sparse_set::{ComponentHookFn, ComponentStorage, LockGuard, Ref, RefMut};
+use crate::sparse_set::{
+    ComponentHookFn, ComponentMeta, ComponentStorage, DeserializeComponentFn, LockGuard, Ref,
+    RefMut, SerializeComponentFn,
+};
 use std::sync::{Arc, RwLock};
 
 /// Error returned when a component type has not been registered in the [`World`].
@@ -36,63 +39,8 @@ impl std::fmt::Display for ComponentNotRegistered {
 
 impl std::error::Error for ComponentNotRegistered {}
 
-// ---------------------------------------------------------------------------
-// Inspector metadata (stored in World, separate from component storages)
-// ---------------------------------------------------------------------------
-
-type ExtractFn = fn(&World, Entity) -> Option<Box<dyn crate::prefab::ComponentBag>>;
-type SerializeComponentFn =
-    fn(
-        &World,
-        Entity,
-        &mut crate::serialize::SerializeContext<'_>,
-    )
-        -> Result<Option<crate::serialize::SerializedComponent>, crate::serialize::SerializeError>;
-type DeserializeComponentFn = fn(
-    Entity,
-    &crate::serialize::Value,
-    &mut crate::serialize::DeserializeContext<'_>,
-) -> Result<(), crate::serialize::DeserializeError>;
-
-/// Type alias for the return type of an inspector's `inspect_fn`.
-///
-/// The inspector renders the component UI using an immutable reference and
-/// returns a list of [`EditAction`]s if the user made any edits.
-/// The return type of inspector's `inspect_fn`.
-///
-/// `None` means the entity didn't have the component or nothing was edited.
-/// `Some(actions)` contains one or more undoable [`EditAction`]s.
-pub type InspectResult = Option<Vec<Box<dyn redlilium_core::abstract_editor::EditAction<World>>>>;
-
-/// Type-erased inspector operations for a single component type.
-struct InspectorEntry {
-    /// Check if an entity has this component.
-    has_fn: fn(&World, Entity) -> bool,
-    /// Render the component's inspector UI with an immutable world reference.
-    /// Returns `Some(actions)` if the user edited any fields.
-    inspect_fn: fn(&World, Entity, &mut egui::Ui) -> InspectResult,
-    /// Remove this component from an entity. Returns true if removed.
-    remove_fn: fn(&mut World, Entity) -> bool,
-    /// Insert a default instance on an entity (None if T doesn't impl Default).
-    insert_default_fn: Option<fn(&mut World, Entity)>,
-    /// Collect all entity references from this component on an entity.
-    collect_entities_fn: fn(&World, Entity, &mut Vec<Entity>),
-    /// Remap all entity references in this component on an entity.
-    remap_entities_fn: fn(&mut World, Entity, &mut dyn FnMut(Entity) -> Entity),
-    /// Clone this component from src entity to dst entity. None if T is not Clone.
-    clone_fn: Option<fn(&mut World, Entity, Entity) -> bool>,
-    /// Extract this component into a type-erased bag. None if T is not Clone.
-    extract_fn: Option<ExtractFn>,
-    /// Serialize this component on an entity. Returns None if entity doesn't have it
-    /// or the component doesn't support serialization.
-    serialize_fn: SerializeComponentFn,
-    /// Deserialize and insert this component on an entity.
-    deserialize_fn: DeserializeComponentFn,
-    /// Get the axis-aligned bounding box contributed by this component on an entity.
-    aabb_fn: fn(&World, Entity) -> Option<redlilium_core::math::Aabb>,
-    /// Display order in the inspector panel. Lower values appear first.
-    display_order: u32,
-}
+// Re-export InspectResult for public API consumers.
+pub use crate::sparse_set::InspectResult;
 
 /// Type-erased serialize helper: reads `T` from the world and serializes it.
 fn serialize_component_fn<T: Component>(
@@ -237,8 +185,8 @@ pub struct World {
     resources: Resources,
     /// Global tick counter for change detection.
     tick: u64,
-    /// Inspector metadata for registered component types, keyed by name.
-    inspector_entries: BTreeMap<&'static str, InspectorEntry>,
+    /// Reverse index from component name to TypeId for name-based lookups.
+    name_index: BTreeMap<&'static str, TypeId>,
     /// Deferred observer registry and pending triggers.
     observers: Observers,
     /// Monomorphized swap functions for each registered `Triggers<M>` resource.
@@ -255,7 +203,7 @@ impl World {
             components: HashMap::new(),
             resources: Resources::new(),
             tick: 0,
-            inspector_entries: BTreeMap::new(),
+            name_index: BTreeMap::new(),
             observers: Observers::new(),
             trigger_swap_fns: Vec::new(),
         }
@@ -366,49 +314,49 @@ impl World {
     pub fn register_inspector<T: Component>(&mut self) {
         self.register_component::<T>();
         T::register_required(self);
-        self.inspector_entries.insert(
-            T::NAME,
-            InspectorEntry {
-                has_fn: |world, entity| world.get::<T>(entity).is_some(),
-                inspect_fn: |world, entity, ui| {
-                    let comp = world.get::<T>(entity)?;
-                    comp.inspect_ui(ui, world, entity)
-                },
-                remove_fn: |world, entity| world.remove::<T>(entity).is_some(),
-                insert_default_fn: None,
-                collect_entities_fn: |world, entity, collector| {
-                    if let Some(comp) = world.get::<T>(entity) {
-                        comp.collect_entities(collector);
-                    }
-                },
-                remap_entities_fn: |world, entity, map| {
-                    if let Some(comp) = world.get_mut::<T>(entity) {
-                        comp.remap_entities(map);
-                    }
-                },
-                clone_fn: Some(|world, src, dst| {
-                    let cloned = world.get::<T>(src).cloned();
-                    if let Some(val) = cloned {
-                        let _ = world.insert(dst, val);
-                        true
-                    } else {
-                        false
-                    }
-                }),
-                extract_fn: Some(|world, entity| {
-                    world.get::<T>(entity).cloned().map(|v| {
-                        Box::new(crate::prefab::TypedBag(v)) as Box<dyn crate::prefab::ComponentBag>
-                    })
-                }),
-                aabb_fn: |world, entity| {
-                    let comp = world.get::<T>(entity)?;
-                    comp.aabb(world)
-                },
-                serialize_fn: serialize_component_fn::<T>,
-                deserialize_fn: deserialize_component_fn::<T>,
-                display_order: 100,
+        self.name_index.insert(T::NAME, TypeId::of::<T>());
+        let storage = self.components.get_mut(&TypeId::of::<T>()).unwrap();
+        storage.meta = Some(ComponentMeta {
+            name: T::NAME,
+            has_fn: |world, entity| world.get::<T>(entity).is_some(),
+            inspect_fn: |world, entity, ui| {
+                let comp = world.get::<T>(entity)?;
+                comp.inspect_ui(ui, world, entity)
             },
-        );
+            remove_fn: |world, entity| world.remove::<T>(entity).is_some(),
+            insert_default_fn: None,
+            collect_entities_fn: |world, entity, collector| {
+                if let Some(comp) = world.get::<T>(entity) {
+                    comp.collect_entities(collector);
+                }
+            },
+            remap_entities_fn: |world, entity, map| {
+                if let Some(comp) = world.get_mut::<T>(entity) {
+                    comp.remap_entities(map);
+                }
+            },
+            clone_fn: Some(|world, src, dst| {
+                let cloned = world.get::<T>(src).cloned();
+                if let Some(val) = cloned {
+                    let _ = world.insert(dst, val);
+                    true
+                } else {
+                    false
+                }
+            }),
+            extract_fn: Some(|world, entity| {
+                world.get::<T>(entity).cloned().map(|v| {
+                    Box::new(crate::prefab::TypedBag(v)) as Box<dyn crate::prefab::ComponentBag>
+                })
+            }),
+            aabb_fn: |world, entity| {
+                let comp = world.get::<T>(entity)?;
+                comp.aabb(world)
+            },
+            serialize_fn: serialize_component_fn::<T>,
+            deserialize_fn: deserialize_component_fn::<T>,
+            display_order: 100,
+        });
     }
 
     /// Registers a component type with full inspector support including "Add Component".
@@ -418,51 +366,51 @@ impl World {
     pub fn register_inspector_default<T: Component + Default>(&mut self) {
         self.register_component::<T>();
         T::register_required(self);
-        self.inspector_entries.insert(
-            T::NAME,
-            InspectorEntry {
-                has_fn: |world, entity| world.get::<T>(entity).is_some(),
-                inspect_fn: |world, entity, ui| {
-                    let comp = world.get::<T>(entity)?;
-                    comp.inspect_ui(ui, world, entity)
-                },
-                remove_fn: |world, entity| world.remove::<T>(entity).is_some(),
-                insert_default_fn: Some(|world, entity| {
-                    let _ = world.insert(entity, T::default());
-                }),
-                collect_entities_fn: |world, entity, collector| {
-                    if let Some(comp) = world.get::<T>(entity) {
-                        comp.collect_entities(collector);
-                    }
-                },
-                remap_entities_fn: |world, entity, map| {
-                    if let Some(comp) = world.get_mut::<T>(entity) {
-                        comp.remap_entities(map);
-                    }
-                },
-                clone_fn: Some(|world, src, dst| {
-                    let cloned = world.get::<T>(src).cloned();
-                    if let Some(val) = cloned {
-                        let _ = world.insert(dst, val);
-                        true
-                    } else {
-                        false
-                    }
-                }),
-                extract_fn: Some(|world, entity| {
-                    world.get::<T>(entity).cloned().map(|v| {
-                        Box::new(crate::prefab::TypedBag(v)) as Box<dyn crate::prefab::ComponentBag>
-                    })
-                }),
-                aabb_fn: |world, entity| {
-                    let comp = world.get::<T>(entity)?;
-                    comp.aabb(world)
-                },
-                serialize_fn: serialize_component_fn::<T>,
-                deserialize_fn: deserialize_component_fn::<T>,
-                display_order: 100,
+        self.name_index.insert(T::NAME, TypeId::of::<T>());
+        let storage = self.components.get_mut(&TypeId::of::<T>()).unwrap();
+        storage.meta = Some(ComponentMeta {
+            name: T::NAME,
+            has_fn: |world, entity| world.get::<T>(entity).is_some(),
+            inspect_fn: |world, entity, ui| {
+                let comp = world.get::<T>(entity)?;
+                comp.inspect_ui(ui, world, entity)
             },
-        );
+            remove_fn: |world, entity| world.remove::<T>(entity).is_some(),
+            insert_default_fn: Some(|world, entity| {
+                let _ = world.insert(entity, T::default());
+            }),
+            collect_entities_fn: |world, entity, collector| {
+                if let Some(comp) = world.get::<T>(entity) {
+                    comp.collect_entities(collector);
+                }
+            },
+            remap_entities_fn: |world, entity, map| {
+                if let Some(comp) = world.get_mut::<T>(entity) {
+                    comp.remap_entities(map);
+                }
+            },
+            clone_fn: Some(|world, src, dst| {
+                let cloned = world.get::<T>(src).cloned();
+                if let Some(val) = cloned {
+                    let _ = world.insert(dst, val);
+                    true
+                } else {
+                    false
+                }
+            }),
+            extract_fn: Some(|world, entity| {
+                world.get::<T>(entity).cloned().map(|v| {
+                    Box::new(crate::prefab::TypedBag(v)) as Box<dyn crate::prefab::ComponentBag>
+                })
+            }),
+            aabb_fn: |world, entity| {
+                let comp = world.get::<T>(entity)?;
+                comp.aabb(world)
+            },
+            serialize_fn: serialize_component_fn::<T>,
+            deserialize_fn: deserialize_component_fn::<T>,
+            display_order: 100,
+        });
     }
 
     /// Sets the display order for a previously registered inspector component.
@@ -470,8 +418,10 @@ impl World {
     /// Lower values appear first in the component inspector panel.
     /// The default order is `100`.
     pub fn set_inspector_order<T: Component>(&mut self, order: u32) {
-        if let Some(entry) = self.inspector_entries.get_mut(T::NAME) {
-            entry.display_order = order;
+        if let Some(storage) = self.components.get_mut(&TypeId::of::<T>())
+            && let Some(meta) = storage.meta_mut()
+        {
+            meta.display_order = order;
         }
     }
 
@@ -1696,6 +1646,21 @@ impl World {
         RemovedFilter::new(storage, since_tick)
     }
 
+    // ---- Component meta helpers ----
+
+    /// Looks up component meta by name.
+    fn meta_by_name(&self, name: &str) -> Option<&ComponentMeta> {
+        let type_id = self.name_index.get(name)?;
+        self.components.get(type_id)?.meta()
+    }
+
+    /// Iterates over all registered component metas.
+    fn iter_meta(&self) -> impl Iterator<Item = &ComponentMeta> {
+        self.components
+            .values()
+            .filter_map(|storage| storage.meta())
+    }
+
     // ---- Inspector ----
 
     /// Returns the names of all inspector-registered components that an entity has.
@@ -1704,10 +1669,9 @@ impl World {
     /// or [`register_inspector_default`](World::register_inspector_default).
     pub fn inspectable_components_of(&self, entity: Entity) -> Vec<&'static str> {
         let mut entries: Vec<_> = self
-            .inspector_entries
-            .iter()
-            .filter(|(_, e)| (e.has_fn)(self, entity))
-            .map(|(name, e)| (*name, e.display_order))
+            .iter_meta()
+            .filter(|m| (m.has_fn)(self, entity))
+            .map(|m| (m.name, m.display_order))
             .collect();
         entries.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
         entries.into_iter().map(|(name, _)| name).collect()
@@ -1729,10 +1693,9 @@ impl World {
 
     /// Returns component names that the entity does NOT have and that support Default insertion.
     pub fn addable_components_of(&self, entity: Entity) -> Vec<&'static str> {
-        self.inspector_entries
-            .iter()
-            .filter(|(_, e)| e.insert_default_fn.is_some() && !(e.has_fn)(self, entity))
-            .map(|(name, _)| *name)
+        self.iter_meta()
+            .filter(|m| m.insert_default_fn.is_some() && !(m.has_fn)(self, entity))
+            .map(|m| m.name)
             .collect()
     }
 
@@ -1741,7 +1704,7 @@ impl World {
     /// Returns `Some(actions)` if the user edited any fields, or `None` if
     /// nothing changed or the entity doesn't have the component.
     pub fn inspect_by_name(&self, entity: Entity, name: &str, ui: &mut egui::Ui) -> InspectResult {
-        let inspect_fn = self.inspector_entries.get(name).map(|e| e.inspect_fn);
+        let inspect_fn = self.meta_by_name(name).map(|m| m.inspect_fn);
         inspect_fn.and_then(|f| f(self, entity, ui))
     }
 
@@ -1749,7 +1712,7 @@ impl World {
     ///
     /// Returns `true` if the component was removed.
     pub fn remove_by_name(&mut self, entity: Entity, name: &str) -> bool {
-        let remove_fn = self.inspector_entries.get(name).map(|e| e.remove_fn);
+        let remove_fn = self.meta_by_name(name).map(|m| m.remove_fn);
         if let Some(f) = remove_fn {
             f(self, entity)
         } else {
@@ -1762,10 +1725,7 @@ impl World {
     /// Does nothing if the component was not registered with Default support
     /// or the name is unknown.
     pub fn insert_default_by_name(&mut self, entity: Entity, name: &str) {
-        let insert_fn = self
-            .inspector_entries
-            .get(name)
-            .and_then(|e| e.insert_default_fn);
+        let insert_fn = self.meta_by_name(name).and_then(|m| m.insert_default_fn);
         if let Some(f) = insert_fn {
             f(self, entity);
         }
@@ -1779,10 +1739,7 @@ impl World {
         entity: Entity,
         name: &str,
     ) -> Option<Box<dyn crate::prefab::ComponentBag>> {
-        let extract_fn = self
-            .inspector_entries
-            .get(name)
-            .and_then(|e| e.extract_fn)?;
+        let extract_fn = self.meta_by_name(name).and_then(|m| m.extract_fn)?;
         extract_fn(self, entity)
     }
 
@@ -1802,11 +1759,11 @@ impl World {
         name: &str,
     ) -> Result<Option<crate::serialize::SerializedComponent>, crate::serialize::SerializeError>
     {
-        let Some(entry) = self.inspector_entries.get(name) else {
+        let Some(meta) = self.meta_by_name(name) else {
             return Ok(None);
         };
         let mut ctx = crate::serialize::SerializeContext::new(self);
-        (entry.serialize_fn)(self, entity, &mut ctx)
+        (meta.serialize_fn)(self, entity, &mut ctx)
     }
 
     /// Deserializes a single component by name and inserts it onto an entity.
@@ -1818,9 +1775,8 @@ impl World {
         serialized: &crate::serialize::SerializedComponent,
     ) -> Result<(), crate::serialize::DeserializeError> {
         let deser_fn = self
-            .inspector_entries
-            .get(serialized.type_name.as_str())
-            .map(|e| e.deserialize_fn)
+            .meta_by_name(serialized.type_name.as_str())
+            .map(|m| m.deserialize_fn)
             .ok_or_else(|| crate::serialize::DeserializeError::UnknownComponent {
                 type_name: serialized.type_name.clone(),
             })?;
@@ -1838,8 +1794,8 @@ impl World {
         name: &str,
         collector: &mut Vec<Entity>,
     ) {
-        if let Some(entry) = self.inspector_entries.get(name) {
-            (entry.collect_entities_fn)(self, entity, collector);
+        if let Some(meta) = self.meta_by_name(name) {
+            (meta.collect_entities_fn)(self, entity, collector);
         }
     }
 
@@ -1852,10 +1808,7 @@ impl World {
         name: &str,
         map: &mut dyn FnMut(Entity) -> Entity,
     ) {
-        let remap_fn = self
-            .inspector_entries
-            .get(name)
-            .map(|e| e.remap_entities_fn);
+        let remap_fn = self.meta_by_name(name).map(|m| m.remap_entities_fn);
         if let Some(f) = remap_fn {
             f(self, entity, map);
         }
@@ -1863,13 +1816,13 @@ impl World {
 
     /// Computes the combined AABB for an entity by unioning AABBs from all its components.
     ///
-    /// Iterates every inspector-registered component type and unions any
+    /// Iterates every registered component type and unions any
     /// AABBs returned by their [`Component::aabb`] implementations.
     /// Returns `None` if no component contributes an AABB.
     pub fn entity_aabb(&self, entity: Entity) -> Option<redlilium_core::math::Aabb> {
         let mut result: Option<redlilium_core::math::Aabb> = None;
-        for entry in self.inspector_entries.values() {
-            if let Some(aabb) = (entry.aabb_fn)(self, entity) {
+        for meta in self.iter_meta() {
+            if let Some(aabb) = (meta.aabb_fn)(self, entity) {
                 result = Some(match result {
                     Some(current) => current.union(&aabb),
                     None => aabb,
@@ -1885,8 +1838,8 @@ impl World {
     /// this returns each component's AABB separately.
     pub fn entity_aabbs(&self, entity: Entity) -> Vec<redlilium_core::math::Aabb> {
         let mut result = Vec::new();
-        for entry in self.inspector_entries.values() {
-            if let Some(aabb) = (entry.aabb_fn)(self, entity) {
+        for meta in self.iter_meta() {
+            if let Some(aabb) = (meta.aabb_fn)(self, entity) {
                 result.push(aabb);
             }
         }
@@ -1895,24 +1848,20 @@ impl World {
 
     /// Collects all entity references from all registered components on an entity.
     ///
-    /// Iterates every inspector-registered component type and appends any
+    /// Iterates every registered component type and appends any
     /// entity references found to `collector`.
     pub fn collect_all_entities(&self, entity: Entity, collector: &mut Vec<Entity>) {
-        for entry in self.inspector_entries.values() {
-            (entry.collect_entities_fn)(self, entity, collector);
+        for meta in self.iter_meta() {
+            (meta.collect_entities_fn)(self, entity, collector);
         }
     }
 
     /// Remaps all entity references in all registered components on an entity.
     ///
-    /// Iterates every inspector-registered component type and remaps any
+    /// Iterates every registered component type and remaps any
     /// entity references found using the provided mapping function.
     pub fn remap_all_entities(&mut self, entity: Entity, map: &mut dyn FnMut(Entity) -> Entity) {
-        let fns: Vec<_> = self
-            .inspector_entries
-            .values()
-            .map(|e| e.remap_entities_fn)
-            .collect();
+        let fns: Vec<_> = self.iter_meta().map(|m| m.remap_entities_fn).collect();
         for f in fns {
             f(self, entity, map);
         }
@@ -1935,11 +1884,10 @@ impl World {
         let dst = self.spawn();
 
         let clone_fns: Vec<_> = self
-            .inspector_entries
-            .values()
-            .filter_map(|e| {
-                if (e.has_fn)(self, src) {
-                    e.clone_fn
+            .iter_meta()
+            .filter_map(|m| {
+                if (m.has_fn)(self, src) {
+                    m.clone_fn
                 } else {
                     None
                 }
@@ -1991,9 +1939,8 @@ impl World {
 
         // 3. Clone all components from each old entity to corresponding new entity
         let clone_fns: Vec<_> = self
-            .inspector_entries
-            .values()
-            .filter_map(|e| e.clone_fn.map(|clone| (e.has_fn, clone)))
+            .iter_meta()
+            .filter_map(|m| m.clone_fn.map(|clone| (m.has_fn, clone)))
             .collect();
 
         for (&old, &new) in &mapping {
@@ -2005,11 +1952,7 @@ impl World {
         }
 
         // 4. Remap all entity references in new entities
-        let remap_fns: Vec<_> = self
-            .inspector_entries
-            .values()
-            .map(|e| e.remap_entities_fn)
-            .collect();
+        let remap_fns: Vec<_> = self.iter_meta().map(|m| m.remap_entities_fn).collect();
 
         for &new in mapping.values() {
             for &f in &remap_fns {
@@ -2047,11 +1990,7 @@ impl World {
         }
 
         // 2. Collect extract_fns
-        let extract_fns: Vec<_> = self
-            .inspector_entries
-            .values()
-            .filter_map(|e| e.extract_fn)
-            .collect();
+        let extract_fns: Vec<_> = self.iter_meta().filter_map(|m| m.extract_fn).collect();
 
         // 3. For each entity, extract all components into bags
         let entities = old_entities
@@ -2099,11 +2038,8 @@ impl World {
         }
 
         // 2. Collect serialize_fns
-        let serialize_fns: Vec<SerializeComponentFn> = self
-            .inspector_entries
-            .values()
-            .map(|e| e.serialize_fn)
-            .collect();
+        let serialize_fns: Vec<SerializeComponentFn> =
+            self.iter_meta().map(|m| m.serialize_fn).collect();
 
         // 3. Create context (Arc dedup tracked across all entities)
         let mut ctx = crate::serialize::SerializeContext::new(self);
@@ -2156,9 +2092,8 @@ impl World {
 
         // 3. Extract deserialize fns by name (before borrowing self mutably via context)
         let deserialize_fns: HashMap<&str, DeserializeComponentFn> = self
-            .inspector_entries
-            .iter()
-            .map(|(&name, entry)| (name, entry.deserialize_fn))
+            .iter_meta()
+            .map(|m| (m.name, m.deserialize_fn))
             .collect();
 
         // 4. Create context with entity remap and Arc dedup cache

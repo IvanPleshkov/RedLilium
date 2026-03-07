@@ -6,6 +6,75 @@ use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use fixedbitset::FixedBitSet;
 
 use crate::entity::Entity;
+use crate::world::World;
+
+// ---------------------------------------------------------------------------
+// Type-erased function pointer aliases for ComponentMeta
+// ---------------------------------------------------------------------------
+
+/// Type-erased extract: reads a component from the world and returns a boxed bag.
+pub(crate) type ExtractFn = fn(&World, Entity) -> Option<Box<dyn crate::prefab::ComponentBag>>;
+
+/// Type-erased serialize: reads a component from the world and serializes it.
+pub(crate) type SerializeComponentFn =
+    fn(
+        &World,
+        Entity,
+        &mut crate::serialize::SerializeContext<'_>,
+    )
+        -> Result<Option<crate::serialize::SerializedComponent>, crate::serialize::SerializeError>;
+
+/// Type-erased deserialize: deserializes a component and inserts it on an entity.
+pub(crate) type DeserializeComponentFn = fn(
+    Entity,
+    &crate::serialize::Value,
+    &mut crate::serialize::DeserializeContext<'_>,
+) -> Result<(), crate::serialize::DeserializeError>;
+
+/// The return type of an inspector's `inspect_fn`.
+///
+/// `None` means the entity didn't have the component or nothing was edited.
+/// `Some(actions)` contains one or more undoable [`EditAction`]s.
+pub type InspectResult = Option<Vec<Box<dyn redlilium_core::abstract_editor::EditAction<World>>>>;
+
+// ---------------------------------------------------------------------------
+// ComponentMeta — type-erased operations for registered component types
+// ---------------------------------------------------------------------------
+
+/// Type-erased metadata and operations for a registered component type.
+///
+/// Stored inside [`ComponentStorage`] for components registered via
+/// [`World::register_inspector`] or [`World::register_inspector_default`].
+/// Provides capabilities beyond raw storage: inspection, serialization,
+/// cloning, entity reference traversal, and more.
+pub(crate) struct ComponentMeta {
+    /// The short component name (from `Component::NAME`).
+    pub name: &'static str,
+    /// Check if an entity has this component.
+    pub has_fn: fn(&World, Entity) -> bool,
+    /// Render the component's inspector UI with an immutable world reference.
+    pub inspect_fn: fn(&World, Entity, &mut egui::Ui) -> InspectResult,
+    /// Remove this component from an entity. Returns true if removed.
+    pub remove_fn: fn(&mut World, Entity) -> bool,
+    /// Insert a default instance on an entity (None if T doesn't impl Default).
+    pub insert_default_fn: Option<fn(&mut World, Entity)>,
+    /// Collect all entity references from this component on an entity.
+    pub collect_entities_fn: fn(&World, Entity, &mut Vec<Entity>),
+    /// Remap all entity references in this component on an entity.
+    pub remap_entities_fn: fn(&mut World, Entity, &mut dyn FnMut(Entity) -> Entity),
+    /// Clone this component from src entity to dst entity. None if T is not Clone.
+    pub clone_fn: Option<fn(&mut World, Entity, Entity) -> bool>,
+    /// Extract this component into a type-erased bag. None if T is not Clone.
+    pub extract_fn: Option<ExtractFn>,
+    /// Serialize this component on an entity.
+    pub serialize_fn: SerializeComponentFn,
+    /// Deserialize and insert this component on an entity.
+    pub deserialize_fn: DeserializeComponentFn,
+    /// Get the axis-aligned bounding box contributed by this component on an entity.
+    pub aabb_fn: fn(&World, Entity) -> Option<redlilium_core::math::Aabb>,
+    /// Display order in the inspector panel. Lower values appear first.
+    pub display_order: u32,
+}
 
 /// Function signature for component lifecycle hooks.
 ///
@@ -322,6 +391,9 @@ pub(crate) struct ComponentStorage {
     /// added to an entity. Each function checks for presence and inserts a
     /// default if absent.
     pub(crate) required_components: Vec<RequiredComponentFn>,
+    /// Type-erased component metadata (inspection, serialization, cloning, etc.).
+    /// Present only for components registered via `register_inspector` / `register_inspector_default`.
+    pub(crate) meta: Option<ComponentMeta>,
 }
 
 impl ComponentStorage {
@@ -357,7 +429,18 @@ impl ComponentStorage {
             on_replace: None,
             on_remove: None,
             required_components: Vec::new(),
+            meta: None,
         }
+    }
+
+    /// Returns the component meta if registered.
+    pub(crate) fn meta(&self) -> Option<&ComponentMeta> {
+        self.meta.as_ref()
+    }
+
+    /// Returns a mutable reference to the component meta if registered.
+    pub(crate) fn meta_mut(&mut self) -> Option<&mut ComponentMeta> {
+        self.meta.as_mut()
     }
 
     /// Downcasts to the typed sparse set.
