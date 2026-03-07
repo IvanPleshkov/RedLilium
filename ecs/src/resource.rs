@@ -5,6 +5,8 @@ use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+use crate::main_thread_resource::MainThreadResources;
+
 /// Trait that all resources must implement.
 ///
 /// Provides type-erased downcasting via [`Any`]. A blanket implementation
@@ -52,6 +54,7 @@ struct ResourceEntry {
 /// scheduler-level lock is needed.
 pub(crate) struct Resources {
     entries: HashMap<TypeId, ResourceEntry>,
+    main_thread: MainThreadResources,
 }
 
 impl Resources {
@@ -59,6 +62,7 @@ impl Resources {
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
+            main_thread: MainThreadResources::new(),
         }
     }
 
@@ -170,6 +174,55 @@ impl Resources {
             _marker: PhantomData,
             borrowed: Cell::new(false),
         }
+    }
+
+    // ---- Main-thread resource delegation ----
+
+    /// Inserts a main-thread resource.
+    ///
+    /// # Safety
+    ///
+    /// Caller must be on the main thread (or hold `&mut self`).
+    pub unsafe fn insert_main_thread<T: 'static>(&self, value: T) {
+        unsafe { self.main_thread.insert(value) }
+    }
+
+    /// Returns whether a main-thread resource of type `T` exists.
+    ///
+    /// # Safety
+    ///
+    /// Caller must be on the main thread.
+    pub unsafe fn has_main_thread<T: 'static>(&self) -> bool {
+        unsafe { self.main_thread.contains::<T>() }
+    }
+
+    /// Removes a main-thread resource and returns it, or `None` if absent.
+    ///
+    /// # Safety
+    ///
+    /// Caller must be on the main thread (or hold `&mut self`).
+    pub unsafe fn remove_main_thread<T: 'static>(&self) -> Option<T> {
+        unsafe { self.main_thread.remove::<T>() }
+    }
+
+    /// Borrows a main-thread resource immutably.
+    ///
+    /// # Safety
+    ///
+    /// Caller must be on the main thread.
+    pub unsafe fn borrow_main_thread<T: 'static>(&self) -> &T {
+        unsafe { self.main_thread.borrow::<T>() }
+    }
+
+    /// Borrows a main-thread resource mutably.
+    ///
+    /// # Safety
+    ///
+    /// Caller must be on the main thread. No other borrows to this resource
+    /// may be active.
+    #[allow(clippy::mut_from_ref)]
+    pub unsafe fn borrow_main_thread_mut<T: 'static>(&self) -> &mut T {
+        unsafe { self.main_thread.borrow_mut::<T>() }
     }
 }
 

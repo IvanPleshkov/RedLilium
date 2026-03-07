@@ -7,7 +7,6 @@ use crate::commands::CommandBuffer;
 use crate::component::Component;
 use crate::entity::{Entity, EntityAllocator};
 use crate::events::Events;
-use crate::main_thread_resource::MainThreadResources;
 use crate::observer::{Observers, OnAdd, OnInsert, OnRemove};
 use crate::query::{AddedFilter, ChangedFilter, ContainsChecker, RemovedFilter};
 use crate::reactive::Triggers;
@@ -236,7 +235,6 @@ pub struct World {
     entities: EntityAllocator,
     components: HashMap<TypeId, ComponentStorage>,
     resources: Resources,
-    main_thread_resources: MainThreadResources,
     /// Global tick counter for change detection.
     tick: u64,
     /// Inspector metadata for registered component types, keyed by name.
@@ -256,7 +254,6 @@ impl World {
             entities: EntityAllocator::new(),
             components: HashMap::new(),
             resources: Resources::new(),
-            main_thread_resources: MainThreadResources::new(),
             tick: 0,
             inspector_entries: BTreeMap::new(),
             observers: Observers::new(),
@@ -2256,13 +2253,13 @@ impl World {
     /// (during setup on the main thread).
     pub fn insert_main_thread_resource<T: 'static>(&mut self, value: T) {
         // SAFETY: &mut self guarantees exclusive access; setup is on main thread.
-        unsafe { self.main_thread_resources.insert(value) }
+        unsafe { self.resources.insert_main_thread(value) }
     }
 
     /// Returns whether a main-thread resource of type `T` exists.
     pub fn has_main_thread_resource<T: 'static>(&self) -> bool {
         // SAFETY: contains() only reads HashMap keys (TypeId), no data access.
-        unsafe { self.main_thread_resources.contains::<T>() }
+        unsafe { self.resources.has_main_thread::<T>() }
     }
 
     /// Removes a main-thread resource and returns it, or `None` if absent.
@@ -2270,7 +2267,7 @@ impl World {
     /// Takes `&mut self`, so it can only be called outside system execution.
     pub fn remove_main_thread_resource<T: 'static>(&mut self) -> Option<T> {
         // SAFETY: &mut self guarantees exclusive access.
-        unsafe { self.main_thread_resources.remove::<T>() }
+        unsafe { self.resources.remove_main_thread::<T>() }
     }
 
     /// Borrows a main-thread resource immutably.
@@ -2279,7 +2276,7 @@ impl World {
     ///
     /// Caller must be on the main thread.
     pub(crate) unsafe fn main_thread_resource<T: 'static>(&self) -> &T {
-        unsafe { self.main_thread_resources.borrow::<T>() }
+        unsafe { self.resources.borrow_main_thread::<T>() }
     }
 
     /// Borrows a main-thread resource mutably.
@@ -2290,7 +2287,7 @@ impl World {
     /// may be active.
     #[allow(clippy::mut_from_ref)] // SAFETY: caller ensures exclusive main-thread access
     pub(crate) unsafe fn main_thread_resource_mut<T: 'static>(&self) -> &mut T {
-        unsafe { self.main_thread_resources.borrow_mut::<T>() }
+        unsafe { self.resources.borrow_main_thread_mut::<T>() }
     }
 
     // ---- Change detection ----
