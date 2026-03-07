@@ -5,7 +5,7 @@ use crate::access_set::AccessInfo;
 use crate::bundle::Bundle;
 use crate::commands::CommandBuffer;
 use crate::component::Component;
-use crate::entity::{Entity, EntityAllocator};
+use crate::entity::{Entities, Entity};
 use crate::events::Events;
 use crate::observer::{Observers, OnAdd, OnInsert, OnRemove};
 use crate::query::{AddedFilter, ChangedFilter, ContainsChecker, RemovedFilter};
@@ -180,7 +180,7 @@ pub fn set_component_actions<T: Component>(entity: Entity, old: T, new: T) -> In
 /// }
 /// ```
 pub struct World {
-    entities: EntityAllocator,
+    entities: Entities,
     components: HashMap<TypeId, parking_lot::RwLock<ComponentStorage>>,
     resources: Resources,
     /// Global tick counter for change detection.
@@ -199,7 +199,7 @@ impl World {
     /// Creates a new empty world.
     pub fn new() -> Self {
         Self {
-            entities: EntityAllocator::new(),
+            entities: Entities::new(),
             components: HashMap::new(),
             resources: Resources::new(),
             tick: 0,
@@ -1052,26 +1052,26 @@ impl World {
             .get_mut_tracked(entity.index(), tick)
     }
 
-    /// Returns the per-entity flag slice from the entity allocator.
+    /// Returns a reference to the entity store.
     ///
     /// Used by `Ref`/`RefMut` to filter disabled entities during iteration.
-    pub(crate) fn entity_flags(&self) -> &[u32] {
-        &self.entities.flags
+    pub(crate) fn entities(&self) -> &Entities {
+        &self.entities
     }
 
     /// Returns whether the given entity is currently disabled.
     pub fn is_disabled(&self, entity: Entity) -> bool {
-        self.entities.flags[entity.index() as usize] & Entity::DISABLED != 0
+        self.entities.get_flags(entity.index()) & Entity::DISABLED != 0
     }
 
     /// Returns whether the given entity is currently static.
     pub fn is_static(&self, entity: Entity) -> bool {
-        self.entities.flags[entity.index() as usize] & Entity::STATIC != 0
+        self.entities.get_flags(entity.index()) & Entity::STATIC != 0
     }
 
     /// Returns whether the given entity is an editor entity.
     pub fn is_editor(&self, entity: Entity) -> bool {
-        self.entities.flags[entity.index() as usize] & Entity::EDITOR != 0
+        self.entities.get_flags(entity.index()) & Entity::EDITOR != 0
     }
 
     /// Returns the current flags for an entity.
@@ -1126,7 +1126,7 @@ impl World {
             .ok_or(ComponentNotRegistered {
                 type_name: std::any::type_name::<T>(),
             })?;
-        Ok(Ref::new(storage, self.entity_flags()))
+        Ok(Ref::new(storage, self.entities()))
     }
 
     /// Gets shared read access to all components of type T, returning `None`
@@ -1135,7 +1135,7 @@ impl World {
     /// Non-panicking variant of [`read`](World::read). Used by `OptionalRead<T>`.
     pub fn try_read<T: 'static>(&self) -> Option<Ref<'_, T>> {
         let storage = self.components.get(&TypeId::of::<T>())?;
-        Some(Ref::new(storage, self.entity_flags()))
+        Some(Ref::new(storage, self.entities()))
     }
 
     /// Gets exclusive write access to all components of type T.
@@ -1157,7 +1157,7 @@ impl World {
             .ok_or(ComponentNotRegistered {
                 type_name: std::any::type_name::<T>(),
             })?;
-        Ok(RefMut::new(storage, self.entity_flags(), self.tick))
+        Ok(RefMut::new(storage, self.entities(), self.tick))
     }
 
     /// Gets exclusive write access to all components of type T, returning `None`
@@ -1166,7 +1166,7 @@ impl World {
     /// Non-panicking variant of [`write`](World::write). Used by `OptionalWrite<T>`.
     pub fn try_write<T: 'static>(&self) -> Option<RefMut<'_, T>> {
         let storage = self.components.get(&TypeId::of::<T>())?;
-        Some(RefMut::new(storage, self.entity_flags(), self.tick))
+        Some(RefMut::new(storage, self.entities(), self.tick))
     }
 
     // ---- ReadAll access (includes static entities) ----
@@ -1185,7 +1185,7 @@ impl World {
             })?;
         Ok(Ref::new_with_mask(
             storage,
-            self.entity_flags(),
+            self.entities(),
             Entity::DISABLED,
         ))
     }
@@ -1196,7 +1196,7 @@ impl World {
         let storage = self.components.get(&TypeId::of::<T>())?;
         Some(Ref::new_with_mask(
             storage,
-            self.entity_flags(),
+            self.entities(),
             Entity::DISABLED,
         ))
     }
@@ -1217,7 +1217,7 @@ impl World {
             })?;
         Ok(RefMut::new_with_mask(
             storage,
-            self.entity_flags(),
+            self.entities(),
             Entity::DISABLED,
             self.tick,
         ))
@@ -1229,7 +1229,7 @@ impl World {
         let storage = self.components.get(&TypeId::of::<T>())?;
         Some(RefMut::new_with_mask(
             storage,
-            self.entity_flags(),
+            self.entities(),
             Entity::DISABLED,
             self.tick,
         ))
@@ -1248,7 +1248,7 @@ impl World {
                 type_name: std::any::type_name::<T>(),
             })?;
         let storage = unsafe { &*lock.data_ptr() };
-        Ok(Ref::new_unlocked(storage, self.entity_flags()))
+        Ok(Ref::new_unlocked(storage, self.entities()))
     }
 
     /// Gets exclusive write access without acquiring a lock.
@@ -1265,7 +1265,7 @@ impl World {
             })?;
         Ok(RefMut::new_unlocked(
             lock.data_ptr(),
-            self.entity_flags(),
+            self.entities(),
             self.tick,
         ))
     }
@@ -1274,7 +1274,7 @@ impl World {
     pub(crate) fn try_read_unlocked<T: 'static>(&self) -> Option<Ref<'_, T>> {
         let lock = self.components.get(&TypeId::of::<T>())?;
         let storage = unsafe { &*lock.data_ptr() };
-        Some(Ref::new_unlocked(storage, self.entity_flags()))
+        Some(Ref::new_unlocked(storage, self.entities()))
     }
 
     /// Gets optional exclusive write access without acquiring a lock.
@@ -1282,7 +1282,7 @@ impl World {
         let lock = self.components.get(&TypeId::of::<T>())?;
         Some(RefMut::new_unlocked(
             lock.data_ptr(),
-            self.entity_flags(),
+            self.entities(),
             self.tick,
         ))
     }
@@ -1300,7 +1300,7 @@ impl World {
         let storage = unsafe { &*lock.data_ptr() };
         Ok(Ref::new_unlocked_with_mask(
             storage,
-            self.entity_flags(),
+            self.entities(),
             Entity::DISABLED,
         ))
     }
@@ -1318,7 +1318,7 @@ impl World {
             })?;
         Ok(RefMut::new_unlocked_with_mask(
             lock.data_ptr(),
-            self.entity_flags(),
+            self.entities(),
             Entity::DISABLED,
             self.tick,
         ))
@@ -2068,6 +2068,7 @@ impl World {
                 Ok(crate::serialize::SerializedEntity {
                     entity_index: entity.index(),
                     entity_spawn_tick: entity.spawn_tick(),
+                    entity_flags: self.get_entity_flags(entity),
                     components,
                 })
             })
@@ -2109,11 +2110,18 @@ impl World {
             .map(|m| (m.name, m.deserialize_fn))
             .collect();
 
-        // 4. Create context with entity remap and Arc dedup cache
+        // 4. Restore entity flags
+        for (i, se) in prefab.entities.iter().enumerate() {
+            if se.entity_flags != 0 {
+                self.set_entity_flags(new_entities[i], se.entity_flags);
+            }
+        }
+
+        // 5. Create context with entity remap and Arc dedup cache
         let mut ctx = crate::serialize::DeserializeContext::new(self);
         ctx.set_entity_map(entity_map);
 
-        // 5. For each entity, deserialize components
+        // 6. For each entity, deserialize components
         for (i, se) in prefab.entities.iter().enumerate() {
             let entity = new_entities[i];
             for comp in &se.components {

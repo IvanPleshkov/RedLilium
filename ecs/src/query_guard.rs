@@ -4,6 +4,7 @@ use std::ops::{Deref, DerefMut};
 use fixedbitset::FixedBitSet;
 
 use crate::access_set::AccessSet;
+use crate::entity::Entities;
 use crate::resource::{ResourceRef, ResourceRefMut};
 use crate::sparse_set::{LockGuard, Mut, Ref, RefMut, SparseSetInner};
 use crate::system_context::LockTracking;
@@ -173,10 +174,11 @@ pub trait QueryItem {
         None
     }
 
-    /// Returns the per-entity flags slice, if available.
+    /// Returns the entities reference, if available.
     ///
     /// Returns `Some` for component storages, `None` for resources.
-    fn query_flags(&self) -> Option<&[u32]> {
+    #[doc(hidden)]
+    fn query_entities_ref(&self) -> Option<&Entities> {
         None
     }
 
@@ -222,8 +224,8 @@ impl<'w, T: 'static> QueryItem for Ref<'w, T> {
         Some(self.storage().membership())
     }
 
-    fn query_flags(&self) -> Option<&[u32]> {
-        Some(self.entity_flags())
+    fn query_entities_ref(&self) -> Option<&Entities> {
+        Some(self.entities_ref())
     }
 
     fn query_exclude_mask(&self) -> Option<u32> {
@@ -260,8 +262,8 @@ impl<'w, T: 'static> QueryItem for RefMut<'w, T> {
         Some(unsafe { &*self.storage_ptr() }.membership())
     }
 
-    fn query_flags(&self) -> Option<&[u32]> {
-        Some(self.entity_flags())
+    fn query_entities_ref(&self) -> Option<&Entities> {
+        Some(self.entities_ref())
     }
 
     fn query_exclude_mask(&self) -> Option<u32> {
@@ -421,10 +423,10 @@ macro_rules! impl_query_item {
                 // Combine exclude masks from all elements (OR = most restrictive).
                 let mask = 0u32 $(| self.$idx.query_exclude_mask().unwrap_or(0))+;
                 // Filter out excluded entities via flag bits.
-                let flags = None $(.or(self.$idx.query_flags()))+;
-                if let Some(flags) = flags {
+                let entities = None $(.or(self.$idx.query_entities_ref()))+;
+                if let Some(entities) = entities {
                     Some(result.ones().filter(|&i| {
-                        i >= flags.len() || flags[i] & mask == 0
+                        i >= entities.slots_len() || entities.get_flags(i as u32) & mask == 0
                     }).map(|i| i as u32).collect())
                 } else {
                     Some(result.ones().map(|i| i as u32).collect())

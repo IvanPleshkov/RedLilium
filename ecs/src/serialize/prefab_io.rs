@@ -22,6 +22,8 @@ pub struct SerializedEntity {
     pub entity_index: u32,
     /// The original entity spawn tick (for entity remapping during deserialization).
     pub entity_spawn_tick: u64,
+    /// Per-entity flag bits (disabled, static, editor, etc.).
+    pub entity_flags: u32,
     /// All serializable components on this entity.
     pub components: Vec<SerializedComponent>,
 }

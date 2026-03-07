@@ -4,7 +4,7 @@ use std::ops::{Deref, DerefMut};
 
 use fixedbitset::FixedBitSet;
 
-use crate::entity::Entity;
+use crate::entity::{Entities, Entity};
 use crate::world::World;
 
 // ---------------------------------------------------------------------------
@@ -622,7 +622,7 @@ impl ComponentStorage {
 /// `iter_unfiltered`) to include all entities.
 pub struct Ref<'a, T: 'static> {
     inner: *const SparseSetInner<T>,
-    entity_flags: &'a [u32],
+    entities: &'a Entities,
     /// Bitmask of entity flag bits that cause an entity to be excluded
     /// from filtered methods. Default: `DISABLED | STATIC`.
     exclude_mask: u32,
@@ -638,7 +638,7 @@ impl<'a, T: 'static> Ref<'a, T> {
     /// Uses the default exclude mask (`DISABLED | STATIC | EDITOR`).
     pub(crate) fn new(
         lock: &'a parking_lot::RwLock<ComponentStorage>,
-        entity_flags: &'a [u32],
+        entities: &'a Entities,
     ) -> Self {
         let guard = lock.try_read().unwrap_or_else(|| {
             panic!("Cannot borrow component immutably: already borrowed mutably")
@@ -646,7 +646,7 @@ impl<'a, T: 'static> Ref<'a, T> {
         let inner = guard.typed::<T>() as *const SparseSetInner<T>;
         Self {
             inner,
-            entity_flags,
+            entities,
             exclude_mask: Self::DEFAULT_MASK,
             _guard: Some(guard),
         }
@@ -658,7 +658,7 @@ impl<'a, T: 'static> Ref<'a, T> {
     /// entities (mask = `DISABLED`), including static entities in iteration.
     pub(crate) fn new_with_mask(
         lock: &'a parking_lot::RwLock<ComponentStorage>,
-        entity_flags: &'a [u32],
+        entities: &'a Entities,
         exclude_mask: u32,
     ) -> Self {
         let guard = lock.try_read().unwrap_or_else(|| {
@@ -667,7 +667,7 @@ impl<'a, T: 'static> Ref<'a, T> {
         let inner = guard.typed::<T>() as *const SparseSetInner<T>;
         Self {
             inner,
-            entity_flags,
+            entities,
             exclude_mask,
             _guard: Some(guard),
         }
@@ -677,11 +677,11 @@ impl<'a, T: 'static> Ref<'a, T> {
     ///
     /// The caller must ensure the lock is already held externally
     /// (e.g. via `acquire_sorted`). Uses the default exclude mask.
-    pub(crate) fn new_unlocked(storage: &'a ComponentStorage, entity_flags: &'a [u32]) -> Self {
+    pub(crate) fn new_unlocked(storage: &'a ComponentStorage, entities: &'a Entities) -> Self {
         let inner = storage.typed::<T>() as *const SparseSetInner<T>;
         Self {
             inner,
-            entity_flags,
+            entities,
             exclude_mask: Self::DEFAULT_MASK,
             _guard: None,
         }
@@ -690,13 +690,13 @@ impl<'a, T: 'static> Ref<'a, T> {
     /// Creates a shared borrow without acquiring a lock, with a custom exclude mask.
     pub(crate) fn new_unlocked_with_mask(
         storage: &'a ComponentStorage,
-        entity_flags: &'a [u32],
+        entities: &'a Entities,
         exclude_mask: u32,
     ) -> Self {
         let inner = storage.typed::<T>() as *const SparseSetInner<T>;
         Self {
             inner,
-            entity_flags,
+            entities,
             exclude_mask,
             _guard: None,
         }
@@ -721,19 +721,19 @@ impl<'a, T: 'static> Ref<'a, T> {
     /// Returns whether the entity at the given index is excluded by this
     /// reference's exclude mask (disabled, static, or both).
     pub fn is_entity_excluded(&self, entity_index: u32) -> bool {
-        let idx = entity_index as usize;
-        idx < self.entity_flags.len() && self.entity_flags[idx] & self.exclude_mask != 0
+        (entity_index as usize) < self.entities.slots_len()
+            && self.entities.get_flags(entity_index) & self.exclude_mask != 0
     }
 
     /// Returns whether the entity at the given index has the DISABLED flag.
     pub fn is_entity_disabled(&self, entity_index: u32) -> bool {
-        let idx = entity_index as usize;
-        idx < self.entity_flags.len() && self.entity_flags[idx] & Entity::DISABLED != 0
+        (entity_index as usize) < self.entities.slots_len()
+            && self.entities.get_flags(entity_index) & Entity::DISABLED != 0
     }
 
-    /// Returns the entity flags slice reference.
-    pub fn entity_flags(&self) -> &'a [u32] {
-        self.entity_flags
+    /// Returns the entities reference.
+    pub(crate) fn entities_ref(&self) -> &'a Entities {
+        self.entities
     }
 
     /// Returns the exclude mask used by filtered methods.
@@ -828,7 +828,7 @@ unsafe impl<T: Send + Sync + 'static> Sync for Ref<'_, T> {}
 /// Use the `_unfiltered` variants to include all entities.
 pub struct RefMut<'a, T: 'static> {
     inner: *mut SparseSetInner<T>,
-    entity_flags: &'a [u32],
+    entities: &'a Entities,
     /// Bitmask of entity flag bits that cause an entity to be excluded.
     /// Default: `DISABLED | STATIC`.
     exclude_mask: u32,
@@ -847,7 +847,7 @@ impl<'a, T: 'static> RefMut<'a, T> {
     /// Uses the default exclude mask (`DISABLED | STATIC | EDITOR`).
     pub(crate) fn new(
         lock: &'a parking_lot::RwLock<ComponentStorage>,
-        entity_flags: &'a [u32],
+        entities: &'a Entities,
         tick: u64,
     ) -> Self {
         let guard = lock
@@ -858,7 +858,7 @@ impl<'a, T: 'static> RefMut<'a, T> {
         let inner = unsafe { (*lock.data_ptr()).typed_mut::<T>() as *mut SparseSetInner<T> };
         Self {
             inner,
-            entity_flags,
+            entities,
             exclude_mask: Self::DEFAULT_MASK,
             tick,
             _guard: Some(guard),
@@ -872,7 +872,7 @@ impl<'a, T: 'static> RefMut<'a, T> {
     /// entities (mask = `DISABLED`), including static and editor entities.
     pub(crate) fn new_with_mask(
         lock: &'a parking_lot::RwLock<ComponentStorage>,
-        entity_flags: &'a [u32],
+        entities: &'a Entities,
         exclude_mask: u32,
         tick: u64,
     ) -> Self {
@@ -882,7 +882,7 @@ impl<'a, T: 'static> RefMut<'a, T> {
         let inner = unsafe { (*lock.data_ptr()).typed_mut::<T>() as *mut SparseSetInner<T> };
         Self {
             inner,
-            entity_flags,
+            entities,
             exclude_mask,
             tick,
             _guard: Some(guard),
@@ -898,13 +898,13 @@ impl<'a, T: 'static> RefMut<'a, T> {
     /// (e.g. via `acquire_sorted`).
     pub(crate) fn new_unlocked(
         storage_ptr: *mut ComponentStorage,
-        entity_flags: &'a [u32],
+        entities: &'a Entities,
         tick: u64,
     ) -> Self {
         let inner = unsafe { (*storage_ptr).typed_mut::<T>() as *mut SparseSetInner<T> };
         Self {
             inner,
-            entity_flags,
+            entities,
             exclude_mask: Self::DEFAULT_MASK,
             tick,
             _guard: None,
@@ -915,14 +915,14 @@ impl<'a, T: 'static> RefMut<'a, T> {
     /// Creates an exclusive borrow without acquiring a lock, with a custom exclude mask.
     pub(crate) fn new_unlocked_with_mask(
         storage_ptr: *mut ComponentStorage,
-        entity_flags: &'a [u32],
+        entities: &'a Entities,
         exclude_mask: u32,
         tick: u64,
     ) -> Self {
         let inner = unsafe { (*storage_ptr).typed_mut::<T>() as *mut SparseSetInner<T> };
         Self {
             inner,
-            entity_flags,
+            entities,
             exclude_mask,
             tick,
             _guard: None,
@@ -948,19 +948,19 @@ impl<'a, T: 'static> RefMut<'a, T> {
     /// Returns whether the entity at the given index is excluded by this
     /// reference's exclude mask (disabled, static, or both).
     pub fn is_entity_excluded(&self, entity_index: u32) -> bool {
-        let idx = entity_index as usize;
-        idx < self.entity_flags.len() && self.entity_flags[idx] & self.exclude_mask != 0
+        (entity_index as usize) < self.entities.slots_len()
+            && self.entities.get_flags(entity_index) & self.exclude_mask != 0
     }
 
     /// Returns whether the entity at the given index has the DISABLED flag.
     pub fn is_entity_disabled(&self, entity_index: u32) -> bool {
-        let idx = entity_index as usize;
-        idx < self.entity_flags.len() && self.entity_flags[idx] & Entity::DISABLED != 0
+        (entity_index as usize) < self.entities.slots_len()
+            && self.entities.get_flags(entity_index) & Entity::DISABLED != 0
     }
 
-    /// Returns the entity flags slice reference.
-    pub fn entity_flags(&self) -> &'a [u32] {
-        self.entity_flags
+    /// Returns the entities reference.
+    pub(crate) fn entities_ref(&self) -> &'a Entities {
+        self.entities
     }
 
     /// Returns the exclude mask used by filtered methods.
@@ -1003,15 +1003,15 @@ impl<'a, T: 'static> RefMut<'a, T> {
     /// Each yielded [`Mut`] marks the component as changed only when
     /// [`DerefMut`] is invoked.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (u32, Mut<'_, T>)> + '_ {
-        let flags = self.entity_flags;
+        let entities = self.entities;
         let mask = self.exclude_mask;
         let tick = self.tick;
         // SAFETY: write lock guarantees exclusive access.
         unsafe { &mut *self.inner }
             .iter_mut_tracked(tick)
             .filter(move |(idx, _)| {
-                let i = *idx as usize;
-                i >= flags.len() || flags[i] & mask == 0
+                let i = *idx;
+                (i as usize) >= entities.slots_len() || entities.get_flags(i) & mask == 0
             })
     }
 
@@ -1194,21 +1194,21 @@ mod tests {
     #[test]
     fn lock_released_on_drop() {
         let lock = parking_lot::RwLock::new(ComponentStorage::new::<u32>());
-        let flags: &[u32] = &[];
+        let entities = Entities::new();
         {
-            let _guard = Ref::<u32>::new(&lock, flags);
+            let _guard = Ref::<u32>::new(&lock, &entities);
         }
         // After Ref is dropped, exclusive lock should succeed
-        let _guard = RefMut::<u32>::new(&lock, flags, 0);
+        let _guard = RefMut::<u32>::new(&lock, &entities, 0);
     }
 
     #[test]
     fn ref_mut_allows_mutation() {
         let lock = parking_lot::RwLock::new(ComponentStorage::new::<u32>());
         lock.write().typed_mut::<u32>().insert(0, 42);
-        let flags: &[u32] = &[];
+        let entities = Entities::new();
         {
-            let mut guard = RefMut::<u32>::new(&lock, flags, 0);
+            let mut guard = RefMut::<u32>::new(&lock, &entities, 0);
             guard.insert(0, 99);
         }
         assert_eq!(lock.read().typed::<u32>().get(0), Some(&99));

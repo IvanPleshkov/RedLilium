@@ -46,7 +46,7 @@ pub fn show_world_inspector(ui: &mut egui::Ui, world: &World, state: &mut Inspec
             if state.show_editor_entities {
                 // Show editor entities first, separated from scene entities
                 let (editor_roots, scene_roots): (Vec<&Entity>, Vec<&Entity>) =
-                    roots.iter().partition(|e| is_editor_entity(**e));
+                    roots.iter().partition(|e| is_editor_entity(world, **e));
 
                 if !editor_roots.is_empty() {
                     ui.label(
@@ -66,7 +66,7 @@ pub fn show_world_inspector(ui: &mut egui::Ui, world: &World, state: &mut Inspec
                 }
             } else {
                 for entity in &roots {
-                    if !is_editor_entity(*entity) {
+                    if !is_editor_entity(world, *entity) {
                         show_entity_node(ui, world, *entity, state);
                     }
                 }
@@ -126,8 +126,8 @@ pub fn show_world_inspector(ui: &mut egui::Ui, world: &World, state: &mut Inspec
 }
 
 /// Returns `true` if the entity has the EDITOR or INHERITED_EDITOR flag.
-fn is_editor_entity(entity: Entity) -> bool {
-    entity.flags() & (Entity::EDITOR | Entity::INHERITED_EDITOR) != 0
+fn is_editor_entity(world: &World, entity: Entity) -> bool {
+    world.get_entity_flags(entity) & (Entity::EDITOR | Entity::INHERITED_EDITOR) != 0
 }
 
 /// Collect entities that have no Parent component (root entities).
@@ -144,7 +144,7 @@ fn collect_roots(world: &World) -> Vec<Entity> {
 /// Render a single entity node in the tree (recursive for children).
 fn show_entity_node(ui: &mut egui::Ui, world: &World, entity: Entity, state: &mut InspectorState) {
     // Skip editor entities when the toggle is off
-    if !state.show_editor_entities && is_editor_entity(entity) {
+    if !state.show_editor_entities && is_editor_entity(world, entity) {
         return;
     }
 
