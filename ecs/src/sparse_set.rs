@@ -363,9 +363,6 @@ pub(crate) trait ErasedSparseSet: Send + Sync {
     /// Checks if the component was added since (strictly after) `since_tick`.
     fn added_since(&self, entity_index: u32, since_tick: u64) -> bool;
 
-    /// Returns the membership bitset.
-    fn membership(&self) -> &FixedBitSet;
-
     /// Downcast to `&dyn Any` for typed access.
     fn as_any(&self) -> &dyn Any;
 
@@ -392,10 +389,6 @@ impl<T: Send + Sync + 'static> ErasedSparseSet for SparseSetInner<T> {
 
     fn added_since(&self, entity_index: u32, since_tick: u64) -> bool {
         SparseSetInner::added_since(self, entity_index, since_tick)
-    }
-
-    fn membership(&self) -> &FixedBitSet {
-        SparseSetInner::membership(self)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -532,12 +525,6 @@ impl ComponentStorage {
     /// Returns true if this component has any required components registered.
     pub fn has_required_components(&self) -> bool {
         !self.required_components.is_empty()
-    }
-
-    /// Returns the membership bitset for this component storage (type-erased).
-    #[allow(dead_code)]
-    pub fn membership(&self) -> &FixedBitSet {
-        self.inner.membership()
     }
 
     /// Checks if the entity has this component (type-erased).
@@ -1313,16 +1300,5 @@ mod tests {
         assert!(set.membership().contains(0));
         assert!(!set.membership().contains(1));
         assert!(set.membership().contains(2));
-    }
-
-    #[test]
-    fn storage_membership_type_erased() {
-        let mut storage = ComponentStorage::new::<u32>();
-        storage.typed_mut::<u32>().insert(3, 42);
-        storage.typed_mut::<u32>().insert(7, 99);
-        let bits = storage.membership();
-        assert!(bits.contains(3));
-        assert!(bits.contains(7));
-        assert!(!bits.contains(0));
     }
 }
