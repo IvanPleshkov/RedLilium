@@ -12,7 +12,7 @@ use crate::query::{AddedFilter, ChangedFilter, ContainsChecker, RemovedFilter};
 use crate::reactive::Triggers;
 use crate::resource::{Resource, ResourceRef, ResourceRefMut, Resources};
 use crate::sparse_set::{
-    ComponentHookFn, ComponentMeta, ComponentStorage, DeserializeComponentFn, LockGuard, Ref,
+    ComponentHookFn, ComponentMeta, ComponentStorage, DeserializeComponentFn, LockGuard, Mut, Ref,
     RefMut, SerializeComponentFn,
 };
 use std::sync::{Arc, RwLock};
@@ -331,7 +331,7 @@ impl World {
                 }
             },
             remap_entities_fn: |world, entity, map| {
-                if let Some(comp) = world.get_mut::<T>(entity) {
+                if let Some(mut comp) = world.get_mut::<T>(entity) {
                     comp.remap_entities(map);
                 }
             },
@@ -385,7 +385,7 @@ impl World {
                 }
             },
             remap_entities_fn: |world, entity, map| {
-                if let Some(comp) = world.get_mut::<T>(entity) {
+                if let Some(mut comp) = world.get_mut::<T>(entity) {
                     comp.remap_entities(map);
                 }
             },
@@ -1076,10 +1076,15 @@ impl World {
         storage.typed::<T>().get(entity.index())
     }
 
-    /// Returns a mutable reference to a component on an entity.
-    pub fn get_mut<T: 'static>(&mut self, entity: Entity) -> Option<&mut T> {
+    /// Returns a [`Mut`] wrapper for a component on an entity.
+    ///
+    /// The component is marked as changed only when [`DerefMut`] is invoked.
+    pub fn get_mut<T: 'static>(&mut self, entity: Entity) -> Option<Mut<'_, T>> {
+        let tick = self.tick;
         let storage = self.components.get_mut(&TypeId::of::<T>())?;
-        storage.typed_mut::<T>().get_mut(entity.index())
+        storage
+            .typed_mut::<T>()
+            .get_mut_tracked(entity.index(), tick)
     }
 
     /// Returns the per-entity flag slice from the entity allocator.
@@ -1187,7 +1192,7 @@ impl World {
             .ok_or(ComponentNotRegistered {
                 type_name: std::any::type_name::<T>(),
             })?;
-        Ok(RefMut::new(storage, self.entity_flags()))
+        Ok(RefMut::new(storage, self.entity_flags(), self.tick))
     }
 
     /// Gets exclusive write access to all components of type T, returning `None`
@@ -1196,7 +1201,7 @@ impl World {
     /// Non-panicking variant of [`write`](World::write). Used by `OptionalWrite<T>`.
     pub fn try_write<T: 'static>(&self) -> Option<RefMut<'_, T>> {
         let storage = self.components.get(&TypeId::of::<T>())?;
-        Some(RefMut::new(storage, self.entity_flags()))
+        Some(RefMut::new(storage, self.entity_flags(), self.tick))
     }
 
     // ---- ReadAll access (includes static entities) ----
@@ -1249,6 +1254,7 @@ impl World {
             storage,
             self.entity_flags(),
             Entity::DISABLED,
+            self.tick,
         ))
     }
 
@@ -1260,6 +1266,7 @@ impl World {
             storage,
             self.entity_flags(),
             Entity::DISABLED,
+            self.tick,
         ))
     }
 
@@ -1290,7 +1297,11 @@ impl World {
             .ok_or(ComponentNotRegistered {
                 type_name: std::any::type_name::<T>(),
             })?;
-        Ok(RefMut::new_unlocked(storage, self.entity_flags()))
+        Ok(RefMut::new_unlocked(
+            storage,
+            self.entity_flags(),
+            self.tick,
+        ))
     }
 
     /// Gets optional shared read access without acquiring a lock.
@@ -1302,7 +1313,11 @@ impl World {
     /// Gets optional exclusive write access without acquiring a lock.
     pub(crate) fn try_write_unlocked<T: 'static>(&self) -> Option<RefMut<'_, T>> {
         let storage = self.components.get(&TypeId::of::<T>())?;
-        Some(RefMut::new_unlocked(storage, self.entity_flags()))
+        Some(RefMut::new_unlocked(
+            storage,
+            self.entity_flags(),
+            self.tick,
+        ))
     }
 
     /// Gets shared read access including static entities, without acquiring a lock.
@@ -1337,6 +1352,7 @@ impl World {
             storage,
             self.entity_flags(),
             Entity::DISABLED,
+            self.tick,
         ))
     }
 
@@ -2466,7 +2482,7 @@ mod tests {
 
         {
             let mut positions = world.write::<Position>().unwrap();
-            for (_, pos) in positions.iter_mut() {
+            for (_, mut pos) in positions.iter_mut() {
                 pos.x += 10.0;
             }
         }

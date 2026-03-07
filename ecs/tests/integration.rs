@@ -279,7 +279,7 @@ fn multiple_frame_simulation() {
         // "Move" the entity each frame
         {
             let mut transforms = world.write::<Transform>().unwrap();
-            let t = transforms.get_mut(entity.index()).unwrap();
+            let mut t = transforms.get_mut(entity.index()).unwrap();
             t.translation = Vec3::new(frame as f32, 0.0, 0.0);
         }
 

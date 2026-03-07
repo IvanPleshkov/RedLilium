@@ -2,7 +2,8 @@ use std::any::TypeId;
 use std::marker::PhantomData;
 
 use crate::query::{
-    AddedFilter, AnyFilter, ContainsChecker, Filter, OrFilter, RemovedFilter, With, Without,
+    AddedFilter, AnyFilter, ChangedFilter, ContainsChecker, Filter, OrFilter, RemovedFilter, With,
+    Without,
 };
 use crate::resource::{ResourceRef, ResourceRefMut};
 use crate::sparse_set::{Ref, RefMut};
@@ -222,6 +223,25 @@ pub struct MaybeAdded<T: 'static>(PhantomData<T>);
 /// In the execute closure, yields [`RemovedFilter`](crate::RemovedFilter).
 /// If `T` has never been registered, the filter matches nothing (no panic).
 pub struct MaybeRemoved<T: 'static>(PhantomData<T>);
+
+/// Filter for entities whose component `T` was changed this tick.
+///
+/// In the execute closure, yields [`ChangedFilter`](crate::ChangedFilter).
+/// Use `filter.matches(entity_index)` to check individual entities.
+///
+/// A component is marked as changed when it is mutated through [`Mut<T>`](crate::Mut).
+///
+/// # Panics
+///
+/// Panics if `T` has never been registered. Use [`MaybeChanged`] for
+/// a non-panicking variant.
+pub struct Changed<T: 'static>(PhantomData<T>);
+
+/// Optional filter for entities whose component `T` was changed this tick.
+///
+/// In the execute closure, yields [`ChangedFilter`](crate::ChangedFilter).
+/// If `T` has never been registered, the filter matches nothing (no panic).
+pub struct MaybeChanged<T: 'static>(PhantomData<T>);
 
 /// Logical OR of two filter access elements.
 ///
@@ -562,6 +582,51 @@ impl<T: 'static> AccessElement for MaybeAdded<T> {
     }
 }
 
+impl<T: 'static> AccessElement for Changed<T> {
+    type Item<'w> = ChangedFilter<'w>;
+
+    fn access_info() -> AccessInfo {
+        AccessInfo {
+            type_id: TypeId::of::<Changed<T>>(),
+            is_write: false,
+        }
+    }
+
+    fn fetch(world: &World) -> Self::Item<'_> {
+        assert!(
+            world.is_component_registered::<T>(),
+            "Component `{}` not registered for Changed<T> filter",
+            std::any::type_name::<T>()
+        );
+        let since_tick = world.current_tick().saturating_sub(1);
+        world.changed::<T>(since_tick)
+    }
+
+    fn fetch_unlocked(world: &World) -> Self::Item<'_> {
+        Self::fetch(world)
+    }
+}
+
+impl<T: 'static> AccessElement for MaybeChanged<T> {
+    type Item<'w> = ChangedFilter<'w>;
+
+    fn access_info() -> AccessInfo {
+        AccessInfo {
+            type_id: TypeId::of::<MaybeChanged<T>>(),
+            is_write: false,
+        }
+    }
+
+    fn fetch(world: &World) -> Self::Item<'_> {
+        let since_tick = world.current_tick().saturating_sub(1);
+        world.changed::<T>(since_tick)
+    }
+
+    fn fetch_unlocked(world: &World) -> Self::Item<'_> {
+        Self::fetch(world)
+    }
+}
+
 impl<T: 'static> AccessElement for MaybeRemoved<T> {
     type Item<'w> = RemovedFilter<'w>;
 
@@ -802,7 +867,7 @@ mod tests {
         world.insert(e, Position { x: 0.0 }).unwrap();
 
         let (mut positions,) = <(Write<Position>,)>::fetch(&world);
-        for (_, pos) in positions.iter_mut() {
+        for (_, mut pos) in positions.iter_mut() {
             pos.x = 99.0;
         }
         drop(positions);

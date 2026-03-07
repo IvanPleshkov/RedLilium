@@ -27,7 +27,7 @@ impl crate::System for UpdateCameraMatrices {
 fn update_camera_matrices(globals: &Ref<GlobalTransform>, cameras: &mut RefMut<Camera>) {
     redlilium_core::profile_scope!("update_camera_matrices");
 
-    for (idx, camera) in cameras.iter_mut() {
+    for (idx, mut camera) in cameras.iter_mut() {
         if let Some(global) = globals.get(idx) {
             camera.view_matrix = global
                 .0

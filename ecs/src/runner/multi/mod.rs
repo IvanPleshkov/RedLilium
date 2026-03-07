@@ -584,7 +584,7 @@ mod tests {
         fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), crate::system::SystemError> {
             ctx.lock::<(Write<Position>, Read<Velocity>)>().execute(
                 |(mut positions, velocities)| {
-                    for (idx, pos) in positions.iter_mut() {
+                    for (idx, mut pos) in positions.iter_mut() {
                         if let Some(vel) = velocities.get(idx) {
                             pos.x += vel.x;
                         }

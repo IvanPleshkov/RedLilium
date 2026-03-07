@@ -446,6 +446,7 @@ mod tests {
     use crate::access_set::{Read, Write};
     use crate::compute::ComputePool;
     use crate::io_runtime::IoRuntime;
+    use crate::sparse_set::Mut;
     use crate::system::run_system_blocking;
     use crate::world::World;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -497,7 +498,7 @@ mod tests {
         world.insert(e, Position { x: 0.0 }).unwrap();
 
         fn set_positions((mut positions,): (crate::RefMut<Position>,)) {
-            for (_, pos) in positions.iter_mut() {
+            for (_, mut pos) in positions.iter_mut() {
                 pos.x = 99.0;
             }
         }
@@ -519,7 +520,7 @@ mod tests {
         world.insert(e, Velocity { x: 5.0 }).unwrap();
 
         fn movement((mut positions, velocities): (crate::RefMut<Position>, crate::Ref<Velocity>)) {
-            for (idx, pos) in positions.iter_mut() {
+            for (idx, mut pos) in positions.iter_mut() {
                 if let Some(vel) = velocities.get(idx) {
                     pos.x += vel.x;
                 }
@@ -591,7 +592,7 @@ mod tests {
 
         let sys = IntoSystem::<(Write<Position>,)>::into_system(
             |(mut positions,): (crate::RefMut<Position>,)| {
-                for (_, pos) in positions.iter_mut() {
+                for (_, mut pos) in positions.iter_mut() {
                     pos.x = 77.0;
                 }
             },
@@ -615,7 +616,7 @@ mod tests {
     #[test]
     fn add_fn_raw_with_access() {
         fn gravity((mut velocities,): (crate::RefMut<Velocity>,)) {
-            for (_, vel) in velocities.iter_mut() {
+            for (_, mut vel) in velocities.iter_mut() {
                 vel.x -= 9.81;
             }
         }
@@ -660,7 +661,7 @@ mod tests {
         let e = world.spawn();
         world.insert(e, Position { x: 10.0 }).unwrap();
 
-        let sys = for_each::<(Write<Position>,), _>(|(pos,): (&mut Position,)| {
+        let sys = for_each::<(Write<Position>,), _>(|(mut pos,): (Mut<Position>,)| {
             pos.x = 99.0;
         });
 
@@ -684,7 +685,7 @@ mod tests {
         let e2 = world.spawn();
         world.insert(e2, Position { x: 20.0 }).unwrap();
 
-        fn movement((pos, vel): (&mut Position, &Velocity)) {
+        fn movement((mut pos, vel): (Mut<Position>, &Velocity)) {
             pos.x += vel.x;
         }
 
@@ -709,7 +710,7 @@ mod tests {
         world.insert(e, Velocity { x: 3.0 }).unwrap();
 
         let sys = for_each::<(Write<Position>, Read<Velocity>, crate::access_set::Res<f32>), _>(
-            |(pos, vel, factor): (&mut Position, &Velocity, &f32)| {
+            |(mut pos, vel, factor): (Mut<Position>, &Velocity, &f32)| {
                 pos.x += vel.x * *factor;
             },
         );
@@ -751,7 +752,7 @@ mod tests {
         let e = world.spawn();
         world.insert(e, Position { x: 0.0 }).unwrap();
 
-        let sys = for_each::<(Write<Position>,), _>(|(pos,): (&mut Position,)| {
+        let sys = for_each::<(Write<Position>,), _>(|(mut pos,): (Mut<Position>,)| {
             pos.x = 77.0;
         });
 
@@ -768,7 +769,7 @@ mod tests {
         let e = world.spawn();
         world.insert(e, Position { x: 0.0 }).unwrap();
 
-        fn set_pos((pos,): (&mut Position,)) {
+        fn set_pos((mut pos,): (Mut<Position>,)) {
             pos.x = 42.0;
         }
 
@@ -781,7 +782,7 @@ mod tests {
 
     #[test]
     fn for_each_in_container() {
-        fn movement((pos, vel): (&mut Position, &Velocity)) {
+        fn movement((mut pos, vel): (Mut<Position>, &Velocity)) {
             pos.x += vel.x;
         }
 
@@ -802,7 +803,7 @@ mod tests {
             world.insert(e, Position { x: 0.0 }).unwrap();
         }
 
-        let sys = par_for_each::<(Write<Position>,), _>(|(pos,): (&mut Position,)| {
+        let sys = par_for_each::<(Write<Position>,), _>(|(mut pos,): (Mut<Position>,)| {
             pos.x = 42.0;
         });
 
@@ -832,7 +833,7 @@ mod tests {
             world.insert(e, Position { x: -1.0 }).unwrap();
         }
 
-        fn movement((pos, vel): (&mut Position, &Velocity)) {
+        fn movement((mut pos, vel): (Mut<Position>, &Velocity)) {
             pos.x += vel.x;
         }
 
@@ -858,7 +859,7 @@ mod tests {
         let e = world.spawn();
         world.insert(e, Position { x: 0.0 }).unwrap();
 
-        fn set_pos((pos,): (&mut Position,)) {
+        fn set_pos((mut pos,): (Mut<Position>,)) {
             pos.x = 99.0;
         }
 

@@ -43,7 +43,7 @@ pub fn set_parent(world: &mut World, entity: Entity, parent: Entity) {
             return; // Already parented correctly
         }
         // Remove entity from old parent's children
-        if let Some(children) = world.get_mut::<Children>(old_parent) {
+        if let Some(mut children) = world.get_mut::<Children>(old_parent) {
             children.0.retain(|&e| e != entity);
         }
     }
@@ -54,7 +54,7 @@ pub fn set_parent(world: &mut World, entity: Entity, parent: Entity) {
         .expect("Parent not registered");
 
     // Add to new parent's Children
-    if let Some(children) = world.get_mut::<Children>(parent) {
+    if let Some(mut children) = world.get_mut::<Children>(parent) {
         if !children.0.contains(&entity) {
             children.0.push(entity);
         }
@@ -76,7 +76,7 @@ pub fn remove_parent(world: &mut World, entity: Entity) {
     };
 
     // Remove from parent's children
-    if let Some(children) = world.get_mut::<Children>(parent.0) {
+    if let Some(mut children) = world.get_mut::<Children>(parent.0) {
         children.0.retain(|&e| e != entity);
     }
 }
@@ -88,7 +88,7 @@ pub fn remove_parent(world: &mut World, entity: Entity) {
 pub fn despawn_recursive(world: &mut World, entity: Entity) {
     // Remove from parent first
     if let Some(parent) = world.remove::<Parent>(entity)
-        && let Some(children) = world.get_mut::<Children>(parent.0)
+        && let Some(mut children) = world.get_mut::<Children>(parent.0)
     {
         children.0.retain(|&e| e != entity);
     }

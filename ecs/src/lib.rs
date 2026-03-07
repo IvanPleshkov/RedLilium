@@ -113,15 +113,16 @@ pub use redlilium_core::compute::{
     set_yield_interval, yield_now,
 };
 pub use resource::{Resource, ResourceRef, ResourceRefMut};
-pub use sparse_set::{Ref, RefMut, SparseSetInner};
+pub use sparse_set::{Mut, Ref, RefMut, SparseSetInner};
 pub use world::{ComponentNotRegistered, InspectResult, World, set_component_actions};
 
 pub use compute_context::EcsComputeContext;
 
 // System & scheduling (new API)
 pub use access_set::{
-    AccessSet, Added, Any, MainThreadRes, MainThreadResMut, MaybeAdded, MaybeRemoved, OptionalRead,
-    OptionalWrite, Or, Read, ReadAll, Removed, Res, ResMut, Write, WriteAll,
+    AccessSet, Added, Any, Changed, MainThreadRes, MainThreadResMut, MaybeAdded, MaybeChanged,
+    MaybeRemoved, OptionalRead, OptionalWrite, Or, Read, ReadAll, Removed, Res, ResMut, Write,
+    WriteAll,
 };
 pub use bundle::Bundle;
 pub use command_collector::{CommandCollector, SpawnBuilder};

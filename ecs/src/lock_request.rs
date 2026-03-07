@@ -181,6 +181,7 @@ mod tests {
     use crate::command_collector::CommandCollector;
     use crate::compute::ComputePool;
     use crate::io_runtime::IoRuntime;
+    use crate::sparse_set::Mut;
     use crate::system_context::SystemContext;
     use crate::world::World;
 
@@ -223,7 +224,7 @@ mod tests {
 
         let request = ctx.lock::<(Write<Position>,)>();
         request.execute(|(mut positions,)| {
-            for (_, pos) in positions.iter_mut() {
+            for (_, mut pos) in positions.iter_mut() {
                 pos.x = 99.0;
             }
         });
@@ -247,7 +248,7 @@ mod tests {
 
         let request = ctx.lock::<(Write<Position>, Read<Velocity>)>();
         request.execute(|(mut positions, velocities)| {
-            for (idx, pos) in positions.iter_mut() {
+            for (idx, mut pos) in positions.iter_mut() {
                 if let Some(vel) = velocities.get(idx) {
                     pos.x += vel.x;
                 }
@@ -290,7 +291,7 @@ mod tests {
         let ctx = SystemContext::new(&world, &compute, &io, &commands);
 
         ctx.lock::<(Write<Position>,)>()
-            .par_for_each(|(pos,): (&mut Position,)| {
+            .par_for_each(|(mut pos,): (Mut<Position>,)| {
                 pos.x = 42.0;
             });
 
@@ -317,7 +318,7 @@ mod tests {
         let ctx = SystemContext::new(&world, &compute, &io, &commands);
 
         ctx.lock::<(Write<Position>, Read<Velocity>)>()
-            .par_for_each(|(pos, vel): (&mut Position, &Velocity)| {
+            .par_for_each(|(mut pos, vel): (Mut<Position>, &Velocity)| {
                 pos.x += vel.x;
             });
 

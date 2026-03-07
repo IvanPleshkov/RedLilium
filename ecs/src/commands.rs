@@ -369,7 +369,7 @@ mod tests {
         let buffer = CommandBuffer::new();
         buffer.insert(entity, Health(100));
         buffer.push(move |world| {
-            let h = world.get_mut::<Health>(entity).unwrap();
+            let mut h = world.get_mut::<Health>(entity).unwrap();
             h.0 += 50;
         });
 

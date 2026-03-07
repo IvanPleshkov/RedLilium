@@ -9,6 +9,77 @@ use crate::entity::Entity;
 use crate::world::World;
 
 // ---------------------------------------------------------------------------
+// Mut<T> — change-detecting mutable reference
+// ---------------------------------------------------------------------------
+
+/// A mutable reference to a component that automatically marks it as changed
+/// when [`DerefMut`] is invoked.
+///
+/// Reading through [`Deref`] does **not** mark the component as changed.
+/// This is the ECS equivalent of Bevy's `Mut<T>`.
+pub struct Mut<'a, T: 'static> {
+    value: &'a mut T,
+    ticks_changed: &'a mut u64,
+    tick: u64,
+}
+
+impl<'a, T: 'static> Mut<'a, T> {
+    /// Creates a new change-detecting mutable reference.
+    pub(crate) fn new(value: &'a mut T, ticks_changed: &'a mut u64, tick: u64) -> Self {
+        Self {
+            value,
+            ticks_changed,
+            tick,
+        }
+    }
+
+    /// Creates a `Mut<T>` from raw pointers.
+    ///
+    /// # Safety
+    ///
+    /// - Both pointers must be valid, aligned, and dereferenceable.
+    /// - The caller must have exclusive access to both pointees.
+    /// - The pointers must not alias any other live references.
+    pub(crate) unsafe fn from_raw(value_ptr: *mut T, tick_ptr: *mut u64, tick: u64) -> Mut<'a, T> {
+        unsafe {
+            Mut {
+                value: &mut *value_ptr,
+                ticks_changed: &mut *tick_ptr,
+                tick,
+            }
+        }
+    }
+
+    /// Returns a mutable reference **without** marking the component as changed.
+    ///
+    /// Use this when you need to write to a component but intentionally do not
+    /// want to trigger change detection (e.g., resetting a dirty flag).
+    pub fn bypass_change_detection(&mut self) -> &mut T {
+        self.value
+    }
+
+    /// Manually marks this component as changed at the current tick.
+    pub fn set_changed(&mut self) {
+        *self.ticks_changed = self.tick;
+    }
+}
+
+impl<T: 'static> Deref for Mut<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        self.value
+    }
+}
+
+impl<T: 'static> DerefMut for Mut<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        *self.ticks_changed = self.tick;
+        self.value
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Type-erased function pointer aliases for ComponentMeta
 // ---------------------------------------------------------------------------
 
@@ -274,42 +345,50 @@ impl<T: 'static> SparseSetInner<T> {
         &self.membership
     }
 
-    /// Returns a mutable pointer to the component for the given entity index.
+    /// Returns mutable pointers to both the component value and its
+    /// `ticks_changed` slot for the given entity index.
     ///
     /// # Safety
     ///
-    /// - `this` must be a valid, properly aligned pointer to an initialized
-    ///   `SparseSetInner<T>`.
-    /// - The caller must have exclusive access to the storage (e.g., write lock held).
-    /// - The caller must ensure no other mutable reference to the same dense
-    ///   slot exists.
-    pub(crate) unsafe fn get_ptr_mut(this: *mut Self, entity_index: u32) -> Option<*mut T> {
-        // SAFETY: caller guarantees `this` is valid and exclusively accessed.
+    /// Same requirements as [`get_ptr_mut`](SparseSetInner::get_ptr_mut).
+    pub(crate) unsafe fn get_ptr_mut_with_tick(
+        this: *mut Self,
+        entity_index: u32,
+    ) -> Option<(*mut T, *mut u64)> {
         unsafe {
             let set = &mut *this;
             let idx = entity_index as usize;
             let dense_idx = *set.sparse.get(idx)?.as_ref()? as usize;
-            Some(set.dense.as_mut_ptr().add(dense_idx))
+            Some((
+                set.dense.as_mut_ptr().add(dense_idx),
+                set.ticks_changed.as_mut_ptr().add(dense_idx),
+            ))
         }
     }
 
-    // ---- Change detection ----
-
-    /// Returns a mutable reference and marks the component as changed at `tick`.
-    pub fn get_mut_tracked(&mut self, entity_index: u32, tick: u64) -> Option<&mut T> {
+    /// Returns a [`Mut`] wrapper for the component at `entity_index`.
+    ///
+    /// The component is marked as changed only when [`DerefMut`] is invoked
+    /// on the returned `Mut<T>`.
+    pub fn get_mut_tracked(&mut self, entity_index: u32, tick: u64) -> Option<Mut<'_, T>> {
         let idx = entity_index as usize;
         let dense_idx = *self.sparse.get(idx)?.as_ref()? as usize;
-        self.ticks_changed[dense_idx] = tick;
-        Some(&mut self.dense[dense_idx])
+        Some(Mut::new(
+            &mut self.dense[dense_idx],
+            &mut self.ticks_changed[dense_idx],
+            tick,
+        ))
     }
 
-    /// Iterates with mutation, marking all accessed components as changed at `tick`.
-    pub fn iter_mut_tracked(&mut self, tick: u64) -> impl Iterator<Item = (u32, &mut T)> {
-        // Mark all as changed
-        for tc in self.ticks_changed.iter_mut() {
-            *tc = tick;
-        }
-        self.entities.iter().copied().zip(self.dense.iter_mut())
+    /// Iterates yielding [`Mut`] wrappers that mark components as changed
+    /// only when [`DerefMut`] is invoked.
+    pub fn iter_mut_tracked(&mut self, tick: u64) -> impl Iterator<Item = (u32, Mut<'_, T>)> + '_ {
+        self.entities.iter().copied().zip(
+            self.dense
+                .iter_mut()
+                .zip(self.ticks_changed.iter_mut())
+                .map(move |(val, tc)| Mut::new(val, tc, tick)),
+        )
     }
 
     /// Returns true if the component was changed since (strictly after) `since_tick`.
@@ -762,6 +841,8 @@ pub struct RefMut<'a, T: 'static> {
     /// Bitmask of entity flag bits that cause an entity to be excluded.
     /// Default: `DISABLED | STATIC`.
     exclude_mask: u32,
+    /// Current world tick, stamped into `ticks_changed` via [`Mut`].
+    tick: u64,
     _guard: Option<RwLockWriteGuard<'a, ()>>,
     _marker: PhantomData<&'a mut SparseSetInner<T>>,
 }
@@ -773,7 +854,7 @@ impl<'a, T: 'static> RefMut<'a, T> {
     /// Creates a new exclusive borrow guard, acquiring the storage's write lock.
     ///
     /// Uses the default exclude mask (`DISABLED | STATIC | EDITOR`).
-    pub(crate) fn new(storage: &'a ComponentStorage, entity_flags: &'a [u32]) -> Self {
+    pub(crate) fn new(storage: &'a ComponentStorage, entity_flags: &'a [u32], tick: u64) -> Self {
         let guard = storage.lock_write();
         // SAFETY: lock_write() guarantees exclusive access. We cast away
         // the shared reference to get a mutable pointer, which is safe because
@@ -783,6 +864,7 @@ impl<'a, T: 'static> RefMut<'a, T> {
             inner,
             entity_flags,
             exclude_mask: Self::DEFAULT_MASK,
+            tick,
             _guard: Some(guard),
             _marker: PhantomData,
         }
@@ -796,6 +878,7 @@ impl<'a, T: 'static> RefMut<'a, T> {
         storage: &'a ComponentStorage,
         entity_flags: &'a [u32],
         exclude_mask: u32,
+        tick: u64,
     ) -> Self {
         let guard = storage.lock_write();
         let inner = storage.typed::<T>() as *const SparseSetInner<T> as *mut SparseSetInner<T>;
@@ -803,6 +886,7 @@ impl<'a, T: 'static> RefMut<'a, T> {
             inner,
             entity_flags,
             exclude_mask,
+            tick,
             _guard: Some(guard),
             _marker: PhantomData,
         }
@@ -812,12 +896,17 @@ impl<'a, T: 'static> RefMut<'a, T> {
     ///
     /// The caller must ensure the write lock is already held externally
     /// (e.g. via `acquire_sorted`). Uses the default exclude mask.
-    pub(crate) fn new_unlocked(storage: &'a ComponentStorage, entity_flags: &'a [u32]) -> Self {
+    pub(crate) fn new_unlocked(
+        storage: &'a ComponentStorage,
+        entity_flags: &'a [u32],
+        tick: u64,
+    ) -> Self {
         let inner = storage.typed::<T>() as *const SparseSetInner<T> as *mut SparseSetInner<T>;
         Self {
             inner,
             entity_flags,
             exclude_mask: Self::DEFAULT_MASK,
+            tick,
             _guard: None,
             _marker: PhantomData,
         }
@@ -828,12 +917,14 @@ impl<'a, T: 'static> RefMut<'a, T> {
         storage: &'a ComponentStorage,
         entity_flags: &'a [u32],
         exclude_mask: u32,
+        tick: u64,
     ) -> Self {
         let inner = storage.typed::<T>() as *const SparseSetInner<T> as *mut SparseSetInner<T>;
         Self {
             inner,
             entity_flags,
             exclude_mask,
+            tick,
             _guard: None,
             _marker: PhantomData,
         }
@@ -845,6 +936,11 @@ impl<'a, T: 'static> RefMut<'a, T> {
     /// requiring `&mut self`, enabling per-entity mutable access in iterators.
     pub(crate) fn storage_ptr(&self) -> *mut SparseSetInner<T> {
         self.inner
+    }
+
+    /// Returns the tick stored in this guard (for [`QueryItem`](crate::QueryItem)).
+    pub(crate) fn query_tick(&self) -> u64 {
+        self.tick
     }
 
     // ---- Filtered methods (shadow Deref'd SparseSetInner methods) ----
@@ -882,24 +978,16 @@ impl<'a, T: 'static> RefMut<'a, T> {
         unsafe { &*self.inner }.get(entity_index)
     }
 
-    /// Returns a mutable reference to the component for the given entity index.
+    /// Returns a [`Mut`] wrapper for the component at the given entity index.
+    ///
+    /// The component is marked as changed only when [`DerefMut`] is invoked.
     /// Returns `None` if the entity is excluded or does not have this component.
-    pub fn get_mut(&mut self, entity_index: u32) -> Option<&mut T> {
+    pub fn get_mut(&mut self, entity_index: u32) -> Option<Mut<'_, T>> {
         if self.is_entity_excluded(entity_index) {
             return None;
         }
         // SAFETY: write lock guarantees exclusive access.
-        unsafe { &mut *self.inner }.get_mut(entity_index)
-    }
-
-    /// Returns a mutable reference and marks the component as changed at `tick`.
-    /// Returns `None` if the entity is excluded or does not have this component.
-    pub fn get_mut_tracked(&mut self, entity_index: u32, tick: u64) -> Option<&mut T> {
-        if self.is_entity_excluded(entity_index) {
-            return None;
-        }
-        // SAFETY: write lock guarantees exclusive access.
-        unsafe { &mut *self.inner }.get_mut_tracked(entity_index, tick)
+        unsafe { &mut *self.inner }.get_mut_tracked(entity_index, self.tick)
     }
 
     /// Iterates over `(entity_index, &component)` pairs, skipping excluded entities.
@@ -910,24 +998,14 @@ impl<'a, T: 'static> RefMut<'a, T> {
             .filter(|(idx, _)| !self.is_entity_excluded(*idx))
     }
 
-    /// Iterates over `(entity_index, &mut component)` pairs, skipping excluded entities.
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (u32, &mut T)> + '_ {
+    /// Iterates over `(entity_index, Mut<T>)` pairs, skipping excluded entities.
+    ///
+    /// Each yielded [`Mut`] marks the component as changed only when
+    /// [`DerefMut`] is invoked.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (u32, Mut<'_, T>)> + '_ {
         let flags = self.entity_flags;
         let mask = self.exclude_mask;
-        // SAFETY: write lock guarantees exclusive access.
-        unsafe { &mut *self.inner }
-            .iter_mut()
-            .filter(move |(idx, _)| {
-                let i = *idx as usize;
-                i >= flags.len() || flags[i] & mask == 0
-            })
-    }
-
-    /// Iterates with mutation, marking all accessed components as changed at `tick`.
-    /// Skips excluded entities.
-    pub fn iter_mut_tracked(&mut self, tick: u64) -> impl Iterator<Item = (u32, &mut T)> + '_ {
-        let flags = self.entity_flags;
-        let mask = self.exclude_mask;
+        let tick = self.tick;
         // SAFETY: write lock guarantees exclusive access.
         unsafe { &mut *self.inner }
             .iter_mut_tracked(tick)
@@ -961,9 +1039,9 @@ impl<'a, T: 'static> RefMut<'a, T> {
         unsafe { &*self.inner }.get(entity_index)
     }
 
-    /// Returns a mutable reference to the component, ignoring disabled status.
-    pub fn get_mut_unfiltered(&mut self, entity_index: u32) -> Option<&mut T> {
-        unsafe { &mut *self.inner }.get_mut(entity_index)
+    /// Returns a [`Mut`] wrapper for the component, ignoring disabled status.
+    pub fn get_mut_unfiltered(&mut self, entity_index: u32) -> Option<Mut<'_, T>> {
+        unsafe { &mut *self.inner }.get_mut_tracked(entity_index, self.tick)
     }
 
     /// Iterates over all `(entity_index, &component)` pairs, including disabled entities.
@@ -971,9 +1049,10 @@ impl<'a, T: 'static> RefMut<'a, T> {
         unsafe { &*self.inner }.iter()
     }
 
-    /// Iterates mutably over all `(entity_index, &mut component)` pairs, including disabled entities.
-    pub fn iter_mut_unfiltered(&mut self) -> impl Iterator<Item = (u32, &mut T)> + '_ {
-        unsafe { &mut *self.inner }.iter_mut()
+    /// Iterates over all `(entity_index, Mut<T>)` pairs, including disabled entities.
+    pub fn iter_mut_unfiltered(&mut self) -> impl Iterator<Item = (u32, Mut<'_, T>)> + '_ {
+        let tick = self.tick;
+        unsafe { &mut *self.inner }.iter_mut_tracked(tick)
     }
 
     /// Returns whether the entity has this component, ignoring disabled status.
@@ -1116,7 +1195,7 @@ mod tests {
             let _guard = Ref::<u32>::new(&storage, flags);
         }
         // After Ref is dropped, exclusive lock should succeed
-        let _guard = RefMut::<u32>::new(&storage, flags);
+        let _guard = RefMut::<u32>::new(&storage, flags, 0);
     }
 
     #[test]
@@ -1125,7 +1204,7 @@ mod tests {
         storage.typed_mut::<u32>().insert(0, 42);
         let flags: &[u32] = &[];
         {
-            let mut guard = RefMut::<u32>::new(&storage, flags);
+            let mut guard = RefMut::<u32>::new(&storage, flags, 0);
             guard.insert(0, 99);
         }
         assert_eq!(storage.typed::<u32>().get(0), Some(&99));
@@ -1194,7 +1273,7 @@ mod tests {
         set.insert_with_tick(1, 20, 2);
         set.insert_with_tick(2, 30, 3);
 
-        for (_, val) in set.iter_mut_tracked(50) {
+        for (_, mut val) in set.iter_mut_tracked(50) {
             *val += 1;
         }
 

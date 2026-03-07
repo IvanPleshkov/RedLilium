@@ -396,7 +396,7 @@ impl Editor {
     fn update_camera_projection(&self, aspect: f32) {
         let ew = self.active_world();
         if let Ok(mut cameras) = ew.world.write_all::<Camera>()
-            && let Some(cam) = cameras.get_mut(ew.editor_camera.index())
+            && let Some(mut cam) = cameras.get_mut(ew.editor_camera.index())
         {
             cam.projection_matrix =
                 redlilium_core::math::perspective_rh(FRAC_PI_4, aspect, 0.1, 500.0);

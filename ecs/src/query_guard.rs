@@ -5,7 +5,7 @@ use fixedbitset::FixedBitSet;
 
 use crate::access_set::AccessSet;
 use crate::resource::{ResourceRef, ResourceRefMut};
-use crate::sparse_set::{LockGuard, Ref, RefMut, SparseSetInner};
+use crate::sparse_set::{LockGuard, Mut, Ref, RefMut, SparseSetInner};
 use crate::system_context::LockTracking;
 
 /// A guard holding component/resource locks and their fetched data.
@@ -232,7 +232,7 @@ impl<'w, T: 'static> QueryItem for Ref<'w, T> {
 }
 
 impl<'w, T: 'static> QueryItem for RefMut<'w, T> {
-    type Item = &'w mut T;
+    type Item = Mut<'w, T>;
 
     fn query_count(&self) -> usize {
         self.len()
@@ -242,14 +242,17 @@ impl<'w, T: 'static> QueryItem for RefMut<'w, T> {
         self.entities()
     }
 
-    unsafe fn query_get(&self, entity_index: u32) -> Option<&'w mut T> {
+    unsafe fn query_get(&self, entity_index: u32) -> Option<Mut<'w, T>> {
         if self.is_entity_excluded(entity_index) {
             return None;
         }
         // SAFETY: write lock is held (via QueryGuard._guards), and the caller
         // (QueryIter) visits each entity_index at most once, so no aliasing
         // mutable references are created.
-        unsafe { SparseSetInner::get_ptr_mut(self.storage_ptr(), entity_index).map(|p| &mut *p) }
+        unsafe {
+            SparseSetInner::get_ptr_mut_with_tick(self.storage_ptr(), entity_index)
+                .map(|(val_ptr, tick_ptr)| Mut::from_raw(val_ptr, tick_ptr, self.query_tick()))
+        }
     }
 
     fn query_membership(&self) -> Option<&FixedBitSet> {
@@ -576,7 +579,7 @@ mod tests {
         {
             let mut q = query::<(Write<Position>,)>(&world);
             let (positions,) = &mut q.items;
-            for (_, pos) in positions.iter_mut() {
+            for (_, mut pos) in positions.iter_mut() {
                 pos.x = 99.0;
             }
         }
@@ -596,7 +599,7 @@ mod tests {
         {
             let mut q = query::<(Write<Position>, Read<Velocity>)>(&world);
             let (positions, velocities) = &mut q.items;
-            for (idx, pos) in positions.iter_mut() {
+            for (idx, mut pos) in positions.iter_mut() {
                 if let Some(vel) = velocities.get(idx) {
                     pos.x += vel.x;
                 }
@@ -618,7 +621,7 @@ mod tests {
             let mut q = query::<(Write<Position>, Res<f32>)>(&world);
             let (positions, factor) = &mut q.items;
             let f = **factor;
-            for (_, pos) in positions.iter_mut() {
+            for (_, mut pos) in positions.iter_mut() {
                 pos.x *= f;
             }
         }
@@ -643,7 +646,7 @@ mod tests {
         {
             let mut q = query::<(Write<Position>,)>(&world);
             let (positions,) = &mut q.items;
-            for (_, pos) in positions.iter_mut() {
+            for (_, mut pos) in positions.iter_mut() {
                 pos.x = 42.0;
             }
         }
@@ -692,7 +695,7 @@ mod tests {
 
         {
             let q = query::<(Write<Position>,)>(&world);
-            for (_, (pos,)) in q {
+            for (_, (mut pos,)) in q {
                 pos.x = 99.0;
             }
         }
@@ -718,7 +721,7 @@ mod tests {
         {
             let q = query::<(Write<Position>, Read<Velocity>)>(&world);
             let mut count = 0;
-            for (_, (pos, vel)) in q {
+            for (_, (mut pos, vel)) in q {
                 pos.x += vel.x;
                 count += 1;
             }
@@ -798,7 +801,7 @@ mod tests {
 
         {
             let q = query::<(Write<Position>, Write<Velocity>)>(&world);
-            for (_, (pos, vel)) in q {
+            for (_, (mut pos, mut vel)) in q {
                 pos.x += 100.0;
                 vel.x += 100.0;
             }
@@ -826,7 +829,7 @@ mod tests {
 
         {
             let q = query::<(Write<Position>, Read<Velocity>, Res<f32>)>(&world);
-            for (_, (pos, vel, factor)) in q {
+            for (_, (mut pos, vel, factor)) in q {
                 pos.x += vel.x * *factor;
             }
         }
@@ -846,7 +849,7 @@ mod tests {
         let mut iter = QueryIter::from(q);
 
         // Partially consume the iterator
-        let (_, (pos,)) = iter.next().unwrap();
+        let (_, (mut pos,)) = iter.next().unwrap();
         pos.x = 42.0;
 
         // Recover the guard — locks still held
@@ -953,7 +956,7 @@ mod tests {
 
         {
             let q = query::<(Write<Position>, Read<Velocity>)>(&world);
-            for (_, (pos, vel)) in q {
+            for (_, (mut pos, vel)) in q {
                 pos.x += vel.x;
             }
         }
@@ -982,7 +985,7 @@ mod tests {
             let iter = QueryIter::from(q);
             // 2 component bitsets (Position + Velocity), so intersection is used
             assert!(iter.intersected.is_some());
-            for (_, (pos, vel, factor)) in iter {
+            for (_, (mut pos, vel, factor)) in iter {
                 pos.x += vel.x * *factor;
             }
         }
@@ -1004,7 +1007,7 @@ mod tests {
 
         {
             let q = query::<(Write<Position>,)>(&world);
-            q.par_for_each(|_entity, (pos,)| {
+            q.par_for_each(|_entity, (mut pos,)| {
                 pos.x += 1.0;
             });
         }
@@ -1044,7 +1047,7 @@ mod tests {
 
         {
             let q = query::<(Write<Position>, Read<Velocity>)>(&world);
-            q.par_for_each(|_entity, (pos, vel)| {
+            q.par_for_each(|_entity, (mut pos, vel)| {
                 pos.x += vel.x;
             });
         }
@@ -1068,7 +1071,7 @@ mod tests {
 
         {
             let q = query::<(Write<Position>, Res<f32>)>(&world);
-            q.par_for_each(|_entity, (pos, factor)| {
+            q.par_for_each(|_entity, (mut pos, factor)| {
                 pos.x *= *factor;
             });
         }

@@ -127,7 +127,7 @@ impl EcsScene {
         let camera_matrix = view_matrix.try_inverse().unwrap();
         let (_, rotation, translation) = to_scale_rotation_translation(&camera_matrix);
 
-        if let Some(transform) = self.world.get_mut::<Transform>(self.camera_entity) {
+        if let Some(mut transform) = self.world.get_mut::<Transform>(self.camera_entity) {
             transform.translation = translation;
             transform.rotation = rotation;
         }
@@ -135,7 +135,7 @@ impl EcsScene {
 
     /// Updates the camera's projection matrix (e.g., on resize).
     pub fn update_camera_projection(&mut self, aspect_ratio: f32) {
-        if let Some(camera) = self.world.get_mut::<Camera>(self.camera_entity) {
+        if let Some(mut camera) = self.world.get_mut::<Camera>(self.camera_entity) {
             camera.projection_matrix = perspective_rh(PI / 4.0, aspect_ratio, 0.1, 100.0);
         }
     }
@@ -200,7 +200,7 @@ impl EcsScene {
             .write::<GlobalTransform>()
             .expect("GlobalTransform not registered");
 
-        for (i, (idx, sphere)) in spheres.iter_mut().enumerate() {
+        for (i, (idx, mut sphere)) in spheres.iter_mut().enumerate() {
             sphere.base_color = base_color;
 
             let row = i / GRID_SIZE;
@@ -208,10 +208,10 @@ impl EcsScene {
             let x = col as f32 * spacing - offset;
             let z = row as f32 * spacing - offset;
 
-            if let Some(transform) = transforms.get_mut(idx) {
+            if let Some(mut transform) = transforms.get_mut(idx) {
                 transform.translation = Vec3::new(x, 0.0, z);
             }
-            if let Some(global) = globals.get_mut(idx) {
+            if let Some(mut global) = globals.get_mut(idx) {
                 global.0 = mat4_from_translation(Vec3::new(x, 0.0, z));
             }
         }

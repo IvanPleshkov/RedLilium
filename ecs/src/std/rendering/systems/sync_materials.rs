@@ -22,7 +22,7 @@ impl crate::System for SyncMaterialUniforms {
         ctx.lock::<(crate::Write<RenderMaterial>, crate::Res<MaterialManager>)>()
             .execute(|(mut materials, mat_manager)| {
                 let device = mat_manager.device();
-                for (_idx, mat) in materials.iter_mut() {
+                for (_idx, mut mat) in materials.iter_mut() {
                     if !mat.is_dirty() {
                         continue;
                     }

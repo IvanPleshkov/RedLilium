@@ -36,7 +36,7 @@ impl crate::System for UpdateFreeFlyCamera {
                 return;
             }
 
-            for (idx, cam) in cameras.iter_mut() {
+            for (idx, mut cam) in cameras.iter_mut() {
                 let dragging = input.mouse_right;
 
                 if dragging {
@@ -97,11 +97,12 @@ impl crate::System for UpdateFreeFlyCamera {
 
                 // Zoom on scroll
                 if input.scroll_delta[1].abs() > f32::EPSILON {
-                    cam.zoom(input.scroll_delta[1] * cam.zoom_sensitivity);
+                    let zoom_amount = input.scroll_delta[1] * cam.zoom_sensitivity;
+                    cam.zoom(zoom_amount);
                 }
 
                 // Update transform from camera parameters
-                if let Some(t) = transforms.get_mut(idx) {
+                if let Some(mut t) = transforms.get_mut(idx) {
                     *t = cam.to_transform();
                 }
             }

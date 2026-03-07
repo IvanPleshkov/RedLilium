@@ -43,7 +43,7 @@ fn update_global_transforms(
     for (idx, transform) in transforms.iter() {
         if parents.get(idx).is_none() {
             let local_matrix = transform.to_matrix();
-            if let Some(gt) = globals.get_mut(idx) {
+            if let Some(mut gt) = globals.get_mut(idx) {
                 gt.0 = local_matrix;
             }
             // Recursively propagate to children
@@ -70,7 +70,7 @@ fn propagate_children(
         } else {
             parent_world
         };
-        if let Some(gt) = globals.get_mut(child_idx) {
+        if let Some(mut gt) = globals.get_mut(child_idx) {
             gt.0 = child_world;
         }
         propagate_children(

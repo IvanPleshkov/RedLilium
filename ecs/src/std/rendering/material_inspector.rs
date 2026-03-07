@@ -286,7 +286,7 @@ impl SetMaterialValuesAction {
         if needs_rebuild {
             self.rebuild_and_set(world, values)
         } else {
-            let mat = world
+            let mut mat = world
                 .get_mut::<RenderMaterial>(self.entity)
                 .ok_or_else(|| {
                     EditActionError::TargetNotFound("entity has no RenderMaterial".into())
@@ -316,7 +316,7 @@ impl SetMaterialValuesAction {
                 .map_err(|e| EditActionError::Custom(format!("material rebuild failed: {e}")))?
         };
 
-        let mat = world
+        let mut mat = world
             .get_mut::<RenderMaterial>(self.entity)
             .ok_or_else(|| {
                 EditActionError::TargetNotFound("entity has no RenderMaterial".into())

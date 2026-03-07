@@ -36,7 +36,7 @@ impl crate::System for StepPhysics2D {
             for (idx, handle) in handles.iter() {
                 if let Some(body) = physics.bodies.get(handle.0)
                     && (body.is_dynamic() || body.is_kinematic())
-                    && let Some(transform) = transforms.get_mut(idx)
+                    && let Some(mut transform) = transforms.get_mut(idx)
                 {
                     let pos = body.position();
                     let t = pos.translation;
