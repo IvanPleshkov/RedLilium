@@ -1,8 +1,10 @@
-/// Debug draw shader source (Slang).
-///
-/// Simple unlit line shader: transforms position by a view-projection matrix
-/// and passes through vertex color.
-pub const DEBUG_DRAW_SHADER_SOURCE: &str = r#"
+// Debug draw shader — simple unlit line/triangle shader.
+//
+// Transforms position by a view-projection matrix and passes through vertex color.
+// Used by the debug drawer for rendering lines, wireframes, and debug overlays.
+//
+// Binding group 0: Debug uniforms (VP matrix).
+
 [[vk::binding(0, 0)]]
 cbuffer DebugUniforms {
     column_major float4x4 view_proj;
@@ -30,4 +32,3 @@ VsOutput vs_main(VsInput input) {
 float4 fs_main(VsOutput input) : SV_Target {
     return input.color;
 }
-"#;

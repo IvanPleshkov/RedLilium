@@ -36,7 +36,6 @@
 mod draw_api;
 mod drawer;
 mod renderer;
-mod shader;
 mod vertex;
 
 pub use drawer::{DebugDrawer, DebugDrawerContext};

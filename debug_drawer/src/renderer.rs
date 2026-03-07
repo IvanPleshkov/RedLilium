@@ -16,8 +16,10 @@ use redlilium_graphics::types::{BufferDescriptor, BufferUsage, TextureFormat};
 
 use redlilium_graphics::materials::{BlendState, Material};
 
-use crate::shader::DEBUG_DRAW_SHADER_SOURCE;
 use crate::vertex::{DebugUniforms, DebugVertex};
+
+/// Debug draw shader source (Slang).
+const SHADER_SOURCE: &str = include_str!("../../shaders/standard/debug_draw.slang");
 
 /// Default initial capacity for the vertex buffer (number of vertices).
 const DEFAULT_VERTEX_CAPACITY: u32 = 4096;
@@ -72,13 +74,13 @@ impl DebugDrawerRenderer {
         let mut material_desc = MaterialDescriptor::new()
             .with_shader(ShaderSource::slang(
                 ShaderStage::Vertex,
-                DEBUG_DRAW_SHADER_SOURCE.as_bytes().to_vec(),
+                SHADER_SOURCE.as_bytes().to_vec(),
                 "vs_main",
                 vec![],
             ))
             .with_shader(ShaderSource::slang(
                 ShaderStage::Fragment,
-                DEBUG_DRAW_SHADER_SOURCE.as_bytes().to_vec(),
+                SHADER_SOURCE.as_bytes().to_vec(),
                 "fs_main",
                 vec![],
             ))
