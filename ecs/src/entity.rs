@@ -255,7 +255,6 @@ impl Entities {
 
     /// Returns the alive entity at the given index, or `None` if the slot is
     /// empty or has been recycled.
-    #[allow(dead_code)]
     pub fn entity_at_index(&self, index: u32) -> Option<Entity> {
         let idx = index as usize;
         if idx < self.ticks.len() && self.ticks[idx] != Self::DEAD_TICK {

@@ -215,19 +215,6 @@ impl World {
     ///
     /// # Safety
     ///
-    /// Safe when called from `&mut self` methods (exclusive access via borrow
-    /// checker) or during system execution where structural changes don't occur.
-    /// Filters use this to read containment data (sparse array) while write
-    /// locks may be held on the same storage — safe because filters only read
-    /// the sparse array while writers only modify the dense array (separate
-    /// `Vec` allocations).
-    #[allow(dead_code)]
-    unsafe fn storage_ref(&self, type_id: &TypeId) -> Option<&ComponentStorage> {
-        self.components
-            .get(type_id)
-            .map(|lock| unsafe { &*lock.data_ptr() })
-    }
-
     /// Returns a mutable reference to the component storage.
     ///
     /// Uses `RwLock::get_mut()` which bypasses locking via the borrow checker
@@ -276,7 +263,7 @@ impl World {
         let observer_triggers: Vec<TypeId> = self
             .components
             .iter()
-            .filter(|(_, lock)| unsafe { &*lock.data_ptr() }.contains_untyped(index))
+            .filter(|(_, lock)| lock.read().contains_untyped(index))
             .filter_map(|(type_id, _)| self.observers.remove_trigger_key(type_id))
             .collect();
 
@@ -1694,7 +1681,7 @@ impl World {
         self.components
             .values()
             .filter_map(|lock| {
-                let storage = unsafe { &*lock.data_ptr() };
+                let storage = lock.read();
                 if storage.contains_untyped(entity.index()) {
                     Some(storage.type_name())
                 } else {
