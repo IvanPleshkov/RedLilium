@@ -321,7 +321,11 @@ impl World {
             was_new: !had_component,
             on_add: if !had_component { on_add } else { None },
             on_insert,
-            required: if !had_component { required } else { SmallVec::new() },
+            required: if !had_component {
+                required
+            } else {
+                SmallVec::new()
+            },
             add_trigger_fn: if !had_component {
                 Some(push_add_trigger::<T>)
             } else {
