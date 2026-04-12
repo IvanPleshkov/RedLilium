@@ -469,12 +469,13 @@ pub fn derive_bundle(input: TokenStream) -> TokenStream {
             let fname = f.ident.as_ref().unwrap();
             let is_bundle = f.attrs.iter().any(|a| a.path().is_ident("bundle"));
             if is_bundle {
+                // Nested bundle: collect its raw inserts into deferred vec
                 quote! {
                     redlilium_ecs::Bundle::insert_into(#fname, world, entity)?;
                 }
             } else {
                 quote! {
-                    world.insert(entity, #fname)?;
+                    __pending.push(world.insert_raw(entity, #fname)?);
                 }
             }
         })
@@ -486,9 +487,11 @@ pub fn derive_bundle(input: TokenStream) -> TokenStream {
                 self,
                 world: &mut redlilium_ecs::World,
                 entity: redlilium_ecs::Entity,
-            ) -> Result<(), redlilium_ecs::ComponentNotRegistered> {
+            ) -> Result<(), redlilium_ecs::WorldError> {
                 let Self { #(#field_names,)* } = self;
+                let mut __pending = Vec::new();
                 #(#insert_stmts)*
+                world.apply_pending(entity, &__pending);
                 Ok(())
             }
         }

@@ -1584,3 +1584,45 @@ fn extract_prefab_dead_root_returns_empty() {
     let prefab = world.extract_prefab(root);
     assert!(prefab.is_empty());
 }
+
+// --- Bundle hook ordering tests ---
+
+#[test]
+fn bundle_hooks_see_all_components() {
+    // When inserting (A, B) as a bundle, A's on_add hook should see B.
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.register_component::<Health>();
+    world.register_component::<Marker>();
+
+    world.set_on_add::<Position>(|world, entity| {
+        // Health should already be present because the bundle inserts both
+        // before firing any hooks.
+        let has_health = world.get::<Health>(entity).is_some();
+        let _ = world.insert(entity, Marker(has_health as u32));
+    });
+
+    let entity = world.spawn();
+    world
+        .insert_bundle(entity, (Position { x: 1.0, y: 2.0 }, Health(100)))
+        .unwrap();
+
+    // Marker(1) means the hook saw Health present
+    assert_eq!(world.get::<Marker>(entity), Some(&Marker(1)));
+}
+
+#[test]
+fn bundle_required_not_overwritten_by_default() {
+    // If bundle contains (A, B) and A requires B, the bundle's B should win
+    // over the default B inserted by the required-component machinery.
+    let mut world = World::new();
+    world.register_component::<ReqA>();
+    world.register_component::<ReqB>();
+    world.register_required::<ReqA, ReqB>();
+
+    let entity = world.spawn();
+    world.insert_bundle(entity, (ReqA(1), ReqB(42))).unwrap();
+
+    // ReqB should be 42 (from bundle), not 0 (from required default)
+    assert_eq!(world.get::<ReqB>(entity), Some(&ReqB(42)));
+}

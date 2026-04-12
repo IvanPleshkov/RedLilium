@@ -26,14 +26,14 @@ use crate::world::World;
 pub trait Bundle: Send + 'static {
     /// Inserts all components in this bundle onto `entity`.
     ///
+    /// All components are written to storage first, then required components
+    /// are applied, then hooks fire — so hooks see the complete entity.
+    ///
     /// # Errors
     ///
     /// Returns an error if any component type has not been registered.
-    fn insert_into(
-        self,
-        world: &mut World,
-        entity: Entity,
-    ) -> Result<(), crate::world::ComponentNotRegistered>;
+    fn insert_into(self, world: &mut World, entity: Entity)
+    -> Result<(), crate::world::WorldError>;
 }
 
 macro_rules! impl_bundle {
@@ -43,10 +43,11 @@ macro_rules! impl_bundle {
                 self,
                 world: &mut World,
                 entity: Entity,
-            ) -> Result<(), crate::world::ComponentNotRegistered> {
+            ) -> Result<(), crate::world::WorldError> {
                 #[allow(non_snake_case)]
                 let ($($T,)+) = self;
-                $(world.insert(entity, $T)?;)+
+                let pending = vec![$(world.insert_raw(entity, $T)?),+];
+                world.apply_pending(entity, &pending);
                 Ok(())
             }
         }

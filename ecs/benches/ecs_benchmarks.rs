@@ -134,7 +134,7 @@ fn bench_remove_component_1k(c: &mut Criterion) {
             },
             |(mut world, entities)| {
                 for e in &entities {
-                    black_box(world.remove::<Position>(*e));
+                    let _ = black_box(world.remove::<Position>(*e));
                 }
             },
             BatchSize::SmallInput,
@@ -235,6 +235,7 @@ fn bench_sparse_set_insert_10k(c: &mut Criterion) {
                             y: 0.0,
                             z: 0.0,
                         },
+                        0,
                     );
                 }
             },
@@ -253,6 +254,7 @@ fn bench_sparse_set_get_10k(c: &mut Criterion) {
                 y: 0.0,
                 z: 0.0,
             },
+            0,
         );
     }
 
@@ -279,6 +281,7 @@ fn bench_sparse_set_iterate_10k(c: &mut Criterion) {
                 y: 0.0,
                 z: 0.0,
             },
+            0,
         );
     }
 
@@ -306,6 +309,7 @@ fn bench_sparse_set_remove_half(c: &mut Criterion) {
                             y: 0.0,
                             z: 0.0,
                         },
+                        0,
                     );
                 }
                 set

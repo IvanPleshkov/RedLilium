@@ -136,12 +136,12 @@ impl crate::ExclusiveSystem for SyncPhysicsBodies3D {
 
             for entity in &stale_joints {
                 if world.is_alive(*entity) {
-                    world.remove::<ImpulseJoint3DHandle>(*entity);
+                    let _ = world.remove::<ImpulseJoint3DHandle>(*entity);
                 }
             }
             for entity in &stale {
                 if world.is_alive(*entity) {
-                    world.remove::<RigidBody3DHandle>(*entity);
+                    let _ = world.remove::<RigidBody3DHandle>(*entity);
                 }
             }
         }
@@ -241,7 +241,7 @@ impl crate::ExclusiveSystem for SyncPhysicsJoints3D {
             }
             for entity in &stale {
                 if world.is_alive(*entity) {
-                    world.remove::<ImpulseJoint3DHandle>(*entity);
+                    let _ = world.remove::<ImpulseJoint3DHandle>(*entity);
                 }
             }
         }
@@ -355,7 +355,7 @@ impl crate::System for SyncPhysicsBodiesSystem3D {
                 // Remove handle components for stale entities
                 for entity in stale_entities {
                     if world.is_alive(entity) {
-                        world.remove::<RigidBody3DHandle>(entity);
+                        let _ = world.remove::<RigidBody3DHandle>(entity);
                     }
                 }
                 // Insert handles and update mapping for new bodies
@@ -438,7 +438,7 @@ impl crate::System for SyncPhysicsJointsSystem3D {
             ctx.commands(move |world| {
                 for entity in stale_entities {
                     if world.is_alive(entity) {
-                        world.remove::<ImpulseJoint3DHandle>(entity);
+                        let _ = world.remove::<ImpulseJoint3DHandle>(entity);
                     }
                 }
                 for (idx, handle) in new_indices {
@@ -488,7 +488,7 @@ mod tests {
         }
 
         // Now remove the descriptor
-        world.remove::<super::super::components3d::RigidBody3D>(e);
+        let _ = world.remove::<super::super::components3d::RigidBody3D>(e);
 
         // Run sync again
         run_exclusive_system_once(&mut SyncPhysicsBodies3D, &mut world).unwrap();

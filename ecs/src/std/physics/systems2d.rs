@@ -127,12 +127,12 @@ impl crate::ExclusiveSystem for SyncPhysicsBodies2D {
 
             for entity in &stale_joints {
                 if world.is_alive(*entity) {
-                    world.remove::<ImpulseJoint2DHandle>(*entity);
+                    let _ = world.remove::<ImpulseJoint2DHandle>(*entity);
                 }
             }
             for entity in &stale {
                 if world.is_alive(*entity) {
-                    world.remove::<RigidBody2DHandle>(*entity);
+                    let _ = world.remove::<RigidBody2DHandle>(*entity);
                 }
             }
         }
@@ -232,7 +232,7 @@ impl crate::ExclusiveSystem for SyncPhysicsJoints2D {
             }
             for entity in &stale {
                 if world.is_alive(*entity) {
-                    world.remove::<ImpulseJoint2DHandle>(*entity);
+                    let _ = world.remove::<ImpulseJoint2DHandle>(*entity);
                 }
             }
         }
@@ -348,7 +348,7 @@ impl crate::System for SyncPhysicsBodiesSystem2D {
             ctx.commands(move |world| {
                 for entity in stale_entities {
                     if world.is_alive(entity) {
-                        world.remove::<RigidBody2DHandle>(entity);
+                        let _ = world.remove::<RigidBody2DHandle>(entity);
                     }
                 }
                 for (idx, handle) in new_indices {
@@ -430,7 +430,7 @@ impl crate::System for SyncPhysicsJointsSystem2D {
             ctx.commands(move |world| {
                 for entity in stale_entities {
                     if world.is_alive(entity) {
-                        world.remove::<ImpulseJoint2DHandle>(entity);
+                        let _ = world.remove::<ImpulseJoint2DHandle>(entity);
                     }
                 }
                 for (idx, handle) in new_indices {
@@ -480,7 +480,7 @@ mod tests {
         }
 
         // Now remove the descriptor
-        world.remove::<crate::std::physics::components2d::RigidBody2D>(e);
+        let _ = world.remove::<crate::std::physics::components2d::RigidBody2D>(e);
 
         // Run sync again
         run_exclusive_system_once(&mut SyncPhysicsBodies2D, &mut world).unwrap();

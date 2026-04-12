@@ -4,9 +4,38 @@ use crate::bundle::Bundle;
 use crate::component::Component;
 use crate::entity::{Entities, Entity};
 use crate::observer::{OnAdd, OnInsert, OnRemove};
-use crate::sparse_set::{ComponentMeta, ComponentStorage, Mut};
+use crate::sparse_set::{
+    ComponentHookFn, ComponentMeta, ComponentStorage, Mut, RequiredComponentFn,
+};
 
 use super::{World, WorldError, deserialize_component_fn, serialize_component_fn};
+
+/// Pending work from a raw component insertion.
+///
+/// Returned by [`World::insert_raw`] and consumed by [`World::apply_pending`].
+/// Separates the storage write from hook/observer/required-component processing
+/// so that bundles can insert all components first, then fire hooks when the
+/// entity is fully constructed.
+pub(crate) struct InsertPending {
+    pub was_new: bool,
+    pub on_add: Option<ComponentHookFn>,
+    pub on_insert: Option<ComponentHookFn>,
+    pub required: Vec<RequiredComponentFn>,
+    /// Monomorphized function to queue `OnAdd<T>` observer trigger.
+    pub add_trigger_fn: Option<fn(&mut World, Entity)>,
+    /// Monomorphized function to queue `OnInsert<T>` observer trigger.
+    pub insert_trigger_fn: fn(&mut World, Entity),
+}
+
+/// Helper: monomorphized trigger-push for `OnAdd<T>`.
+fn push_add_trigger<T: 'static>(world: &mut World, entity: Entity) {
+    world.observers.push_typed_trigger::<OnAdd<T>>(entity);
+}
+
+/// Helper: monomorphized trigger-push for `OnInsert<T>`.
+fn push_insert_trigger<T: 'static>(world: &mut World, entity: Entity) {
+    world.observers.push_typed_trigger::<OnInsert<T>>(entity);
+}
 
 impl World {
     // ---- Component management (structural changes, require &mut self) ----
@@ -217,6 +246,17 @@ impl World {
     /// # Panics
     ///
     /// Panics if the entity is not alive.
+    /// Inserts a component on an entity.
+    ///
+    /// If the entity already has this component, the value is replaced.
+    /// Records the current world tick for change detection — the component
+    /// will be visible to [`Changed<T>`](crate::Changed) filters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorldError::EntityNotAlive`] if the entity is dead.
+    /// Returns [`WorldError::ComponentNotRegistered`] if `T` has never been registered
+    /// via [`register_component`](World::register_component).
     pub fn insert<T: Send + Sync + 'static>(
         &mut self,
         entity: Entity,
@@ -225,10 +265,25 @@ impl World {
         if !self.entities.is_alive(entity) {
             return Err(WorldError::EntityNotAlive { entity });
         }
+        let deferred = self.insert_raw(entity, component)?;
+        self.apply_pending(entity, &[deferred]);
+        Ok(())
+    }
 
+    /// Low-level insert: writes component to storage and fires on_replace.
+    ///
+    /// Does NOT fire on_add/on_insert hooks, apply required components, or
+    /// queue observer triggers. Returns deferred work to be processed by
+    /// [`apply_pending`](World::apply_pending).
+    ///
+    /// The caller must have already verified the entity is alive.
+    pub(crate) fn insert_raw<T: Send + Sync + 'static>(
+        &mut self,
+        entity: Entity,
+        component: T,
+    ) -> Result<InsertPending, WorldError> {
         let type_id = TypeId::of::<T>();
 
-        // TODO(allocation): avoid vector copy for `required` of make it smallvec
         // Extract hook info and requirements (borrow released after this block)
         let (had_component, on_add, on_insert, on_replace, required) = {
             let storage = self
@@ -260,29 +315,58 @@ impl World {
             tick,
         );
 
-        // Apply required components before hooks so the entity is fully
-        // constructed by the time on_add/on_insert handlers observe it.
-        if !had_component {
-            for req_fn in required {
-                req_fn(self, entity);
+        Ok(InsertPending {
+            was_new: !had_component,
+            on_add: if !had_component { on_add } else { None },
+            on_insert,
+            required: if !had_component { required } else { Vec::new() },
+            add_trigger_fn: if !had_component {
+                Some(push_add_trigger::<T>)
+            } else {
+                None
+            },
+            insert_trigger_fn: push_insert_trigger::<T>,
+        })
+    }
+
+    /// Processes deferred work from one or more [`insert_raw`](World::insert_raw) calls.
+    ///
+    /// Order:
+    /// 1. Apply all required components (for new components only)
+    /// 2. Fire on_add hooks (for new components only)
+    /// 3. Fire on_insert hooks (for all components)
+    /// 4. Queue observer triggers
+    pub(crate) fn apply_pending(&mut self, entity: Entity, deferred: &[InsertPending]) {
+        // Phase 1: required components
+        for d in deferred {
+            if d.was_new {
+                for req_fn in &d.required {
+                    req_fn(self, entity);
+                }
             }
         }
 
-        // Fire on_add / on_insert AFTER insertion and required components
-        if !had_component && let Some(hook) = on_add {
-            hook(self, entity);
-        }
-        if let Some(hook) = on_insert {
-            hook(self, entity);
+        // Phase 2: on_add hooks
+        for d in deferred {
+            if let Some(hook) = d.on_add {
+                hook(self, entity);
+            }
         }
 
-        // Queue deferred observer triggers
-        if !had_component {
-            self.observers.push_typed_trigger::<OnAdd<T>>(entity);
+        // Phase 3: on_insert hooks
+        for d in deferred {
+            if let Some(hook) = d.on_insert {
+                hook(self, entity);
+            }
         }
-        self.observers.push_typed_trigger::<OnInsert<T>>(entity);
 
-        Ok(())
+        // Phase 4: observer triggers
+        for d in deferred {
+            if let Some(trigger_fn) = d.add_trigger_fn {
+                trigger_fn(self, entity);
+            }
+            (d.insert_trigger_fn)(self, entity);
+        }
     }
 
     /// Inserts a bundle of components on an entity.

@@ -1,6 +1,6 @@
 mod actions;
 mod batch_ops;
-mod component_ops;
+pub(crate) mod component_ops;
 mod hooks;
 mod inspector;
 mod query_access;
