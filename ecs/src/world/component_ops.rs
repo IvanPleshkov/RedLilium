@@ -1,5 +1,7 @@
 use std::any::TypeId;
 
+use smallvec::SmallVec;
+
 use crate::bundle::Bundle;
 use crate::component::Component;
 use crate::entity::{Entities, Entity};
@@ -20,7 +22,7 @@ pub(crate) struct InsertPending {
     pub was_new: bool,
     pub on_add: Option<ComponentHookFn>,
     pub on_insert: Option<ComponentHookFn>,
-    pub required: Vec<RequiredComponentFn>,
+    pub required: SmallVec<[RequiredComponentFn; 2]>,
     /// Monomorphized function to queue `OnAdd<T>` observer trigger.
     pub add_trigger_fn: Option<fn(&mut World, Entity)>,
     /// Monomorphized function to queue `OnInsert<T>` observer trigger.
@@ -319,7 +321,7 @@ impl World {
             was_new: !had_component,
             on_add: if !had_component { on_add } else { None },
             on_insert,
-            required: if !had_component { required } else { Vec::new() },
+            required: if !had_component { required } else { SmallVec::new() },
             add_trigger_fn: if !had_component {
                 Some(push_add_trigger::<T>)
             } else {

@@ -23,6 +23,7 @@ redlilium-core = { path = "../core" }
 ecs-macro = { path = "../ecs-macro" }
 bytemuck = { workspace = true }
 fixedbitset = { workspace = true }
+smallvec = { workspace = true }
 serde = { workspace = true }
 log.workspace = true
 parking_lot = { workspace = true }

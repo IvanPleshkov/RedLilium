@@ -29,6 +29,7 @@ env_logger = "0.11"
 # Utilities
 bitflags = "2.10"
 fixedbitset = "0.5"
+smallvec = "1.13"
 static_assertions = "1.1"
 
 # Web support

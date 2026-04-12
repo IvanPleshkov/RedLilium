@@ -3,6 +3,7 @@ use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 
 use fixedbitset::FixedBitSet;
+use smallvec::SmallVec;
 
 use crate::entity::{Entities, Entity};
 use crate::world::World;
@@ -500,7 +501,7 @@ pub(crate) struct ComponentStorage {
     /// Functions that insert required components when this component is first
     /// added to an entity. Each function checks for presence and inserts a
     /// default if absent.
-    pub(crate) required_components: Vec<RequiredComponentFn>,
+    pub(crate) required_components: SmallVec<[RequiredComponentFn; 2]>,
     /// Type-erased component metadata (inspection, serialization, cloning, etc.).
     /// Present only for components registered via `register_inspector` / `register_inspector_default`.
     pub(crate) meta: Option<ComponentMeta>,
@@ -516,7 +517,7 @@ impl ComponentStorage {
             on_insert: None,
             on_replace: None,
             on_remove: None,
-            required_components: Vec::new(),
+            required_components: SmallVec::new(),
             meta: None,
         }
     }

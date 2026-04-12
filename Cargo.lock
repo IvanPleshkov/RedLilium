@@ -4358,6 +4358,7 @@ dependencies = [
  "redlilium-graphics",
  "ron",
  "serde",
+ "smallvec",
  "tokio",
  "wasm-bindgen-futures",
 ]

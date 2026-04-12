@@ -46,7 +46,7 @@ macro_rules! impl_bundle {
             ) -> Result<(), crate::world::WorldError> {
                 #[allow(non_snake_case)]
                 let ($($T,)+) = self;
-                let pending = vec![$(world.insert_raw(entity, $T)?),+];
+                let pending = [$(world.insert_raw(entity, $T)?),+];
                 world.apply_pending(entity, &pending);
                 Ok(())
             }
