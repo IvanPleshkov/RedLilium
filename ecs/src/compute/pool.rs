@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use redlilium_core::compute::{CancellationToken, Priority, reset_yield_timer};
 
-use crate::compute_context::EcsComputeContext;
-use crate::io_runtime::IoRuntime;
+use crate::compute::EcsComputeContext;
+use crate::compute::IoRuntime;
 
 /// Shared state between a [`TaskHandle`] and the pool's internal future wrapper.
 ///

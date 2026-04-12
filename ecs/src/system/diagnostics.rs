@@ -9,9 +9,9 @@ use std::any::TypeId;
 use std::fmt;
 use std::time::Duration;
 
-use crate::access_set::{AccessInfo, normalize_access_infos};
+use crate::query::access::{AccessInfo, normalize_access_infos};
 use crate::system::SystemError;
-use crate::systems_container::SystemsContainer;
+use crate::system::SystemsContainer;
 use crate::world::World;
 
 // ---------------------------------------------------------------------------
@@ -275,9 +275,9 @@ fn find_conflicts(a: &[AccessInfo], b: &[AccessInfo], world: &World) -> Vec<Acce
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::access_set::{Read, Write};
+    use crate::query::{Read, Write};
     use crate::system::System;
-    use crate::system_context::SystemContext;
+    use crate::system::SystemContext;
 
     struct Position {
         _x: f32,
@@ -320,7 +320,7 @@ mod tests {
     #[test]
     fn detects_ambiguity_between_unordered_systems() {
         use crate::runner::EcsRunnerSingleThread;
-        use crate::systems_container::SystemsContainer;
+        use crate::system::SystemsContainer;
 
         let mut world = World::new();
         world.register_component::<Position>();
@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn no_ambiguity_when_ordered() {
         use crate::runner::EcsRunnerSingleThread;
-        use crate::systems_container::SystemsContainer;
+        use crate::system::SystemsContainer;
 
         let mut world = World::new();
         world.register_component::<Position>();
@@ -383,7 +383,7 @@ mod tests {
     #[test]
     fn no_ambiguity_with_disjoint_access() {
         use crate::runner::EcsRunnerSingleThread;
-        use crate::systems_container::SystemsContainer;
+        use crate::system::SystemsContainer;
 
         let mut world = World::new();
         world.register_component::<Position>();
@@ -414,7 +414,7 @@ mod tests {
     #[test]
     fn timing_report_collected() {
         use crate::runner::EcsRunnerSingleThread;
-        use crate::systems_container::SystemsContainer;
+        use crate::system::SystemsContainer;
 
         let mut world = World::new();
         let mut container = SystemsContainer::new();
@@ -438,7 +438,7 @@ mod tests {
     #[test]
     fn no_diagnostics_returns_empty_report() {
         use crate::runner::EcsRunnerSingleThread;
-        use crate::systems_container::SystemsContainer;
+        use crate::system::SystemsContainer;
 
         let mut world = World::new();
         let mut container = SystemsContainer::new();

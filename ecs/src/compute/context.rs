@@ -1,6 +1,6 @@
 use redlilium_core::compute::{CancellationToken, Checkpoint, ComputeContext, YieldNow, yield_now};
 
-use crate::io_runtime::IoRuntime;
+use crate::compute::IoRuntime;
 
 /// ECS-specific compute context implementing [`ComputeContext`].
 ///

@@ -132,7 +132,7 @@ mod tests {
 
     use std::pin::Pin;
 
-    use crate::compute::noop_waker;
+    use crate::compute::pool::noop_waker;
 
     #[test]
     fn creation_and_clone() {

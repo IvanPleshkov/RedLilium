@@ -3,11 +3,11 @@ use std::ops::{Deref, DerefMut};
 
 use fixedbitset::FixedBitSet;
 
-use crate::access_set::AccessSet;
 use crate::entity::Entities;
+use crate::query::AccessSet;
 use crate::resource::{ResourceRef, ResourceRefMut};
 use crate::sparse_set::{LockGuard, Mut, Ref, RefMut, SparseSetInner};
-use crate::system_context::LockTracking;
+use crate::system::context::LockTracking;
 
 /// A guard holding component/resource locks and their fetched data.
 ///
@@ -104,20 +104,25 @@ where
         A::Item<'a>: Sync,
         F: Fn(u32, <A::Item<'a> as QueryItem>::Item) + Sync,
     {
-        self.par_for_each_with(crate::par_for_each::ParConfig::default(), f);
+        self.par_for_each_with(crate::system::par_for_each::ParConfig::default(), f);
     }
 
     /// Like [`par_for_each`](Self::par_for_each), but with explicit
     /// parallelism configuration.
-    pub fn par_for_each_with<F>(&self, config: crate::par_for_each::ParConfig, f: F)
+    pub fn par_for_each_with<F>(&self, config: crate::system::par_for_each::ParConfig, f: F)
     where
         A::Item<'a>: Sync,
         F: Fn(u32, <A::Item<'a> as QueryItem>::Item) + Sync,
     {
         if let Some(intersected) = self.items.query_intersected_entities() {
-            crate::par_for_each::par_for_each_entities(&self.items, &intersected, &config, &f);
+            crate::system::par_for_each::par_for_each_entities(
+                &self.items,
+                &intersected,
+                &config,
+                &f,
+            );
         } else {
-            crate::par_for_each::par_for_each_entities(
+            crate::system::par_for_each::par_for_each_entities(
                 &self.items,
                 self.items.query_entities(),
                 &config,
@@ -540,7 +545,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::access_set::{AccessSet, Read, Res, ResMut, Write};
+    use crate::query::{AccessSet, Read, Res, ResMut, Write};
     use crate::world::World;
 
     struct Position {

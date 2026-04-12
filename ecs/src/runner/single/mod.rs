@@ -2,17 +2,17 @@ use parking_lot::Mutex;
 use std::any::Any;
 use std::time::Duration;
 
-use crate::command_collector::CommandCollector;
+use crate::commands::CommandCollector;
 use crate::compute::ComputePool;
-use crate::diagnostics::{
+use crate::compute::IoRuntime;
+use crate::system::SystemContext;
+use crate::system::SystemsContainer;
+use crate::system::diagnostics::{
     AccessRecorder, RunDiagnostics, RunReport, RunResult, SystemTiming, TimingReport,
     analyze_ambiguities,
 };
-use crate::io_runtime::IoRuntime;
+use crate::system::results_store::SystemResultsStore;
 use crate::system::{SystemError, panic_payload_to_string};
-use crate::system_context::SystemContext;
-use crate::system_results_store::SystemResultsStore;
-use crate::systems_container::SystemsContainer;
 use crate::world::World;
 
 use super::ShutdownError;
@@ -314,7 +314,7 @@ impl Default for EcsRunnerSingleThread {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::access_set::{Read, Write};
+    use crate::query::{Read, Write};
     use crate::system::System;
     use crate::system::SystemError;
 
@@ -693,7 +693,7 @@ mod tests {
 
     // ---- Run condition tests ----
 
-    use crate::condition::{Condition, ConditionMode};
+    use crate::system::{Condition, ConditionMode};
 
     struct CondTrueSystem;
     impl System for CondTrueSystem {

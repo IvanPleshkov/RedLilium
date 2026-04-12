@@ -117,9 +117,9 @@ impl<T: Send + Sync + 'static> crate::system::System for EventUpdateSystem<T> {
     type Result = ();
     fn run<'a>(
         &'a self,
-        ctx: &'a crate::system_context::SystemContext<'a>,
+        ctx: &'a crate::system::SystemContext<'a>,
     ) -> Result<(), crate::system::SystemError> {
-        ctx.lock::<(crate::access_set::ResMut<Events<T>>,)>()
+        ctx.lock::<(crate::query::ResMut<Events<T>>,)>()
             .execute(|(mut events,)| {
                 events.update();
             });
@@ -223,7 +223,7 @@ mod tests {
 
         // Run update system
         use crate::compute::ComputePool;
-        use crate::io_runtime::IoRuntime;
+        use crate::compute::IoRuntime;
         use crate::system::run_system_blocking;
         let update = EventUpdateSystem::<TestEvent>::new();
         let compute = ComputePool::new(IoRuntime::new());

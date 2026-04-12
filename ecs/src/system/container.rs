@@ -6,12 +6,12 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::condition::{ConditionMode, ConditionResult, condition_checker};
+use crate::system::condition::{ConditionMode, ConditionResult, condition_checker};
 
 /// Function pointer type for condition checking.
 type ConditionCheckerFn = fn(&(dyn Any + Send + Sync)) -> bool;
-use crate::function_system::IntoSystem;
-use crate::system::{
+use crate::system::function::IntoSystem;
+use crate::system::traits::{
     DynExclusiveSystem, DynReadOnlyExclusiveSystem, DynSystem, ExclusiveFunctionSystem,
     ExclusiveSystem, ReadOnlyExclusiveFunctionSystem, ReadOnlyExclusiveSystem, System,
 };
@@ -265,15 +265,12 @@ impl SystemsContainer {
     /// let mut container = SystemsContainer::new();
     /// container.add_fn::<(Write<Position>, Read<Velocity>), _>(movement);
     /// ```
-    pub fn add_fn<A, F>(
-        &mut self,
-        func: F,
-    ) -> Arc<RwLock<crate::function_system::ForEachSystem<F, A>>>
+    pub fn add_fn<A, F>(&mut self, func: F) -> Arc<RwLock<crate::system::ForEachSystem<F, A>>>
     where
-        A: crate::function_system::ForEachAccess + Send + Sync + 'static,
+        A: crate::system::ForEachAccess + Send + Sync + 'static,
         F: for<'a> Fn(A::EachItem<'a>) + Send + Sync + 'static,
     {
-        self.add(crate::function_system::for_each::<A, F>(func))
+        self.add(crate::system::for_each::<A, F>(func))
     }
 
     /// Registers a parallel per-entity function as a system.
@@ -294,13 +291,13 @@ impl SystemsContainer {
     pub fn add_par_fn<A, F>(
         &mut self,
         func: F,
-    ) -> Arc<RwLock<crate::function_system::ParForEachSystem<F, A>>>
+    ) -> Arc<RwLock<crate::system::ParForEachSystem<F, A>>>
     where
-        A: crate::function_system::ForEachAccess + Send + Sync + 'static,
+        A: crate::system::ForEachAccess + Send + Sync + 'static,
         F: for<'a> Fn(A::EachItem<'a>) + Send + Sync + 'static,
         for<'a> A::Item<'a>: Sync,
     {
-        self.add(crate::function_system::par_for_each::<A, F>(func))
+        self.add(crate::system::par_for_each::<A, F>(func))
     }
 
     /// Registers a function that receives raw component storages as a system.
@@ -698,7 +695,7 @@ impl SystemsContainer {
     pub(crate) fn check_conditions(
         &self,
         idx: usize,
-        results: &crate::system_results_store::SystemResultsStore,
+        results: &crate::system::results_store::SystemResultsStore,
     ) -> bool {
         let conditions = &self.condition_edges[idx];
         if conditions.is_empty() {
@@ -972,7 +969,7 @@ fn topological_sort(edges: &[Vec<usize>], in_degrees: &[usize]) -> Result<Vec<us
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::system_context::SystemContext;
+    use crate::system::SystemContext;
 
     struct SystemA;
     impl System for SystemA {
@@ -1302,7 +1299,7 @@ mod tests {
 
     // ---- Condition system tests ----
 
-    use crate::condition::{Condition, ConditionMode};
+    use crate::system::{Condition, ConditionMode};
 
     struct CondTrue;
     impl System for CondTrue {
@@ -1380,7 +1377,7 @@ mod tests {
 
     #[test]
     fn check_conditions_no_conditions_returns_true() {
-        use crate::system_results_store::SystemResultsStore;
+        use crate::system::results_store::SystemResultsStore;
         use std::collections::HashMap;
 
         let mut container = SystemsContainer::new();
@@ -1392,7 +1389,7 @@ mod tests {
 
     #[test]
     fn check_conditions_all_mode() {
-        use crate::system_results_store::SystemResultsStore;
+        use crate::system::results_store::SystemResultsStore;
 
         let mut container = SystemsContainer::new();
         container.add_condition(CondTrue);
@@ -1411,7 +1408,7 @@ mod tests {
 
     #[test]
     fn check_conditions_any_mode() {
-        use crate::system_results_store::SystemResultsStore;
+        use crate::system::results_store::SystemResultsStore;
 
         let mut container = SystemsContainer::new();
         container.add_condition(CondTrue);
@@ -1513,7 +1510,7 @@ mod tests {
 
     #[test]
     fn set_condition_skips_all_members() {
-        use crate::system_results_store::SystemResultsStore;
+        use crate::system::results_store::SystemResultsStore;
 
         let mut container = SystemsContainer::new();
         container.add_condition(CondFalse);
@@ -1536,7 +1533,7 @@ mod tests {
 
     #[test]
     fn set_condition_inherited_by_later_members() {
-        use crate::system_results_store::SystemResultsStore;
+        use crate::system::results_store::SystemResultsStore;
 
         let mut container = SystemsContainer::new();
         container.add_condition(CondFalse);

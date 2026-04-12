@@ -56,8 +56,8 @@ use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::runner::EcsRunner;
-use crate::state::{ApplyStateTransition, NextState, State, StateTransition, States};
-use crate::systems_container::SystemsContainer;
+use crate::system::SystemsContainer;
+use crate::system::{ApplyStateTransition, NextState, State, StateTransition, States};
 use crate::world::World;
 
 // ---------------------------------------------------------------------------
@@ -459,8 +459,8 @@ impl Default for Schedules {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::system::SystemContext;
     use crate::system::{System, SystemError};
-    use crate::system_context::SystemContext;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -609,16 +609,15 @@ mod tests {
         impl System for CheckFixedDelta {
             type Result = ();
             fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
-                ctx.lock::<(crate::access_set::Res<Time>,)>()
-                    .execute(|(time,)| {
-                        // During FixedUpdate, delta should equal fixed_delta
-                        assert!(
-                            (time.delta() - time.fixed_delta()).abs() < 1e-10,
-                            "Expected delta={}, got delta={}",
-                            time.fixed_delta(),
-                            time.delta()
-                        );
-                    });
+                ctx.lock::<(crate::query::Res<Time>,)>().execute(|(time,)| {
+                    // During FixedUpdate, delta should equal fixed_delta
+                    assert!(
+                        (time.delta() - time.fixed_delta()).abs() < 1e-10,
+                        "Expected delta={}, got delta={}",
+                        time.fixed_delta(),
+                        time.delta()
+                    );
+                });
                 Ok(())
             }
         }

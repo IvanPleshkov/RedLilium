@@ -38,27 +38,18 @@
 #[doc(hidden)]
 extern crate self as redlilium_ecs;
 
-mod access_set;
 mod bundle;
-mod command_collector;
 mod commands;
 pub mod component;
 pub mod component_field;
 mod compute;
-mod compute_context;
-mod condition;
-pub mod diagnostics;
 mod entity;
 mod events;
-mod function_system;
 pub mod inspect;
-mod io_runtime;
-mod lock_request;
 mod main_thread_dispatcher;
 mod main_thread_resource;
 pub mod map_entities;
 mod observer;
-mod par_for_each;
 #[cfg(any(
     feature = "physics-3d",
     feature = "physics-3d-f32",
@@ -68,22 +59,16 @@ mod par_for_each;
 pub use self::std::physics;
 pub mod prefab;
 mod query;
-mod query_guard;
 mod reactive;
 #[cfg(feature = "rendering")]
 pub use self::std::rendering;
 mod resource;
 mod runner;
-mod schedule;
 pub mod serialize;
 mod sparse_set;
-mod state;
 #[allow(clippy::module_inception)]
 pub mod std;
 mod system;
-pub mod system_context;
-pub(crate) mod system_results_store;
-mod systems_container;
 #[cfg(feature = "inspector")]
 pub mod ui;
 mod world;
@@ -92,19 +77,19 @@ mod world;
 pub use commands::CommandBuffer;
 pub use component::Component;
 pub use component_field::ComponentField;
+pub use compute::IoRuntime;
 pub use compute::{ComputePool, TaskHandle};
 pub use ecs_macro::{Bundle, Component};
 pub use egui;
 pub use entity::Entity;
 pub use events::{EventUpdateSystem, Events};
-pub use io_runtime::IoRuntime;
 pub use observer::{OnAdd, OnInsert, OnRemove};
 pub use prefab::Prefab;
 pub use query::{
     AddedFilter, AnyFilter, ChangedFilter, ContainsChecker, Filter, OrFilter, RemovedFilter, With,
     Without,
 };
-pub use query_guard::{QueryGuard, QueryItem, QueryIter, ResMutRef};
+pub use query::{QueryGuard, QueryItem, QueryIter, ResMutRef};
 pub use reactive::{HasTriggers, Triggers};
 pub use redlilium_core::compute::{
     CancellationToken, Cancelled, Checkpoint, ComputeContext, ComputeMutex, ComputeMutexGuard,
@@ -116,39 +101,39 @@ pub use resource::{Resource, ResourceRef, ResourceRefMut};
 pub use sparse_set::{Mut, Ref, RefMut, SparseSetInner};
 pub use world::{ComponentNotRegistered, InspectResult, World, set_component_actions};
 
-pub use compute_context::EcsComputeContext;
+pub use compute::EcsComputeContext;
 
 // System & scheduling (new API)
-pub use access_set::{
+pub use bundle::Bundle;
+pub use commands::{CommandCollector, SpawnBuilder};
+pub use query::LockRequest;
+pub use query::{
     AccessSet, Added, Any, Changed, MainThreadRes, MainThreadResMut, MaybeAdded, MaybeChanged,
     MaybeRemoved, OptionalRead, OptionalWrite, Or, Read, ReadAll, Removed, Res, ResMut, Write,
     WriteAll,
 };
-pub use bundle::Bundle;
-pub use command_collector::{CommandCollector, SpawnBuilder};
-pub use condition::{Condition, ConditionMode, ConditionResult};
-pub use diagnostics::{
+pub use runner::{EcsRunner, EcsRunnerSingleThread, ShutdownError};
+pub use system::ParConfig;
+pub use system::SystemContext;
+pub use system::{
     AccessConflict, AmbiguityInfo, RunDiagnostics, RunReport, RunResult, SystemTiming, TimingReport,
 };
-pub use function_system::{
-    ForEach, ForEachAccess, ForEachSystem, FunctionSystem, IntoSystem, ParForEach,
-    ParForEachSystem, for_each, par_for_each,
-};
-pub use lock_request::LockRequest;
-pub use par_for_each::ParConfig;
-pub use runner::{EcsRunner, EcsRunnerSingleThread, ShutdownError};
-pub use schedule::{
-    FixedUpdate, PostUpdate, PreUpdate, ScheduleId, ScheduleLabel, Schedules, Startup, Time, Update,
-};
-pub use state::{ApplyStateTransition, NextState, State, StateTransition, States, init_state};
+pub use system::{ApplyStateTransition, NextState, State, StateTransition, States, init_state};
+pub use system::{Condition, ConditionMode, ConditionResult};
+pub use system::{CycleError, Edge, SystemSet, SystemsContainer};
 pub use system::{
     ExclusiveFunctionSystem, ExclusiveSystem, ReadOnlyExclusiveFunctionSystem,
     ReadOnlyExclusiveSystem, System, SystemError, panic_payload_to_string,
     run_exclusive_system_blocking, run_exclusive_system_once,
     run_read_only_exclusive_system_blocking, run_system_blocking, run_system_once,
 };
-pub use system_context::SystemContext;
-pub use systems_container::{CycleError, Edge, SystemSet, SystemsContainer};
+pub use system::{
+    FixedUpdate, PostUpdate, PreUpdate, ScheduleId, ScheduleLabel, Schedules, Startup, Time, Update,
+};
+pub use system::{
+    ForEach, ForEachAccess, ForEachSystem, FunctionSystem, IntoSystem, ParForEach,
+    ParForEachSystem, for_each, par_for_each,
+};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use runner::EcsRunnerMultiThread;

@@ -3,18 +3,19 @@ use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 
-use crate::access_set::{AccessInfo, AccessSet, normalize_access_infos};
 use crate::bundle::Bundle;
-use crate::command_collector::{CommandCollector, SpawnBuilder};
+use crate::commands::{CommandCollector, SpawnBuilder};
 use crate::compute::ComputePool;
-use crate::diagnostics::AccessRecorder;
+use crate::compute::IoRuntime;
 use crate::entity::Entity;
-use crate::io_runtime::IoRuntime;
-use crate::lock_request::LockRequest;
 use crate::main_thread_dispatcher::MainThreadDispatcher;
-use crate::query_guard::QueryGuard;
+use crate::query::AccessSet;
+use crate::query::LockRequest;
+use crate::query::QueryGuard;
+use crate::query::access::{AccessInfo, normalize_access_infos};
+use crate::system::diagnostics::AccessRecorder;
+use crate::system::results_store::SystemResultsStore;
 use crate::system::{ExclusiveSystem, System};
-use crate::system_results_store::SystemResultsStore;
 use crate::world::World;
 
 // ---------------------------------------------------------------------------
@@ -536,7 +537,7 @@ impl<'a> SystemContext<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io_runtime::IoRuntime;
+    use crate::compute::IoRuntime;
 
     #[derive(Debug, PartialEq)]
     struct Position {
@@ -667,7 +668,7 @@ mod tests {
     // Deadlock detection tests
     // -----------------------------------------------------------------------
 
-    use crate::access_set::{Read, Write};
+    use crate::query::{Read, Write};
 
     struct Velocity {
         _x: f32,

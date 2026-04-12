@@ -33,7 +33,7 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 
 use crate::system::ExclusiveSystem;
-use crate::systems_container::{CycleError, SystemsContainer};
+use crate::system::{CycleError, SystemsContainer};
 use crate::world::World;
 
 /// Marker trait for types that can be used as application states.
@@ -356,7 +356,7 @@ macro_rules! state_exit_condition {
 mod tests {
     use super::*;
     use crate::compute::ComputePool;
-    use crate::io_runtime::IoRuntime;
+    use crate::compute::IoRuntime;
     use crate::system::{run_exclusive_system_blocking, run_system_blocking};
 
     #[derive(Clone, Debug, PartialEq, Eq, Hash)]

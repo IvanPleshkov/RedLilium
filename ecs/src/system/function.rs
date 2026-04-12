@@ -1,9 +1,9 @@
 use std::marker::PhantomData;
 
-use crate::access_set::{AccessElement, AccessSet};
-use crate::query_guard::QueryItem;
+use crate::query::QueryItem;
+use crate::query::{AccessElement, AccessSet};
 use crate::system::System;
-use crate::system_context::SystemContext;
+use crate::system::SystemContext;
 
 /// A system built from a plain function.
 ///
@@ -152,7 +152,7 @@ pub trait ForEachAccess: AccessSet {
     /// parallelism configuration.
     fn run_par_for_each_with<'w>(
         items: &Self::Item<'w>,
-        config: &crate::par_for_each::ParConfig,
+        config: &crate::system::par_for_each::ParConfig,
         f: impl Fn(Self::EachItem<'w>) + Sync,
     ) where
         Self::Item<'w>: Sync;
@@ -210,12 +210,12 @@ macro_rules! impl_for_each_access {
             where
                 Self::Item<'w>: Sync,
             {
-                Self::run_par_for_each_with(items, &crate::par_for_each::ParConfig::default(), f);
+                Self::run_par_for_each_with(items, &crate::system::par_for_each::ParConfig::default(), f);
             }
 
             fn run_par_for_each_with<'w>(
                 items: &Self::Item<'w>,
-                config: &crate::par_for_each::ParConfig,
+                config: &crate::system::par_for_each::ParConfig,
                 f: impl Fn(Self::EachItem<'w>) + Sync,
             )
             where
@@ -237,7 +237,7 @@ macro_rules! impl_for_each_access {
                     min_entities.to_vec()
                 };
 
-                crate::par_for_each::par_for_each_entities(
+                crate::system::par_for_each::par_for_each_entities(
                     items,
                     &entities,
                     config,
@@ -443,9 +443,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::access_set::{Read, Write};
     use crate::compute::ComputePool;
-    use crate::io_runtime::IoRuntime;
+    use crate::compute::IoRuntime;
+    use crate::query::{Read, Write};
     use crate::sparse_set::Mut;
     use crate::system::run_system_blocking;
     use crate::world::World;
@@ -543,7 +543,7 @@ mod tests {
             assert_eq!(*dt, 1.5);
         }
 
-        let sys = IntoSystem::<(crate::access_set::Res<f64>,)>::into_system(read_dt);
+        let sys = IntoSystem::<(crate::query::Res<f64>,)>::into_system(read_dt);
         let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
         run_system_blocking(&sys, &world, &compute, &io).unwrap();
@@ -558,7 +558,7 @@ mod tests {
         }
 
         let sys =
-            IntoSystem::<(crate::access_set::OptionalRead<Position>,)>::into_system(check_optional);
+            IntoSystem::<(crate::query::OptionalRead<Position>,)>::into_system(check_optional);
         let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
         run_system_blocking(&sys, &world, &compute, &io).unwrap();
@@ -577,7 +577,7 @@ mod tests {
         }
 
         let sys =
-            IntoSystem::<(crate::access_set::OptionalRead<Position>,)>::into_system(check_optional);
+            IntoSystem::<(crate::query::OptionalRead<Position>,)>::into_system(check_optional);
         let compute = ComputePool::new(IoRuntime::new());
         let io = IoRuntime::new();
         run_system_blocking(&sys, &world, &compute, &io).unwrap();
@@ -709,7 +709,7 @@ mod tests {
         world.insert(e, Position { x: 0.0 }).unwrap();
         world.insert(e, Velocity { x: 3.0 }).unwrap();
 
-        let sys = for_each::<(Write<Position>, Read<Velocity>, crate::access_set::Res<f32>), _>(
+        let sys = for_each::<(Write<Position>, Read<Velocity>, crate::query::Res<f32>), _>(
             |(mut pos, vel, factor): (Mut<Position>, &Velocity, &f32)| {
                 pos.x += vel.x * *factor;
             },
@@ -732,8 +732,8 @@ mod tests {
         let e2 = world.spawn();
         world.insert(e2, Position { x: 7.0 }).unwrap();
 
-        let sys = for_each::<(Read<Position>, crate::access_set::ResMut<f32>), _>(
-            |(pos, mut acc): (&Position, crate::query_guard::ResMutRef<f32>)| {
+        let sys = for_each::<(Read<Position>, crate::query::ResMut<f32>), _>(
+            |(pos, mut acc): (&Position, crate::query::ResMutRef<f32>)| {
                 *acc += pos.x;
             },
         );

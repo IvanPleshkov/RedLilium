@@ -9,7 +9,7 @@
 //! [`ForEachAccess::run_par_for_each`](crate::ForEachAccess::run_par_for_each),
 //! and [`LockRequest::par_for_each`](crate::LockRequest::par_for_each).
 
-use crate::query_guard::QueryItem;
+use crate::query::QueryItem;
 
 /// Configuration for parallel iteration.
 ///

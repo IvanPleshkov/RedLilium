@@ -1,9 +1,10 @@
 use std::marker::PhantomData;
 use std::sync::mpsc;
 
-use crate::access_set::{AccessSet, normalize_access_infos};
 use crate::main_thread_dispatcher::MainThreadWork;
-use crate::system_context::SystemContext;
+use crate::query::AccessSet;
+use crate::query::access::normalize_access_infos;
+use crate::system::SystemContext;
 
 /// A pending lock request for a set of component/resource accesses.
 ///
@@ -152,9 +153,9 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
     /// ```
     pub fn par_for_each<F>(self, f: F)
     where
-        A: crate::function_system::ForEachAccess,
+        A: crate::system::ForEachAccess,
         for<'w> A::Item<'w>: Sync,
-        F: for<'w> Fn(<A as crate::function_system::ForEachAccess>::EachItem<'w>) + Send + Sync,
+        F: for<'w> Fn(<A as crate::system::ForEachAccess>::EachItem<'w>) + Send + Sync,
     {
         self.execute(|items| {
             A::run_par_for_each(&items, &f);
@@ -163,11 +164,11 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
 
     /// Like [`par_for_each`](Self::par_for_each), but with explicit
     /// parallelism configuration.
-    pub fn par_for_each_with<F>(self, config: crate::par_for_each::ParConfig, f: F)
+    pub fn par_for_each_with<F>(self, config: crate::system::par_for_each::ParConfig, f: F)
     where
-        A: crate::function_system::ForEachAccess,
+        A: crate::system::ForEachAccess,
         for<'w> A::Item<'w>: Sync,
-        F: for<'w> Fn(<A as crate::function_system::ForEachAccess>::EachItem<'w>) + Send + Sync,
+        F: for<'w> Fn(<A as crate::system::ForEachAccess>::EachItem<'w>) + Send + Sync,
     {
         self.execute(|items| {
             A::run_par_for_each_with(&items, &config, &f);
@@ -177,12 +178,12 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
 
 #[cfg(test)]
 mod tests {
-    use crate::access_set::{Read, Write};
-    use crate::command_collector::CommandCollector;
+    use crate::commands::CommandCollector;
     use crate::compute::ComputePool;
-    use crate::io_runtime::IoRuntime;
+    use crate::compute::IoRuntime;
+    use crate::query::{Read, Write};
     use crate::sparse_set::Mut;
-    use crate::system_context::SystemContext;
+    use crate::system::SystemContext;
     use crate::world::World;
 
     struct Position {
@@ -200,7 +201,7 @@ mod tests {
         world.insert(e, Position { x: 42.0 }).unwrap();
 
         let compute = ComputePool::new(IoRuntime::new());
-        let io = crate::io_runtime::IoRuntime::new();
+        let io = crate::compute::IoRuntime::new();
         let commands = CommandCollector::new();
         let ctx = SystemContext::new(&world, &compute, &io, &commands);
 
@@ -218,7 +219,7 @@ mod tests {
         world.insert(e, Position { x: 0.0 }).unwrap();
 
         let compute = ComputePool::new(IoRuntime::new());
-        let io = crate::io_runtime::IoRuntime::new();
+        let io = crate::compute::IoRuntime::new();
         let commands = CommandCollector::new();
         let ctx = SystemContext::new(&world, &compute, &io, &commands);
 
@@ -242,7 +243,7 @@ mod tests {
         world.insert(e, Velocity { x: 5.0 }).unwrap();
 
         let compute = ComputePool::new(IoRuntime::new());
-        let io = crate::io_runtime::IoRuntime::new();
+        let io = crate::compute::IoRuntime::new();
         let commands = CommandCollector::new();
         let ctx = SystemContext::new(&world, &compute, &io, &commands);
 
@@ -266,7 +267,7 @@ mod tests {
         world.insert(e, Position { x: 42.0 }).unwrap();
 
         let compute = ComputePool::new(IoRuntime::new());
-        let io = crate::io_runtime::IoRuntime::new();
+        let io = crate::compute::IoRuntime::new();
         let commands = CommandCollector::new();
         let ctx = SystemContext::new(&world, &compute, &io, &commands);
 
@@ -286,7 +287,7 @@ mod tests {
         }
 
         let compute = ComputePool::new(IoRuntime::new());
-        let io = crate::io_runtime::IoRuntime::new();
+        let io = crate::compute::IoRuntime::new();
         let commands = CommandCollector::new();
         let ctx = SystemContext::new(&world, &compute, &io, &commands);
 
@@ -313,7 +314,7 @@ mod tests {
         }
 
         let compute = ComputePool::new(IoRuntime::new());
-        let io = crate::io_runtime::IoRuntime::new();
+        let io = crate::compute::IoRuntime::new();
         let commands = CommandCollector::new();
         let ctx = SystemContext::new(&world, &compute, &io, &commands);
 

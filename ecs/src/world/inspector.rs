@@ -1,0 +1,501 @@
+use std::collections::HashMap;
+
+use crate::entity::Entity;
+use crate::sparse_set::{
+    ComponentMeta, DeserializeComponentFn, InspectResult, SerializeComponentFn,
+};
+
+use super::World;
+
+impl World {
+    // ---- Component meta helpers ----
+
+    /// Looks up component meta by name.
+    fn meta_by_name(&self, name: &str) -> Option<&ComponentMeta> {
+        let type_id = self.name_index.get(name)?;
+        let lock = self.components.get(type_id)?;
+        let storage = unsafe { &*lock.data_ptr() };
+        storage.meta()
+    }
+
+    /// Iterates over all registered component metas.
+    fn iter_meta(&self) -> impl Iterator<Item = &ComponentMeta> {
+        self.components.values().filter_map(|lock| {
+            let storage = unsafe { &*lock.data_ptr() };
+            storage.meta()
+        })
+    }
+
+    // ---- Inspector ----
+
+    /// Returns the names of all inspector-registered components that an entity has.
+    ///
+    /// Only includes components registered via [`register_inspector`](World::register_inspector)
+    /// or [`register_inspector_default`](World::register_inspector_default).
+    pub fn inspectable_components_of(&self, entity: Entity) -> Vec<&'static str> {
+        let mut entries: Vec<_> = self
+            .iter_meta()
+            .filter(|m| (m.has_fn)(self, entity))
+            .map(|m| (m.name, m.display_order))
+            .collect();
+        entries.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
+        entries.into_iter().map(|(name, _)| name).collect()
+    }
+
+    /// Returns the type names of ALL components attached to an entity.
+    ///
+    /// Unlike [`inspectable_components_of`](World::inspectable_components_of), this
+    /// includes components that were not registered via
+    /// [`register_inspector`](World::register_inspector). The returned names are
+    /// fully-qualified Rust type paths (from [`std::any::type_name`]).
+    pub fn all_component_names_of(&self, entity: Entity) -> Vec<&'static str> {
+        self.components
+            .values()
+            .filter_map(|lock| {
+                let storage = lock.read();
+                if storage.contains_untyped(entity.index()) {
+                    Some(storage.type_name())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Returns component names that the entity does NOT have and that support Default insertion.
+    pub fn addable_components_of(&self, entity: Entity) -> Vec<&'static str> {
+        self.iter_meta()
+            .filter(|m| m.insert_default_fn.is_some() && !(m.has_fn)(self, entity))
+            .map(|m| m.name)
+            .collect()
+    }
+
+    /// Renders the inspector UI for a component by name.
+    ///
+    /// Returns `Some(actions)` if the user edited any fields, or `None` if
+    /// nothing changed or the entity doesn't have the component.
+    pub fn inspect_by_name(&self, entity: Entity, name: &str, ui: &mut egui::Ui) -> InspectResult {
+        let inspect_fn = self.meta_by_name(name).map(|m| m.inspect_fn);
+        inspect_fn.and_then(|f| f(self, entity, ui))
+    }
+
+    /// Removes a component by name from an entity.
+    ///
+    /// Returns `true` if the component was removed.
+    pub fn remove_by_name(&mut self, entity: Entity, name: &str) -> bool {
+        let remove_fn = self.meta_by_name(name).map(|m| m.remove_fn);
+        if let Some(f) = remove_fn {
+            f(self, entity)
+        } else {
+            false
+        }
+    }
+
+    /// Inserts a default instance of a component by name on an entity.
+    ///
+    /// Does nothing if the component was not registered with Default support
+    /// or the name is unknown.
+    pub fn insert_default_by_name(&mut self, entity: Entity, name: &str) {
+        let insert_fn = self.meta_by_name(name).and_then(|m| m.insert_default_fn);
+        if let Some(f) = insert_fn {
+            f(self, entity);
+        }
+    }
+
+    /// Extracts a type-erased clone of a component by name from an entity.
+    ///
+    /// Returns `None` if the component is not present or the name is unknown.
+    pub(crate) fn extract_by_name(
+        &self,
+        entity: Entity,
+        name: &str,
+    ) -> Option<Box<dyn crate::prefab::ComponentBag>> {
+        let extract_fn = self.meta_by_name(name).and_then(|m| m.extract_fn)?;
+        extract_fn(self, entity)
+    }
+
+    /// Inserts a type-erased component from a [`ComponentBag`](crate::prefab::ComponentBag)
+    /// onto an entity, consuming the bag.
+    pub(crate) fn insert_bag(&mut self, entity: Entity, bag: Box<dyn crate::prefab::ComponentBag>) {
+        bag.consume_into(self, entity);
+    }
+
+    /// Serializes a single component by name from an entity.
+    ///
+    /// Returns `Ok(None)` if the component is not present, the name is unknown,
+    /// or the component doesn't support serialization.
+    pub fn serialize_component_by_name(
+        &self,
+        entity: Entity,
+        name: &str,
+    ) -> Result<Option<crate::serialize::SerializedComponent>, crate::serialize::SerializeError>
+    {
+        let Some(meta) = self.meta_by_name(name) else {
+            return Ok(None);
+        };
+        let mut ctx = crate::serialize::SerializeContext::new(self);
+        (meta.serialize_fn)(self, entity, &mut ctx)
+    }
+
+    /// Deserializes a single component by name and inserts it onto an entity.
+    ///
+    /// Returns `Err` if the component type is unknown or deserialization fails.
+    pub fn deserialize_component_by_name(
+        &mut self,
+        entity: Entity,
+        serialized: &crate::serialize::SerializedComponent,
+    ) -> Result<(), crate::serialize::DeserializeError> {
+        let deser_fn = self
+            .meta_by_name(serialized.type_name.as_str())
+            .map(|m| m.deserialize_fn)
+            .ok_or_else(|| crate::serialize::DeserializeError::UnknownComponent {
+                type_name: serialized.type_name.clone(),
+            })?;
+        let mut ctx = crate::serialize::DeserializeContext::new(self);
+        deser_fn(entity, &serialized.data, &mut ctx)
+    }
+
+    /// Collects all entity references from a component by name on an entity.
+    ///
+    /// Appends referenced entities to `collector`. Does nothing if the
+    /// component name is unknown or the entity doesn't have it.
+    pub fn collect_entities_by_name(
+        &self,
+        entity: Entity,
+        name: &str,
+        collector: &mut Vec<Entity>,
+    ) {
+        if let Some(meta) = self.meta_by_name(name) {
+            (meta.collect_entities_fn)(self, entity, collector);
+        }
+    }
+
+    /// Remaps all entity references in a component by name on an entity.
+    ///
+    /// Does nothing if the component name is unknown or the entity doesn't have it.
+    pub fn remap_entities_by_name(
+        &mut self,
+        entity: Entity,
+        name: &str,
+        map: &mut dyn FnMut(Entity) -> Entity,
+    ) {
+        let remap_fn = self.meta_by_name(name).map(|m| m.remap_entities_fn);
+        if let Some(f) = remap_fn {
+            f(self, entity, map);
+        }
+    }
+
+    /// Computes the combined AABB for an entity by unioning AABBs from all its components.
+    ///
+    /// Iterates every registered component type and unions any
+    /// AABBs returned by their [`Component::aabb`] implementations.
+    /// Returns `None` if no component contributes an AABB.
+    pub fn entity_aabb(&self, entity: Entity) -> Option<redlilium_core::math::Aabb> {
+        let mut result: Option<redlilium_core::math::Aabb> = None;
+        for meta in self.iter_meta() {
+            if let Some(aabb) = (meta.aabb_fn)(self, entity) {
+                result = Some(match result {
+                    Some(current) => current.union(&aabb),
+                    None => aabb,
+                });
+            }
+        }
+        result
+    }
+
+    /// Returns individual AABBs from each component on an entity.
+    ///
+    /// Unlike [`entity_aabb`](Self::entity_aabb) which unions all AABBs,
+    /// this returns each component's AABB separately.
+    pub fn entity_aabbs(&self, entity: Entity) -> Vec<redlilium_core::math::Aabb> {
+        let mut result = Vec::new();
+        for meta in self.iter_meta() {
+            if let Some(aabb) = (meta.aabb_fn)(self, entity) {
+                result.push(aabb);
+            }
+        }
+        result
+    }
+
+    /// Collects all entity references from all registered components on an entity.
+    ///
+    /// Iterates every registered component type and appends any
+    /// entity references found to `collector`.
+    pub fn collect_all_entities(&self, entity: Entity, collector: &mut Vec<Entity>) {
+        for meta in self.iter_meta() {
+            (meta.collect_entities_fn)(self, entity, collector);
+        }
+    }
+
+    /// Remaps all entity references in all registered components on an entity.
+    ///
+    /// Iterates every registered component type and remaps any
+    /// entity references found using the provided mapping function.
+    pub fn remap_all_entities(&mut self, entity: Entity, map: &mut dyn FnMut(Entity) -> Entity) {
+        let fns: Vec<_> = self.iter_meta().map(|m| m.remap_entities_fn).collect();
+        for f in fns {
+            f(self, entity, map);
+        }
+    }
+
+    /// Clones all inspector-registered components from one entity to a new entity.
+    ///
+    /// Spawns a new entity and copies every component registered via
+    /// [`register_inspector`](World::register_inspector) or
+    /// [`register_inspector_default`](World::register_inspector_default).
+    ///
+    /// Does **not** traverse the hierarchy or remap entity references.
+    /// For hierarchy-aware cloning, use [`clone_entity_tree`](World::clone_entity_tree).
+    ///
+    /// Returns `None` if the source entity is not alive.
+    pub fn clone_entity(&mut self, src: Entity) -> Option<Entity> {
+        if !self.is_alive(src) {
+            return None;
+        }
+        let dst = self.spawn();
+
+        let clone_fns: Vec<_> = self
+            .iter_meta()
+            .filter_map(|m| {
+                if (m.has_fn)(self, src) {
+                    m.clone_fn
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for f in clone_fns {
+            f(self, src, dst);
+        }
+
+        Some(dst)
+    }
+
+    /// Clones an entity subtree, remapping all internal entity references.
+    ///
+    /// Performs a breadth-first walk from `root` through [`Children`](crate::Children)
+    /// components, clones all clone-enabled components on every entity in the
+    /// subtree, then remaps all entity references (via [`remap_all_entities`])
+    /// so that internal references point to the new cloned entities.
+    ///
+    /// Entity references that point **outside** the subtree are left unchanged.
+    ///
+    /// Returns a mapping from old entity IDs to new entity IDs.
+    /// The cloned root is `mapping[&root]`.
+    ///
+    /// Returns an empty map if `root` is not alive.
+    pub fn clone_entity_tree(&mut self, root: Entity) -> HashMap<Entity, Entity> {
+        if !self.is_alive(root) {
+            return HashMap::new();
+        }
+
+        // 1. Collect all entities in subtree via Children (BFS)
+        let mut old_entities = vec![root];
+        let mut i = 0;
+        while i < old_entities.len() {
+            let entity = old_entities[i];
+            if let Some(children) = self.get::<crate::Children>(entity) {
+                old_entities.extend(children.0.iter().copied());
+            }
+            i += 1;
+        }
+
+        // 2. Spawn new entities and build old->new mapping
+        let mut mapping = HashMap::with_capacity(old_entities.len());
+        for &old in &old_entities {
+            let new = self.spawn();
+            mapping.insert(old, new);
+        }
+
+        // 3. Clone all components from each old entity to corresponding new entity
+        let clone_fns: Vec<_> = self
+            .iter_meta()
+            .filter_map(|m| m.clone_fn.map(|clone| (m.has_fn, clone)))
+            .collect();
+
+        for (&old, &new) in &mapping {
+            for &(has_fn, clone_fn) in &clone_fns {
+                if has_fn(self, old) {
+                    clone_fn(self, old, new);
+                }
+            }
+        }
+
+        // 4. Remap all entity references in new entities
+        let remap_fns: Vec<_> = self.iter_meta().map(|m| m.remap_entities_fn).collect();
+
+        for &new in mapping.values() {
+            for &f in &remap_fns {
+                f(self, new, &mut |e| *mapping.get(&e).unwrap_or(&e));
+            }
+        }
+
+        mapping
+    }
+
+    /// Extracts a prefab from an entity subtree.
+    ///
+    /// Performs a breadth-first walk from `root` through [`Children`](crate::Children)
+    /// components and extracts all clone-enabled components into a portable
+    /// [`Prefab`](crate::prefab::Prefab). The prefab is fully self-contained
+    /// and can be instantiated into any world.
+    ///
+    /// Components without clone/extract support are silently skipped.
+    ///
+    /// Returns an empty prefab if `root` is not alive.
+    pub fn extract_prefab(&self, root: Entity) -> crate::prefab::Prefab {
+        if !self.is_alive(root) {
+            return crate::prefab::Prefab::empty();
+        }
+
+        // 1. BFS walk via Children to collect all entities in subtree
+        let mut old_entities = vec![root];
+        let mut i = 0;
+        while i < old_entities.len() {
+            let entity = old_entities[i];
+            if let Some(children) = self.get::<crate::Children>(entity) {
+                old_entities.extend(children.0.iter().copied());
+            }
+            i += 1;
+        }
+
+        // 2. Collect extract_fns
+        let extract_fns: Vec<_> = self.iter_meta().filter_map(|m| m.extract_fn).collect();
+
+        // 3. For each entity, extract all components into bags
+        let entities = old_entities
+            .iter()
+            .map(|&entity| {
+                let bags: Vec<_> = extract_fns.iter().filter_map(|f| f(self, entity)).collect();
+                (entity, bags)
+            })
+            .collect();
+
+        crate::prefab::Prefab::new(entities)
+    }
+
+    /// Serializes an entity subtree into a [`SerializedPrefab`](crate::serialize::SerializedPrefab).
+    ///
+    /// Performs a breadth-first walk from `root` through [`Children`](crate::Children)
+    /// components and serializes all serializable components. Components that
+    /// return [`NotSerializable`](crate::serialize::SerializeError::NotSerializable)
+    /// are silently skipped.
+    ///
+    /// The resulting prefab can be encoded to RON or bincode via the
+    /// [`format`](crate::serialize::format) module and deserialized back with
+    /// [`deserialize_prefab`](World::deserialize_prefab).
+    ///
+    /// Returns an empty prefab if `root` is not alive.
+    pub fn serialize_prefab(
+        &self,
+        root: Entity,
+    ) -> Result<crate::serialize::SerializedPrefab, crate::serialize::SerializeError> {
+        if !self.is_alive(root) {
+            return Ok(crate::serialize::SerializedPrefab {
+                entities: Vec::new(),
+            });
+        }
+
+        // 1. BFS walk via Children to collect all entities in subtree
+        let mut old_entities = vec![root];
+        let mut i = 0;
+        while i < old_entities.len() {
+            let entity = old_entities[i];
+            if let Some(children) = self.get::<crate::Children>(entity) {
+                old_entities.extend(children.0.iter().copied());
+            }
+            i += 1;
+        }
+
+        // 2. Collect serialize_fns
+        let serialize_fns: Vec<SerializeComponentFn> =
+            self.iter_meta().map(|m| m.serialize_fn).collect();
+
+        // 3. Create context (Arc dedup tracked across all entities)
+        let mut ctx = crate::serialize::SerializeContext::new(self);
+
+        // 4. For each entity, serialize all components
+        let serialized_entities = old_entities
+            .iter()
+            .map(|&entity| {
+                let components: Vec<_> = serialize_fns
+                    .iter()
+                    .filter_map(|f| f(self, entity, &mut ctx).transpose())
+                    .collect::<Result<_, _>>()?;
+                Ok(crate::serialize::SerializedEntity {
+                    entity_index: entity.index(),
+                    entity_spawn_tick: entity.spawn_tick(),
+                    entity_flags: self.get_entity_flags(entity),
+                    components,
+                })
+            })
+            .collect::<Result<_, crate::serialize::SerializeError>>()?;
+
+        Ok(crate::serialize::SerializedPrefab {
+            entities: serialized_entities,
+        })
+    }
+
+    /// Deserializes a [`SerializedPrefab`](crate::serialize::SerializedPrefab) into new entities.
+    ///
+    /// Spawns new entities, deserializes components, and remaps entity references
+    /// (e.g., [`Parent`](crate::Parent) / [`Children`](crate::Children)) to the
+    /// newly spawned entities. Arc values that were shared during serialization
+    /// are shared again via the deduplication cache.
+    ///
+    /// Returns the list of new entities in BFS order (index 0 = root).
+    ///
+    /// Unknown component types are silently skipped.
+    pub fn deserialize_prefab(
+        &mut self,
+        prefab: &crate::serialize::SerializedPrefab,
+    ) -> Result<Vec<Entity>, crate::serialize::DeserializeError> {
+        // 1. Spawn entities
+        let new_entities: Vec<Entity> = prefab.entities.iter().map(|_| self.spawn()).collect();
+
+        // 2. Build entity remap: (old_index, old_spawn_tick) -> new Entity
+        let entity_map: HashMap<(u32, u64), Entity> = prefab
+            .entities
+            .iter()
+            .zip(new_entities.iter())
+            .map(|(se, &new_e)| ((se.entity_index, se.entity_spawn_tick), new_e))
+            .collect();
+
+        // 3. Extract deserialize fns by name (before borrowing self mutably via context)
+        let deserialize_fns: HashMap<&str, DeserializeComponentFn> = self
+            .iter_meta()
+            .map(|m| (m.name, m.deserialize_fn))
+            .collect();
+
+        // 4. Restore entity flags
+        for (i, se) in prefab.entities.iter().enumerate() {
+            if se.entity_flags != 0 {
+                self.set_entity_flags(new_entities[i], se.entity_flags);
+            }
+        }
+
+        // 5. Create context with entity remap and Arc dedup cache
+        let mut ctx = crate::serialize::DeserializeContext::new(self);
+        ctx.set_entity_map(entity_map);
+
+        // 6. For each entity, deserialize components
+        for (i, se) in prefab.entities.iter().enumerate() {
+            let entity = new_entities[i];
+            for comp in &se.components {
+                if let Some(&deser_fn) = deserialize_fns.get(comp.type_name.as_str()) {
+                    match deser_fn(entity, &comp.data, &mut ctx) {
+                        Ok(()) => {}
+                        Err(crate::serialize::DeserializeError::NotDeserializable { .. }) => {
+                            // Skip components that don't support deserialization
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                // Skip unknown component types silently
+            }
+        }
+
+        Ok(new_entities)
+    }
+}

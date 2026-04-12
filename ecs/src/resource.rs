@@ -262,7 +262,7 @@ pub struct ResourceRefMut<'a, T: 'static> {
     guard: RwLockWriteGuard<'a, dyn Resource>,
     _marker: PhantomData<&'a mut T>,
     /// Runtime borrow tracking for iterator safety.
-    /// `true` while a [`ResMutRef`](crate::query_guard::ResMutRef) derived
+    /// `true` while a [`ResMutRef`](crate::query::ResMutRef) derived
     /// from this resource is alive.
     pub(crate) borrowed: Cell<bool>,
 }

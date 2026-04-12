@@ -1,10 +1,10 @@
 use std::marker::PhantomData;
 
-use crate::access_set::Res;
-use crate::condition::Condition;
 use crate::entity::Entity;
+use crate::query::Res;
+use crate::system::Condition;
+use crate::system::SystemContext;
 use crate::system::SystemError;
-use crate::system_context::SystemContext;
 
 /// Double-buffered list of triggered entities for a specific observer event.
 ///
@@ -281,8 +281,8 @@ mod tests {
         world.update_triggers();
 
         let condition = HasTriggers::<OnAdd<Health>>::new();
-        let compute = crate::compute::ComputePool::new(crate::io_runtime::IoRuntime::new());
-        let io = crate::io_runtime::IoRuntime::new();
+        let compute = crate::compute::ComputePool::new(crate::compute::IoRuntime::new());
+        let io = crate::compute::IoRuntime::new();
         let result = crate::system::run_system_blocking(&condition, &world, &compute, &io).unwrap();
         assert!(result.is_true());
     }
@@ -297,8 +297,8 @@ mod tests {
         world.update_triggers();
 
         let condition = HasTriggers::<OnAdd<Health>>::new();
-        let compute = crate::compute::ComputePool::new(crate::io_runtime::IoRuntime::new());
-        let io = crate::io_runtime::IoRuntime::new();
+        let compute = crate::compute::ComputePool::new(crate::compute::IoRuntime::new());
+        let io = crate::compute::IoRuntime::new();
         let result = crate::system::run_system_blocking(&condition, &world, &compute, &io).unwrap();
         assert!(result.is_false());
     }
@@ -320,8 +320,8 @@ mod tests {
 
     #[test]
     fn integration_runner_test() {
-        use crate::access_set::Res;
-        use crate::systems_container::SystemsContainer;
+        use crate::query::Res;
+        use crate::system::SystemsContainer;
 
         struct ReactiveSystem(Arc<AtomicU32>);
         impl crate::system::System for ReactiveSystem {

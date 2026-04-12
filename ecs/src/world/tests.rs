@@ -1,0 +1,1584 @@
+use super::*;
+
+#[derive(Debug, Clone, PartialEq)]
+struct Position {
+    x: f32,
+    y: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct Velocity {
+    x: f32,
+    y: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct Health(u32);
+
+struct Frozen;
+
+#[test]
+fn spawn_and_check_alive() {
+    let mut world = World::new();
+    let entity = world.spawn();
+    assert!(world.is_alive(entity));
+    assert_eq!(world.entity_count(), 1);
+}
+
+#[test]
+fn despawn_removes_entity() {
+    let mut world = World::new();
+    let entity = world.spawn();
+    assert!(world.despawn(entity));
+    assert!(!world.is_alive(entity));
+    assert_eq!(world.entity_count(), 0);
+}
+
+#[test]
+fn despawn_dead_entity_returns_false() {
+    let mut world = World::new();
+    let entity = world.spawn();
+    world.despawn(entity);
+    assert!(!world.despawn(entity));
+}
+
+#[test]
+fn insert_and_get_component() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    let entity = world.spawn();
+    world.insert(entity, Position { x: 1.0, y: 2.0 }).unwrap();
+
+    assert_eq!(
+        world.get::<Position>(entity),
+        Some(&Position { x: 1.0, y: 2.0 })
+    );
+}
+
+#[test]
+fn insert_unregistered_returns_err() {
+    let mut world = World::new();
+    let entity = world.spawn();
+    let result = world.insert(entity, Position { x: 0.0, y: 0.0 });
+    assert!(result.is_err());
+    assert!(result.unwrap_err().type_name.contains("Position"));
+}
+
+#[test]
+fn read_unregistered_returns_err() {
+    let world = World::new();
+    assert!(world.read::<Position>().is_err());
+}
+
+#[test]
+fn write_unregistered_returns_err() {
+    let world = World::new();
+    assert!(world.write::<Position>().is_err());
+}
+
+#[test]
+#[should_panic(expected = "Cannot insert component on dead entity")]
+fn insert_on_dead_entity_panics() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    let entity = world.spawn();
+    world.despawn(entity);
+    let _ = world.insert(entity, Position { x: 0.0, y: 0.0 });
+}
+
+#[test]
+fn remove_component() {
+    let mut world = World::new();
+    world.register_component::<Health>();
+    let entity = world.spawn();
+    world.insert(entity, Health(100)).unwrap();
+
+    assert_eq!(world.remove::<Health>(entity), Some(Health(100)));
+    assert!(world.get::<Health>(entity).is_none());
+}
+
+#[test]
+fn despawn_removes_all_components() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.register_component::<Health>();
+    let entity = world.spawn();
+    world.insert(entity, Position { x: 0.0, y: 0.0 }).unwrap();
+    world.insert(entity, Health(100)).unwrap();
+
+    world.despawn(entity);
+
+    // Spawn a new entity that reuses the same index
+    let new_entity = world.spawn();
+    assert_eq!(new_entity.index(), entity.index());
+
+    // New entity should not have old components
+    assert!(world.get::<Position>(new_entity).is_none());
+    assert!(world.get::<Health>(new_entity).is_none());
+}
+
+#[test]
+fn read_query_iterates_all() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    for i in 0..3 {
+        let e = world.spawn();
+        world
+            .insert(
+                e,
+                Position {
+                    x: i as f32,
+                    y: 0.0,
+                },
+            )
+            .unwrap();
+    }
+
+    let positions = world.read::<Position>().unwrap();
+    assert_eq!(positions.len(), 3);
+
+    let xs: Vec<f32> = positions.iter().map(|(_, p)| p.x).collect();
+    assert!(xs.contains(&0.0));
+    assert!(xs.contains(&1.0));
+    assert!(xs.contains(&2.0));
+}
+
+#[test]
+fn write_query_allows_mutation() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    let e = world.spawn();
+    world.insert(e, Position { x: 1.0, y: 2.0 }).unwrap();
+
+    {
+        let mut positions = world.write::<Position>().unwrap();
+        for (_, mut pos) in positions.iter_mut() {
+            pos.x += 10.0;
+        }
+    }
+
+    assert_eq!(
+        world.get::<Position>(e),
+        Some(&Position { x: 11.0, y: 2.0 })
+    );
+}
+
+#[test]
+fn double_read_succeeds() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    let e = world.spawn();
+    world.insert(e, Position { x: 0.0, y: 0.0 }).unwrap();
+
+    let _a = world.read::<Position>().unwrap();
+    let _b = world.read::<Position>().unwrap();
+}
+
+#[test]
+#[should_panic(expected = "already borrowed")]
+fn read_write_conflict_panics() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    let e = world.spawn();
+    world.insert(e, Position { x: 0.0, y: 0.0 }).unwrap();
+
+    let _r = world.read::<Position>().unwrap();
+    let _w = world.write::<Position>().unwrap();
+}
+
+#[test]
+fn resource_insert_and_get() {
+    let mut world = World::new();
+    world.insert_resource(42u32);
+
+    let val = world.resource::<u32>();
+    assert_eq!(*val, 42);
+}
+
+#[test]
+fn resource_mut_modify() {
+    let mut world = World::new();
+    world.insert_resource(42u32);
+
+    {
+        let mut val = world.resource_mut::<u32>();
+        *val = 99;
+    }
+
+    let val = world.resource::<u32>();
+    assert_eq!(*val, 99);
+}
+
+#[test]
+fn entity_recycling_invalidates_components() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    let old = world.spawn();
+    world.insert(old, Position { x: 1.0, y: 2.0 }).unwrap();
+
+    world.despawn(old);
+    world.advance_tick(); // Advance tick so recycled slot gets a different spawn_tick
+    let new = world.spawn();
+
+    // Same index, different spawn tick
+    assert_eq!(new.index(), old.index());
+    assert_ne!(new.spawn_tick(), old.spawn_tick());
+
+    // New entity should not have old entity's components
+    assert!(world.get::<Position>(new).is_none());
+}
+
+#[test]
+fn with_filter_in_query() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.register_component::<Health>();
+
+    let e1 = world.spawn();
+    world.insert(e1, Position { x: 1.0, y: 0.0 }).unwrap();
+    world.insert(e1, Health(100)).unwrap();
+
+    let e2 = world.spawn();
+    world.insert(e2, Position { x: 2.0, y: 0.0 }).unwrap();
+
+    let positions = world.read::<Position>().unwrap();
+    let has_health = world.with::<Health>();
+
+    let healthy_positions: Vec<f32> = positions
+        .iter()
+        .filter(|(idx, _)| has_health.matches(*idx))
+        .map(|(_, p)| p.x)
+        .collect();
+
+    assert_eq!(healthy_positions, vec![1.0]);
+}
+
+#[test]
+fn without_filter_in_query() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.register_component::<Frozen>();
+
+    let e1 = world.spawn();
+    world.insert(e1, Position { x: 1.0, y: 0.0 }).unwrap();
+    world.insert(e1, Frozen).unwrap();
+
+    let e2 = world.spawn();
+    world.insert(e2, Position { x: 2.0, y: 0.0 }).unwrap();
+
+    let positions = world.read::<Position>().unwrap();
+    let not_frozen = world.without::<Frozen>();
+
+    let unfrozen_positions: Vec<f32> = positions
+        .iter()
+        .filter(|(idx, _)| not_frozen.matches(*idx))
+        .map(|(_, p)| p.x)
+        .collect();
+
+    assert_eq!(unfrozen_positions, vec![2.0]);
+}
+
+#[test]
+fn combined_read_iteration() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.register_component::<Velocity>();
+
+    let e1 = world.spawn();
+    world.insert(e1, Position { x: 0.0, y: 0.0 }).unwrap();
+    world.insert(e1, Velocity { x: 1.0, y: 0.0 }).unwrap();
+
+    let e2 = world.spawn();
+    world.insert(e2, Position { x: 5.0, y: 5.0 }).unwrap();
+    // e2 has no Velocity
+
+    let positions = world.read::<Position>().unwrap();
+    let velocities = world.read::<Velocity>().unwrap();
+
+    let mut count = 0;
+    for (idx, _pos) in positions.iter() {
+        if velocities.get(idx).is_some() {
+            count += 1;
+        }
+    }
+    assert_eq!(count, 1); // Only e1 has both
+}
+
+#[test]
+fn removed_filter_after_remove() {
+    let mut world = World::new();
+    world.register_component::<Health>();
+
+    let entity = world.spawn();
+    world.insert(entity, Health(100)).unwrap();
+
+    world.advance_tick(); // tick = 1
+    let before_remove = world.current_tick();
+
+    world.advance_tick(); // tick = 2
+    world.remove::<Health>(entity);
+
+    let removed = world.removed::<Health>(before_remove);
+    assert!(removed.matches(entity.index()));
+}
+
+#[test]
+fn removed_filter_not_matching_before_tick() {
+    let mut world = World::new();
+    world.register_component::<Health>();
+
+    let entity = world.spawn();
+    world.insert(entity, Health(100)).unwrap();
+
+    world.advance_tick(); // tick = 1
+    world.remove::<Health>(entity); // removed at tick 1
+
+    // Query with since_tick = 1, removal at tick 1 is NOT strictly after 1
+    let removed = world.removed::<Health>(1);
+    assert!(!removed.matches(entity.index()));
+
+    // Query with since_tick = 0, removal at tick 1 IS strictly after 0
+    let removed = world.removed::<Health>(0);
+    assert!(removed.matches(entity.index()));
+}
+
+#[test]
+fn removed_filter_after_despawn() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.register_component::<Health>();
+
+    let entity = world.spawn();
+    world.insert(entity, Position { x: 1.0, y: 2.0 }).unwrap();
+    world.insert(entity, Health(100)).unwrap();
+
+    world.advance_tick(); // tick = 1
+    world.despawn(entity);
+
+    // Both components should be tracked as removed
+    let removed_pos = world.removed::<Position>(0);
+    let removed_health = world.removed::<Health>(0);
+    assert!(removed_pos.matches(entity.index()));
+    assert!(removed_health.matches(entity.index()));
+}
+
+#[test]
+fn removed_filter_iter() {
+    let mut world = World::new();
+    world.register_component::<Health>();
+
+    let e1 = world.spawn();
+    let e2 = world.spawn();
+    let e3 = world.spawn();
+    world.insert(e1, Health(100)).unwrap();
+    world.insert(e2, Health(200)).unwrap();
+    world.insert(e3, Health(300)).unwrap();
+
+    world.advance_tick(); // tick = 1
+    world.remove::<Health>(e1);
+    world.remove::<Health>(e3);
+
+    let removed = world.removed::<Health>(0);
+    let mut entities: Vec<u32> = removed.iter().collect();
+    entities.sort();
+    assert_eq!(entities, vec![e1.index(), e3.index()]);
+}
+
+#[test]
+fn clear_removed_tracking_works() {
+    let mut world = World::new();
+    world.register_component::<Health>();
+
+    let entity = world.spawn();
+    world.insert(entity, Health(100)).unwrap();
+
+    world.advance_tick(); // tick = 1
+    world.remove::<Health>(entity);
+
+    assert!(world.removed::<Health>(0).matches(entity.index()));
+
+    world.clear_removed_tracking();
+
+    assert!(!world.removed::<Health>(0).matches(entity.index()));
+}
+
+#[test]
+fn removed_filter_unregistered_matches_nothing() {
+    let world = World::new();
+    let removed = world.removed::<Health>(0);
+    assert!(!removed.matches(0));
+    assert_eq!(removed.iter().count(), 0);
+}
+
+#[test]
+fn remove_nonexistent_component_not_tracked() {
+    let mut world = World::new();
+    world.register_component::<Health>();
+
+    let entity = world.spawn();
+    // Don't insert Health, just try to remove it
+    world.advance_tick();
+    world.remove::<Health>(entity);
+
+    let removed = world.removed::<Health>(0);
+    assert!(!removed.matches(entity.index()));
+}
+
+// ---- Batch operation tests ----
+
+#[test]
+fn spawn_batch_creates_entities() {
+    let mut world = World::new();
+    let entities = world.spawn_batch(5);
+
+    assert_eq!(entities.len(), 5);
+    assert_eq!(world.entity_count(), 5);
+    for e in &entities {
+        assert!(world.is_alive(*e));
+    }
+}
+
+#[test]
+fn spawn_batch_zero() {
+    let mut world = World::new();
+    let entities = world.spawn_batch(0);
+    assert!(entities.is_empty());
+    assert_eq!(world.entity_count(), 0);
+}
+
+#[test]
+fn spawn_batch_with_inserts_components() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.register_component::<Health>();
+
+    let entities = world.spawn_batch_with(3, (Position { x: 1.0, y: 2.0 }, Health(100)));
+
+    assert_eq!(entities.len(), 3);
+    for e in &entities {
+        assert_eq!(
+            world.get::<Position>(*e),
+            Some(&Position { x: 1.0, y: 2.0 })
+        );
+        assert_eq!(world.get::<Health>(*e), Some(&Health(100)));
+    }
+}
+
+#[test]
+fn spawn_batch_with_fn_unique_data() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+
+    let entities = world.spawn_batch_with_fn(4, |i| {
+        (Position {
+            x: i as f32,
+            y: (i * 10) as f32,
+        },)
+    });
+
+    assert_eq!(entities.len(), 4);
+    for (i, e) in entities.iter().enumerate() {
+        assert_eq!(
+            world.get::<Position>(*e),
+            Some(&Position {
+                x: i as f32,
+                y: (i * 10) as f32
+            })
+        );
+    }
+}
+
+#[test]
+fn despawn_batch_removes_all() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.register_component::<Health>();
+
+    let entities = world.spawn_batch(4);
+    for e in &entities {
+        world.insert(*e, Position { x: 0.0, y: 0.0 }).unwrap();
+        world.insert(*e, Health(50)).unwrap();
+    }
+
+    world.advance_tick(); // tick = 1
+    world.despawn_batch(&entities);
+
+    assert_eq!(world.entity_count(), 0);
+    for e in &entities {
+        assert!(!world.is_alive(*e));
+    }
+
+    // Removal tracking should work
+    for e in &entities {
+        assert!(world.removed::<Position>(0).matches(e.index()));
+        assert!(world.removed::<Health>(0).matches(e.index()));
+    }
+}
+
+#[test]
+fn despawn_batch_skips_dead() {
+    let mut world = World::new();
+    let entities = world.spawn_batch(3);
+    world.despawn(entities[1]); // pre-despawn one
+
+    world.despawn_batch(&entities); // should not panic on already dead entity[1]
+    assert_eq!(world.entity_count(), 0);
+}
+
+#[test]
+fn insert_batch_adds_components() {
+    let mut world = World::new();
+    world.register_component::<Health>();
+
+    let entities = world.spawn_batch(3);
+    let healths = vec![Health(10), Health(20), Health(30)];
+
+    world.insert_batch(&entities, healths).unwrap();
+
+    assert_eq!(world.get::<Health>(entities[0]), Some(&Health(10)));
+    assert_eq!(world.get::<Health>(entities[1]), Some(&Health(20)));
+    assert_eq!(world.get::<Health>(entities[2]), Some(&Health(30)));
+}
+
+#[test]
+fn insert_batch_tracked_records_tick() {
+    let mut world = World::new();
+    world.register_component::<Health>();
+    world.advance_tick(); // tick = 1
+
+    let entities = world.spawn_batch(2);
+    let healths = vec![Health(10), Health(20)];
+
+    world.insert_batch_tracked(&entities, healths).unwrap();
+
+    assert!(world.added::<Health>(0).matches(entities[0].index()));
+    assert!(world.added::<Health>(0).matches(entities[1].index()));
+}
+
+#[test]
+#[should_panic(expected = "entities and components must have the same length")]
+fn insert_batch_mismatched_lengths_panics() {
+    let mut world = World::new();
+    world.register_component::<Health>();
+
+    let entities = world.spawn_batch(2);
+    let healths = vec![Health(10)];
+
+    let _ = world.insert_batch(&entities, healths);
+}
+
+#[test]
+fn insert_batch_unregistered_returns_err() {
+    let mut world = World::new();
+    let entities = world.spawn_batch(1);
+    let result = world.insert_batch(&entities, vec![Health(10)]);
+    assert!(result.is_err());
+}
+
+#[test]
+fn remove_batch_removes_components() {
+    let mut world = World::new();
+    world.register_component::<Health>();
+
+    let entities = world.spawn_batch(3);
+    for (i, e) in entities.iter().enumerate() {
+        world.insert(*e, Health(i as u32 * 10)).unwrap();
+    }
+
+    world.advance_tick();
+    world.remove_batch::<Health>(&entities[0..2]);
+
+    assert!(world.get::<Health>(entities[0]).is_none());
+    assert!(world.get::<Health>(entities[1]).is_none());
+    assert_eq!(world.get::<Health>(entities[2]), Some(&Health(20)));
+
+    // Removal tracking
+    assert!(world.removed::<Health>(0).matches(entities[0].index()));
+    assert!(world.removed::<Health>(0).matches(entities[1].index()));
+    assert!(!world.removed::<Health>(0).matches(entities[2].index()));
+}
+
+#[test]
+fn remove_batch_unregistered_no_panic() {
+    let mut world = World::new();
+    let entities = world.spawn_batch(2);
+    // Should not panic when component type is not registered
+    world.remove_batch::<Health>(&entities);
+}
+
+// ---- Lifecycle hook tests ----
+
+#[derive(Debug, Clone, PartialEq)]
+struct Marker(u32);
+
+#[test]
+fn on_add_fires_on_first_insert() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.register_component::<Marker>();
+    world.set_on_add::<Position>(|world, entity| {
+        let _ = world.insert(entity, Marker(1));
+    });
+
+    let entity = world.spawn();
+    world.insert(entity, Position { x: 1.0, y: 2.0 }).unwrap();
+
+    // Marker should have been added by on_add hook
+    assert_eq!(world.get::<Marker>(entity), Some(&Marker(1)));
+}
+
+#[test]
+fn on_add_does_not_fire_on_replace() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.register_component::<Marker>();
+    world.set_on_add::<Position>(|world, entity| {
+        let _ = world.insert(entity, Marker(1));
+    });
+
+    let entity = world.spawn();
+    world.insert(entity, Position { x: 1.0, y: 2.0 }).unwrap();
+    assert_eq!(world.get::<Marker>(entity), Some(&Marker(1)));
+
+    // Remove marker, then replace position — on_add should NOT fire
+    world.remove::<Marker>(entity);
+    world.insert(entity, Position { x: 3.0, y: 4.0 }).unwrap();
+    assert!(world.get::<Marker>(entity).is_none());
+}
+
+#[test]
+fn on_insert_fires_on_every_insert() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.register_component::<Marker>();
+    world.set_on_insert::<Position>(|world, entity| {
+        let count = world.get::<Marker>(entity).map(|m| m.0).unwrap_or(0);
+        let _ = world.insert(entity, Marker(count + 1));
+    });
+
+    let entity = world.spawn();
+    world.insert(entity, Position { x: 1.0, y: 0.0 }).unwrap();
+    assert_eq!(world.get::<Marker>(entity), Some(&Marker(1)));
+
+    world.insert(entity, Position { x: 2.0, y: 0.0 }).unwrap();
+    assert_eq!(world.get::<Marker>(entity), Some(&Marker(2)));
+}
+
+#[test]
+fn on_replace_fires_before_overwrite() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.register_component::<Marker>();
+    world.set_on_replace::<Position>(|world, entity| {
+        // Read old value and store it in Marker
+        if let Some(pos) = world.get::<Position>(entity) {
+            let _ = world.insert(entity, Marker(pos.x as u32));
+        }
+    });
+
+    let entity = world.spawn();
+    world.insert(entity, Position { x: 10.0, y: 0.0 }).unwrap();
+    // on_replace should NOT fire on first insert
+    assert!(world.get::<Marker>(entity).is_none());
+
+    world.insert(entity, Position { x: 20.0, y: 0.0 }).unwrap();
+    // Hook read old value x=10
+    assert_eq!(world.get::<Marker>(entity), Some(&Marker(10)));
+
+    world.insert(entity, Position { x: 30.0, y: 0.0 }).unwrap();
+    // Hook read old value x=20
+    assert_eq!(world.get::<Marker>(entity), Some(&Marker(20)));
+}
+
+#[test]
+fn on_remove_fires_before_removal() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.register_component::<Marker>();
+    world.set_on_remove::<Position>(|world, entity| {
+        // Read component before it's removed
+        if let Some(pos) = world.get::<Position>(entity) {
+            let _ = world.insert(entity, Marker(pos.x as u32));
+        }
+    });
+
+    let entity = world.spawn();
+    world.insert(entity, Position { x: 42.0, y: 0.0 }).unwrap();
+    world.remove::<Position>(entity);
+
+    // Hook stored Position.x in Marker before removal
+    assert_eq!(world.get::<Marker>(entity), Some(&Marker(42)));
+    assert!(world.get::<Position>(entity).is_none());
+}
+
+#[test]
+fn on_remove_fires_during_despawn() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.insert_resource(0u32);
+
+    world.set_on_remove::<Position>(|world, entity| {
+        if let Some(pos) = world.get::<Position>(entity) {
+            let mut counter = world.resource_mut::<u32>();
+            *counter = pos.x as u32;
+        }
+    });
+
+    let entity = world.spawn();
+    world.insert(entity, Position { x: 77.0, y: 0.0 }).unwrap();
+    world.despawn(entity);
+
+    let val = world.resource::<u32>();
+    assert_eq!(*val, 77);
+}
+
+#[test]
+fn on_remove_fires_during_despawn_batch() {
+    let mut world = World::new();
+    world.register_component::<Health>();
+    world.insert_resource(0u32);
+
+    world.set_on_remove::<Health>(|world, _entity| {
+        let mut counter = world.resource_mut::<u32>();
+        *counter += 1;
+    });
+
+    let entities = world.spawn_batch(3);
+    for e in &entities {
+        world.insert(*e, Health(10)).unwrap();
+    }
+    world.despawn_batch(&entities);
+
+    let count = world.resource::<u32>();
+    assert_eq!(*count, 3);
+}
+
+#[test]
+fn on_remove_entity_still_alive_during_despawn() {
+    let mut world = World::new();
+    world.register_component::<Health>();
+    world.insert_resource(false);
+
+    world.set_on_remove::<Health>(|world, entity| {
+        let mut was_alive = world.resource_mut::<bool>();
+        *was_alive = world.is_alive(entity);
+    });
+
+    let entity = world.spawn();
+    world.insert(entity, Health(1)).unwrap();
+    world.despawn(entity);
+
+    let was_alive = world.resource::<bool>();
+    assert!(*was_alive);
+}
+
+#[test]
+fn hooks_fire_during_insert_batch() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.register_component::<Marker>();
+
+    world.set_on_add::<Position>(|world, entity| {
+        let _ = world.insert(entity, Marker(1));
+    });
+
+    let entities = world.spawn_batch(3);
+    let positions = vec![
+        Position { x: 1.0, y: 0.0 },
+        Position { x: 2.0, y: 0.0 },
+        Position { x: 3.0, y: 0.0 },
+    ];
+    world.insert_batch(&entities, positions).unwrap();
+
+    for e in &entities {
+        assert_eq!(world.get::<Marker>(*e), Some(&Marker(1)));
+    }
+}
+
+#[test]
+fn hooks_fire_during_insert_batch_tracked() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.register_component::<Marker>();
+    world.advance_tick(); // tick = 1
+
+    world.set_on_add::<Position>(|world, entity| {
+        let _ = world.insert(entity, Marker(1));
+    });
+
+    let entities = world.spawn_batch(2);
+    let positions = vec![Position { x: 1.0, y: 0.0 }, Position { x: 2.0, y: 0.0 }];
+    world.insert_batch_tracked(&entities, positions).unwrap();
+
+    for e in &entities {
+        assert_eq!(world.get::<Marker>(*e), Some(&Marker(1)));
+    }
+    // Verify tick tracking still works
+    assert!(world.added::<Position>(0).matches(entities[0].index()));
+}
+
+#[test]
+fn hooks_fire_during_remove_batch() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.register_component::<Marker>();
+
+    world.set_on_remove::<Position>(|world, entity| {
+        if let Some(pos) = world.get::<Position>(entity) {
+            let _ = world.insert(entity, Marker(pos.x as u32));
+        }
+    });
+
+    let entities = world.spawn_batch(3);
+    for (i, e) in entities.iter().enumerate() {
+        world
+            .insert(
+                *e,
+                Position {
+                    x: (i + 1) as f32,
+                    y: 0.0,
+                },
+            )
+            .unwrap();
+    }
+    world.remove_batch::<Position>(&entities);
+
+    assert_eq!(world.get::<Marker>(entities[0]), Some(&Marker(1)));
+    assert_eq!(world.get::<Marker>(entities[1]), Some(&Marker(2)));
+    assert_eq!(world.get::<Marker>(entities[2]), Some(&Marker(3)));
+}
+
+#[test]
+fn on_add_required_component_pattern() {
+    // Classic use case: inserting A automatically inserts B
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.register_component::<Velocity>();
+
+    world.set_on_add::<Position>(|world, entity| {
+        if world.get::<Velocity>(entity).is_none() {
+            let _ = world.insert(entity, Velocity { x: 0.0, y: 0.0 });
+        }
+    });
+
+    let entity = world.spawn();
+    world.insert(entity, Position { x: 1.0, y: 2.0 }).unwrap();
+
+    assert_eq!(
+        world.get::<Velocity>(entity),
+        Some(&Velocity { x: 0.0, y: 0.0 })
+    );
+}
+
+#[test]
+fn multiple_hooks_on_same_component() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.register_component::<Marker>();
+    world.insert_resource(0u32);
+
+    world.set_on_add::<Position>(|world, entity| {
+        let _ = world.insert(entity, Marker(1));
+    });
+    world.set_on_insert::<Position>(|world, _entity| {
+        let mut counter = world.resource_mut::<u32>();
+        *counter += 1;
+    });
+
+    let entity = world.spawn();
+    world.insert(entity, Position { x: 1.0, y: 0.0 }).unwrap();
+
+    // Both hooks should have fired
+    assert_eq!(world.get::<Marker>(entity), Some(&Marker(1)));
+    assert_eq!(*world.resource::<u32>(), 1);
+
+    // Replace — only on_insert fires, not on_add
+    world.remove::<Marker>(entity);
+    world.insert(entity, Position { x: 2.0, y: 0.0 }).unwrap();
+
+    assert!(world.get::<Marker>(entity).is_none());
+    assert_eq!(*world.resource::<u32>(), 2);
+}
+
+#[test]
+fn hooks_via_commands() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.register_component::<Marker>();
+    world.init_commands();
+
+    world.set_on_add::<Position>(|world, entity| {
+        let _ = world.insert(entity, Marker(99));
+    });
+
+    // Queue insertion via command buffer
+    let entity = world.spawn();
+    {
+        let cmds = world.resource::<crate::commands::CommandBuffer>();
+        cmds.push(move |world: &mut World| {
+            let _ = world.insert(entity, Position { x: 1.0, y: 0.0 });
+        });
+    }
+    world.apply_commands();
+
+    // Hook should have fired when command was applied
+    assert_eq!(world.get::<Marker>(entity), Some(&Marker(99)));
+}
+
+#[test]
+fn no_hooks_batch_fast_path() {
+    // Ensure batch operations still work efficiently without hooks
+    let mut world = World::new();
+    world.register_component::<Health>();
+
+    let entities = world.spawn_batch(100);
+    let healths: Vec<Health> = (0..100).map(Health).collect();
+    world.insert_batch(&entities, healths).unwrap();
+
+    for (i, e) in entities.iter().enumerate() {
+        assert_eq!(world.get::<Health>(*e), Some(&Health(i as u32)));
+    }
+}
+
+#[test]
+fn despawn_multiple_components_hooks() {
+    // Despawn fires on_remove for each component type
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.register_component::<Health>();
+    world.insert_resource(0u32);
+
+    world.set_on_remove::<Position>(|world, _entity| {
+        let mut c = world.resource_mut::<u32>();
+        *c += 10;
+    });
+    world.set_on_remove::<Health>(|world, _entity| {
+        let mut c = world.resource_mut::<u32>();
+        *c += 1;
+    });
+
+    let entity = world.spawn();
+    world.insert(entity, Position { x: 0.0, y: 0.0 }).unwrap();
+    world.insert(entity, Health(100)).unwrap();
+    world.despawn(entity);
+
+    // Both hooks should have fired
+    assert_eq!(*world.resource::<u32>(), 11);
+}
+
+// --- Required components tests ---
+
+#[derive(Debug, Clone, PartialEq, Default)]
+struct ReqA(u32);
+#[derive(Debug, Clone, PartialEq, Default)]
+struct ReqB(u32);
+#[derive(Debug, Clone, PartialEq, Default)]
+struct ReqC(u32);
+
+#[test]
+fn required_component_inserted_automatically() {
+    let mut world = World::new();
+    world.register_component::<ReqA>();
+    world.register_required::<ReqA, ReqB>();
+
+    let entity = world.spawn();
+    world.insert(entity, ReqA(1)).unwrap();
+
+    assert_eq!(world.get::<ReqB>(entity), Some(&ReqB(0)));
+}
+
+#[test]
+fn required_component_not_overwritten() {
+    let mut world = World::new();
+    world.register_component::<ReqA>();
+    world.register_component::<ReqB>();
+    world.register_required::<ReqA, ReqB>();
+
+    let entity = world.spawn();
+    world.insert(entity, ReqB(42)).unwrap();
+    world.insert(entity, ReqA(1)).unwrap();
+
+    // Existing ReqB should NOT be overwritten
+    assert_eq!(world.get::<ReqB>(entity), Some(&ReqB(42)));
+}
+
+#[test]
+fn required_component_not_applied_on_replace() {
+    let mut world = World::new();
+    world.register_component::<ReqA>();
+    world.register_required::<ReqA, ReqB>();
+
+    let entity = world.spawn();
+    world.insert(entity, ReqA(1)).unwrap();
+    assert_eq!(world.get::<ReqB>(entity), Some(&ReqB(0)));
+
+    // Remove ReqB, then replace ReqA — requirements should NOT fire again
+    world.remove::<ReqB>(entity);
+    world.insert(entity, ReqA(2)).unwrap();
+    assert!(world.get::<ReqB>(entity).is_none());
+}
+
+#[test]
+fn transitive_requirements() {
+    let mut world = World::new();
+    world.register_component::<ReqA>();
+    world.register_required::<ReqA, ReqB>();
+    world.register_required::<ReqB, ReqC>();
+
+    let entity = world.spawn();
+    world.insert(entity, ReqA(1)).unwrap();
+
+    assert_eq!(world.get::<ReqB>(entity), Some(&ReqB(0)));
+    assert_eq!(world.get::<ReqC>(entity), Some(&ReqC(0)));
+}
+
+#[test]
+fn required_components_coexist_with_on_add_hook() {
+    let mut world = World::new();
+    world.register_component::<ReqA>();
+    world.register_component::<Marker>();
+    world.register_required::<ReqA, ReqB>();
+
+    world.set_on_add::<ReqA>(|world, entity| {
+        let _ = world.insert(entity, Marker(99));
+    });
+
+    let entity = world.spawn();
+    world.insert(entity, ReqA(1)).unwrap();
+
+    assert_eq!(world.get::<ReqB>(entity), Some(&ReqB(0)));
+    assert_eq!(world.get::<Marker>(entity), Some(&Marker(99)));
+}
+
+#[test]
+fn required_component_auto_registers() {
+    let mut world = World::new();
+    world.register_component::<ReqA>();
+    // Don't manually register ReqB — register_required should do it
+    world.register_required::<ReqA, ReqB>();
+
+    let entity = world.spawn();
+    world.insert(entity, ReqA(1)).unwrap();
+    assert_eq!(world.get::<ReqB>(entity), Some(&ReqB(0)));
+}
+
+#[test]
+fn required_components_in_batch_insert() {
+    let mut world = World::new();
+    world.register_component::<ReqA>();
+    world.register_required::<ReqA, ReqB>();
+
+    let entities = world.spawn_batch(3);
+    let components = vec![ReqA(1), ReqA(2), ReqA(3)];
+    world.insert_batch(&entities, components).unwrap();
+
+    for e in &entities {
+        assert_eq!(world.get::<ReqB>(*e), Some(&ReqB(0)));
+    }
+}
+
+#[test]
+fn required_components_in_batch_tracked() {
+    let mut world = World::new();
+    world.register_component::<ReqA>();
+    world.register_required::<ReqA, ReqB>();
+
+    let entities = world.spawn_batch(2);
+    let components = vec![ReqA(1), ReqA(2)];
+    world.insert_batch_tracked(&entities, components).unwrap();
+
+    for e in &entities {
+        assert_eq!(world.get::<ReqB>(*e), Some(&ReqB(0)));
+    }
+}
+
+#[test]
+fn required_components_via_bundle() {
+    let mut world = World::new();
+    world.register_component::<ReqA>();
+    world.register_component::<Health>();
+    world.register_required::<ReqA, ReqB>();
+
+    let entity = world.spawn_with((ReqA(1), Health(100)));
+    assert_eq!(world.get::<ReqB>(entity), Some(&ReqB(0)));
+}
+
+#[test]
+fn multiple_required_components() {
+    let mut world = World::new();
+    world.register_component::<ReqA>();
+    world.register_required::<ReqA, ReqB>();
+    world.register_required::<ReqA, ReqC>();
+
+    let entity = world.spawn();
+    world.insert(entity, ReqA(1)).unwrap();
+
+    assert_eq!(world.get::<ReqB>(entity), Some(&ReqB(0)));
+    assert_eq!(world.get::<ReqC>(entity), Some(&ReqC(0)));
+}
+
+// --- Entity collect/remap tests ---
+
+#[test]
+fn collect_entities_from_parent() {
+    use crate::std::components::{Children, Parent};
+
+    let mut world = World::new();
+    world.register_inspector::<Parent>();
+    world.register_inspector_default::<Children>();
+
+    let parent = world.spawn();
+    let child = world.spawn();
+    world.insert(child, Parent(parent)).unwrap();
+
+    let mut collected = Vec::new();
+    world.collect_entities_by_name(child, "Parent", &mut collected);
+    assert_eq!(collected, vec![parent]);
+}
+
+#[test]
+fn collect_entities_from_children() {
+    use crate::std::components::{Children, Parent};
+
+    let mut world = World::new();
+    world.register_inspector::<Parent>();
+    world.register_inspector_default::<Children>();
+
+    let parent = world.spawn();
+    let c1 = world.spawn();
+    let c2 = world.spawn();
+    world.insert(parent, Children(vec![c1, c2])).unwrap();
+
+    let mut collected = Vec::new();
+    world.collect_entities_by_name(parent, "Children", &mut collected);
+    assert_eq!(collected, vec![c1, c2]);
+}
+
+#[test]
+fn remap_entities_in_parent() {
+    use crate::std::components::{Children, Parent};
+
+    let mut world = World::new();
+    world.register_inspector::<Parent>();
+    world.register_inspector_default::<Children>();
+
+    let old_parent = world.spawn();
+    let new_parent = world.spawn();
+    let child = world.spawn();
+    world.insert(child, Parent(old_parent)).unwrap();
+
+    world.remap_entities_by_name(child, "Parent", &mut |e| {
+        if e == old_parent { new_parent } else { e }
+    });
+
+    assert_eq!(world.get::<Parent>(child), Some(&Parent(new_parent)));
+}
+
+#[test]
+fn remap_entities_in_children() {
+    use crate::std::components::{Children, Parent};
+
+    let mut world = World::new();
+    world.register_inspector::<Parent>();
+    world.register_inspector_default::<Children>();
+
+    let parent = world.spawn();
+    let old_c1 = world.spawn();
+    let old_c2 = world.spawn();
+    let new_c1 = world.spawn();
+    let new_c2 = world.spawn();
+    world
+        .insert(parent, Children(vec![old_c1, old_c2]))
+        .unwrap();
+
+    world.remap_entities_by_name(parent, "Children", &mut |e| {
+        if e == old_c1 {
+            new_c1
+        } else if e == old_c2 {
+            new_c2
+        } else {
+            e
+        }
+    });
+
+    assert_eq!(
+        world.get::<Children>(parent),
+        Some(&Children(vec![new_c1, new_c2]))
+    );
+}
+
+#[test]
+fn collect_all_entities_gathers_from_all_components() {
+    use crate::std::components::{Children, Parent};
+
+    let mut world = World::new();
+    world.register_inspector::<Parent>();
+    world.register_inspector_default::<Children>();
+
+    let parent = world.spawn();
+    let c1 = world.spawn();
+    let c2 = world.spawn();
+    // Entity has both Parent (pointing at parent) and Children (containing c1, c2)
+    let entity = world.spawn();
+    world.insert(entity, Parent(parent)).unwrap();
+    world.insert(entity, Children(vec![c1, c2])).unwrap();
+
+    let mut collected = Vec::new();
+    world.collect_all_entities(entity, &mut collected);
+    assert_eq!(collected.len(), 3);
+    assert!(collected.contains(&parent));
+    assert!(collected.contains(&c1));
+    assert!(collected.contains(&c2));
+}
+
+#[test]
+fn collect_noop_for_non_entity_component() {
+    let mut world = World::new();
+    world.register_inspector_default::<crate::std::components::Transform>();
+
+    let entity = world.spawn();
+    world
+        .insert(entity, crate::std::components::Transform::IDENTITY)
+        .unwrap();
+
+    let mut collected = Vec::new();
+    world.collect_entities_by_name(entity, "Transform", &mut collected);
+    assert!(collected.is_empty());
+}
+
+// --- Clone entity tests ---
+
+#[test]
+fn clone_entity_copies_components() {
+    let mut world = World::new();
+    crate::register_std_components(&mut world);
+
+    let src = world.spawn();
+    let t = crate::std::components::Transform::from_translation(redlilium_core::math::Vec3::new(
+        1.0, 2.0, 3.0,
+    ));
+    world.insert(src, t).unwrap();
+    world
+        .insert(src, crate::std::components::Name::new("original"))
+        .unwrap();
+
+    let dst = world.clone_entity(src).unwrap();
+
+    assert_ne!(src, dst);
+    assert_eq!(
+        world.get::<crate::std::components::Transform>(dst),
+        Some(&t)
+    );
+    assert_eq!(
+        world
+            .get::<crate::std::components::Name>(dst)
+            .map(|n| n.as_str()),
+        Some("original"),
+    );
+}
+
+#[test]
+fn clone_entity_dead_source_returns_none() {
+    let mut world = World::new();
+    crate::register_std_components(&mut world);
+
+    let src = world.spawn();
+    world.despawn(src);
+
+    assert!(world.clone_entity(src).is_none());
+}
+
+#[test]
+fn clone_entity_tree_flat() {
+    let mut world = World::new();
+    crate::register_std_components(&mut world);
+
+    let parent = world.spawn();
+    world
+        .insert(parent, crate::std::components::Name::new("parent"))
+        .unwrap();
+    world
+        .insert(parent, crate::std::components::Transform::IDENTITY)
+        .unwrap();
+
+    let child_a = world.spawn();
+    world
+        .insert(child_a, crate::std::components::Name::new("child_a"))
+        .unwrap();
+    crate::std::hierarchy::set_parent(&mut world, child_a, parent);
+
+    let child_b = world.spawn();
+    world
+        .insert(child_b, crate::std::components::Name::new("child_b"))
+        .unwrap();
+    crate::std::hierarchy::set_parent(&mut world, child_b, parent);
+
+    // 3 original + 3 cloned = 6
+    let entity_count_before = world.entity_count();
+    let mapping = world.clone_entity_tree(parent);
+    assert_eq!(mapping.len(), 3);
+    assert_eq!(world.entity_count(), entity_count_before + 3);
+
+    let new_parent = mapping[&parent];
+    let new_child_a = mapping[&child_a];
+    let new_child_b = mapping[&child_b];
+
+    // Verify component data cloned
+    assert_eq!(
+        world
+            .get::<crate::std::components::Name>(new_parent)
+            .map(|n| n.as_str()),
+        Some("parent"),
+    );
+    assert_eq!(
+        world
+            .get::<crate::std::components::Name>(new_child_a)
+            .map(|n| n.as_str()),
+        Some("child_a"),
+    );
+
+    // Verify hierarchy remapped
+    let children = world.get::<crate::Children>(new_parent).unwrap();
+    assert_eq!(children.0, vec![new_child_a, new_child_b]);
+
+    let parent_of_a = world.get::<crate::Parent>(new_child_a).unwrap();
+    assert_eq!(parent_of_a.0, new_parent);
+
+    let parent_of_b = world.get::<crate::Parent>(new_child_b).unwrap();
+    assert_eq!(parent_of_b.0, new_parent);
+
+    // Cloned root should have no parent (original didn't)
+    assert!(world.get::<crate::Parent>(new_parent).is_none());
+}
+
+#[test]
+fn clone_entity_tree_deep() {
+    let mut world = World::new();
+    crate::register_std_components(&mut world);
+
+    // root -> mid -> leaf
+    let root = world.spawn();
+    world
+        .insert(root, crate::std::components::Name::new("root"))
+        .unwrap();
+
+    let mid = world.spawn();
+    world
+        .insert(mid, crate::std::components::Name::new("mid"))
+        .unwrap();
+    crate::std::hierarchy::set_parent(&mut world, mid, root);
+
+    let leaf = world.spawn();
+    world
+        .insert(leaf, crate::std::components::Name::new("leaf"))
+        .unwrap();
+    crate::std::hierarchy::set_parent(&mut world, leaf, mid);
+
+    let mapping = world.clone_entity_tree(root);
+    assert_eq!(mapping.len(), 3);
+
+    let new_root = mapping[&root];
+    let new_mid = mapping[&mid];
+    let new_leaf = mapping[&leaf];
+
+    // root -> mid
+    let root_children = world.get::<crate::Children>(new_root).unwrap();
+    assert_eq!(root_children.0, vec![new_mid]);
+
+    // mid -> leaf
+    let mid_children = world.get::<crate::Children>(new_mid).unwrap();
+    assert_eq!(mid_children.0, vec![new_leaf]);
+
+    // leaf has parent = mid
+    assert_eq!(world.get::<crate::Parent>(new_leaf).unwrap().0, new_mid);
+
+    // mid has parent = root
+    assert_eq!(world.get::<crate::Parent>(new_mid).unwrap().0, new_root);
+
+    // root has no parent
+    assert!(world.get::<crate::Parent>(new_root).is_none());
+}
+
+#[test]
+fn clone_entity_tree_dead_root_returns_empty() {
+    let mut world = World::new();
+    crate::register_std_components(&mut world);
+
+    let root = world.spawn();
+    world.despawn(root);
+
+    let mapping = world.clone_entity_tree(root);
+    assert!(mapping.is_empty());
+}
+
+// --- Prefab extract + instantiate tests ---
+
+#[test]
+fn extract_and_instantiate_single_entity() {
+    let mut world = World::new();
+    crate::register_std_components(&mut world);
+
+    let src = world.spawn();
+    let t = crate::std::components::Transform::from_translation(redlilium_core::math::Vec3::new(
+        5.0, 6.0, 7.0,
+    ));
+    world.insert(src, t).unwrap();
+    world
+        .insert(src, crate::std::components::Name::new("prefab_src"))
+        .unwrap();
+
+    let prefab = world.extract_prefab(src);
+    assert_eq!(prefab.entity_count(), 1);
+
+    let spawned = prefab.instantiate(&mut world);
+    assert_eq!(spawned.len(), 1);
+
+    let dst = spawned[0];
+    assert_ne!(src, dst);
+    assert_eq!(
+        world.get::<crate::std::components::Transform>(dst),
+        Some(&t)
+    );
+    assert_eq!(
+        world
+            .get::<crate::std::components::Name>(dst)
+            .map(|n| n.as_str()),
+        Some("prefab_src"),
+    );
+}
+
+#[test]
+fn extract_and_instantiate_tree_with_hierarchy() {
+    let mut world = World::new();
+    crate::register_std_components(&mut world);
+
+    // Build: parent -> child_a, child_b
+    let parent = world.spawn();
+    world
+        .insert(parent, crate::std::components::Name::new("parent"))
+        .unwrap();
+    let child_a = world.spawn();
+    world
+        .insert(child_a, crate::std::components::Name::new("child_a"))
+        .unwrap();
+    crate::std::hierarchy::set_parent(&mut world, child_a, parent);
+    let child_b = world.spawn();
+    world
+        .insert(child_b, crate::std::components::Name::new("child_b"))
+        .unwrap();
+    crate::std::hierarchy::set_parent(&mut world, child_b, parent);
+
+    let prefab = world.extract_prefab(parent);
+    assert_eq!(prefab.entity_count(), 3);
+
+    let spawned = prefab.instantiate(&mut world);
+    assert_eq!(spawned.len(), 3);
+
+    let new_parent = spawned[0];
+    let new_child_a = spawned[1];
+    let new_child_b = spawned[2];
+
+    // Verify hierarchy is remapped
+    let children = world.get::<crate::Children>(new_parent).unwrap();
+    assert_eq!(children.0, vec![new_child_a, new_child_b]);
+
+    assert_eq!(
+        world.get::<crate::Parent>(new_child_a).unwrap().0,
+        new_parent,
+    );
+    assert_eq!(
+        world.get::<crate::Parent>(new_child_b).unwrap().0,
+        new_parent,
+    );
+
+    // Root has no parent
+    assert!(world.get::<crate::Parent>(new_parent).is_none());
+
+    // Component data cloned
+    assert_eq!(
+        world
+            .get::<crate::std::components::Name>(new_parent)
+            .map(|n| n.as_str()),
+        Some("parent"),
+    );
+}
+
+#[test]
+fn prefab_instantiate_multiple_times() {
+    let mut world = World::new();
+    crate::register_std_components(&mut world);
+
+    let src = world.spawn();
+    world
+        .insert(src, crate::std::components::Name::new("template"))
+        .unwrap();
+
+    let prefab = world.extract_prefab(src);
+
+    let a = prefab.instantiate(&mut world);
+    let b = prefab.instantiate(&mut world);
+
+    assert_ne!(a[0], b[0]);
+    assert_eq!(
+        world
+            .get::<crate::std::components::Name>(a[0])
+            .map(|n| n.as_str()),
+        Some("template"),
+    );
+    assert_eq!(
+        world
+            .get::<crate::std::components::Name>(b[0])
+            .map(|n| n.as_str()),
+        Some("template"),
+    );
+}
+
+#[test]
+fn prefab_cross_world() {
+    let mut world_a = World::new();
+    crate::register_std_components(&mut world_a);
+
+    let src = world_a.spawn();
+    world_a
+        .insert(src, crate::std::components::Name::new("cross"))
+        .unwrap();
+    world_a
+        .insert(
+            src,
+            crate::std::components::Transform::from_translation(redlilium_core::math::Vec3::new(
+                1.0, 2.0, 3.0,
+            )),
+        )
+        .unwrap();
+
+    let prefab = world_a.extract_prefab(src);
+
+    // Instantiate into a completely different world
+    let mut world_b = World::new();
+    crate::register_std_components(&mut world_b);
+
+    let spawned = prefab.instantiate(&mut world_b);
+    assert_eq!(spawned.len(), 1);
+    assert_eq!(
+        world_b
+            .get::<crate::std::components::Name>(spawned[0])
+            .map(|n| n.as_str()),
+        Some("cross"),
+    );
+    let t = world_b
+        .get::<crate::std::components::Transform>(spawned[0])
+        .unwrap();
+    assert!((t.translation - redlilium_core::math::Vec3::new(1.0, 2.0, 3.0)).norm() < 1e-6);
+}
+
+#[test]
+fn extract_prefab_dead_root_returns_empty() {
+    let mut world = World::new();
+    crate::register_std_components(&mut world);
+
+    let root = world.spawn();
+    world.despawn(root);
+
+    let prefab = world.extract_prefab(root);
+    assert!(prefab.is_empty());
+}

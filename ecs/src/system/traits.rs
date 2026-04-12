@@ -1,9 +1,9 @@
 use std::any::Any;
 use std::fmt;
 
-use crate::command_collector::CommandCollector;
+use crate::commands::CommandCollector;
 use crate::compute::ComputePool;
-use crate::system_context::SystemContext;
+use crate::system::SystemContext;
 use crate::world::World;
 
 /// Error type returned by system execution.
@@ -368,7 +368,7 @@ pub fn run_system_blocking<S: System>(
     system: &S,
     world: &World,
     compute: &ComputePool,
-    io: &crate::io_runtime::IoRuntime,
+    io: &crate::compute::IoRuntime,
 ) -> Result<S::Result, SystemError> {
     let commands = CommandCollector::new();
     let ctx = SystemContext::new(world, compute, io, &commands);
@@ -398,7 +398,7 @@ pub fn run_system_once<S: System>(
     system: &S,
     world: &mut World,
     compute: &ComputePool,
-    io: &crate::io_runtime::IoRuntime,
+    io: &crate::compute::IoRuntime,
 ) -> Result<S::Result, SystemError> {
     let commands = CommandCollector::new();
     let result = {
@@ -440,8 +440,8 @@ pub fn run_read_only_exclusive_system_blocking<S: ReadOnlyExclusiveSystem>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::access_set::{Read, Write};
-    use crate::io_runtime::IoRuntime;
+    use crate::compute::IoRuntime;
+    use crate::query::{Read, Write};
 
     struct Position {
         x: f32,

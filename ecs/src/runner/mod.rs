@@ -11,8 +11,8 @@ pub use multi::EcsRunnerMultiThread;
 use std::time::Duration;
 
 use crate::compute::ComputePool;
-use crate::io_runtime::IoRuntime;
-use crate::systems_container::SystemsContainer;
+use crate::compute::IoRuntime;
+use crate::system::SystemsContainer;
 use crate::world::World;
 
 /// Error returned when graceful shutdown exceeds the time budget.
@@ -102,15 +102,15 @@ impl EcsRunner {
 
     /// Runs all systems with diagnostics collection controlled by `diagnostics`.
     ///
-    /// Returns a [`RunResult`](crate::diagnostics::RunResult) containing any
-    /// system errors and an optional [`RunReport`](crate::diagnostics::RunReport)
+    /// Returns a [`RunResult`](crate::system::diagnostics::RunResult) containing any
+    /// system errors and an optional [`RunReport`](crate::system::diagnostics::RunReport)
     /// with ambiguity and timing information.
     pub fn run_with(
         &self,
         world: &mut World,
         systems: &SystemsContainer,
-        diagnostics: &crate::diagnostics::RunDiagnostics,
-    ) -> crate::diagnostics::RunResult {
+        diagnostics: &crate::system::diagnostics::RunDiagnostics,
+    ) -> crate::system::diagnostics::RunResult {
         match self {
             Self::SingleThread(runner) => runner.run_with(world, systems, diagnostics),
             #[cfg(not(target_arch = "wasm32"))]
@@ -152,9 +152,9 @@ impl EcsRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::access_set::{Read, Write};
+    use crate::query::{Read, Write};
     use crate::system::System;
-    use crate::system_context::SystemContext;
+    use crate::system::SystemContext;
 
     struct Position {
         x: f32,
