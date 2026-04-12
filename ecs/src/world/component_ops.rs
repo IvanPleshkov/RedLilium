@@ -47,7 +47,7 @@ impl World {
                 let comp = world.get::<T>(entity)?;
                 comp.inspect_ui(ui, world, entity)
             },
-            remove_fn: |world, entity| world.remove::<T>(entity).is_some(),
+            remove_fn: |world, entity| world.remove::<T>(entity).is_ok_and(|v| v.is_some()),
             insert_default_fn: None,
             collect_entities_fn: |world, entity, collector| {
                 if let Some(comp) = world.get::<T>(entity) {
@@ -103,7 +103,7 @@ impl World {
                 let comp = world.get::<T>(entity)?;
                 comp.inspect_ui(ui, world, entity)
             },
-            remove_fn: |world, entity| world.remove::<T>(entity).is_some(),
+            remove_fn: |world, entity| world.remove::<T>(entity).is_ok_and(|v| v.is_some()),
             insert_default_fn: Some(|world, entity| {
                 let _ = world.insert(entity, T::default());
             }),
@@ -254,24 +254,26 @@ impl World {
 
         // Perform the actual insert (always tracked at current tick)
         let tick = self.tick;
-        self.storage_mut(&type_id)
-            .unwrap()
-            .typed_mut::<T>()
-            .insert_with_tick(entity.index(), component, tick);
+        self.storage_mut(&type_id).unwrap().typed_mut::<T>().insert(
+            entity.index(),
+            component,
+            tick,
+        );
 
-        // Fire on_add / on_insert AFTER insertion
+        // Apply required components before hooks so the entity is fully
+        // constructed by the time on_add/on_insert handlers observe it.
+        if !had_component {
+            for req_fn in required {
+                req_fn(self, entity);
+            }
+        }
+
+        // Fire on_add / on_insert AFTER insertion and required components
         if !had_component && let Some(hook) = on_add {
             hook(self, entity);
         }
         if let Some(hook) = on_insert {
             hook(self, entity);
-        }
-
-        // Apply required components (only on first add)
-        if !had_component {
-            for req_fn in required {
-                req_fn(self, entity);
-            }
         }
 
         // Queue deferred observer triggers
@@ -309,31 +311,41 @@ impl World {
     ///
     /// Convenience for `spawn()` + `insert_bundle()`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if any component type has not been registered.
-    pub fn spawn_with(&mut self, bundle: impl Bundle) -> Entity {
+    /// Returns [`WorldError::ComponentNotRegistered`] if any component type
+    /// has not been registered. The entity is still spawned (alive but empty).
+    pub fn spawn_with(&mut self, bundle: impl Bundle) -> Result<Entity, WorldError> {
         let entity = self.spawn();
-        bundle
-            .insert_into(self, entity)
-            .expect("Component in bundle not registered");
-        entity
+        bundle.insert_into(self, entity)?;
+        Ok(entity)
     }
 
     /// Removes a component from an entity.
     ///
-    /// Returns the removed value, or `None` if the entity did not have it.
+    /// Removes a component from an entity.
+    ///
+    /// Returns `Ok(Some(value))` if the component was present and removed,
+    /// `Ok(None)` if the entity is alive but does not have this component,
+    /// or `Err(WorldError::EntityNotAlive)` if the entity is dead.
+    ///
     /// Fires `on_remove` hook before removal. Records the removal for
     /// [`removed`](World::removed) filter queries.
-    pub fn remove<T: 'static>(&mut self, entity: Entity) -> Option<T> {
+    pub fn remove<T: 'static>(&mut self, entity: Entity) -> Result<Option<T>, WorldError> {
+        if !self.entities.is_alive(entity) {
+            return Err(WorldError::EntityNotAlive { entity });
+        }
+
         let tick = self.tick;
         let type_id = TypeId::of::<T>();
 
         // Check presence and extract hook
         let on_remove = {
-            let storage = self.storage_mut(&type_id)?;
+            let Some(storage) = self.storage_mut(&type_id) else {
+                return Ok(None);
+            };
             if !storage.contains_untyped(entity.index()) {
-                return None;
+                return Ok(None);
             }
             storage.on_remove
         };
@@ -344,19 +356,37 @@ impl World {
         }
 
         // Perform removal
-        let storage = self.storage_mut(&type_id)?;
+        let Some(storage) = self.storage_mut(&type_id) else {
+            return Ok(None);
+        };
         let result = storage.typed_mut::<T>().remove(entity.index());
         if result.is_some() {
             storage.record_removal(entity.index(), tick);
             // Queue deferred observer trigger
             self.observers.push_typed_trigger::<OnRemove<T>>(entity);
         }
-        result
+        Ok(result)
     }
 
     /// Returns a reference to a component on an entity.
+    ///
+    /// We intentionally bypass the `RwLock` and return a plain `&T` instead
+    /// of a lock guard. This avoids deadlocks in hooks (which read components
+    /// while inside an `insert`/`remove` call path) and keeps the API
+    /// ergonomic for the common single-threaded access pattern.
+    ///
+    /// # Safety of the `unsafe` block
+    ///
+    /// `data_ptr()` returns a raw pointer to the storage without locking.
+    /// This is safe here because `&self` on `World` guarantees no `&mut self`
+    /// method (insert, remove, despawn) is running concurrently. Parallel
+    /// system execution uses the separate `read_unlocked` / `write_unlocked`
+    /// API which acquires locks externally via `acquire_sorted`.
     pub fn get<T: 'static>(&self, entity: Entity) -> Option<&T> {
         let lock = self.components.get(&TypeId::of::<T>())?;
+        // SAFETY: &self guarantees no concurrent mutation of World.
+        // We don't acquire the RwLock to avoid deadlocks in hook callbacks
+        // and to return a lightweight &T instead of a lock guard.
         let storage = unsafe { &*lock.data_ptr() };
         storage.typed::<T>().get(entity.index())
     }
@@ -365,14 +395,13 @@ impl World {
     ///
     /// The component is marked as changed only when [`DerefMut`] is invoked.
     pub fn get_mut<T: 'static>(&mut self, entity: Entity) -> Option<Mut<'_, T>> {
-        let tick = self.tick;
         let storage = self
             .components
             .get_mut(&TypeId::of::<T>())
             .map(|l| l.get_mut())?;
         storage
             .typed_mut::<T>()
-            .get_mut_tracked(entity.index(), tick)
+            .get_mut_tracked(entity.index(), self.tick)
     }
 
     /// Returns a reference to the entity store.

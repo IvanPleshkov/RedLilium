@@ -59,7 +59,7 @@ impl CommandCollector {
     /// Queues a component removal from an entity.
     pub fn remove<T: Send + Sync + 'static>(&self, entity: Entity) {
         self.push(move |world| {
-            world.remove::<T>(entity);
+            let _ = world.remove::<T>(entity);
         });
     }
 
@@ -143,7 +143,9 @@ impl CommandCollector {
     /// Panics when applied if any component type has not been registered.
     pub fn spawn_with(&self, bundle: impl Bundle) {
         self.push(move |world| {
-            world.spawn_with(bundle);
+            world
+                .spawn_with(bundle)
+                .expect("Component in bundle not registered");
         });
     }
 

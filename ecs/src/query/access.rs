@@ -963,7 +963,7 @@ mod tests {
         world.insert(e, Health(100)).unwrap();
 
         world.advance_tick(); // tick = 1
-        world.remove::<Health>(e); // removed at tick 1
+        let _ = world.remove::<Health>(e); // removed at tick 1
 
         let (filter,) = <(Removed<Health>,)>::fetch(&world);
         assert!(filter.matches(e.index()));
@@ -983,7 +983,7 @@ mod tests {
         world.insert(e2, Health(200)).unwrap();
 
         world.advance_tick(); // tick = 1
-        world.remove::<Health>(e1); // removed at tick 1
+        let _ = world.remove::<Health>(e1); // removed at tick 1
 
         let (positions, removed) = <(Read<Position>, Removed<Health>)>::fetch(&world);
         let affected: Vec<f32> = positions
@@ -1044,7 +1044,7 @@ mod tests {
         world.insert(e, Health(50)).unwrap();
 
         world.advance_tick(); // tick = 1
-        world.remove::<Health>(e);
+        let _ = world.remove::<Health>(e);
 
         let (filter,) = <(MaybeRemoved<Health>,)>::fetch(&world);
         assert!(filter.matches(e.index()));

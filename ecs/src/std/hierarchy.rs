@@ -71,7 +71,7 @@ pub fn set_parent(world: &mut World, entity: Entity, parent: Entity) {
 /// from its parent's [`Children`] list. Does nothing if `entity` has
 /// no parent.
 pub fn remove_parent(world: &mut World, entity: Entity) {
-    let Some(parent) = world.remove::<Parent>(entity) else {
+    let Ok(Some(parent)) = world.remove::<Parent>(entity) else {
         return;
     };
 
@@ -87,7 +87,7 @@ pub fn remove_parent(world: &mut World, entity: Entity) {
 /// then despawns the entity and all descendants depth-first.
 pub fn despawn_recursive(world: &mut World, entity: Entity) {
     // Remove from parent first
-    if let Some(parent) = world.remove::<Parent>(entity)
+    if let Ok(Some(parent)) = world.remove::<Parent>(entity)
         && let Some(mut children) = world.get_mut::<Children>(parent.0)
     {
         children.0.retain(|&e| e != entity);
@@ -101,6 +101,8 @@ fn despawn_subtree(world: &mut World, entity: Entity) {
     // Collect children first to avoid borrow issues
     let child_entities = world
         .remove::<Children>(entity)
+        .ok()
+        .flatten()
         .map(|c| c.0)
         .unwrap_or_default();
 

@@ -212,19 +212,12 @@ impl<T: 'static> SparseSetInner<T> {
         }
     }
 
-    /// Inserts a component for the given entity index.
-    /// If the entity already has this component, the value is replaced.
-    /// Uses tick 0 for change tracking (untracked).
-    pub fn insert(&mut self, entity_index: u32, value: T) {
-        self.insert_with_tick(entity_index, value, 0);
-    }
-
-    /// Inserts a component with change tracking at the given tick.
+    /// Inserts a component for the given entity index at the given tick.
     ///
     /// If the entity already has this component, the value is replaced
     /// and `ticks_changed` is updated. If it's a new insertion,
     /// both `ticks_added` and `ticks_changed` are set to `tick`.
-    pub fn insert_with_tick(&mut self, entity_index: u32, value: T, tick: u64) {
+    pub fn insert(&mut self, entity_index: u32, value: T, tick: u64) {
         let idx = entity_index as usize;
 
         // Grow sparse array if needed
@@ -1092,15 +1085,15 @@ mod tests {
     #[test]
     fn insert_and_get() {
         let mut set = SparseSetInner::<u32>::new();
-        set.insert(5, 42);
+        set.insert(5, 42, 0);
         assert_eq!(set.get(5), Some(&42));
     }
 
     #[test]
     fn insert_replace() {
         let mut set = SparseSetInner::<u32>::new();
-        set.insert(5, 42);
-        set.insert(5, 99);
+        set.insert(5, 42, 0);
+        set.insert(5, 99, 0);
         assert_eq!(set.get(5), Some(&99));
         assert_eq!(set.len(), 1);
     }
@@ -1108,7 +1101,7 @@ mod tests {
     #[test]
     fn remove_returns_value() {
         let mut set = SparseSetInner::<u32>::new();
-        set.insert(5, 42);
+        set.insert(5, 42, 0);
         assert_eq!(set.remove(5), Some(42));
         assert_eq!(set.get(5), None);
     }
@@ -1123,7 +1116,7 @@ mod tests {
     fn contains() {
         let mut set = SparseSetInner::<u32>::new();
         assert!(!set.contains(5));
-        set.insert(5, 42);
+        set.insert(5, 42, 0);
         assert!(set.contains(5));
         set.remove(5);
         assert!(!set.contains(5));
@@ -1132,9 +1125,9 @@ mod tests {
     #[test]
     fn iteration() {
         let mut set = SparseSetInner::<&str>::new();
-        set.insert(1, "a");
-        set.insert(5, "b");
-        set.insert(3, "c");
+        set.insert(1, "a", 0);
+        set.insert(5, "b", 0);
+        set.insert(3, "c", 0);
 
         let mut items: Vec<_> = set.iter().collect();
         items.sort_by_key(|(idx, _)| *idx);
@@ -1144,9 +1137,9 @@ mod tests {
     #[test]
     fn swap_remove_correctness() {
         let mut set = SparseSetInner::<u32>::new();
-        set.insert(0, 10);
-        set.insert(1, 20);
-        set.insert(2, 30);
+        set.insert(0, 10, 0);
+        set.insert(1, 20, 0);
+        set.insert(2, 30, 0);
 
         // Remove middle element (dense index 1), last element (entity 2) swaps in
         set.remove(1);
@@ -1205,11 +1198,11 @@ mod tests {
     #[test]
     fn ref_mut_allows_mutation() {
         let lock = parking_lot::RwLock::new(ComponentStorage::new::<u32>());
-        lock.write().typed_mut::<u32>().insert(0, 42);
+        lock.write().typed_mut::<u32>().insert(0, 42, 0);
         let entities = Entities::new();
         {
             let mut guard = RefMut::<u32>::new(&lock, &entities, 0);
-            guard.insert(0, 99);
+            guard.insert(0, 99, 0);
         }
         assert_eq!(lock.read().typed::<u32>().get(0), Some(&99));
     }
@@ -1217,7 +1210,7 @@ mod tests {
     #[test]
     fn remove_untyped_works() {
         let mut storage = ComponentStorage::new::<u32>();
-        storage.typed_mut::<u32>().insert(5, 42);
+        storage.typed_mut::<u32>().insert(5, 42, 0);
         assert!(storage.contains_untyped(5));
         assert!(storage.remove_untyped(5));
         assert!(!storage.contains_untyped(5));
@@ -1228,7 +1221,7 @@ mod tests {
     #[test]
     fn insert_with_tick_tracks_added() {
         let mut set = SparseSetInner::<u32>::new();
-        set.insert_with_tick(5, 42, 10);
+        set.insert(5, 42, 10);
         assert!(set.added_since(5, 0));
         assert!(set.added_since(5, 9));
         assert!(!set.added_since(5, 10)); // not strictly after
@@ -1238,7 +1231,7 @@ mod tests {
     #[test]
     fn insert_with_tick_tracks_changed() {
         let mut set = SparseSetInner::<u32>::new();
-        set.insert_with_tick(5, 42, 10);
+        set.insert(5, 42, 10);
         assert!(set.changed_since(5, 0));
         assert!(set.changed_since(5, 9));
         assert!(!set.changed_since(5, 10));
@@ -1247,8 +1240,8 @@ mod tests {
     #[test]
     fn replace_updates_changed_tick() {
         let mut set = SparseSetInner::<u32>::new();
-        set.insert_with_tick(5, 42, 10);
-        set.insert_with_tick(5, 99, 20); // replace
+        set.insert(5, 42, 10);
+        set.insert(5, 99, 20); // replace
 
         // Added tick stays at 10
         assert!(set.added_since(5, 9));
@@ -1262,7 +1255,7 @@ mod tests {
     #[test]
     fn get_mut_tracked_marks_changed() {
         let mut set = SparseSetInner::<u32>::new();
-        set.insert_with_tick(5, 42, 10);
+        set.insert(5, 42, 10);
 
         *set.get_mut_tracked(5, 25).unwrap() = 99;
         assert_eq!(set.get(5), Some(&99));
@@ -1273,9 +1266,9 @@ mod tests {
     #[test]
     fn iter_mut_tracked_marks_all_changed() {
         let mut set = SparseSetInner::<u32>::new();
-        set.insert_with_tick(0, 10, 1);
-        set.insert_with_tick(1, 20, 2);
-        set.insert_with_tick(2, 30, 3);
+        set.insert(0, 10, 1);
+        set.insert(1, 20, 2);
+        set.insert(2, 30, 3);
 
         for (_, mut val) in set.iter_mut_tracked(50) {
             *val += 1;
@@ -1290,7 +1283,7 @@ mod tests {
     #[test]
     fn untracked_insert_uses_tick_zero() {
         let mut set = SparseSetInner::<u32>::new();
-        set.insert(5, 42); // tick = 0
+        set.insert(5, 42, 0); // tick = 0
         assert!(!set.added_since(5, 0));
         assert!(!set.changed_since(5, 0));
     }
@@ -1298,9 +1291,9 @@ mod tests {
     #[test]
     fn remove_maintains_tick_arrays() {
         let mut set = SparseSetInner::<u32>::new();
-        set.insert_with_tick(0, 10, 1);
-        set.insert_with_tick(1, 20, 5);
-        set.insert_with_tick(2, 30, 10);
+        set.insert(0, 10, 1);
+        set.insert(1, 20, 5);
+        set.insert(2, 30, 10);
 
         // Remove entity 0 — entity 2 swaps into its slot
         set.remove(0);
@@ -1324,7 +1317,7 @@ mod tests {
     #[test]
     fn storage_changed_since_untyped() {
         let mut storage = ComponentStorage::new::<u32>();
-        storage.typed_mut::<u32>().insert_with_tick(5, 42, 10);
+        storage.typed_mut::<u32>().insert(5, 42, 10);
 
         assert!(storage.changed_since_untyped(5, 9));
         assert!(!storage.changed_since_untyped(5, 10));
@@ -1338,14 +1331,14 @@ mod tests {
     fn membership_tracks_insert() {
         let mut set = SparseSetInner::<u32>::new();
         assert!(!set.membership().contains(5));
-        set.insert(5, 42);
+        set.insert(5, 42, 0);
         assert!(set.membership().contains(5));
     }
 
     #[test]
     fn membership_tracks_remove() {
         let mut set = SparseSetInner::<u32>::new();
-        set.insert(5, 42);
+        set.insert(5, 42, 0);
         assert!(set.membership().contains(5));
         set.remove(5);
         assert!(!set.membership().contains(5));
@@ -1354,8 +1347,8 @@ mod tests {
     #[test]
     fn membership_replace_keeps_bit() {
         let mut set = SparseSetInner::<u32>::new();
-        set.insert(5, 42);
-        set.insert(5, 99); // replace
+        set.insert(5, 42, 0);
+        set.insert(5, 99, 0); // replace
         assert!(set.membership().contains(5));
         assert_eq!(set.len(), 1);
     }
@@ -1363,9 +1356,9 @@ mod tests {
     #[test]
     fn membership_multiple_entities() {
         let mut set = SparseSetInner::<u32>::new();
-        set.insert(0, 10);
-        set.insert(5, 20);
-        set.insert(100, 30);
+        set.insert(0, 10, 0);
+        set.insert(5, 20, 0);
+        set.insert(100, 30, 0);
         assert!(set.membership().contains(0));
         assert!(set.membership().contains(5));
         assert!(set.membership().contains(100));
@@ -1376,9 +1369,9 @@ mod tests {
     #[test]
     fn membership_remove_middle_entity() {
         let mut set = SparseSetInner::<u32>::new();
-        set.insert(0, 10);
-        set.insert(1, 20);
-        set.insert(2, 30);
+        set.insert(0, 10, 0);
+        set.insert(1, 20, 0);
+        set.insert(2, 30, 0);
         set.remove(1);
         assert!(set.membership().contains(0));
         assert!(!set.membership().contains(1));

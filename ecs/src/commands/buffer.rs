@@ -76,7 +76,7 @@ impl CommandBuffer {
     /// Queues a component removal from an entity.
     pub fn remove<T: Send + Sync + 'static>(&self, entity: crate::entity::Entity) {
         self.push(move |world| {
-            world.remove::<T>(entity);
+            let _ = world.remove::<T>(entity);
         });
     }
 

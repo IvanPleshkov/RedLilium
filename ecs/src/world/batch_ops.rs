@@ -148,10 +148,11 @@ impl World {
                     hook(self, *entity);
                 }
 
-                self.storage_mut(&type_id)
-                    .unwrap()
-                    .typed_mut::<T>()
-                    .insert(entity.index(), component);
+                self.storage_mut(&type_id).unwrap().typed_mut::<T>().insert(
+                    entity.index(),
+                    component,
+                    0,
+                );
 
                 if !had && let Some(hook) = on_add {
                     hook(self, *entity);
@@ -188,7 +189,7 @@ impl World {
                     "Cannot insert component on dead entity {entity}"
                 );
                 let had = set.contains(entity.index());
-                set.insert(entity.index(), component);
+                set.insert(entity.index(), component, 0);
 
                 // Queue deferred observer triggers
                 if !had {
@@ -265,10 +266,11 @@ impl World {
                     hook(self, *entity);
                 }
 
-                self.storage_mut(&type_id)
-                    .unwrap()
-                    .typed_mut::<T>()
-                    .insert_with_tick(entity.index(), component, tick);
+                self.storage_mut(&type_id).unwrap().typed_mut::<T>().insert(
+                    entity.index(),
+                    component,
+                    tick,
+                );
 
                 if !had && let Some(hook) = on_add {
                     hook(self, *entity);
@@ -305,7 +307,7 @@ impl World {
                     "Cannot insert component on dead entity {entity}"
                 );
                 let had = set.contains(entity.index());
-                set.insert_with_tick(entity.index(), component, tick);
+                set.insert(entity.index(), component, tick);
 
                 // Queue deferred observer triggers
                 if !had {

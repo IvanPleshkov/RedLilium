@@ -285,7 +285,7 @@ mod tests {
     #[test]
     fn with_filter_matches() {
         let mut storage = ComponentStorage::new::<u32>();
-        storage.typed_mut::<u32>().insert(5, 42);
+        storage.typed_mut::<u32>().insert(5, 42, 0);
         let checker = ContainsChecker::with(Some(&storage));
         assert!(checker.matches(5));
     }
@@ -307,7 +307,7 @@ mod tests {
     #[test]
     fn without_filter_rejects() {
         let mut storage = ComponentStorage::new::<u32>();
-        storage.typed_mut::<u32>().insert(5, 42);
+        storage.typed_mut::<u32>().insert(5, 42, 0);
         let checker = ContainsChecker::without(Some(&storage));
         assert!(!checker.matches(5)); // Entity 5 HAS the component
     }
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn removed_filter_matches() {
         let mut storage = ComponentStorage::new::<u32>();
-        storage.typed_mut::<u32>().insert(5, 42);
+        storage.typed_mut::<u32>().insert(5, 42, 0);
         storage.typed_mut::<u32>().remove(5);
         storage.record_removal(5, 10);
 
@@ -398,7 +398,7 @@ mod tests {
     #[test]
     fn or_filter_matches_first() {
         let mut s1 = ComponentStorage::new::<u32>();
-        s1.typed_mut::<u32>().insert(5, 42);
+        s1.typed_mut::<u32>().insert(5, 42, 0);
         let s2 = ComponentStorage::new::<u64>();
 
         let a = ContainsChecker::with(Some(&s1));
@@ -411,7 +411,7 @@ mod tests {
     fn or_filter_matches_second() {
         let s1 = ComponentStorage::new::<u32>();
         let mut s2 = ComponentStorage::new::<u64>();
-        s2.typed_mut::<u64>().insert(5, 99);
+        s2.typed_mut::<u64>().insert(5, 99, 0);
 
         let a = ContainsChecker::with(Some(&s1));
         let b = ContainsChecker::with(Some(&s2));
@@ -422,9 +422,9 @@ mod tests {
     #[test]
     fn or_filter_matches_both() {
         let mut s1 = ComponentStorage::new::<u32>();
-        s1.typed_mut::<u32>().insert(5, 42);
+        s1.typed_mut::<u32>().insert(5, 42, 0);
         let mut s2 = ComponentStorage::new::<u64>();
-        s2.typed_mut::<u64>().insert(5, 99);
+        s2.typed_mut::<u64>().insert(5, 99, 0);
 
         let a = ContainsChecker::with(Some(&s1));
         let b = ContainsChecker::with(Some(&s2));
@@ -446,7 +446,7 @@ mod tests {
     #[test]
     fn or_filter_via_filter_trait() {
         let mut s1 = ComponentStorage::new::<u32>();
-        s1.typed_mut::<u32>().insert(5, 42);
+        s1.typed_mut::<u32>().insert(5, 42, 0);
         let s2 = ComponentStorage::new::<u64>();
 
         let a = ContainsChecker::with(Some(&s1));
@@ -463,7 +463,7 @@ mod tests {
     fn any_filter_matches_one_of_three() {
         let s1 = ComponentStorage::new::<u32>();
         let mut s2 = ComponentStorage::new::<u64>();
-        s2.typed_mut::<u64>().insert(5, 99);
+        s2.typed_mut::<u64>().insert(5, 99, 0);
         let s3 = ComponentStorage::new::<f32>();
 
         let a = ContainsChecker::with(Some(&s1));

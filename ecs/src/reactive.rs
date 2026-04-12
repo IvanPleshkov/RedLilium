@@ -242,7 +242,7 @@ mod tests {
 
         let entity = world.spawn();
         world.insert(entity, Health(100)).unwrap();
-        world.remove::<Health>(entity);
+        let _ = world.remove::<Health>(entity);
 
         world.flush_observers();
         world.update_triggers();

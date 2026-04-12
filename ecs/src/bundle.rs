@@ -21,7 +21,7 @@ use crate::world::World;
 /// let entity = world.spawn_with((
 ///     Transform::IDENTITY,
 ///     Visibility::VISIBLE,
-/// ));
+/// )).unwrap();
 /// ```
 pub trait Bundle: Send + 'static {
     /// Inserts all components in this bundle onto `entity`.
@@ -208,10 +208,12 @@ mod tests {
         world.register_component::<Position>();
         world.register_component::<Health>();
 
-        let entity = world.spawn_with(PlayerBundle {
-            position: Position { x: 7.0, y: 8.0 },
-            health: Health(50),
-        });
+        let entity = world
+            .spawn_with(PlayerBundle {
+                position: Position { x: 7.0, y: 8.0 },
+                health: Health(50),
+            })
+            .unwrap();
 
         assert_eq!(
             world.get::<Position>(entity),

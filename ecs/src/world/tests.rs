@@ -95,7 +95,7 @@ fn remove_component() {
     let entity = world.spawn();
     world.insert(entity, Health(100)).unwrap();
 
-    assert_eq!(world.remove::<Health>(entity), Some(Health(100)));
+    assert_eq!(world.remove::<Health>(entity).unwrap(), Some(Health(100)));
     assert!(world.get::<Health>(entity).is_none());
 }
 
@@ -318,7 +318,7 @@ fn removed_filter_after_remove() {
     let before_remove = world.current_tick();
 
     world.advance_tick(); // tick = 2
-    world.remove::<Health>(entity);
+    let _ = world.remove::<Health>(entity);
 
     let removed = world.removed::<Health>(before_remove);
     assert!(removed.matches(entity.index()));
@@ -333,7 +333,7 @@ fn removed_filter_not_matching_before_tick() {
     world.insert(entity, Health(100)).unwrap();
 
     world.advance_tick(); // tick = 1
-    world.remove::<Health>(entity); // removed at tick 1
+    let _ = world.remove::<Health>(entity); // removed at tick 1
 
     // Query with since_tick = 1, removal at tick 1 is NOT strictly after 1
     let removed = world.removed::<Health>(1);
@@ -377,8 +377,8 @@ fn removed_filter_iter() {
     world.insert(e3, Health(300)).unwrap();
 
     world.advance_tick(); // tick = 1
-    world.remove::<Health>(e1);
-    world.remove::<Health>(e3);
+    let _ = world.remove::<Health>(e1);
+    let _ = world.remove::<Health>(e3);
 
     let removed = world.removed::<Health>(0);
     let mut entities: Vec<u32> = removed.iter().collect();
@@ -395,7 +395,7 @@ fn clear_removed_tracking_works() {
     world.insert(entity, Health(100)).unwrap();
 
     world.advance_tick(); // tick = 1
-    world.remove::<Health>(entity);
+    let _ = world.remove::<Health>(entity);
 
     assert!(world.removed::<Health>(0).matches(entity.index()));
 
@@ -420,7 +420,7 @@ fn remove_nonexistent_component_not_tracked() {
     let entity = world.spawn();
     // Don't insert Health, just try to remove it
     world.advance_tick();
-    world.remove::<Health>(entity);
+    let _ = world.remove::<Health>(entity);
 
     let removed = world.removed::<Health>(0);
     assert!(!removed.matches(entity.index()));
@@ -643,7 +643,7 @@ fn on_add_does_not_fire_on_replace() {
     assert_eq!(world.get::<Marker>(entity), Some(&Marker(1)));
 
     // Remove marker, then replace position — on_add should NOT fire
-    world.remove::<Marker>(entity);
+    let _ = world.remove::<Marker>(entity);
     world.insert(entity, Position { x: 3.0, y: 4.0 }).unwrap();
     assert!(world.get::<Marker>(entity).is_none());
 }
@@ -706,7 +706,7 @@ fn on_remove_fires_before_removal() {
 
     let entity = world.spawn();
     world.insert(entity, Position { x: 42.0, y: 0.0 }).unwrap();
-    world.remove::<Position>(entity);
+    let _ = world.remove::<Position>(entity);
 
     // Hook stored Position.x in Marker before removal
     assert_eq!(world.get::<Marker>(entity), Some(&Marker(42)));
@@ -895,7 +895,7 @@ fn multiple_hooks_on_same_component() {
     assert_eq!(*world.resource::<u32>(), 1);
 
     // Replace — only on_insert fires, not on_add
-    world.remove::<Marker>(entity);
+    let _ = world.remove::<Marker>(entity);
     world.insert(entity, Position { x: 2.0, y: 0.0 }).unwrap();
 
     assert!(world.get::<Marker>(entity).is_none());
@@ -1015,7 +1015,7 @@ fn required_component_not_applied_on_replace() {
     assert_eq!(world.get::<ReqB>(entity), Some(&ReqB(0)));
 
     // Remove ReqB, then replace ReqA — requirements should NOT fire again
-    world.remove::<ReqB>(entity);
+    let _ = world.remove::<ReqB>(entity);
     world.insert(entity, ReqA(2)).unwrap();
     assert!(world.get::<ReqB>(entity).is_none());
 }
@@ -1101,7 +1101,7 @@ fn required_components_via_bundle() {
     world.register_component::<Health>();
     world.register_required::<ReqA, ReqB>();
 
-    let entity = world.spawn_with((ReqA(1), Health(100)));
+    let entity = world.spawn_with((ReqA(1), Health(100))).unwrap();
     assert_eq!(world.get::<ReqB>(entity), Some(&ReqB(0)));
 }
 
