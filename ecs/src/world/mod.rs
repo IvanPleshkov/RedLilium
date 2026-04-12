@@ -175,41 +175,39 @@ impl World {
         let index = entity.index();
         let tick = self.tick;
 
+        // TODO(allocation): can we have a preallocated buffer for hooks?
         // Pass 1: collect on_remove hooks for components this entity has
         let hooks: Vec<crate::sparse_set::ComponentHookFn> = self
             .components
             .values_mut()
             .map(|lock| lock.get_mut())
-            .filter(|s| s.contains_untyped(index))
-            .filter_map(|s| s.on_remove)
+            .filter_map(|s| s.on_remove.filter(|_| s.contains_untyped(index)))
             .collect();
 
-        // Pass 2: fire hooks (entity still alive, components still readable)
+        // Pass 2: fire hooks (entity still alive, components still readable).
+        // A hook may despawn this entity (directly or via nested hooks),
+        // so check liveness after each call to avoid running hooks on a
+        // dead entity and double-cleaning.
         for hook in hooks {
             hook(self, entity);
-        }
-
-        // Collect deferred OnRemove observer triggers before removing components.
-        // We need to check which component types have registered remove observers.
-        let observer_triggers: Vec<TypeId> = self
-            .components
-            .iter()
-            .filter(|(_, lock)| lock.read().contains_untyped(index))
-            .filter_map(|(type_id, _)| self.observers.remove_trigger_key(type_id))
-            .collect();
-
-        // Deallocate entity and remove all components (including any added by hooks)
-        self.entities.deallocate(entity);
-        for lock in self.components.values_mut() {
-            let storage = lock.get_mut();
-            if storage.remove_untyped(index) {
-                storage.record_removal(index, tick);
+            if !self.entities.is_alive(entity) {
+                return true; // already fully despawned by a hook
             }
         }
 
-        // Queue deferred observer triggers
-        for trigger_key in observer_triggers {
-            self.observers.push_trigger(trigger_key, entity);
+        // Pass 3: Deallocate entity, remove all components, and queue
+        // observer triggers in a single pass.
+        self.entities.deallocate(entity);
+        let components = &mut self.components;
+        let observers = &mut self.observers;
+        for (type_id, lock) in components.iter_mut() {
+            let storage = lock.get_mut();
+            if storage.remove_untyped(index) {
+                storage.record_removal(index, tick);
+                if let Some(trigger_key) = observers.remove_trigger_key(type_id) {
+                    observers.push_trigger(trigger_key, entity);
+                }
+            }
         }
 
         true
