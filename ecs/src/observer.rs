@@ -356,7 +356,6 @@ mod tests {
 
         // Should not panic, no pending triggers
         world.flush_observers();
-        assert!(!world.has_pending_observers());
     }
 
     #[test]

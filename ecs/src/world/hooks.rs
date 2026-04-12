@@ -133,17 +133,12 @@ impl World {
     /// # Panics
     ///
     /// Panics if cascading exceeds 100 iterations.
-    pub fn flush_observers(&mut self) {
+    pub(crate) fn flush_observers(&mut self) {
         if !self.observers.has_pending() {
             return;
         }
         let world_ptr: *mut World = self;
         self.observers.flush(world_ptr);
-    }
-
-    /// Returns `true` if there are pending observer triggers.
-    pub fn has_pending_observers(&self) -> bool {
-        self.observers.has_pending()
     }
 
     // ---- Reactive trigger buffers ----
@@ -197,7 +192,7 @@ impl World {
     /// Moves `collecting` → `readable` and clears `collecting` for each
     /// registered trigger buffer. Called by the runner at the start of
     /// each tick, before any systems execute.
-    pub fn update_triggers(&mut self) {
+    pub(crate) fn update_triggers(&mut self) {
         if self.trigger_swap_fns.is_empty() {
             return;
         }
@@ -206,10 +201,5 @@ impl World {
             f(self);
         }
         self.trigger_swap_fns = fns;
-    }
-
-    /// Returns the TypeIds of all registered resource types.
-    pub fn resource_type_ids(&self) -> impl Iterator<Item = std::any::TypeId> + '_ {
-        self.resources.type_ids()
     }
 }
