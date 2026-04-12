@@ -6,7 +6,7 @@ use crate::entity::{Entities, Entity};
 use crate::observer::{OnAdd, OnInsert, OnRemove};
 use crate::sparse_set::{ComponentMeta, ComponentStorage, Mut};
 
-use super::{ComponentNotRegistered, World, deserialize_component_fn, serialize_component_fn};
+use super::{World, WorldError, deserialize_component_fn, serialize_component_fn};
 
 impl World {
     // ---- Component management (structural changes, require &mut self) ----
@@ -221,21 +221,21 @@ impl World {
         &mut self,
         entity: Entity,
         component: T,
-    ) -> Result<(), ComponentNotRegistered> {
-        assert!(
-            self.entities.is_alive(entity),
-            "Cannot insert component on dead entity {entity}"
-        );
+    ) -> Result<(), WorldError> {
+        if !self.entities.is_alive(entity) {
+            return Err(WorldError::EntityNotAlive { entity });
+        }
 
         let type_id = TypeId::of::<T>();
 
+        // TODO(allocation): avoid vector copy for `required` of make it smallvec
         // Extract hook info and requirements (borrow released after this block)
         let (had_component, on_add, on_insert, on_replace, required) = {
             let storage = self
                 .components
                 .get_mut(&type_id)
                 .map(|l| l.get_mut())
-                .ok_or(ComponentNotRegistered {
+                .ok_or(WorldError::ComponentNotRegistered {
                     type_name: std::any::type_name::<T>(),
                 })?;
             (
@@ -293,18 +293,15 @@ impl World {
     /// Returns [`ComponentNotRegistered`] if any component type has never
     /// been registered.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the entity is not alive.
-    pub fn insert_bundle(
-        &mut self,
-        entity: Entity,
-        bundle: impl Bundle,
-    ) -> Result<(), ComponentNotRegistered> {
-        assert!(
-            self.entities.is_alive(entity),
-            "Cannot insert bundle on dead entity {entity}"
-        );
+    /// Returns [`WorldError::EntityNotAlive`] if the entity is dead.
+    /// Returns [`WorldError::ComponentNotRegistered`] if any component type
+    /// has never been registered.
+    pub fn insert_bundle(&mut self, entity: Entity, bundle: impl Bundle) -> Result<(), WorldError> {
+        if !self.entities.is_alive(entity) {
+            return Err(WorldError::EntityNotAlive { entity });
+        }
         bundle.insert_into(self, entity)
     }
 

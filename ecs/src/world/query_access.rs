@@ -5,7 +5,7 @@ use crate::query::access::AccessInfo;
 use crate::query::{AddedFilter, ChangedFilter, ContainsChecker, RemovedFilter};
 use crate::sparse_set::{LockGuard, Ref, RefMut};
 
-use super::{ComponentNotRegistered, World};
+use super::{World, WorldError};
 
 impl World {
     // ---- Query access (runtime borrow-checked, take &self) ----
@@ -22,13 +22,13 @@ impl World {
     /// # Panics
     ///
     /// Panics if T is exclusively borrowed by a [`write`](World::write) call.
-    pub fn read<T: 'static>(&self) -> Result<Ref<'_, T>, ComponentNotRegistered> {
-        let storage = self
-            .components
-            .get(&TypeId::of::<T>())
-            .ok_or(ComponentNotRegistered {
-                type_name: std::any::type_name::<T>(),
-            })?;
+    pub fn read<T: 'static>(&self) -> Result<Ref<'_, T>, WorldError> {
+        let storage =
+            self.components
+                .get(&TypeId::of::<T>())
+                .ok_or(WorldError::ComponentNotRegistered {
+                    type_name: std::any::type_name::<T>(),
+                })?;
         Ok(Ref::new(storage, self.entities()))
     }
 
@@ -53,13 +53,13 @@ impl World {
     /// # Panics
     ///
     /// Panics if T is borrowed by any [`read`](World::read) or [`write`](World::write) call.
-    pub fn write<T: 'static>(&self) -> Result<RefMut<'_, T>, ComponentNotRegistered> {
-        let storage = self
-            .components
-            .get(&TypeId::of::<T>())
-            .ok_or(ComponentNotRegistered {
-                type_name: std::any::type_name::<T>(),
-            })?;
+    pub fn write<T: 'static>(&self) -> Result<RefMut<'_, T>, WorldError> {
+        let storage =
+            self.components
+                .get(&TypeId::of::<T>())
+                .ok_or(WorldError::ComponentNotRegistered {
+                    type_name: std::any::type_name::<T>(),
+                })?;
         Ok(RefMut::new(storage, self.entities(), self.tick))
     }
 
@@ -79,13 +79,13 @@ impl World {
     /// Like [`read`](World::read), but only excludes disabled entities —
     /// static entities are included. Use this in systems that need to
     /// observe all active entities (e.g., rendering, physics broadphase).
-    pub fn read_all<T: 'static>(&self) -> Result<Ref<'_, T>, ComponentNotRegistered> {
-        let storage = self
-            .components
-            .get(&TypeId::of::<T>())
-            .ok_or(ComponentNotRegistered {
-                type_name: std::any::type_name::<T>(),
-            })?;
+    pub fn read_all<T: 'static>(&self) -> Result<Ref<'_, T>, WorldError> {
+        let storage =
+            self.components
+                .get(&TypeId::of::<T>())
+                .ok_or(WorldError::ComponentNotRegistered {
+                    type_name: std::any::type_name::<T>(),
+                })?;
         Ok(Ref::new_with_mask(
             storage,
             self.entities(),
@@ -110,13 +110,13 @@ impl World {
     ///
     /// Like [`write`](World::write), but only excludes disabled entities —
     /// both static and editor entities are included.
-    pub fn write_all<T: 'static>(&self) -> Result<RefMut<'_, T>, ComponentNotRegistered> {
-        let storage = self
-            .components
-            .get(&TypeId::of::<T>())
-            .ok_or(ComponentNotRegistered {
-                type_name: std::any::type_name::<T>(),
-            })?;
+    pub fn write_all<T: 'static>(&self) -> Result<RefMut<'_, T>, WorldError> {
+        let storage =
+            self.components
+                .get(&TypeId::of::<T>())
+                .ok_or(WorldError::ComponentNotRegistered {
+                    type_name: std::any::type_name::<T>(),
+                })?;
         Ok(RefMut::new_with_mask(
             storage,
             self.entities(),
@@ -142,13 +142,13 @@ impl World {
     /// Gets shared read access without acquiring a lock.
     ///
     /// The caller must ensure the read lock is already held externally.
-    pub(crate) fn read_unlocked<T: 'static>(&self) -> Result<Ref<'_, T>, ComponentNotRegistered> {
-        let lock = self
-            .components
-            .get(&TypeId::of::<T>())
-            .ok_or(ComponentNotRegistered {
-                type_name: std::any::type_name::<T>(),
-            })?;
+    pub(crate) fn read_unlocked<T: 'static>(&self) -> Result<Ref<'_, T>, WorldError> {
+        let lock =
+            self.components
+                .get(&TypeId::of::<T>())
+                .ok_or(WorldError::ComponentNotRegistered {
+                    type_name: std::any::type_name::<T>(),
+                })?;
         let storage = unsafe { &*lock.data_ptr() };
         Ok(Ref::new_unlocked(storage, self.entities()))
     }
@@ -156,15 +156,13 @@ impl World {
     /// Gets exclusive write access without acquiring a lock.
     ///
     /// The caller must ensure the write lock is already held externally.
-    pub(crate) fn write_unlocked<T: 'static>(
-        &self,
-    ) -> Result<RefMut<'_, T>, ComponentNotRegistered> {
-        let lock = self
-            .components
-            .get(&TypeId::of::<T>())
-            .ok_or(ComponentNotRegistered {
-                type_name: std::any::type_name::<T>(),
-            })?;
+    pub(crate) fn write_unlocked<T: 'static>(&self) -> Result<RefMut<'_, T>, WorldError> {
+        let lock =
+            self.components
+                .get(&TypeId::of::<T>())
+                .ok_or(WorldError::ComponentNotRegistered {
+                    type_name: std::any::type_name::<T>(),
+                })?;
         Ok(RefMut::new_unlocked(
             lock.data_ptr(),
             self.entities(),
@@ -190,15 +188,13 @@ impl World {
     }
 
     /// Gets shared read access including static entities, without acquiring a lock.
-    pub(crate) fn read_all_unlocked<T: 'static>(
-        &self,
-    ) -> Result<Ref<'_, T>, ComponentNotRegistered> {
-        let lock = self
-            .components
-            .get(&TypeId::of::<T>())
-            .ok_or(ComponentNotRegistered {
-                type_name: std::any::type_name::<T>(),
-            })?;
+    pub(crate) fn read_all_unlocked<T: 'static>(&self) -> Result<Ref<'_, T>, WorldError> {
+        let lock =
+            self.components
+                .get(&TypeId::of::<T>())
+                .ok_or(WorldError::ComponentNotRegistered {
+                    type_name: std::any::type_name::<T>(),
+                })?;
         let storage = unsafe { &*lock.data_ptr() };
         Ok(Ref::new_unlocked_with_mask(
             storage,
@@ -209,15 +205,13 @@ impl World {
 
     /// Gets exclusive write access including static and editor entities,
     /// without acquiring a lock.
-    pub(crate) fn write_all_unlocked<T: 'static>(
-        &self,
-    ) -> Result<RefMut<'_, T>, ComponentNotRegistered> {
-        let lock = self
-            .components
-            .get(&TypeId::of::<T>())
-            .ok_or(ComponentNotRegistered {
-                type_name: std::any::type_name::<T>(),
-            })?;
+    pub(crate) fn write_all_unlocked<T: 'static>(&self) -> Result<RefMut<'_, T>, WorldError> {
+        let lock =
+            self.components
+                .get(&TypeId::of::<T>())
+                .ok_or(WorldError::ComponentNotRegistered {
+                    type_name: std::any::type_name::<T>(),
+                })?;
         Ok(RefMut::new_unlocked_with_mask(
             lock.data_ptr(),
             self.entities(),

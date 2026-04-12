@@ -105,6 +105,7 @@ impl World {
     /// Extracts a type-erased clone of a component by name from an entity.
     ///
     /// Returns `None` if the component is not present or the name is unknown.
+    #[cfg_attr(not(feature = "inspector"), allow(dead_code))]
     pub(crate) fn extract_by_name(
         &self,
         entity: Entity,
@@ -116,6 +117,7 @@ impl World {
 
     /// Inserts a type-erased component from a [`ComponentBag`](crate::prefab::ComponentBag)
     /// onto an entity, consuming the bag.
+    #[cfg_attr(not(feature = "inspector"), allow(dead_code))]
     pub(crate) fn insert_bag(&mut self, entity: Entity, bag: Box<dyn crate::prefab::ComponentBag>) {
         bag.consume_into(self, entity);
     }

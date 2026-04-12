@@ -4,7 +4,7 @@ use crate::bundle::Bundle;
 use crate::entity::Entity;
 use crate::observer::{OnAdd, OnInsert, OnRemove};
 
-use super::{ComponentNotRegistered, World};
+use super::{World, WorldError};
 
 impl World {
     // ---- Batch entity operations ----
@@ -100,7 +100,7 @@ impl World {
         &mut self,
         entities: &[Entity],
         components: Vec<T>,
-    ) -> Result<(), ComponentNotRegistered> {
+    ) -> Result<(), WorldError> {
         assert_eq!(
             entities.len(),
             components.len(),
@@ -115,7 +115,7 @@ impl World {
                 .components
                 .get_mut(&type_id)
                 .map(|l| l.get_mut())
-                .ok_or(ComponentNotRegistered {
+                .ok_or(WorldError::ComponentNotRegistered {
                     type_name: std::any::type_name::<T>(),
                 })?;
             (
@@ -216,7 +216,7 @@ impl World {
         &mut self,
         entities: &[Entity],
         components: Vec<T>,
-    ) -> Result<(), ComponentNotRegistered> {
+    ) -> Result<(), WorldError> {
         assert_eq!(
             entities.len(),
             components.len(),
@@ -232,7 +232,7 @@ impl World {
                 .components
                 .get_mut(&type_id)
                 .map(|l| l.get_mut())
-                .ok_or(ComponentNotRegistered {
+                .ok_or(WorldError::ComponentNotRegistered {
                     type_name: std::any::type_name::<T>(),
                 })?;
             (

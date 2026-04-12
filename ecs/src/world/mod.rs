@@ -18,27 +18,41 @@ use crate::reactive::Triggers;
 use crate::resource::Resources;
 use crate::sparse_set::ComponentStorage;
 
-/// Error returned when a component type has not been registered in the [`World`].
-///
-/// This happens when calling [`World::insert`], [`World::read`], or [`World::write`]
-/// on a type that was never passed to [`World::register_component`] or inserted.
+/// Error returned by [`World`] operations that require a registered component
+/// type or a living entity.
 #[derive(Debug)]
-pub struct ComponentNotRegistered {
-    /// The name of the unregistered component type.
-    pub type_name: &'static str,
+pub enum WorldError {
+    /// The component type has never been registered via
+    /// [`World::register_component`] or inserted.
+    ComponentNotRegistered {
+        /// The name of the unregistered component type.
+        type_name: &'static str,
+    },
+    /// The entity is not alive (already despawned or never existed).
+    EntityNotAlive {
+        /// The dead entity.
+        entity: Entity,
+    },
 }
 
-impl std::fmt::Display for ComponentNotRegistered {
+impl std::fmt::Display for WorldError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Component type `{}` has never been registered. Call register_component() first.",
-            self.type_name
-        )
+        match self {
+            Self::ComponentNotRegistered { type_name } => write!(
+                f,
+                "Component type `{type_name}` has never been registered. Call register_component() first."
+            ),
+            Self::EntityNotAlive { entity } => {
+                write!(f, "Entity {entity} is not alive")
+            }
+        }
     }
 }
 
-impl std::error::Error for ComponentNotRegistered {}
+impl std::error::Error for WorldError {}
+
+/// Convenience alias for backward compatibility.
+pub type ComponentNotRegistered = WorldError;
 
 // Re-export InspectResult for public API consumers.
 pub use crate::sparse_set::InspectResult;
@@ -72,9 +86,16 @@ fn deserialize_component_fn<T: Component>(
 ) -> Result<(), crate::serialize::DeserializeError> {
     ctx.load_data(data)?;
     let comp = T::deserialize_component(ctx)?;
-    ctx.world_mut().insert(entity, comp).map_err(|e| {
-        crate::serialize::DeserializeError::UnknownComponent {
-            type_name: e.type_name.to_string(),
+    ctx.world_mut().insert(entity, comp).map_err(|e| match e {
+        WorldError::ComponentNotRegistered { type_name } => {
+            crate::serialize::DeserializeError::UnknownComponent {
+                type_name: type_name.to_string(),
+            }
+        }
+        WorldError::EntityNotAlive { entity } => {
+            crate::serialize::DeserializeError::UnknownComponent {
+                type_name: format!("entity {entity} not alive"),
+            }
         }
     })?;
     Ok(())

@@ -60,8 +60,10 @@ fn insert_unregistered_returns_err() {
     let mut world = World::new();
     let entity = world.spawn();
     let result = world.insert(entity, Position { x: 0.0, y: 0.0 });
-    assert!(result.is_err());
-    assert!(result.unwrap_err().type_name.contains("Position"));
+    assert!(matches!(
+        result.unwrap_err(),
+        WorldError::ComponentNotRegistered { type_name } if type_name.contains("Position")
+    ));
 }
 
 #[test]
@@ -77,13 +79,13 @@ fn write_unregistered_returns_err() {
 }
 
 #[test]
-#[should_panic(expected = "Cannot insert component on dead entity")]
-fn insert_on_dead_entity_panics() {
+fn insert_on_dead_entity_returns_err() {
     let mut world = World::new();
     world.register_component::<Position>();
     let entity = world.spawn();
     world.despawn(entity);
-    let _ = world.insert(entity, Position { x: 0.0, y: 0.0 });
+    let result = world.insert(entity, Position { x: 0.0, y: 0.0 });
+    assert!(matches!(result, Err(WorldError::EntityNotAlive { .. })));
 }
 
 #[test]

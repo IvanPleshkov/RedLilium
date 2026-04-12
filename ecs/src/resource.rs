@@ -110,11 +110,6 @@ impl Resources {
         self.entries.contains_key(&TypeId::of::<T>())
     }
 
-    /// Returns the TypeIds of all registered resource types.
-    pub fn type_ids(&self) -> impl Iterator<Item = TypeId> + '_ {
-        self.entries.keys().copied()
-    }
-
     /// Returns the `Arc<RwLock<dyn Resource>>` handle for a resource.
     ///
     /// Panics if the resource does not exist.
