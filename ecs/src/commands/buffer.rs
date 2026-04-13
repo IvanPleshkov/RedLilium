@@ -100,21 +100,15 @@ impl CommandBuffer {
         });
     }
 
-    /// Queues inserting a component on each entity from parallel vectors.
+    /// Queues inserting a component on each entity.
     ///
     /// # Panics
     ///
     /// Panics when applied if the component type has not been registered
-    /// or if the vectors have different lengths.
-    pub fn insert_batch<T: Send + Sync + 'static>(
-        &self,
-        entities: Vec<Entity>,
-        components: Vec<T>,
-    ) {
+    /// or if any entity is dead.
+    pub fn insert_batch<T: Send + Sync + 'static>(&self, items: Vec<(Entity, T)>) {
         self.push(move |world| {
-            world
-                .insert_batch(&entities, components)
-                .expect("Component not registered");
+            world.insert_batch(items).expect("insert_batch failed");
         });
     }
 
@@ -449,7 +443,12 @@ mod tests {
         let entities: Vec<_> = (0..3).map(|_| world.spawn()).collect();
 
         let buffer = CommandBuffer::new();
-        buffer.insert_batch(entities.clone(), vec![Health(10), Health(20), Health(30)]);
+        let items: Vec<_> = entities
+            .iter()
+            .copied()
+            .zip(vec![Health(10), Health(20), Health(30)])
+            .collect();
+        buffer.insert_batch(items);
 
         let cmds = buffer.drain();
         for cmd in cmds {

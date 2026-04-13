@@ -58,9 +58,6 @@ pub type ComponentNotRegistered = WorldError;
 pub use crate::sparse_set::InspectResult;
 
 pub use actions::set_component_actions;
-#[doc(hidden)]
-pub use component_ops::InsertPending;
-use smallvec::SmallVec;
 
 /// Type-erased serialize helper: reads `T` from the world and serializes it.
 fn serialize_component_fn<T: Component>(
@@ -200,7 +197,7 @@ impl World {
         let tick = self.tick;
 
         // Pass 1: collect on_remove hooks for components this entity has
-        let hooks: SmallVec<[crate::sparse_set::ComponentHookFn; 2]> = self
+        let hooks: smallvec::SmallVec<[crate::sparse_set::ComponentHookFn; 2]> = self
             .components
             .values_mut()
             .map(|lock| lock.get_mut())

@@ -539,7 +539,9 @@ fn insert_batch_adds_components() {
     let entities = world.spawn_batch(3);
     let healths = vec![Health(10), Health(20), Health(30)];
 
-    world.insert_batch(&entities, healths).unwrap();
+    world
+        .insert_batch(entities.iter().copied().zip(healths))
+        .unwrap();
 
     assert_eq!(world.get::<Health>(entities[0]), Some(&Health(10)));
     assert_eq!(world.get::<Health>(entities[1]), Some(&Health(20)));
@@ -547,7 +549,7 @@ fn insert_batch_adds_components() {
 }
 
 #[test]
-fn insert_batch_tracked_records_tick() {
+fn insert_batch_records_tick() {
     let mut world = World::new();
     world.register_component::<Health>();
     world.advance_tick(); // tick = 1
@@ -555,29 +557,19 @@ fn insert_batch_tracked_records_tick() {
     let entities = world.spawn_batch(2);
     let healths = vec![Health(10), Health(20)];
 
-    world.insert_batch_tracked(&entities, healths).unwrap();
+    world
+        .insert_batch(entities.iter().copied().zip(healths))
+        .unwrap();
 
     assert!(world.added::<Health>(0).matches(entities[0].index()));
     assert!(world.added::<Health>(0).matches(entities[1].index()));
 }
 
 #[test]
-#[should_panic(expected = "entities and components must have the same length")]
-fn insert_batch_mismatched_lengths_panics() {
-    let mut world = World::new();
-    world.register_component::<Health>();
-
-    let entities = world.spawn_batch(2);
-    let healths = vec![Health(10)];
-
-    let _ = world.insert_batch(&entities, healths);
-}
-
-#[test]
 fn insert_batch_unregistered_returns_err() {
     let mut world = World::new();
     let entities = world.spawn_batch(1);
-    let result = world.insert_batch(&entities, vec![Health(10)]);
+    let result = world.insert_batch(entities.iter().copied().zip(vec![Health(10)]));
     assert!(result.is_err());
 }
 
@@ -794,7 +786,9 @@ fn hooks_fire_during_insert_batch() {
         Position { x: 2.0, y: 0.0 },
         Position { x: 3.0, y: 0.0 },
     ];
-    world.insert_batch(&entities, positions).unwrap();
+    world
+        .insert_batch(entities.iter().copied().zip(positions))
+        .unwrap();
 
     for e in &entities {
         assert_eq!(world.get::<Marker>(*e), Some(&Marker(1)));
@@ -802,7 +796,7 @@ fn hooks_fire_during_insert_batch() {
 }
 
 #[test]
-fn hooks_fire_during_insert_batch_tracked() {
+fn hooks_fire_during_insert_batch_with_tick_tracking() {
     let mut world = World::new();
     world.register_component::<Position>();
     world.register_component::<Marker>();
@@ -814,12 +808,14 @@ fn hooks_fire_during_insert_batch_tracked() {
 
     let entities = world.spawn_batch(2);
     let positions = vec![Position { x: 1.0, y: 0.0 }, Position { x: 2.0, y: 0.0 }];
-    world.insert_batch_tracked(&entities, positions).unwrap();
+    world
+        .insert_batch(entities.iter().copied().zip(positions))
+        .unwrap();
 
     for e in &entities {
         assert_eq!(world.get::<Marker>(*e), Some(&Marker(1)));
     }
-    // Verify tick tracking still works
+    // Verify tick tracking works (insert_batch always tracks)
     assert!(world.added::<Position>(0).matches(entities[0].index()));
 }
 
@@ -939,7 +935,9 @@ fn no_hooks_batch_fast_path() {
 
     let entities = world.spawn_batch(100);
     let healths: Vec<Health> = (0..100).map(Health).collect();
-    world.insert_batch(&entities, healths).unwrap();
+    world
+        .insert_batch(entities.iter().copied().zip(healths))
+        .unwrap();
 
     for (i, e) in entities.iter().enumerate() {
         assert_eq!(world.get::<Health>(*e), Some(&Health(i as u32)));
@@ -1076,7 +1074,9 @@ fn required_components_in_batch_insert() {
 
     let entities = world.spawn_batch(3);
     let components = vec![ReqA(1), ReqA(2), ReqA(3)];
-    world.insert_batch(&entities, components).unwrap();
+    world
+        .insert_batch(entities.iter().copied().zip(components))
+        .unwrap();
 
     for e in &entities {
         assert_eq!(world.get::<ReqB>(*e), Some(&ReqB(0)));
@@ -1091,7 +1091,9 @@ fn required_components_in_batch_tracked() {
 
     let entities = world.spawn_batch(2);
     let components = vec![ReqA(1), ReqA(2)];
-    world.insert_batch_tracked(&entities, components).unwrap();
+    world
+        .insert_batch(entities.iter().copied().zip(components))
+        .unwrap();
 
     for e in &entities {
         assert_eq!(world.get::<ReqB>(*e), Some(&ReqB(0)));
@@ -1629,4 +1631,106 @@ fn bundle_required_not_overwritten_by_default() {
 
     // ReqB should be 42 (from bundle), not 0 (from required default)
     assert_eq!(world.get::<ReqB>(entity), Some(&ReqB(42)));
+}
+
+// --- Transaction cleanup tests ---
+
+#[test]
+fn spawn_with_unregistered_rolls_back_entity() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    // Health is NOT registered
+
+    let count_before = world.entity_count();
+    let result = world.spawn_with((Position { x: 1.0, y: 2.0 }, Health(100)));
+
+    assert!(result.is_err());
+    // Entity should not exist — transaction cleaned up the spawn
+    assert_eq!(world.entity_count(), count_before);
+}
+
+#[test]
+fn spawn_with_success_commits() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.register_component::<Health>();
+
+    let entity = world
+        .spawn_with((Position { x: 1.0, y: 2.0 }, Health(100)))
+        .unwrap();
+
+    assert!(world.is_alive(entity));
+    assert_eq!(
+        world.get::<Position>(entity),
+        Some(&Position { x: 1.0, y: 2.0 })
+    );
+    assert_eq!(world.get::<Health>(entity), Some(&Health(100)));
+}
+
+#[test]
+fn insert_bundle_unregistered_rolls_back_components() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    // Health is NOT registered
+
+    let entity = world.spawn();
+    let result = world.insert_bundle(entity, (Position { x: 1.0, y: 2.0 }, Health(100)));
+
+    assert!(result.is_err());
+    // Position should not have been inserted — transaction rolled back
+    assert!(world.get::<Position>(entity).is_none());
+}
+
+#[test]
+fn spawn_batch_with_partial_failure_rolls_back_all() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    // Health NOT registered
+
+    let count_before = world.entity_count();
+    let result = world.spawn_batch_with(3, (Position { x: 1.0, y: 0.0 }, Health(100)));
+
+    assert!(result.is_err());
+    // All entities should be rolled back
+    assert_eq!(world.entity_count(), count_before);
+}
+
+#[test]
+fn transaction_hooks_fire_after_all_mutations() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.register_component::<Health>();
+    world.register_component::<Marker>();
+
+    world.set_on_add::<Position>(|world, entity| {
+        let has_health = world.get::<Health>(entity).is_some();
+        let _ = world.insert(entity, Marker(has_health as u32));
+    });
+
+    let entity = world
+        .spawn_with((Position { x: 1.0, y: 2.0 }, Health(100)))
+        .unwrap();
+
+    // Marker(1) means the hook saw Health present at commit time
+    assert_eq!(world.get::<Marker>(entity), Some(&Marker(1)));
+}
+
+#[test]
+fn insert_bundle_replaces_and_rolls_back() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    // Health NOT registered
+
+    let entity = world.spawn();
+    world.insert(entity, Position { x: 1.0, y: 2.0 }).unwrap();
+
+    // Try to insert bundle that replaces Position and adds Health (unregistered)
+    let result = world.insert_bundle(entity, (Position { x: 99.0, y: 99.0 }, Health(100)));
+    assert!(result.is_err());
+
+    // Position should be restored to original value
+    assert_eq!(
+        world.get::<Position>(entity),
+        Some(&Position { x: 1.0, y: 2.0 })
+    );
 }

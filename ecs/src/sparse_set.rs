@@ -558,11 +558,6 @@ impl ComponentStorage {
         self.inner.remove(entity_index)
     }
 
-    /// Returns true if this component has any required components registered.
-    pub fn has_required_components(&self) -> bool {
-        !self.required_components.is_empty()
-    }
-
     /// Checks if the entity has this component (type-erased).
     pub fn contains_untyped(&self, entity_index: u32) -> bool {
         self.inner.contains(entity_index)

@@ -463,18 +463,41 @@ pub fn derive_bundle(input: TokenStream) -> TokenStream {
 
     let field_names: Vec<_> = fields.iter().map(|f| f.ident.as_ref().unwrap()).collect();
 
-    let collect_stmts: Vec<_> = fields
+    let validate_field_stmts: Vec<_> = fields
+        .iter()
+        .map(|f| {
+            let fname = f.ident.as_ref().unwrap();
+            let ftype = &f.ty;
+            let is_bundle = f.attrs.iter().any(|a| a.path().is_ident("bundle"));
+            if is_bundle {
+                quote! {
+                    redlilium_ecs::Bundle::validate(&self.#fname, world)?;
+                }
+            } else {
+                quote! {
+                    if !world.is_component_registered::<#ftype>() {
+                        return Err(redlilium_ecs::WorldError::ComponentNotRegistered {
+                            type_name: std::any::type_name::<#ftype>(),
+                        });
+                    }
+                }
+            }
+        })
+        .collect();
+
+    let insert_stmts: Vec<_> = fields
         .iter()
         .map(|f| {
             let fname = f.ident.as_ref().unwrap();
             let is_bundle = f.attrs.iter().any(|a| a.path().is_ident("bundle"));
             if is_bundle {
                 quote! {
-                    redlilium_ecs::Bundle::collect_pending(#fname, world, entity, out)?;
+                    redlilium_ecs::Bundle::insert_into(#fname, world, entity);
                 }
             } else {
                 quote! {
-                    out.push(world.insert_raw(entity, #fname)?);
+                    // Safe to unwrap: validate() was called before insert_into()
+                    world.insert(entity, #fname).unwrap();
                 }
             }
         })
@@ -482,15 +505,18 @@ pub fn derive_bundle(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         impl #impl_generics redlilium_ecs::Bundle for #name #ty_generics #where_clause {
-            fn collect_pending(
+            fn validate(&self, world: &redlilium_ecs::World) -> Result<(), redlilium_ecs::WorldError> {
+                #(#validate_field_stmts)*
+                Ok(())
+            }
+
+            fn insert_into(
                 self,
                 world: &mut redlilium_ecs::World,
                 entity: redlilium_ecs::Entity,
-                out: &mut Vec<redlilium_ecs::InsertPending>,
-            ) -> Result<(), redlilium_ecs::WorldError> {
+            ) {
                 let Self { #(#field_names,)* } = self;
-                #(#collect_stmts)*
-                Ok(())
+                #(#insert_stmts)*
             }
         }
     };

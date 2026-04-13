@@ -85,19 +85,15 @@ impl CommandCollector {
 
     /// Queues inserting a component on each entity from parallel vectors.
     ///
+    /// Queues inserting a component on each entity.
+    ///
     /// # Panics
     ///
     /// Panics when applied if the component type has not been registered
-    /// or if the vectors have different lengths.
-    pub fn insert_batch<T: Send + Sync + 'static>(
-        &self,
-        entities: Vec<Entity>,
-        components: Vec<T>,
-    ) {
+    /// or if any entity is dead.
+    pub fn insert_batch<T: Send + Sync + 'static>(&self, items: Vec<(Entity, T)>) {
         self.push(move |world| {
-            world
-                .insert_batch(&entities, components)
-                .expect("Component not registered");
+            world.insert_batch(items).expect("insert_batch failed");
         });
     }
 
@@ -132,9 +128,7 @@ impl CommandCollector {
     /// Panics when applied if any component type has not been registered.
     pub fn insert_bundle(&self, entity: Entity, bundle: impl Bundle) {
         self.push(move |world| {
-            bundle
-                .insert_into(world, entity)
-                .expect("Component in bundle not registered");
+            bundle.insert_into(world, entity);
         });
     }
 
@@ -190,9 +184,7 @@ impl<'a> SpawnBuilder<'a> {
     /// Panics when applied if any component type in the bundle has not been registered.
     pub fn with_bundle(mut self, bundle: impl Bundle) -> Self {
         self.inserts.push(Box::new(move |world, entity| {
-            bundle
-                .insert_into(world, entity)
-                .expect("Component in bundle not registered");
+            bundle.insert_into(world, entity);
         }));
         self
     }
@@ -383,7 +375,12 @@ mod tests {
         let entities: Vec<_> = (0..2).map(|_| world.spawn()).collect();
 
         let collector = CommandCollector::new();
-        collector.insert_batch(entities.clone(), vec![Health(10), Health(20)]);
+        let items: Vec<_> = entities
+            .iter()
+            .copied()
+            .zip(vec![Health(10), Health(20)])
+            .collect();
+        collector.insert_batch(items);
         apply(&collector, &mut world);
 
         assert_eq!(world.get::<Health>(entities[0]), Some(&Health(10)));

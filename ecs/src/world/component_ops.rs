@@ -12,30 +12,24 @@ use crate::sparse_set::{
 
 use super::{World, WorldError, deserialize_component_fn, serialize_component_fn};
 
-/// Pending work from a raw component insertion.
+/// Pending hook work from a raw component insertion.
 ///
 /// Returned by [`World::insert_raw`] and consumed by [`World::apply_pending`].
-/// Separates the storage write from hook/observer/required-component processing
-/// so that bundles can insert all components first, then fire hooks when the
-/// entity is fully constructed.
-#[doc(hidden)]
-pub struct InsertPending {
-    pub was_new: bool,
-    pub on_add: Option<ComponentHookFn>,
-    pub on_insert: Option<ComponentHookFn>,
-    pub required: SmallVec<[RequiredComponentFn; 2]>,
-    /// Monomorphized function to queue `OnAdd<T>` observer trigger.
-    pub add_trigger_fn: Option<fn(&mut World, Entity)>,
-    /// Monomorphized function to queue `OnInsert<T>` observer trigger.
-    pub insert_trigger_fn: fn(&mut World, Entity),
+/// Separates the storage write from hook/observer processing so that bundles
+/// can insert all components first, then fire hooks when the entity is complete.
+pub(crate) struct InsertPending {
+    pub(crate) was_new: bool,
+    pub(crate) on_add: Option<ComponentHookFn>,
+    pub(crate) on_insert: Option<ComponentHookFn>,
+    pub(crate) required: SmallVec<[RequiredComponentFn; 2]>,
+    pub(crate) add_trigger_fn: Option<fn(&mut World, Entity)>,
+    pub(crate) insert_trigger_fn: fn(&mut World, Entity),
 }
 
-/// Helper: monomorphized trigger-push for `OnAdd<T>`.
 fn push_add_trigger<T: 'static>(world: &mut World, entity: Entity) {
     world.observers.push_typed_trigger::<OnAdd<T>>(entity);
 }
 
-/// Helper: monomorphized trigger-push for `OnInsert<T>`.
 fn push_insert_trigger<T: 'static>(world: &mut World, entity: Entity) {
     world.observers.push_typed_trigger::<OnInsert<T>>(entity);
 }
@@ -268,20 +262,19 @@ impl World {
         if !self.entities.is_alive(entity) {
             return Err(WorldError::EntityNotAlive { entity });
         }
-        let deferred = self.insert_raw(entity, component)?;
-        self.apply_pending(entity, &[deferred]);
+        let pending = self.insert_raw(entity, component)?;
+        self.apply_pending(entity, &[pending]);
         Ok(())
     }
 
     /// Low-level insert: writes component to storage and fires on_replace.
     ///
     /// Does NOT fire on_add/on_insert hooks, apply required components, or
-    /// queue observer triggers. Returns deferred work to be processed by
-    /// [`apply_pending`](World::apply_pending).
+    /// queue observer triggers. Returns [`InsertPending`] for the caller
+    /// to process via [`apply_pending`].
     ///
     /// The caller must have already verified the entity is alive.
-    #[doc(hidden)]
-    pub fn insert_raw<T: Send + Sync + 'static>(
+    pub(crate) fn insert_raw<T: Send + Sync + 'static>(
         &mut self,
         entity: Entity,
         component: T,
@@ -337,40 +330,32 @@ impl World {
         })
     }
 
-    /// Processes deferred work from one or more [`insert_raw`](World::insert_raw) calls.
+    /// Processes deferred work from one or more [`insert_raw`] calls.
     ///
     /// Order:
-    /// 1. Apply all required components (for new components only)
-    /// 2. Fire on_add hooks (for new components only)
-    /// 3. Fire on_insert hooks (for all components)
-    /// 4. Queue observer triggers
-    #[doc(hidden)]
-    pub fn apply_pending(&mut self, entity: Entity, deferred: &[InsertPending]) {
-        // Phase 1: required components
-        for d in deferred {
+    /// 1. Required components (for new components only)
+    /// 2. on_add hooks (for new components only)
+    /// 3. on_insert hooks (for all components)
+    /// 4. Observer triggers
+    pub(crate) fn apply_pending(&mut self, entity: Entity, pending: &[InsertPending]) {
+        for d in pending {
             if d.was_new {
                 for req_fn in &d.required {
                     req_fn(self, entity);
                 }
             }
         }
-
-        // Phase 2: on_add hooks
-        for d in deferred {
+        for d in pending {
             if let Some(hook) = d.on_add {
                 hook(self, entity);
             }
         }
-
-        // Phase 3: on_insert hooks
-        for d in deferred {
+        for d in pending {
             if let Some(hook) = d.on_insert {
                 hook(self, entity);
             }
         }
-
-        // Phase 4: observer triggers
-        for d in deferred {
+        for d in pending {
             if let Some(trigger_fn) = d.add_trigger_fn {
                 trigger_fn(self, entity);
             }
@@ -378,15 +363,17 @@ impl World {
         }
     }
 
+    /// Checks whether all component types in a bundle are registered.
+    ///
+    /// Call this before writing to ensure no partial inserts can occur.
+    pub fn is_component_registered_by_id(&self, type_id: TypeId) -> bool {
+        self.components.contains_key(&type_id)
+    }
+
     /// Inserts a bundle of components on an entity.
     ///
-    /// A bundle is a tuple of components, e.g. `(Position, Velocity, Health)`.
-    /// All components are inserted at once.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ComponentNotRegistered`] if any component type has never
-    /// been registered.
+    /// Validates all component types upfront. All components are written
+    /// before any hooks fire, so hooks see the complete entity.
     ///
     /// # Errors
     ///
@@ -397,20 +384,24 @@ impl World {
         if !self.entities.is_alive(entity) {
             return Err(WorldError::EntityNotAlive { entity });
         }
-        bundle.insert_into(self, entity)
+        bundle.validate(self)?;
+        bundle.insert_into(self, entity);
+        Ok(())
     }
 
     /// Spawns a new entity with a bundle of components.
     ///
-    /// Convenience for `spawn()` + `insert_bundle()`.
+    /// Validates all component types upfront. If validation fails, no
+    /// entity is spawned and the world is unchanged.
     ///
     /// # Errors
     ///
     /// Returns [`WorldError::ComponentNotRegistered`] if any component type
-    /// has not been registered. The entity is still spawned (alive but empty).
+    /// has not been registered.
     pub fn spawn_with(&mut self, bundle: impl Bundle) -> Result<Entity, WorldError> {
+        bundle.validate(self)?;
         let entity = self.spawn();
-        bundle.insert_into(self, entity)?;
+        bundle.insert_into(self, entity);
         Ok(entity)
     }
 

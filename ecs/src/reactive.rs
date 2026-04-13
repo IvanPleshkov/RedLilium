@@ -185,7 +185,9 @@ mod tests {
 
         let entities: Vec<_> = (0..5).map(|_| world.spawn()).collect();
         let components: Vec<_> = (0..5).map(|i| Health(i * 10)).collect();
-        world.insert_batch(&entities, components).unwrap();
+        world
+            .insert_batch(entities.iter().copied().zip(components))
+            .unwrap();
 
         world.flush_observers();
         world.update_triggers();

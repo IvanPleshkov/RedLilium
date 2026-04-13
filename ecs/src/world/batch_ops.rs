@@ -1,9 +1,10 @@
 use std::any::TypeId;
 
+use smallvec::SmallVec;
+
 use crate::bundle::Bundle;
 use crate::entity::Entity;
-use crate::observer::{OnAdd, OnInsert, OnRemove};
-use crate::world::component_ops::InsertPending;
+use crate::observer::OnRemove;
 
 use super::{World, WorldError};
 
@@ -27,44 +28,36 @@ impl World {
 
     /// Spawns `count` entities, each with a clone of the given bundle.
     ///
-    /// All entities are spawned and fully populated before any hooks fire.
-    /// This means `on_add` handlers can observe not only all components on
-    /// their own entity, but also all other entities in the batch. Use this
-    /// when spawning a group of related entities that reference each other.
+    /// All mutations are atomic: if any component fails to insert, all
+    /// spawned entities are cleaned up and the world is unchanged.
+    /// All hooks fire after every entity is fully populated, so `on_add`
+    /// handlers can observe the entire batch.
     ///
     /// # Errors
     ///
     /// Returns [`WorldError::ComponentNotRegistered`] if any component type
-    /// in the bundle has not been registered. Already-spawned entities
-    /// remain alive but may be incomplete.
+    /// in the bundle has not been registered.
     pub fn spawn_batch_with(
         &mut self,
         count: u32,
         bundle: impl Bundle + Clone,
     ) -> Result<Vec<Entity>, WorldError> {
-        let entities = self.entities.allocate_many(count, self.tick);
+        // Validate upfront — no entities spawned if types are wrong
+        bundle.validate(self)?;
 
-        // Phase 1: insert all components for all entities (no hooks)
-        let mut all_pending: Vec<(Entity, Vec<InsertPending>)> = Vec::with_capacity(count as usize);
-        for &entity in &entities {
-            let mut pending = Vec::new();
-            bundle.clone().collect_pending(self, entity, &mut pending)?;
-            all_pending.push((entity, pending));
+        let mut entities = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let entity = self.spawn();
+            bundle.clone().insert_into(self, entity);
+            entities.push(entity);
         }
-
-        // Phase 2: apply hooks for all entities (all components present)
-        for (entity, pending) in &all_pending {
-            self.apply_pending(*entity, pending);
-        }
-
         Ok(entities)
     }
 
     /// Spawns `count` entities, calling `f(index)` to produce each entity's bundle.
     ///
-    /// Use this when each entity needs different component data. All entities
-    /// are spawned and fully populated before any hooks fire, so `on_add`
-    /// handlers can observe the entire batch.
+    /// Use this when each entity needs different component data. All
+    /// component types are validated upfront before any entities are spawned.
     ///
     /// # Example
     ///
@@ -83,268 +76,115 @@ impl World {
         count: u32,
         f: impl Fn(usize) -> B,
     ) -> Result<Vec<Entity>, WorldError> {
-        let entities = self.entities.allocate_many(count, self.tick);
-
-        // Phase 1: insert all components for all entities (no hooks)
-        let mut all_pending: Vec<(Entity, Vec<InsertPending>)> = Vec::with_capacity(count as usize);
-        for (i, &entity) in entities.iter().enumerate() {
-            let mut pending = Vec::new();
-            f(i).collect_pending(self, entity, &mut pending)?;
-            all_pending.push((entity, pending));
+        // Validate with a sample bundle — all bundles have the same types
+        if count > 0 {
+            f(0).validate(self)?;
         }
 
-        // Phase 2: apply hooks for all entities (all components present)
-        for (entity, pending) in &all_pending {
-            self.apply_pending(*entity, pending);
+        let mut entities = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            let entity = self.spawn();
+            f(i as usize).insert_into(self, entity);
+            entities.push(entity);
         }
-
         Ok(entities)
     }
 
     /// Despawns multiple entities at once.
     ///
+    /// All `on_remove` hooks fire first while every entity in the batch
+    /// is still alive and has its components, then all entities are
+    /// deallocated and their components removed. This means hooks can
+    /// observe the full batch in a consistent state.
+    ///
     /// Skips entities that are already dead.
-    /// Fires `on_remove` hooks before removal for each entity.
     /// Records removals for [`removed`](World::removed) filter queries.
     pub fn despawn_batch(&mut self, entities: &[Entity]) {
+        // Phase 1: collect on_remove hooks for all entities
+        let mut hooks: SmallVec<[(Entity, crate::sparse_set::ComponentHookFn); 8]> =
+            Default::default();
         for &entity in entities {
-            self.despawn(entity);
+            if !self.entities.is_alive(entity) {
+                continue;
+            }
+            let index = entity.index();
+            for lock in self.components.values_mut() {
+                let storage = lock.get_mut();
+                if let Some(hook) = storage
+                    .on_remove
+                    .filter(|_| storage.contains_untyped(index))
+                {
+                    hooks.push((entity, hook));
+                }
+            }
+        }
+
+        // Phase 2: fire all hooks (all entities still alive, all components readable)
+        for &(entity, hook) in &hooks {
+            if self.entities.is_alive(entity) {
+                hook(self, entity);
+            }
+        }
+
+        // Phase 3: deallocate all entities and remove components
+        let tick = self.tick;
+        for &entity in entities {
+            if !self.entities.is_alive(entity) {
+                continue;
+            }
+            let index = entity.index();
+            self.entities.deallocate(entity);
+            let components = &mut self.components;
+            let observers = &mut self.observers;
+            for (type_id, lock) in components.iter_mut() {
+                let storage = lock.get_mut();
+                if storage.remove_untyped(index) {
+                    storage.record_removal(index, tick);
+                    if let Some(trigger_key) = observers.remove_trigger_key(type_id) {
+                        observers.push_trigger(trigger_key, entity);
+                    }
+                }
+            }
         }
     }
 
-    /// Inserts a component on each entity from parallel slices.
+    /// Inserts a component on each entity from an iterator of `(Entity, T)` pairs.
     ///
-    /// `entities` and `components` must have the same length.
-    /// Uses tick 0 (untracked). For change-tracked insertion,
-    /// use [`insert_batch_tracked`](World::insert_batch_tracked).
-    /// Fires lifecycle hooks (`on_add`, `on_insert`, `on_replace`) per entity.
+    /// All entities are validated upfront — if any is dead, the entire
+    /// operation fails before any mutation. All `on_replace` hooks fire
+    /// first (old values readable for all entities), then all values are
+    /// written, then `on_add`/`on_insert` hooks fire. This ensures hooks
+    /// see a consistent batch state.
+    ///
+    /// Records the current tick for change detection.
     ///
     /// # Errors
     ///
-    /// Returns [`ComponentNotRegistered`] if `T` has never been registered.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the slices have different lengths or if any entity is dead.
+    /// Returns [`WorldError::EntityNotAlive`] if any entity is dead.
+    /// Returns [`WorldError::ComponentNotRegistered`] if `T` has never been registered.
     pub fn insert_batch<T: Send + Sync + 'static>(
         &mut self,
-        entities: &[Entity],
-        components: Vec<T>,
+        items: impl IntoIterator<Item = (Entity, T)>,
     ) -> Result<(), WorldError> {
-        assert_eq!(
-            entities.len(),
-            components.len(),
-            "insert_batch: entities and components must have the same length"
-        );
+        let items: Vec<(Entity, T)> = items.into_iter().collect();
 
-        let type_id = TypeId::of::<T>();
-
-        // Verify registered and extract hooks
-        let (on_add, on_insert, on_replace, has_required) = {
-            let storage = self
-                .components
-                .get_mut(&type_id)
-                .map(|l| l.get_mut())
-                .ok_or(WorldError::ComponentNotRegistered {
-                    type_name: std::any::type_name::<T>(),
-                })?;
-            (
-                storage.on_add,
-                storage.on_insert,
-                storage.on_replace,
-                storage.has_required_components(),
-            )
-        };
-        let has_hooks = on_add.is_some() || on_insert.is_some() || on_replace.is_some();
-
-        // Reserve capacity upfront
-        self.storage_mut(&type_id)
-            .unwrap()
-            .typed_mut::<T>()
-            .reserve(components.len());
-
-        if has_hooks || has_required {
-            for (entity, component) in entities.iter().zip(components) {
-                assert!(
-                    self.entities.is_alive(*entity),
-                    "Cannot insert component on dead entity {entity}"
-                );
-                let had = self
-                    .storage_mut(&type_id)
-                    .unwrap()
-                    .contains_untyped(entity.index());
-
-                if had && let Some(hook) = on_replace {
-                    hook(self, *entity);
-                }
-
-                self.storage_mut(&type_id).unwrap().typed_mut::<T>().insert(
-                    entity.index(),
-                    component,
-                    0,
-                );
-
-                if !had && let Some(hook) = on_add {
-                    hook(self, *entity);
-                }
-                if let Some(hook) = on_insert {
-                    hook(self, *entity);
-                }
-
-                // Apply required components (only on first add)
-                if !had {
-                    let required = self
-                        .storage_mut(&type_id)
-                        .unwrap()
-                        .required_components
-                        .clone();
-                    for req_fn in required {
-                        req_fn(self, *entity);
-                    }
-                }
-
-                // Queue deferred observer triggers
-                if !had {
-                    self.observers.push_typed_trigger::<OnAdd<T>>(*entity);
-                }
-                self.observers.push_typed_trigger::<OnInsert<T>>(*entity);
-            }
-        } else {
-            // Fast path: no hooks and no required components, direct sparse set insert
-            let storage = self.components.get_mut(&type_id).unwrap().get_mut();
-            let set = storage.typed_mut::<T>();
-            for (entity, component) in entities.iter().zip(components) {
-                assert!(
-                    self.entities.is_alive(*entity),
-                    "Cannot insert component on dead entity {entity}"
-                );
-                let had = set.contains(entity.index());
-                set.insert(entity.index(), component, 0);
-
-                // Queue deferred observer triggers
-                if !had {
-                    self.observers.push_typed_trigger::<OnAdd<T>>(*entity);
-                }
-                self.observers.push_typed_trigger::<OnInsert<T>>(*entity);
+        // Validate all entities upfront — fail before any mutation.
+        for (entity, _) in &items {
+            if !self.entities.is_alive(*entity) {
+                return Err(WorldError::EntityNotAlive { entity: *entity });
             }
         }
-        Ok(())
-    }
 
-    /// Inserts a component on each entity with change tracking.
-    ///
-    /// Like [`insert_batch`](World::insert_batch) but records the current tick.
-    /// Fires lifecycle hooks (`on_add`, `on_insert`, `on_replace`) per entity.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ComponentNotRegistered`] if `T` has never been registered.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the slices have different lengths or if any entity is dead.
-    pub fn insert_batch_tracked<T: Send + Sync + 'static>(
-        &mut self,
-        entities: &[Entity],
-        components: Vec<T>,
-    ) -> Result<(), WorldError> {
-        assert_eq!(
-            entities.len(),
-            components.len(),
-            "insert_batch_tracked: entities and components must have the same length"
-        );
-
+        // Validate type registered
         let type_id = TypeId::of::<T>();
-        let tick = self.tick;
+        if !self.components.contains_key(&type_id) {
+            return Err(WorldError::ComponentNotRegistered {
+                type_name: std::any::type_name::<T>(),
+            });
+        }
 
-        // Verify registered and extract hooks
-        let (on_add, on_insert, on_replace, has_required) = {
-            let storage = self
-                .components
-                .get_mut(&type_id)
-                .map(|l| l.get_mut())
-                .ok_or(WorldError::ComponentNotRegistered {
-                    type_name: std::any::type_name::<T>(),
-                })?;
-            (
-                storage.on_add,
-                storage.on_insert,
-                storage.on_replace,
-                storage.has_required_components(),
-            )
-        };
-        let has_hooks = on_add.is_some() || on_insert.is_some() || on_replace.is_some();
-
-        // Reserve capacity upfront
-        self.storage_mut(&type_id)
-            .unwrap()
-            .typed_mut::<T>()
-            .reserve(components.len());
-
-        if has_hooks || has_required {
-            for (entity, component) in entities.iter().zip(components) {
-                assert!(
-                    self.entities.is_alive(*entity),
-                    "Cannot insert component on dead entity {entity}"
-                );
-                let had = self
-                    .storage_mut(&type_id)
-                    .unwrap()
-                    .contains_untyped(entity.index());
-
-                if had && let Some(hook) = on_replace {
-                    hook(self, *entity);
-                }
-
-                self.storage_mut(&type_id).unwrap().typed_mut::<T>().insert(
-                    entity.index(),
-                    component,
-                    tick,
-                );
-
-                if !had && let Some(hook) = on_add {
-                    hook(self, *entity);
-                }
-                if let Some(hook) = on_insert {
-                    hook(self, *entity);
-                }
-
-                // Apply required components (only on first add)
-                if !had {
-                    let required = self
-                        .storage_mut(&type_id)
-                        .unwrap()
-                        .required_components
-                        .clone();
-                    for req_fn in required {
-                        req_fn(self, *entity);
-                    }
-                }
-
-                // Queue deferred observer triggers
-                if !had {
-                    self.observers.push_typed_trigger::<OnAdd<T>>(*entity);
-                }
-                self.observers.push_typed_trigger::<OnInsert<T>>(*entity);
-            }
-        } else {
-            // Fast path: no hooks and no required components, direct sparse set insert
-            let storage = self.components.get_mut(&type_id).unwrap().get_mut();
-            let set = storage.typed_mut::<T>();
-            for (entity, component) in entities.iter().zip(components) {
-                assert!(
-                    self.entities.is_alive(*entity),
-                    "Cannot insert component on dead entity {entity}"
-                );
-                let had = set.contains(entity.index());
-                set.insert(entity.index(), component, tick);
-
-                // Queue deferred observer triggers
-                if !had {
-                    self.observers.push_typed_trigger::<OnAdd<T>>(*entity);
-                }
-                self.observers.push_typed_trigger::<OnInsert<T>>(*entity);
-            }
+        for (entity, component) in items {
+            self.insert(entity, component)?;
         }
         Ok(())
     }

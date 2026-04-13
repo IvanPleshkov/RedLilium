@@ -1,5 +1,4 @@
 use crate::entity::Entity;
-use crate::world::InsertPending;
 use crate::world::World;
 
 /// A group of components that can be inserted together on an entity.
@@ -10,7 +9,6 @@ use crate::world::World;
 /// # Example
 ///
 /// ```ignore
-/// // Insert a bundle of components at once
 /// world.insert_bundle(entity, (
 ///     Transform::from_translation(Vec3::new(0.0, 1.0, 0.0)),
 ///     GlobalTransform::default(),
@@ -18,71 +16,45 @@ use crate::world::World;
 ///     Name::new("Player"),
 /// )).unwrap();
 ///
-/// // Spawn an entity with a bundle
 /// let entity = world.spawn_with((
 ///     Transform::IDENTITY,
 ///     Visibility::VISIBLE,
 /// )).unwrap();
 /// ```
 pub trait Bundle: Send + 'static {
-    /// Inserts all components into storage without firing hooks.
+    /// Checks that all component types in this bundle are registered.
     ///
-    /// Pushes [`InsertPending`] items into `out` for each component.
-    /// The caller is responsible for calling [`World::apply_pending`]
-    /// after all entities have been populated.
-    #[doc(hidden)]
-    fn collect_pending(
-        self,
-        world: &mut World,
-        entity: Entity,
-        out: &mut Vec<InsertPending>,
-    ) -> Result<(), crate::world::WorldError>;
+    /// Call this before [`insert_into`] to ensure no partial inserts.
+    fn validate(&self, world: &World) -> Result<(), crate::world::WorldError>;
 
-    /// Inserts all components onto `entity`, then applies required components
-    /// and fires hooks.
+    /// Inserts all components onto `entity` and collects pending hook work.
     ///
-    /// All bundle components are written to storage first, so hooks see
-    /// the complete entity.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if any component type has not been registered.
-    fn insert_into(self, world: &mut World, entity: Entity) -> Result<(), crate::world::WorldError>
-    where
-        Self: Sized,
-    {
-        let mut pending = Vec::new();
-        self.collect_pending(world, entity, &mut pending)?;
-        world.apply_pending(entity, &pending);
-        Ok(())
-    }
+    /// The caller must have already called [`validate`]. All components are
+    /// written to storage before any hooks fire (hooks are in the returned
+    /// pending list, processed by [`World::apply_pending`]).
+    fn insert_into(self, world: &mut World, entity: Entity);
 }
 
 macro_rules! impl_bundle {
     ($($T:ident),+) => {
         impl<$($T: Send + Sync + 'static),+> Bundle for ($($T,)+) {
-            fn collect_pending(
-                self,
-                world: &mut World,
-                entity: Entity,
-                out: &mut Vec<InsertPending>,
-            ) -> Result<(), crate::world::WorldError> {
-                #[allow(non_snake_case)]
-                let ($($T,)+) = self;
-                $(out.push(world.insert_raw(entity, $T)?);)+
+            fn validate(&self, world: &World) -> Result<(), crate::world::WorldError> {
+                $(
+                    if !world.is_component_registered::<$T>() {
+                        return Err(crate::world::WorldError::ComponentNotRegistered {
+                            type_name: std::any::type_name::<$T>(),
+                        });
+                    }
+                )+
                 Ok(())
             }
 
-            fn insert_into(
-                self,
-                world: &mut World,
-                entity: Entity,
-            ) -> Result<(), crate::world::WorldError> {
+            fn insert_into(self, world: &mut World, entity: Entity) {
                 #[allow(non_snake_case)]
                 let ($($T,)+) = self;
-                let pending = [$(world.insert_raw(entity, $T)?),+];
+                // insert_raw is infallible after validate — unwrap is safe
+                let pending = [$(world.insert_raw(entity, $T).unwrap()),+];
                 world.apply_pending(entity, &pending);
-                Ok(())
             }
         }
     };
@@ -121,7 +93,7 @@ mod tests {
         world.register_component::<Health>();
         let entity = world.spawn();
 
-        (Health(100),).insert_into(&mut world, entity).unwrap();
+        (Health(100),).insert_into(&mut world, entity);
 
         assert_eq!(world.get::<Health>(entity), Some(&Health(100)));
     }
@@ -133,9 +105,7 @@ mod tests {
         world.register_component::<Health>();
         let entity = world.spawn();
 
-        (Position { x: 1.0, y: 2.0 }, Health(50))
-            .insert_into(&mut world, entity)
-            .unwrap();
+        (Position { x: 1.0, y: 2.0 }, Health(50)).insert_into(&mut world, entity);
 
         assert_eq!(
             world.get::<Position>(entity),
@@ -153,21 +123,19 @@ mod tests {
         let entity = world.spawn();
 
         (Position { x: 0.0, y: 0.0 }, Velocity { x: 1.0 }, Health(75))
-            .insert_into(&mut world, entity)
-            .unwrap();
+            .insert_into(&mut world, entity);
 
         assert_eq!(world.get::<Velocity>(entity), Some(&Velocity { x: 1.0 }));
         assert_eq!(world.get::<Health>(entity), Some(&Health(75)));
     }
 
     #[test]
-    fn unregistered_component_returns_err() {
+    fn unregistered_component_validate_fails() {
         let mut world = World::new();
         world.register_component::<Position>();
         // Health is NOT registered
-        let entity = world.spawn();
 
-        let result = (Position { x: 0.0, y: 0.0 }, Health(100)).insert_into(&mut world, entity);
+        let result = (Position { x: 0.0, y: 0.0 }, Health(100)).validate(&world);
         assert!(result.is_err());
     }
 
@@ -190,7 +158,7 @@ mod tests {
             position: Position { x: 5.0, y: 10.0 },
             health: Health(100),
         };
-        bundle.insert_into(&mut world, entity).unwrap();
+        bundle.insert_into(&mut world, entity);
 
         assert_eq!(
             world.get::<Position>(entity),
@@ -227,7 +195,7 @@ mod tests {
                 velocity: Velocity { x: 3.0 },
             },
         };
-        bundle.insert_into(&mut world, entity).unwrap();
+        bundle.insert_into(&mut world, entity);
 
         assert_eq!(world.get::<Health>(entity), Some(&Health(200)));
         assert_eq!(
@@ -268,7 +236,9 @@ mod tests {
             position: Position { x: 0.0, y: 0.0 },
             health: Health(100),
         };
-        let result = bundle.insert_into(&mut world, entity);
+        let result = world.insert_bundle(entity, bundle);
         assert!(result.is_err());
+        // Position should NOT have been inserted (validate-first)
+        assert!(world.get::<Position>(entity).is_none());
     }
 }
