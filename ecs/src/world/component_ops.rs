@@ -18,7 +18,8 @@ use super::{World, WorldError, deserialize_component_fn, serialize_component_fn}
 /// Separates the storage write from hook/observer/required-component processing
 /// so that bundles can insert all components first, then fire hooks when the
 /// entity is fully constructed.
-pub(crate) struct InsertPending {
+#[doc(hidden)]
+pub struct InsertPending {
     pub was_new: bool,
     pub on_add: Option<ComponentHookFn>,
     pub on_insert: Option<ComponentHookFn>,
@@ -279,7 +280,8 @@ impl World {
     /// [`apply_pending`](World::apply_pending).
     ///
     /// The caller must have already verified the entity is alive.
-    pub(crate) fn insert_raw<T: Send + Sync + 'static>(
+    #[doc(hidden)]
+    pub fn insert_raw<T: Send + Sync + 'static>(
         &mut self,
         entity: Entity,
         component: T,
@@ -342,7 +344,8 @@ impl World {
     /// 2. Fire on_add hooks (for new components only)
     /// 3. Fire on_insert hooks (for all components)
     /// 4. Queue observer triggers
-    pub(crate) fn apply_pending(&mut self, entity: Entity, deferred: &[InsertPending]) {
+    #[doc(hidden)]
+    pub fn apply_pending(&mut self, entity: Entity, deferred: &[InsertPending]) {
         // Phase 1: required components
         for d in deferred {
             if d.was_new {

@@ -70,7 +70,9 @@ impl CommandCollector {
     /// Panics when applied if any component type has not been registered.
     pub fn spawn_batch_with(&self, count: u32, bundle: impl Bundle + Clone) {
         self.push(move |world| {
-            world.spawn_batch_with(count, bundle);
+            world
+                .spawn_batch_with(count, bundle)
+                .expect("Component in bundle not registered");
         });
     }
 

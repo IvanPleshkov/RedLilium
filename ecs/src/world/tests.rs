@@ -454,7 +454,9 @@ fn spawn_batch_with_inserts_components() {
     world.register_component::<Position>();
     world.register_component::<Health>();
 
-    let entities = world.spawn_batch_with(3, (Position { x: 1.0, y: 2.0 }, Health(100)));
+    let entities = world
+        .spawn_batch_with(3, (Position { x: 1.0, y: 2.0 }, Health(100)))
+        .unwrap();
 
     assert_eq!(entities.len(), 3);
     for e in &entities {
@@ -471,12 +473,14 @@ fn spawn_batch_with_fn_unique_data() {
     let mut world = World::new();
     world.register_component::<Position>();
 
-    let entities = world.spawn_batch_with_fn(4, |i| {
-        (Position {
-            x: i as f32,
-            y: (i * 10) as f32,
-        },)
-    });
+    let entities = world
+        .spawn_batch_with_fn(4, |i| {
+            (Position {
+                x: i as f32,
+                y: (i * 10) as f32,
+            },)
+        })
+        .unwrap();
 
     assert_eq!(entities.len(), 4);
     for (i, e) in entities.iter().enumerate() {

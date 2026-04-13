@@ -58,6 +58,9 @@ pub type ComponentNotRegistered = WorldError;
 pub use crate::sparse_set::InspectResult;
 
 pub use actions::set_component_actions;
+#[doc(hidden)]
+pub use component_ops::InsertPending;
+use smallvec::SmallVec;
 
 /// Type-erased serialize helper: reads `T` from the world and serializes it.
 fn serialize_component_fn<T: Component>(
@@ -196,9 +199,8 @@ impl World {
         let index = entity.index();
         let tick = self.tick;
 
-        // TODO(allocation): can we have a preallocated buffer for hooks?
         // Pass 1: collect on_remove hooks for components this entity has
-        let hooks: Vec<crate::sparse_set::ComponentHookFn> = self
+        let hooks: SmallVec<[crate::sparse_set::ComponentHookFn; 2]> = self
             .components
             .values_mut()
             .map(|lock| lock.get_mut())

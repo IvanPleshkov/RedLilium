@@ -99,6 +99,8 @@ pub use redlilium_core::compute::{
 };
 pub use resource::{Resource, ResourceRef, ResourceRefMut};
 pub use sparse_set::{Mut, Ref, RefMut, SparseSetInner};
+#[doc(hidden)]
+pub use world::InsertPending;
 pub use world::{ComponentNotRegistered, InspectResult, World, WorldError, set_component_actions};
 
 pub use compute::EcsComputeContext;

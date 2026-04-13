@@ -3,6 +3,7 @@ use std::any::TypeId;
 use crate::bundle::Bundle;
 use crate::entity::Entity;
 use crate::observer::{OnAdd, OnInsert, OnRemove};
+use crate::world::component_ops::InsertPending;
 
 use super::{World, WorldError};
 
@@ -26,49 +27,78 @@ impl World {
 
     /// Spawns `count` entities, each with a clone of the given bundle.
     ///
-    /// More efficient than calling [`spawn_with`](World::spawn_with) in a loop
-    /// because entity allocation is batched and component storage is pre-reserved.
+    /// All entities are spawned and fully populated before any hooks fire.
+    /// This means `on_add` handlers can observe not only all components on
+    /// their own entity, but also all other entities in the batch. Use this
+    /// when spawning a group of related entities that reference each other.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if any component type in the bundle has not been registered.
-    pub fn spawn_batch_with(&mut self, count: u32, bundle: impl Bundle + Clone) -> Vec<Entity> {
+    /// Returns [`WorldError::ComponentNotRegistered`] if any component type
+    /// in the bundle has not been registered. Already-spawned entities
+    /// remain alive but may be incomplete.
+    pub fn spawn_batch_with(
+        &mut self,
+        count: u32,
+        bundle: impl Bundle + Clone,
+    ) -> Result<Vec<Entity>, WorldError> {
         let entities = self.entities.allocate_many(count, self.tick);
-        for entity in &entities {
-            bundle
-                .clone()
-                .insert_into(self, *entity)
-                .expect("Component in bundle not registered");
+
+        // Phase 1: insert all components for all entities (no hooks)
+        let mut all_pending: Vec<(Entity, Vec<InsertPending>)> = Vec::with_capacity(count as usize);
+        for &entity in &entities {
+            let mut pending = Vec::new();
+            bundle.clone().collect_pending(self, entity, &mut pending)?;
+            all_pending.push((entity, pending));
         }
-        entities
+
+        // Phase 2: apply hooks for all entities (all components present)
+        for (entity, pending) in &all_pending {
+            self.apply_pending(*entity, pending);
+        }
+
+        Ok(entities)
     }
 
     /// Spawns `count` entities, calling `f(index)` to produce each entity's bundle.
     ///
-    /// Use this when each entity needs different component data.
+    /// Use this when each entity needs different component data. All entities
+    /// are spawned and fully populated before any hooks fire, so `on_add`
+    /// handlers can observe the entire batch.
     ///
     /// # Example
     ///
     /// ```ignore
     /// let entities = world.spawn_batch_with_fn(10, |i| {
     ///     (Position { x: i as f32, y: 0.0 }, Health(100))
-    /// });
+    /// }).unwrap();
     /// ```
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if any component type in the bundle has not been registered.
+    /// Returns [`WorldError::ComponentNotRegistered`] if any component type
+    /// in the bundle has not been registered.
     pub fn spawn_batch_with_fn<B: Bundle>(
         &mut self,
         count: u32,
         f: impl Fn(usize) -> B,
-    ) -> Vec<Entity> {
+    ) -> Result<Vec<Entity>, WorldError> {
         let entities = self.entities.allocate_many(count, self.tick);
-        for (i, entity) in entities.iter().enumerate() {
-            f(i).insert_into(self, *entity)
-                .expect("Component in bundle not registered");
+
+        // Phase 1: insert all components for all entities (no hooks)
+        let mut all_pending: Vec<(Entity, Vec<InsertPending>)> = Vec::with_capacity(count as usize);
+        for (i, &entity) in entities.iter().enumerate() {
+            let mut pending = Vec::new();
+            f(i).collect_pending(self, entity, &mut pending)?;
+            all_pending.push((entity, pending));
         }
-        entities
+
+        // Phase 2: apply hooks for all entities (all components present)
+        for (entity, pending) in &all_pending {
+            self.apply_pending(*entity, pending);
+        }
+
+        Ok(entities)
     }
 
     /// Despawns multiple entities at once.

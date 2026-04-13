@@ -463,19 +463,18 @@ pub fn derive_bundle(input: TokenStream) -> TokenStream {
 
     let field_names: Vec<_> = fields.iter().map(|f| f.ident.as_ref().unwrap()).collect();
 
-    let insert_stmts: Vec<_> = fields
+    let collect_stmts: Vec<_> = fields
         .iter()
         .map(|f| {
             let fname = f.ident.as_ref().unwrap();
             let is_bundle = f.attrs.iter().any(|a| a.path().is_ident("bundle"));
             if is_bundle {
-                // Nested bundle: collect its raw inserts into deferred vec
                 quote! {
-                    redlilium_ecs::Bundle::insert_into(#fname, world, entity)?;
+                    redlilium_ecs::Bundle::collect_pending(#fname, world, entity, out)?;
                 }
             } else {
                 quote! {
-                    __pending.push(world.insert_raw(entity, #fname)?);
+                    out.push(world.insert_raw(entity, #fname)?);
                 }
             }
         })
@@ -483,15 +482,14 @@ pub fn derive_bundle(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         impl #impl_generics redlilium_ecs::Bundle for #name #ty_generics #where_clause {
-            fn insert_into(
+            fn collect_pending(
                 self,
                 world: &mut redlilium_ecs::World,
                 entity: redlilium_ecs::Entity,
+                out: &mut Vec<redlilium_ecs::InsertPending>,
             ) -> Result<(), redlilium_ecs::WorldError> {
                 let Self { #(#field_names,)* } = self;
-                let mut __pending = Vec::new();
-                #(#insert_stmts)*
-                world.apply_pending(entity, &__pending);
+                #(#collect_stmts)*
                 Ok(())
             }
         }

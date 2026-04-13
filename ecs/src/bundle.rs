@@ -1,4 +1,5 @@
 use crate::entity::Entity;
+use crate::world::InsertPending;
 use crate::world::World;
 
 /// A group of components that can be inserted together on an entity.
@@ -24,21 +25,54 @@ use crate::world::World;
 /// )).unwrap();
 /// ```
 pub trait Bundle: Send + 'static {
-    /// Inserts all components in this bundle onto `entity`.
+    /// Inserts all components into storage without firing hooks.
     ///
-    /// All components are written to storage first, then required components
-    /// are applied, then hooks fire — so hooks see the complete entity.
+    /// Pushes [`InsertPending`] items into `out` for each component.
+    /// The caller is responsible for calling [`World::apply_pending`]
+    /// after all entities have been populated.
+    #[doc(hidden)]
+    fn collect_pending(
+        self,
+        world: &mut World,
+        entity: Entity,
+        out: &mut Vec<InsertPending>,
+    ) -> Result<(), crate::world::WorldError>;
+
+    /// Inserts all components onto `entity`, then applies required components
+    /// and fires hooks.
+    ///
+    /// All bundle components are written to storage first, so hooks see
+    /// the complete entity.
     ///
     /// # Errors
     ///
     /// Returns an error if any component type has not been registered.
-    fn insert_into(self, world: &mut World, entity: Entity)
-    -> Result<(), crate::world::WorldError>;
+    fn insert_into(self, world: &mut World, entity: Entity) -> Result<(), crate::world::WorldError>
+    where
+        Self: Sized,
+    {
+        let mut pending = Vec::new();
+        self.collect_pending(world, entity, &mut pending)?;
+        world.apply_pending(entity, &pending);
+        Ok(())
+    }
 }
 
 macro_rules! impl_bundle {
     ($($T:ident),+) => {
         impl<$($T: Send + Sync + 'static),+> Bundle for ($($T,)+) {
+            fn collect_pending(
+                self,
+                world: &mut World,
+                entity: Entity,
+                out: &mut Vec<InsertPending>,
+            ) -> Result<(), crate::world::WorldError> {
+                #[allow(non_snake_case)]
+                let ($($T,)+) = self;
+                $(out.push(world.insert_raw(entity, $T)?);)+
+                Ok(())
+            }
+
             fn insert_into(
                 self,
                 world: &mut World,
