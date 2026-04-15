@@ -46,7 +46,7 @@ impl World {
     /// # Panics
     ///
     /// Panics if the resource does not exist.
-    pub fn resource_handle<T: 'static>(&self) -> Arc<parking_lot::RwLock<dyn Resource>> {
+    pub fn resource_shared<T: 'static>(&self) -> Arc<parking_lot::RwLock<dyn Resource>> {
         self.resources.get_handle::<T>()
     }
 
@@ -144,15 +144,6 @@ impl World {
 
     // ---- Commands ----
 
-    /// Initializes a [`CommandBuffer`] resource if not already present.
-    ///
-    /// Call this before running systems that use commands.
-    pub fn init_commands(&mut self) {
-        if !self.has_resource::<CommandBuffer>() {
-            self.insert_resource(CommandBuffer::new());
-        }
-    }
-
     /// Drains and applies all queued commands from the [`CommandBuffer`] resource.
     ///
     /// Each command receives `&mut World` and can perform structural changes
@@ -160,11 +151,6 @@ impl World {
     /// were queued.
     ///
     /// Call this after `schedule.run()` or between schedule stages.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the `CommandBuffer` resource does not exist.
-    /// Call [`init_commands`](World::init_commands) first.
     pub fn apply_commands(&mut self) {
         let cmds = {
             let buffer = self.resources.borrow::<CommandBuffer>();

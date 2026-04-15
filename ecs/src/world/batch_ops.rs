@@ -45,11 +45,9 @@ impl World {
         // Validate upfront — no entities spawned if types are wrong
         bundle.validate(self)?;
 
-        let mut entities = Vec::with_capacity(count as usize);
-        for _ in 0..count {
-            let entity = self.spawn();
+        let entities = self.entities.allocate_many(count, self.tick);
+        for &entity in &entities {
             bundle.clone().insert_into(self, entity);
-            entities.push(entity);
         }
         Ok(entities)
     }
@@ -81,11 +79,9 @@ impl World {
             f(0).validate(self)?;
         }
 
-        let mut entities = Vec::with_capacity(count as usize);
-        for i in 0..count {
-            let entity = self.spawn();
-            f(i as usize).insert_into(self, entity);
-            entities.push(entity);
+        let entities = self.entities.allocate_many(count, self.tick);
+        for (i, &entity) in entities.iter().enumerate() {
+            f(i).insert_into(self, entity);
         }
         Ok(entities)
     }

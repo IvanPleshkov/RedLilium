@@ -150,10 +150,12 @@ impl redlilium_core::abstract_editor::Editable for World {}
 impl World {
     /// Creates a new empty world.
     pub fn new() -> Self {
+        let mut resources = Resources::new();
+        resources.insert(crate::commands::CommandBuffer::new());
         Self {
             entities: Entities::new(),
             components: HashMap::new(),
-            resources: Resources::new(),
+            resources,
             tick: 0,
             name_index: BTreeMap::new(),
             observers: Observers::new(),

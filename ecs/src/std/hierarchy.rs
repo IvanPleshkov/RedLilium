@@ -606,7 +606,6 @@ mod tests {
     fn command_set_parent() {
         let mut world = World::new();
         register_hierarchy(&mut world);
-        world.init_commands();
 
         let parent = world.spawn();
         let child = world.spawn();
@@ -625,7 +624,6 @@ mod tests {
     fn command_despawn_recursive() {
         let mut world = World::new();
         register_hierarchy(&mut world);
-        world.init_commands();
 
         let parent = world.spawn();
         let child = world.spawn();

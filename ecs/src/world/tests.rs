@@ -907,8 +907,6 @@ fn hooks_via_commands() {
     let mut world = World::new();
     world.register_component::<Position>();
     world.register_component::<Marker>();
-    world.init_commands();
-
     world.set_on_add::<Position>(|world, entity| {
         let _ = world.insert(entity, Marker(99));
     });
