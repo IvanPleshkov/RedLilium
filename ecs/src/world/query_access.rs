@@ -1,5 +1,7 @@
 use std::any::TypeId;
 
+use smallvec::SmallVec;
+
 use crate::entity::Entity;
 use crate::query::access::AccessInfo;
 use crate::query::{AddedFilter, ChangedFilter, ContainsChecker, RemovedFilter};
@@ -227,8 +229,8 @@ impl World {
     ///
     /// Resources are NOT included — they lock themselves via their own
     /// `Arc<RwLock<T>>` when accessed.
-    pub(crate) fn acquire_sorted(&self, infos: &[AccessInfo]) -> Vec<LockGuard<'_>> {
-        let mut sorted = infos.to_vec();
+    pub(crate) fn acquire_sorted(&self, infos: &[AccessInfo]) -> SmallVec<[LockGuard<'_>; 8]> {
+        let mut sorted: SmallVec<[AccessInfo; 8]> = infos.into();
         sorted.sort_by_key(|info| info.type_id);
         sorted.dedup_by(|a, b| {
             if a.type_id == b.type_id {

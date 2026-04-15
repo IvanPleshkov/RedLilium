@@ -209,7 +209,7 @@ pub(crate) fn analyze_ambiguities(
     let mut ambiguities = Vec::new();
 
     // Normalize each system's recorded access (merge duplicates, upgrade writes)
-    let normalized: Vec<Vec<AccessInfo>> = records
+    let normalized: Vec<_> = records
         .into_iter()
         .map(|r| normalize_access_infos(&r))
         .collect();

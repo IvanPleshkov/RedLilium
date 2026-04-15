@@ -1,6 +1,8 @@
 use std::any::TypeId;
 use std::marker::PhantomData;
 
+use smallvec::SmallVec;
+
 use crate::query::{
     AddedFilter, AnyFilter, ChangedFilter, ContainsChecker, Filter, OrFilter, RemovedFilter, With,
     Without,
@@ -18,8 +20,8 @@ pub struct AccessInfo {
 
 /// Normalizes access infos: sorts by TypeId and deduplicates, upgrading
 /// to write if any duplicate requests write access.
-pub(crate) fn normalize_access_infos(infos: &[AccessInfo]) -> Vec<AccessInfo> {
-    let mut sorted = infos.to_vec();
+pub(crate) fn normalize_access_infos(infos: &[AccessInfo]) -> SmallVec<[AccessInfo; 8]> {
+    let mut sorted: SmallVec<[AccessInfo; 8]> = infos.into();
     sorted.sort_by_key(|info| info.type_id);
     sorted.dedup_by(|a, b| {
         if a.type_id == b.type_id {
@@ -71,7 +73,7 @@ pub trait AccessSet {
     type Item<'w>;
 
     /// Returns access metadata for all elements.
-    fn access_infos() -> Vec<AccessInfo>;
+    fn access_infos() -> SmallVec<[AccessInfo; 8]>;
 
     /// Fetches all elements from the world, acquiring per-storage locks.
     fn fetch(world: &World) -> Self::Item<'_>;
@@ -758,8 +760,8 @@ impl_any_access_element!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F, 6 G, 7 H);
 impl AccessSet for () {
     type Item<'w> = ();
 
-    fn access_infos() -> Vec<AccessInfo> {
-        Vec::new()
+    fn access_infos() -> SmallVec<[AccessInfo; 8]> {
+        SmallVec::new()
     }
 
     fn fetch(_world: &World) -> Self::Item<'_> {}
@@ -776,8 +778,8 @@ macro_rules! impl_access_set {
         impl<$($T: AccessElement),+> AccessSet for ($($T,)+) {
             type Item<'w> = ($($T::Item<'w>,)+);
 
-            fn access_infos() -> Vec<AccessInfo> {
-                vec![$($T::access_info()),+]
+            fn access_infos() -> SmallVec<[AccessInfo; 8]> {
+                smallvec::smallvec![$($T::access_info()),+]
             }
 
             fn fetch(world: &World) -> Self::Item<'_> {

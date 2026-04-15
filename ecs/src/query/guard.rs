@@ -2,6 +2,7 @@ use std::cell::Cell;
 use std::ops::{Deref, DerefMut};
 
 use fixedbitset::FixedBitSet;
+use smallvec::SmallVec;
 
 use crate::entity::Entities;
 use crate::query::AccessSet;
@@ -44,7 +45,7 @@ use crate::system::context::LockTracking;
 /// [`MainThreadResMut`](crate::MainThreadResMut)) are not supported.
 /// Use `lock().execute()` for those.
 pub struct QueryGuard<'a, A: AccessSet> {
-    _guards: Vec<LockGuard<'a>>,
+    _guards: SmallVec<[LockGuard<'a>; 8]>,
     /// The fetched component/resource data. Destructure this to access
     /// individual storages.
     pub items: A::Item<'a>,
@@ -55,7 +56,7 @@ pub struct QueryGuard<'a, A: AccessSet> {
 
 impl<'a, A: AccessSet> QueryGuard<'a, A> {
     #[cfg(test)]
-    pub(crate) fn new(guards: Vec<LockGuard<'a>>, items: A::Item<'a>) -> Self {
+    pub(crate) fn new(guards: SmallVec<[LockGuard<'a>; 8]>, items: A::Item<'a>) -> Self {
         Self {
             _guards: guards,
             items,
@@ -64,7 +65,7 @@ impl<'a, A: AccessSet> QueryGuard<'a, A> {
     }
 
     pub(crate) fn new_tracked(
-        guards: Vec<LockGuard<'a>>,
+        guards: SmallVec<[LockGuard<'a>; 8]>,
         items: A::Item<'a>,
         tracking: LockTracking<'a>,
     ) -> Self {

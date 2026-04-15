@@ -1,4 +1,5 @@
 use parking_lot::Mutex;
+use smallvec::SmallVec;
 use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
@@ -34,7 +35,7 @@ enum HeldLock {
 /// Created by [`SystemContext::make_tracking`] and stored inside [`QueryGuard`]
 /// or used as a scope guard in [`LockRequest::execute`].
 pub(crate) struct LockTracking<'a> {
-    infos: Vec<AccessInfo>,
+    infos: SmallVec<[AccessInfo; 8]>,
     held_locks: &'a Mutex<HashMap<TypeId, HeldLock>>,
 }
 
@@ -275,7 +276,7 @@ impl<'a> SystemContext<'a> {
     /// Creates a [`LockTracking`] guard that will unregister the given
     /// component locks when dropped.
     pub(crate) fn make_tracking(&self, sorted: &[AccessInfo]) -> LockTracking<'_> {
-        let component_infos: Vec<AccessInfo> = sorted
+        let component_infos: SmallVec<[AccessInfo; 8]> = sorted
             .iter()
             .filter(|i| self.world.component_type_name(i.type_id).is_some())
             .copied()
