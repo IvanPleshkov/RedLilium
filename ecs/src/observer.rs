@@ -202,7 +202,10 @@ impl Observers {
                 self.handlers.entry(key).or_default().extend(new_fns);
             }
 
-            if iteration == MAX_ITERATIONS - 1 {
+            // Only treat the limit as exceeded if work genuinely remains after
+            // the final pass — a cascade exactly MAX_ITERATIONS deep that
+            // resolves cleanly must not panic.
+            if iteration == MAX_ITERATIONS - 1 && !self.pending.is_empty() {
                 panic!(
                     "Observer cascade exceeded {MAX_ITERATIONS} iterations. \
                      This likely indicates an infinite loop where observers \

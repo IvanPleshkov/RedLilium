@@ -3,7 +3,7 @@ use std::any::TypeId;
 use smallvec::SmallVec;
 
 use crate::entity::Entity;
-use crate::query::access::AccessInfo;
+use crate::query::access::{AccessInfo, AccessKind};
 use crate::query::{AddedFilter, ChangedFilter, ContainsChecker, RemovedFilter};
 use crate::sparse_set::{LockGuard, Ref, RefMut};
 
@@ -230,27 +230,41 @@ impl World {
     /// Resources are NOT included — they lock themselves via their own
     /// `Arc<RwLock<T>>` when accessed.
     pub(crate) fn acquire_sorted(&self, infos: &[AccessInfo]) -> SmallVec<[LockGuard<'_>; 8]> {
-        let mut sorted: SmallVec<[AccessInfo; 8]> = infos.into();
-        sorted.sort_by_key(|info| info.type_id);
-        sorted.dedup_by(|a, b| {
-            if a.type_id == b.type_id {
-                b.is_write = b.is_write || a.is_write;
-                true
-            } else {
-                false
-            }
-        });
+        // Reject aliasing-unsafe access sets (e.g. `(Write<T>, Write<T>)`)
+        // before any data is fetched unlocked, otherwise the per-element
+        // fetch would hand out two references to the same storage (UB).
+        crate::query::access::validate_no_aliasing_conflict(infos);
 
+        let sorted = crate::query::access::normalize_access_infos(infos);
+
+        // Acquire every lock up-front in the normalized (TypeId-then-kind) order.
+        // Because the order is global and consistent across all systems, two
+        // systems that touch the same set of components/resources can never take
+        // them in opposite orders, so there is no lock-ordering deadlock — and
+        // resources block here instead of panicking on contention via `try_*`.
         sorted
             .iter()
-            .filter_map(|info| {
-                // Only component storages — resources self-lock via Arc<RwLock<T>>
-                let lock = self.components.get(&info.type_id)?;
-                Some(if info.is_write {
-                    LockGuard::Write(lock.write())
-                } else {
-                    LockGuard::Read(lock.read())
-                })
+            .filter_map(|info| match info.kind {
+                AccessKind::Component | AccessKind::ComponentFilter => {
+                    let lock = self.components.get(&info.type_id)?;
+                    Some(if info.is_write {
+                        LockGuard::Write(lock.write())
+                    } else {
+                        LockGuard::Read(lock.read())
+                    })
+                }
+                AccessKind::Resource => {
+                    if info.is_write {
+                        self.resource_write_guard_dyn(info.type_id)
+                            .map(LockGuard::ResourceWrite)
+                    } else {
+                        self.resource_read_guard_dyn(info.type_id)
+                            .map(LockGuard::ResourceRead)
+                    }
+                }
+                // Main-thread resources are single-threaded (no lock); pure
+                // filter markers borrow no storage.
+                AccessKind::MainThreadResource | AccessKind::Filter => None,
             })
             .collect()
     }

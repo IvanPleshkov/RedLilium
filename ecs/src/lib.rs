@@ -69,7 +69,6 @@ mod sparse_set;
 #[allow(clippy::module_inception)]
 pub mod std;
 mod system;
-#[cfg(feature = "inspector")]
 pub mod ui;
 mod world;
 

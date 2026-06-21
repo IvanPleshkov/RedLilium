@@ -14,7 +14,6 @@ physics-2d = ["dep:rapier2d-f64", "redlilium-core/physics-math"]
 physics-2d-f32 = ["dep:rapier2d", "redlilium-core/physics-math", "redlilium-core/physics-f32"]
 physics = ["physics-3d", "physics-2d"]
 rendering = ["dep:redlilium-graphics", "dep:redlilium-debug-drawer", "dep:image"]
-inspector = []
 serialize-ron = ["dep:ron"]
 serialize-bincode = ["dep:bincode"]
 

@@ -35,6 +35,7 @@ impl crate::System for UpdateGlobalTransforms {
                     &children_storage,
                     &parents,
                     &changed,
+                    &|e| ctx.world().is_alive(e),
                 );
             },
         );
@@ -48,12 +49,21 @@ fn update_global_transforms(
     children_storage: &Ref<Children>,
     parents: &Ref<Parent>,
     changed: &ChangedFilter<'_>,
+    is_alive: &dyn Fn(crate::Entity) -> bool,
 ) {
     redlilium_core::profile_scope!("update_global_transforms");
 
-    // Process root entities (no Parent component)
+    // Process root entities. An entity is a propagation root if it has no
+    // `Parent`, or its `Parent` points to a dead entity (e.g. after the parent
+    // was despawned without despawning the subtree) — otherwise such an orphan
+    // would never be reached by the downward `Children` walk and would keep a
+    // stale `GlobalTransform`.
     for (idx, transform) in transforms.iter() {
-        if parents.get(idx).is_none() {
+        let is_root = match parents.get(idx) {
+            None => true,
+            Some(parent) => !is_alive(parent.0),
+        };
+        if is_root {
             if changed.matches(idx) {
                 let local_matrix = transform.to_matrix();
                 if let Some(mut gt) = globals.get_mut(idx) {
@@ -175,6 +185,7 @@ mod tests {
             &children_storage,
             &parents,
             &changed,
+            &|e| world.is_alive(e),
         );
     }
 
@@ -193,6 +204,38 @@ mod tests {
         let globals = world.read::<GlobalTransform>().unwrap();
         let global = globals.get(e.index()).unwrap();
         assert!((global.translation() - Vec3::new(1.0, 2.0, 3.0)).norm() < 1e-6);
+    }
+
+    #[test]
+    fn orphan_with_dead_parent_is_updated() {
+        // A child whose parent was despawned (leaving a stale Parent) must still
+        // have its GlobalTransform recomputed as a root, not silently skipped.
+        let mut world = World::new();
+        register_hierarchy(&mut world);
+
+        let parent = world.spawn();
+        world.insert(parent, Transform::default()).unwrap();
+        world.insert(parent, GlobalTransform::IDENTITY).unwrap();
+
+        let child = world.spawn();
+        world
+            .insert(child, Transform::from_translation(Vec3::new(5.0, 0.0, 0.0)))
+            .unwrap();
+        world.insert(child, GlobalTransform::IDENTITY).unwrap();
+        set_parent(&mut world, child, parent);
+
+        // Despawn only the parent, leaving the child with a stale Parent.
+        world.despawn(parent);
+        assert!(!world.is_alive(parent));
+
+        run_update(&world);
+
+        let globals = world.read::<GlobalTransform>().unwrap();
+        let global = globals.get(child.index()).unwrap();
+        assert!(
+            (global.translation() - Vec3::new(5.0, 0.0, 0.0)).norm() < 1e-6,
+            "orphaned child should use its local transform as world transform"
+        );
     }
 
     #[test]

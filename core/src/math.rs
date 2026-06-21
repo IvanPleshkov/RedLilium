@@ -31,7 +31,10 @@ pub fn mat4_from_scale_rotation_translation(
     rotation: Quat,
     translation: Vec3,
 ) -> Mat4 {
-    let r = nalgebra::UnitQuaternion::new_unchecked(rotation);
+    // Normalize: a non-unit quaternion (e.g. drifted from accumulated edits or
+    // loaded data) would otherwise embed its squared norm as extra scale and
+    // silently produce a wrong matrix. `new_normalize` is a no-op for unit input.
+    let r = nalgebra::UnitQuaternion::new_normalize(rotation);
     let m = r.to_rotation_matrix();
     let rm = m.matrix();
     #[rustfmt::skip]
@@ -117,7 +120,8 @@ pub fn quat_from_rotation_z(angle: f32) -> Quat {
 
 /// Rotate a vector by a quaternion.
 pub fn quat_rotate_vec3(q: Quat, v: Vec3) -> Vec3 {
-    nalgebra::UnitQuaternion::new_unchecked(q) * v
+    // Normalize so a non-unit quaternion does not also scale the vector.
+    nalgebra::UnitQuaternion::new_normalize(q) * v
 }
 
 /// Convert a 4x4 matrix to a column-major `[[f32; 4]; 4]` array.

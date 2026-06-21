@@ -933,7 +933,11 @@ fn map_attribute_format(
             (gj::accessor::ComponentType::F32, gj::accessor::Type::Vec4)
         }
         VertexAttributeFormat::Uint4 => {
-            (gj::accessor::ComponentType::U16, gj::accessor::Type::Vec4)
+            // `Uint4` is 16-byte u32x4 in memory (see accessor_format / the
+            // u16→u32 widening on import). Declare U32 so the exported stride
+            // matches the data; declaring U16 would describe 8-byte elements
+            // and corrupt readers.
+            (gj::accessor::ComponentType::U32, gj::accessor::Type::Vec4)
         }
         VertexAttributeFormat::Unorm8x4 => {
             (gj::accessor::ComponentType::U8, gj::accessor::Type::Vec4)
@@ -1028,6 +1032,7 @@ fn compute_position_min_max(
 
     let mut min = [f32::MAX; 3];
     let mut max = [f32::MIN; 3];
+    let mut any = false;
 
     for v in 0..vertex_count as usize {
         let base = v * stride as usize + offset as usize;
@@ -1049,6 +1054,13 @@ fn compute_position_min_max(
                 max[c] = val;
             }
         }
+        any = true;
+    }
+
+    // Don't emit an inverted (MAX/MIN) min/max when no full position was read —
+    // glTF requires min <= max and validators reject the sentinel values.
+    if !any {
+        return (None, None);
     }
 
     (Some(json_f32_array(&min)), Some(json_f32_array(&max)))

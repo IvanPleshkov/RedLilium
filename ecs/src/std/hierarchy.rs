@@ -20,7 +20,41 @@
 
 use crate::{CommandBuffer, CommandCollector, Entity, World};
 
-use super::components::{Children, Parent};
+use super::components::{Children, Parent, Transform};
+
+/// Returns whether `ancestor` is `descendant` itself or reachable by walking
+/// `descendant`'s `Parent` chain upward. Used to reject hierarchy cycles.
+///
+/// The walk is bounded by a visited set so a pre-existing (manually created)
+/// cycle cannot make this loop forever.
+fn is_ancestor_of(world: &World, ancestor: Entity, descendant: Entity) -> bool {
+    let mut current = descendant;
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        if current == ancestor {
+            return true;
+        }
+        if !seen.insert(current) {
+            return false; // hit a pre-existing cycle; stop
+        }
+        match world.get::<Parent>(current) {
+            Some(p) => current = p.0,
+            None => return false,
+        }
+    }
+}
+
+/// Marks an entity's [`Transform`] as changed (if it has one) so the
+/// global-transform propagation system recomputes its subtree.
+///
+/// Reparenting changes an entity's *world* position without touching its local
+/// [`Transform`], so without this the `Changed<Transform>` gate would skip the
+/// moved subtree and it would keep a stale `GlobalTransform`.
+fn mark_transform_changed(world: &mut World, entity: Entity) {
+    if let Some(mut transform) = world.get_mut::<Transform>(entity) {
+        transform.set_changed();
+    }
+}
 
 /// Sets `entity` as a child of `parent`.
 ///
@@ -35,6 +69,14 @@ pub fn set_parent(world: &mut World, entity: Entity, parent: Entity) {
     assert_ne!(
         entity, parent,
         "Cannot set entity as its own parent: {entity}"
+    );
+
+    // Reject cycles: if `parent` is already a descendant of `entity`, parenting
+    // `entity` under it would form a loop, which makes transform propagation and
+    // other hierarchy walks recurse forever (stack overflow).
+    assert!(
+        !is_ancestor_of(world, entity, parent),
+        "Cannot set parent {parent} of {entity}: would create a hierarchy cycle"
     );
 
     // Remove from old parent if any
@@ -63,6 +105,10 @@ pub fn set_parent(world: &mut World, entity: Entity, parent: Entity) {
             .insert(parent, Children(vec![entity]))
             .expect("Children not registered");
     }
+
+    // The entity's world transform changed even though its local Transform did
+    // not — dirty it so propagation recomputes the moved subtree.
+    mark_transform_changed(world, entity);
 }
 
 /// Removes the parent relationship from `entity`.
@@ -79,6 +125,10 @@ pub fn remove_parent(world: &mut World, entity: Entity) {
     if let Some(mut children) = world.get_mut::<Children>(parent.0) {
         children.0.retain(|&e| e != entity);
     }
+
+    // The entity's world transform now equals its local Transform; dirty it so
+    // propagation recomputes the (now-unparented) subtree.
+    mark_transform_changed(world, entity);
 }
 
 /// Despawns an entity and all its descendants recursively.
@@ -516,12 +566,73 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "would create a hierarchy cycle")]
+    fn set_parent_cycle_panics() {
+        let mut world = World::new();
+        register_hierarchy(&mut world);
+        let a = world.spawn();
+        let b = world.spawn();
+        let c = world.spawn();
+        set_parent(&mut world, b, a); // a -> b
+        set_parent(&mut world, c, b); // a -> b -> c
+        set_parent(&mut world, a, c); // would close the loop a -> b -> c -> a
+    }
+
+    #[test]
     #[should_panic(expected = "Cannot set entity as its own parent")]
     fn set_parent_self_panics() {
         let mut world = World::new();
         register_hierarchy(&mut world);
         let entity = world.spawn();
         set_parent(&mut world, entity, entity);
+    }
+
+    #[test]
+    fn set_parent_marks_transform_changed() {
+        let mut world = World::new();
+        register_hierarchy(&mut world);
+        world.register_component::<Transform>();
+        let parent = world.spawn();
+        let child = world.spawn();
+        world.insert(child, Transform::default()).unwrap();
+
+        // Advance so the insert no longer counts as changed this frame.
+        world.advance_tick();
+        world.advance_tick();
+        let since = world.current_tick().saturating_sub(1);
+        assert!(!world.changed::<Transform>(since).matches(child.index()));
+
+        set_parent(&mut world, child, parent);
+
+        let since = world.current_tick().saturating_sub(1);
+        assert!(
+            world.changed::<Transform>(since).matches(child.index()),
+            "reparenting must mark the child's Transform as changed"
+        );
+    }
+
+    #[test]
+    fn remove_parent_marks_transform_changed() {
+        let mut world = World::new();
+        register_hierarchy(&mut world);
+        world.register_component::<Transform>();
+        let parent = world.spawn();
+        let child = world.spawn();
+        world.insert(child, Transform::default()).unwrap();
+        set_parent(&mut world, child, parent);
+
+        world.advance_tick();
+        world.advance_tick();
+        let since = world.current_tick().saturating_sub(1);
+        assert!(!world.changed::<Transform>(since).matches(child.index()));
+
+        remove_parent(&mut world, child);
+
+        let since = world.current_tick().saturating_sub(1);
+        assert!(
+            world.changed::<Transform>(since).matches(child.index()),
+            "unparenting must mark the child's Transform as changed"
+        );
     }
 
     #[test]

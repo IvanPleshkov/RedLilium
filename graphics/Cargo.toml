@@ -18,16 +18,16 @@ redlilium-core = { path = "../core" }
 log.workspace = true
 bitflags.workspace = true
 static_assertions.workspace = true
-winit = "0.30"
+winit.workspace = true
 raw-window-handle = "0.6"
-bytemuck = { version = "1.18", features = ["derive"] }
+bytemuck.workspace = true
 
 # Shader parsing and composition
 naga.workspace = true
 shader-slang = { workspace = true, optional = true }
 
 # UI
-egui = "0.33.3"
+egui.workspace = true
 
 # Clipboard (desktop only, not available on WASM)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

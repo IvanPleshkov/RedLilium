@@ -25,7 +25,12 @@ pub struct VulkanSwapchain {
     pub(crate) current_image_index: u32,
     /// Semaphores signaled when swapchain image is available (one per frame in flight).
     pub(crate) image_available_semaphores: Vec<vk::Semaphore>,
-    /// Semaphores signaled when rendering is complete (one per frame in flight).
+    /// Semaphores signaled by the render submit that writes the swapchain image,
+    /// waited on by the present layout-transition submit (one per frame in
+    /// flight). This is what orders "render finished" → "present barrier".
+    pub(crate) image_render_finished_semaphores: Vec<vk::Semaphore>,
+    /// Semaphores signaled when the present barrier is complete, waited on by
+    /// `queue_present` (one per frame in flight).
     pub(crate) render_finished_semaphores: Vec<vk::Semaphore>,
     /// Fences for CPU-GPU synchronization (one per frame in flight).
     pub(crate) in_flight_fences: Vec<vk::Fence>,
@@ -149,6 +154,7 @@ impl VulkanSwapchain {
 
         let frames_in_flight = config.frames_in_flight;
         let mut image_available_semaphores = Vec::with_capacity(frames_in_flight);
+        let mut image_render_finished_semaphores = Vec::with_capacity(frames_in_flight);
         let mut render_finished_semaphores = Vec::with_capacity(frames_in_flight);
         let mut in_flight_fences = Vec::with_capacity(frames_in_flight);
 
@@ -165,6 +171,19 @@ impl VulkanSwapchain {
                 ))
             })?;
             image_available_semaphores.push(image_available);
+
+            let image_render_finished = unsafe {
+                vulkan_backend
+                    .device()
+                    .create_semaphore(&semaphore_info, None)
+            }
+            .map_err(|e| {
+                GraphicsError::ResourceCreationFailed(format!(
+                    "Failed to create image render-finished semaphore: {:?}",
+                    e
+                ))
+            })?;
+            image_render_finished_semaphores.push(image_render_finished);
 
             let render_finished = unsafe {
                 vulkan_backend
@@ -224,6 +243,7 @@ impl VulkanSwapchain {
             extent,
             current_image_index: 0,
             image_available_semaphores,
+            image_render_finished_semaphores,
             render_finished_semaphores,
             in_flight_fences,
             present_command_buffers,
@@ -260,6 +280,9 @@ impl VulkanSwapchain {
 
             // Destroy synchronization primitives
             for semaphore in self.image_available_semaphores.drain(..) {
+                self.device.destroy_semaphore(semaphore, None);
+            }
+            for semaphore in self.image_render_finished_semaphores.drain(..) {
                 self.device.destroy_semaphore(semaphore, None);
             }
             for semaphore in self.render_finished_semaphores.drain(..) {
@@ -310,7 +333,15 @@ impl VulkanSwapchain {
 
         // Acquire next image with semaphore synchronization
         let image_available_semaphore = self.image_available_semaphores[current_frame];
+        let image_render_finished_semaphore = self.image_render_finished_semaphores[current_frame];
         let render_finished_semaphore = self.render_finished_semaphores[current_frame];
+
+        // Register this frame's acquire/render-done semaphores with the backend
+        // so the render submit that writes the swapchain image picks them up
+        // (waits on `image_available`, signals `image_render_finished`).
+        vulkan_backend
+            .begin_swapchain_frame(image_available_semaphore, image_render_finished_semaphore);
+
         let (image_index, _suboptimal) = unsafe {
             vulkan_backend.swapchain_loader().acquire_next_image(
                 self.swapchain,
@@ -357,6 +388,7 @@ impl VulkanSwapchain {
             frame_index: current_frame,
             swapchain: swapchain_handle,
             image_available_semaphore,
+            image_render_finished_semaphore,
             render_finished_semaphore,
             in_flight_fence,
             present_command_buffer: present_cmd,
@@ -376,6 +408,9 @@ pub struct VulkanSwapchainAcquireResult {
     pub swapchain: vk::SwapchainKHR,
     /// The image available semaphore for this frame.
     pub image_available_semaphore: vk::Semaphore,
+    /// Semaphore signaled by the render submit that writes the swapchain image
+    /// (waited on by the present layout-transition submit).
+    pub image_render_finished_semaphore: vk::Semaphore,
     /// The render finished semaphore for this frame.
     pub render_finished_semaphore: vk::Semaphore,
     /// The in-flight fence for this frame.
@@ -392,6 +427,7 @@ pub fn present_vulkan_frame(
     swapchain: vk::SwapchainKHR,
     image_index: u32,
     image_available_semaphore: vk::Semaphore,
+    image_render_finished_semaphore: vk::Semaphore,
     render_finished_semaphore: vk::Semaphore,
     in_flight_fence: vk::Fence,
     present_command_buffer: vk::CommandBuffer,
@@ -462,8 +498,20 @@ pub fn present_vulkan_frame(
         GraphicsError::Internal(format!("Failed to end command buffer for present: {:?}", e))
     })?;
 
-    // Submit command buffer with synchronization
-    let wait_semaphores = [image_available_semaphore];
+    // Submit command buffer with synchronization.
+    //
+    // If the render submit that wrote the swapchain image consumed
+    // `image_available` (the normal path), this barrier submit must instead wait
+    // on `image_render_finished` (signaled when rendering completed) so the
+    // COLOR_ATTACHMENT_OPTIMAL→PRESENT_SRC transition happens after the writes.
+    // If nothing rendered to the swapchain this frame, fall back to waiting on
+    // `image_available` directly (the image was acquired but never written).
+    let wait_semaphore = if vulkan_backend.swapchain_render_consumed() {
+        image_render_finished_semaphore
+    } else {
+        image_available_semaphore
+    };
+    let wait_semaphores = [wait_semaphore];
     let signal_semaphores = [render_finished_semaphore];
     let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
 

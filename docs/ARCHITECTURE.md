@@ -4,29 +4,37 @@ This document describes the high-level architecture of RedLilium Engine.
 
 ## Overview
 
-RedLilium Engine is structured as a Cargo workspace with four main crates:
+RedLilium Engine is structured as a Cargo workspace. The core layering:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                   redlilium-demos                       │
-│              (Demo scenes and examples)                 │
+│            redlilium-demos / redlilium-editor           │
+│              (Runnable apps and tooling)                │
 ├──────────────────────────┬──────────────────────────────┤
 │     redlilium-ecs        │     redlilium-graphics       │
-│  (ECS components/systems)│  (Rendering, Shaders, GPU)   │
+│  (ECS; optional `rendering`│ (Rendering, Shaders, GPU)   │
+│   feature → graphics)    │                              │
 ├──────────────────────────┴──────────────────────────────┤
 │                    redlilium-core                       │
 │               (Tools and common utilities)              │
 └─────────────────────────────────────────────────────────┘
 ```
 
+Supporting crates: `redlilium-app` (windowing/app loop), `redlilium-editor`,
+`redlilium-vfs` (virtual filesystem), `redlilium-debug-drawer`, and `ecs-macro`
+(derive macros). See the root `Cargo.toml` `[workspace] members` for the full list.
+
 ## Design Principles
 
 ### 1. Separation of Concerns
 
 - **Core** handles tools and common parts with no graphics or ECS dependencies
-- **ECS** handles entity-component-system architecture with no rendering logic
+- **ECS** is rendering-agnostic by default. Graphics integration (the
+  `std::rendering` module) lives behind the optional `rendering` feature, which
+  pulls in `redlilium-graphics` + `redlilium-debug-drawer`; the default ECS build
+  has no rendering dependency.
 - **Graphics** handles all rendering with no game logic
-- **Demos** combines all crates to create runnable applications
+- **Demos / Editor** combine the crates to create runnable applications
 
 ### 2. Platform Abstraction
 

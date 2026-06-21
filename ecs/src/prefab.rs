@@ -63,7 +63,15 @@ impl<T: Component + Clone> ComponentBag for TypedBag<T> {
     }
 
     fn consume_into(self: Box<Self>, world: &mut World, entity: Entity) {
-        let _ = world.insert(entity, self.0);
+        if let Err(e) = world.insert(entity, self.0) {
+            // Most likely the component type is not registered in the target
+            // world (e.g. cross-world instantiation). Surface it instead of
+            // silently constructing a partial entity.
+            log::warn!(
+                "Prefab: skipping component `{}` on {entity}: {e}",
+                std::any::type_name::<T>()
+            );
+        }
     }
 }
 

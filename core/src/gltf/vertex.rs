@@ -217,6 +217,17 @@ fn read_accessor_bytes<'a>(
     let element_size = component_size * component_count;
     let stride = view.stride().unwrap_or(element_size);
 
+    // Validate against a malformed/truncated file before slicing, so an
+    // out-of-range offset returns an error instead of panicking. `load_gltf`
+    // is a public entry point for untrusted asset data.
+    if start > buffer_data.len() {
+        return Err(GltfError::AccessorError(format!(
+            "accessor {} offset {start} exceeds buffer length {}",
+            accessor.index(),
+            buffer_data.len()
+        )));
+    }
+
     Ok((&buffer_data[start..], stride))
 }
 
@@ -278,6 +289,29 @@ pub(crate) fn interleave_vertices(
                     }
                 }
             }
+        } else if accessor.data_type() == gltf_dep::accessor::DataType::U16
+            && !accessor.normalized()
+            && attr.format == VertexAttributeFormat::Uint4
+        {
+            // Widen non-normalized u16x4 (8 bytes) → u32x4 (16 bytes). This is
+            // the common glTF JOINTS_0 case (unsigned short joint indices). A
+            // raw byte copy (the `else` branch) would pack two u16 into each u32
+            // and zero the upper lanes, corrupting joint indices.
+            for v in 0..vertex_count as usize {
+                let src_offset = v * src_stride;
+                let dst_offset = v * stride as usize + attr.offset as usize;
+                if src_offset + 8 <= src_data.len() && dst_offset + 16 <= result.len() {
+                    for c in 0..4 {
+                        let bytes = [
+                            src_data[src_offset + c * 2],
+                            src_data[src_offset + c * 2 + 1],
+                        ];
+                        let val = u16::from_le_bytes(bytes) as u32;
+                        result[dst_offset + c * 4..dst_offset + c * 4 + 4]
+                            .copy_from_slice(&val.to_le_bytes());
+                    }
+                }
+            }
         } else {
             // Direct copy (most common path: f32 data)
             for v in 0..vertex_count as usize {
@@ -304,6 +338,23 @@ pub(crate) fn read_indices(
 ) -> Result<(Vec<u8>, IndexFormat, u32), GltfError> {
     let (src_data, src_stride) = read_accessor_bytes(accessor, buffers)?;
     let count = accessor.count() as u32;
+
+    // Validate the index data fits within the buffer view before indexing it,
+    // so a malformed/truncated file returns an error instead of panicking.
+    let comp_size = accessor.data_type().size();
+    if count > 0 {
+        let last_element_end = (count as usize - 1)
+            .checked_mul(src_stride)
+            .and_then(|o| o.checked_add(comp_size))
+            .ok_or_else(|| GltfError::AccessorError("index accessor size overflow".to_string()))?;
+        if last_element_end > src_data.len() {
+            return Err(GltfError::AccessorError(format!(
+                "index accessor {} reads {last_element_end} bytes but only {} are available",
+                accessor.index(),
+                src_data.len()
+            )));
+        }
+    }
 
     // Choose output format based on vertex count
     let output_format = if vertex_count > 65535 {

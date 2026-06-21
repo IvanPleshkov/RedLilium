@@ -24,7 +24,6 @@
 //! This module is only available when the `rendering` feature is enabled.
 
 pub mod components;
-#[cfg(feature = "inspector")]
 pub(crate) mod material_inspector;
 pub mod resources;
 pub mod shaders;

@@ -227,13 +227,30 @@ impl WgpuBackend {
 
     /// Execute a compiled render graph.
     ///
-    /// # Async Behavior
+    /// # Ordering & synchronization (wgpu)
     ///
-    /// - If `signal_fence` is provided: Returns immediately after submission (async).
-    ///   The caller can wait on the fence using `wait_fence()` or poll with `is_fence_signaled()`.
-    /// - If `signal_fence` is `None`: Blocks until GPU completes (sync, for backwards compatibility).
+    /// wgpu does not expose GPU semaphores, so `_wait_semaphores` /
+    /// `_signal_semaphores` are intentionally ignored. Cross-graph ordering is
+    /// instead guaranteed by wgpu's **in-order execution of queue submissions**:
+    /// graphs are submitted in dependency order (the scheduler executes
+    /// `submit()`/`present()` in call order to a single queue), so a dependent
+    /// graph's work always runs after its dependencies' work.
     ///
-    /// For true async rendering with multiple frames in flight, always provide a fence.
+    /// # Fence behavior
+    ///
+    /// - If `signal_fence` is provided: returns immediately after submission;
+    ///   the submission index is stored in the fence for async polling.
+    /// - If `signal_fence` is `None`: currently blocks until the submission
+    ///   completes (`poll(Wait)`).
+    ///
+    /// NOTE: the `None`-fence block is conservative. CPU/GPU overlap is bounded
+    /// per frame by the frame-in-flight fence waited in
+    /// [`FramePipeline::begin_frame`](crate::pipeline::FramePipeline::begin_frame),
+    /// so making intermediate submits non-blocking is possible — but only once
+    /// every frame's GPU completion is represented by a real submission-tied
+    /// fence (today `FrameSchedule::finish` creates an untied fence and relies on
+    /// this block to mean "GPU is idle"). Removing the block without that change
+    /// would let `begin_frame` recycle resources still in use by the GPU.
     pub fn execute_graph(
         &self,
         graph: &RenderGraph,

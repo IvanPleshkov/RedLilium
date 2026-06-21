@@ -29,10 +29,19 @@ fn update_camera_matrices(globals: &Ref<GlobalTransform>, cameras: &mut RefMut<C
 
     for (idx, mut camera) in cameras.iter_mut() {
         if let Some(global) = globals.get(idx) {
-            camera.view_matrix = global
-                .0
-                .try_inverse()
-                .unwrap_or(redlilium_core::math::Mat4::identity());
+            match global.0.try_inverse() {
+                Some(view) => camera.view_matrix = view,
+                None => {
+                    // A non-invertible GlobalTransform (e.g. zero/degenerate
+                    // scale inherited from a parent, or NaN). Keep the previous
+                    // valid view matrix instead of snapping the camera to the
+                    // origin, and warn so the cause is diagnosable.
+                    log::warn!(
+                        "Camera {idx} has a non-invertible GlobalTransform; \
+                         keeping previous view matrix"
+                    );
+                }
+            }
         }
     }
 }

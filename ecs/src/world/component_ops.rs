@@ -465,6 +465,11 @@ impl World {
     /// system execution uses the separate `read_unlocked` / `write_unlocked`
     /// API which acquires locks externally via `acquire_sorted`.
     pub fn get<T: 'static>(&self, entity: Entity) -> Option<&T> {
+        // Reject stale/dead handles so a recycled slot does not return the new
+        // occupant's component (component storage is indexed by slot only).
+        if !self.entities.is_alive(entity) {
+            return None;
+        }
         let lock = self.components.get(&TypeId::of::<T>())?;
         // SAFETY: &self guarantees no concurrent mutation of World.
         // We don't acquire the RwLock to avoid deadlocks in hook callbacks
@@ -477,13 +482,18 @@ impl World {
     ///
     /// The component is marked as changed only when [`DerefMut`] is invoked.
     pub fn get_mut<T: 'static>(&mut self, entity: Entity) -> Option<Mut<'_, T>> {
+        // Reject stale/dead handles (see `get`).
+        if !self.entities.is_alive(entity) {
+            return None;
+        }
+        let tick = self.tick;
         let storage = self
             .components
             .get_mut(&TypeId::of::<T>())
             .map(|l| l.get_mut())?;
         storage
             .typed_mut::<T>()
-            .get_mut_tracked(entity.index(), self.tick)
+            .get_mut_tracked(entity.index(), tick)
     }
 
     /// Returns a reference to the entity store.

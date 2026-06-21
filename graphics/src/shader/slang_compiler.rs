@@ -25,6 +25,28 @@ pub struct CompiledShader {
 /// `(source, entry_point, stage, defines)`.
 pub type ShaderReflectInput<'a> = (&'a str, &'a str, ShaderStage, &'a [(&'a str, &'a str)]);
 
+/// Converts `(binding_space, layout)` pairs (sorted ascending, unique spaces)
+/// into a dense `Vec` where the vector index equals the binding space.
+///
+/// Bind-group layouts are consumed positionally downstream (vector index ==
+/// `@group(N)` / `space N`). When a shader uses non-contiguous spaces (e.g. 0
+/// and 2), the missing spaces are filled with empty layouts so each remaining
+/// layout stays at its correct group index instead of being shifted down.
+fn densify_binding_layouts(by_space: Vec<(u32, BindingLayout)>) -> Vec<BindingLayout> {
+    let mut dense: Vec<BindingLayout> = Vec::new();
+    for (space, layout) in by_space {
+        let space = space as usize;
+        while dense.len() < space {
+            dense.push(BindingLayout {
+                entries: Vec::new(),
+                label: None,
+            });
+        }
+        dense.push(layout);
+    }
+    dense
+}
+
 /// Slang shader compiler.
 ///
 /// Wraps a Slang `GlobalSession` and provides methods for compiling shaders
@@ -124,7 +146,7 @@ impl SlangCompiler {
             .as_slice()
             .to_vec();
 
-        let binding_layouts = self.reflect_bindings(&linked, stage)?;
+        let binding_layouts = densify_binding_layouts(self.reflect_bindings(&linked, stage)?);
 
         Ok(CompiledShader {
             bytecode,
@@ -133,11 +155,16 @@ impl SlangCompiler {
     }
 
     /// Reflect binding layouts from a compiled Slang program.
+    ///
+    /// Returns `(binding_space, layout)` pairs keyed by the **real** Slang
+    /// binding space, sorted ascending. Callers must map space → bind-group
+    /// index themselves (see [`densify_binding_layouts`]); the space is *not*
+    /// the position in the returned vector when spaces are non-contiguous.
     fn reflect_bindings(
         &self,
         linked: &slang::ComponentType,
         stage: ShaderStage,
-    ) -> Result<Vec<BindingLayout>, GraphicsError> {
+    ) -> Result<Vec<(u32, BindingLayout)>, GraphicsError> {
         let reflection = linked.layout(0).map_err(|e| {
             GraphicsError::ShaderCompilationFailed(format!("Slang reflection failed: {e}"))
         })?;
@@ -168,11 +195,16 @@ impl SlangCompiler {
             });
         }
 
-        let layouts: Vec<BindingLayout> = groups
-            .into_values()
-            .map(|entries| BindingLayout {
-                entries,
-                label: None,
+        let layouts: Vec<(u32, BindingLayout)> = groups
+            .into_iter()
+            .map(|(space, entries)| {
+                (
+                    space,
+                    BindingLayout {
+                        entries,
+                        label: None,
+                    },
+                )
             })
             .collect();
 
@@ -206,8 +238,7 @@ impl SlangCompiler {
 
             let layouts = self.reflect_bindings(&linked, stage)?;
 
-            for (space_idx, layout) in layouts.into_iter().enumerate() {
-                let space = space_idx as u32;
+            for (space, layout) in layouts.into_iter() {
                 let space_map = merged.entry(space).or_default();
 
                 for entry in layout.entries {
@@ -236,9 +267,9 @@ impl SlangCompiler {
             }
         }
 
-        let layouts = merged
-            .into_values()
-            .map(|bindings| {
+        let by_space: Vec<(u32, BindingLayout)> = merged
+            .into_iter()
+            .map(|(space, bindings)| {
                 let entries = bindings
                     .into_iter()
                     .map(
@@ -250,14 +281,17 @@ impl SlangCompiler {
                         },
                     )
                     .collect();
-                BindingLayout {
-                    entries,
-                    label: None,
-                }
+                (
+                    space,
+                    BindingLayout {
+                        entries,
+                        label: None,
+                    },
+                )
             })
             .collect();
 
-        Ok(layouts)
+        Ok(densify_binding_layouts(by_space))
     }
 
     /// Map a Slang type layout to our BindingType.
@@ -425,6 +459,11 @@ impl SlangCompiler {
             GraphicsError::ShaderCompilationFailed(format!("Slang linking failed: {e}"))
         })?;
 
+        // The module has been loaded and linked from disk; the per-compilation
+        // temp directory is no longer needed. Remove it so repeated compiles
+        // (hot-reload, many materials) don't accumulate temp dirs indefinitely.
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
         Ok((linked, session))
     }
 
@@ -462,6 +501,56 @@ impl Default for SlangCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn densify_fills_gaps_at_correct_space() {
+        // Spaces 0 and 2 (1 missing): the space-2 layout must land at index 2,
+        // not be shifted down to index 1.
+        let l0 = BindingLayout {
+            entries: vec![BindingLayoutEntry {
+                binding: 0,
+                binding_type: BindingType::UniformBuffer,
+                visibility: ShaderStageFlags::VERTEX,
+                label: Some("a".into()),
+            }],
+            label: None,
+        };
+        let l2 = BindingLayout {
+            entries: vec![BindingLayoutEntry {
+                binding: 0,
+                binding_type: BindingType::UniformBuffer,
+                visibility: ShaderStageFlags::FRAGMENT,
+                label: Some("b".into()),
+            }],
+            label: None,
+        };
+        let dense = densify_binding_layouts(vec![(0, l0), (2, l2)]);
+        assert_eq!(dense.len(), 3);
+        assert_eq!(dense[0].entries.len(), 1);
+        assert_eq!(dense[0].entries[0].label.as_deref(), Some("a"));
+        assert!(dense[1].entries.is_empty(), "gap space 1 must be empty");
+        assert_eq!(dense[2].entries[0].label.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn densify_contiguous_is_identity_shaped() {
+        let mk = |vis| BindingLayout {
+            entries: vec![BindingLayoutEntry {
+                binding: 0,
+                binding_type: BindingType::UniformBuffer,
+                visibility: vis,
+                label: None,
+            }],
+            label: None,
+        };
+        let dense = densify_binding_layouts(vec![
+            (0, mk(ShaderStageFlags::VERTEX)),
+            (1, mk(ShaderStageFlags::FRAGMENT)),
+        ]);
+        assert_eq!(dense.len(), 2);
+        assert!(!dense[0].entries.is_empty());
+        assert!(!dense[1].entries.is_empty());
+    }
 
     #[test]
     fn test_compiler_creation() {

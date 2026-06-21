@@ -23,13 +23,14 @@ impl World {
     /// assert_eq!(entities.len(), 100);
     /// ```
     pub fn spawn_batch(&mut self, count: u32) -> Vec<Entity> {
-        self.entities.allocate_many(count, self.tick)
+        self.entities.allocate_many(count)
     }
 
     /// Spawns `count` entities, each with a clone of the given bundle.
     ///
-    /// All mutations are atomic: if any component fails to insert, all
-    /// spawned entities are cleaned up and the world is unchanged.
+    /// Component types are validated up-front, so if validation fails no
+    /// entities are spawned and the world is unchanged. Once validation passes
+    /// the inserts are infallible, so there is no mid-batch rollback path.
     /// All hooks fire after every entity is fully populated, so `on_add`
     /// handlers can observe the entire batch.
     ///
@@ -45,7 +46,7 @@ impl World {
         // Validate upfront — no entities spawned if types are wrong
         bundle.validate(self)?;
 
-        let entities = self.entities.allocate_many(count, self.tick);
+        let entities = self.entities.allocate_many(count);
         for &entity in &entities {
             bundle.clone().insert_into(self, entity);
         }
@@ -79,7 +80,7 @@ impl World {
             f(0).validate(self)?;
         }
 
-        let entities = self.entities.allocate_many(count, self.tick);
+        let entities = self.entities.allocate_many(count);
         for (i, &entity) in entities.iter().enumerate() {
             f(i).insert_into(self, entity);
         }
@@ -146,10 +147,13 @@ impl World {
     /// Inserts a component on each entity from an iterator of `(Entity, T)` pairs.
     ///
     /// All entities are validated upfront — if any is dead, the entire
-    /// operation fails before any mutation. All `on_replace` hooks fire
-    /// first (old values readable for all entities), then all values are
-    /// written, then `on_add`/`on_insert` hooks fire. This ensures hooks
-    /// see a consistent batch state.
+    /// operation fails before any mutation.
+    ///
+    /// Each entity is then processed in turn exactly like [`insert`](Self::insert):
+    /// for a given entity all of its hooks run (`on_replace` → write →
+    /// `on_add`/`on_insert`) before the next entity is processed. Hooks therefore
+    /// observe a partially-applied batch (later entities not yet written) — do
+    /// not rely on the whole batch being visible from within a hook.
     ///
     /// Records the current tick for change detection.
     ///

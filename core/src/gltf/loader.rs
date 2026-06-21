@@ -103,6 +103,14 @@ impl LoadContext {
                     })?;
                     let start = view.offset();
                     let end = start + view.length();
+                    // Bounds-check before slicing: a malformed file could point
+                    // the image view past the buffer end and panic otherwise.
+                    if end > buffer_data.len() {
+                        return Err(GltfError::BufferError(format!(
+                            "image buffer view [{start}..{end}] exceeds buffer length {}",
+                            buffer_data.len()
+                        )));
+                    }
                     let image_bytes = &buffer_data[start..end];
 
                     images.push(decode_image(image_bytes, mime_type)?);

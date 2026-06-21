@@ -193,6 +193,32 @@ impl WgpuBackend {
             {
                 bind_group_entries.clear();
                 for entry in &binding_group.entries {
+                    // CombinedTextureSampler is a single material binding, but
+                    // Slang reflection emits a separate texture (binding N) and
+                    // sampler (binding N+1). Emit BOTH so the bind group matches
+                    // the reflected layout — otherwise the sampler is missing and
+                    // wgpu rejects the bind group.
+                    if let crate::materials::BoundResource::CombinedTextureSampler {
+                        texture,
+                        sampler,
+                    } = &entry.resource
+                    {
+                        if let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() {
+                            bind_group_entries.push(wgpu::BindGroupEntry {
+                                binding: entry.binding,
+                                resource: wgpu::BindingResource::TextureView(view),
+                            });
+                        }
+                        if let crate::backend::GpuSampler::Wgpu(wgpu_sampler) = sampler.gpu_handle()
+                        {
+                            bind_group_entries.push(wgpu::BindGroupEntry {
+                                binding: entry.binding + 1,
+                                resource: wgpu::BindingResource::Sampler(wgpu_sampler),
+                            });
+                        }
+                        continue;
+                    }
+
                     let resource = match &entry.resource {
                         crate::materials::BoundResource::Buffer(buffer) => {
                             if let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() {
@@ -221,14 +247,8 @@ impl WgpuBackend {
                                 None
                             }
                         }
-                        crate::materials::BoundResource::CombinedTextureSampler {
-                            texture, ..
-                        } => {
-                            if let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() {
-                                Some(wgpu::BindingResource::TextureView(view))
-                            } else {
-                                None
-                            }
+                        crate::materials::BoundResource::CombinedTextureSampler { .. } => {
+                            unreachable!("CombinedTextureSampler handled above")
                         }
                     };
                     if let Some(r) = resource {
@@ -576,6 +596,32 @@ impl WgpuBackend {
             {
                 bind_group_entries.clear();
                 for entry in &binding_group.entries {
+                    // CombinedTextureSampler is a single material binding, but
+                    // Slang reflection emits a separate texture (binding N) and
+                    // sampler (binding N+1). Emit BOTH so the bind group matches
+                    // the reflected layout — otherwise the sampler is missing and
+                    // wgpu rejects the bind group.
+                    if let crate::materials::BoundResource::CombinedTextureSampler {
+                        texture,
+                        sampler,
+                    } = &entry.resource
+                    {
+                        if let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() {
+                            bind_group_entries.push(wgpu::BindGroupEntry {
+                                binding: entry.binding,
+                                resource: wgpu::BindingResource::TextureView(view),
+                            });
+                        }
+                        if let crate::backend::GpuSampler::Wgpu(wgpu_sampler) = sampler.gpu_handle()
+                        {
+                            bind_group_entries.push(wgpu::BindGroupEntry {
+                                binding: entry.binding + 1,
+                                resource: wgpu::BindingResource::Sampler(wgpu_sampler),
+                            });
+                        }
+                        continue;
+                    }
+
                     let resource = match &entry.resource {
                         crate::materials::BoundResource::Buffer(buffer) => {
                             if let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() {
@@ -604,14 +650,8 @@ impl WgpuBackend {
                                 None
                             }
                         }
-                        crate::materials::BoundResource::CombinedTextureSampler {
-                            texture, ..
-                        } => {
-                            if let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() {
-                                Some(wgpu::BindingResource::TextureView(view))
-                            } else {
-                                None
-                            }
+                        crate::materials::BoundResource::CombinedTextureSampler { .. } => {
+                            unreachable!("CombinedTextureSampler handled above")
                         }
                     };
                     if let Some(r) = resource {

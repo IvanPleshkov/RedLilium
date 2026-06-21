@@ -513,13 +513,17 @@ impl<T: Send + Sync + 'static> ErasedSparseSet for SparseSetInner<T> {
     }
 }
 
-/// A lock guard for either a read or write lock on a component storage.
+/// A lock guard for a read or write lock on a component storage or a resource.
 ///
 /// The guard is held purely for its RAII drop behavior (releasing the lock).
+/// Resources are locked alongside components in `World::acquire_sorted` so all
+/// locks for an access set are taken up-front in one globally-consistent order.
 #[allow(dead_code)]
 pub(crate) enum LockGuard<'a> {
     Read(parking_lot::RwLockReadGuard<'a, ComponentStorage>),
     Write(parking_lot::RwLockWriteGuard<'a, ComponentStorage>),
+    ResourceRead(parking_lot::RwLockReadGuard<'a, dyn crate::resource::Resource>),
+    ResourceWrite(parking_lot::RwLockWriteGuard<'a, dyn crate::resource::Resource>),
 }
 
 /// A type-erased sparse set that stores components of a single type.

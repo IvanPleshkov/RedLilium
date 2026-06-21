@@ -37,9 +37,16 @@ impl crate::System for UpdateFreeFlyCamera {
             }
 
             for (idx, mut cam) in cameras.iter_mut() {
+                // Tracks whether the camera's pose actually changed this frame,
+                // so we only rewrite (and dirty) the Transform when it did —
+                // otherwise change detection would fire every frame.
+                let mut changed = false;
                 let dragging = input.mouse_right;
 
-                if dragging {
+                if dragging
+                    && (input.cursor_delta[0].abs() > f32::EPSILON
+                        || input.cursor_delta[1].abs() > f32::EPSILON)
+                {
                     let dx = input.cursor_delta[0] * cam.rotate_sensitivity;
                     let dy = input.cursor_delta[1] * cam.rotate_sensitivity;
 
@@ -52,6 +59,7 @@ impl crate::System for UpdateFreeFlyCamera {
                         // Orbit mode: rotate around fixed target
                         cam.orbit_rotate(-dx, dy);
                     }
+                    changed = true;
                 }
 
                 // Shift: ramp up speed multiplier; release resets it
@@ -93,16 +101,19 @@ impl crate::System for UpdateFreeFlyCamera {
                     || move_up.abs() > f32::EPSILON
                 {
                     cam.fly_move(move_forward, move_right, move_up);
+                    changed = true;
                 }
 
                 // Zoom on scroll
                 if input.scroll_delta[1].abs() > f32::EPSILON {
                     let zoom_amount = input.scroll_delta[1] * cam.zoom_sensitivity;
                     cam.zoom(zoom_amount);
+                    changed = true;
                 }
 
-                // Update transform from camera parameters
-                if let Some(mut t) = transforms.get_mut(idx) {
+                // Update transform from camera parameters only when the camera
+                // actually moved/rotated/zoomed this frame.
+                if changed && let Some(mut t) = transforms.get_mut(idx) {
                     *t = cam.to_transform();
                 }
             }

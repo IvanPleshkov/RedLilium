@@ -44,7 +44,9 @@ pub fn quat_to_na(q: Quat) -> redlilium_core::math::UnitQuaternion {
         arr[1] as Real,
         arr[2] as Real,
     );
-    redlilium_core::math::UnitQuaternion::new_unchecked(quat)
+    // Normalize before handing to rapier: a drifted (non-unit) Transform
+    // rotation would otherwise corrupt the simulation's orientation.
+    redlilium_core::math::UnitQuaternion::new_normalize(quat)
 }
 
 /// Converts a physics `UnitQuaternion<Real>` to a rendering `Quat` (f32).
@@ -110,11 +112,7 @@ pub fn extract_trimesh_data(
     let vertex_data = mesh.vertex_buffer_data(buffer_index)?;
     let stride = layout.buffers.get(buffer_index)?.stride as usize;
     let offset = pos_attr.offset as usize;
-    let vertex_count = if stride > 0 {
-        vertex_data.len() / stride
-    } else {
-        0
-    };
+    let vertex_count = vertex_data.len().checked_div(stride).unwrap_or(0);
 
     // Extract positions (assumed f32x3)
     let mut vertices = Vec::with_capacity(vertex_count);

@@ -208,9 +208,18 @@ impl russh::client::Handler for SshHandler {
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh_keys::PublicKey,
+        server_public_key: &russh_keys::PublicKey,
     ) -> Result<bool, Self::Error> {
-        // Accept all host keys for now.
+        // SECURITY: host-key verification is not yet implemented — every key is
+        // accepted, which leaves the connection open to man-in-the-middle. Log
+        // the key fingerprint prominently so it is at least visible and could be
+        // pinned out-of-band. TODO: verify against a known_hosts store / pinned
+        // key from config and reject unknown/changed keys.
+        let fingerprint = server_public_key.fingerprint(Default::default());
+        log::warn!(
+            "SFTP: accepting UNVERIFIED server host key (fingerprint {fingerprint}); \
+             host-key verification is not implemented — connection is vulnerable to MITM"
+        );
         Ok(true)
     }
 }

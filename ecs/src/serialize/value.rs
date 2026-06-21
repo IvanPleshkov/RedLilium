@@ -315,9 +315,21 @@ impl serde::ser::SerializeMap for ValueSerializeMap {
 
     fn serialize_key<T: ?Sized + Serialize>(&mut self, key: &T) -> Result<(), ValueError> {
         let key_val = key.serialize(ValueSerializer)?;
+        // Map keys are stored as strings. Use the natural representation for
+        // scalar keys (so an integer key 5 becomes "5", not "I64(5)") and reject
+        // compound keys rather than emitting un-parseable Debug output.
         let key_str = match key_val {
             Value::String(s) => s,
-            other => format!("{other:?}"),
+            Value::I64(v) => v.to_string(),
+            Value::U64(v) => v.to_string(),
+            Value::F32(v) => v.to_string(),
+            Value::F64(v) => v.to_string(),
+            Value::Bool(b) => b.to_string(),
+            other => {
+                return Err(ValueError(format!(
+                    "unsupported map key type {other:?}; only string and scalar keys are supported"
+                )));
+            }
         };
         self.current_key = Some(key_str);
         Ok(())
@@ -431,7 +443,13 @@ impl<'de> serde::Deserializer<'de> for ValueDeserializer {
     fn deserialize_i64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, ValueError> {
         match self.0 {
             Value::I64(v) => visitor.visit_i64(v),
-            Value::U64(v) => visitor.visit_i64(v as i64),
+            // Checked: a `u64` above `i64::MAX` would silently wrap to a negative
+            // value with `as`. Fail loudly instead of corrupting the value.
+            Value::U64(v) => {
+                let n = i64::try_from(v)
+                    .map_err(|_| de::Error::custom(format!("integer {v} out of range for i64")))?;
+                visitor.visit_i64(n)
+            }
             _ => self.deserialize_any(visitor),
         }
     }
@@ -448,7 +466,13 @@ impl<'de> serde::Deserializer<'de> for ValueDeserializer {
     fn deserialize_u64<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, ValueError> {
         match self.0 {
             Value::U64(v) => visitor.visit_u64(v),
-            Value::I64(v) => visitor.visit_u64(v as u64),
+            // Checked: a negative `i64` would silently wrap to a huge positive
+            // value with `as`. Fail loudly instead of corrupting the value.
+            Value::I64(v) => {
+                let n = u64::try_from(v)
+                    .map_err(|_| de::Error::custom(format!("integer {v} out of range for u64")))?;
+                visitor.visit_u64(n)
+            }
             _ => self.deserialize_any(visitor),
         }
     }

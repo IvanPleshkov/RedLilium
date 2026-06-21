@@ -346,6 +346,9 @@ pub enum GpuSurfaceTexture {
         swapchain: vk::SwapchainKHR,
         /// The image available semaphore.
         image_available_semaphore: vk::Semaphore,
+        /// Semaphore signaled by the render submit that writes the swapchain
+        /// image (waited on by the present layout-transition submit).
+        image_render_finished_semaphore: vk::Semaphore,
         /// The render finished semaphore.
         render_finished_semaphore: vk::Semaphore,
         /// The in-flight fence.
@@ -417,6 +420,7 @@ impl GpuSurfaceTexture {
                 image_index,
                 swapchain,
                 image_available_semaphore,
+                image_render_finished_semaphore,
                 render_finished_semaphore,
                 in_flight_fence,
                 present_command_buffer,
@@ -429,6 +433,7 @@ impl GpuSurfaceTexture {
                         swapchain,
                         image_index,
                         image_available_semaphore,
+                        image_render_finished_semaphore,
                         render_finished_semaphore,
                         in_flight_fence,
                         present_command_buffer,
@@ -604,6 +609,7 @@ impl GpuSurface {
                         frame_index: result.frame_index,
                         swapchain: result.swapchain,
                         image_available_semaphore: result.image_available_semaphore,
+                        image_render_finished_semaphore: result.image_render_finished_semaphore,
                         render_finished_semaphore: result.render_finished_semaphore,
                         in_flight_fence: result.in_flight_fence,
                         present_command_buffer: result.present_command_buffer,

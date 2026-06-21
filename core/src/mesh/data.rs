@@ -208,8 +208,8 @@ impl CpuMesh {
     /// Vertex count is inferred from the data length and stride.
     pub fn with_vertex_data(mut self, buffer_index: usize, data: Vec<u8>) -> Self {
         let stride = self.layout.buffer_stride(buffer_index) as usize;
-        if stride > 0 {
-            self.vertex_count = (data.len() / stride) as u32;
+        if let Some(count) = data.len().checked_div(stride) {
+            self.vertex_count = count as u32;
         }
         if buffer_index < self.vertex_buffers.len() {
             self.vertex_buffers[buffer_index] = data;
@@ -342,6 +342,7 @@ impl CpuMesh {
 
         let mut min = [f32::MAX; 3];
         let mut max = [f32::MIN; 3];
+        let mut any = false;
 
         for i in 0..vertex_count {
             let base = i * stride + offset;
@@ -372,6 +373,13 @@ impl CpuMesh {
             max[0] = max[0].max(x);
             max[1] = max[1].max(y);
             max[2] = max[2].max(z);
+            any = true;
+        }
+
+        // If the position data was too short to read even one full vertex,
+        // return None rather than an inverted (MAX/MIN) bounding box.
+        if !any {
+            return None;
         }
 
         Some(crate::math::Aabb::new(min, max))

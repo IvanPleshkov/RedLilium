@@ -11,20 +11,175 @@ use crate::resource::{ResourceRef, ResourceRefMut};
 use crate::sparse_set::{Ref, RefMut};
 use crate::world::World;
 
+/// The storage class an [`AccessInfo`] refers to.
+///
+/// Two accesses are only the *same underlying storage* when both their
+/// [`AccessInfo::type_id`] and `kind` match. This distinction matters because
+/// components, `Arc<RwLock<T>>` resources, and main-thread resources of the
+/// same type `T` all report `TypeId::of::<T>()` yet live in independent
+/// storages, so they must not be merged (or rejected) against one another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AccessKind {
+    /// Real component storage (`Read`/`Write`/`ReadAll`/`WriteAll`/`Optional*`).
+    Component,
+    /// A filter that reads component-storage metadata (change/add/remove ticks
+    /// or membership): `Changed`/`Added`/`Removed`/`With`/`Without` and their
+    /// `Maybe*` variants. Carries the real component `TypeId` so it acquires a
+    /// **read** lock on that component's storage — this serializes the filter
+    /// against any concurrent `Write<T>` system, preventing a data race on the
+    /// change/add ticks. Shares a storage with [`AccessKind::Component`].
+    ComponentFilter,
+    /// `Arc<RwLock<T>>` resource (`Res`/`ResMut`).
+    Resource,
+    /// Main-thread-only resource (`MainThreadRes`/`MainThreadResMut`).
+    MainThreadResource,
+    /// Pure filter marker that borrows no storage (`Or`/`Any` combinators).
+    /// Carries a unique marker `TypeId`.
+    Filter,
+}
+
+/// Identifies the storage an access refers to, for deduplication and conflict
+/// checks. [`AccessKind::Component`] and [`AccessKind::ComponentFilter`] of the
+/// same type map to the same class because they lock the same underlying
+/// component storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum StorageClass {
+    Component,
+    Resource,
+    MainThreadResource,
+    Marker,
+}
+
+impl AccessKind {
+    fn storage_class(self) -> StorageClass {
+        match self {
+            AccessKind::Component | AccessKind::ComponentFilter => StorageClass::Component,
+            AccessKind::Resource => StorageClass::Resource,
+            AccessKind::MainThreadResource => StorageClass::MainThreadResource,
+            AccessKind::Filter => StorageClass::Marker,
+        }
+    }
+}
+
 /// Metadata about a single component/resource access request.
 #[derive(Debug, Clone, Copy)]
 pub struct AccessInfo {
     pub type_id: TypeId,
     pub is_write: bool,
+    pub kind: AccessKind,
 }
 
-/// Normalizes access infos: sorts by TypeId and deduplicates, upgrading
-/// to write if any duplicate requests write access.
+impl AccessInfo {
+    /// Access to a component storage.
+    pub(crate) fn component(type_id: TypeId, is_write: bool) -> Self {
+        Self {
+            type_id,
+            is_write,
+            kind: AccessKind::Component,
+        }
+    }
+
+    /// Access to an `Arc<RwLock<T>>` resource.
+    pub(crate) fn resource(type_id: TypeId, is_write: bool) -> Self {
+        Self {
+            type_id,
+            is_write,
+            kind: AccessKind::Resource,
+        }
+    }
+
+    /// Access to a main-thread-only resource.
+    pub(crate) fn main_thread(type_id: TypeId, is_write: bool) -> Self {
+        Self {
+            type_id,
+            is_write,
+            kind: AccessKind::MainThreadResource,
+        }
+    }
+
+    /// A filter that reads a component's storage metadata (locks the component
+    /// for read). `type_id` is the real component `TypeId`.
+    pub(crate) fn component_filter(type_id: TypeId) -> Self {
+        Self {
+            type_id,
+            is_write: false,
+            kind: AccessKind::ComponentFilter,
+        }
+    }
+
+    /// A pure filter marker access that borrows no storage.
+    pub(crate) fn filter(type_id: TypeId) -> Self {
+        Self {
+            type_id,
+            is_write: false,
+            kind: AccessKind::Filter,
+        }
+    }
+
+    /// Sort/dedup key identifying the underlying storage.
+    fn storage_key(&self) -> (TypeId, StorageClass) {
+        (self.type_id, self.kind.storage_class())
+    }
+
+    /// Whether two infos refer to the same underlying storage.
+    fn same_storage(&self, other: &AccessInfo) -> bool {
+        self.storage_key() == other.storage_key()
+    }
+}
+
+/// Validates that no aliasing-sensitive storage (a component or a main-thread
+/// resource) appears more than once in a single access set when any of those
+/// accesses is mutable.
+///
+/// Such a set — e.g. `(Write<T>, Write<T>)`, `(Read<T>, Write<T>)`, or
+/// `(MainThreadRes<T>, MainThreadResMut<T>)` — would otherwise hand out two
+/// references to the same storage (`&mut`/`&mut` or `&`/`&mut`) because locks
+/// are deduplicated by storage while data is fetched per element, producing
+/// undefined behavior. Panics with a clear message instead.
+///
+/// Resources self-lock via their `Arc<RwLock<T>>` and panic on a conflicting
+/// borrow, so they are not aliasing-unsafe and are not checked here. Filters
+/// carry unique marker `TypeId`s and borrow no storage exclusively.
+pub(crate) fn validate_no_aliasing_conflict(infos: &[AccessInfo]) {
+    for (i, a) in infos.iter().enumerate() {
+        let class = a.kind.storage_class();
+        // Resources self-lock and panic on conflict; pure markers borrow no
+        // storage. Only component storages and main-thread resources can alias.
+        if !matches!(
+            class,
+            StorageClass::Component | StorageClass::MainThreadResource
+        ) {
+            continue;
+        }
+        for b in &infos[i + 1..] {
+            // A storage accessed mutably must be the sole accessor in the set:
+            // any second access (read, write, or storage-reading filter) to the
+            // same storage would alias it (`&mut`/`&mut` or `&mut`/`&`) = UB.
+            if a.same_storage(b) && (a.is_write || b.is_write) {
+                let what = match class {
+                    StorageClass::MainThreadResource => "main-thread resource",
+                    _ => "component",
+                };
+                panic!(
+                    "the same {what} appears more than once in a single access set \
+                     with at least one mutable access; this would alias the same \
+                     storage (undefined behavior). A {what} accessed mutably must be \
+                     the sole access to it in the set (e.g. `(Write<T>, Write<T>)`, \
+                     `(Read<T>, Write<T>)`, and `(Write<T>, Changed<T>)` are not \
+                     allowed)."
+                );
+            }
+        }
+    }
+}
+
+/// Normalizes access infos: sorts by underlying storage and deduplicates,
+/// upgrading to write if any duplicate requests write access.
 pub(crate) fn normalize_access_infos(infos: &[AccessInfo]) -> SmallVec<[AccessInfo; 8]> {
     let mut sorted: SmallVec<[AccessInfo; 8]> = infos.into();
-    sorted.sort_by_key(|info| info.type_id);
+    sorted.sort_by_key(|info| info.storage_key());
     sorted.dedup_by(|a, b| {
-        if a.type_id == b.type_id {
+        if a.same_storage(b) {
             b.is_write = b.is_write || a.is_write;
             true
         } else {
@@ -293,10 +448,7 @@ impl<T: 'static> AccessElement for Read<T> {
     type Item<'w> = Ref<'w, T>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo {
-            type_id: TypeId::of::<T>(),
-            is_write: false,
-        }
+        AccessInfo::component(TypeId::of::<T>(), false)
     }
 
     fn fetch(world: &World) -> Self::Item<'_> {
@@ -316,10 +468,7 @@ impl<T: 'static> AccessElement for Write<T> {
     type Item<'w> = RefMut<'w, T>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo {
-            type_id: TypeId::of::<T>(),
-            is_write: true,
-        }
+        AccessInfo::component(TypeId::of::<T>(), true)
     }
 
     fn fetch(world: &World) -> Self::Item<'_> {
@@ -339,10 +488,7 @@ impl<T: 'static> AccessElement for ReadAll<T> {
     type Item<'w> = Ref<'w, T>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo {
-            type_id: TypeId::of::<T>(),
-            is_write: false,
-        }
+        AccessInfo::component(TypeId::of::<T>(), false)
     }
 
     fn fetch(world: &World) -> Self::Item<'_> {
@@ -362,10 +508,7 @@ impl<T: 'static> AccessElement for WriteAll<T> {
     type Item<'w> = RefMut<'w, T>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo {
-            type_id: TypeId::of::<T>(),
-            is_write: true,
-        }
+        AccessInfo::component(TypeId::of::<T>(), true)
     }
 
     fn fetch(world: &World) -> Self::Item<'_> {
@@ -385,10 +528,7 @@ impl<T: 'static> AccessElement for OptionalRead<T> {
     type Item<'w> = Option<Ref<'w, T>>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo {
-            type_id: TypeId::of::<T>(),
-            is_write: false,
-        }
+        AccessInfo::component(TypeId::of::<T>(), false)
     }
 
     fn fetch(world: &World) -> Self::Item<'_> {
@@ -404,10 +544,7 @@ impl<T: 'static> AccessElement for OptionalWrite<T> {
     type Item<'w> = Option<RefMut<'w, T>>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo {
-            type_id: TypeId::of::<T>(),
-            is_write: true,
-        }
+        AccessInfo::component(TypeId::of::<T>(), true)
     }
 
     fn fetch(world: &World) -> Self::Item<'_> {
@@ -423,20 +560,18 @@ impl<T: 'static> AccessElement for Res<T> {
     type Item<'w> = ResourceRef<'w, T>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo {
-            type_id: TypeId::of::<T>(),
-            is_write: false,
-        }
+        AccessInfo::resource(TypeId::of::<T>(), false)
     }
 
     fn fetch(world: &World) -> Self::Item<'_> {
         world.resource::<T>()
     }
 
-    /// Resources self-lock via `Arc<RwLock<T>>`, so fetch_unlocked
-    /// behaves identically to fetch.
     fn fetch_unlocked(world: &World) -> Self::Item<'_> {
-        world.resource::<T>()
+        // The read lock was already acquired (in TypeId-sorted order) by
+        // `acquire_sorted`; build a guardless view to avoid re-locking.
+        // SAFETY: the lock is held for the duration of this access set.
+        unsafe { world.resource_unlocked::<T>() }
     }
 }
 
@@ -444,20 +579,17 @@ impl<T: 'static> AccessElement for ResMut<T> {
     type Item<'w> = ResourceRefMut<'w, T>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo {
-            type_id: TypeId::of::<T>(),
-            is_write: true,
-        }
+        AccessInfo::resource(TypeId::of::<T>(), true)
     }
 
     fn fetch(world: &World) -> Self::Item<'_> {
         world.resource_mut::<T>()
     }
 
-    /// Resources self-lock via `Arc<RwLock<T>>`, so fetch_unlocked
-    /// behaves identically to fetch.
     fn fetch_unlocked(world: &World) -> Self::Item<'_> {
-        world.resource_mut::<T>()
+        // The write lock was already acquired by `acquire_sorted`.
+        // SAFETY: the lock is held for the duration of this access set.
+        unsafe { world.resource_mut_unlocked::<T>() }
     }
 }
 
@@ -465,10 +597,7 @@ impl<T: 'static> AccessElement for MainThreadRes<T> {
     type Item<'w> = &'w T;
 
     fn access_info() -> AccessInfo {
-        AccessInfo {
-            type_id: TypeId::of::<T>(),
-            is_write: false,
-        }
+        AccessInfo::main_thread(TypeId::of::<T>(), false)
     }
 
     fn fetch(world: &World) -> Self::Item<'_> {
@@ -490,10 +619,7 @@ impl<T: 'static> AccessElement for MainThreadResMut<T> {
     type Item<'w> = &'w mut T;
 
     fn access_info() -> AccessInfo {
-        AccessInfo {
-            type_id: TypeId::of::<T>(),
-            is_write: true,
-        }
+        AccessInfo::main_thread(TypeId::of::<T>(), true)
     }
 
     fn fetch(world: &World) -> Self::Item<'_> {
@@ -515,12 +641,9 @@ impl<T: 'static> AccessElement for Added<T> {
     type Item<'w> = AddedFilter<'w>;
 
     fn access_info() -> AccessInfo {
-        // Use the marker type's own TypeId so it doesn't collide with
-        // component storage and no lock is acquired.
-        AccessInfo {
-            type_id: TypeId::of::<Added<T>>(),
-            is_write: false,
-        }
+        // Read the real component's storage metadata under a read lock so this
+        // filter serializes against any concurrent `Write<T>` system.
+        AccessInfo::component_filter(TypeId::of::<T>())
     }
 
     fn fetch(world: &World) -> Self::Item<'_> {
@@ -543,10 +666,7 @@ impl<T: 'static> AccessElement for Removed<T> {
     type Item<'w> = RemovedFilter<'w>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo {
-            type_id: TypeId::of::<Removed<T>>(),
-            is_write: false,
-        }
+        AccessInfo::component_filter(TypeId::of::<T>())
     }
 
     fn fetch(world: &World) -> Self::Item<'_> {
@@ -568,10 +688,7 @@ impl<T: 'static> AccessElement for MaybeAdded<T> {
     type Item<'w> = AddedFilter<'w>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo {
-            type_id: TypeId::of::<MaybeAdded<T>>(),
-            is_write: false,
-        }
+        AccessInfo::component_filter(TypeId::of::<T>())
     }
 
     fn fetch(world: &World) -> Self::Item<'_> {
@@ -588,10 +705,7 @@ impl<T: 'static> AccessElement for Changed<T> {
     type Item<'w> = ChangedFilter<'w>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo {
-            type_id: TypeId::of::<Changed<T>>(),
-            is_write: false,
-        }
+        AccessInfo::component_filter(TypeId::of::<T>())
     }
 
     fn fetch(world: &World) -> Self::Item<'_> {
@@ -613,10 +727,7 @@ impl<T: 'static> AccessElement for MaybeChanged<T> {
     type Item<'w> = ChangedFilter<'w>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo {
-            type_id: TypeId::of::<MaybeChanged<T>>(),
-            is_write: false,
-        }
+        AccessInfo::component_filter(TypeId::of::<T>())
     }
 
     fn fetch(world: &World) -> Self::Item<'_> {
@@ -633,10 +744,7 @@ impl<T: 'static> AccessElement for MaybeRemoved<T> {
     type Item<'w> = RemovedFilter<'w>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo {
-            type_id: TypeId::of::<MaybeRemoved<T>>(),
-            is_write: false,
-        }
+        AccessInfo::component_filter(TypeId::of::<T>())
     }
 
     fn fetch(world: &World) -> Self::Item<'_> {
@@ -653,10 +761,7 @@ impl<T: 'static> AccessElement for With<T> {
     type Item<'w> = ContainsChecker<'w>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo {
-            type_id: TypeId::of::<With<T>>(),
-            is_write: false,
-        }
+        AccessInfo::component_filter(TypeId::of::<T>())
     }
 
     fn fetch(world: &World) -> Self::Item<'_> {
@@ -673,10 +778,7 @@ impl<T: 'static> AccessElement for Without<T> {
     type Item<'w> = ContainsChecker<'w>;
 
     fn access_info() -> AccessInfo {
-        AccessInfo {
-            type_id: TypeId::of::<Without<T>>(),
-            is_write: false,
-        }
+        AccessInfo::component_filter(TypeId::of::<T>())
     }
 
     fn fetch(world: &World) -> Self::Item<'_> {
@@ -702,10 +804,7 @@ where
 
     fn access_info() -> AccessInfo {
         // Filters don't hold locks; use our own marker TypeId.
-        AccessInfo {
-            type_id: TypeId::of::<Or<A, B>>(),
-            is_write: false,
-        }
+        AccessInfo::filter(TypeId::of::<Or<A, B>>())
     }
 
     fn fetch(world: &World) -> Self::Item<'_> {
@@ -729,10 +828,7 @@ macro_rules! impl_any_access_element {
             type Item<'w> = AnyFilter<($($T::Item<'w>,)+)>;
 
             fn access_info() -> AccessInfo {
-                AccessInfo {
-                    type_id: TypeId::of::<Any<($($T,)+)>>(),
-                    is_write: false,
-                }
+                AccessInfo::filter(TypeId::of::<Any<($($T,)+)>>())
             }
 
             fn fetch(world: &World) -> Self::Item<'_> {
@@ -848,6 +944,75 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "more than once")]
+    fn duplicate_write_write_rejected() {
+        let infos = <(Write<Position>, Write<Position>)>::access_infos();
+        validate_no_aliasing_conflict(&infos);
+    }
+
+    #[test]
+    #[should_panic(expected = "more than once")]
+    fn duplicate_read_write_rejected() {
+        let infos = <(Read<Position>, Write<Position>)>::access_infos();
+        validate_no_aliasing_conflict(&infos);
+    }
+
+    #[test]
+    #[should_panic(expected = "main-thread resource")]
+    fn duplicate_main_thread_res_resmut_rejected() {
+        let infos = <(MainThreadRes<Position>, MainThreadResMut<Position>)>::access_infos();
+        validate_no_aliasing_conflict(&infos);
+    }
+
+    #[test]
+    fn duplicate_read_read_allowed() {
+        // Two shared reads of the same component do not alias mutably.
+        let infos = <(Read<Position>, Read<Position>)>::access_infos();
+        validate_no_aliasing_conflict(&infos);
+    }
+
+    #[test]
+    fn distinct_components_allowed() {
+        let infos = <(Write<Position>, Write<Velocity>)>::access_infos();
+        validate_no_aliasing_conflict(&infos);
+    }
+
+    #[test]
+    fn component_and_resource_same_type_not_conflated() {
+        // A type used as both a component and a resource lives in independent
+        // storages and must not be rejected even when both are mutable.
+        let infos = <(Write<Position>, ResMut<Position>)>::access_infos();
+        validate_no_aliasing_conflict(&infos);
+    }
+
+    #[test]
+    #[should_panic(expected = "more than once")]
+    fn write_and_changed_same_component_rejected() {
+        // A storage-reading filter borrows the component storage shared while
+        // Write borrows it mutably — aliasing, so the combination is rejected.
+        let infos = <(Write<Position>, Changed<Position>)>::access_infos();
+        validate_no_aliasing_conflict(&infos);
+    }
+
+    #[test]
+    fn read_and_changed_same_component_allowed() {
+        // Read + filter are both shared borrows of the storage — no aliasing.
+        let infos = <(Read<Position>, Changed<Position>)>::access_infos();
+        validate_no_aliasing_conflict(&infos);
+    }
+
+    #[test]
+    fn changed_filter_dedups_with_read_into_single_lock() {
+        // Read<T> and a storage-reading filter on the same T must collapse to a
+        // single (read) lock entry, never two locks on the same storage.
+        let infos = <(Read<Position>, With<Position>, Changed<Position>)>::access_infos();
+        let normalized = normalize_access_infos(&infos);
+        assert_eq!(normalized.len(), 1);
+        assert_eq!(normalized[0].type_id, TypeId::of::<Position>());
+        assert!(!normalized[0].is_write);
+    }
+
+    #[test]
     fn fetch_reads_from_world() {
         let mut world = World::new();
         world.register_component::<Position>();
@@ -911,19 +1076,20 @@ mod tests {
     struct Health(u32);
 
     #[test]
-    fn added_filter_access_info_uses_marker_type() {
+    fn added_filter_access_info_locks_component() {
         let info = <Added<Position>>::access_info();
-        // TypeId should be Added<Position>, not Position itself
-        assert_ne!(info.type_id, TypeId::of::<Position>());
-        assert_eq!(info.type_id, TypeId::of::<Added<Position>>());
+        // Storage-reading filters lock the real component (read), so they
+        // report the component's TypeId and a ComponentFilter kind.
+        assert_eq!(info.type_id, TypeId::of::<Position>());
+        assert_eq!(info.kind, AccessKind::ComponentFilter);
         assert!(!info.is_write);
     }
 
     #[test]
-    fn removed_filter_access_info_uses_marker_type() {
+    fn removed_filter_access_info_locks_component() {
         let info = <Removed<Position>>::access_info();
-        assert_ne!(info.type_id, TypeId::of::<Position>());
-        assert_eq!(info.type_id, TypeId::of::<Removed<Position>>());
+        assert_eq!(info.type_id, TypeId::of::<Position>());
+        assert_eq!(info.kind, AccessKind::ComponentFilter);
         assert!(!info.is_write);
     }
 
@@ -1058,18 +1224,18 @@ mod tests {
     struct Frozen;
 
     #[test]
-    fn with_access_info_uses_marker_type() {
+    fn with_access_info_locks_component() {
         let info = <With<Position>>::access_info();
-        assert_ne!(info.type_id, TypeId::of::<Position>());
-        assert_eq!(info.type_id, TypeId::of::<With<Position>>());
+        assert_eq!(info.type_id, TypeId::of::<Position>());
+        assert_eq!(info.kind, AccessKind::ComponentFilter);
         assert!(!info.is_write);
     }
 
     #[test]
-    fn without_access_info_uses_marker_type() {
+    fn without_access_info_locks_component() {
         let info = <Without<Position>>::access_info();
-        assert_ne!(info.type_id, TypeId::of::<Position>());
-        assert_eq!(info.type_id, TypeId::of::<Without<Position>>());
+        assert_eq!(info.type_id, TypeId::of::<Position>());
+        assert_eq!(info.kind, AccessKind::ComponentFilter);
         assert!(!info.is_write);
     }
 

@@ -141,8 +141,43 @@ impl Resources {
             )
         });
 
+        let ptr = guard
+            .as_any()
+            .downcast_ref::<T>()
+            .unwrap_or_else(|| panic!("Resource `{}` type mismatch", entry.type_name))
+            as *const T;
+
         ResourceRef {
-            guard,
+            ptr,
+            _guard: Some(guard),
+            _marker: PhantomData,
+        }
+    }
+
+    /// Borrows a resource of type T immutably **without** acquiring its lock.
+    ///
+    /// # Safety
+    ///
+    /// The caller must already hold a read lock on this resource (e.g. acquired
+    /// up-front by `World::acquire_sorted`) for the lifetime of the returned
+    /// reference, and no `&mut` to it may exist.
+    pub(crate) unsafe fn borrow_unlocked<T: 'static>(&self) -> ResourceRef<'_, T> {
+        let entry = self
+            .entries
+            .get(&TypeId::of::<T>())
+            .unwrap_or_else(|| panic!("Resource `{}` does not exist", type_name::<T>()));
+
+        // SAFETY: the caller guarantees the read lock is held externally.
+        let data: &dyn Resource = unsafe { &*entry.handle.data_ptr() };
+        let ptr = data
+            .as_any()
+            .downcast_ref::<T>()
+            .unwrap_or_else(|| panic!("Resource `{}` type mismatch", entry.type_name))
+            as *const T;
+
+        ResourceRef {
+            ptr,
+            _guard: None,
             _marker: PhantomData,
         }
     }
@@ -159,18 +194,75 @@ impl Resources {
             .get(&TypeId::of::<T>())
             .unwrap_or_else(|| panic!("Resource `{}` does not exist", type_name::<T>()));
 
-        let guard = entry.handle.try_write().unwrap_or_else(|| {
+        let mut guard = entry.handle.try_write().unwrap_or_else(|| {
             panic!(
                 "Cannot borrow resource `{}` mutably: already borrowed",
                 entry.type_name
             )
         });
 
+        let ptr = guard
+            .as_any_mut()
+            .downcast_mut::<T>()
+            .unwrap_or_else(|| panic!("Resource `{}` type mismatch", entry.type_name))
+            as *mut T;
+
         ResourceRefMut {
-            guard,
+            ptr,
+            _guard: Some(guard),
             _marker: PhantomData,
             borrowed: Cell::new(false),
         }
+    }
+
+    /// Borrows a resource of type T mutably **without** acquiring its lock.
+    ///
+    /// # Safety
+    ///
+    /// The caller must already hold a write lock on this resource (e.g. acquired
+    /// up-front by `World::acquire_sorted`) for the lifetime of the returned
+    /// reference, and no other reference to it may exist.
+    pub(crate) unsafe fn borrow_mut_unlocked<T: 'static>(&self) -> ResourceRefMut<'_, T> {
+        let entry = self
+            .entries
+            .get(&TypeId::of::<T>())
+            .unwrap_or_else(|| panic!("Resource `{}` does not exist", type_name::<T>()));
+
+        // SAFETY: the caller guarantees the write lock is held externally.
+        let data: &mut dyn Resource = unsafe { &mut *entry.handle.data_ptr() };
+        let ptr = data
+            .as_any_mut()
+            .downcast_mut::<T>()
+            .unwrap_or_else(|| panic!("Resource `{}` type mismatch", entry.type_name))
+            as *mut T;
+
+        ResourceRefMut {
+            ptr,
+            _guard: None,
+            _marker: PhantomData,
+            borrowed: Cell::new(false),
+        }
+    }
+
+    /// Acquires the read lock on a resource by `TypeId`, blocking until
+    /// available. Returns the type-erased guard, or `None` if the resource does
+    /// not exist. Used by `World::acquire_sorted` to lock resources up-front in
+    /// a globally-consistent order (deadlock-free, blocking instead of the
+    /// panic-on-contention `try_*` path).
+    pub(crate) fn read_guard_dyn(
+        &self,
+        type_id: TypeId,
+    ) -> Option<RwLockReadGuard<'_, dyn Resource>> {
+        Some(self.entries.get(&type_id)?.handle.read())
+    }
+
+    /// Acquires the write lock on a resource by `TypeId`, blocking until
+    /// available. See [`read_guard_dyn`](Self::read_guard_dyn).
+    pub(crate) fn write_guard_dyn(
+        &self,
+        type_id: TypeId,
+    ) -> Option<RwLockWriteGuard<'_, dyn Resource>> {
+        Some(self.entries.get(&type_id)?.handle.write())
     }
 
     // ---- Main-thread resource delegation ----
@@ -231,30 +323,48 @@ impl Default for Resources {
 
 /// Shared borrow of a resource.
 ///
-/// Holds an `RwLockReadGuard<dyn Resource>` and downcasts to `&T` in [`Deref`].
-/// Automatically releases the lock when dropped.
+/// Downcasts to `&T` via [`Deref`]. Either holds its own `RwLockReadGuard`
+/// (standalone [`Resources::borrow`]) or borrows data whose read lock is held
+/// externally — e.g. acquired up-front in a globally-sorted order by
+/// `World::acquire_sorted` (see [`Resources::borrow_unlocked`]).
 pub struct ResourceRef<'a, T: 'static> {
-    guard: RwLockReadGuard<'a, dyn Resource>,
+    /// Points into the locked resource data; valid for `'a` because either
+    /// `_guard` is held or the caller holds the read lock externally.
+    ptr: *const T,
+    _guard: Option<RwLockReadGuard<'a, dyn Resource>>,
     _marker: PhantomData<&'a T>,
 }
+
+// SAFETY: `ResourceRef` is a read-only view, equivalent to `&T`. `&T` is
+// `Send`/`Sync` exactly when `T: Sync`; the held read guard (when present) is
+// itself `Send + Sync`. This preserves the pre-existing auto-traits after
+// switching the internal representation to a raw pointer.
+unsafe impl<T: Sync> Send for ResourceRef<'_, T> {}
+unsafe impl<T: Sync> Sync for ResourceRef<'_, T> {}
 
 impl<T: 'static> Deref for ResourceRef<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        self.guard.as_any().downcast_ref::<T>().unwrap()
+        // SAFETY: `ptr` points into resource data kept alive by the held guard
+        // or by an externally-held read lock for `'a`.
+        unsafe { &*self.ptr }
     }
 }
 
 /// Exclusive borrow of a resource.
 ///
-/// Holds an `RwLockWriteGuard<dyn Resource>` and downcasts to `&mut T` in
-/// [`DerefMut`]. Automatically releases the lock when dropped.
+/// Downcasts to `&mut T` via [`DerefMut`]. Either holds its own
+/// `RwLockWriteGuard` (standalone [`Resources::borrow_mut`]) or borrows data
+/// whose write lock is held externally (see [`Resources::borrow_mut_unlocked`]).
 ///
 /// Contains a runtime borrow flag used by [`QueryItem`](crate::QueryItem)
 /// iteration to detect aliasing `&mut T` references (similar to `RefCell`).
+/// The `Cell` also makes this type `!Sync`, which intentionally excludes
+/// `ResMut` from `par_for_each`.
 pub struct ResourceRefMut<'a, T: 'static> {
-    guard: RwLockWriteGuard<'a, dyn Resource>,
+    ptr: *mut T,
+    _guard: Option<RwLockWriteGuard<'a, dyn Resource>>,
     _marker: PhantomData<&'a mut T>,
     /// Runtime borrow tracking for iterator safety.
     /// `true` while a [`ResMutRef`](crate::query::ResMutRef) derived
@@ -262,17 +372,14 @@ pub struct ResourceRefMut<'a, T: 'static> {
     pub(crate) borrowed: Cell<bool>,
 }
 
+// SAFETY: equivalent to `&mut T`, which is `Send` when `T: Send`. (`Sync` is
+// intentionally NOT implemented — the `Cell<bool>` keeps it `!Sync`.)
+unsafe impl<T: Send> Send for ResourceRefMut<'_, T> {}
+
 impl<T: 'static> ResourceRefMut<'_, T> {
     /// Returns a raw mutable pointer to the underlying resource data.
-    ///
-    /// Goes through `*mut RwLockWriteGuard` → `&mut dyn Resource` →
-    /// `downcast_mut` to avoid creating an intermediate `&T` that would
-    /// make a subsequent `&mut T` UB.
     pub(crate) fn as_ptr_mut(&self) -> *mut T {
-        let guard_ptr = &self.guard as *const RwLockWriteGuard<'_, dyn Resource>
-            as *mut RwLockWriteGuard<'_, dyn Resource>;
-        // SAFETY: the write guard guarantees exclusive access to the data.
-        unsafe { (*guard_ptr).as_any_mut().downcast_mut::<T>().unwrap() as *mut T }
+        self.ptr
     }
 }
 
@@ -280,13 +387,15 @@ impl<T: 'static> Deref for ResourceRefMut<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        self.guard.as_any().downcast_ref::<T>().unwrap()
+        // SAFETY: exclusive access held via the write guard or externally.
+        unsafe { &*self.ptr }
     }
 }
 
 impl<T: 'static> DerefMut for ResourceRefMut<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.guard.as_any_mut().downcast_mut::<T>().unwrap()
+        // SAFETY: exclusive access held via the write guard or externally.
+        unsafe { &mut *self.ptr }
     }
 }
 

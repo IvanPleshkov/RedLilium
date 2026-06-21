@@ -314,11 +314,16 @@ impl crate::System for SyncPhysicsBodiesSystem3D {
                 crate::Read<crate::Transform>,
             )>()
             .execute(|(mut physics, bodies, colliders, transforms)| {
-                // Remove stale
+                // Remove stale: entity dead (full-identity check, so a recycled
+                // slot does not keep the old body), disabled, or lost RigidBody3D.
                 let stale: Vec<crate::Entity> = physics
                     .entity_to_body
                     .keys()
-                    .filter(|e| bodies.get(e.index()).is_none())
+                    .filter(|e| {
+                        !ctx.world().is_alive(**e)
+                            || ctx.world().is_disabled(**e)
+                            || bodies.get(e.index()).is_none()
+                    })
                     .copied()
                     .collect();
                 for entity in &stale {
@@ -395,11 +400,16 @@ impl crate::System for SyncPhysicsJointsSystem3D {
                 crate::Read<super::components3d::ImpulseJoint3D>,
             )>()
             .execute(|(mut physics, joints)| {
-                // Remove stale
+                // Remove stale: entity dead (full-identity check), disabled, or
+                // lost the ImpulseJoint3D component.
                 let stale: Vec<crate::Entity> = physics
                     .entity_to_joint
                     .keys()
-                    .filter(|e| joints.get(e.index()).is_none())
+                    .filter(|e| {
+                        !ctx.world().is_alive(**e)
+                            || ctx.world().is_disabled(**e)
+                            || joints.get(e.index()).is_none()
+                    })
                     .copied()
                     .collect();
                 for entity in &stale {

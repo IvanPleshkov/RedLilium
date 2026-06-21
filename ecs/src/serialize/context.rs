@@ -161,7 +161,15 @@ pub struct DeserializeContext<'w> {
     world: &'w mut World,
     fields: HashMap<String, Value>,
     arc_cache: HashMap<u32, Arc<dyn Any + Send + Sync>>,
+    /// Raw (still-typed-as-`Value`) inner of every `ArcValue` seen during a
+    /// pre-scan, keyed by dedup id. Lets an `ArcRef` be resolved even when the
+    /// component that carried the original `ArcValue` was skipped (unknown type),
+    /// by deserializing the inner at the (known-typed) `ArcRef` site instead.
+    arc_raw: HashMap<u32, Value>,
     entity_map: HashMap<(u32, u64), Entity>,
+    /// Name of the component currently being deserialized, used to enrich
+    /// [`DeserializeError::MissingField`] / `TypeMismatch` diagnostics.
+    current_component: String,
 }
 
 impl<'w> DeserializeContext<'w> {
@@ -171,7 +179,40 @@ impl<'w> DeserializeContext<'w> {
             world,
             fields: HashMap::new(),
             arc_cache: HashMap::new(),
+            arc_raw: HashMap::new(),
             entity_map: HashMap::new(),
+            current_component: String::new(),
+        }
+    }
+
+    /// Sets the name of the component about to be deserialized, used to enrich
+    /// error diagnostics. Cleared after the component is processed.
+    pub fn set_current_component(&mut self, name: &str) {
+        self.current_component = name.to_owned();
+    }
+
+    /// Pre-scans a serialized component [`Value`] tree, recording the raw inner
+    /// of every [`Value::ArcValue`] by id. Call this for *all* components of a
+    /// prefab (including those whose type is unknown/skipped) before
+    /// deserializing any of them, so a shared Arc first introduced on a skipped
+    /// component can still be resolved by a later [`Value::ArcRef`].
+    pub fn prescan_arc_values(&mut self, value: &Value) {
+        match value {
+            Value::ArcValue { id, inner } => {
+                self.arc_raw.entry(*id).or_insert_with(|| (**inner).clone());
+                self.prescan_arc_values(inner);
+            }
+            Value::List(items) => {
+                for v in items {
+                    self.prescan_arc_values(v);
+                }
+            }
+            Value::Map(entries) => {
+                for (_, v) in entries {
+                    self.prescan_arc_values(v);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -222,7 +263,7 @@ impl<'w> DeserializeContext<'w> {
             .remove(name)
             .ok_or_else(|| DeserializeError::MissingField {
                 field: name.to_owned(),
-                component: String::new(),
+                component: self.current_component.clone(),
             })
     }
 
@@ -235,15 +276,31 @@ impl<'w> DeserializeContext<'w> {
         value::from_value(val).map_err(|e| DeserializeError::FormatError(e.to_string()))
     }
 
+    /// Resolves a serialized entity reference through the remap table.
+    ///
+    /// Returns an error on a miss rather than fabricating a handle from the
+    /// source indices — such a handle would silently alias an unrelated or dead
+    /// entity in the destination world.
+    fn resolve_entity(
+        &self,
+        field: &str,
+        index: u32,
+        spawn_tick: u64,
+    ) -> Result<Entity, DeserializeError> {
+        self.entity_map.get(&(index, spawn_tick)).copied().ok_or(
+            DeserializeError::UnmappedEntityReference {
+                field: field.to_owned(),
+                index,
+                spawn_tick,
+            },
+        )
+    }
+
     /// Read an entity reference, applying the remap table.
     pub fn read_entity(&mut self, name: &str) -> Result<Entity, DeserializeError> {
         let val = self.read_field(name)?;
         match val {
-            Value::Entity { index, spawn_tick } => Ok(self
-                .entity_map
-                .get(&(index, spawn_tick))
-                .copied()
-                .unwrap_or(Entity::new(index, spawn_tick))),
+            Value::Entity { index, spawn_tick } => self.resolve_entity(name, index, spawn_tick),
             _ => Err(DeserializeError::TypeMismatch {
                 field: name.to_owned(),
                 expected: "Entity".into(),
@@ -259,11 +316,9 @@ impl<'w> DeserializeContext<'w> {
             Value::List(items) => items
                 .into_iter()
                 .map(|v| match v {
-                    Value::Entity { index, spawn_tick } => Ok(self
-                        .entity_map
-                        .get(&(index, spawn_tick))
-                        .copied()
-                        .unwrap_or(Entity::new(index, spawn_tick))),
+                    Value::Entity { index, spawn_tick } => {
+                        self.resolve_entity(name, index, spawn_tick)
+                    }
                     _ => Err(DeserializeError::TypeMismatch {
                         field: name.to_owned(),
                         expected: "Entity".into(),
@@ -280,16 +335,16 @@ impl<'w> DeserializeContext<'w> {
     }
 
     /// Read an optional entity reference, applying the remap table.
+    ///
+    /// An unmapped (out-of-set) reference resolves to `None` rather than a
+    /// fabricated, dangling handle.
     pub fn read_optional_entity(&mut self, name: &str) -> Result<Option<Entity>, DeserializeError> {
         let val = self.read_field(name)?;
         match val {
             Value::Null => Ok(None),
-            Value::Entity { index, spawn_tick } => Ok(Some(
-                self.entity_map
-                    .get(&(index, spawn_tick))
-                    .copied()
-                    .unwrap_or(Entity::new(index, spawn_tick)),
-            )),
+            Value::Entity { index, spawn_tick } => {
+                Ok(self.entity_map.get(&(index, spawn_tick)).copied())
+            }
             _ => Err(DeserializeError::TypeMismatch {
                 field: name.to_owned(),
                 expected: "Entity or Null".into(),
@@ -320,18 +375,33 @@ impl<'w> DeserializeContext<'w> {
                 Ok(arc)
             }
             Value::ArcRef(id) => {
-                let any_arc = self
-                    .arc_cache
+                if let Some(any_arc) = self.arc_cache.get(&id) {
+                    let typed = any_arc.clone().downcast::<T>().map_err(|_| {
+                        DeserializeError::TypeMismatch {
+                            field: name.to_owned(),
+                            expected: std::any::type_name::<T>().to_owned(),
+                            found: "Arc of different type".into(),
+                        }
+                    })?;
+                    return Ok(typed);
+                }
+                // Not yet materialized as a typed Arc — the original `ArcValue`
+                // was on a skipped/earlier component. Deserialize the raw inner
+                // recorded by `prescan_arc_values` as `T` here (we know the type
+                // at this site), then cache it so further `ArcRef`s share it.
+                let inner = self
+                    .arc_raw
                     .get(&id)
-                    .ok_or(DeserializeError::InvalidArcRef { id })?;
-                let typed = any_arc.clone().downcast::<T>().map_err(|_| {
-                    DeserializeError::TypeMismatch {
-                        field: name.to_owned(),
-                        expected: std::any::type_name::<T>().to_owned(),
-                        found: "Arc of different type".into(),
-                    }
+                    .ok_or(DeserializeError::InvalidArcRef { id })?
+                    .clone();
+                let data: T = value::from_value(inner).map_err(|e| {
+                    DeserializeError::FormatError(format!(
+                        "failed to deserialize shared Arc inner for field '{name}': {e}"
+                    ))
                 })?;
-                Ok(typed)
+                let arc = Arc::new(data);
+                self.arc_cache.insert(id, arc.clone());
+                Ok(arc)
             }
             _ => {
                 // Fallback: try to deserialize as a plain value and wrap in Arc
@@ -346,5 +416,67 @@ impl<'w> DeserializeContext<'w> {
     pub fn end_struct(&mut self) -> Result<(), DeserializeError> {
         self.fields.clear();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn arc_ref_resolves_when_value_was_on_skipped_component() {
+        // The original `ArcValue` lives on a component we never deserialize
+        // (unknown type → skipped). A later registered component references it
+        // via `ArcRef`. After pre-scanning, the ref must still resolve.
+        let mut world = World::new();
+        let mut ctx = DeserializeContext::new(&mut world);
+
+        let skipped = Value::Map(vec![(
+            "shared".to_string(),
+            Value::ArcValue {
+                id: 7,
+                inner: Box::new(Value::U64(42)),
+            },
+        )]);
+        ctx.prescan_arc_values(&skipped);
+
+        let registered = Value::Map(vec![("shared".to_string(), Value::ArcRef(7))]);
+        ctx.load_data(&registered).unwrap();
+        let arc: Arc<u64> = ctx.read_arc("shared").unwrap();
+        assert_eq!(*arc, 42);
+    }
+
+    #[test]
+    fn two_arc_refs_to_skipped_value_share_one_arc() {
+        let mut world = World::new();
+        let mut ctx = DeserializeContext::new(&mut world);
+
+        ctx.prescan_arc_values(&Value::ArcValue {
+            id: 3,
+            inner: Box::new(Value::U64(100)),
+        });
+
+        ctx.load_data(&Value::Map(vec![("a".to_string(), Value::ArcRef(3))]))
+            .unwrap();
+        let first: Arc<u64> = ctx.read_arc("a").unwrap();
+
+        ctx.load_data(&Value::Map(vec![("b".to_string(), Value::ArcRef(3))]))
+            .unwrap();
+        let second: Arc<u64> = ctx.read_arc("b").unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second), "ArcRefs must share one Arc");
+    }
+
+    #[test]
+    fn unknown_arc_ref_still_errors() {
+        let mut world = World::new();
+        let mut ctx = DeserializeContext::new(&mut world);
+        ctx.load_data(&Value::Map(vec![("x".to_string(), Value::ArcRef(99))]))
+            .unwrap();
+        let res: Result<Arc<u64>, _> = ctx.read_arc("x");
+        assert!(matches!(
+            res,
+            Err(DeserializeError::InvalidArcRef { id: 99 })
+        ));
     }
 }

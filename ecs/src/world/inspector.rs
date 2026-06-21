@@ -105,7 +105,6 @@ impl World {
     /// Extracts a type-erased clone of a component by name from an entity.
     ///
     /// Returns `None` if the component is not present or the name is unknown.
-    #[cfg_attr(not(feature = "inspector"), allow(dead_code))]
     pub(crate) fn extract_by_name(
         &self,
         entity: Entity,
@@ -117,7 +116,6 @@ impl World {
 
     /// Inserts a type-erased component from a [`ComponentBag`](crate::prefab::ComponentBag)
     /// onto an entity, consuming the bag.
-    #[cfg_attr(not(feature = "inspector"), allow(dead_code))]
     pub(crate) fn insert_bag(&mut self, entity: Entity, bag: Box<dyn crate::prefab::ComponentBag>) {
         bag.consume_into(self, entity);
     }
@@ -154,6 +152,7 @@ impl World {
                 type_name: serialized.type_name.clone(),
             })?;
         let mut ctx = crate::serialize::DeserializeContext::new(self);
+        ctx.set_current_component(&serialized.type_name);
         deser_fn(entity, &serialized.data, &mut ctx)
     }
 
@@ -246,6 +245,32 @@ impl World {
     /// [`register_inspector`](World::register_inspector) or
     /// [`register_inspector_default`](World::register_inspector_default).
     ///
+    /// Collects all entities in the subtree rooted at `root` via a breadth-first
+    /// walk over [`Children`](crate::Children), in BFS order (index 0 = root).
+    ///
+    /// Deduplicates with a visited set so a malformed hierarchy (an entity
+    /// appearing in multiple `Children` lists, or a cycle from manual edits)
+    /// yields each entity at most once instead of being collected repeatedly or
+    /// recursing without bound.
+    fn collect_subtree_bfs(&self, root: Entity) -> Vec<Entity> {
+        let mut order = vec![root];
+        let mut visited: std::collections::HashSet<Entity> = std::collections::HashSet::new();
+        visited.insert(root);
+        let mut i = 0;
+        while i < order.len() {
+            let entity = order[i];
+            if let Some(children) = self.get::<crate::Children>(entity) {
+                for &child in &children.0 {
+                    if visited.insert(child) {
+                        order.push(child);
+                    }
+                }
+            }
+            i += 1;
+        }
+        order
+    }
+
     /// Does **not** traverse the hierarchy or remap entity references.
     /// For hierarchy-aware cloning, use [`clone_entity_tree`](World::clone_entity_tree).
     ///
@@ -293,15 +318,7 @@ impl World {
         }
 
         // 1. Collect all entities in subtree via Children (BFS)
-        let mut old_entities = vec![root];
-        let mut i = 0;
-        while i < old_entities.len() {
-            let entity = old_entities[i];
-            if let Some(children) = self.get::<crate::Children>(entity) {
-                old_entities.extend(children.0.iter().copied());
-            }
-            i += 1;
-        }
+        let old_entities = self.collect_subtree_bfs(root);
 
         // 2. Spawn new entities and build old->new mapping
         let mut mapping = HashMap::with_capacity(old_entities.len());
@@ -352,15 +369,7 @@ impl World {
         }
 
         // 1. BFS walk via Children to collect all entities in subtree
-        let mut old_entities = vec![root];
-        let mut i = 0;
-        while i < old_entities.len() {
-            let entity = old_entities[i];
-            if let Some(children) = self.get::<crate::Children>(entity) {
-                old_entities.extend(children.0.iter().copied());
-            }
-            i += 1;
-        }
+        let old_entities = self.collect_subtree_bfs(root);
 
         // 2. Collect extract_fns
         let extract_fns: Vec<_> = self.iter_meta().filter_map(|m| m.extract_fn).collect();
@@ -400,15 +409,7 @@ impl World {
         }
 
         // 1. BFS walk via Children to collect all entities in subtree
-        let mut old_entities = vec![root];
-        let mut i = 0;
-        while i < old_entities.len() {
-            let entity = old_entities[i];
-            if let Some(children) = self.get::<crate::Children>(entity) {
-                old_entities.extend(children.0.iter().copied());
-            }
-            i += 1;
-        }
+        let old_entities = self.collect_subtree_bfs(root);
 
         // 2. Collect serialize_fns
         let serialize_fns: Vec<SerializeComponentFn> =
@@ -481,11 +482,22 @@ impl World {
         let mut ctx = crate::serialize::DeserializeContext::new(self);
         ctx.set_entity_map(entity_map);
 
+        // 5b. Pre-scan EVERY component's data (including those whose type is
+        // unknown/skipped) to record each shared Arc's raw inner. This lets an
+        // `ArcRef` on a registered component resolve even when the original
+        // `ArcValue` lived on a component that gets skipped below.
+        for se in &prefab.entities {
+            for comp in &se.components {
+                ctx.prescan_arc_values(&comp.data);
+            }
+        }
+
         // 6. For each entity, deserialize components
         for (i, se) in prefab.entities.iter().enumerate() {
             let entity = new_entities[i];
             for comp in &se.components {
                 if let Some(&deser_fn) = deserialize_fns.get(comp.type_name.as_str()) {
+                    ctx.set_current_component(&comp.type_name);
                     match deser_fn(entity, &comp.data, &mut ctx) {
                         Ok(()) => {}
                         Err(crate::serialize::DeserializeError::NotDeserializable { .. }) => {

@@ -212,6 +212,53 @@ fn resource_mut_modify() {
 }
 
 #[test]
+fn parallel_resources_opposite_lock_order_no_deadlock() {
+    // Two threads acquire the same two resources in OPPOSITE declaration order.
+    // Because `acquire_sorted` takes locks in a global TypeId order, this cannot
+    // deadlock. (Without sorted acquisition this test would hang.)
+    use crate::query::access::AccessSet;
+    use crate::{Res, ResMut};
+
+    struct ResA;
+    struct ResB;
+
+    let mut world = World::new();
+    world.insert_resource(ResA);
+    world.insert_resource(ResB);
+    let world = std::sync::Arc::new(world);
+
+    let ab = <(ResMut<ResA>, ResMut<ResB>)>::access_infos();
+    let ba = <(ResMut<ResB>, ResMut<ResA>)>::access_infos();
+    // A read/write mix in opposite order too.
+    let ab_mixed = <(Res<ResA>, ResMut<ResB>)>::access_infos();
+
+    std::thread::scope(|s| {
+        let w = world.clone();
+        s.spawn(move || {
+            for _ in 0..3000 {
+                let g = w.acquire_sorted(&ab);
+                drop(g);
+            }
+        });
+        let w = world.clone();
+        s.spawn(move || {
+            for _ in 0..3000 {
+                let g = w.acquire_sorted(&ba);
+                drop(g);
+            }
+        });
+        let w = world.clone();
+        s.spawn(move || {
+            for _ in 0..3000 {
+                let g = w.acquire_sorted(&ab_mixed);
+                drop(g);
+            }
+        });
+    });
+    // Reaching here means no deadlock and no panic-on-contention.
+}
+
+#[test]
 fn entity_recycling_invalidates_components() {
     let mut world = World::new();
     world.register_component::<Position>();
@@ -219,12 +266,18 @@ fn entity_recycling_invalidates_components() {
     world.insert(old, Position { x: 1.0, y: 2.0 }).unwrap();
 
     world.despawn(old);
-    world.advance_tick(); // Advance tick so recycled slot gets a different spawn_tick
+    // No advance_tick(): the per-slot generation alone must make the recycled
+    // handle distinct from the old one (ABA-safe within the same tick).
     let new = world.spawn();
 
-    // Same index, different spawn tick
+    // Same index, different generation.
     assert_eq!(new.index(), old.index());
     assert_ne!(new.spawn_tick(), old.spawn_tick());
+    assert_ne!(new, old);
+
+    // The stale handle must report dead and must not see the new entity.
+    assert!(!world.is_alive(old));
+    assert!(world.is_alive(new));
 
     // New entity should not have old entity's components
     assert!(world.get::<Position>(new).is_none());

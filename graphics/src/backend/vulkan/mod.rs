@@ -14,6 +14,7 @@ pub mod layout;
 mod pipeline;
 pub mod swapchain;
 
+use std::mem::ManuallyDrop;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -130,9 +131,26 @@ pub struct VulkanBackend {
     /// Graphics queue family index.
     graphics_queue_family: u32,
     /// Memory allocator (wrapped in Arc for sharing with GPU resource Drop impls).
-    allocator: Arc<Mutex<Allocator>>,
+    ///
+    /// Wrapped in `ManuallyDrop` so it can be dropped explicitly in
+    /// [`Drop::drop`] *before* the logical device is destroyed — gpu-allocator
+    /// frees its pooled memory blocks using the device when the `Allocator` is
+    /// dropped, which would be UB against an already-destroyed device.
+    allocator: ManuallyDrop<Arc<Mutex<Allocator>>>,
     /// Command pool for graphics operations.
+    ///
+    /// INVARIANT: Vulkan requires the pool (and recording into its buffers) to
+    /// be externally synchronized. All users — `execute_graph`, `write_texture`,
+    /// swapchain present, and `advance_frame` — run on the single render thread
+    /// that drives `&mut FrameSchedule`, so accesses are serialized by that
+    /// ownership. If GPU submission/upload is ever moved off that thread (e.g.
+    /// async texture uploads), this pool must become per-thread/per-frame or be
+    /// guarded by a mutex, otherwise concurrent alloc/free/reset/record is UB.
     command_pool: vk::CommandPool,
+    /// Per-frame swapchain synchronization, set on `acquire_next_image` and
+    /// consumed by the render submit that writes the swapchain image so that
+    /// submit waits on `image_available` and signals `image_render_finished`.
+    swapchain_sync: Mutex<SwapchainSync>,
     /// Whether validation layers are enabled.
     #[allow(dead_code)]
     validation_enabled: bool,
@@ -233,8 +251,9 @@ impl VulkanBackend {
             device,
             graphics_queue,
             graphics_queue_family,
-            allocator,
+            allocator: ManuallyDrop::new(allocator),
             command_pool,
+            swapchain_sync: Mutex::new(SwapchainSync::default()),
             validation_enabled,
             dynamic_rendering,
             surface_loader,
@@ -297,6 +316,45 @@ impl VulkanBackend {
         &self.allocator
     }
 
+    /// Registers this frame's swapchain acquire/render-done semaphores.
+    ///
+    /// Called by `acquire_next_image`. The render submit that writes the
+    /// swapchain image (detected in `execute_graph`) consumes these to wait on
+    /// `image_available` and signal `image_render_finished`.
+    pub(crate) fn begin_swapchain_frame(
+        &self,
+        image_available: vk::Semaphore,
+        image_render_finished: vk::Semaphore,
+    ) {
+        let mut sync = self.swapchain_sync.lock();
+        sync.image_available = Some(image_available);
+        sync.image_render_finished = Some(image_render_finished);
+        sync.consumed = false;
+    }
+
+    /// If a swapchain acquire is pending and not yet consumed, returns the
+    /// `(wait_on_image_available, signal_image_render_finished)` semaphore pair
+    /// and marks the frame consumed. Returns `None` otherwise.
+    pub(crate) fn take_swapchain_render_sync(&self) -> Option<(vk::Semaphore, vk::Semaphore)> {
+        let mut sync = self.swapchain_sync.lock();
+        if sync.consumed {
+            return None;
+        }
+        match (sync.image_available.take(), sync.image_render_finished) {
+            (Some(ia), Some(irf)) => {
+                sync.consumed = true;
+                Some((ia, irf))
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether the swapchain image was written (and `image_available` consumed)
+    /// by a render submit this frame. Used by present to pick its wait semaphore.
+    pub(crate) fn swapchain_render_consumed(&self) -> bool {
+        self.swapchain_sync.lock().consumed
+    }
+
     /// Advance to the next frame.
     ///
     /// Frees command buffers from the oldest frame slot, advances the layout
@@ -329,7 +387,17 @@ impl VulkanBackend {
         self.current_slot
             .store((current + 1) % MAX_FRAMES_IN_FLIGHT, Ordering::SeqCst);
 
-        // Advance layout tracker to new frame (resets layout state)
+        // Advance layout tracker to new frame. This resets tracked layouts to
+        // UNDEFINED, so every texture's first use next frame emits an
+        // oldLayout=UNDEFINED transition (contents may be discarded).
+        //
+        // LIMITATION: this assumes all tracked textures are *transient* — fully
+        // written/cleared each frame (the only case the engine currently uses).
+        // A texture whose contents must persist across frames (temporal /
+        // history buffer) would be invalidated. Supporting those requires
+        // distinguishing persistent textures and preserving their layout across
+        // frames (and keying the tracker on a stable id rather than the raw
+        // vk::Image handle, which can be reused after destruction).
         self.layout_tracker.lock().advance_frame();
 
         // Reset the oldest slot's descriptor pool — safe because the fence wait
@@ -428,6 +496,35 @@ impl VulkanBackend {
     }
 }
 
+/// Returns whether any pass in the graph renders to the swapchain (surface)
+/// image. Such a graph's submit must be synchronized against acquire/present.
+fn graph_writes_swapchain(graph: &RenderGraph) -> bool {
+    graph.passes().iter().any(|pass| {
+        pass.as_graphics()
+            .and_then(|g| g.render_targets())
+            .is_some_and(|targets| {
+                targets
+                    .color_attachments
+                    .iter()
+                    .any(|attachment| matches!(attachment.target, RenderTarget::Surface { .. }))
+            })
+    })
+}
+
+/// Per-frame swapchain synchronization handoff between `acquire_next_image`,
+/// the render submit (in `execute_graph`), and present.
+#[derive(Default)]
+struct SwapchainSync {
+    /// Signaled by acquire; the swapchain-writing submit waits on it. `None`
+    /// once consumed.
+    image_available: Option<vk::Semaphore>,
+    /// Signaled by the swapchain-writing submit; present waits on it.
+    image_render_finished: Option<vk::Semaphore>,
+    /// Whether a render submit this frame consumed `image_available` (i.e. wrote
+    /// the swapchain image). Present uses this to pick its wait semaphore.
+    consumed: bool,
+}
+
 impl Drop for VulkanBackend {
     fn drop(&mut self) {
         unsafe {
@@ -450,9 +547,12 @@ impl Drop for VulkanBackend {
             // Destroy command pool
             self.device.destroy_command_pool(self.command_pool, None);
 
-            // Drop allocator before device
-            // The allocator is behind a Mutex, so we need to take it
-            // This happens automatically when VulkanBackend is dropped
+            // Drop the allocator BEFORE destroying the device. gpu-allocator's
+            // `Allocator::drop` frees its pooled memory blocks using the device,
+            // so it must run while the device is still valid. Struct fields drop
+            // *after* this method returns, so we drop it explicitly here.
+            // SAFETY: `self.allocator` is never used again after this point.
+            ManuallyDrop::drop(&mut self.allocator);
 
             // Destroy logical device
             self.device.destroy_device(None);
@@ -1031,12 +1131,20 @@ impl VulkanBackend {
     ///
     /// # Async Behavior
     ///
-    /// - If `signal_fence` is provided: Returns immediately after submission (async).
-    ///   The caller can wait on the fence using `wait_fence()` or poll with `is_fence_signaled()`.
-    ///   Command buffers are queued for deferred destruction after the GPU finishes.
-    /// - If `signal_fence` is `None`: Blocks until GPU completes (sync, for backwards compatibility).
+    /// This always returns immediately after `vkQueueSubmit` — it does **not**
+    /// block on GPU completion in either case.
     ///
-    /// For true async rendering with multiple frames in flight, always provide a fence.
+    /// - If `signal_fence` is provided: the submission signals that fence; the
+    ///   caller waits/polls it. Command buffers are queued for deferred freeing
+    ///   after the GPU finishes (per frame-in-flight slot).
+    /// - If `signal_fence` is `None`: submitted with a null fence. GPU lifetime
+    ///   of referenced resources is still guaranteed because the `RenderGraph`
+    ///   holds `Arc`s to them until the slot's frame fence is waited in
+    ///   [`FramePipeline::begin_frame`](crate::pipeline::FramePipeline::begin_frame).
+    ///
+    /// Cross-graph ordering is enforced via the GPU semaphores in
+    /// `wait_semaphores` / `signal_semaphores` (built by the scheduler from the
+    /// dependency graph).
     pub fn execute_graph(
         &self,
         graph: &RenderGraph,
@@ -1093,7 +1201,7 @@ impl VulkanBackend {
         })?;
 
         // Extract raw Vulkan semaphore handles
-        let vk_wait_semaphores: Vec<vk::Semaphore> = wait_semaphores
+        let mut vk_wait_semaphores: Vec<vk::Semaphore> = wait_semaphores
             .iter()
             .filter_map(|s| {
                 if let GpuSemaphore::Vulkan { semaphore, .. } = s {
@@ -1104,12 +1212,12 @@ impl VulkanBackend {
             })
             .collect();
 
-        let wait_stage_masks: Vec<vk::PipelineStageFlags> = vk_wait_semaphores
+        let mut wait_stage_masks: Vec<vk::PipelineStageFlags> = vk_wait_semaphores
             .iter()
             .map(|_| vk::PipelineStageFlags::ALL_COMMANDS)
             .collect();
 
-        let vk_signal_semaphores: Vec<vk::Semaphore> = signal_semaphores
+        let mut vk_signal_semaphores: Vec<vk::Semaphore> = signal_semaphores
             .iter()
             .filter_map(|s| {
                 if let GpuSemaphore::Vulkan { semaphore, .. } = s {
@@ -1119,6 +1227,19 @@ impl VulkanBackend {
                 }
             })
             .collect();
+
+        // If this graph writes the acquired swapchain image, this submit must
+        // wait on `image_available` (so it does not write the image before the
+        // presentation engine releases it) and signal `image_render_finished`
+        // (so present transitions/presents only after rendering completes).
+        if graph_writes_swapchain(graph)
+            && let Some((image_available, image_render_finished)) =
+                self.take_swapchain_render_sync()
+        {
+            vk_wait_semaphores.push(image_available);
+            wait_stage_masks.push(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT);
+            vk_signal_semaphores.push(image_render_finished);
+        }
 
         // Get fence to signal
         let fence = signal_fence.and_then(|f| {

@@ -48,6 +48,14 @@ pub enum DeserializeError {
     FormatError(String),
     /// Arc reference ID not found in the deduplication cache.
     InvalidArcRef { id: u32 },
+    /// An entity reference pointed outside the deserialized set and could not
+    /// be remapped. Fabricating a handle from the source indices would alias an
+    /// unrelated or dead entity, so this is rejected instead.
+    UnmappedEntityReference {
+        field: String,
+        index: u32,
+        spawn_tick: u64,
+    },
 }
 
 impl fmt::Display for DeserializeError {
@@ -78,6 +86,17 @@ impl fmt::Display for DeserializeError {
             Self::FormatError(msg) => write!(f, "format error: {msg}"),
             Self::InvalidArcRef { id } => {
                 write!(f, "invalid Arc reference id {id}")
+            }
+            Self::UnmappedEntityReference {
+                field,
+                index,
+                spawn_tick,
+            } => {
+                write!(
+                    f,
+                    "entity reference in field '{field}' ({index}@{spawn_tick}) points outside \
+                     the deserialized set and cannot be remapped"
+                )
             }
         }
     }

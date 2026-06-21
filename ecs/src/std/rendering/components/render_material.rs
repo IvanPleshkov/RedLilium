@@ -42,34 +42,7 @@ impl crate::Component for RenderMaterial {
         world: &crate::World,
         entity: crate::Entity,
     ) -> crate::InspectResult {
-        #[cfg(feature = "inspector")]
-        {
-            super::super::material_inspector::inspect_material_ui(world, entity, ui)
-        }
-        #[cfg(not(feature = "inspector"))]
-        {
-            let _ = (world, entity);
-            ui.horizontal(|ui| {
-                ui.label("material");
-                match self.bundle().label() {
-                    Some(label) => ui.label(format!("Material: {label}")),
-                    None => ui.weak("Material (unnamed)"),
-                };
-            });
-
-            // Show CPU-side material properties (read-only)
-            if let Some(cpu_inst) = &self.cpu_instance {
-                let cpu_mat = &cpu_inst.material;
-                for (i, binding_def) in cpu_mat.bindings.iter().enumerate() {
-                    if i >= cpu_inst.values.len() {
-                        break;
-                    }
-                    show_material_value_readonly(ui, &binding_def.name, &cpu_inst.values[i]);
-                }
-            }
-
-            None
-        }
+        super::super::material_inspector::inspect_material_ui(world, entity, ui)
     }
 
     fn collect_entities(&self, _collector: &mut Vec<crate::Entity>) {}
@@ -347,37 +320,4 @@ impl RenderMaterial {
             self.pass_materials = pass_materials;
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Read-only material value display (non-inspector builds)
-// ---------------------------------------------------------------------------
-
-/// Display a single material property value as a read-only label row.
-#[cfg(not(feature = "inspector"))]
-fn show_material_value_readonly(ui: &mut crate::egui::Ui, name: &str, value: &MaterialValue) {
-    ui.horizontal(|ui| {
-        ui.label(name);
-        match value {
-            MaterialValue::Float(v) => {
-                ui.weak(format!("{v:.3}"));
-            }
-            MaterialValue::Vec3(v) => {
-                ui.weak(format!("[{:.3}, {:.3}, {:.3}]", v[0], v[1], v[2]));
-            }
-            MaterialValue::Vec4(v) => {
-                ui.weak(format!(
-                    "[{:.3}, {:.3}, {:.3}, {:.3}]",
-                    v[0], v[1], v[2], v[3]
-                ));
-            }
-            MaterialValue::Texture(tex_ref) => {
-                let tex_name = match &tex_ref.texture {
-                    TextureSource::Named(n) => n.as_str(),
-                    TextureSource::Cpu(cpu_tex) => cpu_tex.name.as_deref().unwrap_or("<embedded>"),
-                };
-                ui.weak(tex_name);
-            }
-        }
-    });
 }
