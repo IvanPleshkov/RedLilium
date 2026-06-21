@@ -8,29 +8,29 @@ Hooks fire immediately during the mutation, before control returns to the caller
 
 ```rust
 // Fires when a component is added to an entity that didn't have it
-world.set_on_add::<Health>(|world, entity| {
+world.on_add::<Health>(|world, entity| {
     println!("Health added to {:?}", entity);
 });
 
 // Fires on every insertion (including overwrites)
-world.set_on_insert::<Health>(|world, entity| {
+world.on_insert::<Health>(|world, entity| {
     println!("Health inserted on {:?}", entity);
 });
 
 // Fires before a component is overwritten (old value still readable)
-world.set_on_replace::<Health>(|world, entity| {
+world.on_replace::<Health>(|world, entity| {
     let old = world.get::<Health>(entity).unwrap();
     println!("Replacing health: {}", old.current);
 });
 
 // Fires before a component is removed (value still readable)
-world.set_on_remove::<Health>(|world, entity| {
+world.on_remove::<Health>(|world, entity| {
     let hp = world.get::<Health>(entity).unwrap();
     println!("Removing health: {}", hp.current);
 });
 ```
 
-Only one hook per component per event type. Setting a new hook replaces the old one.
+Multiple hooks can be registered per component per event type. They fire in registration order.
 
 ## Deferred Observers
 
@@ -101,4 +101,4 @@ impl System for HealthBarSystem {
 | Deferred reaction after all commands | Observer |
 | System-readable list of affected entities | Reactive trigger |
 
-Hooks are simplest but limited to one per event. Observers support multiple handlers and cascading. Triggers integrate cleanly with the system scheduling model.
+Hooks are simplest and fire immediately. Observers support cascading. Triggers integrate cleanly with the system scheduling model.

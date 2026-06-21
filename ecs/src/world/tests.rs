@@ -614,7 +614,7 @@ fn on_add_fires_on_first_insert() {
     let mut world = World::new();
     world.register_component::<Position>();
     world.register_component::<Marker>();
-    world.set_on_add::<Position>(|world, entity| {
+    world.on_add::<Position>(|world, entity| {
         let _ = world.insert(entity, Marker(1));
     });
 
@@ -630,7 +630,7 @@ fn on_add_does_not_fire_on_replace() {
     let mut world = World::new();
     world.register_component::<Position>();
     world.register_component::<Marker>();
-    world.set_on_add::<Position>(|world, entity| {
+    world.on_add::<Position>(|world, entity| {
         let _ = world.insert(entity, Marker(1));
     });
 
@@ -649,7 +649,7 @@ fn on_insert_fires_on_every_insert() {
     let mut world = World::new();
     world.register_component::<Position>();
     world.register_component::<Marker>();
-    world.set_on_insert::<Position>(|world, entity| {
+    world.on_insert::<Position>(|world, entity| {
         let count = world.get::<Marker>(entity).map(|m| m.0).unwrap_or(0);
         let _ = world.insert(entity, Marker(count + 1));
     });
@@ -667,7 +667,7 @@ fn on_replace_fires_before_overwrite() {
     let mut world = World::new();
     world.register_component::<Position>();
     world.register_component::<Marker>();
-    world.set_on_replace::<Position>(|world, entity| {
+    world.on_replace::<Position>(|world, entity| {
         // Read old value and store it in Marker
         if let Some(pos) = world.get::<Position>(entity) {
             let _ = world.insert(entity, Marker(pos.x as u32));
@@ -693,7 +693,7 @@ fn on_remove_fires_before_removal() {
     let mut world = World::new();
     world.register_component::<Position>();
     world.register_component::<Marker>();
-    world.set_on_remove::<Position>(|world, entity| {
+    world.on_remove::<Position>(|world, entity| {
         // Read component before it's removed
         if let Some(pos) = world.get::<Position>(entity) {
             let _ = world.insert(entity, Marker(pos.x as u32));
@@ -715,7 +715,7 @@ fn on_remove_fires_during_despawn() {
     world.register_component::<Position>();
     world.insert_resource(0u32);
 
-    world.set_on_remove::<Position>(|world, entity| {
+    world.on_remove::<Position>(|world, entity| {
         if let Some(pos) = world.get::<Position>(entity) {
             let mut counter = world.resource_mut::<u32>();
             *counter = pos.x as u32;
@@ -736,7 +736,7 @@ fn on_remove_fires_during_despawn_batch() {
     world.register_component::<Health>();
     world.insert_resource(0u32);
 
-    world.set_on_remove::<Health>(|world, _entity| {
+    world.on_remove::<Health>(|world, _entity| {
         let mut counter = world.resource_mut::<u32>();
         *counter += 1;
     });
@@ -757,7 +757,7 @@ fn on_remove_entity_still_alive_during_despawn() {
     world.register_component::<Health>();
     world.insert_resource(false);
 
-    world.set_on_remove::<Health>(|world, entity| {
+    world.on_remove::<Health>(|world, entity| {
         let mut was_alive = world.resource_mut::<bool>();
         *was_alive = world.is_alive(entity);
     });
@@ -776,7 +776,7 @@ fn hooks_fire_during_insert_batch() {
     world.register_component::<Position>();
     world.register_component::<Marker>();
 
-    world.set_on_add::<Position>(|world, entity| {
+    world.on_add::<Position>(|world, entity| {
         let _ = world.insert(entity, Marker(1));
     });
 
@@ -802,7 +802,7 @@ fn hooks_fire_during_insert_batch_with_tick_tracking() {
     world.register_component::<Marker>();
     world.advance_tick(); // tick = 1
 
-    world.set_on_add::<Position>(|world, entity| {
+    world.on_add::<Position>(|world, entity| {
         let _ = world.insert(entity, Marker(1));
     });
 
@@ -825,7 +825,7 @@ fn hooks_fire_during_remove_batch() {
     world.register_component::<Position>();
     world.register_component::<Marker>();
 
-    world.set_on_remove::<Position>(|world, entity| {
+    world.on_remove::<Position>(|world, entity| {
         if let Some(pos) = world.get::<Position>(entity) {
             let _ = world.insert(entity, Marker(pos.x as u32));
         }
@@ -857,7 +857,7 @@ fn on_add_required_component_pattern() {
     world.register_component::<Position>();
     world.register_component::<Velocity>();
 
-    world.set_on_add::<Position>(|world, entity| {
+    world.on_add::<Position>(|world, entity| {
         if world.get::<Velocity>(entity).is_none() {
             let _ = world.insert(entity, Velocity { x: 0.0, y: 0.0 });
         }
@@ -879,10 +879,10 @@ fn multiple_hooks_on_same_component() {
     world.register_component::<Marker>();
     world.insert_resource(0u32);
 
-    world.set_on_add::<Position>(|world, entity| {
+    world.on_add::<Position>(|world, entity| {
         let _ = world.insert(entity, Marker(1));
     });
-    world.set_on_insert::<Position>(|world, _entity| {
+    world.on_insert::<Position>(|world, _entity| {
         let mut counter = world.resource_mut::<u32>();
         *counter += 1;
     });
@@ -907,7 +907,7 @@ fn hooks_via_commands() {
     let mut world = World::new();
     world.register_component::<Position>();
     world.register_component::<Marker>();
-    world.set_on_add::<Position>(|world, entity| {
+    world.on_add::<Position>(|world, entity| {
         let _ = world.insert(entity, Marker(99));
     });
 
@@ -923,6 +923,48 @@ fn hooks_via_commands() {
 
     // Hook should have fired when command was applied
     assert_eq!(world.get::<Marker>(entity), Some(&Marker(99)));
+}
+
+#[test]
+fn multiple_on_add_hooks_fire_in_order() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.insert_resource::<Vec<u32>>(Vec::new());
+
+    world.on_add::<Position>(|world, _entity| {
+        world.resource_mut::<Vec<u32>>().push(1);
+    });
+    world.on_add::<Position>(|world, _entity| {
+        world.resource_mut::<Vec<u32>>().push(2);
+    });
+    world.on_add::<Position>(|world, _entity| {
+        world.resource_mut::<Vec<u32>>().push(3);
+    });
+
+    let entity = world.spawn();
+    world.insert(entity, Position { x: 0.0, y: 0.0 }).unwrap();
+
+    assert_eq!(*world.resource::<Vec<u32>>(), vec![1, 2, 3]);
+}
+
+#[test]
+fn multiple_on_remove_hooks_fire_in_order() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.insert_resource::<Vec<u32>>(Vec::new());
+
+    world.on_remove::<Position>(|world, _entity| {
+        world.resource_mut::<Vec<u32>>().push(10);
+    });
+    world.on_remove::<Position>(|world, _entity| {
+        world.resource_mut::<Vec<u32>>().push(20);
+    });
+
+    let entity = world.spawn();
+    world.insert(entity, Position { x: 0.0, y: 0.0 }).unwrap();
+    let _ = world.remove::<Position>(entity);
+
+    assert_eq!(*world.resource::<Vec<u32>>(), vec![10, 20]);
 }
 
 #[test]
@@ -950,11 +992,11 @@ fn despawn_multiple_components_hooks() {
     world.register_component::<Health>();
     world.insert_resource(0u32);
 
-    world.set_on_remove::<Position>(|world, _entity| {
+    world.on_remove::<Position>(|world, _entity| {
         let mut c = world.resource_mut::<u32>();
         *c += 10;
     });
-    world.set_on_remove::<Health>(|world, _entity| {
+    world.on_remove::<Health>(|world, _entity| {
         let mut c = world.resource_mut::<u32>();
         *c += 1;
     });
@@ -1041,7 +1083,7 @@ fn required_components_coexist_with_on_add_hook() {
     world.register_component::<Marker>();
     world.register_required::<ReqA, ReqB>();
 
-    world.set_on_add::<ReqA>(|world, entity| {
+    world.on_add::<ReqA>(|world, entity| {
         let _ = world.insert(entity, Marker(99));
     });
 
@@ -1599,7 +1641,7 @@ fn bundle_hooks_see_all_components() {
     world.register_component::<Health>();
     world.register_component::<Marker>();
 
-    world.set_on_add::<Position>(|world, entity| {
+    world.on_add::<Position>(|world, entity| {
         // Health should already be present because the bundle inserts both
         // before firing any hooks.
         let has_health = world.get::<Health>(entity).is_some();
@@ -1700,7 +1742,7 @@ fn transaction_hooks_fire_after_all_mutations() {
     world.register_component::<Health>();
     world.register_component::<Marker>();
 
-    world.set_on_add::<Position>(|world, entity| {
+    world.on_add::<Position>(|world, entity| {
         let has_health = world.get::<Health>(entity).is_some();
         let _ = world.insert(entity, Marker(has_health as u32));
     });

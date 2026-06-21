@@ -162,6 +162,47 @@ pub(crate) struct ComponentMeta {
 /// | `on_remove` | Before component is removed | Cleanup resources |
 pub type ComponentHookFn = fn(&mut crate::world::World, crate::entity::Entity);
 
+/// A collection of lifecycle hooks for a single event on a component type.
+///
+/// Supports multiple hooks per event, fired in registration order.
+/// Uses `SmallVec<[_; 1]>` to avoid heap allocation in the common case
+/// of zero or one hook.
+#[derive(Clone, Default)]
+pub(crate) struct ComponentHooks {
+    hooks: SmallVec<[ComponentHookFn; 1]>,
+}
+
+impl ComponentHooks {
+    /// Creates an empty hook list.
+    pub fn new() -> Self {
+        Self {
+            hooks: SmallVec::new(),
+        }
+    }
+
+    /// Appends a hook. Multiple hooks fire in registration order.
+    pub fn push(&mut self, hook: ComponentHookFn) {
+        self.hooks.push(hook);
+    }
+
+    /// Returns `true` if no hooks are registered.
+    pub fn is_empty(&self) -> bool {
+        self.hooks.is_empty()
+    }
+
+    /// Returns an iterator over the registered hooks.
+    pub fn iter(&self) -> impl Iterator<Item = ComponentHookFn> + '_ {
+        self.hooks.iter().copied()
+    }
+
+    /// Fires all registered hooks in order.
+    pub fn fire(&self, world: &mut World, entity: Entity) {
+        for &hook in &self.hooks {
+            hook(world, entity);
+        }
+    }
+}
+
 /// Function that inserts a required component's default value on an entity
 /// if not already present.
 ///
@@ -490,14 +531,14 @@ pub(crate) struct ComponentStorage {
     /// Records of (entity_index, tick) for recently removed components.
     /// Cleared by [`World::clear_removed_tracking`](crate::World::clear_removed_tracking).
     removed_ticks: Vec<(u32, u64)>,
-    /// Hook called when a component is added to an entity for the first time.
-    pub(crate) on_add: Option<ComponentHookFn>,
-    /// Hook called on every insertion (both new addition and replacement).
-    pub(crate) on_insert: Option<ComponentHookFn>,
-    /// Hook called just before an existing component value is replaced.
-    pub(crate) on_replace: Option<ComponentHookFn>,
-    /// Hook called just before a component is removed from an entity.
-    pub(crate) on_remove: Option<ComponentHookFn>,
+    /// Hooks called when a component is added to an entity for the first time.
+    pub(crate) on_add: ComponentHooks,
+    /// Hooks called on every insertion (both new addition and replacement).
+    pub(crate) on_insert: ComponentHooks,
+    /// Hooks called just before an existing component value is replaced.
+    pub(crate) on_replace: ComponentHooks,
+    /// Hooks called just before a component is removed from an entity.
+    pub(crate) on_remove: ComponentHooks,
     /// Functions that insert required components when this component is first
     /// added to an entity. Each function checks for presence and inserts a
     /// default if absent.
@@ -513,10 +554,10 @@ impl ComponentStorage {
         Self {
             inner: Box::new(SparseSetInner::<T>::new()),
             removed_ticks: Vec::new(),
-            on_add: None,
-            on_insert: None,
-            on_replace: None,
-            on_remove: None,
+            on_add: ComponentHooks::new(),
+            on_insert: ComponentHooks::new(),
+            on_replace: ComponentHooks::new(),
+            on_remove: ComponentHooks::new(),
             required_components: SmallVec::new(),
             meta: None,
         }

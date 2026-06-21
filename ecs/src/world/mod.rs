@@ -203,7 +203,8 @@ impl World {
             .components
             .values_mut()
             .map(|lock| lock.get_mut())
-            .filter_map(|s| s.on_remove.filter(|_| s.contains_untyped(index)))
+            .filter(|s| !s.on_remove.is_empty() && s.contains_untyped(index))
+            .flat_map(|s| s.on_remove.iter())
             .collect();
 
         // Pass 2: fire hooks (entity still alive, components still readable).

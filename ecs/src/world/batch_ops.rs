@@ -106,11 +106,10 @@ impl World {
             let index = entity.index();
             for lock in self.components.values_mut() {
                 let storage = lock.get_mut();
-                if let Some(hook) = storage
-                    .on_remove
-                    .filter(|_| storage.contains_untyped(index))
-                {
-                    hooks.push((entity, hook));
+                if !storage.on_remove.is_empty() && storage.contains_untyped(index) {
+                    for hook in storage.on_remove.iter() {
+                        hooks.push((entity, hook));
+                    }
                 }
             }
         }
@@ -194,16 +193,16 @@ impl World {
         let tick = self.tick;
         let type_id = TypeId::of::<T>();
 
-        // Extract on_remove hook
+        // Extract on_remove hooks
         let on_remove = {
             let Some(storage) = self.storage_mut(&type_id) else {
                 return;
             };
-            storage.on_remove
+            storage.on_remove.clone()
         };
 
         // Fire on_remove hooks before removal
-        if let Some(hook) = on_remove {
+        if !on_remove.is_empty() {
             let with_component: Vec<Entity> = entities
                 .iter()
                 .copied()
@@ -213,7 +212,7 @@ impl World {
                 })
                 .collect();
             for entity in with_component {
-                hook(self, entity);
+                on_remove.fire(self, entity);
             }
         }
 

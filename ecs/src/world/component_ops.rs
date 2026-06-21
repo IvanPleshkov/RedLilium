@@ -7,7 +7,7 @@ use crate::component::Component;
 use crate::entity::{Entities, Entity};
 use crate::observer::{OnAdd, OnInsert, OnRemove};
 use crate::sparse_set::{
-    ComponentHookFn, ComponentMeta, ComponentStorage, Mut, RequiredComponentFn,
+    ComponentHooks, ComponentMeta, ComponentStorage, Mut, RequiredComponentFn,
 };
 
 use super::{World, WorldError, deserialize_component_fn, serialize_component_fn};
@@ -19,8 +19,8 @@ use super::{World, WorldError, deserialize_component_fn, serialize_component_fn}
 /// can insert all components first, then fire hooks when the entity is complete.
 pub(crate) struct InsertPending {
     pub(crate) was_new: bool,
-    pub(crate) on_add: Option<ComponentHookFn>,
-    pub(crate) on_insert: Option<ComponentHookFn>,
+    pub(crate) on_add: ComponentHooks,
+    pub(crate) on_insert: ComponentHooks,
     pub(crate) required: SmallVec<[RequiredComponentFn; 2]>,
     pub(crate) add_trigger_fn: Option<fn(&mut World, Entity)>,
     pub(crate) insert_trigger_fn: fn(&mut World, Entity),
@@ -292,16 +292,16 @@ impl World {
                 })?;
             (
                 storage.contains_untyped(entity.index()),
-                storage.on_add,
-                storage.on_insert,
-                storage.on_replace,
+                storage.on_add.clone(),
+                storage.on_insert.clone(),
+                storage.on_replace.clone(),
                 storage.required_components.clone(),
             )
         };
 
         // Fire on_replace BEFORE overwriting (old value still readable)
-        if had_component && let Some(hook) = on_replace {
-            hook(self, entity);
+        if had_component {
+            on_replace.fire(self, entity);
         }
 
         // Perform the actual insert (always tracked at current tick)
@@ -314,7 +314,11 @@ impl World {
 
         Ok(InsertPending {
             was_new: !had_component,
-            on_add: if !had_component { on_add } else { None },
+            on_add: if !had_component {
+                on_add
+            } else {
+                ComponentHooks::new()
+            },
             on_insert,
             required: if !had_component {
                 required
@@ -346,14 +350,10 @@ impl World {
             }
         }
         for d in pending {
-            if let Some(hook) = d.on_add {
-                hook(self, entity);
-            }
+            d.on_add.fire(self, entity);
         }
         for d in pending {
-            if let Some(hook) = d.on_insert {
-                hook(self, entity);
-            }
+            d.on_insert.fire(self, entity);
         }
         for d in pending {
             if let Some(trigger_fn) = d.add_trigger_fn {
@@ -423,7 +423,7 @@ impl World {
         let tick = self.tick;
         let type_id = TypeId::of::<T>();
 
-        // Check presence and extract hook
+        // Check presence and extract hooks
         let on_remove = {
             let Some(storage) = self.storage_mut(&type_id) else {
                 return Ok(None);
@@ -431,13 +431,11 @@ impl World {
             if !storage.contains_untyped(entity.index()) {
                 return Ok(None);
             }
-            storage.on_remove
+            storage.on_remove.clone()
         };
 
         // Fire on_remove BEFORE removal (value still readable)
-        if let Some(hook) = on_remove {
-            hook(self, entity);
-        }
+        on_remove.fire(self, entity);
 
         // Perform removal
         let Some(storage) = self.storage_mut(&type_id) else {

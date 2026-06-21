@@ -8,73 +8,85 @@ use super::World;
 impl World {
     // ---- Lifecycle hooks ----
 
-    /// Sets the `on_add` hook for component type `T`.
+    /// Adds an `on_add` hook for component type `T`.
     ///
     /// The hook fires after a component is inserted on an entity that
     /// did **not** previously have it. It does not fire on replacement.
     ///
+    /// Multiple hooks can be registered; they fire in registration order.
+    ///
     /// # Panics
     ///
     /// Panics if `T` has not been registered.
-    pub fn set_on_add<T: 'static>(&mut self, hook: ComponentHookFn) -> &mut Self {
+    pub fn on_add<T: 'static>(&mut self, hook: ComponentHookFn) -> &mut Self {
         self.components
             .get_mut(&std::any::TypeId::of::<T>())
             .expect("Component not registered")
             .get_mut()
-            .on_add = Some(hook);
+            .on_add
+            .push(hook);
         self
     }
 
-    /// Sets the `on_insert` hook for component type `T`.
+    /// Adds an `on_insert` hook for component type `T`.
     ///
     /// The hook fires after every insertion — both new additions and
     /// replacements of existing values.
     ///
+    /// Multiple hooks can be registered; they fire in registration order.
+    ///
     /// # Panics
     ///
     /// Panics if `T` has not been registered.
-    pub fn set_on_insert<T: 'static>(&mut self, hook: ComponentHookFn) -> &mut Self {
+    pub fn on_insert<T: 'static>(&mut self, hook: ComponentHookFn) -> &mut Self {
         self.components
             .get_mut(&std::any::TypeId::of::<T>())
             .expect("Component not registered")
             .get_mut()
-            .on_insert = Some(hook);
+            .on_insert
+            .push(hook);
         self
     }
 
-    /// Sets the `on_replace` hook for component type `T`.
+    /// Adds an `on_replace` hook for component type `T`.
     ///
     /// The hook fires just **before** an existing component value is
     /// overwritten by a new insertion. The old value is still readable
     /// via `world.get::<T>(entity)` inside the hook.
     ///
+    /// Multiple hooks can be registered; they fire in registration order.
+    ///
     /// # Panics
     ///
     /// Panics if `T` has not been registered.
-    pub fn set_on_replace<T: 'static>(&mut self, hook: ComponentHookFn) -> &mut Self {
+    pub fn on_replace<T: 'static>(&mut self, hook: ComponentHookFn) -> &mut Self {
         self.components
             .get_mut(&std::any::TypeId::of::<T>())
             .expect("Component not registered")
             .get_mut()
-            .on_replace = Some(hook);
+            .on_replace
+            .push(hook);
         self
     }
 
-    /// Sets the `on_remove` hook for component type `T`.
+    /// Adds an `on_remove` hook for component type `T`.
     ///
     /// The hook fires just **before** the component is removed from the
     /// entity (including during despawn). The value is still readable
     /// via `world.get::<T>(entity)` inside the hook.
     ///
+    /// Multiple hooks can be registered; they fire in registration order.
+    ///
     /// # Panics
     ///
     /// Panics if `T` has not been registered.
-    pub fn set_on_remove<T: 'static>(&mut self, hook: ComponentHookFn) -> &mut Self {
+    pub fn on_remove<T: 'static>(&mut self, hook: ComponentHookFn) -> &mut Self {
         self.components
             .get_mut(&std::any::TypeId::of::<T>())
             .expect("Component not registered")
             .get_mut()
-            .on_remove = Some(hook);
+            .on_remove
+            .push(hook);
         self
     }
 
@@ -116,7 +128,7 @@ impl World {
     ///
     /// **Note**: By the time the observer runs, the component has already
     /// been removed. For cleanup that requires reading the component value,
-    /// use [`set_on_remove`](World::set_on_remove) hooks instead.
+    /// use [`on_remove`](World::on_remove) hooks instead.
     pub fn observe_remove<T: 'static>(
         &mut self,
         handler: impl Fn(&mut World, Entity) + Send + Sync + 'static,
