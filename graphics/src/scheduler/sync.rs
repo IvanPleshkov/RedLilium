@@ -6,40 +6,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::backend::{GpuFence, GpuSemaphore};
+use crate::backend::GpuFence;
 use crate::instance::GraphicsInstance;
-
-/// GPU semaphore for synchronizing operations within a frame.
-///
-/// Wraps a backend-specific GPU semaphore handle. The semaphore is
-/// signaled when the associated graph completes execution, and waited
-/// on by graphs that depend on it.
-///
-/// Unlike fences, semaphores cannot be waited on from the CPU.
-#[derive(Debug)]
-pub struct Semaphore {
-    /// Unique identifier for debugging.
-    id: u64,
-    /// The actual GPU semaphore handle.
-    gpu_semaphore: GpuSemaphore,
-}
-
-impl Semaphore {
-    /// Create a new semaphore with the given ID and GPU handle.
-    pub(crate) fn new(id: u64, gpu_semaphore: GpuSemaphore) -> Self {
-        Self { id, gpu_semaphore }
-    }
-
-    /// Get the semaphore's unique ID (for debugging).
-    pub fn id(&self) -> u64 {
-        self.id
-    }
-
-    /// Get a reference to the underlying GPU semaphore.
-    pub(crate) fn gpu_semaphore(&self) -> &GpuSemaphore {
-        &self.gpu_semaphore
-    }
-}
 
 /// Status of a fence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,12 +234,6 @@ impl Default for Fence {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_semaphore_id() {
-        let sem = Semaphore::new(42, GpuSemaphore::Dummy);
-        assert_eq!(sem.id(), 42);
-    }
 
     #[test]
     fn test_fence_unsignaled() {

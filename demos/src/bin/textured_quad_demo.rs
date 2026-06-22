@@ -421,8 +421,7 @@ impl AppHandler for TexturedQuadDemo {
 
         graph.add_graphics_pass(render_pass);
 
-        let _handle = ctx.submit("main", graph, &[]);
-        ctx.finish(&[])
+        ctx.render(graph)
     }
 
     fn on_shutdown(&mut self, _ctx: &mut AppContext) {

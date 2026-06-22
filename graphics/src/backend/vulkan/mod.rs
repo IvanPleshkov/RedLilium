@@ -27,7 +27,7 @@ use crate::graph::{CompiledGraph, Pass, RenderGraph, RenderTarget};
 use crate::types::{BufferDescriptor, SamplerDescriptor, TextureDescriptor};
 use redlilium_core::profiling::profile_scope;
 
-use super::{GpuBuffer, GpuFence, GpuSampler, GpuSemaphore, GpuTexture};
+use super::{GpuBuffer, GpuFence, GpuSampler, GpuTexture};
 
 /// Maximum number of frames in flight for per-slot resource tracking.
 pub const MAX_FRAMES_IN_FLIGHT: usize = 3;
@@ -1034,18 +1034,6 @@ impl VulkanBackend {
         })
     }
 
-    /// Create a GPU semaphore for GPU-GPU synchronization.
-    pub fn create_semaphore(&self) -> GpuSemaphore {
-        let semaphore_info = vk::SemaphoreCreateInfo::default();
-        let semaphore = unsafe { self.device.create_semaphore(&semaphore_info, None) }
-            .expect("Failed to create Vulkan semaphore");
-
-        GpuSemaphore::Vulkan {
-            device: self.device.clone(),
-            semaphore,
-        }
-    }
-
     /// Create a fence for CPU-GPU synchronization.
     pub fn create_fence(&self, signaled: bool) -> GpuFence {
         let flags = if signaled {
@@ -1149,8 +1137,6 @@ impl VulkanBackend {
         &self,
         graph: &RenderGraph,
         compiled: &CompiledGraph,
-        wait_semaphores: &[&GpuSemaphore],
-        signal_semaphores: &[&GpuSemaphore],
         signal_fence: Option<&GpuFence>,
     ) -> Result<(), GraphicsError> {
         profile_scope!("vulkan_execute_graph");
@@ -1200,33 +1186,12 @@ impl VulkanBackend {
             GraphicsError::Internal(format!("Failed to end command buffer: {:?}", e))
         })?;
 
-        // Extract raw Vulkan semaphore handles
-        let mut vk_wait_semaphores: Vec<vk::Semaphore> = wait_semaphores
-            .iter()
-            .filter_map(|s| {
-                if let GpuSemaphore::Vulkan { semaphore, .. } = s {
-                    Some(*semaphore)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let mut wait_stage_masks: Vec<vk::PipelineStageFlags> = vk_wait_semaphores
-            .iter()
-            .map(|_| vk::PipelineStageFlags::ALL_COMMANDS)
-            .collect();
-
-        let mut vk_signal_semaphores: Vec<vk::Semaphore> = signal_semaphores
-            .iter()
-            .filter_map(|s| {
-                if let GpuSemaphore::Vulkan { semaphore, .. } = s {
-                    Some(*semaphore)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        // One render graph per frame: the only synchronization is the swapchain
+        // acquire/render-finished handshake below. There is no cross-graph
+        // semaphore ordering (a single submit per frame).
+        let mut vk_wait_semaphores: Vec<vk::Semaphore> = Vec::new();
+        let mut wait_stage_masks: Vec<vk::PipelineStageFlags> = Vec::new();
+        let mut vk_signal_semaphores: Vec<vk::Semaphore> = Vec::new();
 
         // If this graph writes the acquired swapchain image, this submit must
         // wait on `image_available` (so it does not write the image before the

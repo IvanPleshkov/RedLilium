@@ -184,8 +184,7 @@ impl WindowTestApp {
         );
         let _pass_handle = graph.add_graphics_pass(pass);
 
-        let graph_handle = schedule.submit(format!("frame_{}", self.frame_count), graph, &[]);
-        schedule.finish(&[graph_handle]);
+        schedule.render(graph);
         pipeline.end_frame(schedule);
 
         swapchain_texture.present();

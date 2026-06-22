@@ -1,8 +1,9 @@
-//! Frame scheduling and streaming graph submission.
+//! Per-frame render-graph execution.
 //!
-//! The scheduler provides streaming submission of render graphs to the GPU,
-//! allowing graphs to start executing as soon as they're ready while the CPU
-//! continues building subsequent graphs.
+//! Each frame builds and submits **exactly one** render graph. Cross-frame
+//! CPU/GPU overlap is provided by the frames-in-flight machinery in the
+//! pipeline, so there are no cross-graph dependencies or GPU semaphores —
+//! multi-pass work lives inside the single graph and is ordered by the compiler.
 //!
 //! # Architecture
 //!
@@ -11,17 +12,15 @@
 //! | Layer | Type | Purpose |
 //! |-------|------|---------|
 //! | Pipeline | [`FramePipeline`](crate::pipeline::FramePipeline) | Multiple frames in flight |
-//! | **Schedule** | [`FrameSchedule`] | Streaming graph submission (this module) |
-//! | Graph | [`RenderGraph`](crate::graph::RenderGraph) | Pass dependencies |
+//! | **Schedule** | [`FrameSchedule`] | Executes the frame's single graph (this module) |
+//! | Graph | [`RenderGraph`](crate::graph::RenderGraph) | Passes + their dependencies |
 //! | Pass | [`GraphicsPass`](crate::graph::GraphicsPass), etc. | Single GPU operation |
 //!
 //! For the full architecture documentation, see `docs/ARCHITECTURE.md`.
 //!
 //! # Module Contents
 //!
-//! - [`FrameSchedule`] - Manages streaming submission for a single frame
-//! - [`GraphHandle`] - Handle to a submitted graph, used for dependencies
-//! - [`Semaphore`] - GPU synchronization primitive for graph ordering
+//! - [`FrameSchedule`] - Executes the single render graph for one frame
 //! - [`Fence`] - CPU-GPU synchronization for frame completion
 //!
 //! # Example
@@ -30,25 +29,19 @@
 //! // FrameSchedule is created by FramePipeline::begin_frame()
 //! let mut schedule = pipeline.begin_frame();
 //!
-//! // Submit shadow graph immediately - GPU starts working
-//! let shadows = schedule.submit("shadows", shadow_graph, &[]);
+//! // Build the frame's single graph (it may contain many passes).
+//! let mut graph = schedule.acquire_graph();
+//! graph.add_graphics_pass(shadow_pass);
+//! graph.add_graphics_pass(main_pass);
 //!
-//! // Build and submit depth while GPU renders shadows
-//! let depth = schedule.submit("depth", depth_graph, &[]);
-//!
-//! // Main pass waits for both shadows and depth
-//! let main = schedule.submit("main", main_graph, &[shadows, depth]);
-//!
-//! // Present to screen (marks schedule as complete)
-//! schedule.present("present", post_graph, &[main]);
-//!
-//! // Return schedule to pipeline
+//! // Execute it (signals the frame fence), then hand back to the pipeline.
+//! schedule.render(graph);
 //! pipeline.end_frame(schedule);
 //! ```
 
 mod sync;
 
-pub use sync::{Fence, FenceStatus, Semaphore};
+pub use sync::{Fence, FenceStatus};
 
 use std::sync::Arc;
 
@@ -56,44 +49,6 @@ use crate::device::GraphicsDevice;
 use crate::graph::{RenderGraph, RenderGraphCompilationMode};
 use crate::resources::{RingAllocation, RingBuffer};
 use redlilium_core::profiling::profile_scope;
-
-/// Handle to a submitted graph in the frame schedule.
-///
-/// Used to declare dependencies between graphs. A graph can wait
-/// for multiple other graphs to complete before starting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct GraphHandle(u32);
-
-impl GraphHandle {
-    fn new(index: u32) -> Self {
-        Self(index)
-    }
-
-    fn index(self) -> usize {
-        self.0 as usize
-    }
-}
-
-/// Information about a submitted graph.
-pub(crate) struct SubmittedGraph {
-    /// Debug name for this graph.
-    name: String,
-    /// Semaphore signaled when this graph completes on GPU.
-    completion: Semaphore,
-    /// Handles of graphs this one waited for (for debugging/visualization).
-    #[allow(dead_code)]
-    waited_for: Vec<GraphHandle>,
-}
-
-impl std::fmt::Debug for SubmittedGraph {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SubmittedGraph")
-            .field("name", &self.name)
-            .field("completion", &self.completion)
-            .field("waited_for", &self.waited_for)
-            .finish()
-    }
-}
 
 /// Frame schedule for streaming graph submission.
 ///
@@ -130,13 +85,9 @@ impl std::fmt::Debug for SubmittedGraph {
 /// pipeline.end_frame(schedule);
 /// ```
 pub struct FrameSchedule {
-    /// Device for executing graphs.
+    /// Device for executing the graph.
     device: Arc<GraphicsDevice>,
-    /// Submitted graphs with their completion semaphores.
-    submitted: Vec<SubmittedGraph>,
-    /// Counter for generating semaphore IDs.
-    semaphore_counter: u64,
-    /// Fence signaled when frame completes (set by present()).
+    /// Fence signaled when this frame's single submit completes (set by `render`).
     fence: Option<Fence>,
     /// The frame slot index (for per-frame resource management).
     frame_slot: usize,
@@ -144,7 +95,8 @@ pub struct FrameSchedule {
     ring_buffer: Option<RingBuffer>,
     /// Pool of reusable render graphs (moved from FramePipeline each frame).
     graph_pool: Vec<RenderGraph>,
-    /// Graphs submitted this frame (for recycling in end_frame).
+    /// The graph executed this frame, kept for recycling in end_frame. Its `Arc`
+    /// references keep GPU resources alive until the slot's fence wait.
     submitted_graphs: Vec<RenderGraph>,
 }
 
@@ -153,8 +105,6 @@ impl std::fmt::Debug for FrameSchedule {
         f.debug_struct("FrameSchedule")
             .field("device", &self.device.name())
             .field("frame_slot", &self.frame_slot)
-            .field("submitted", &self.submitted)
-            .field("semaphore_counter", &self.semaphore_counter)
             .field("fence", &self.fence)
             .finish()
     }
@@ -172,8 +122,6 @@ impl FrameSchedule {
     ) -> Self {
         Self {
             device,
-            submitted: Vec::new(),
-            semaphore_counter: 0,
             fence: None,
             frame_slot,
             ring_buffer,
@@ -257,283 +205,48 @@ impl FrameSchedule {
         std::mem::take(&mut self.submitted_graphs)
     }
 
-    /// Take ownership of the submitted metadata (keeps semaphores alive per-slot).
-    pub(crate) fn take_submitted(&mut self) -> Vec<SubmittedGraph> {
-        std::mem::take(&mut self.submitted)
-    }
+    /// Execute the frame's single render graph and signal the frame fence.
+    ///
+    /// Exactly **one** render graph is submitted per frame. Cross-frame CPU/GPU
+    /// overlap is provided by the frames-in-flight machinery in the pipeline, so
+    /// there are no cross-graph dependencies or semaphores. The created fence is
+    /// signalled when this submit completes; the pipeline waits on it before
+    /// recycling the slot. The graph is kept for recycling — its `Arc`
+    /// references keep GPU resources alive until that fence wait.
+    ///
+    /// Takes ownership of the graph for pooling. Must be called exactly once,
+    /// before [`FramePipeline::end_frame`](crate::pipeline::FramePipeline::end_frame).
+    ///
+    /// # Panics
+    ///
+    /// Panics if called more than once on the same schedule.
+    pub fn render(&mut self, mut graph: RenderGraph) {
+        profile_scope!("render_graph");
 
-    /// Submit a graph for immediate execution.
-    ///
-    /// The graph is submitted to the GPU immediately. If `wait_for` is non-empty,
-    /// the GPU will wait for those graphs to complete before starting this one.
-    ///
-    /// Takes ownership of the graph for pooling. Use [`acquire_graph`](Self::acquire_graph)
-    /// to get a graph from the pool.
-    ///
-    /// Returns a handle that can be used as a dependency for subsequent graphs.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - Debug name for this graph submission
-    /// * `graph` - The render graph to execute (ownership transferred)
-    /// * `wait_for` - Graphs that must complete before this one starts
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // Acquire from pool, configure, submit
-    /// let mut graph = schedule.acquire_graph();
-    /// graph.add_graphics_pass(shadow_pass);
-    /// let shadows = schedule.submit("shadows", graph, &[]);
-    ///
-    /// // Another graph waiting for shadows
-    /// let mut graph = schedule.acquire_graph();
-    /// graph.add_graphics_pass(light_pass);
-    /// let lighting = schedule.submit("lighting", graph, &[shadows]);
-    /// ```
-    pub fn submit(
-        &mut self,
-        name: impl Into<String>,
-        mut graph: RenderGraph,
-        wait_for: &[GraphHandle],
-    ) -> GraphHandle {
-        let name = name.into();
-        profile_scope!("submit_graph");
+        assert!(
+            self.fence.is_none(),
+            "render() has already been called on this schedule"
+        );
 
-        // Validate wait_for handles
-        for &handle in wait_for {
-            assert!(
-                handle.index() < self.submitted.len(),
-                "Invalid dependency handle"
-            );
-        }
+        // Fence signalled by this frame's single submit.
+        let fence = Fence::new_gpu(Arc::clone(self.device.instance()));
 
-        // Get semaphore ID before acquiring backend lock (avoids borrow conflict)
-        let semaphore_id = self.next_semaphore_id();
-
-        // Create GPU-backed completion semaphore for this graph
-        let backend = self.device.instance().backend();
-        let gpu_semaphore = backend.create_semaphore();
-        let completion = Semaphore::new(semaphore_id, gpu_semaphore);
-
-        // Collect GPU semaphores to wait on from dependency handles
-        let wait_gpu_semaphores: Vec<&crate::backend::GpuSemaphore> = wait_for
-            .iter()
-            .map(|h| self.submitted[h.index()].completion.gpu_semaphore())
-            .collect();
-
-        // Signal this graph's completion semaphore
-        let signal_gpu_semaphores: Vec<&crate::backend::GpuSemaphore> =
-            vec![completion.gpu_semaphore()];
-
-        // Compile and execute the graph on the GPU
         match graph.compile(RenderGraphCompilationMode::Strict) {
             Ok(_) => {
                 profile_scope!("execute_graph");
                 let compiled = graph.compiled().unwrap();
-                if let Err(e) = backend.execute_graph(
-                    &graph,
-                    compiled,
-                    &wait_gpu_semaphores,
-                    &signal_gpu_semaphores,
-                    None,
-                ) {
-                    log::error!("Failed to execute graph '{}': {}", name, e);
+                let backend = self.device.instance().backend();
+                if let Err(e) = backend.execute_graph(&graph, compiled, fence.gpu_fence()) {
+                    log::error!("Failed to execute frame graph: {e}");
                 }
             }
             Err(e) => {
-                log::error!("Failed to compile graph '{}': {}", name, e);
+                log::error!("Failed to compile frame graph: {e}");
             }
         }
 
-        let handle = GraphHandle::new(self.submitted.len() as u32);
-        self.submitted.push(SubmittedGraph {
-            name,
-            completion,
-            waited_for: wait_for.to_vec(),
-        });
-
-        // Store graph for recycling at end of frame
+        // Keep the graph for recycling at end of frame.
         self.submitted_graphs.push(graph);
-
-        handle
-    }
-
-    /// Submit a graph and present to swapchain.
-    ///
-    /// This is typically the final submission of a frame. It waits for
-    /// the specified dependencies, executes the graph, and presents
-    /// the result to the swapchain.
-    ///
-    /// Takes ownership of the graph for pooling. Use [`acquire_graph`](Self::acquire_graph)
-    /// to get a graph from the pool.
-    ///
-    /// After calling this, the schedule is considered complete and should
-    /// be returned to the pipeline via [`FramePipeline::end_frame`](crate::pipeline::FramePipeline::end_frame).
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - Debug name for this graph submission
-    /// * `graph` - The render graph to execute (ownership transferred)
-    /// * `wait_for` - Graphs that must complete before this one starts
-    ///
-    /// # Panics
-    ///
-    /// Panics if `present` has already been called on this schedule.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let mut schedule = pipeline.begin_frame();
-    /// let mut graph = schedule.acquire_graph();
-    /// graph.add_graphics_pass(main_pass);
-    /// let main = schedule.submit("main", graph, &[]);
-    /// let mut present_graph = schedule.acquire_graph();
-    /// present_graph.add_graphics_pass(final_pass);
-    /// schedule.present("present", present_graph, &[main]);
-    /// pipeline.end_frame(schedule);
-    /// ```
-    pub fn present(
-        &mut self,
-        name: impl Into<String>,
-        mut graph: RenderGraph,
-        wait_for: &[GraphHandle],
-    ) {
-        profile_scope!("present");
-
-        assert!(
-            self.fence.is_none(),
-            "present() has already been called on this schedule"
-        );
-
-        let name = name.into();
-
-        // Validate wait_for handles
-        for &handle in wait_for {
-            assert!(
-                handle.index() < self.submitted.len(),
-                "Invalid dependency handle"
-            );
-        }
-
-        // Get semaphore ID before acquiring backend lock (avoids borrow conflict)
-        let semaphore_id = self.next_semaphore_id();
-
-        // Create GPU-backed fence first (acquires+releases backend read lock internally)
-        let instance = Arc::clone(self.device.instance());
-        let fence = Fence::new_gpu(instance);
-
-        // Create GPU-backed completion semaphore
-        let backend = self.device.instance().backend();
-        let gpu_semaphore = backend.create_semaphore();
-        let completion = Semaphore::new(semaphore_id, gpu_semaphore);
-
-        // Collect GPU semaphores to wait on from dependency handles
-        let wait_gpu_semaphores: Vec<&crate::backend::GpuSemaphore> = wait_for
-            .iter()
-            .map(|h| self.submitted[h.index()].completion.gpu_semaphore())
-            .collect();
-
-        // Signal this graph's completion semaphore
-        let signal_gpu_semaphores: Vec<&crate::backend::GpuSemaphore> =
-            vec![completion.gpu_semaphore()];
-
-        // Compile and execute with semaphores and fence
-        match graph.compile(RenderGraphCompilationMode::Strict) {
-            Ok(_) => {
-                profile_scope!("execute_present");
-                let compiled = graph.compiled().unwrap();
-                if let Err(e) = backend.execute_graph(
-                    &graph,
-                    compiled,
-                    &wait_gpu_semaphores,
-                    &signal_gpu_semaphores,
-                    fence.gpu_fence(),
-                ) {
-                    log::error!("Failed to execute present graph '{}': {}", name, e);
-                }
-            }
-            Err(e) => {
-                log::error!("Failed to compile present graph '{}': {}", name, e);
-            }
-        }
-
-        self.submitted.push(SubmittedGraph {
-            name,
-            completion,
-            waited_for: wait_for.to_vec(),
-        });
-
-        // Store graph for recycling at end of frame
-        self.submitted_graphs.push(graph);
-
-        self.fence = Some(fence);
-    }
-
-    /// Get the number of submitted graphs.
-    pub fn submitted_count(&self) -> usize {
-        self.submitted.len()
-    }
-
-    /// Check if any graphs have been submitted.
-    pub fn is_empty(&self) -> bool {
-        self.submitted.is_empty()
-    }
-
-    /// Check if the schedule has been presented.
-    pub fn is_presented(&self) -> bool {
-        self.fence.is_some()
-    }
-
-    /// Get debug names of all submitted graphs in submission order.
-    pub fn submitted_names(&self) -> impl Iterator<Item = &str> {
-        self.submitted.iter().map(|s| s.name.as_str())
-    }
-
-    /// Finish the schedule without presenting to a swapchain.
-    ///
-    /// This is an alternative to [`present`](Self::present) for offscreen rendering
-    /// or test scenarios where no swapchain is involved. It sets a fence that will
-    /// be signaled when all submitted graphs complete.
-    ///
-    /// After calling this, the schedule is considered complete and should
-    /// be returned to the pipeline via [`FramePipeline::end_frame`](crate::pipeline::FramePipeline::end_frame).
-    ///
-    /// # Panics
-    ///
-    /// Panics if `present` or `finish` has already been called on this schedule.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let mut schedule = pipeline.begin_frame();
-    /// let main = schedule.submit("main", main_graph, &[]);
-    /// schedule.finish(&[main]);  // No swapchain presentation
-    /// pipeline.end_frame(schedule);
-    /// ```
-    pub fn finish(&mut self, wait_for: &[GraphHandle]) {
-        profile_scope!("finish");
-
-        assert!(
-            self.fence.is_none(),
-            "finish() or present() has already been called on this schedule"
-        );
-
-        // Validate wait_for handles
-        for &handle in wait_for {
-            assert!(
-                handle.index() < self.submitted.len(),
-                "Invalid dependency handle"
-            );
-        }
-
-        // Create fence for CPU synchronization
-        // Note: Since intermediate submit() calls currently execute synchronously,
-        // all GPU work is already complete by the time finish() is called.
-        // We create a signaled fence to indicate completion.
-        let instance = Arc::clone(self.device.instance());
-        let fence = Fence::new_gpu(instance);
-
         self.fence = Some(fence);
     }
 
@@ -543,18 +256,11 @@ impl FrameSchedule {
     ///
     /// # Panics
     ///
-    /// Panics if neither `present()` nor `finish()` was called.
+    /// Panics if [`render`](Self::render) was not called.
     pub(crate) fn take_fence(&mut self) -> Fence {
         self.fence
             .take()
-            .expect("present() or finish() must be called before end_frame()")
-    }
-
-    /// Generate a unique semaphore ID.
-    fn next_semaphore_id(&mut self) -> u64 {
-        let id = self.semaphore_counter;
-        self.semaphore_counter += 1;
-        id
+            .expect("render() must be called before end_frame()")
     }
 }
 
@@ -577,182 +283,42 @@ mod tests {
     }
 
     #[test]
-    fn test_submit_single_graph() {
+    fn render_signals_fence() {
         let mut schedule = make_test_schedule();
-
-        let graph = make_test_graph("test");
-        let handle = schedule.submit("test", graph, &[]);
-
-        assert_eq!(schedule.submitted_count(), 1);
-        assert_eq!(handle.index(), 0);
-    }
-
-    #[test]
-    fn test_submit_with_dependencies() {
-        let mut schedule = make_test_schedule();
-
-        let shadow_graph = make_test_graph("shadow");
-        let depth_graph = make_test_graph("depth");
-        let main_graph = make_test_graph("main");
-
-        let shadow = schedule.submit("shadows", shadow_graph, &[]);
-        let depth = schedule.submit("depth", depth_graph, &[]);
-        let main = schedule.submit("main", main_graph, &[shadow, depth]);
-
-        assert_eq!(schedule.submitted_count(), 3);
-        assert_eq!(main.index(), 2);
-    }
-
-    #[test]
-    fn test_present() {
-        let mut schedule = make_test_schedule();
-
-        let main_graph = make_test_graph("main");
-        let present_graph = make_test_graph("present");
-
-        let main = schedule.submit("main", main_graph, &[]);
-        assert!(!schedule.is_presented());
-
-        schedule.present("present", present_graph, &[main]);
-
-        assert_eq!(schedule.submitted_count(), 2);
-        assert!(schedule.is_presented());
-    }
-
-    #[test]
-    fn test_take_fence() {
-        let mut schedule = make_test_schedule();
-
-        let main_graph = make_test_graph("main");
-        let present_graph = make_test_graph("present");
-
-        let main = schedule.submit("main", main_graph, &[]);
-        schedule.present("present", present_graph, &[main]);
+        schedule.render(make_test_graph("main"));
 
         let fence = schedule.take_fence();
-        // Wait for GPU work to complete
         fence.wait();
         assert_eq!(fence.status(), FenceStatus::Signaled);
-        assert!(!schedule.is_presented()); // Fence was taken
     }
 
     #[test]
-    #[should_panic(expected = "present() has already been called")]
-    fn test_double_present_panics() {
+    fn render_multi_pass_single_graph() {
+        // One graph per frame may still carry many passes; ordering/barriers are
+        // the compiler's job. Just verify it executes and signals.
         let mut schedule = make_test_schedule();
+        let mut graph = RenderGraph::new();
+        graph.add_graphics_pass(GraphicsPass::new("shadow".into()));
+        graph.add_graphics_pass(GraphicsPass::new("main".into()));
+        schedule.render(graph);
 
-        let present1 = make_test_graph("present1");
-        let present2 = make_test_graph("present2");
-
-        schedule.present("present1", present1, &[]);
-        schedule.present("present2", present2, &[]); // Panics
+        let fence = schedule.take_fence();
+        fence.wait();
+        assert_eq!(fence.status(), FenceStatus::Signaled);
     }
 
     #[test]
-    #[should_panic(expected = "present() or finish() must be called before end_frame()")]
-    fn test_take_fence_without_present_panics() {
+    #[should_panic(expected = "render() has already been called")]
+    fn double_render_panics() {
         let mut schedule = make_test_schedule();
-        let main_graph = make_test_graph("main");
-        schedule.submit("main", main_graph, &[]);
+        schedule.render(make_test_graph("a"));
+        schedule.render(make_test_graph("b")); // Panics
+    }
+
+    #[test]
+    #[should_panic(expected = "render() must be called before end_frame()")]
+    fn take_fence_without_render_panics() {
+        let mut schedule = make_test_schedule();
         schedule.take_fence(); // Panics
-    }
-
-    #[test]
-    fn test_finish() {
-        let mut schedule = make_test_schedule();
-
-        let main_graph = make_test_graph("main");
-        let main = schedule.submit("main", main_graph, &[]);
-        assert!(!schedule.is_presented());
-
-        schedule.finish(&[main]);
-
-        // is_presented returns true for finish() too since fence is set
-        assert!(schedule.is_presented());
-    }
-
-    #[test]
-    fn test_finish_empty_dependencies() {
-        let mut schedule = make_test_schedule();
-        let main_graph = make_test_graph("main");
-        schedule.submit("main", main_graph, &[]);
-        schedule.finish(&[]); // Finish without waiting for any graph
-
-        assert!(schedule.is_presented());
-    }
-
-    #[test]
-    #[should_panic(expected = "finish() or present() has already been called")]
-    fn test_double_finish_panics() {
-        let mut schedule = make_test_schedule();
-
-        schedule.finish(&[]);
-        schedule.finish(&[]); // Panics
-    }
-
-    #[test]
-    #[should_panic(expected = "finish() or present() has already been called")]
-    fn test_finish_after_present_panics() {
-        let mut schedule = make_test_schedule();
-
-        let present_graph = make_test_graph("present");
-        schedule.present("present", present_graph, &[]);
-        schedule.finish(&[]); // Panics
-    }
-
-    #[test]
-    fn test_submitted_names() {
-        let mut schedule = make_test_schedule();
-
-        let shadow_graph = make_test_graph("shadow");
-        let main_graph = make_test_graph("main");
-        let post_graph = make_test_graph("post");
-
-        schedule.submit("shadows", shadow_graph, &[]);
-        schedule.submit("main", main_graph, &[]);
-        schedule.present("post", post_graph, &[]);
-
-        let names: Vec<_> = schedule.submitted_names().collect();
-        assert_eq!(names, vec!["shadows", "main", "post"]);
-    }
-
-    #[test]
-    #[should_panic(expected = "Invalid dependency handle")]
-    fn test_invalid_dependency_panics() {
-        let mut schedule = make_test_schedule();
-
-        // Try to depend on non-existent graph
-        let invalid_handle = GraphHandle::new(999);
-        let test_graph = make_test_graph("test");
-        schedule.submit("test", test_graph, &[invalid_handle]);
-    }
-
-    #[test]
-    fn test_complex_dependency_graph() {
-        let mut schedule = make_test_schedule();
-
-        // Build a diamond dependency pattern:
-        //       shadows
-        //      /       \
-        //   depth     gbuffer
-        //      \       /
-        //        main
-        //          |
-        //        post
-
-        let shadow_graph = make_test_graph("shadow");
-        let depth_graph = make_test_graph("depth");
-        let gbuffer_graph = make_test_graph("gbuffer");
-        let main_graph = make_test_graph("main");
-        let post_graph = make_test_graph("post");
-
-        let shadows = schedule.submit("shadows", shadow_graph, &[]);
-        let depth = schedule.submit("depth", depth_graph, &[shadows]);
-        let gbuffer = schedule.submit("gbuffer", gbuffer_graph, &[shadows]);
-        let main = schedule.submit("main", main_graph, &[depth, gbuffer]);
-        schedule.present("post", post_graph, &[main]);
-
-        assert_eq!(schedule.submitted_count(), 5);
-        assert!(schedule.is_presented());
     }
 }

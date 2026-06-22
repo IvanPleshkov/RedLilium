@@ -106,17 +106,17 @@ The rendering system is organized in four layers, from low-level to high-level:
 │  - Graceful shutdown (wait_idle)                                        │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                          FrameSchedule                                  │
-│  Orchestrates multiple render graphs within ONE frame. Enables          │
-│  streaming submission (submit graphs as they're ready).                 │
+│  Executes the ONE render graph for the frame (one submit per frame).    │
+│  Cross-frame CPU/GPU overlap comes from frames-in-flight, so there are  │
+│  no cross-graph dependencies or GPU semaphores.                         │
 │                                                                         │
 │  Responsibilities:                                                      │
-│  - Accept compiled graphs and submit immediately to GPU                 │
-│  - Track dependencies between graphs via semaphores                     │
-│  - Return fence for frame completion                                    │
+│  - Compile and submit the single frame graph to the GPU                 │
+│  - Signal the frame fence on that submit                                │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                           RenderGraph                                   │
-│  Describes a set of passes and their dependencies. Represents one       │
-│  logical rendering task (e.g., "shadow rendering", "main scene").       │
+│  The single graph for the frame: all passes (shadow, main, post,        │
+│  transfer/upload, UI overlay) and their dependencies.                   │
 │                                                                         │
 │  Responsibilities:                                                      │
 │  - Store passes (graphics, transfer, compute)                           │

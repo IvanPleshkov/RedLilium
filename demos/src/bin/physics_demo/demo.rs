@@ -439,9 +439,7 @@ impl AppHandler for PhysicsDemoApp {
             }
         }
 
-        let _handle = ctx.submit("main", graph, &[]);
-
-        ctx.finish(&[])
+        ctx.render(graph)
     }
 
     fn on_mouse_move(&mut self, _ctx: &mut AppContext, x: f64, y: f64) {

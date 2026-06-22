@@ -293,28 +293,15 @@ impl<'a> DrawContext<'a> {
         self.schedule.acquire_graph()
     }
 
-    /// Submit a render graph to the frame schedule.
+    /// Render the frame's single graph and present it.
     ///
-    /// Takes ownership of the graph for pooling. Use [`acquire_graph`](Self::acquire_graph)
-    /// to get a graph from the pool.
-    ///
-    /// Returns a handle that can be used as a dependency for other graphs.
-    pub fn submit(
-        &mut self,
-        name: impl Into<String>,
-        graph: RenderGraph,
-        wait_for: &[redlilium_graphics::GraphHandle],
-    ) -> redlilium_graphics::GraphHandle {
-        self.schedule.submit(name, graph, wait_for)
-    }
-
-    /// Finish the frame with the given dependencies.
-    ///
-    /// This should be called at the end of `on_draw` to signal that
-    /// all render graphs have been submitted. Returns the FrameSchedule
-    /// which must be returned from `on_draw` for proper frame management.
-    pub fn finish(mut self, wait_for: &[redlilium_graphics::GraphHandle]) -> FrameSchedule {
-        self.schedule.finish(wait_for);
+    /// One render graph is submitted per frame (it may contain many passes;
+    /// ordering and barriers are resolved by the graph compiler). Takes
+    /// ownership of the graph, executes it (signalling the frame fence), and
+    /// presents the swapchain image. Returns the [`FrameSchedule`], which must
+    /// be returned from `on_draw` for the pipeline to complete the frame.
+    pub fn render(mut self, graph: RenderGraph) -> FrameSchedule {
+        self.schedule.render(graph);
         self.swapchain_texture.present();
         self.schedule
     }

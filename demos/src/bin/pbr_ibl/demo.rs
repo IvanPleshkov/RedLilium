@@ -403,11 +403,9 @@ impl AppHandler for PbrIblDemo {
             }
         }
 
-        let _handle = ctx.submit("main", graph, &[]);
-
         profile_memory_stats!();
 
-        ctx.finish(&[])
+        ctx.render(graph)
     }
 
     fn on_mouse_move(&mut self, _ctx: &mut AppContext, x: f64, y: f64) {

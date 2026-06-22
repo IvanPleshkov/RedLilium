@@ -46,7 +46,7 @@ impl crate::System for ForwardRenderSystem {
                 visibilities,
                 mut schedule_res,
             )| {
-                let Some(schedule) = schedule_res.schedule_mut() else {
+                let Some(graph) = schedule_res.graph_mut() else {
                     return;
                 };
 
@@ -100,9 +100,7 @@ impl crate::System for ForwardRenderSystem {
                         }
                     }
 
-                    let mut graph = schedule.acquire_graph();
                     graph.add_graphics_pass(pass);
-                    schedule.submit(format!("camera_{cam_idx}"), graph, &[]);
                 }
             },
         );
@@ -141,7 +139,7 @@ impl crate::System for EditorForwardRenderSystem {
                 visibilities,
                 mut schedule_res,
             )| {
-                let Some(schedule) = schedule_res.schedule_mut() else {
+                let Some(graph) = schedule_res.graph_mut() else {
                     return;
                 };
 
@@ -195,9 +193,7 @@ impl crate::System for EditorForwardRenderSystem {
                         }
                     }
 
-                    let mut graph = schedule.acquire_graph();
                     graph.add_graphics_pass(pass);
-                    schedule.submit(format!("editor_camera_{cam_idx}"), graph, &[]);
                 }
             },
         );

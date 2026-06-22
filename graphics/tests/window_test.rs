@@ -223,11 +223,8 @@ impl WindowTestApp {
         );
         let _pass_handle = graph.add_graphics_pass(pass);
 
-        // Submit the render graph
-        let graph_handle = schedule.submit(format!("frame_{}", self.frame_count), graph, &[]);
-
-        // Finish the schedule (offscreen rendering, no actual present to swapchain yet)
-        schedule.finish(&[graph_handle]);
+        // Render the frame's single graph (signals the frame fence).
+        schedule.render(graph);
 
         // End the frame
         pipeline.end_frame(schedule);

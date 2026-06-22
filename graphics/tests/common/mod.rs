@@ -192,11 +192,8 @@ impl TestContext {
         let mut pipeline = self.pipeline.borrow_mut();
         let mut schedule = pipeline.begin_frame();
 
-        // Submit the graph - this actually executes on the GPU
-        let handle = schedule.submit("test_graph", graph, &[]);
-
-        // Finish the schedule (offscreen, no presentation)
-        schedule.finish(&[handle]);
+        // Render the single graph - this actually executes on the GPU
+        schedule.render(graph);
 
         // End the frame and wait for completion
         pipeline.end_frame(schedule);

@@ -285,37 +285,6 @@ impl std::fmt::Debug for GpuFence {
     }
 }
 
-/// Handle to a GPU semaphore for GPU-GPU synchronization.
-#[allow(clippy::large_enum_variant)]
-pub enum GpuSemaphore {
-    /// Dummy backend (no GPU semaphore)
-    Dummy,
-    /// wgpu backend (semaphores are implicit in wgpu)
-    #[cfg(feature = "wgpu-backend")]
-    Wgpu,
-    /// Vulkan backend semaphore
-    #[cfg(feature = "vulkan-backend")]
-    Vulkan {
-        device: ash::Device,
-        semaphore: vk::Semaphore,
-    },
-}
-
-impl std::fmt::Debug for GpuSemaphore {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Dummy => write!(f, "GpuSemaphore::Dummy"),
-            #[cfg(feature = "wgpu-backend")]
-            Self::Wgpu => write!(f, "GpuSemaphore::Wgpu"),
-            #[cfg(feature = "vulkan-backend")]
-            Self::Vulkan { semaphore, .. } => f
-                .debug_struct("GpuSemaphore::Vulkan")
-                .field("semaphore", semaphore)
-                .finish_non_exhaustive(),
-        }
-    }
-}
-
 /// Handle to an acquired surface texture for presentation.
 ///
 /// This encapsulates all backend-specific state needed to render to a surface
@@ -716,15 +685,6 @@ impl Drop for GpuFence {
 }
 
 #[cfg(feature = "vulkan-backend")]
-impl Drop for GpuSemaphore {
-    fn drop(&mut self) {
-        if let GpuSemaphore::Vulkan { device, semaphore } = self {
-            unsafe { device.destroy_semaphore(*semaphore, None) };
-        }
-    }
-}
-
-#[cfg(feature = "vulkan-backend")]
 impl Drop for GpuPipeline {
     fn drop(&mut self) {
         if let GpuPipeline::Vulkan {
@@ -846,17 +806,6 @@ impl GpuBackend {
         }
     }
 
-    /// Create a semaphore for GPU-GPU synchronization.
-    pub fn create_semaphore(&self) -> GpuSemaphore {
-        match self {
-            Self::Dummy(backend) => backend.create_semaphore(),
-            #[cfg(feature = "wgpu-backend")]
-            Self::Wgpu(backend) => backend.create_semaphore(),
-            #[cfg(feature = "vulkan-backend")]
-            Self::Vulkan(backend) => backend.create_semaphore(),
-        }
-    }
-
     /// Create a fence for CPU-GPU synchronization.
     pub fn create_fence(&self, signaled: bool) -> GpuFence {
         match self {
@@ -920,41 +869,23 @@ impl GpuBackend {
     ///
     /// # Arguments
     ///
-    /// * `wait_semaphores` - GPU semaphores to wait on before execution begins
-    /// * `signal_semaphores` - GPU semaphores to signal when execution completes
     /// * `signal_fence` - Optional fence to signal when execution completes (for CPU waiting)
+    ///
+    /// One render graph is submitted per frame, so there is no cross-graph
+    /// semaphore ordering. Swapchain acquire/present synchronization is handled
+    /// internally by the backend.
     pub fn execute_graph(
         &self,
         graph: &RenderGraph,
         compiled: &CompiledGraph,
-        wait_semaphores: &[&GpuSemaphore],
-        signal_semaphores: &[&GpuSemaphore],
         signal_fence: Option<&GpuFence>,
     ) -> Result<(), GraphicsError> {
         match self {
-            Self::Dummy(backend) => backend.execute_graph(
-                graph,
-                compiled,
-                wait_semaphores,
-                signal_semaphores,
-                signal_fence,
-            ),
+            Self::Dummy(backend) => backend.execute_graph(graph, compiled, signal_fence),
             #[cfg(feature = "wgpu-backend")]
-            Self::Wgpu(backend) => backend.execute_graph(
-                graph,
-                compiled,
-                wait_semaphores,
-                signal_semaphores,
-                signal_fence,
-            ),
+            Self::Wgpu(backend) => backend.execute_graph(graph, compiled, signal_fence),
             #[cfg(feature = "vulkan-backend")]
-            Self::Vulkan(backend) => backend.execute_graph(
-                graph,
-                compiled,
-                wait_semaphores,
-                signal_semaphores,
-                signal_fence,
-            ),
+            Self::Vulkan(backend) => backend.execute_graph(graph, compiled, signal_fence),
         }
     }
 

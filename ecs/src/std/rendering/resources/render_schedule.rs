@@ -1,50 +1,53 @@
-//! Frame schedule resource.
+//! Frame render-graph resource.
 
-use redlilium_graphics::FrameSchedule;
+use redlilium_graphics::RenderGraph;
 
-/// Resource wrapping a [`FrameSchedule`] for the current frame.
+/// Resource holding the current frame's single [`RenderGraph`].
 ///
-/// The application layer inserts this before running ECS systems and
-/// extracts it after, using [`take`](Self::take).
+/// One render graph is built per frame: the application inserts this resource
+/// (with a fresh graph) before running ECS systems, rendering systems append
+/// their passes to it, and the application extracts the graph afterwards via
+/// [`take`](Self::take) and renders it. Pass ordering and barriers are resolved
+/// by the graph compiler, so multiple cameras/passes coexist in one graph.
 pub struct RenderSchedule {
-    schedule: Option<FrameSchedule>,
+    graph: Option<RenderGraph>,
 }
 
 impl RenderSchedule {
-    /// Create a new render schedule resource holding the given frame schedule.
-    pub fn new(schedule: FrameSchedule) -> Self {
-        Self {
-            schedule: Some(schedule),
-        }
+    /// Create a render schedule holding the given frame graph.
+    pub fn new(graph: RenderGraph) -> Self {
+        Self { graph: Some(graph) }
     }
 
     /// Create an empty render schedule (no active frame).
     pub fn empty() -> Self {
-        Self { schedule: None }
+        Self { graph: None }
     }
 
-    /// Take the frame schedule out, leaving this resource empty.
-    pub fn take(&mut self) -> Option<FrameSchedule> {
-        self.schedule.take()
+    /// Take the frame graph out, leaving this resource empty.
+    pub fn take(&mut self) -> Option<RenderGraph> {
+        self.graph.take()
     }
 
-    /// Replace the current schedule with a new one.
-    pub fn set(&mut self, schedule: FrameSchedule) {
-        self.schedule = Some(schedule);
+    /// Replace the current frame graph.
+    pub fn set(&mut self, graph: RenderGraph) {
+        self.graph = Some(graph);
     }
 
-    /// Get a reference to the frame schedule, if present.
-    pub fn schedule(&self) -> Option<&FrameSchedule> {
-        self.schedule.as_ref()
+    /// Get a reference to the frame graph, if present.
+    pub fn graph(&self) -> Option<&RenderGraph> {
+        self.graph.as_ref()
     }
 
-    /// Get a mutable reference to the frame schedule, if present.
-    pub fn schedule_mut(&mut self) -> Option<&mut FrameSchedule> {
-        self.schedule.as_mut()
+    /// Get a mutable reference to the frame graph, if present.
+    ///
+    /// Rendering systems append their passes here.
+    pub fn graph_mut(&mut self) -> Option<&mut RenderGraph> {
+        self.graph.as_mut()
     }
 
-    /// Returns `true` if a frame schedule is currently held.
+    /// Returns `true` if a frame graph is currently held.
     pub fn is_active(&self) -> bool {
-        self.schedule.is_some()
+        self.graph.is_some()
     }
 }

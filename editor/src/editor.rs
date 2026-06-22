@@ -755,7 +755,10 @@ impl AppHandler for Editor {
         #[allow(unused_variables)]
         let window = ctx.window().clone();
         let custom_titlebar = ctx.custom_titlebar();
-        let mut ui_graph = ctx.acquire_graph();
+        // One render graph per frame: scene passes and the egui overlay pass all
+        // go into this graph; ordering is an explicit intra-graph dependency.
+        let mut graph = ctx.acquire_graph();
+        let mut egui_handle = None;
         let mut scene_view_rect = None;
         let mut pixels_per_point = 1.0;
 
@@ -998,7 +1001,7 @@ impl AppHandler for Editor {
             self.egui_wants_keyboard = egui_ctx.wants_keyboard_input();
 
             if let Some(egui_pass) = egui.end_frame(&render_target, width, height) {
-                ui_graph.add_graphics_pass(egui_pass);
+                egui_handle = Some(graph.add_graphics_pass(egui_pass));
             }
         }
 
@@ -1030,8 +1033,9 @@ impl AppHandler for Editor {
             }
         }
 
-        // Submit scene first (clears swapchain), then egui on top
-        let mut deps = Vec::new();
+        // Scene passes clear the swapchain; the egui overlay draws on top. Both
+        // are in the single frame graph; the egui pass is made to depend on the
+        // scene pass so the order is deterministic for the Strict compiler.
 
         // Take pending pick/rect coordinates before the immutable borrow of scene_view.
         let pending_pick = self
@@ -1066,33 +1070,34 @@ impl AppHandler for Editor {
                     }
                 }
 
-                let mut scene_graph = ctx.acquire_graph();
-                let scene_pass_handle = scene_graph.add_graphics_pass(scene_pass);
+                let scene_pass_handle = graph.add_graphics_pass(scene_pass);
+
+                // The egui overlay (already added) draws on top of the scene.
+                if let Some(eh) = egui_handle {
+                    graph.add_dependency(eh, scene_pass_handle);
+                }
 
                 // Entity index pass (for picking) — renders to R32Uint texture
                 // Depends on scene pass because both write to the shared depth texture.
                 if let Some(ei_pass) = scene_view.build_entity_index_pass(&ew.world) {
-                    let ei_handle = scene_graph.add_graphics_pass(ei_pass);
-                    scene_graph.add_dependency(ei_handle, scene_pass_handle);
+                    let ei_handle = graph.add_graphics_pass(ei_pass);
+                    graph.add_dependency(ei_handle, scene_pass_handle);
 
                     // Single-pixel readback transfer.
                     if let Some([px, py]) = pending_pick {
                         log::info!("Submitting pick readback at ({px}, {py})");
                         let readback_pass = scene_view.build_pick_readback(px, py);
-                        let readback_handle = scene_graph.add_transfer_pass(readback_pass);
-                        scene_graph.add_dependency(readback_handle, ei_handle);
+                        let readback_handle = graph.add_transfer_pass(readback_pass);
+                        graph.add_dependency(readback_handle, ei_handle);
                     }
 
                     // Rect selection readback transfer.
                     if let Some([rx, ry, rw, rh]) = pending_rect {
                         let rect_readback_pass = scene_view.build_rect_readback(rx, ry, rw, rh);
-                        let rect_rb_handle = scene_graph.add_transfer_pass(rect_readback_pass);
-                        scene_graph.add_dependency(rect_rb_handle, ei_handle);
+                        let rect_rb_handle = graph.add_transfer_pass(rect_readback_pass);
+                        graph.add_dependency(rect_rb_handle, ei_handle);
                     }
                 }
-
-                let scene_handle = ctx.submit("scene", scene_graph, &[]);
-                deps.push(scene_handle);
             }
         }
 
@@ -1108,9 +1113,7 @@ impl AppHandler for Editor {
             scene_view.set_rect_pick_in_flight(rw, rh);
         }
 
-        let _ui_handle = ctx.submit("editor_ui", ui_graph, &deps);
-
-        ctx.finish(&[])
+        ctx.render(graph)
     }
 
     fn on_mouse_move(&mut self, _ctx: &mut AppContext, x: f64, y: f64) {

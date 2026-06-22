@@ -68,7 +68,7 @@ use crate::device::GraphicsDevice;
 use crate::error::GraphicsError;
 use crate::graph::RenderGraph;
 use crate::resources::RingBuffer;
-use crate::scheduler::{Fence, FrameSchedule, SubmittedGraph};
+use crate::scheduler::{Fence, FrameSchedule};
 use crate::types::BufferUsage;
 use redlilium_core::profiling::{frame_mark, profile_scope};
 
@@ -130,9 +130,6 @@ pub struct FramePipeline {
     /// Per-slot submitted graphs kept alive until fence wait guarantees GPU is done.
     /// Resetting these after fence wait drops Arc references to GPU resources safely.
     slot_graphs: Vec<Vec<RenderGraph>>,
-
-    /// Per-slot submitted metadata (keeps semaphores alive until fence wait).
-    slot_submitted: Vec<Vec<SubmittedGraph>>,
 }
 
 impl std::fmt::Debug for FramePipeline {
@@ -174,7 +171,6 @@ impl FramePipeline {
             ring_buffers: Vec::new(),
             graph_pool: Vec::new(),
             slot_graphs: (0..frames_in_flight).map(|_| Vec::new()).collect(),
-            slot_submitted: (0..frames_in_flight).map(|_| Vec::new()).collect(),
         }
     }
 
@@ -223,9 +219,6 @@ impl FramePipeline {
                 self.graph_pool.push(graph);
             }
         }
-
-        // Drop old submitted metadata (destroys semaphores — safe after fence wait)
-        self.slot_submitted[self.current_slot].clear();
 
         self.frame_count += 1;
 
@@ -305,9 +298,6 @@ impl FramePipeline {
             }
         }
 
-        // Drop old submitted metadata (destroys semaphores — safe after fence wait)
-        self.slot_submitted[self.current_slot].clear();
-
         self.frame_count += 1;
 
         // Take ring buffer for this slot (if configured) and reset it
@@ -369,9 +359,6 @@ impl FramePipeline {
         // Their Arc references keep GPU resources alive until begin_frame() resets them
         // after the fence wait guarantees the GPU is done.
         self.slot_graphs[self.current_slot] = schedule.take_submitted_graphs();
-
-        // Store submitted metadata per-slot (keeps semaphores alive until fence wait)
-        self.slot_submitted[self.current_slot] = schedule.take_submitted();
 
         // Return unused graphs to the pool directly
         self.graph_pool.extend(schedule.take_graph_pool());
@@ -486,9 +473,6 @@ impl FramePipeline {
                 graph.reset();
                 self.graph_pool.push(graph);
             }
-        }
-        for slot_submitted in &mut self.slot_submitted {
-            slot_submitted.clear();
         }
     }
 
@@ -688,11 +672,9 @@ mod tests {
     #[test]
     fn test_begin_frame_returns_schedule() {
         let mut pipeline = make_test_pipeline(2);
-        let schedule = pipeline.begin_frame();
+        let _schedule = pipeline.begin_frame();
 
         assert_eq!(pipeline.frame_count(), 1);
-        assert!(schedule.is_empty());
-        assert!(!schedule.is_presented());
     }
 
     #[test]
@@ -701,7 +683,7 @@ mod tests {
         assert_eq!(pipeline.current_slot(), 0);
 
         let mut schedule = pipeline.begin_frame();
-        schedule.present("present", make_test_graph("present"), &[]);
+        schedule.render(make_test_graph("present"));
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 1);
 
@@ -709,14 +691,14 @@ mod tests {
         pipeline.signal_all_fences();
 
         let mut schedule = pipeline.begin_frame();
-        schedule.present("present", make_test_graph("present"), &[]);
+        schedule.render(make_test_graph("present"));
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 2);
 
         pipeline.signal_all_fences();
 
         let mut schedule = pipeline.begin_frame();
-        schedule.present("present", make_test_graph("present"), &[]);
+        schedule.render(make_test_graph("present"));
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 0); // Wraps around
     }
@@ -748,7 +730,7 @@ mod tests {
         // Frame 0
         let mut schedule = pipeline.begin_frame();
         assert_eq!(pipeline.frame_count(), 1);
-        schedule.present("present", make_test_graph("present"), &[]);
+        schedule.render(make_test_graph("present"));
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 1);
 
@@ -758,7 +740,7 @@ mod tests {
         // Frame 1
         let mut schedule = pipeline.begin_frame();
         assert_eq!(pipeline.frame_count(), 2);
-        schedule.present("present", make_test_graph("present"), &[]);
+        schedule.render(make_test_graph("present"));
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 0);
 
@@ -766,10 +748,9 @@ mod tests {
         pipeline.signal_all_fences();
 
         // Frame 2 (reuses slot 0)
-        let schedule = pipeline.begin_frame();
+        let _schedule = pipeline.begin_frame();
         assert_eq!(pipeline.frame_count(), 3);
         assert_eq!(pipeline.current_slot(), 0);
-        assert!(schedule.is_empty()); // Fresh schedule
     }
 
     #[test]
@@ -798,47 +779,20 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "present() or finish() must be called before end_frame()")]
-    fn test_end_frame_without_present_panics() {
+    #[should_panic(expected = "render() must be called before end_frame()")]
+    fn test_end_frame_without_render_panics() {
         let mut pipeline = make_test_pipeline(2);
         let schedule = pipeline.begin_frame();
-        pipeline.end_frame(schedule); // Panics - no present() or finish() called
+        pipeline.end_frame(schedule); // Panics - render() not called
     }
 
     #[test]
-    fn test_full_frame_with_finish() {
+    fn test_full_frame_with_render() {
         let mut pipeline = make_test_pipeline(2);
 
         let mut schedule = pipeline.begin_frame();
-
-        // Build a simple offscreen render
-        let main_graph = make_test_graph("main");
-        let main = schedule.submit("main", main_graph, &[]);
-        schedule.finish(&[main]); // Use finish instead of present
-
-        assert!(schedule.is_presented()); // is_presented returns true for finish too
-
-        pipeline.end_frame(schedule);
-        assert_eq!(pipeline.current_slot(), 1);
-    }
-
-    #[test]
-    fn test_full_frame_with_graphs() {
-        let mut pipeline = make_test_pipeline(2);
-
-        let mut schedule = pipeline.begin_frame();
-
-        // Build a simple dependency chain
-        let shadow_graph = make_test_graph("shadow");
-        let main_graph = make_test_graph("main");
-        let present_graph = make_test_graph("present");
-
-        let shadows = schedule.submit("shadows", shadow_graph, &[]);
-        let main = schedule.submit("main", main_graph, &[shadows]);
-        schedule.present("present", present_graph, &[main]);
-
-        assert_eq!(schedule.submitted_count(), 3);
-        assert!(schedule.is_presented());
+        // One graph per frame (may carry multiple passes).
+        schedule.render(make_test_graph("main"));
 
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 1);
