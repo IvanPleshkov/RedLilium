@@ -239,6 +239,58 @@ mod tests {
     }
 
     #[test]
+    fn propagation_requires_advancing_the_tick() {
+        // Regression: the demos drove systems via the runner without ever
+        // calling World::advance_tick, leaving the tick at 0. Change ticks are
+        // compared with a strict `>` against `current_tick - 1` (which
+        // saturates to 0), so writes stamped at tick 0 are never seen as
+        // "changed" — the camera's GlobalTransform was never recomputed and the
+        // camera appeared frozen. The per-frame loop must advance the tick
+        // before running systems.
+        let mut world = World::new();
+        world.register_component::<Transform>();
+        world.register_component::<GlobalTransform>();
+        world.register_component::<Parent>();
+        world.register_component::<Children>();
+        // Note: deliberately NOT advancing the tick here — it stays at 0.
+
+        let e = world.spawn();
+        world
+            .insert(e, Transform::from_translation(Vec3::new(1.0, 0.0, 0.0)))
+            .unwrap();
+        world.insert(e, GlobalTransform::IDENTITY).unwrap();
+
+        // With the tick frozen at 0, the insert is invisible to
+        // Changed<Transform>, so GlobalTransform is never recomputed.
+        run_update(&world);
+        {
+            let globals = world.read::<GlobalTransform>().unwrap();
+            assert!(
+                globals.get(e.index()).unwrap().translation().norm() < 1e-6,
+                "at tick 0 the change is undetectable; GlobalTransform stays IDENTITY"
+            );
+        }
+
+        // Advancing the tick (as the frame loop must) makes a later local
+        // change visible and propagates it to GlobalTransform.
+        world.advance_tick();
+        {
+            let mut transforms = world.write::<Transform>().unwrap();
+            *transforms.get_mut(e.index()).unwrap() =
+                Transform::from_translation(Vec3::new(7.0, 0.0, 0.0));
+        }
+        run_update(&world);
+        {
+            let globals = world.read::<GlobalTransform>().unwrap();
+            assert!(
+                (globals.get(e.index()).unwrap().translation() - Vec3::new(7.0, 0.0, 0.0)).norm()
+                    < 1e-6,
+                "after advancing the tick, the local change propagates"
+            );
+        }
+    }
+
+    #[test]
     fn rotation_propagates() {
         let mut world = World::new();
         register_hierarchy(&mut world);

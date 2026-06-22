@@ -140,6 +140,15 @@ impl EcsScene {
         }
     }
 
+    /// Advances the change-detection tick. Call once at the start of each
+    /// frame, *before* mutating any components (e.g. the camera transform) —
+    /// otherwise those writes land on the previous tick and `Changed<T>`
+    /// filters in [`run_systems`](Self::run_systems) never see them, leaving
+    /// the camera's view matrix stale.
+    pub fn begin_frame(&mut self) {
+        self.world.advance_tick();
+    }
+
     /// Runs the ECS systems (transform propagation + camera matrix update).
     pub fn run_systems(&mut self) {
         self.runner.run(&mut self.world, &self.systems);

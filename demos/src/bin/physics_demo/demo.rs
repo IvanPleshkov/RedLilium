@@ -155,8 +155,12 @@ impl PhysicsDemoApp {
             cam_entity,
             Camera::perspective(std::f32::consts::FRAC_PI_4, ctx.aspect_ratio(), 0.1, 200.0),
         );
-        let _ = world.insert(cam_entity, fly_cam.to_transform());
-        let _ = world.insert(cam_entity, GlobalTransform::IDENTITY);
+        let cam_transform = fly_cam.to_transform();
+        let _ = world.insert(cam_entity, cam_transform);
+        // Seed the GlobalTransform with the correct initial pose. The free-fly
+        // system only rewrites the Transform in response to input, so without
+        // this the camera would sit at the origin until the user first moves it.
+        let _ = world.insert(cam_entity, GlobalTransform(cam_transform.to_matrix()));
         self.camera_entity = Some(cam_entity);
 
         // Update UI stats
@@ -304,6 +308,11 @@ impl AppHandler for PhysicsDemoApp {
         if let (Some(world), Some(systems), Some(runner)) =
             (&mut self.world, &self.systems, &self.runner)
         {
+            // Advance the change-detection tick at the start of each frame,
+            // before running systems — otherwise `Changed<Transform>` filters
+            // never fire and the free-fly camera's GlobalTransform (and thus
+            // the view matrix) is never recomputed in response to input.
+            world.advance_tick();
             runner.run(world, systems);
         }
 

@@ -240,6 +240,10 @@ impl AppHandler for PbrIblDemo {
 
         // Update ECS scene from orbit camera and run systems
         if let Some(scene) = &mut self.ecs_scene {
+            // Advance the change-detection tick before mutating any components,
+            // so the camera transform write below is detected this frame.
+            scene.begin_frame();
+
             // Sync orbit camera → ECS camera entity transform
             scene.update_camera_transform(self.camera.position(), self.camera.target);
 
