@@ -1,6 +1,6 @@
 //! Scene view state for rendering ECS entities into the editor's SceneView panel.
 //!
-//! Reads Camera, GlobalTransform, RenderMesh, RenderMaterial, and Visibility
+//! Reads Camera, GlobalTransform, MeshRenderer, and Visibility
 //! from the ECS World and builds a forward rendering pass targeting the
 //! swapchain with viewport/scissor matching the egui panel rect.
 //!
@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use redlilium_core::material::CpuMaterial;
 use redlilium_ecs::{
-    PerEntityBuffers, RenderMaterial, RenderMesh, RenderPassType, Visibility, World, shaders,
+    MeshRenderer, PerEntityBuffers, PrimitiveMaterial, RenderPassType, Visibility, World, shaders,
 };
 use redlilium_graphics::{
     Buffer, BufferDescriptor, BufferTextureCopyRegion, BufferTextureLayout, BufferUsage,
@@ -103,16 +103,18 @@ impl SceneViewState {
 
     /// Create GPU resources for a renderable entity with picking support.
     ///
-    /// Returns `(per_entity_buffers, render_material, gpu_mesh)`.
+    /// Returns `(per_entity_buffers, primitive_material, gpu_mesh)`. The caller
+    /// assembles these into a [`Primitive`](redlilium_ecs::Primitive) +
+    /// [`MeshRenderer`](redlilium_ecs::MeshRenderer).
     pub fn create_entity_resources(
         &self,
         cpu_mesh: &redlilium_core::mesh::CpuMesh,
     ) -> (
         PerEntityBuffers,
-        RenderMaterial,
+        PrimitiveMaterial,
         Arc<redlilium_graphics::Mesh>,
     ) {
-        let (per_entity, render_material, _bundle) = shaders::create_opaque_color_entity_full(
+        let (per_entity, material) = shaders::create_opaque_color_entity_full(
             &self.device,
             &self.opaque_material,
             &self.entity_index_material,
@@ -124,7 +126,7 @@ impl SceneViewState {
             .create_mesh_from_cpu(cpu_mesh)
             .expect("Failed to create entity GPU mesh");
 
-        (per_entity, render_material, gpu_mesh)
+        (per_entity, material, gpu_mesh)
     }
 
     /// Update the viewport and scissor from an egui panel rect.
@@ -160,8 +162,7 @@ impl SceneViewState {
         world: &World,
         swapchain: &SurfaceTexture,
     ) -> Option<GraphicsPass> {
-        let meshes = world.read::<RenderMesh>().ok()?;
-        let materials = world.read::<RenderMaterial>().ok()?;
+        let renderers = world.read::<MeshRenderer>().ok()?;
         let visibilities = world.read::<Visibility>().ok()?;
 
         let mut pass = GraphicsPass::new("scene_view".into());
@@ -185,17 +186,16 @@ impl SceneViewState {
             pass.set_scissor_rect(*scissor);
         }
 
-        for (entity_idx, render_mesh) in meshes.iter() {
-            let Some(render_material) = materials.get(entity_idx) else {
-                continue;
-            };
+        for (entity_idx, renderer) in renderers.iter() {
             if let Some(vis) = visibilities.get(entity_idx)
                 && !vis.is_visible()
             {
                 continue;
             }
-            if let Some(instance) = render_material.pass(RenderPassType::Forward) {
-                pass.add_draw(render_mesh.mesh.clone(), Arc::clone(instance));
+            for primitive in &renderer.primitives {
+                if let Some(instance) = primitive.material.pass(RenderPassType::Forward) {
+                    pass.add_draw(primitive.mesh.clone(), Arc::clone(instance));
+                }
             }
         }
 
@@ -205,8 +205,7 @@ impl SceneViewState {
     /// Build a graphics pass that renders entity indices to the entity-index
     /// texture (R32Uint). Uses the same depth buffer as the scene pass.
     pub fn build_entity_index_pass(&self, world: &World) -> Option<GraphicsPass> {
-        let meshes = world.read::<RenderMesh>().ok()?;
-        let materials = world.read::<RenderMaterial>().ok()?;
+        let renderers = world.read::<MeshRenderer>().ok()?;
         let visibilities = world.read::<Visibility>().ok()?;
 
         let mut pass = GraphicsPass::new("entity_index".into());
@@ -234,18 +233,17 @@ impl SceneViewState {
         }
 
         let mut draw_count = 0u32;
-        for (entity_idx, render_mesh) in meshes.iter() {
-            let Some(render_material) = materials.get(entity_idx) else {
-                continue;
-            };
+        for (entity_idx, renderer) in renderers.iter() {
             if let Some(vis) = visibilities.get(entity_idx)
                 && !vis.is_visible()
             {
                 continue;
             }
-            if let Some(instance) = render_material.pass(RenderPassType::EntityIndex) {
-                pass.add_draw(render_mesh.mesh.clone(), Arc::clone(instance));
-                draw_count += 1;
+            for primitive in &renderer.primitives {
+                if let Some(instance) = primitive.material.pass(RenderPassType::EntityIndex) {
+                    pass.add_draw(primitive.mesh.clone(), Arc::clone(instance));
+                    draw_count += 1;
+                }
             }
         }
 

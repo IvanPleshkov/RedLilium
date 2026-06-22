@@ -32,7 +32,7 @@ use redlilium_graphics::{
 use crate::Entity;
 use crate::std::components::{Camera, GlobalTransform};
 use crate::std::rendering::components::{
-    MaterialBundle, PerEntityBuffers, RenderMaterial, RenderPassType,
+    MaterialBundle, PerEntityBuffers, PrimitiveMaterial, RenderPassType,
 };
 
 /// Slang shader for opaque color rendering with camera VP + model matrix uniforms.
@@ -98,105 +98,87 @@ pub fn create_opaque_color_cpu_material() -> Arc<CpuMaterial> {
     })
 }
 
-/// Create per-entity GPU resources for the opaque color material.
+/// Per-entity transform GPU resources, shared by every [`Primitive`] of one
+/// entity. The forward + entity-index uniform buffers hold the (per-entity)
+/// view-projection / model matrices, so all primitives bind the same group 0.
 ///
-/// Returns `(uniform_buffer, material_bundle)`. The uniform buffer should
-/// be kept alongside the entity for per-frame updates via
-/// [`update_opaque_color_uniforms`].
-/// Returns `(forward_buffer, material_props_buffer, material_bundle)`. The
-/// material props buffer must be handed to the [`RenderMaterial`] (via
-/// `with_material_uniform_buffer`) so material value edits actually sync to the
-/// GPU.
-pub fn create_opaque_color_entity(
-    device: &Arc<GraphicsDevice>,
-    material: &Arc<Material>,
-) -> (Arc<Buffer>, Arc<Buffer>, Arc<MaterialBundle>) {
-    let uniform_buffer = device
-        .create_buffer(&BufferDescriptor::new(
-            std::mem::size_of::<OpaqueColorUniforms>() as u64,
-            BufferUsage::UNIFORM | BufferUsage::COPY_DST,
-        ))
-        .expect("Failed to create opaque color uniform buffer");
-
-    let transform_group = Arc::new(BindingGroup::new().with_buffer(0, uniform_buffer.clone()));
-
-    // Material props buffer (base_color)
-    let mat_props_buffer = create_material_props_buffer(device);
-    let mat_props_group = Arc::new(BindingGroup::new().with_buffer(0, mat_props_buffer.clone()));
-
-    let instance = Arc::new(
-        MaterialInstance::new(Arc::clone(material))
-            .with_binding_group(Arc::clone(&transform_group)) // group 0
-            .with_binding_group(mat_props_group), // group 1
-    );
-
-    let bundle = Arc::new(
-        MaterialBundle::new()
-            .with_pass(RenderPassType::Forward, instance)
-            .with_shared_bindings(vec![transform_group]),
-    );
-
-    (uniform_buffer, mat_props_buffer, bundle)
+/// [`Primitive`]: crate::std::rendering::components::Primitive
+pub struct EntityTransform {
+    /// The per-entity uniform buffers (forward + optional entity-index).
+    pub buffers: PerEntityBuffers,
+    /// Binding group 0 for the forward pass.
+    forward_group: Arc<BindingGroup>,
+    /// Binding group 0 for the entity-index (picking) pass, if enabled.
+    entity_index_group: Option<Arc<BindingGroup>>,
 }
 
-/// Extended version of [`create_opaque_color_entity`] that also adds an
-/// [`EntityIndex`](RenderPassType::EntityIndex) pass for picking.
-///
-/// Returns `(forward_buffer, entity_index_buffer, material_props_buffer, material_bundle)`.
-pub fn create_opaque_color_entity_with_picking(
-    device: &Arc<GraphicsDevice>,
-    forward_material: &Arc<Material>,
-    entity_index_material: &Arc<Material>,
-) -> (Arc<Buffer>, Arc<Buffer>, Arc<Buffer>, Arc<MaterialBundle>) {
-    let uniform_buffer = device
+/// Create the per-entity transform buffers + their binding groups. When
+/// `picking` is set, also creates the entity-index transform buffer used by the
+/// picking pass.
+pub fn create_entity_transform(device: &Arc<GraphicsDevice>, picking: bool) -> EntityTransform {
+    let fwd_buf = device
         .create_buffer(&BufferDescriptor::new(
             std::mem::size_of::<OpaqueColorUniforms>() as u64,
             BufferUsage::UNIFORM | BufferUsage::COPY_DST,
         ))
         .expect("Failed to create opaque color uniform buffer");
+    let forward_group = Arc::new(BindingGroup::new().with_buffer(0, fwd_buf.clone()));
 
-    let transform_group = Arc::new(BindingGroup::new().with_buffer(0, uniform_buffer.clone()));
+    if picking {
+        let ei_buf = device
+            .create_buffer(&BufferDescriptor::new(
+                std::mem::size_of::<super::entity_index::EntityIndexUniforms>() as u64,
+                BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+            ))
+            .expect("Failed to create entity index uniform buffer");
+        let entity_index_group = Arc::new(BindingGroup::new().with_buffer(0, ei_buf.clone()));
+        EntityTransform {
+            buffers: PerEntityBuffers::with_entity_index(fwd_buf, ei_buf),
+            forward_group,
+            entity_index_group: Some(entity_index_group),
+        }
+    } else {
+        EntityTransform {
+            buffers: PerEntityBuffers::new(fwd_buf),
+            forward_group,
+            entity_index_group: None,
+        }
+    }
+}
 
-    // Material props buffer (base_color)
+/// Build a single primitive's [`PrimitiveMaterial`] that shares the entity's
+/// `transform` (group 0) and owns its own material-property buffer (group 1).
+/// Adds an [`EntityIndex`](RenderPassType::EntityIndex) pass when both
+/// `entity_index_material` and the transform's picking group are present.
+pub fn create_opaque_color_primitive_material(
+    device: &Arc<GraphicsDevice>,
+    forward_material: &Arc<Material>,
+    entity_index_material: Option<&Arc<Material>>,
+    cpu_material: &Arc<CpuMaterial>,
+    transform: &EntityTransform,
+) -> PrimitiveMaterial {
+    // Material props buffer (base_color) — per primitive.
     let mat_props_buffer = create_material_props_buffer(device);
     let mat_props_group = Arc::new(BindingGroup::new().with_buffer(0, mat_props_buffer.clone()));
 
     let forward_instance = Arc::new(
         MaterialInstance::new(Arc::clone(forward_material))
-            .with_binding_group(Arc::clone(&transform_group)) // group 0
-            .with_binding_group(mat_props_group), // group 1
+            .with_binding_group(Arc::clone(&transform.forward_group)) // group 0 (shared)
+            .with_binding_group(mat_props_group), // group 1 (per-primitive)
     );
 
-    let (ei_buffer, ei_instance) =
-        super::entity_index::create_entity_index_instance(device, entity_index_material);
+    let mut bundle = MaterialBundle::new()
+        .with_pass(RenderPassType::Forward, forward_instance)
+        .with_shared_bindings(vec![Arc::clone(&transform.forward_group)]);
 
-    let bundle = Arc::new(
-        MaterialBundle::new()
-            .with_pass(RenderPassType::Forward, forward_instance)
-            .with_pass(RenderPassType::EntityIndex, ei_instance)
-            .with_shared_bindings(vec![transform_group]),
-    );
-
-    (uniform_buffer, ei_buffer, mat_props_buffer, bundle)
-}
-
-/// Create per-entity GPU resources for opaque color with picking, returning
-/// components ready for ECS insertion.
-///
-/// Returns `(per_entity_buffers, render_material, material_bundle)`.
-/// The `PerEntityBuffers` and `RenderMaterial` should be inserted as
-/// components; the [`UpdatePerEntityUniforms`](super::super::UpdatePerEntityUniforms)
-/// and [`SyncMaterialUniforms`](super::super::SyncMaterialUniforms)
-/// systems will handle GPU updates automatically.
-pub fn create_opaque_color_entity_full(
-    device: &Arc<GraphicsDevice>,
-    forward_material: &Arc<Material>,
-    entity_index_material: &Arc<Material>,
-    cpu_material: &Arc<CpuMaterial>,
-) -> (PerEntityBuffers, RenderMaterial, Arc<MaterialBundle>) {
-    let (fwd_buf, ei_buf, mat_props_buf, bundle) =
-        create_opaque_color_entity_with_picking(device, forward_material, entity_index_material);
-    let per_entity = PerEntityBuffers::with_entity_index(fwd_buf, ei_buf);
+    if let (Some(ei_material), Some(ei_group)) =
+        (entity_index_material, &transform.entity_index_group)
+    {
+        let ei_instance = Arc::new(
+            MaterialInstance::new(Arc::clone(ei_material)).with_binding_group(Arc::clone(ei_group)), // group 0 (shared)
+        );
+        bundle = bundle.with_pass(RenderPassType::EntityIndex, ei_instance);
+    }
 
     let cpu_instance = Arc::new(
         CpuMaterialInstance::new(Arc::clone(cpu_material)).with_value(
@@ -205,14 +187,35 @@ pub fn create_opaque_color_entity_full(
         ),
     );
 
-    let render_material = RenderMaterial::with_cpu_data(
-        Arc::clone(&bundle),
+    PrimitiveMaterial::with_cpu_data(
+        Arc::new(bundle),
         cpu_instance,
         vec![(RenderPassType::Forward, "opaque_color".into())],
     )
-    .with_material_uniform_buffer(mat_props_buf);
+    .with_material_uniform_buffer(mat_props_buffer)
+}
 
-    (per_entity, render_material, bundle)
+/// Convenience builder for a single-primitive entity: creates the per-entity
+/// transform (with picking) plus one [`PrimitiveMaterial`].
+///
+/// Returns `(per_entity_buffers, primitive_material)`. The caller wraps the
+/// material in a [`Primitive`](crate::std::rendering::components::Primitive) +
+/// [`MeshRenderer`](crate::std::rendering::components::MeshRenderer).
+pub fn create_opaque_color_entity_full(
+    device: &Arc<GraphicsDevice>,
+    forward_material: &Arc<Material>,
+    entity_index_material: &Arc<Material>,
+    cpu_material: &Arc<CpuMaterial>,
+) -> (PerEntityBuffers, PrimitiveMaterial) {
+    let transform = create_entity_transform(device, true);
+    let material = create_opaque_color_primitive_material(
+        device,
+        forward_material,
+        Some(entity_index_material),
+        cpu_material,
+        &transform,
+    );
+    (transform.buffers, material)
 }
 
 /// Create the material properties GPU buffer with default base_color.

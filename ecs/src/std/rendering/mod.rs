@@ -5,8 +5,7 @@
 //!
 //! # Components
 //!
-//! - [`RenderMesh`] — GPU mesh attached to an entity
-//! - [`RenderMaterial`] — GPU material instance attached to an entity
+//! - [`MeshRenderer`] — list of (mesh, material) primitives on an entity
 //! - [`CameraTarget`] — Render target textures for a camera entity
 //!
 //! # Resources
@@ -30,7 +29,8 @@ pub mod shaders;
 pub mod systems;
 
 pub use components::{
-    CameraTarget, MaterialBundle, PerEntityBuffers, RenderMaterial, RenderMesh, RenderPassType,
+    CameraTarget, MaterialBundle, MeshRenderer, PerEntityBuffers, Primitive, PrimitiveMaterial,
+    RenderPassType,
 };
 pub use resources::{
     CpuBundleInfo, MaterialManager, MaterialManagerError, MeshManager, RenderSchedule,
@@ -48,8 +48,7 @@ use crate::World;
 /// Call this after [`register_std_components`](crate::register_std_components)
 /// to enable rendering support.
 pub fn register_rendering_components(world: &mut World) {
-    world.register_inspector::<RenderMesh>();
-    world.register_inspector::<RenderMaterial>();
+    world.register_inspector::<MeshRenderer>();
     world.register_component::<CameraTarget>();
     world.register_component::<PerEntityBuffers>();
 }

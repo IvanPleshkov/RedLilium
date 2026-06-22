@@ -15,10 +15,10 @@ use redlilium_ecs::ui::{
 };
 use redlilium_ecs::{
     Camera, DrawGrid, DrawSelectionAabb, EcsRunner, Entity, FreeFlyCamera, GlobalTransform,
-    GridConfig, InitializeRenderEntities, MaterialManager, MeshManager, Name, PerEntityBuffers,
-    PostUpdate, RenderMesh, Schedules, SyncMaterialUniforms, TextureManager, Transform, Update,
-    UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms, UpdatePerEntityUniforms,
-    Visibility, WindowInput, World, register_std_components,
+    GridConfig, InitializeRenderEntities, MaterialManager, MeshManager, MeshRenderer, Name,
+    PerEntityBuffers, PostUpdate, Primitive, Schedules, SyncMaterialUniforms, TextureManager,
+    Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms,
+    UpdatePerEntityUniforms, Visibility, WindowInput, World, register_std_components,
 };
 use redlilium_graphics::egui::{EguiApp, EguiController};
 use redlilium_graphics::{FrameSchedule, RenderTarget, TextureFormat};
@@ -66,9 +66,10 @@ pub struct EditorWorld {
 }
 
 pub struct Editor {
-    // Multi-world support
-    worlds: Vec<EditorWorld>,
-    active_world: usize,
+    // The single editor world. Created lazily once graphics is available
+    // (see `on_resume`); `None` until then. The engine is single-world by
+    // design — one scene is resident at a time.
+    world: Option<EditorWorld>,
     runner: EcsRunner,
 
     // VFS and asset browser
@@ -138,8 +139,7 @@ impl Editor {
         let console = ConsolePanel::new(crate::log_capture::log_buffer());
 
         Self {
-            worlds: Vec::new(),
-            active_world: 0,
+            world: None,
             runner: EcsRunner::single_thread(),
             vfs,
             asset_browser,
@@ -244,14 +244,15 @@ impl Editor {
                 .unwrap();
             world.insert(entity, Visibility::VISIBLE).unwrap();
 
-            let (per_entity, render_mat, mesh) = scene_view.create_entity_resources(&cpu_cube);
-            let render_mesh = match cube_aabb {
-                Some(aabb) => RenderMesh::with_aabb(mesh, aabb),
-                None => RenderMesh::new(mesh),
+            let (per_entity, material, mesh) = scene_view.create_entity_resources(&cpu_cube);
+            let primitive = match cube_aabb {
+                Some(aabb) => Primitive::with_aabb(mesh, material, aabb),
+                None => Primitive::new(mesh, material),
             };
-            register_render_material(&world, &render_mat);
-            world.insert(entity, render_mesh).unwrap();
-            world.insert(entity, render_mat).unwrap();
+            register_render_material(&world, &primitive.material);
+            world
+                .insert(entity, MeshRenderer::single(primitive))
+                .unwrap();
             world.insert(entity, per_entity).unwrap();
         }
 
@@ -270,14 +271,15 @@ impl Editor {
                 .unwrap();
             world.insert(entity, Visibility::VISIBLE).unwrap();
 
-            let (per_entity, render_mat, mesh) = scene_view.create_entity_resources(&cpu_cube);
-            let render_mesh = match cube_aabb {
-                Some(aabb) => RenderMesh::with_aabb(mesh, aabb),
-                None => RenderMesh::new(mesh),
+            let (per_entity, material, mesh) = scene_view.create_entity_resources(&cpu_cube);
+            let primitive = match cube_aabb {
+                Some(aabb) => Primitive::with_aabb(mesh, material, aabb),
+                None => Primitive::new(mesh, material),
             };
-            register_render_material(&world, &render_mat);
-            world.insert(entity, render_mesh).unwrap();
-            world.insert(entity, render_mat).unwrap();
+            register_render_material(&world, &primitive.material);
+            world
+                .insert(entity, MeshRenderer::single(primitive))
+                .unwrap();
             world.insert(entity, per_entity).unwrap();
         }
 
@@ -347,14 +349,14 @@ impl Editor {
 
     /// Get the active editor world (immutable).
     fn active_world(&self) -> &EditorWorld {
-        &self.worlds[self.active_world]
+        self.world.as_ref().unwrap()
     }
 
     /// Returns `true` if any editor world has unsaved changes.
     fn has_unsaved_changes(&self) -> bool {
-        self.worlds
-            .iter()
-            .any(|ew| ew.history.has_unsaved_changes())
+        self.world
+            .as_ref()
+            .is_some_and(|ew| ew.history.has_unsaved_changes())
     }
 
     /// Whether the cursor is currently inside the scene view panel.
@@ -425,10 +427,10 @@ impl AppHandler for Editor {
         let mut scene_view = SceneViewState::new(ctx.device().clone(), ctx.surface_format());
         scene_view.resize_if_needed(ctx.width(), ctx.height());
 
-        // Create the first editor world with a demo scene
+        // Create the editor world with a demo scene
         let aspect = ctx.aspect_ratio();
         let editor_world = self.create_editor_world(&scene_view, aspect);
-        self.worlds.push(editor_world);
+        self.world = Some(editor_world);
 
         self.scene_view = Some(scene_view);
 
@@ -441,7 +443,7 @@ impl AppHandler for Editor {
 
         // Run startup schedules
         let runner = &self.runner;
-        let ew = &mut self.worlds[0];
+        let ew = self.world.as_mut().unwrap();
         ew.schedules.run_startup(&mut ew.world, runner);
 
         // Create native menu after the event loop / NSApplication is initialized
@@ -459,7 +461,7 @@ impl AppHandler for Editor {
             sv.resize_if_needed(ctx.width(), ctx.height());
         }
         // Update camera projection for new aspect ratio
-        if !self.worlds.is_empty()
+        if self.world.is_some()
             && let Some(sv) = &self.scene_view
         {
             self.update_camera_projection(sv.aspect_ratio());
@@ -479,7 +481,7 @@ impl AppHandler for Editor {
             return false;
         }
 
-        if self.worlds.is_empty() {
+        if self.world.is_none() {
             return true;
         }
 
@@ -487,7 +489,7 @@ impl AppHandler for Editor {
         if let Some(scene_view) = &mut self.scene_view
             && let Some(entity_index) = scene_view.resolve_pick()
         {
-            let ew = &mut self.worlds[self.active_world];
+            let ew = self.world.as_mut().unwrap();
             // Find entity whose sparse-set index matches the picked index
             let target = ew
                 .world
@@ -520,7 +522,7 @@ impl AppHandler for Editor {
         if let Some(scene_view) = &mut self.scene_view
             && let Some(entity_indices) = scene_view.resolve_rect_pick()
         {
-            let ew = &mut self.worlds[self.active_world];
+            let ew = self.world.as_mut().unwrap();
             let selected: Vec<Entity> = if let Ok(buffers) = ew.world.read::<PerEntityBuffers>() {
                 entity_indices
                     .iter()
@@ -554,7 +556,7 @@ impl AppHandler for Editor {
             && let Some(action) = menu.poll_event()
         {
             use crate::menu::MenuAction;
-            let ew = &mut self.worlds[self.active_world];
+            let ew = self.world.as_mut().unwrap();
             match action {
                 MenuAction::Save => {
                     ew.history.mark_saved();
@@ -592,7 +594,7 @@ impl AppHandler for Editor {
         // Drain action queue and execute through history (before systems so
         // that Changed<T> filters can detect the mutations this frame).
         {
-            let ew = &mut self.worlds[self.active_world];
+            let ew = self.world.as_mut().unwrap();
             let actions = ew.world.resource::<ActionQueue<World>>().drain();
             for action in actions {
                 if let Err(e) = ew.history.execute(action, &mut ew.world) {
@@ -603,13 +605,8 @@ impl AppHandler for Editor {
 
         // Run ECS schedules (always run in editing mode for camera/transforms)
         {
-            let Editor {
-                worlds,
-                active_world,
-                runner,
-                ..
-            } = self;
-            let ew = &mut worlds[*active_world];
+            let Editor { world, runner, .. } = self;
+            let ew = world.as_mut().unwrap();
             ew.schedules
                 .run_frame(&mut ew.world, runner, ctx.delta_time() as f64);
         }
@@ -618,7 +615,7 @@ impl AppHandler for Editor {
         if let Some((entity, comp_name, vfs_dir)) =
             self.asset_browser.pending_component_export.take()
         {
-            let ew = &self.worlds[self.active_world];
+            let ew = self.world.as_ref().unwrap();
             match ew.world.serialize_component_by_name(entity, comp_name) {
                 Ok(Some(serialized)) => {
                     match redlilium_ecs::serialize::encode(
@@ -664,7 +661,7 @@ impl AppHandler for Editor {
             ) {
                 Ok(serialized) => {
                     let action = ImportComponentAction::new(entity, serialized);
-                    let ew = &mut self.worlds[self.active_world];
+                    let ew = self.world.as_mut().unwrap();
                     if let Err(e) = ew.history.execute(Box::new(action), &mut ew.world) {
                         log::warn!("Import action failed: {e}");
                     }
@@ -675,7 +672,7 @@ impl AppHandler for Editor {
 
         // Process prefab export (world inspector → asset browser)
         if let Some((root_entity, vfs_dir)) = self.asset_browser.pending_prefab_export.take() {
-            let ew = &self.worlds[self.active_world];
+            let ew = self.world.as_ref().unwrap();
             if ew.world.is_alive(root_entity) {
                 match ew.world.serialize_prefab(root_entity) {
                     Ok(serialized) => {
@@ -727,7 +724,7 @@ impl AppHandler for Editor {
             ) {
                 Ok(serialized) => {
                     let action = SpawnPrefabAction::new(serialized, parent);
-                    let ew = &mut self.worlds[self.active_world];
+                    let ew = self.world.as_mut().unwrap();
                     if let Err(e) = ew.history.execute(Box::new(action), &mut ew.world) {
                         log::warn!("Prefab spawn action failed: {e}");
                     }
@@ -816,18 +813,14 @@ impl AppHandler for Editor {
                     use crate::menu::MenuAction;
                     match action {
                         MenuAction::CloseWindow => {
-                            if self
-                                .worlds
-                                .iter()
-                                .any(|ew| ew.history.has_unsaved_changes())
-                            {
+                            if self.has_unsaved_changes() {
                                 self.show_close_dialog = true;
                             } else {
                                 self.should_close = true;
                             }
                         }
-                        _ if !self.worlds.is_empty() => {
-                            let ew = &mut self.worlds[self.active_world];
+                        _ if self.world.is_some() => {
+                            let ew = self.world.as_mut().unwrap();
                             match action {
                                 MenuAction::Save => {
                                     ew.history.mark_saved();
@@ -870,11 +863,7 @@ impl AppHandler for Editor {
             egui::CentralPanel::default()
                 .frame(panel_frame)
                 .show(&egui_ctx, |ui| {
-                    let ew = if self.worlds.is_empty() {
-                        None
-                    } else {
-                        Some(&mut self.worlds[self.active_world])
-                    };
+                    let ew = self.world.as_mut();
                     if let Some(ew) = ew {
                         // Compute drag selection rect in egui logical points.
                         let drag_rect = if self.dragging_box
@@ -968,7 +957,7 @@ impl AppHandler for Editor {
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
                             if ui.button("Save").clicked() {
-                                for ew in &mut self.worlds {
+                                if let Some(ew) = &mut self.world {
                                     ew.history.mark_saved();
                                 }
                                 self.show_close_dialog = false;
@@ -1017,7 +1006,7 @@ impl AppHandler for Editor {
             if let Some(sv) = &mut self.scene_view {
                 sv.set_viewport(rect, pixels_per_point);
             }
-            if !self.worlds.is_empty() {
+            if self.world.is_some() {
                 let aspect = self
                     .scene_view
                     .as_ref()
@@ -1049,9 +1038,9 @@ impl AppHandler for Editor {
 
         if let Some(scene_view) = &self.scene_view
             && scene_view.has_viewport()
-            && !self.worlds.is_empty()
+            && self.world.is_some()
         {
-            let ew = &self.worlds[self.active_world];
+            let ew = self.world.as_ref().unwrap();
             if let Some(mut scene_pass) =
                 scene_view.build_scene_pass(&ew.world, ctx.swapchain_texture())
             {
@@ -1121,7 +1110,7 @@ impl AppHandler for Editor {
         if let Some(egui) = &mut self.egui_controller {
             egui.on_mouse_move(x, y);
         }
-        if !self.worlds.is_empty() {
+        if self.world.is_some() {
             let ew = self.active_world();
             {
                 let mut input = ew.window_input.write();
@@ -1148,7 +1137,7 @@ impl AppHandler for Editor {
         // Only forward presses when cursor is in scene view and egui doesn't
         // want the pointer (e.g. color picker popup over scene view).
         // Always forward releases so buttons don't get stuck.
-        if !self.worlds.is_empty()
+        if self.world.is_some()
             && (!pressed || (self.cursor_in_scene_view() && !self.egui_wants_pointer))
         {
             let idx = match button {
@@ -1172,8 +1161,7 @@ impl AppHandler for Editor {
                     self.dragging_box = false;
                     // Clear selection immediately on click; the GPU pick or
                     // box selection will re-select if anything is hit.
-                    if !self.worlds.is_empty() {
-                        let ew = &mut self.worlds[self.active_world];
+                    if let Some(ew) = &mut self.world {
                         let action: Box<dyn redlilium_core::abstract_editor::EditAction<World>> =
                             Box::new(SelectAction::clear());
                         let _ = ew.history.execute(action, &mut ew.world);
@@ -1204,7 +1192,7 @@ impl AppHandler for Editor {
         if let Some(egui) = &mut self.egui_controller {
             egui.on_mouse_scroll(MouseScrollDelta::LineDelta(dx, dy));
         }
-        if !self.worlds.is_empty() && self.cursor_in_scene_view() && !self.egui_wants_pointer {
+        if self.world.is_some() && self.cursor_in_scene_view() && !self.egui_wants_pointer {
             let ew = self.active_world();
             {
                 let mut input = ew.window_input.write();
@@ -1247,7 +1235,7 @@ impl AppHandler for Editor {
         }
         // Only forward key presses when egui doesn't want keyboard; always
         // forward releases so keys don't get stuck.
-        if !self.worlds.is_empty()
+        if self.world.is_some()
             && (!event.state.is_pressed() || !self.egui_wants_keyboard)
             && let PhysicalKey::Code(winit_key) = event.physical_key
             && let Some(key) = redlilium_app::input::map_winit_key(winit_key)
@@ -1309,9 +1297,10 @@ fn show_drag_overlay(ctx: &egui::Context, world: &World) {
     }
 }
 
-/// Register a [`RenderMaterial`]'s bundle in the world's [`MaterialManager`]
-/// so that prefab serialization can look up its CPU source data.
-fn register_render_material(world: &World, render_mat: &redlilium_ecs::RenderMaterial) {
+/// Register a [`PrimitiveMaterial`](redlilium_ecs::PrimitiveMaterial)'s bundle
+/// in the world's [`MaterialManager`] so prefab serialization can look up its
+/// CPU source data.
+fn register_render_material(world: &World, render_mat: &redlilium_ecs::PrimitiveMaterial) {
     if let (Some(cpu_instance), Some(pass_materials)) =
         (render_mat.cpu_instance(), render_mat.pass_materials())
     {

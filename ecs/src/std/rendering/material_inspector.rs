@@ -1,8 +1,8 @@
-//! Custom inspector UI for the [`RenderMaterial`] component.
+//! Custom inspector UI for the [`MeshRenderer`] component.
 //!
-//! Displays material binding values (colors, sliders, texture names) in the
-//! component inspector panel, similar to Unity/Unreal material editors.
-//! Edits produce undoable actions that rebuild the GPU material bundle.
+//! Displays each primitive's material binding values (colors, sliders, texture
+//! names) in the component inspector panel, similar to Unity/Unreal material
+//! editors. Edits produce undoable actions that rebuild the GPU material bundle.
 
 use std::sync::Arc;
 
@@ -14,22 +14,61 @@ use redlilium_core::material::{
 
 use super::components::RenderPassType;
 use super::resources::{MaterialManager, TextureManager};
-use crate::std::rendering::RenderMaterial;
+use crate::std::rendering::{MeshRenderer, PrimitiveMaterial};
 use crate::{Entity, InspectResult, World};
 
 // ---------------------------------------------------------------------------
 // Custom inspect function
 // ---------------------------------------------------------------------------
 
-/// Custom inspector for [`RenderMaterial`] that reads the component's
-/// [`CpuMaterialInstance`] to display and edit material properties.
-pub(crate) fn inspect_material_ui(
+/// Custom inspector for [`MeshRenderer`]: lists each primitive with its mesh
+/// label and editable material properties (reading the per-primitive
+/// [`CpuMaterialInstance`]).
+pub(crate) fn inspect_mesh_renderer_ui(
     world: &World,
     entity: Entity,
     ui: &mut egui::Ui,
 ) -> InspectResult {
-    let comp = world.get::<RenderMaterial>(entity)?;
+    let renderer = world.get::<MeshRenderer>(entity)?;
 
+    let single = renderer.primitives.len() == 1;
+    let mut actions: Vec<Box<dyn EditAction<World>>> = Vec::new();
+
+    for (index, primitive) in renderer.primitives.iter().enumerate() {
+        egui::CollapsingHeader::new(format!("Primitive {index}"))
+            .default_open(single)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("mesh");
+                    match primitive.mesh.label() {
+                        Some(label) => ui.label(format!("Mesh: {label}")),
+                        None => ui.weak("Mesh (unnamed)"),
+                    };
+                });
+
+                if let Some(action) =
+                    inspect_primitive_material(entity, index, &primitive.material, ui)
+                {
+                    actions.push(action);
+                }
+            });
+    }
+
+    if actions.is_empty() {
+        None
+    } else {
+        Some(actions)
+    }
+}
+
+/// Render one primitive's material properties. Returns an undoable action if the
+/// user edited any value this frame.
+fn inspect_primitive_material(
+    entity: Entity,
+    primitive_index: usize,
+    comp: &PrimitiveMaterial,
+    ui: &mut egui::Ui,
+) -> Option<Box<dyn EditAction<World>>> {
     // Show label
     ui.horizontal(|ui| {
         ui.label("material");
@@ -74,14 +113,15 @@ pub(crate) fn inspect_material_ui(
         return None;
     }
 
-    Some(vec![Box::new(SetMaterialValuesAction {
+    Some(Box::new(SetMaterialValuesAction {
         entity,
+        primitive_index,
         old_values: cpu_instance.values.clone(),
         new_values,
         cpu_material: cpu_mat,
         instance_name: cpu_instance.name.clone(),
         pass_materials,
-    })])
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +295,8 @@ fn show_texture_value(ui: &mut egui::Ui, name: &str, tex_ref: &TextureRef) {
 /// GPU bundle via [`MaterialManager::create_bundle`].
 struct SetMaterialValuesAction {
     entity: Entity,
+    /// Index of the edited primitive within the entity's [`MeshRenderer`].
+    primitive_index: usize,
     old_values: Vec<MaterialValue>,
     new_values: Vec<MaterialValue>,
     cpu_material: Arc<CpuMaterial>,
@@ -271,7 +313,7 @@ impl std::fmt::Debug for SetMaterialValuesAction {
 }
 
 impl SetMaterialValuesAction {
-    /// Apply new material values to the entity's `RenderMaterial`.
+    /// Apply new material values to the entity's `MeshRenderer` primitive.
     ///
     /// For scalar/vector-only changes the values are set directly and the
     /// `SyncMaterialUniforms` system handles GPU upload. If any texture
@@ -286,12 +328,16 @@ impl SetMaterialValuesAction {
         if needs_rebuild {
             self.rebuild_and_set(world, values)
         } else {
-            let mut mat = world
-                .get_mut::<RenderMaterial>(self.entity)
+            let mut renderer = world.get_mut::<MeshRenderer>(self.entity).ok_or_else(|| {
+                EditActionError::TargetNotFound("entity has no MeshRenderer".into())
+            })?;
+            let primitive = renderer
+                .primitives
+                .get_mut(self.primitive_index)
                 .ok_or_else(|| {
-                    EditActionError::TargetNotFound("entity has no RenderMaterial".into())
+                    EditActionError::TargetNotFound("primitive index out of range".into())
                 })?;
-            mat.set_values(values.to_vec());
+            primitive.material.set_values(values.to_vec());
             Ok(())
         }
     }
@@ -316,12 +362,16 @@ impl SetMaterialValuesAction {
                 .map_err(|e| EditActionError::Custom(format!("material rebuild failed: {e}")))?
         };
 
-        let mut mat = world
-            .get_mut::<RenderMaterial>(self.entity)
+        let mut renderer = world
+            .get_mut::<MeshRenderer>(self.entity)
+            .ok_or_else(|| EditActionError::TargetNotFound("entity has no MeshRenderer".into()))?;
+        let primitive = renderer
+            .primitives
+            .get_mut(self.primitive_index)
             .ok_or_else(|| {
-                EditActionError::TargetNotFound("entity has no RenderMaterial".into())
+                EditActionError::TargetNotFound("primitive index out of range".into())
             })?;
-        mat.set_bundle(
+        primitive.material.set_bundle(
             bundle,
             Some(Arc::new(cpu_instance)),
             Some(self.pass_materials.clone()),
@@ -358,6 +408,7 @@ impl EditAction<World> for SetMaterialValuesAction {
     fn merge(&mut self, other: Box<dyn EditAction<World>>) -> Option<Box<dyn EditAction<World>>> {
         if let Some(other) = other.as_any().downcast_ref::<Self>()
             && self.entity == other.entity
+            && self.primitive_index == other.primitive_index
         {
             self.new_values = other.new_values.clone();
             return None; // consumed

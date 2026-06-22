@@ -10,13 +10,13 @@ use redlilium_graphics::{
 use crate::SystemContext;
 use crate::std::components::{Camera, GlobalTransform, Visibility};
 use crate::std::rendering::components::{
-    CameraTarget, PerEntityBuffers, RenderMaterial, RenderMesh, RenderPassType,
+    CameraTarget, MeshRenderer, PerEntityBuffers, RenderPassType,
 };
 use crate::std::rendering::resources::RenderSchedule;
 
 /// Simple forward render system.
 ///
-/// Collects all visible entities with [`RenderMesh`] + [`RenderMaterial`] and,
+/// Collects all visible entities with a [`MeshRenderer`] and,
 /// for each camera that has a [`CameraTarget`], builds a render graph with a
 /// single forward graphics pass and submits it to the [`RenderSchedule`].
 pub struct ForwardRenderSystem;
@@ -29,23 +29,13 @@ impl crate::System for ForwardRenderSystem {
             crate::Read<Camera>,
             crate::Read<GlobalTransform>,
             crate::Read<CameraTarget>,
-            crate::Read<RenderMesh>,
-            crate::Read<RenderMaterial>,
+            crate::Read<MeshRenderer>,
             crate::Read<PerEntityBuffers>,
             crate::Read<Visibility>,
             crate::ResMut<RenderSchedule>,
         )>()
         .execute(
-            |(
-                cameras,
-                globals,
-                targets,
-                meshes,
-                materials,
-                per_entity,
-                visibilities,
-                mut schedule_res,
-            )| {
+            |(cameras, globals, targets, renderers, per_entity, visibilities, mut schedule_res)| {
                 let Some(graph) = schedule_res.graph_mut() else {
                     return;
                 };
@@ -82,21 +72,21 @@ impl crate::System for ForwardRenderSystem {
                     let mut pass = GraphicsPass::new(format!("forward_{cam_idx}"));
                     pass.set_render_targets(render_target_config);
 
-                    for (entity_idx, render_mesh) in meshes.iter() {
+                    for (entity_idx, renderer) in renderers.iter() {
                         if !per_entity.contains(entity_idx) {
                             continue;
                         }
-                        let Some(render_material) = materials.get(entity_idx) else {
-                            continue;
-                        };
                         if let Some(vis) = visibilities.get(entity_idx)
                             && !vis.is_visible()
                         {
                             continue;
                         }
 
-                        if let Some(instance) = render_material.pass(RenderPassType::Forward) {
-                            pass.add_draw(Arc::clone(&render_mesh.mesh), Arc::clone(instance));
+                        for primitive in &renderer.primitives {
+                            if let Some(instance) = primitive.material.pass(RenderPassType::Forward)
+                            {
+                                pass.add_draw(Arc::clone(&primitive.mesh), Arc::clone(instance));
+                            }
                         }
                     }
 
@@ -122,23 +112,13 @@ impl crate::System for EditorForwardRenderSystem {
             crate::ReadAll<Camera>,
             crate::ReadAll<GlobalTransform>,
             crate::ReadAll<CameraTarget>,
-            crate::Read<RenderMesh>,
-            crate::Read<RenderMaterial>,
+            crate::Read<MeshRenderer>,
             crate::Read<PerEntityBuffers>,
             crate::Read<Visibility>,
             crate::ResMut<RenderSchedule>,
         )>()
         .execute(
-            |(
-                cameras,
-                globals,
-                targets,
-                meshes,
-                materials,
-                per_entity,
-                visibilities,
-                mut schedule_res,
-            )| {
+            |(cameras, globals, targets, renderers, per_entity, visibilities, mut schedule_res)| {
                 let Some(graph) = schedule_res.graph_mut() else {
                     return;
                 };
@@ -175,21 +155,21 @@ impl crate::System for EditorForwardRenderSystem {
                     let mut pass = GraphicsPass::new(format!("editor_forward_{cam_idx}"));
                     pass.set_render_targets(render_target_config);
 
-                    for (entity_idx, render_mesh) in meshes.iter() {
+                    for (entity_idx, renderer) in renderers.iter() {
                         if !per_entity.contains(entity_idx) {
                             continue;
                         }
-                        let Some(render_material) = materials.get(entity_idx) else {
-                            continue;
-                        };
                         if let Some(vis) = visibilities.get(entity_idx)
                             && !vis.is_visible()
                         {
                             continue;
                         }
 
-                        if let Some(instance) = render_material.pass(RenderPassType::Forward) {
-                            pass.add_draw(Arc::clone(&render_mesh.mesh), Arc::clone(instance));
+                        for primitive in &renderer.primitives {
+                            if let Some(instance) = primitive.material.pass(RenderPassType::Forward)
+                            {
+                                pass.add_draw(Arc::clone(&primitive.mesh), Arc::clone(instance));
+                            }
                         }
                     }
 

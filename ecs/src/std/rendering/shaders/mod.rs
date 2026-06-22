@@ -11,7 +11,8 @@ pub use entity_index::{
     update_entity_index_uniforms,
 };
 pub use opaque_color::{
-    OpaqueColorUniforms, create_opaque_color_cpu_material, create_opaque_color_entity,
-    create_opaque_color_entity_full, create_opaque_color_entity_with_picking,
-    create_opaque_color_material, update_opaque_color_uniforms,
+    EntityTransform, OpaqueColorUniforms, create_entity_transform,
+    create_opaque_color_cpu_material, create_opaque_color_entity_full,
+    create_opaque_color_material, create_opaque_color_primitive_material,
+    update_opaque_color_uniforms,
 };
