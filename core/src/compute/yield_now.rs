@@ -43,6 +43,16 @@ pub fn reset_yield_timer() {
 /// runtime will only actually suspend when enough wall-clock time
 /// has elapsed since the last real yield (see [`set_yield_interval`]).
 ///
+/// # Throttle granularity
+///
+/// The "enough time elapsed" timer is **per worker thread**, not per task. A task that migrates between worker threads (work stealing)
+/// consults whichever thread it is currently running on, so the throttle is
+/// best-effort: a migrated task may suspend slightly sooner or later than the
+/// configured interval. This only affects yield *cadence* (a coarse
+/// context-switch optimization), never correctness — cooperative yielding still
+/// works regardless of which thread a task lands on. A per-task timer would
+/// require threading task state through this call and is deliberately avoided.
+///
 /// # Example
 ///
 /// ```ignore

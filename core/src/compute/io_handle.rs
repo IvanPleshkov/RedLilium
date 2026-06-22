@@ -59,12 +59,21 @@ impl<T> Future for IoHandle<T> {
     /// `Poll::Ready(None)` if the sender was dropped,
     /// `Poll::Pending` if the task is still running.
     ///
-    /// Designed for manual polling with a noop waker — the real async
-    /// runtime drives the IO; this just checks the channel.
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<T>> {
+    /// Primarily intended for the cooperative compute pool, which re-polls
+    /// every tick with a noop waker — the real async runtime drives the IO and
+    /// this just checks the channel. The result arrives over a `std::mpsc`
+    /// channel, which cannot signal a `Waker`; so when still pending we
+    /// self-wake (`wake_by_ref`) to request another poll. On the cooperative
+    /// pool the noop waker makes this a no-op (it re-polls regardless); on a
+    /// standard waker-driven executor it prevents a lost wakeup (permanent
+    /// hang) at the cost of busy-polling until the result is ready.
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<T>> {
         match self.receiver.try_recv() {
             Ok(val) => Poll::Ready(Some(val)),
-            Err(mpsc::TryRecvError::Empty) => Poll::Pending,
+            Err(mpsc::TryRecvError::Empty) => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
             Err(mpsc::TryRecvError::Disconnected) => Poll::Ready(None),
         }
     }

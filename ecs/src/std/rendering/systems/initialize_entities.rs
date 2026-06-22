@@ -67,10 +67,11 @@ impl crate::ExclusiveSystem for InitializeRenderEntities {
                     &cpu_material,
                 )
             } else {
-                let (fwd_buf, bundle) = crate::std::rendering::shaders::create_opaque_color_entity(
-                    &device,
-                    &forward_gpu,
-                );
+                let (fwd_buf, mat_props_buf, bundle) =
+                    crate::std::rendering::shaders::create_opaque_color_entity(
+                        &device,
+                        &forward_gpu,
+                    );
                 let per_entity = PerEntityBuffers::new(fwd_buf);
                 let rm = RenderMaterial::with_cpu_data(
                     Arc::clone(&bundle),
@@ -78,7 +79,10 @@ impl crate::ExclusiveSystem for InitializeRenderEntities {
                         cpu_material,
                     )),
                     pass_materials.clone(),
-                );
+                )
+                // Without the material props buffer, SyncMaterialUniforms has
+                // nothing to write to and material value edits never reach the GPU.
+                .with_material_uniform_buffer(mat_props_buf);
                 (per_entity, rm, bundle)
             };
 

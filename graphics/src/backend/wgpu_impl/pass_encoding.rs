@@ -219,44 +219,51 @@ impl WgpuBackend {
                         continue;
                     }
 
+                    // A non-wgpu GPU handle here means a resource from another
+                    // backend was bound. Silently skipping it would desync the
+                    // bind group from its layout (entry count mismatch) and
+                    // surface as a confusing wgpu validation error later, so
+                    // fail loudly at the actual cause instead.
+                    let mismatch = |kind: &str| {
+                        GraphicsError::InvalidParameter(format!(
+                            "wgpu: {kind} bound at binding {} has a non-wgpu GPU handle \
+                             (resource from a different backend)",
+                            entry.binding
+                        ))
+                    };
                     let resource = match &entry.resource {
                         crate::materials::BoundResource::Buffer(buffer) => {
-                            if let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() {
-                                Some(wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                    buffer: wgpu_buffer,
-                                    offset: 0,
-                                    size: None,
-                                }))
-                            } else {
-                                None
-                            }
+                            let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() else {
+                                return Err(mismatch("buffer"));
+                            };
+                            wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: wgpu_buffer,
+                                offset: 0,
+                                size: None,
+                            })
                         }
                         crate::materials::BoundResource::Texture(texture) => {
-                            if let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() {
-                                Some(wgpu::BindingResource::TextureView(view))
-                            } else {
-                                None
-                            }
+                            let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() else {
+                                return Err(mismatch("texture"));
+                            };
+                            wgpu::BindingResource::TextureView(view)
                         }
                         crate::materials::BoundResource::Sampler(sampler) => {
-                            if let crate::backend::GpuSampler::Wgpu(wgpu_sampler) =
+                            let crate::backend::GpuSampler::Wgpu(wgpu_sampler) =
                                 sampler.gpu_handle()
-                            {
-                                Some(wgpu::BindingResource::Sampler(wgpu_sampler))
-                            } else {
-                                None
-                            }
+                            else {
+                                return Err(mismatch("sampler"));
+                            };
+                            wgpu::BindingResource::Sampler(wgpu_sampler)
                         }
                         crate::materials::BoundResource::CombinedTextureSampler { .. } => {
                             unreachable!("CombinedTextureSampler handled above")
                         }
                     };
-                    if let Some(r) = resource {
-                        bind_group_entries.push(wgpu::BindGroupEntry {
-                            binding: entry.binding,
-                            resource: r,
-                        });
-                    }
+                    bind_group_entries.push(wgpu::BindGroupEntry {
+                        binding: entry.binding,
+                        resource,
+                    });
                 }
 
                 scratch_bind_groups.push(self.device.create_bind_group(
@@ -622,44 +629,51 @@ impl WgpuBackend {
                         continue;
                     }
 
+                    // A non-wgpu GPU handle here means a resource from another
+                    // backend was bound. Silently skipping it would desync the
+                    // bind group from its layout (entry count mismatch) and
+                    // surface as a confusing wgpu validation error later, so
+                    // fail loudly at the actual cause instead.
+                    let mismatch = |kind: &str| {
+                        GraphicsError::InvalidParameter(format!(
+                            "wgpu: {kind} bound at binding {} has a non-wgpu GPU handle \
+                             (resource from a different backend)",
+                            entry.binding
+                        ))
+                    };
                     let resource = match &entry.resource {
                         crate::materials::BoundResource::Buffer(buffer) => {
-                            if let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() {
-                                Some(wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                    buffer: wgpu_buffer,
-                                    offset: 0,
-                                    size: None,
-                                }))
-                            } else {
-                                None
-                            }
+                            let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() else {
+                                return Err(mismatch("buffer"));
+                            };
+                            wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: wgpu_buffer,
+                                offset: 0,
+                                size: None,
+                            })
                         }
                         crate::materials::BoundResource::Texture(texture) => {
-                            if let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() {
-                                Some(wgpu::BindingResource::TextureView(view))
-                            } else {
-                                None
-                            }
+                            let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() else {
+                                return Err(mismatch("texture"));
+                            };
+                            wgpu::BindingResource::TextureView(view)
                         }
                         crate::materials::BoundResource::Sampler(sampler) => {
-                            if let crate::backend::GpuSampler::Wgpu(wgpu_sampler) =
+                            let crate::backend::GpuSampler::Wgpu(wgpu_sampler) =
                                 sampler.gpu_handle()
-                            {
-                                Some(wgpu::BindingResource::Sampler(wgpu_sampler))
-                            } else {
-                                None
-                            }
+                            else {
+                                return Err(mismatch("sampler"));
+                            };
+                            wgpu::BindingResource::Sampler(wgpu_sampler)
                         }
                         crate::materials::BoundResource::CombinedTextureSampler { .. } => {
                             unreachable!("CombinedTextureSampler handled above")
                         }
                     };
-                    if let Some(r) = resource {
-                        bind_group_entries.push(wgpu::BindGroupEntry {
-                            binding: entry.binding,
-                            resource: r,
-                        });
-                    }
+                    bind_group_entries.push(wgpu::BindGroupEntry {
+                        binding: entry.binding,
+                        resource,
+                    });
                 }
 
                 scratch_bind_groups.push(self.device.create_bind_group(

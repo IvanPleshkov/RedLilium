@@ -14,7 +14,7 @@ const TOY_CAR_GLB: &[u8] = include_bytes!("ToyCar.glb");
 fn collect_instances(doc: &crate::gltf::GltfDocument) -> Vec<Arc<CpuMaterialInstance>> {
     let mut instances: Vec<Arc<CpuMaterialInstance>> = Vec::new();
     for scene in &doc.scenes {
-        for inst in &scene.materials {
+        for inst in scene.materials.iter() {
             if !instances.iter().any(|m| Arc::ptr_eq(m, inst)) {
                 instances.push(Arc::clone(inst));
             }

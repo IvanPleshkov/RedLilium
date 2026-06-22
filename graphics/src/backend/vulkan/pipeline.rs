@@ -12,21 +12,46 @@ use redlilium_core::mesh::{PrimitiveTopology, VertexLayout};
 
 use super::conversion::{convert_blend_state, convert_texture_format};
 
+/// Number of descriptor sets each individual descriptor pool can hand out
+/// before a new pool is appended to the slot's chain.
+const SETS_PER_POOL: u32 = 1000;
+
 /// Manages Vulkan pipeline creation and descriptor pool resources.
 pub struct PipelineManager {
     device: ash::Device,
-    /// Per-slot descriptor pools — one per frame in flight.
-    /// Each slot's pool is only reset after its fence signals,
-    /// preventing resets while another slot's descriptors are in use.
-    descriptor_pools: [vk::DescriptorPool; super::MAX_FRAMES_IN_FLIGHT],
+    /// Pool-size template used to create each additional pool when a slot's
+    /// current pools run out of descriptor sets.
+    pool_sizes: Vec<vk::DescriptorPoolSize>,
+    /// Per-slot growable chain of descriptor pools — at least one per frame in
+    /// flight. A slot's chain grows (an extra pool is appended) when allocation
+    /// exhausts the current pools, removing the previous hard cap of
+    /// [`SETS_PER_POOL`] sets per frame. The whole chain is reset together once
+    /// the slot's fence signals, so resets never race in-flight descriptors.
+    descriptor_pools: [parking_lot::Mutex<Vec<vk::DescriptorPool>>; super::MAX_FRAMES_IN_FLIGHT],
     /// Whether resources have been explicitly destroyed.
     destroyed: bool,
 }
 
 impl PipelineManager {
+    /// Create a single descriptor pool sized by `pool_sizes`.
+    fn create_pool(
+        device: &ash::Device,
+        pool_sizes: &[vk::DescriptorPoolSize],
+    ) -> Result<vk::DescriptorPool, GraphicsError> {
+        let pool_info = vk::DescriptorPoolCreateInfo::default()
+            .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
+            .max_sets(SETS_PER_POOL)
+            .pool_sizes(pool_sizes);
+        unsafe { device.create_descriptor_pool(&pool_info, None) }.map_err(|e| {
+            GraphicsError::ResourceCreationFailed(format!(
+                "Failed to create descriptor pool: {e:?}"
+            ))
+        })
+    }
+
     /// Create a new pipeline manager.
     pub fn new(device: ash::Device) -> Result<Self, GraphicsError> {
-        let pool_sizes = [
+        let pool_sizes = vec![
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
                 descriptor_count: 1000,
@@ -53,24 +78,22 @@ impl PipelineManager {
             },
         ];
 
-        let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
-            .max_sets(1000)
-            .pool_sizes(&pool_sizes);
-
-        // Create one descriptor pool per frame slot so each can be reset independently
-        let mut descriptor_pools = [vk::DescriptorPool::null(); super::MAX_FRAMES_IN_FLIGHT];
-        for pool in &mut descriptor_pools {
-            *pool = unsafe { device.create_descriptor_pool(&pool_info, None) }.map_err(|e| {
-                GraphicsError::ResourceCreationFailed(format!(
-                    "Failed to create descriptor pool: {:?}",
-                    e
-                ))
-            })?;
+        // Create one descriptor pool per frame slot so each can be reset
+        // independently; each slot starts with a single-pool chain.
+        let mut slots: Vec<parking_lot::Mutex<Vec<vk::DescriptorPool>>> =
+            Vec::with_capacity(super::MAX_FRAMES_IN_FLIGHT);
+        for _ in 0..super::MAX_FRAMES_IN_FLIGHT {
+            let pool = Self::create_pool(&device, &pool_sizes)?;
+            slots.push(parking_lot::Mutex::new(vec![pool]));
         }
+        let descriptor_pools: [parking_lot::Mutex<Vec<vk::DescriptorPool>>;
+            super::MAX_FRAMES_IN_FLIGHT] = slots
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("created exactly MAX_FRAMES_IN_FLIGHT pools"));
 
         Ok(Self {
             device,
+            pool_sizes,
             descriptor_pools,
             destroyed: false,
         })
@@ -293,18 +316,38 @@ impl PipelineManager {
         layout: vk::DescriptorSetLayout,
     ) -> Result<vk::DescriptorSet, GraphicsError> {
         let layouts = [layout];
-        let alloc_info = vk::DescriptorSetAllocateInfo::default()
-            .descriptor_pool(self.descriptor_pools[slot])
-            .set_layouts(&layouts);
+        let mut chain = self.descriptor_pools[slot].lock();
 
-        let sets = unsafe { self.device.allocate_descriptor_sets(&alloc_info) }.map_err(|e| {
-            GraphicsError::ResourceCreationFailed(format!(
-                "Failed to allocate descriptor set: {:?}",
-                e
-            ))
-        })?;
+        // Try the most-recently-added pool; if it's exhausted or fragmented,
+        // append a fresh pool and retry once. `grew` bounds this so a layout
+        // that can't fit in any single pool errors instead of looping forever.
+        let mut grew = false;
+        loop {
+            let pool = *chain
+                .last()
+                .expect("each slot always has at least one pool");
+            let alloc_info = vk::DescriptorSetAllocateInfo::default()
+                .descriptor_pool(pool)
+                .set_layouts(&layouts);
 
-        Ok(sets[0])
+            match unsafe { self.device.allocate_descriptor_sets(&alloc_info) } {
+                Ok(sets) => return Ok(sets[0]),
+                Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY)
+                | Err(vk::Result::ERROR_FRAGMENTED_POOL)
+                    if !grew =>
+                {
+                    // Grow the chain and retry against the fresh pool.
+                    let new_pool = Self::create_pool(&self.device, &self.pool_sizes)?;
+                    chain.push(new_pool);
+                    grew = true;
+                }
+                Err(e) => {
+                    return Err(GraphicsError::ResourceCreationFailed(format!(
+                        "Failed to allocate descriptor set: {e:?}"
+                    )));
+                }
+            }
+        }
     }
 
     /// Create a graphics pipeline.
@@ -526,26 +569,23 @@ impl PipelineManager {
         Ok(pipelines[0])
     }
 
-    /// Get the descriptor pool for a given frame slot.
-    #[allow(dead_code)]
-    pub fn descriptor_pool(&self, slot: usize) -> vk::DescriptorPool {
-        self.descriptor_pools[slot]
-    }
-
-    /// Reset the descriptor pool for a given frame slot, freeing all its descriptor sets.
+    /// Reset every descriptor pool in a frame slot's chain, freeing all their
+    /// descriptor sets. Pools are kept (not destroyed) so the chain — sized to
+    /// the slot's peak usage — is reused next frame without reallocation.
     ///
     /// This should only be called after the slot's fence has signaled,
-    /// ensuring no descriptor sets from this pool are in use by the GPU.
+    /// ensuring no descriptor sets from these pools are in use by the GPU.
     pub fn reset_descriptor_pool(&self, slot: usize) -> Result<(), GraphicsError> {
-        unsafe {
-            self.device.reset_descriptor_pool(
-                self.descriptor_pools[slot],
-                vk::DescriptorPoolResetFlags::empty(),
-            )
+        let chain = self.descriptor_pools[slot].lock();
+        for &pool in chain.iter() {
+            unsafe {
+                self.device
+                    .reset_descriptor_pool(pool, vk::DescriptorPoolResetFlags::empty())
+            }
+            .map_err(|e| {
+                GraphicsError::Internal(format!("Failed to reset descriptor pool: {e:?}"))
+            })?;
         }
-        .map_err(|e| {
-            GraphicsError::Internal(format!("Failed to reset descriptor pool: {:?}", e))
-        })?;
         Ok(())
     }
 }
@@ -569,11 +609,13 @@ impl PipelineManager {
         // Pipelines are owned by Materials and destroyed when their last Arc is dropped.
         // We only need to destroy the descriptor pools here.
 
-        // Destroy all per-slot descriptor pools
+        // Destroy every pool in every per-slot chain.
         // SAFETY: Caller guarantees GPU is idle and device is valid
-        for pool in &self.descriptor_pools {
-            unsafe {
-                self.device.destroy_descriptor_pool(*pool, None);
+        for slot in &self.descriptor_pools {
+            for &pool in slot.lock().iter() {
+                unsafe {
+                    self.device.destroy_descriptor_pool(pool, None);
+                }
             }
         }
 

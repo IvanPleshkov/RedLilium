@@ -232,8 +232,18 @@ pub(crate) fn compile_into(
     {
         profile_scope!("compute_in_degree");
         let mut in_degree = vec![0u32; n];
-        for &(dependent, _dependency) in &all_edges {
+        // Adjacency: dependents[dep] = passes that depend on `dep`. Building this
+        // once makes Kahn's algorithm O(V + E) instead of rescanning every edge
+        // for every popped node (the previous O(V * E)).
+        let mut dependents: Vec<Vec<u32>> = vec![Vec::new(); n];
+        for &(dependent, dependency) in &all_edges {
             in_degree[dependent.index()] += 1;
+            dependents[dependency.index()].push(dependent.index() as u32);
+        }
+        // Sort each adjacency list so the produced order is deterministic
+        // (all_edges comes from an unordered HashSet).
+        for list in &mut dependents {
+            list.sort_unstable();
         }
 
         let mut queue: VecDeque<PassHandle> = (0..n as u32)
@@ -246,12 +256,11 @@ pub(crate) fn compile_into(
             while let Some(handle) = queue.pop_front() {
                 target.pass_order.push(handle);
 
-                for &(dependent, dependency) in &all_edges {
-                    if dependency == handle {
-                        in_degree[dependent.index()] -= 1;
-                        if in_degree[dependent.index()] == 0 {
-                            queue.push_back(dependent);
-                        }
+                for &dep in &dependents[handle.index()] {
+                    let idx = dep as usize;
+                    in_degree[idx] -= 1;
+                    if in_degree[idx] == 0 {
+                        queue.push_back(PassHandle::new(dep));
                     }
                 }
             }
@@ -429,26 +438,32 @@ fn infer_resource_edges(
     Ok(auto_edges)
 }
 
-/// Compute transitive reachability matrix using Floyd-Warshall.
+/// Compute the transitive reachability matrix.
 ///
-/// `reach[i][j]` is true if there is a path from pass i to pass j
-/// through the given edges. Edge `(dependent, dependency)` means
-/// dependency → dependent (dependency can reach dependent).
+/// `reach[i][j]` is true if there is a path from pass i to pass j through the
+/// given edges. Edge `(dependent, dependency)` means dependency → dependent
+/// (dependency can reach dependent).
+///
+/// Computed via one depth-first traversal per source over an adjacency list,
+/// which is O(V * (V + E)) — far cheaper than the previous Floyd-Warshall
+/// O(V^3) for the sparse graphs render passes produce. The result (including
+/// `reach[i][i]` only when a cycle passes through `i`) is identical.
 fn compute_reachability(n: usize, edges: &[(PassHandle, PassHandle)]) -> Vec<Vec<bool>> {
-    let mut reach = vec![vec![false; n]; n];
-
-    // Edge (dependent, dependency): dependency runs before dependent
-    // So dependency can reach dependent
+    // succ[dependency] = passes reachable in one step (dependency → dependent).
+    let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
     for &(dependent, dependency) in edges {
-        reach[dependency.index()][dependent.index()] = true;
+        succ[dependency.index()].push(dependent.index());
     }
 
-    for k in 0..n {
-        for i in 0..n {
-            for j in 0..n {
-                if reach[i][k] && reach[k][j] {
-                    reach[i][j] = true;
-                }
+    let mut reach = vec![vec![false; n]; n];
+    let mut stack: Vec<usize> = Vec::new();
+    for s in 0..n {
+        stack.clear();
+        stack.extend(succ[s].iter().copied());
+        while let Some(u) = stack.pop() {
+            if !reach[s][u] {
+                reach[s][u] = true;
+                stack.extend(succ[u].iter().copied());
             }
         }
     }
@@ -544,6 +559,46 @@ mod tests {
         assert!(order.contains(&a));
         assert!(order.contains(&b));
         assert!(order.contains(&c));
+    }
+
+    #[test]
+    fn test_compile_wide_graph_valid_topo_order() {
+        // Larger DAG to exercise the adjacency-list Kahn's algorithm: every
+        // dependency must appear before its dependents in the output.
+        let mut graph = RenderGraph::new();
+        let p: Vec<_> = (0..8)
+            .map(|i| graph.add_graphics_pass(GraphicsPass::new(format!("P{i}"))))
+            .collect();
+
+        // Edges (dependent, dependency): a small DAG with fan-out/fan-in.
+        let deps = [
+            (1, 0),
+            (2, 0),
+            (3, 1),
+            (3, 2),
+            (4, 2),
+            (5, 3),
+            (5, 4),
+            (6, 5),
+            (7, 6),
+            (7, 0),
+        ];
+        for &(dep, on) in &deps {
+            graph.add_dependency(p[dep], p[on]);
+        }
+
+        let compiled = compile(&graph, Automatic).unwrap();
+        let order = compiled.pass_order();
+        assert_eq!(order.len(), 8);
+
+        let position: std::collections::HashMap<_, _> =
+            order.iter().enumerate().map(|(i, h)| (*h, i)).collect();
+        for &(dep, on) in &deps {
+            assert!(
+                position[&p[on]] < position[&p[dep]],
+                "dependency P{on} must precede dependent P{dep}"
+            );
+        }
     }
 
     #[test]

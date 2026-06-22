@@ -63,7 +63,7 @@ impl ExportContext {
     pub(super) fn collect_resources(&mut self, scenes: &[&Scene]) {
         // Collect unique material instances from all scenes
         for scene in scenes {
-            for inst_arc in &scene.materials {
+            for inst_arc in scene.materials.iter() {
                 let ptr = Arc::as_ptr(inst_arc);
                 if !self.instance_map.contains_key(&ptr) {
                     let idx = self.instance_list.len() as u32;

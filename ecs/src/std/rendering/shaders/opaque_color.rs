@@ -103,10 +103,14 @@ pub fn create_opaque_color_cpu_material() -> Arc<CpuMaterial> {
 /// Returns `(uniform_buffer, material_bundle)`. The uniform buffer should
 /// be kept alongside the entity for per-frame updates via
 /// [`update_opaque_color_uniforms`].
+/// Returns `(forward_buffer, material_props_buffer, material_bundle)`. The
+/// material props buffer must be handed to the [`RenderMaterial`] (via
+/// `with_material_uniform_buffer`) so material value edits actually sync to the
+/// GPU.
 pub fn create_opaque_color_entity(
     device: &Arc<GraphicsDevice>,
     material: &Arc<Material>,
-) -> (Arc<Buffer>, Arc<MaterialBundle>) {
+) -> (Arc<Buffer>, Arc<Buffer>, Arc<MaterialBundle>) {
     let uniform_buffer = device
         .create_buffer(&BufferDescriptor::new(
             std::mem::size_of::<OpaqueColorUniforms>() as u64,
@@ -118,7 +122,7 @@ pub fn create_opaque_color_entity(
 
     // Material props buffer (base_color)
     let mat_props_buffer = create_material_props_buffer(device);
-    let mat_props_group = Arc::new(BindingGroup::new().with_buffer(0, mat_props_buffer));
+    let mat_props_group = Arc::new(BindingGroup::new().with_buffer(0, mat_props_buffer.clone()));
 
     let instance = Arc::new(
         MaterialInstance::new(Arc::clone(material))
@@ -132,7 +136,7 @@ pub fn create_opaque_color_entity(
             .with_shared_bindings(vec![transform_group]),
     );
 
-    (uniform_buffer, bundle)
+    (uniform_buffer, mat_props_buffer, bundle)
 }
 
 /// Extended version of [`create_opaque_color_entity`] that also adds an

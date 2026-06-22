@@ -1,4 +1,5 @@
 use crate::{Entity, World};
+use redlilium_core::math::Mat4;
 use redlilium_core::scene::{CameraProjection, Scene, SceneNode};
 
 use super::components::{Camera, GlobalTransform, Name, Transform, Visibility};
@@ -24,7 +25,7 @@ pub fn spawn_scene(world: &mut World, scene: &Scene) -> Vec<Entity> {
     scene
         .nodes
         .iter()
-        .map(|node| spawn_node(world, node, scene, None))
+        .map(|node| spawn_node(world, node, scene, None, Mat4::identity()))
         .collect()
 }
 
@@ -33,15 +34,20 @@ fn spawn_node(
     node: &SceneNode,
     scene: &Scene,
     parent_entity: Option<Entity>,
+    parent_world: Mat4,
 ) -> Entity {
     let entity = world.spawn();
 
     let transform = Transform::from(node.transform);
+    // Compose with the parent's world matrix so GlobalTransform is correct
+    // immediately (before the first UpdateGlobalTransforms run), matching what
+    // propagation would compute.
+    let world_matrix = parent_world * transform.to_matrix();
     world
         .insert(entity, transform)
         .expect("Transform not registered");
     world
-        .insert(entity, GlobalTransform(transform.to_matrix()))
+        .insert(entity, GlobalTransform(world_matrix))
         .expect("GlobalTransform not registered");
     world
         .insert(entity, Visibility::VISIBLE)
@@ -82,7 +88,7 @@ fn spawn_node(
     }
 
     for child_node in &node.children {
-        spawn_node(world, child_node, scene, Some(entity));
+        spawn_node(world, child_node, scene, Some(entity), world_matrix);
     }
 
     entity
@@ -133,6 +139,34 @@ mod tests {
         // Check Name
         let n = world.get::<Name>(e).unwrap();
         assert_eq!(n.as_str(), "TestNode");
+    }
+
+    #[test]
+    fn child_global_transform_is_parent_composed_at_spawn() {
+        // Before any UpdateGlobalTransforms run, a child's GlobalTransform must
+        // already reflect the parent's world transform, not just the local one.
+        use redlilium_core::scene::NodeTransform;
+        let mut world = World::new();
+        crate::register_std_components(&mut world);
+
+        let child = SceneNode::new()
+            .with_transform(NodeTransform::IDENTITY.with_translation([0.0, 1.0, 0.0]));
+        let parent = SceneNode::new()
+            .with_transform(NodeTransform::IDENTITY.with_translation([10.0, 0.0, 0.0]))
+            .with_children(vec![child]);
+        let scene = Scene::new().with_nodes(vec![parent]);
+
+        let roots = spawn_scene(&mut world, &scene);
+        let children = world.get::<crate::Children>(roots[0]).unwrap();
+        let child_entity = children.0[0];
+
+        let gt = world.get::<GlobalTransform>(child_entity).unwrap();
+        // World = parent(10,0,0) * local(0,1,0) = (10,1,0)
+        assert!(
+            (gt.translation() - redlilium_core::math::Vec3::new(10.0, 1.0, 0.0)).norm() < 1e-6,
+            "child GlobalTransform should be parent-composed, got {:?}",
+            gt.translation()
+        );
     }
 
     #[test]

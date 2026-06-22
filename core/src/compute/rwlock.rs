@@ -45,6 +45,11 @@ const UNLOCKED: i32 = 0;
 pub struct ComputeRwLock<T> {
     /// 0 = unlocked, positive = reader count, -1 = writer.
     state: AtomicI32,
+    /// Number of writers currently waiting to acquire. While this is non-zero,
+    /// `try_read` refuses to admit *new* readers so that a continuous stream of
+    /// readers cannot starve a pending writer (writer preference). Existing
+    /// readers still drain normally, after which the writer acquires.
+    writers_waiting: AtomicI32,
     data: UnsafeCell<T>,
 }
 
@@ -59,6 +64,7 @@ impl<T> ComputeRwLock<T> {
     pub fn new(value: T) -> Self {
         Self {
             state: AtomicI32::new(UNLOCKED),
+            writers_waiting: AtomicI32::new(0),
             data: UnsafeCell::new(value),
         }
     }
@@ -68,6 +74,11 @@ impl<T> ComputeRwLock<T> {
     /// Returns `Some(guard)` if successful, `None` if a writer is active.
     pub fn try_read(&self) -> Option<ComputeReadGuard<'_, T>> {
         loop {
+            // Writer preference: don't admit new readers while a writer is
+            // waiting, so a reader stream can't starve it.
+            if self.writers_waiting.load(Ordering::Relaxed) > 0 {
+                return None;
+            }
             let current = self.state.load(Ordering::Relaxed);
             if current == WRITER {
                 return None;
@@ -117,7 +128,10 @@ impl<T> ComputeRwLock<T> {
     /// Each poll attempts [`try_write()`](Self::try_write). If any readers
     /// or another writer is active, returns `Poll::Pending`.
     pub fn write(&self) -> ComputeRwLockWrite<'_, T> {
-        ComputeRwLockWrite { lock: self }
+        ComputeRwLockWrite {
+            lock: self,
+            registered: false,
+        }
     }
 
     /// Consumes the lock and returns the inner value.
@@ -259,18 +273,43 @@ impl<'a, T> Future for ComputeRwLockRead<'a, T> {
 /// Future returned by [`ComputeRwLock::write`].
 ///
 /// On each poll, attempts to acquire an exclusive write lock. If any
-/// readers or another writer is active, returns `Poll::Pending`.
+/// readers or another writer is active, returns `Poll::Pending`. While pending
+/// it counts itself in the lock's `writers_waiting` so new readers yield to it
+/// (writer preference); the count is released on acquire or on drop.
 pub struct ComputeRwLockWrite<'a, T> {
     lock: &'a ComputeRwLock<T>,
+    /// Whether this future has incremented `writers_waiting` and not yet
+    /// released it.
+    registered: bool,
 }
 
 impl<'a, T> Future for ComputeRwLockWrite<'a, T> {
     type Output = ComputeWriteGuard<'a, T>;
 
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.lock.try_write() {
-            Some(guard) => Poll::Ready(guard),
+        let this = self.get_mut();
+        // Announce intent before attempting, so readers start yielding to us.
+        if !this.registered {
+            this.lock.writers_waiting.fetch_add(1, Ordering::Relaxed);
+            this.registered = true;
+        }
+        match this.lock.try_write() {
+            Some(guard) => {
+                this.lock.writers_waiting.fetch_sub(1, Ordering::Relaxed);
+                this.registered = false;
+                Poll::Ready(guard)
+            }
             None => Poll::Pending,
+        }
+    }
+}
+
+impl<T> Drop for ComputeRwLockWrite<'_, T> {
+    fn drop(&mut self) {
+        // If dropped (cancelled) while still waiting, release our reservation so
+        // we don't permanently block readers.
+        if self.registered {
+            self.lock.writers_waiting.fetch_sub(1, Ordering::Relaxed);
         }
     }
 }
@@ -472,5 +511,50 @@ mod tests {
     fn send_sync_bounds() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<ComputeRwLock<Vec<u8>>>();
+    }
+
+    #[test]
+    fn waiting_writer_blocks_new_readers() {
+        // Writer preference: once a writer is waiting, new readers are refused
+        // so the writer cannot be starved by a continuous reader stream.
+        let lock = ComputeRwLock::new(0u32);
+        let existing = lock.try_read().unwrap(); // state = 1 reader
+
+        let mut w = lock.write();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        // Writer can't acquire yet (reader held), registers as waiting.
+        assert!(Pin::new(&mut w).poll(&mut cx).is_pending());
+
+        // A new reader must now be refused even though it could have shared.
+        assert!(
+            lock.try_read().is_none(),
+            "new reader admitted while a writer was waiting"
+        );
+
+        // Existing reader drains → writer acquires.
+        drop(existing);
+        assert!(Pin::new(&mut w).poll(&mut cx).is_ready());
+    }
+
+    #[test]
+    fn dropped_waiting_writer_unblocks_readers() {
+        // A write future cancelled while waiting must release its reservation,
+        // otherwise readers would be blocked forever.
+        let lock = ComputeRwLock::new(0u32);
+        let reader = lock.try_read().unwrap();
+
+        let mut w = lock.write();
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(Pin::new(&mut w).poll(&mut cx).is_pending());
+        assert!(lock.try_read().is_none()); // blocked by waiting writer
+
+        drop(w); // cancel the waiting writer
+        drop(reader);
+        assert!(
+            lock.try_read().is_some(),
+            "readers should resume after the waiting writer is dropped"
+        );
     }
 }

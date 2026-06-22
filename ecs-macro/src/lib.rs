@@ -91,7 +91,7 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                     let fname = f.ident.as_ref().unwrap();
                     let fname_str = fname.to_string();
                     quote! {
-                        let #fname = match redlilium_ecs::inspect::Inspect(&self.#fname).show(#fname_str, ui) {
+                        let #fname = match redlilium_ecs::inspect::Inspect(&self.#fname).show(#fname_str, __ui) {
                             Some(v) => { _changed = true; v }
                             None => self.#fname.clone(),
                         };
@@ -150,7 +150,7 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                             let fname_str = fname.to_string();
                             let fty = &f.ty;
                             quote! {
-                                let #fname = redlilium_ecs::serialize::DeserializeField::<#fty>::deserialize_field(#fname_str, ctx)?;
+                                let #fname = redlilium_ecs::serialize::DeserializeField::<#fty>::deserialize_field(#fname_str, __ctx)?;
                             }
                         });
                     let visible_names: Vec<_> = visible_fields
@@ -163,16 +163,16 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                     });
                     quote! {
                         fn deserialize_component(
-                            ctx: &mut redlilium_ecs::serialize::DeserializeContext<'_>,
+                            __ctx: &mut redlilium_ecs::serialize::DeserializeContext<'_>,
                         ) -> Result<Self, redlilium_ecs::serialize::DeserializeError>
                         where
                             Self: Sized,
                         {
                             #[allow(unused_imports)]
                             use redlilium_ecs::serialize::DeserializeFieldFallback as _;
-                            ctx.begin_struct(Self::NAME)?;
+                            __ctx.begin_struct(Self::NAME)?;
                             #(#deser_stmts)*
-                            ctx.end_struct()?;
+                            __ctx.end_struct()?;
                             Ok(Self { #(#visible_names,)* #(#skipped_defaults,)* })
                         }
                     }
@@ -213,7 +213,7 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                 let inspect_stmts: Vec<_> = indices.iter().zip(inspect_field_vars.iter()).map(|(idx, var)| {
                     let idx_str = idx.index.to_string();
                     quote! {
-                        let #var = match redlilium_ecs::inspect::Inspect(&self.#idx).show(#idx_str, ui) {
+                        let #var = match redlilium_ecs::inspect::Inspect(&self.#idx).show(#idx_str, __ui) {
                             Some(v) => { _changed = true; v }
                             None => self.#idx.clone(),
                         };
@@ -318,7 +318,7 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                 )
             }
             Fields::Unit => (
-                quote! { let _ = (ui, _entity); None },
+                quote! { let _ = (__ui, _entity); None },
                 quote! { let _ = collector; },
                 quote! { let _ = map; },
                 if skip_serialization {
@@ -381,7 +381,7 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
         impl #impl_generics redlilium_ecs::Component for #name #ty_generics #where_clause {
             const NAME: &'static str = #name_str;
 
-            fn inspect_ui(&self, ui: &mut redlilium_ecs::egui::Ui, _world: &redlilium_ecs::World, _entity: redlilium_ecs::Entity) -> redlilium_ecs::InspectResult {
+            fn inspect_ui(&self, __ui: &mut redlilium_ecs::egui::Ui, _world: &redlilium_ecs::World, _entity: redlilium_ecs::Entity) -> redlilium_ecs::InspectResult {
                 #[allow(unused_imports)]
                 use redlilium_ecs::inspect::InspectFallback as _;
                 #inspect_body

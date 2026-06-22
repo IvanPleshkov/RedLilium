@@ -437,6 +437,10 @@ impl ComputePool {
     /// let result = pool.block_on(&mut handle); // Some(42)
     /// ```
     pub fn block_on<T>(&self, handle: &mut TaskHandle<T>) -> Option<T> {
+        // Counts consecutive rounds in which no compute task made progress —
+        // i.e. we're waiting purely on external IO or another thread. Used to
+        // back off so this loop doesn't peg a core at 100%.
+        let mut idle_rounds: u32 = 0;
         loop {
             if let Some(val) = handle.try_recv() {
                 return Some(val);
@@ -444,9 +448,25 @@ impl ComputePool {
             if handle.is_cancelled() {
                 return None;
             }
-            self.tick_all();
+            let progressed = self.tick_all();
             #[cfg(not(target_arch = "wasm32"))]
-            std::thread::yield_now();
+            {
+                if progressed > 0 {
+                    idle_rounds = 0;
+                    std::thread::yield_now();
+                } else {
+                    // Nothing to drive locally; escalate from cheap yields to a
+                    // short sleep so we stop busy-spinning while waiting on IO.
+                    idle_rounds = idle_rounds.saturating_add(1);
+                    if idle_rounds < 32 {
+                        std::thread::yield_now();
+                    } else {
+                        std::thread::sleep(std::time::Duration::from_micros(100));
+                    }
+                }
+            }
+            #[cfg(target_arch = "wasm32")]
+            let _ = progressed;
         }
     }
 

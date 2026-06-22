@@ -677,6 +677,32 @@ mod tests {
         assert_eq!(round_trip_serde(v, "pos"), v);
     }
 
+    // Hygiene: a derived Component with fields literally named `ui` / `ctx`
+    // (the generated function parameters) must still compile and round-trip —
+    // the macro uses `__ui` / `__ctx` internally to avoid being shadowed.
+    #[derive(Clone, Debug, PartialEq, crate::Component)]
+    struct HygieneProbe {
+        ui: f32,
+        ctx: f32,
+    }
+
+    #[test]
+    fn derive_handles_fields_named_ui_and_ctx() {
+        use crate::Component;
+        let probe = HygieneProbe { ui: 1.5, ctx: 2.5 };
+
+        let world = World::new();
+        let mut sctx = SerializeContext::new(&world);
+        let serialized = probe.serialize_component(&mut sctx).unwrap();
+
+        let mut world = World::new();
+        let mut dctx = DeserializeContext::new(&mut world);
+        dctx.load_data(&serialized).unwrap();
+        let back = HygieneProbe::deserialize_component(&mut dctx).unwrap();
+
+        assert_eq!(probe, back);
+    }
+
     #[test]
     fn serialize_entity() {
         let entity = crate::Entity::new(42, 100);

@@ -154,24 +154,29 @@ impl Default for SceneNode {
 ///
 /// Represents a single scene (one of potentially many in a document).
 /// Nodes are organized as a forest of trees (multiple root nodes).
-/// Resource arrays (meshes, cameras, skins) are owned by the scene
-/// so that node indices resolve locally.
+///
+/// The resource arrays (meshes, materials, cameras, skins, animations) hold the
+/// whole document's resources so that node indices resolve directly. They are
+/// wrapped in [`Arc`] so that loading a multi-scene document shares one copy of
+/// these (potentially large) buffers across all scenes instead of deep-cloning
+/// them per scene. Each `Arc<Vec<_>>` derefs to its `Vec`, so reads
+/// (`iter`/`len`/indexing) are unchanged.
 #[derive(Debug)]
 pub struct Scene {
     /// Scene name, if any.
     pub name: Option<String>,
     /// Root nodes of the scene.
     pub nodes: Vec<SceneNode>,
-    /// All meshes referenced by nodes in this scene.
-    pub meshes: Vec<CpuMesh>,
-    /// All materials referenced by meshes in this scene.
-    pub materials: Vec<Arc<CpuMaterialInstance>>,
-    /// All cameras referenced by nodes in this scene.
-    pub cameras: Vec<SceneCamera>,
-    /// All skins referenced by nodes in this scene.
-    pub skins: Vec<SceneSkin>,
-    /// All animations in this scene.
-    pub animations: Vec<Animation>,
+    /// All meshes in the document (shared across scenes).
+    pub meshes: Arc<Vec<CpuMesh>>,
+    /// All materials in the document (shared across scenes).
+    pub materials: Arc<Vec<Arc<CpuMaterialInstance>>>,
+    /// All cameras in the document (shared across scenes).
+    pub cameras: Arc<Vec<SceneCamera>>,
+    /// All skins in the document (shared across scenes).
+    pub skins: Arc<Vec<SceneSkin>>,
+    /// All animations in the document (shared across scenes).
+    pub animations: Arc<Vec<Animation>>,
 }
 
 impl Scene {
@@ -180,11 +185,11 @@ impl Scene {
         Self {
             name: None,
             nodes: Vec::new(),
-            meshes: Vec::new(),
-            materials: Vec::new(),
-            cameras: Vec::new(),
-            skins: Vec::new(),
-            animations: Vec::new(),
+            meshes: Arc::new(Vec::new()),
+            materials: Arc::new(Vec::new()),
+            cameras: Arc::new(Vec::new()),
+            skins: Arc::new(Vec::new()),
+            animations: Arc::new(Vec::new()),
         }
     }
 
@@ -205,35 +210,35 @@ impl Scene {
     /// Set the meshes.
     #[must_use]
     pub fn with_meshes(mut self, meshes: Vec<CpuMesh>) -> Self {
-        self.meshes = meshes;
+        self.meshes = Arc::new(meshes);
         self
     }
 
     /// Set the materials.
     #[must_use]
     pub fn with_materials(mut self, materials: Vec<Arc<CpuMaterialInstance>>) -> Self {
-        self.materials = materials;
+        self.materials = Arc::new(materials);
         self
     }
 
     /// Set the cameras.
     #[must_use]
     pub fn with_cameras(mut self, cameras: Vec<SceneCamera>) -> Self {
-        self.cameras = cameras;
+        self.cameras = Arc::new(cameras);
         self
     }
 
     /// Set the skins.
     #[must_use]
     pub fn with_skins(mut self, skins: Vec<SceneSkin>) -> Self {
-        self.skins = skins;
+        self.skins = Arc::new(skins);
         self
     }
 
     /// Set the animations.
     #[must_use]
     pub fn with_animations(mut self, animations: Vec<Animation>) -> Self {
-        self.animations = animations;
+        self.animations = Arc::new(animations);
         self
     }
 }

@@ -535,45 +535,29 @@ impl LoadContext {
         mut skins: Vec<SceneSkin>,
         mut animations: Vec<Animation>,
     ) -> Vec<Scene> {
-        let scene_count = self.document.scenes().count();
+        // Wrap the document-level resources in `Arc` once. Every scene shares
+        // the same buffers via cheap `Arc::clone` instead of deep-cloning the
+        // (potentially large) mesh/animation data per scene. Node indices are
+        // document-global, so all scenes reference the full shared arrays.
+        let meshes = Arc::new(std::mem::take(&mut meshes));
+        let materials = Arc::new(std::mem::take(&mut materials));
+        let cameras = Arc::new(std::mem::take(&mut cameras));
+        let skins = Arc::new(std::mem::take(&mut skins));
+        let animations = Arc::new(std::mem::take(&mut animations));
 
         self.document
             .scenes()
-            .enumerate()
-            .map(|(i, scene)| {
-                let is_last = i == scene_count - 1;
-                Scene {
-                    name: scene.name().map(String::from),
-                    nodes: scene
-                        .nodes()
-                        .map(|n| load_node(&n, &self.mesh_index_map))
-                        .collect(),
-                    meshes: if is_last {
-                        std::mem::take(&mut meshes)
-                    } else {
-                        meshes.clone()
-                    },
-                    materials: if is_last {
-                        std::mem::take(&mut materials)
-                    } else {
-                        materials.clone()
-                    },
-                    cameras: if is_last {
-                        std::mem::take(&mut cameras)
-                    } else {
-                        cameras.clone()
-                    },
-                    skins: if is_last {
-                        std::mem::take(&mut skins)
-                    } else {
-                        skins.clone()
-                    },
-                    animations: if is_last {
-                        std::mem::take(&mut animations)
-                    } else {
-                        animations.clone()
-                    },
-                }
+            .map(|scene| Scene {
+                name: scene.name().map(String::from),
+                nodes: scene
+                    .nodes()
+                    .map(|n| load_node(&n, &self.mesh_index_map))
+                    .collect(),
+                meshes: Arc::clone(&meshes),
+                materials: Arc::clone(&materials),
+                cameras: Arc::clone(&cameras),
+                skins: Arc::clone(&skins),
+                animations: Arc::clone(&animations),
             })
             .collect()
     }
