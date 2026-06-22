@@ -118,19 +118,29 @@ pub fn create_logical_device(
         }
     }
 
-    // Enable required features
-    let features = vk::PhysicalDeviceFeatures::default().sampler_anisotropy(true);
+    // Enable required features:
+    // - sampler_anisotropy: anisotropic texture filtering.
+    // - fill_mode_non_solid: wireframe (PolygonMode::Line) pipelines.
+    let features = vk::PhysicalDeviceFeatures::default()
+        .sampler_anisotropy(true)
+        .fill_mode_non_solid(true);
 
     // Enable dynamic rendering via extension features (works on Vulkan 1.2 with extension)
     // This is compatible with MoltenVK which only supports Vulkan 1.2
     let mut dynamic_rendering_features =
         vk::PhysicalDeviceDynamicRenderingFeatures::default().dynamic_rendering(true);
 
+    // shaderDrawParameters: shaders that read SV_InstanceID compile to SPIR-V
+    // using the DrawParameters capability, which requires this feature.
+    let mut vulkan11_features =
+        vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
+
     let create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_create_infos)
         .enabled_extension_names(&device_extensions)
         .enabled_features(&features)
-        .push_next(&mut dynamic_rendering_features);
+        .push_next(&mut dynamic_rendering_features)
+        .push_next(&mut vulkan11_features);
 
     let device =
         unsafe { instance.create_device(physical_device, &create_info, None) }.map_err(|e| {

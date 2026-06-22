@@ -309,6 +309,9 @@ impl SlangCompiler {
                     use slang::ResourceShape;
                     match shape {
                         ResourceShape::SlangTextureCube => BindingType::TextureCube,
+                        // Structured / byte-address buffers are SSBOs, not textures.
+                        ResourceShape::SlangStructuredBuffer
+                        | ResourceShape::SlangByteAddressBuffer => BindingType::StorageBuffer,
                         _ => BindingType::Texture,
                     }
                 } else {
@@ -758,6 +761,47 @@ float4 fs_main(VsOutput input) : SV_Target {
             space1.entries[1]
                 .visibility
                 .contains(ShaderStageFlags::FRAGMENT)
+        );
+    }
+
+    #[test]
+    fn test_reflect_structured_buffer_is_storage() {
+        // A StructuredBuffer must reflect as a storage buffer, not a texture
+        // (regression: `Resource` kind previously mapped everything to Texture).
+        let compiler = SlangCompiler::new().unwrap();
+
+        let source = r#"
+struct InstanceData { float4x4 model; };
+
+[[vk::binding(0, 0)]]
+cbuffer Uniforms { float4x4 vp; };
+
+[[vk::binding(1, 0)]]
+StructuredBuffer<InstanceData> instances;
+
+[shader("vertex")]
+float4 vs_main(float3 position : POSITION, uint id : SV_InstanceID) : SV_Position {
+    return mul(mul(vp, instances[id].model), float4(position, 1.0));
+}
+"#;
+
+        let shaders: Vec<ShaderReflectInput<'_>> =
+            vec![(source, "vs_main", ShaderStage::Vertex, &[])];
+        let layouts = compiler
+            .reflect_all_bindings(&shaders)
+            .expect("reflect_all_bindings failed");
+
+        let space0 = &layouts[0];
+        let instances = space0
+            .entries
+            .iter()
+            .find(|e| e.binding == 1)
+            .expect("binding 1 (instances) present");
+        assert_eq!(
+            instances.binding_type,
+            BindingType::StorageBuffer,
+            "StructuredBuffer must reflect as StorageBuffer, got {:?}",
+            instances.binding_type
         );
     }
 }
