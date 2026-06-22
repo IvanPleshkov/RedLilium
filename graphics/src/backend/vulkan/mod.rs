@@ -160,8 +160,12 @@ pub struct VulkanBackend {
     surface_loader: ash::khr::surface::Instance,
     /// Swapchain extension.
     swapchain_loader: ash::khr::swapchain::Device,
-    /// Per-slot command buffers awaiting free after fence wait.
-    per_slot_command_buffers: [Mutex<Vec<vk::CommandBuffer>>; MAX_FRAMES_IN_FLIGHT],
+    /// Per-frame-slot command pools for the render-graph submit. Each slot's
+    /// pool is reset wholesale (`vkResetCommandPool`) once its fence signals,
+    /// which frees all of that frame's command buffers at once (cheaper than
+    /// per-buffer freeing and isolates frames from each other). Staging uploads
+    /// and swapchain present use the separate long-lived `command_pool`.
+    frame_command_pools: [vk::CommandPool; MAX_FRAMES_IN_FLIGHT],
     /// Current frame slot index for command buffer tracking.
     current_slot: AtomicUsize,
     /// Layout tracker for automatic barrier placement.
@@ -219,8 +223,17 @@ impl VulkanBackend {
             device.clone(),
         )?));
 
-        // Create command pool
+        // Create command pool (staging uploads + swapchain present).
         let command_pool = command::create_command_pool(&device, graphics_queue_family)?;
+
+        // Per-frame-slot pools for the render-graph submit, reset per slot.
+        let frame_command_pools = {
+            let mut pools = [vk::CommandPool::null(); MAX_FRAMES_IN_FLIGHT];
+            for pool in &mut pools {
+                *pool = command::create_command_pool(&device, graphics_queue_family)?;
+            }
+            pools
+        };
 
         // Load dynamic rendering extension
         let dynamic_rendering = ash::khr::dynamic_rendering::Device::new(&instance, &device);
@@ -258,7 +271,7 @@ impl VulkanBackend {
             dynamic_rendering,
             surface_loader,
             swapchain_loader,
-            per_slot_command_buffers: Default::default(),
+            frame_command_pools,
             current_slot: AtomicUsize::new(0),
             layout_tracker,
             pipeline_manager,
@@ -371,16 +384,13 @@ impl VulkanBackend {
         let current = self.current_slot.load(Ordering::Relaxed);
         let oldest = (current + 1) % MAX_FRAMES_IN_FLIGHT;
 
-        // Free command buffers from oldest slot (GPU is done with them)
-        let old_buffers: Vec<_> = self.per_slot_command_buffers[oldest]
-            .lock()
-            .drain(..)
-            .collect();
-        if !old_buffers.is_empty() {
-            unsafe {
-                self.device
-                    .free_command_buffers(self.command_pool, &old_buffers)
-            };
+        // Reset the oldest slot's frame command pool, freeing all its command
+        // buffers at once. Safe: the slot's fence has been waited (GPU done).
+        unsafe {
+            let _ = self.device.reset_command_pool(
+                self.frame_command_pools[oldest],
+                vk::CommandPoolResetFlags::empty(),
+            );
         }
 
         // Advance to next slot
@@ -531,20 +541,15 @@ impl Drop for VulkanBackend {
             // Wait for device to be idle before cleanup
             let _ = self.device.device_wait_idle();
 
-            // Free all remaining per-slot command buffers
-            for slot in &self.per_slot_command_buffers {
-                let bufs: Vec<_> = slot.lock().drain(..).collect();
-                if !bufs.is_empty() {
-                    self.device.free_command_buffers(self.command_pool, &bufs);
-                }
-            }
-
             // Destroy pipeline manager resources BEFORE destroying the device.
             // PipelineManager holds Vulkan handles (descriptor pool, pipelines, etc.)
             // that must be destroyed while the device is still valid.
             self.pipeline_manager.destroy();
 
-            // Destroy command pool
+            // Destroy command pools (frame pools free their buffers on destroy).
+            for &pool in &self.frame_command_pools {
+                self.device.destroy_command_pool(pool, None);
+            }
             self.device.destroy_command_pool(self.command_pool, None);
 
             // Drop the allocator BEFORE destroying the device. gpu-allocator's
@@ -1141,9 +1146,11 @@ impl VulkanBackend {
     ) -> Result<(), GraphicsError> {
         profile_scope!("vulkan_execute_graph");
 
-        // Allocate command buffer
+        // Allocate the frame's command buffer from the current slot's pool
+        // (reset wholesale when the slot is recycled).
+        let slot = self.current_slot.load(Ordering::Relaxed);
         let alloc_info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(self.command_pool)
+            .command_pool(self.frame_command_pools[slot])
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
 
@@ -1246,11 +1253,9 @@ impl VulkanBackend {
             })?;
         }
 
-        // Track command buffers per-slot for deferred freeing after fence wait.
-        let slot = self.current_slot.load(Ordering::Relaxed);
-        self.per_slot_command_buffers[slot]
-            .lock()
-            .extend(command_buffers);
+        // No per-buffer freeing: the slot's pool is reset wholesale in
+        // `advance_frame` once its fence signals.
+        let _ = command_buffers;
 
         Ok(())
     }
