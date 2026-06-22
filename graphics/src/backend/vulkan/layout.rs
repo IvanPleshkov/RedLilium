@@ -392,20 +392,57 @@ impl TextureId {
     }
 }
 
-/// Per-frame texture layout state.
+/// Tracks the current Vulkan image layout of every tracked texture.
 ///
-/// Each frame-in-flight has its own state because the same texture
-/// might be in different layouts in different frames.
-#[derive(Debug, Default)]
-pub struct FrameLayoutState {
-    /// Current layout of each tracked texture.
+/// # Global, not per-frame
+///
+/// Layout is a real GPU-side property of an image that persists **across
+/// frames**, so this is a single global map (not reset each frame). Offscreen
+/// textures only ever change layout through the barriers this tracker emits
+/// (the swapchain image is handled separately by the present path and is not
+/// tracked here), and submits are serialized on one queue with per-frame
+/// fences — so this CPU-side map, updated in pass-record order, matches GPU
+/// execution order.
+///
+/// Keeping layouts across frames is what lets **persistent / history textures**
+/// (temporal AA, accumulation, motion blur) retain their contents: their first
+/// use next frame transitions from their real previous layout rather than from
+/// `UNDEFINED`. Transient targets are unaffected — they are re-cleared
+/// (`LoadOp::Clear`) and the resulting same-layout barrier is a cheap no-op.
+///
+/// Keyed by a **stable [`TextureId`]** (a per-texture counter), not the raw
+/// `vk::Image` handle: a destroyed image's handle may be reused by a new
+/// texture, which — without a reset — would otherwise inherit a stale layout.
+///
+/// NOTE: entries accumulate with the total number of textures ever created
+/// (no per-frame clear). This is fine for typical workloads; if texture churn
+/// becomes significant, add removal on texture destruction.
+#[derive(Debug)]
+pub struct TextureLayoutTracker {
+    /// Current layout of each tracked texture, by stable id.
     layouts: HashMap<TextureId, TextureLayout>,
+    /// Usage graph cache for sharing.
+    usage_graph_cache: TextureUsageGraphCache,
 }
 
-impl FrameLayoutState {
-    /// Create a new empty frame state.
+impl Default for TextureLayoutTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TextureLayoutTracker {
+    /// Create a new empty tracker.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            layouts: HashMap::new(),
+            usage_graph_cache: TextureUsageGraphCache::new(),
+        }
+    }
+
+    /// Get or create a usage graph for the given usage flags.
+    pub fn get_usage_graph(&self, usage: TextureUsage) -> Arc<TextureUsageGraph> {
+        self.usage_graph_cache.get_or_create(usage)
     }
 
     /// Get the current layout of a texture, or `Undefined` if not tracked.
@@ -416,99 +453,9 @@ impl FrameLayoutState {
             .unwrap_or(TextureLayout::Undefined)
     }
 
-    /// Update the layout after a transition.
+    /// Update the tracked layout after a transition.
     pub fn set_layout(&mut self, id: TextureId, layout: TextureLayout) {
         self.layouts.insert(id, layout);
-    }
-
-    /// Clear tracking for a specific texture (e.g., when texture is destroyed).
-    pub fn remove(&mut self, id: TextureId) {
-        self.layouts.remove(&id);
-    }
-
-    /// Reset all layouts to `Undefined`.
-    ///
-    /// This is called at the start of a new frame to ensure textures
-    /// start from a known state.
-    pub fn reset(&mut self) {
-        self.layouts.clear();
-    }
-
-    /// Get the number of tracked textures.
-    pub fn len(&self) -> usize {
-        self.layouts.len()
-    }
-
-    /// Check if any textures are being tracked.
-    pub fn is_empty(&self) -> bool {
-        self.layouts.is_empty()
-    }
-}
-
-/// Controller for texture layout tracking across frames.
-///
-/// This struct manages per-frame layout state and provides the usage graph
-/// cache for efficient sharing between textures.
-#[derive(Debug)]
-pub struct TextureLayoutTracker {
-    /// Layout state per frame in flight.
-    frame_states: Vec<FrameLayoutState>,
-    /// Current frame index.
-    current_frame: usize,
-    /// Usage graph cache for sharing.
-    usage_graph_cache: TextureUsageGraphCache,
-}
-
-impl TextureLayoutTracker {
-    /// Create a new tracker for the specified number of frames in flight.
-    pub fn new(frames_in_flight: usize) -> Self {
-        Self {
-            frame_states: (0..frames_in_flight)
-                .map(|_| FrameLayoutState::new())
-                .collect(),
-            current_frame: 0,
-            usage_graph_cache: TextureUsageGraphCache::new(),
-        }
-    }
-
-    /// Advance to the next frame.
-    ///
-    /// This resets the layout state for the new frame slot, ensuring
-    /// textures start from `Undefined` state.
-    pub fn advance_frame(&mut self) {
-        self.current_frame = (self.current_frame + 1) % self.frame_states.len();
-        // Reset the frame state for the new frame
-        self.frame_states[self.current_frame].reset();
-    }
-
-    /// Get the current frame index.
-    pub fn current_frame(&self) -> usize {
-        self.current_frame
-    }
-
-    /// Get the current frame's layout state (immutable).
-    pub fn current_state(&self) -> &FrameLayoutState {
-        &self.frame_states[self.current_frame]
-    }
-
-    /// Get the current frame's layout state (mutable).
-    pub fn current_state_mut(&mut self) -> &mut FrameLayoutState {
-        &mut self.frame_states[self.current_frame]
-    }
-
-    /// Get or create a usage graph for the given usage flags.
-    pub fn get_usage_graph(&self, usage: TextureUsage) -> Arc<TextureUsageGraph> {
-        self.usage_graph_cache.get_or_create(usage)
-    }
-
-    /// Get the current layout of a texture in the current frame.
-    pub fn get_layout(&self, id: TextureId) -> TextureLayout {
-        self.current_state().get_layout(id)
-    }
-
-    /// Set the layout of a texture in the current frame.
-    pub fn set_layout(&mut self, id: TextureId, layout: TextureLayout) {
-        self.current_state_mut().set_layout(id, layout);
     }
 }
 
@@ -597,40 +544,32 @@ mod tests {
     }
 
     #[test]
-    fn test_frame_layout_state() {
-        let mut state = FrameLayoutState::new();
-
+    fn test_layout_tracker_get_set() {
+        let mut tracker = TextureLayoutTracker::new();
         let id = TextureId::from_raw(12345);
 
-        // Initially undefined
-        assert_eq!(state.get_layout(id), TextureLayout::Undefined);
+        // Initially undefined.
+        assert_eq!(tracker.get_layout(id), TextureLayout::Undefined);
 
-        // Set layout
-        state.set_layout(id, TextureLayout::ColorAttachment);
-        assert_eq!(state.get_layout(id), TextureLayout::ColorAttachment);
-
-        // Reset clears everything
-        state.reset();
-        assert_eq!(state.get_layout(id), TextureLayout::Undefined);
-    }
-
-    #[test]
-    fn test_layout_tracker_advance_frame() {
-        let mut tracker = TextureLayoutTracker::new(3);
-
-        let id = TextureId::from_raw(12345);
-
-        // Set layout in frame 0
         tracker.set_layout(id, TextureLayout::ColorAttachment);
         assert_eq!(tracker.get_layout(id), TextureLayout::ColorAttachment);
 
-        // Advance to frame 1
-        tracker.advance_frame();
-        assert_eq!(tracker.current_frame(), 1);
-        // New frame starts undefined
-        assert_eq!(tracker.get_layout(id), TextureLayout::Undefined);
+        // Distinct ids are tracked independently.
+        let other = TextureId::from_raw(67890);
+        assert_eq!(tracker.get_layout(other), TextureLayout::Undefined);
+    }
 
-        // Set different layout in frame 1
+    #[test]
+    fn test_layout_persists_globally() {
+        // Layouts are global and persist (no per-frame reset): a texture's
+        // tracked layout carries forward until the next transition.
+        let mut tracker = TextureLayoutTracker::new();
+        let id = TextureId::from_raw(12345);
+
+        tracker.set_layout(id, TextureLayout::ColorAttachment);
+        // ... (a frame boundary would have reset this in the old design) ...
+        assert_eq!(tracker.get_layout(id), TextureLayout::ColorAttachment);
+
         tracker.set_layout(id, TextureLayout::ShaderReadOnly);
         assert_eq!(tracker.get_layout(id), TextureLayout::ShaderReadOnly);
     }

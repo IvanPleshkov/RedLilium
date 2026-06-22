@@ -16,7 +16,7 @@ pub mod swapchain;
 
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use ash::vk;
 use gpu_allocator::vulkan::Allocator;
@@ -31,6 +31,10 @@ use super::{GpuBuffer, GpuFence, GpuSampler, GpuTexture};
 
 /// Maximum number of frames in flight for per-slot resource tracking.
 pub const MAX_FRAMES_IN_FLIGHT: usize = 3;
+
+/// Process-wide source of stable texture ids for the layout tracker. Monotonic
+/// so a destroyed texture's id is never reused (no layout aliasing).
+static NEXT_TEXTURE_ID: AtomicU64 = AtomicU64::new(1);
 pub use layout::{TextureLayout, TextureLayoutTracker, TextureUsageGraph};
 
 use self::barriers::{BarrierBatch, BufferId};
@@ -245,7 +249,7 @@ impl VulkanBackend {
         let swapchain_loader = ash::khr::swapchain::Device::new(&instance, &device);
 
         // Create layout tracker for automatic barrier placement
-        let layout_tracker = Mutex::new(TextureLayoutTracker::new(MAX_FRAMES_IN_FLIGHT));
+        let layout_tracker = Mutex::new(TextureLayoutTracker::new());
 
         // Create pipeline manager for shader compilation and graphics pipelines
         let pipeline_manager = pipeline::PipelineManager::new(device.clone())?;
@@ -397,18 +401,9 @@ impl VulkanBackend {
         self.current_slot
             .store((current + 1) % MAX_FRAMES_IN_FLIGHT, Ordering::SeqCst);
 
-        // Advance layout tracker to new frame. This resets tracked layouts to
-        // UNDEFINED, so every texture's first use next frame emits an
-        // oldLayout=UNDEFINED transition (contents may be discarded).
-        //
-        // LIMITATION: this assumes all tracked textures are *transient* — fully
-        // written/cleared each frame (the only case the engine currently uses).
-        // A texture whose contents must persist across frames (temporal /
-        // history buffer) would be invalidated. Supporting those requires
-        // distinguishing persistent textures and preserving their layout across
-        // frames (and keying the tracker on a stable id rather than the raw
-        // vk::Image handle, which can be reused after destruction).
-        self.layout_tracker.lock().advance_frame();
+        // The layout tracker is global and persists across frames (see
+        // TextureLayoutTracker docs) — no per-frame reset, so persistent
+        // textures keep their contents.
 
         // Reset the oldest slot's descriptor pool — safe because the fence wait
         // guarantees the GPU is done with all descriptor sets from this slot.
@@ -843,6 +838,7 @@ impl VulkanBackend {
             format,
             extent,
             allocator: Arc::clone(&self.allocator),
+            id: NEXT_TEXTURE_ID.fetch_add(1, Ordering::Relaxed),
         })
     }
 
@@ -1276,11 +1272,13 @@ impl VulkanBackend {
         // Generate texture (image) barriers
         for decl in &usage.texture_usages {
             // Get Vulkan image info from the texture
-            let GpuTexture::Vulkan { image, .. } = decl.texture.gpu_handle() else {
+            let GpuTexture::Vulkan { image, id, .. } = decl.texture.gpu_handle() else {
                 continue;
             };
 
-            let texture_id = TextureId::from(*image);
+            // Key by the stable id, not the raw image handle (handle reuse after
+            // destruction would otherwise alias a stale tracked layout).
+            let texture_id = TextureId::from_raw(*id);
             let current_layout = tracker.get_layout(texture_id);
             let required_layout = decl.access.to_layout();
 

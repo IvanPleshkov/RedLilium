@@ -900,3 +900,54 @@ fn test_layout_tracking_multi_pass(#[case] backend: Backend) {
         rt2_pixel
     );
 }
+
+/// Verify a texture's contents survive a frame boundary (M10).
+///
+/// Frame 1 clears the texture to a known color; frame 2 (a separate
+/// `execute_graph`, crossing the `advance_frame` boundary) reads it back
+/// WITHOUT re-clearing. With the old per-frame layout reset, frame 2's first
+/// barrier would use `oldLayout = UNDEFINED` and the driver could discard the
+/// contents; the global layout tracker keeps the real previous layout, so the
+/// cleared color persists.
+///
+/// `W = 64` makes the readback row exactly 256 bytes (already aligned), so the
+/// pixel offset is alignment-independent.
+#[rstest]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_texture_contents_persist_across_frames(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new(backend) else {
+        eprintln!("Backend {:?} not available, skipping", backend);
+        return;
+    };
+
+    const W: u32 = 64;
+    const H: u32 = 64;
+    // Values that round-trip cleanly through 8-bit unorm.
+    let color = [0.25_f32, 0.5, 0.75, 1.0];
+
+    let tex = ctx.create_render_target(W, H);
+    let size = readback_buffer_size(W, H, 4);
+    let readback = ctx.create_readback_buffer(size);
+
+    // Frame 1: clear the texture to `color` and store it.
+    let mut g1 = RenderGraph::new();
+    g1.add_graphics_pass(create_simple_render_pass("clear", tex.clone(), color));
+    ctx.execute_graph(g1);
+
+    // Frame 2: read the texture back without touching its contents.
+    let mut g2 = RenderGraph::new();
+    let mut copy = TransferPass::new("readback".into());
+    copy.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::readback_texture_whole(tex, readback.clone()),
+    ));
+    g2.add_transfer_pass(copy);
+    ctx.execute_graph(g2);
+
+    let data = ctx.device.read_buffer(&readback, 0, size);
+    let expected = ExpectedPixel::from_float(color[0], color[1], color[2], color[3]);
+    assert!(
+        verify_pixel(&data, W, W / 2, H / 2, expected, 2),
+        "texture contents did not persist across the frame boundary (backend {backend:?})"
+    );
+}

@@ -101,6 +101,10 @@ pub enum GpuTexture {
         extent: vk::Extent3D,
         /// Allocator for freeing memory on drop.
         allocator: Arc<Mutex<Allocator>>,
+        /// Stable, process-unique id used to key the layout tracker. Unlike the
+        /// raw `image` handle, this is never reused after the texture is
+        /// destroyed, so it can't alias a recreated texture's tracked layout.
+        id: u64,
     },
 }
 
