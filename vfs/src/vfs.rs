@@ -102,6 +102,16 @@ impl Vfs {
         provider.list_dir(&resolved_path)
     }
 
+    /// List the immediate children of a directory with their kind
+    /// (file vs directory). See [`VfsProvider::list_dir_entries`].
+    pub fn list_dir_entries(&self, raw_path: &str) -> VfsFuture<Vec<crate::VfsDirEntry>> {
+        let (provider, resolved_path) = match self.resolve(raw_path) {
+            Ok(v) => v,
+            Err(e) => return Box::pin(async move { Err(e) }),
+        };
+        provider.list_dir_entries(&resolved_path)
+    }
+
     /// Write data to a file.
     ///
     /// Returns [`VfsError::ReadOnly`] if the resolved provider does not

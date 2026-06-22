@@ -9,6 +9,16 @@ use crate::VfsError;
 /// so they can be spawned on any async runtime (e.g. via `IoRunner::run()`).
 pub type VfsFuture<T> = Pin<Box<dyn Future<Output = Result<T, VfsError>> + Send>>;
 
+/// A single directory entry with its kind, returned by
+/// [`list_dir_entries`](VfsProvider::list_dir_entries).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VfsDirEntry {
+    /// The entry name (not a full path).
+    pub name: String,
+    /// Whether the entry is a directory (`true`) or a file (`false`).
+    pub is_dir: bool,
+}
+
 /// Trait for virtual file system backends.
 ///
 /// Providers implement byte-level I/O operations. The returned futures do NOT
@@ -42,6 +52,28 @@ pub trait VfsProvider: Send + Sync + 'static {
     /// Returns file and directory names (not full paths).
     /// Returns an empty vec for non-existent directories.
     fn list_dir(&self, path: &str) -> VfsFuture<Vec<String>>;
+
+    /// List the immediate children of a directory **with their kind**
+    /// (file vs directory).
+    ///
+    /// The default implementation falls back to [`list_dir`](Self::list_dir)
+    /// and guesses the kind from whether the name contains a `.` — providers
+    /// that can report real metadata (filesystem, in-memory) override this so
+    /// names like `my.assets` (a directory) or `LICENSE` (a file) classify
+    /// correctly.
+    fn list_dir_entries(&self, path: &str) -> VfsFuture<Vec<VfsDirEntry>> {
+        let names = self.list_dir(path);
+        Box::pin(async move {
+            Ok(names
+                .await?
+                .into_iter()
+                .map(|name| {
+                    let is_dir = !name.contains('.');
+                    VfsDirEntry { name, is_dir }
+                })
+                .collect())
+        })
+    }
 
     // --- Write operations (optional, default returns ReadOnly) ---
 

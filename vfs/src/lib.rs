@@ -48,7 +48,7 @@ pub use error::VfsError;
 pub use filesystem::FileSystemProvider;
 pub use memory::MemoryProvider;
 pub use poll::poll_now;
-pub use provider::{VfsFuture, VfsProvider};
+pub use provider::{VfsDirEntry, VfsFuture, VfsProvider};
 #[cfg(all(feature = "sftp", not(target_arch = "wasm32")))]
 pub use sftp::{SftpConfig, SftpProvider};
 pub use vfs::Vfs;

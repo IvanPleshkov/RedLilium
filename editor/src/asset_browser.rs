@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use redlilium_ecs::Entity;
 use redlilium_ecs::ui::{ComponentDragPayload, ComponentFileDragPayload, PrefabFileDragPayload};
-use redlilium_vfs::Vfs;
+use redlilium_vfs::{Vfs, VfsDirEntry};
 
 use crate::background_vfs::{BackgroundVfs, VfsRequestId, VfsResult};
 use crate::fs_watcher::FsWatcher;
@@ -29,8 +29,8 @@ pub struct AssetBrowser {
 
     // Async VFS support
     bg_vfs: BackgroundVfs,
-    /// Cached directory listings by VFS path.
-    dir_cache: HashMap<String, Vec<String>>,
+    /// Cached directory listings (with entry kinds) by VFS path.
+    dir_cache: HashMap<String, Vec<VfsDirEntry>>,
     /// In-flight listing requests: vfs_path -> request_id.
     pending_requests: HashMap<String, VfsRequestId>,
     /// In-flight write requests: vfs_path -> request_id.
@@ -128,7 +128,7 @@ impl AssetBrowser {
 
     /// Request a directory listing. Returns cached result if available,
     /// otherwise dispatches a background request and returns `None`.
-    fn request_list_dir(&mut self, vfs: &Vfs, vfs_path: &str) -> Option<Vec<String>> {
+    fn request_list_dir(&mut self, vfs: &Vfs, vfs_path: &str) -> Option<Vec<VfsDirEntry>> {
         if let Some(entries) = self.dir_cache.get(vfs_path) {
             return Some(entries.clone());
         }
@@ -294,7 +294,13 @@ impl AssetBrowser {
         };
 
         let entries = self.request_list_dir(vfs, &vfs_path)?;
-        Some(entries.into_iter().filter(|e| !e.contains('.')).collect())
+        Some(
+            entries
+                .into_iter()
+                .filter(|e| e.is_dir)
+                .map(|e| e.name)
+                .collect(),
+        )
     }
 
     /// Draw the file listing (right panel).
@@ -315,12 +321,12 @@ impl AssetBrowser {
             };
 
             match self.request_list_dir(vfs, &vfs_path) {
-                Some(names) => {
-                    self.cached_entries = names
+                Some(entries) => {
+                    self.cached_entries = entries
                         .into_iter()
-                        .map(|name| {
-                            let is_dir = !name.contains('.');
-                            DirEntry { name, is_dir }
+                        .map(|e| DirEntry {
+                            name: e.name,
+                            is_dir: e.is_dir,
                         })
                         .collect();
 

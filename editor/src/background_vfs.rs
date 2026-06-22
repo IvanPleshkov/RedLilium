@@ -1,6 +1,6 @@
 use std::sync::mpsc;
 
-use redlilium_vfs::{Vfs, VfsError};
+use redlilium_vfs::{Vfs, VfsDirEntry, VfsError};
 
 /// Opaque identifier for an in-flight VFS request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -8,7 +8,7 @@ pub struct VfsRequestId(u64);
 
 /// Result of a completed background VFS operation.
 pub enum VfsResult {
-    ListDir(Result<Vec<String>, VfsError>),
+    ListDir(Result<Vec<VfsDirEntry>, VfsError>),
     Write(Result<(), VfsError>),
     Read(Result<Vec<u8>, VfsError>),
 }
@@ -44,12 +44,13 @@ impl BackgroundVfs {
         }
     }
 
-    /// Dispatch an async `list_dir` request. Returns an ID to match the result.
+    /// Dispatch an async directory listing (with entry kinds). Returns an ID to
+    /// match the result.
     pub fn list_dir(&mut self, vfs: &Vfs, path: &str) -> VfsRequestId {
         let id = VfsRequestId(self.next_id);
         self.next_id += 1;
 
-        let future = vfs.list_dir(path);
+        let future = vfs.list_dir_entries(path);
         let tx = self.result_tx.clone();
 
         self.runtime.spawn(async move {

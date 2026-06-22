@@ -106,6 +106,44 @@ impl VfsProvider for MemoryProvider {
         })
     }
 
+    fn list_dir_entries(&self, path: &str) -> VfsFuture<Vec<crate::VfsDirEntry>> {
+        let files = self.files.clone();
+        let path = path.to_owned();
+        Box::pin(async move {
+            let map = files.read().unwrap();
+            // name -> is_dir. A child is a directory when some key has further
+            // path segments after it; a leaf key is a file.
+            let mut children: std::collections::HashMap<String, bool> =
+                std::collections::HashMap::new();
+
+            let prefix = if path.is_empty() {
+                String::new()
+            } else {
+                format!("{path}/")
+            };
+
+            for key in map.keys() {
+                if let Some(rest) = key.strip_prefix(&prefix) {
+                    let (child, is_dir) = match rest.find('/') {
+                        Some(pos) => (&rest[..pos], true),
+                        None => (rest, false),
+                    };
+                    if !child.is_empty() {
+                        let entry = children.entry(child.to_owned()).or_insert(is_dir);
+                        *entry = *entry || is_dir;
+                    }
+                }
+            }
+
+            let mut result: Vec<crate::VfsDirEntry> = children
+                .into_iter()
+                .map(|(name, is_dir)| crate::VfsDirEntry { name, is_dir })
+                .collect();
+            result.sort_by(|a, b| a.name.cmp(&b.name));
+            Ok(result)
+        })
+    }
+
     fn is_read_only(&self) -> bool {
         false
     }
@@ -219,6 +257,19 @@ mod tests {
         let mem = MemoryProvider::new();
         let entries = poll_ready(mem.list_dir("nonexistent")).unwrap();
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn list_dir_entries_reports_kind_not_dot_heuristic() {
+        let mem = MemoryProvider::new();
+        mem.insert("LICENSE", vec![]); // file without a dot
+        mem.insert("my.assets/data.bin", vec![]); // directory with a dot
+
+        let entries = poll_ready(mem.list_dir_entries("")).unwrap();
+        let license = entries.iter().find(|e| e.name == "LICENSE").unwrap();
+        assert!(!license.is_dir, "LICENSE is a file even without a dot");
+        let assets = entries.iter().find(|e| e.name == "my.assets").unwrap();
+        assert!(assets.is_dir, "my.assets is a directory even with a dot");
     }
 
     #[test]

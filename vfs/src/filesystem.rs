@@ -68,6 +68,29 @@ impl VfsProvider for FileSystemProvider {
         })
     }
 
+    fn list_dir_entries(&self, path: &str) -> VfsFuture<Vec<crate::VfsDirEntry>> {
+        let full_path = self.resolve(path);
+        Box::pin(async move {
+            if !full_path.is_dir() {
+                return Ok(Vec::new());
+            }
+            let mut entries = Vec::new();
+            for entry in std::fs::read_dir(full_path)? {
+                let entry = entry?;
+                if let Some(name) = entry.file_name().to_str() {
+                    // Real metadata — correct for dotted dirs / dotless files.
+                    let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                    entries.push(crate::VfsDirEntry {
+                        name: name.to_owned(),
+                        is_dir,
+                    });
+                }
+            }
+            entries.sort_by(|a, b| a.name.cmp(&b.name));
+            Ok(entries)
+        })
+    }
+
     fn is_read_only(&self) -> bool {
         false
     }

@@ -12,10 +12,8 @@ pub struct ConsolePanel {
     min_level: log::Level,
     /// Text filter (case-insensitive substring match).
     filter_text: String,
-    /// Whether to auto-scroll to the bottom.
+    /// Whether to auto-scroll to the bottom (pin to the newest line).
     auto_scroll: bool,
-    /// Number of entries last frame (to detect new entries).
-    last_count: usize,
 }
 
 impl ConsolePanel {
@@ -26,7 +24,6 @@ impl ConsolePanel {
             min_level: log::Level::Trace,
             filter_text: String::new(),
             auto_scroll: true,
-            last_count: 0,
         }
     }
 
@@ -82,13 +79,10 @@ impl ConsolePanel {
             })
             .collect();
 
-        let new_entries = buf.entries().len() != self.last_count;
-        self.last_count = buf.entries().len();
-
         let row_height = ui.text_style_height(&egui::TextStyle::Monospace) + 2.0;
         let total_rows = entries.len();
 
-        egui::ScrollArea::vertical()
+        let output = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .stick_to_bottom(self.auto_scroll)
             .show_rows(ui, row_height, total_rows, |ui, row_range| {
@@ -126,8 +120,23 @@ impl ConsolePanel {
                 }
             });
 
-        // If the user scrolls up, disable auto-scroll; new entries re-enable it
-        if new_entries {
+        // Drive auto-scroll from the user's scroll position/gesture. While
+        // `auto_scroll` is set, `stick_to_bottom` keeps the view pinned to the
+        // newest line; a scroll gesture over the console releases that pin so
+        // the user can read history, and returning to the bottom re-engages it.
+        let max_offset = (output.content_size.y - output.inner_rect.height()).max(0.0);
+        let at_bottom = output.state.offset.y >= max_offset - 2.0;
+        let pointer_over = ui
+            .input(|i| i.pointer.hover_pos())
+            .is_some_and(|p| output.inner_rect.contains(p));
+        if self.auto_scroll {
+            // A scroll gesture over the area means the user wants to leave the
+            // tail. (Sign-agnostic: any gesture releases; if they were merely
+            // nudging at the bottom, the `at_bottom` branch re-engages next frame.)
+            if pointer_over && ui.input(|i| i.raw_scroll_delta.y != 0.0) {
+                self.auto_scroll = false;
+            }
+        } else if at_bottom {
             self.auto_scroll = true;
         }
     }
