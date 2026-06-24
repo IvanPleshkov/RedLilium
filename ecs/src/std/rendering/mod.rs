@@ -29,17 +29,13 @@ pub mod shaders;
 pub mod systems;
 
 pub use components::{
-    CameraTarget, MaterialBundle, MeshRenderer, PerEntityBuffers, Primitive, PrimitiveMaterial,
-    RenderPassType,
+    CameraTarget, MaterialBundle, MeshRenderer, Primitive, PrimitiveMaterial, RenderPassType,
 };
 pub use resources::{
     CpuBundleInfo, MaterialManager, MaterialManagerError, MeshManager, RenderSchedule,
     TextureManager, TextureManagerError, pack_uniform_bytes,
 };
-pub use systems::{
-    EditorForwardRenderSystem, ForwardRenderSystem, InitializeRenderEntities, SyncMaterialUniforms,
-    UpdatePerEntityUniforms,
-};
+pub use systems::SyncMaterialUniforms;
 
 use crate::World;
 
@@ -50,5 +46,4 @@ use crate::World;
 pub fn register_rendering_components(world: &mut World) {
     world.register_inspector::<MeshRenderer>();
     world.register_component::<CameraTarget>();
-    world.register_component::<PerEntityBuffers>();
 }
