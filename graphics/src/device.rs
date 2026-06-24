@@ -13,8 +13,7 @@ use crate::mesh::{CpuMesh, Mesh, MeshDescriptor};
 use crate::pipeline::FramePipeline;
 use crate::resources::{Buffer, Sampler, Texture};
 use crate::types::{
-    BufferDescriptor, BufferUsage, CpuSampler, CpuTexture, Extent3d, SamplerDescriptor,
-    TextureDescriptor, TextureUsage,
+    BufferDescriptor, BufferUsage, CpuSampler, SamplerDescriptor, TextureDescriptor,
 };
 use redlilium_core::profiling::profile_scope;
 
@@ -194,47 +193,6 @@ impl GraphicsDevice {
         // Track it
         if let Ok(mut textures) = self.textures.write() {
             textures.push(Arc::downgrade(&texture));
-        }
-
-        Ok(texture)
-    }
-
-    /// Create a GPU texture from a CPU-side texture.
-    ///
-    /// This is a convenience method that:
-    /// 1. Creates a GPU texture with `TEXTURE_BINDING | COPY_DST` usage
-    /// 2. Writes the pixel data from the `CpuTexture` into it
-    ///
-    /// For textures that need custom usage flags, mip levels, or multisampling,
-    /// use [`create_texture`] with a [`TextureDescriptor`] instead.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use redlilium_core::texture::{CpuTexture, TextureFormat};
-    ///
-    /// let cpu_tex = CpuTexture::new(256, 256, TextureFormat::Rgba8Unorm, pixel_data);
-    /// let gpu_tex = device.create_texture_from_cpu(&cpu_tex)?;
-    /// ```
-    pub fn create_texture_from_cpu(
-        self: &Arc<Self>,
-        cpu_texture: &CpuTexture,
-    ) -> Result<Arc<Texture>, GraphicsError> {
-        profile_scope!("create_texture_from_cpu");
-
-        let descriptor = TextureDescriptor {
-            label: cpu_texture.name.clone(),
-            size: Extent3d::new_2d(cpu_texture.width, cpu_texture.height),
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: cpu_texture.dimension,
-            format: cpu_texture.format,
-            usage: TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST,
-        };
-        let texture = self.create_texture(&descriptor)?;
-
-        if !cpu_texture.data.is_empty() {
-            self.write_texture(&texture, &cpu_texture.data)?;
         }
 
         Ok(texture)
@@ -518,51 +476,6 @@ impl GraphicsDevice {
         Ok(mesh)
     }
 
-    /// Create a GPU mesh from a CPU mesh, uploading vertex and index data.
-    ///
-    /// This is a convenience method that:
-    /// 1. Creates a GPU mesh with the appropriate buffers
-    /// 2. Writes the vertex data from the CpuMesh into each buffer slot
-    /// 3. Writes the index data if present
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use redlilium_core::mesh::generators;
-    ///
-    /// let sphere = generators::generate_sphere(1.0, 32, 16);
-    /// let gpu_mesh = device.create_mesh_from_cpu(&sphere)?;
-    /// ```
-    pub fn create_mesh_from_cpu(
-        self: &Arc<Self>,
-        cpu_mesh: &CpuMesh,
-    ) -> Result<Arc<Mesh>, GraphicsError> {
-        profile_scope!("create_mesh_from_cpu");
-
-        let descriptor = cpu_mesh.to_descriptor();
-        let mesh = self.create_mesh(&descriptor)?;
-
-        // Write vertex data for each buffer slot
-        for i in 0..cpu_mesh.buffer_count() {
-            if let (Some(gpu_buffer), Some(cpu_data)) =
-                (mesh.vertex_buffer(i), cpu_mesh.vertex_buffer_data(i))
-                && !cpu_data.is_empty()
-            {
-                self.write_buffer(gpu_buffer, 0, cpu_data)?;
-            }
-        }
-
-        // Write index data if present
-        if let (Some(gpu_index_buffer), Some(cpu_index_data)) =
-            (mesh.index_buffer(), cpu_mesh.index_data())
-            && !cpu_index_data.is_empty()
-        {
-            self.write_buffer(gpu_index_buffer, 0, cpu_index_data)?;
-        }
-
-        Ok(mesh)
-    }
-
     /// Allocate a GPU mesh from CPU data and return the transfer operations that
     /// upload its vertex/index data **through the frame graph**.
     ///
@@ -722,32 +635,6 @@ impl GraphicsDevice {
         self.instance
             .backend()
             .read_buffer(buffer.gpu_handle(), offset, size)
-    }
-
-    /// Write data to a texture.
-    ///
-    /// Uploads pixel data to the texture. The data should be in the format
-    /// matching the texture's format.
-    ///
-    /// # Arguments
-    ///
-    /// * `texture` - The texture to write to
-    /// * `data` - The pixel data to upload
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let pixels: Vec<u8> = vec![255, 0, 0, 255, 0, 255, 0, 255, ...]; // RGBA data
-    /// device.write_texture(&texture, &pixels)?;
-    /// ```
-    pub fn write_texture(
-        &self,
-        texture: &Texture,
-        data: &[u8],
-    ) -> Result<(), crate::error::GraphicsError> {
-        self.instance
-            .backend()
-            .write_texture(texture.gpu_handle(), data, texture.descriptor())
     }
 
     /// Clean up dead weak references to released resources.
