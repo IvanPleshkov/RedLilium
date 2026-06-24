@@ -77,6 +77,9 @@ pub fn create_opaque_color_material(
                 .with_vertex_layout(VertexLayout::position_normal())
                 .with_color_format(color_format)
                 .with_depth_format(depth_format)
+                // Group 0 binding 0 (per-entity transform) is bound with a
+                // per-draw dynamic offset (ring-allocated each frame).
+                .with_dynamic_uniform(0, 0)
                 .with_label("std_opaque_color"),
         )
         .expect("Failed to create opaque color material")
@@ -216,6 +219,63 @@ pub fn create_opaque_color_entity_full(
         &transform,
     );
     (transform.buffers, material)
+}
+
+/// Build a primitive material whose per-entity transform (group 0) is bound to
+/// shared ring buffers as a **dynamic** uniform. Each draw selects its entity's
+/// slot via `DrawCommand::dynamic_offsets`; the rings are filled per frame with
+/// `RingBuffer::write` (no synchronous GPU writes, race-free across frames).
+///
+/// `forward_ring` holds [`OpaqueColorUniforms`] elements; `entity_index_ring`
+/// (when picking) holds [`EntityIndexUniforms`](super::entity_index::EntityIndexUniforms).
+pub fn create_opaque_color_primitive_material_ring(
+    device: &Arc<GraphicsDevice>,
+    forward_material: &Arc<Material>,
+    entity_index_material: Option<&Arc<Material>>,
+    cpu_material: &Arc<CpuMaterial>,
+    forward_ring: &Arc<Buffer>,
+    entity_index_ring: Option<&Arc<Buffer>>,
+) -> PrimitiveMaterial {
+    let mat_props_buffer = create_material_props_buffer(device);
+    let mat_props_group = Arc::new(BindingGroup::new().with_buffer(0, mat_props_buffer.clone()));
+
+    // Group 0 binds one element of the forward ring; the per-draw dynamic offset
+    // selects the entity's slot.
+    let fwd_size = std::mem::size_of::<OpaqueColorUniforms>() as u64;
+    let forward_group =
+        Arc::new(BindingGroup::new().with_buffer_range(0, forward_ring.clone(), 0, fwd_size));
+    let forward_instance = Arc::new(
+        MaterialInstance::new(Arc::clone(forward_material))
+            .with_binding_group(Arc::clone(&forward_group))
+            .with_binding_group(mat_props_group),
+    );
+
+    let mut bundle = MaterialBundle::new()
+        .with_pass(RenderPassType::Forward, forward_instance)
+        .with_shared_bindings(vec![forward_group]);
+
+    if let (Some(ei_material), Some(ei_ring)) = (entity_index_material, entity_index_ring) {
+        let ei_size = std::mem::size_of::<super::entity_index::EntityIndexUniforms>() as u64;
+        let ei_group =
+            Arc::new(BindingGroup::new().with_buffer_range(0, ei_ring.clone(), 0, ei_size));
+        let ei_instance =
+            Arc::new(MaterialInstance::new(Arc::clone(ei_material)).with_binding_group(ei_group));
+        bundle = bundle.with_pass(RenderPassType::EntityIndex, ei_instance);
+    }
+
+    let cpu_instance = Arc::new(
+        CpuMaterialInstance::new(Arc::clone(cpu_material)).with_value(
+            0,
+            redlilium_core::material::MaterialValue::Vec4(DEFAULT_BASE_COLOR),
+        ),
+    );
+
+    PrimitiveMaterial::with_cpu_data(
+        Arc::new(bundle),
+        cpu_instance,
+        vec![(RenderPassType::Forward, "opaque_color".into())],
+    )
+    .with_material_uniform_buffer(mat_props_buffer)
 }
 
 /// Create the material properties GPU buffer with default base_color.

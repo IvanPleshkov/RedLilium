@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::backend::GpuBuffer;
 use crate::device::GraphicsDevice;
+use crate::error::GraphicsError;
 use crate::types::BufferDescriptor;
 
 /// A GPU buffer resource.
@@ -60,6 +61,33 @@ impl Buffer {
     /// Get the buffer label, if set.
     pub fn label(&self) -> Option<&str> {
         self.descriptor.label.as_deref()
+    }
+
+    /// Crate-internal direct write into this buffer's host-visible mapped memory.
+    ///
+    /// This is the low-level primitive behind [`RingBuffer`](crate::RingBuffer);
+    /// it is **not** public so that external code cannot do unsynchronized GPU
+    /// writes. The caller must guarantee the GPU is not currently reading the
+    /// written region (the ring buffer guarantees this via per-frame slots).
+    pub(crate) fn write_mapped(&self, offset: u64, data: &[u8]) -> Result<(), GraphicsError> {
+        self.device
+            .instance()
+            .backend()
+            .write_buffer(&self.gpu_handle, offset, data)
+    }
+
+    /// Crate-internal read of this buffer's host-visible mapped memory.
+    ///
+    /// Used by the frame pipeline to drain [`ReadbackBuffer`] operations after
+    /// the slot's fence has signalled (so the GPU has finished writing). Not
+    /// public so external code cannot read GPU memory that may still be in use.
+    ///
+    /// [`ReadbackBuffer`]: crate::TransferOperation::ReadbackBuffer
+    pub(crate) fn read_mapped(&self, offset: u64, size: u64) -> Vec<u8> {
+        self.device
+            .instance()
+            .backend()
+            .read_buffer(&self.gpu_handle, offset, size)
     }
 }
 

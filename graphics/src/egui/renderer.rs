@@ -9,7 +9,10 @@ use egui::epaint::{ImageDelta, Primitive, Vertex};
 use egui::{ClippedPrimitive, TextureId, TexturesDelta};
 
 use crate::GraphicsDevice;
-use crate::graph::{ColorAttachment, GraphicsPass, LoadOp, RenderTarget, RenderTargetConfig};
+use crate::graph::{
+    ColorAttachment, GraphicsPass, LoadOp, RenderGraph, RenderTarget, RenderTargetConfig,
+    TransferConfig, TransferOperation, TransferPass,
+};
 use crate::materials::{
     BindingGroup, Material, MaterialDescriptor, MaterialInstance, ShaderSource, ShaderStage,
 };
@@ -101,6 +104,10 @@ pub struct EguiRenderer {
     next_user_texture_id: u64,
     /// Pool of GPU mesh buffers reused across frames.
     mesh_pool: EguiMeshPool,
+    /// Pending atlas uploads, drained into the frame graph by
+    /// [`flush_uploads`](Self::flush_uploads). Texture data is uploaded through
+    /// the render graph, never synchronously.
+    pending_uploads: Vec<TransferOperation>,
 }
 
 impl EguiRenderer {
@@ -199,7 +206,23 @@ impl EguiRenderer {
                 entries: Vec::new(),
                 vertices: Vec::new(),
             },
+            pending_uploads: Vec::new(),
         }
+    }
+
+    /// Flush queued atlas uploads into the current frame's render graph.
+    ///
+    /// Call once per frame while building the frame graph (before or alongside
+    /// the egui pass). The graph compiler orders the upload before the egui draw
+    /// that samples the atlas, so updates take effect the same frame.
+    pub fn flush_uploads(&mut self, graph: &mut RenderGraph) {
+        if self.pending_uploads.is_empty() {
+            return;
+        }
+        let ops = std::mem::take(&mut self.pending_uploads);
+        let mut pass = TransferPass::new("egui_texture_uploads".into());
+        pass.set_transfer_config(TransferConfig::new().with_operations(ops));
+        graph.add_transfer_pass(pass);
     }
 
     /// Update screen size uniforms (integer version for resize events).
@@ -268,11 +291,12 @@ impl EguiRenderer {
                     }
                 }
 
-                // Re-upload the full texture
-                if let Some(texture) = self.textures.get(&id) {
-                    self.device
-                        .write_texture(texture, &data.pixels)
-                        .expect("Failed to write egui texture");
+                // Re-upload the full texture through the frame graph.
+                if let Some(texture) = self.textures.get(&id).cloned() {
+                    let op =
+                        TransferOperation::upload_texture_data(&self.device, texture, &data.pixels)
+                            .expect("Failed to stage egui texture upload");
+                    self.pending_uploads.push(op);
                 }
                 return;
             }
@@ -298,10 +322,11 @@ impl EguiRenderer {
             )
             .expect("Failed to create egui texture");
 
-        // Upload pixel data
-        self.device
-            .write_texture(&texture, &new_pixels)
-            .expect("Failed to write egui texture");
+        // Upload pixel data through the frame graph.
+        let op =
+            TransferOperation::upload_texture_data(&self.device, Arc::clone(&texture), &new_pixels)
+                .expect("Failed to stage egui texture upload");
+        self.pending_uploads.push(op);
 
         // Store CPU-side data for future partial updates
         self.texture_data.insert(

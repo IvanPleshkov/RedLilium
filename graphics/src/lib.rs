@@ -1,3 +1,7 @@
+// The wgpu type graph is deep; auto-trait (Send/Sync) evaluation for our
+// resource types (e.g. the `assert_impl_all!(BindingGroup: ...)` checks)
+// exceeds the default recursion limit of 128.
+#![recursion_limit = "256"]
 //! # RedLilium Graphics
 //!
 //! Custom rendering engine for RedLilium built around an abstract render graph.

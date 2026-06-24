@@ -493,6 +493,11 @@ pub fn convert_binding_type(binding_type: crate::materials::BindingType) -> wgpu
             has_dynamic_offset: false,
             min_binding_size: None,
         },
+        crate::materials::BindingType::DynamicUniformBuffer => wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: true,
+            min_binding_size: None,
+        },
         crate::materials::BindingType::StorageBuffer => wgpu::BindingType::Buffer {
             ty: wgpu::BufferBindingType::Storage { read_only: true },
             has_dynamic_offset: false,

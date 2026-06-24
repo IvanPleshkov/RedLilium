@@ -257,6 +257,7 @@ impl PipelineManager {
             .map(|entry| {
                 let descriptor_type = match entry.binding_type {
                     BindingType::UniformBuffer => vk::DescriptorType::UNIFORM_BUFFER,
+                    BindingType::DynamicUniformBuffer => vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
                     BindingType::StorageBuffer => vk::DescriptorType::STORAGE_BUFFER,
                     BindingType::Sampler => vk::DescriptorType::SAMPLER,
                     BindingType::Texture => vk::DescriptorType::SAMPLED_IMAGE,

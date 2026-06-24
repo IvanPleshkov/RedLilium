@@ -15,8 +15,24 @@ use super::material::Material;
 /// A bound resource for a specific binding slot.
 #[derive(Debug, Clone)]
 pub enum BoundResource {
-    /// A uniform or storage buffer.
+    /// A uniform or storage buffer (binds the whole buffer).
     Buffer(Arc<Buffer>),
+
+    /// A sub-range of a buffer: `offset..offset+size` bytes.
+    ///
+    /// Used for ring-allocated dynamic uniforms: bind with `offset = 0` and
+    /// `size = <one element>`; the per-draw
+    /// [`dynamic_offsets`](crate::DrawCommand::dynamic_offsets) select the
+    /// element. The binding's layout type must be
+    /// [`DynamicUniformBuffer`](crate::BindingType::DynamicUniformBuffer).
+    BufferRange {
+        /// The buffer.
+        buffer: Arc<Buffer>,
+        /// Byte offset of the bound range.
+        offset: u64,
+        /// Size of the bound range in bytes (one dynamic element).
+        size: u64,
+    },
 
     /// A texture resource.
     Texture(Arc<Texture>),
@@ -34,9 +50,18 @@ pub enum BoundResource {
 }
 
 impl BoundResource {
-    /// Create a buffer binding.
+    /// Create a buffer binding (whole buffer).
     pub fn buffer(buffer: Arc<Buffer>) -> Self {
         Self::Buffer(buffer)
+    }
+
+    /// Create a sub-range buffer binding.
+    pub fn buffer_range(buffer: Arc<Buffer>, offset: u64, size: u64) -> Self {
+        Self::BufferRange {
+            buffer,
+            offset,
+            size,
+        }
     }
 
     /// Create a texture binding.
@@ -103,6 +128,17 @@ impl BindingGroup {
     /// Add a buffer binding.
     pub fn with_buffer(self, binding: u32, buffer: Arc<Buffer>) -> Self {
         self.with_entry(binding, BoundResource::buffer(buffer))
+    }
+
+    /// Add a sub-range buffer binding (for dynamic ring uniforms).
+    pub fn with_buffer_range(
+        self,
+        binding: u32,
+        buffer: Arc<Buffer>,
+        offset: u64,
+        size: u64,
+    ) -> Self {
+        self.with_entry(binding, BoundResource::buffer_range(buffer, offset, size))
     }
 
     /// Add a texture binding.

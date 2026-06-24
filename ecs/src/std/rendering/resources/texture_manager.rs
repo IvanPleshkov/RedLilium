@@ -6,7 +6,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use redlilium_graphics::{
-    CpuSampler, CpuTexture, GraphicsDevice, GraphicsError, Sampler, Texture, TextureFormat,
+    CpuSampler, CpuTexture, Extent3d, GraphicsDevice, GraphicsError, RenderGraph, Sampler, Texture,
+    TextureDescriptor, TextureFormat, TextureUsage, TransferConfig, TransferOperation,
+    TransferPass,
 };
 
 /// Errors that can occur in [`TextureManager`] operations.
@@ -70,6 +72,11 @@ pub struct TextureManager {
     device: Arc<GraphicsDevice>,
     textures: HashMap<String, Arc<Texture>>,
     samplers: HashMap<String, Arc<Sampler>>,
+    /// Pending texture uploads, flushed into the frame graph by
+    /// [`flush_uploads`](Self::flush_uploads). Data is uploaded through the
+    /// render graph (never synchronously), so a freshly created texture becomes
+    /// resident one or more frames later.
+    pending_uploads: Vec<TransferOperation>,
 }
 
 impl TextureManager {
@@ -79,7 +86,23 @@ impl TextureManager {
             device,
             textures: HashMap::new(),
             samplers: HashMap::new(),
+            pending_uploads: Vec::new(),
         }
+    }
+
+    /// Flush queued texture uploads into the current frame's render graph.
+    ///
+    /// Call once per frame while building the frame graph. Adds a transfer pass
+    /// that copies staged CPU data into the textures created since the last
+    /// flush. Does nothing if there are no pending uploads.
+    pub fn flush_uploads(&mut self, graph: &mut RenderGraph) {
+        if self.pending_uploads.is_empty() {
+            return;
+        }
+        let ops = std::mem::take(&mut self.pending_uploads);
+        let mut pass = TransferPass::new("texture_uploads".into());
+        pass.set_transfer_config(TransferConfig::new().with_operations(ops));
+        graph.add_transfer_pass(pass);
     }
 
     /// Get the graphics device.
@@ -90,11 +113,35 @@ impl TextureManager {
     // --- Texture creation & lookup ---
 
     /// Create a GPU texture from CPU data.
+    ///
+    /// The texture is allocated immediately, but its pixel data is uploaded
+    /// **through the frame graph** on the next [`flush_uploads`](Self::flush_uploads)
+    /// — it is not written synchronously. The texture is therefore not sampled
+    /// correctly until that upload executes (one or more frames later).
     pub fn create_texture(
         &mut self,
         cpu_texture: &CpuTexture,
     ) -> Result<Arc<Texture>, GraphicsError> {
-        let texture = self.device.create_texture_from_cpu(cpu_texture)?;
+        let descriptor = TextureDescriptor {
+            label: cpu_texture.name.clone(),
+            size: Extent3d::new_2d(cpu_texture.width, cpu_texture.height),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: cpu_texture.dimension,
+            format: cpu_texture.format,
+            usage: TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST,
+        };
+        let texture = self.device.create_texture(&descriptor)?;
+
+        if !cpu_texture.data.is_empty() {
+            self.pending_uploads
+                .push(TransferOperation::upload_texture_data(
+                    &self.device,
+                    Arc::clone(&texture),
+                    &cpu_texture.data,
+                )?);
+        }
+
         if let Some(name) = &cpu_texture.name {
             self.textures.insert(name.clone(), Arc::clone(&texture));
         }

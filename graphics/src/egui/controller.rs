@@ -288,4 +288,13 @@ impl EguiController {
     pub fn unregister_user_texture(&mut self, id: TextureId) {
         self.renderer.unregister_user_texture(id);
     }
+
+    /// Flush queued egui atlas uploads into the current frame's render graph.
+    ///
+    /// Call once per frame after [`end_frame`](Self::end_frame), passing the
+    /// same graph the egui pass is added to. The graph compiler orders the
+    /// upload before the egui draw, so atlas updates take effect the same frame.
+    pub fn flush_uploads(&mut self, graph: &mut crate::graph::RenderGraph) {
+        self.renderer.flush_uploads(graph);
+    }
 }

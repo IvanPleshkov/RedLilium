@@ -10,6 +10,14 @@ pub enum BindingType {
     /// Uniform buffer (read-only, small, frequently updated).
     UniformBuffer,
 
+    /// Uniform buffer bound with a per-draw dynamic offset.
+    ///
+    /// The binding references a (typically ring) buffer once; each draw supplies
+    /// a byte offset via [`DrawCommand::dynamic_offsets`](crate::DrawCommand).
+    /// Used for per-frame/per-entity data (transforms, material params) so the
+    /// binding group stays stable while the data region varies per draw.
+    DynamicUniformBuffer,
+
     /// Storage buffer (read-write, larger data).
     StorageBuffer,
 

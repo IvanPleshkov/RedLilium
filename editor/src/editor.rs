@@ -15,10 +15,10 @@ use redlilium_ecs::ui::{
 };
 use redlilium_ecs::{
     Camera, DrawGrid, DrawSelectionAabb, EcsRunner, Entity, FreeFlyCamera, GlobalTransform,
-    GridConfig, InitializeRenderEntities, MaterialManager, MeshManager, MeshRenderer, Name,
-    PerEntityBuffers, PostUpdate, Primitive, Schedules, SyncMaterialUniforms, TextureManager,
-    Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms,
-    UpdatePerEntityUniforms, Visibility, WindowInput, World, register_std_components,
+    GridConfig, MaterialManager, MeshManager, MeshRenderer, Name, PostUpdate, Primitive, Schedules,
+    SyncMaterialUniforms, TextureManager, Transform, Update, UpdateCameraMatrices,
+    UpdateFreeFlyCamera, UpdateGlobalTransforms, Visibility, WindowInput, World,
+    register_std_components,
 };
 use redlilium_graphics::egui::{EguiApp, EguiController};
 use redlilium_graphics::{FrameSchedule, RenderTarget, TextureFormat};
@@ -244,7 +244,7 @@ impl Editor {
                 .unwrap();
             world.insert(entity, Visibility::VISIBLE).unwrap();
 
-            let (per_entity, material, mesh) = scene_view.create_entity_resources(&cpu_cube);
+            let (material, mesh) = scene_view.create_entity_resources(&cpu_cube);
             let primitive = match cube_aabb {
                 Some(aabb) => Primitive::with_aabb(mesh, material, aabb),
                 None => Primitive::new(mesh, material),
@@ -253,7 +253,6 @@ impl Editor {
             world
                 .insert(entity, MeshRenderer::single(primitive))
                 .unwrap();
-            world.insert(entity, per_entity).unwrap();
         }
 
         // 3 cubes at different positions
@@ -271,7 +270,7 @@ impl Editor {
                 .unwrap();
             world.insert(entity, Visibility::VISIBLE).unwrap();
 
-            let (per_entity, material, mesh) = scene_view.create_entity_resources(&cpu_cube);
+            let (material, mesh) = scene_view.create_entity_resources(&cpu_cube);
             let primitive = match cube_aabb {
                 Some(aabb) => Primitive::with_aabb(mesh, material, aabb),
                 None => Primitive::new(mesh, material),
@@ -280,7 +279,6 @@ impl Editor {
             world
                 .insert(entity, MeshRenderer::single(primitive))
                 .unwrap();
-            world.insert(entity, per_entity).unwrap();
         }
 
         // Insert ActionQueue for editor action dispatch
@@ -318,20 +316,11 @@ impl Editor {
             .add_edge::<UpdateGlobalTransforms, UpdateCameraMatrices>()
             .expect("No cycle");
 
-        // Initialize GPU resources for newly deserialized render entities.
-        schedules
-            .get_mut::<PostUpdate>()
-            .add_exclusive(InitializeRenderEntities);
-
-        // Automatic GPU sync systems — run after camera matrices are computed.
-        schedules
-            .get_mut::<PostUpdate>()
-            .add(UpdatePerEntityUniforms);
+        // Per-entity transforms are uploaded via the scene-view ring in
+        // `on_draw` (not a per-frame ECS system), so `UpdatePerEntityUniforms`
+        // and `InitializeRenderEntities` (per-entity transform buffers) are not
+        // used here. Material property uniforms still sync via SyncMaterialUniforms.
         schedules.get_mut::<PostUpdate>().add(SyncMaterialUniforms);
-        schedules
-            .get_mut::<PostUpdate>()
-            .add_edge::<UpdateCameraMatrices, UpdatePerEntityUniforms>()
-            .expect("No cycle");
         schedules
             .get_mut::<PostUpdate>()
             .add_edge::<UpdateCameraMatrices, SyncMaterialUniforms>()
@@ -491,16 +480,12 @@ impl AppHandler for Editor {
         {
             let ew = self.world.as_mut().unwrap();
             // Find entity whose sparse-set index matches the picked index
-            let target = ew
-                .world
-                .read::<PerEntityBuffers>()
-                .ok()
-                .and_then(|buffers| {
-                    buffers
-                        .iter()
-                        .find(|(idx, _)| *idx == entity_index)
-                        .map(|(_, _)| ())
-                });
+            let target = ew.world.read::<MeshRenderer>().ok().and_then(|buffers| {
+                buffers
+                    .iter()
+                    .find(|(idx, _)| *idx == entity_index)
+                    .map(|(_, _)| ())
+            });
             // Reconstruct full Entity from world (need spawn_tick etc.)
             let target_entity = if target.is_some() {
                 ew.world.entity_at_index(entity_index)
@@ -523,12 +508,12 @@ impl AppHandler for Editor {
             && let Some(entity_indices) = scene_view.resolve_rect_pick()
         {
             let ew = self.world.as_mut().unwrap();
-            let selected: Vec<Entity> = if let Ok(buffers) = ew.world.read::<PerEntityBuffers>() {
+            let selected: Vec<Entity> = if let Ok(renderers) = ew.world.read::<MeshRenderer>() {
                 entity_indices
                     .iter()
                     .filter_map(|&idx| {
-                        // Verify the index has a PerEntityBuffers component
-                        if buffers.get(idx).is_some() {
+                        // Verify the index is a renderable entity.
+                        if renderers.get(idx).is_some() {
                             ew.world.entity_at_index(idx)
                         } else {
                             None
@@ -992,6 +977,9 @@ impl AppHandler for Editor {
             if let Some(egui_pass) = egui.end_frame(&render_target, width, height) {
                 egui_handle = Some(graph.add_graphics_pass(egui_pass));
             }
+            // Upload any egui atlas changes through this frame's graph (ordered
+            // before the egui draw by the compiler).
+            egui.flush_uploads(&mut graph);
         }
 
         // Update viewport/scissor from SceneView panel rect (outside egui block)
@@ -1036,11 +1024,28 @@ impl AppHandler for Editor {
             .as_mut()
             .and_then(|sv| sv.take_pending_rect_pick());
 
+        // Fill per-entity transform rings for this frame (writes VP*model into a
+        // persistent ring; draws select their entity's slot via a dynamic offset).
+        if let (Some(scene_view), Some(ew)) = (&mut self.scene_view, self.world.as_ref())
+            && scene_view.has_viewport()
+        {
+            scene_view.fill_transform_rings(&ew.world);
+        }
+
         if let Some(scene_view) = &self.scene_view
             && scene_view.has_viewport()
             && self.world.is_some()
         {
             let ew = self.world.as_ref().unwrap();
+
+            // Upload any textures created since last frame through this frame's
+            // graph (deferred, graph-ordered — never a synchronous GPU write).
+            if ew.world.has_resource::<TextureManager>() {
+                ew.world
+                    .resource_mut::<TextureManager>()
+                    .flush_uploads(&mut graph);
+            }
+
             if let Some(mut scene_pass) =
                 scene_view.build_scene_pass(&ew.world, ctx.swapchain_texture())
             {
@@ -1090,16 +1095,13 @@ impl AppHandler for Editor {
             }
         }
 
-        // Mark picks in flight after the immutable borrow is released.
-        if pending_pick.is_some()
-            && let Some(scene_view) = &mut self.scene_view
-        {
-            scene_view.set_pick_in_flight();
-        }
+        // Record the rect readback layout (for decoding the async result) after
+        // the immutable borrow is released. Single-pixel picks need no state —
+        // their result is polled from `pick_result`.
         if let Some([_, _, rw, rh]) = pending_rect
             && let Some(scene_view) = &mut self.scene_view
         {
-            scene_view.set_rect_pick_in_flight(rw, rh);
+            scene_view.set_rect_layout(rw, rh);
         }
 
         ctx.render(graph)

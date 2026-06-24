@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use redlilium_graphics::{
-    ColorAttachment, DepthStencilAttachment, GraphicsPass, LoadOp, RenderTarget,
+    ColorAttachment, DepthStencilAttachment, DrawCommand, GraphicsPass, LoadOp, RenderTarget,
     RenderTargetConfig, StoreOp,
 };
 
@@ -85,7 +85,13 @@ impl crate::System for ForwardRenderSystem {
                         for primitive in &renderer.primitives {
                             if let Some(instance) = primitive.material.pass(RenderPassType::Forward)
                             {
-                                pass.add_draw(Arc::clone(&primitive.mesh), Arc::clone(instance));
+                                pass.add_draw_command(
+                                    DrawCommand::new(
+                                        Arc::clone(&primitive.mesh),
+                                        Arc::clone(instance),
+                                    )
+                                    .with_dynamic_offsets(vec![vec![0]]),
+                                );
                             }
                         }
                     }
@@ -168,7 +174,13 @@ impl crate::System for EditorForwardRenderSystem {
                         for primitive in &renderer.primitives {
                             if let Some(instance) = primitive.material.pass(RenderPassType::Forward)
                             {
-                                pass.add_draw(Arc::clone(&primitive.mesh), Arc::clone(instance));
+                                pass.add_draw_command(
+                                    DrawCommand::new(
+                                        Arc::clone(&primitive.mesh),
+                                        Arc::clone(instance),
+                                    )
+                                    .with_dynamic_offsets(vec![vec![0]]),
+                                );
                             }
                         }
                     }

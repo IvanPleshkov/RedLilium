@@ -8,10 +8,13 @@
 //! - Buffer to texture uploads
 //! - Texture to buffer readbacks
 
-use std::sync::Arc;
+use std::ops::Range;
+use std::sync::{Arc, Mutex};
 
+use crate::device::GraphicsDevice;
+use crate::error::GraphicsError;
 use crate::resources::{Buffer, Texture};
-use crate::types::Extent3d;
+use crate::types::{BufferDescriptor, BufferUsage, Extent3d};
 
 /// A region within a buffer for copy operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -238,6 +241,41 @@ pub enum TransferOperation {
         /// Regions to copy.
         regions: Vec<BufferTextureCopyRegion>,
     },
+
+    /// Upload CPU bytes into a GPU buffer through the frame graph.
+    ///
+    /// The `data` source is held by `Arc`, so its memory stays alive for the
+    /// duration of the operation (no use-after-free / access violation); the
+    /// backend bounds-checks `src_range` against it. This does **not** guard
+    /// against data races on `dst` — the caller must not write to a buffer the
+    /// GPU is still reading (use a [`RingBuffer`](crate::RingBuffer) or
+    /// double-buffer for per-frame data).
+    WriteBuffer {
+        /// Destination GPU buffer.
+        dst: Arc<Buffer>,
+        /// Byte offset into the destination.
+        dst_offset: u64,
+        /// Owned source bytes (typically produced via `bytemuck`).
+        data: Arc<[u8]>,
+        /// Sub-range of `data` to upload.
+        src_range: Range<usize>,
+    },
+
+    /// Read back GPU buffer bytes to CPU **after the frame's fence**.
+    ///
+    /// This op records nothing during encoding; it is a marker the frame
+    /// pipeline drains once the slot's fence signals, copying `src[src_range]`
+    /// into `dst`. The result is therefore available one or more frames later
+    /// (poll `dst`). The GPU→`src` copy (e.g. a `TextureToBuffer`) must be a
+    /// separate, earlier operation; `src` must be a host-visible readback buffer.
+    ReadbackBuffer {
+        /// Host-visible source buffer the GPU wrote earlier this frame.
+        src: Arc<Buffer>,
+        /// Sub-range of `src` to read.
+        src_range: Range<usize>,
+        /// CPU destination, filled after the fence.
+        dst: Arc<Mutex<Vec<u8>>>,
+    },
 }
 
 impl TransferOperation {
@@ -310,6 +348,71 @@ impl TransferOperation {
             src,
             dst,
             regions: vec![BufferTextureCopyRegion::whole(extent)],
+        }
+    }
+
+    /// Upload tightly-packed CPU `data` into `dst` texture through the frame
+    /// graph.
+    ///
+    /// Creates a staging buffer, fills it from `data`, and returns a
+    /// `BufferToTexture` copy. The staging buffer is owned by the returned
+    /// operation, so it stays alive until the frame's GPU work completes (the
+    /// frame pipeline retains submitted graphs until their fence). `data` must
+    /// be tightly packed (no row padding) for the texture's extent.
+    pub fn upload_texture_data(
+        device: &Arc<GraphicsDevice>,
+        dst: Arc<Texture>,
+        data: &[u8],
+    ) -> Result<Self, GraphicsError> {
+        let staging = device.create_buffer(
+            &BufferDescriptor::new(
+                data.len() as u64,
+                BufferUsage::COPY_SRC | BufferUsage::COPY_DST,
+            )
+            .with_label("texture_upload_staging"),
+        )?;
+        // Fresh staging buffer — never touched by the GPU, so the mapped write
+        // cannot race.
+        staging.write_mapped(0, data)?;
+        Ok(Self::upload_texture_whole(staging, dst))
+    }
+
+    /// Upload all of `data` into `dst` at `dst_offset` through the frame graph.
+    pub fn write_buffer(dst: Arc<Buffer>, dst_offset: u64, data: Arc<[u8]>) -> Self {
+        let src_range = 0..data.len();
+        Self::WriteBuffer {
+            dst,
+            dst_offset,
+            data,
+            src_range,
+        }
+    }
+
+    /// Read back a sub-range of `src` into `dst` after the frame's fence.
+    pub fn readback_buffer(
+        src: Arc<Buffer>,
+        src_range: Range<usize>,
+        dst: Arc<Mutex<Vec<u8>>>,
+    ) -> Self {
+        Self::ReadbackBuffer {
+            src,
+            src_range,
+            dst,
+        }
+    }
+
+    /// Upload a sub-range of `data` into `dst` at `dst_offset`.
+    pub fn write_buffer_range(
+        dst: Arc<Buffer>,
+        dst_offset: u64,
+        data: Arc<[u8]>,
+        src_range: Range<usize>,
+    ) -> Self {
+        Self::WriteBuffer {
+            dst,
+            dst_offset,
+            data,
+            src_range,
         }
     }
 }

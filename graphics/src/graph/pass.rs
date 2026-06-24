@@ -139,6 +139,14 @@ pub struct DrawCommand {
     pub first_instance: u32,
     /// Optional scissor rectangle for clipping.
     pub scissor_rect: Option<ScissorRect>,
+    /// Per-bind-group dynamic byte offsets, indexed by bind-group index.
+    ///
+    /// Each inner `Vec` holds the offsets for that group's
+    /// [`DynamicUniformBuffer`](crate::BindingType::DynamicUniformBuffer)
+    /// bindings, in binding order. Empty (or a missing group entry) means no
+    /// dynamic offsets for that group. The caller supplies these because it
+    /// knows the material layout; the backend does not introspect it.
+    pub dynamic_offsets: Vec<Vec<u32>>,
 }
 
 impl DrawCommand {
@@ -159,7 +167,16 @@ impl DrawCommand {
             instance_count: 1,
             first_instance: 0,
             scissor_rect: None,
+            dynamic_offsets: Vec::new(),
         }
+    }
+
+    /// Set per-bind-group dynamic uniform offsets (see [`dynamic_offsets`]).
+    ///
+    /// [`dynamic_offsets`]: Self::dynamic_offsets
+    pub fn with_dynamic_offsets(mut self, offsets: Vec<Vec<u32>>) -> Self {
+        self.dynamic_offsets = offsets;
+        self
     }
 
     /// Set the number of instances to draw.
@@ -865,6 +882,12 @@ impl TransferPass {
                         usage.add_buffer(Arc::clone(src), BufferAccessMode::TransferRead);
                         usage.add_buffer(Arc::clone(dst), BufferAccessMode::TransferWrite);
                     }
+                    TransferOperation::WriteBuffer { dst, .. } => {
+                        usage.add_buffer(Arc::clone(dst), BufferAccessMode::TransferWrite);
+                    }
+                    // Drained by the frame pipeline after the fence; no GPU work
+                    // here, so no barrier. The GPU->src copy is a separate op.
+                    TransferOperation::ReadbackBuffer { .. } => {}
                 }
             }
         }

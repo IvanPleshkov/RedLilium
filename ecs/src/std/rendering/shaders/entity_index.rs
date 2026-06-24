@@ -58,6 +58,8 @@ pub fn create_entity_index_material(
                 .with_vertex_layout(VertexLayout::position_normal())
                 .with_color_format(TextureFormat::R32Uint)
                 .with_depth_format(depth_format)
+                // Group 0 binding 0 (per-entity transform) uses a per-draw offset.
+                .with_dynamic_uniform(0, 0)
                 .with_label("std_entity_index"),
         )
         .expect("Failed to create entity index material")

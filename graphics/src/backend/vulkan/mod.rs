@@ -2074,6 +2074,22 @@ impl VulkanBackend {
                             });
                         }
                     }
+                    BoundResource::BufferRange {
+                        buffer,
+                        offset,
+                        size,
+                    } => {
+                        if let GpuBuffer::Vulkan {
+                            buffer: vk_buffer, ..
+                        } = buffer.gpu_handle()
+                        {
+                            scratch_buffer_infos.push(vk::DescriptorBufferInfo {
+                                buffer: *vk_buffer,
+                                offset: *offset,
+                                range: *size,
+                            });
+                        }
+                    }
                     BoundResource::Texture(texture) => {
                         if let GpuTexture::Vulkan { view, .. } = texture.gpu_handle() {
                             scratch_image_infos.push(vk::DescriptorImageInfo {
@@ -2130,16 +2146,19 @@ impl VulkanBackend {
                 });
 
                 let write = match &entry.resource {
-                    BoundResource::Buffer(_) => {
+                    BoundResource::Buffer(_) | BoundResource::BufferRange { .. } => {
                         let info = &scratch_buffer_infos[buffer_idx..buffer_idx + 1];
                         buffer_idx += 1;
                         // Use the binding type from layout, defaulting to UNIFORM_BUFFER
-                        let descriptor_type =
-                            if binding_type == Some(crate::materials::BindingType::StorageBuffer) {
+                        let descriptor_type = match binding_type {
+                            Some(crate::materials::BindingType::StorageBuffer) => {
                                 vk::DescriptorType::STORAGE_BUFFER
-                            } else {
-                                vk::DescriptorType::UNIFORM_BUFFER
-                            };
+                            }
+                            Some(crate::materials::BindingType::DynamicUniformBuffer) => {
+                                vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC
+                            }
+                            _ => vk::DescriptorType::UNIFORM_BUFFER,
+                        };
                         vk::WriteDescriptorSet::default()
                             .dst_set(descriptor_set)
                             .dst_binding(entry.binding)
@@ -2192,8 +2211,11 @@ impl VulkanBackend {
                 .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
         }
 
-        // Bind descriptor sets
+        // Bind descriptor sets. Dynamic offsets are flattened across sets in
+        // group order (matching `scratch_ds_sets`), one per dynamic binding.
         if !scratch_ds_sets.is_empty() {
+            let dynamic_offsets: Vec<u32> =
+                draw_cmd.dynamic_offsets.iter().flatten().copied().collect();
             unsafe {
                 self.device.cmd_bind_descriptor_sets(
                     cmd,
@@ -2201,7 +2223,7 @@ impl VulkanBackend {
                     pipeline_layout,
                     0,
                     scratch_ds_sets,
-                    &[],
+                    &dynamic_offsets,
                 );
             }
         }
@@ -2344,6 +2366,44 @@ impl VulkanBackend {
                         .cmd_copy_buffer(cmd, *src_buffer, *dst_buffer, &copy_regions);
                 }
             }
+            TransferOperation::WriteBuffer {
+                dst,
+                dst_offset,
+                data,
+                src_range,
+            } => {
+                let bytes = data.get(src_range.clone()).ok_or_else(|| {
+                    GraphicsError::InvalidParameter(format!(
+                        "WriteBuffer src_range {:?} out of bounds (data len {})",
+                        src_range,
+                        data.len()
+                    ))
+                })?;
+                let GpuBuffer::Vulkan { allocation, .. } = dst.gpu_handle() else {
+                    return Ok(());
+                };
+                let guard = allocation.lock();
+                let Some(allocation) = guard.as_ref() else {
+                    return Err(GraphicsError::Internal(
+                        "WriteBuffer dst allocation is None".to_string(),
+                    ));
+                };
+                let Some(mapped_ptr) = allocation.mapped_ptr() else {
+                    return Err(GraphicsError::Internal(
+                        "WriteBuffer dst is not host-visible (mapped)".to_string(),
+                    ));
+                };
+                // CPU memcpy into mapped memory during command recording; the
+                // write completes before submission, so the GPU sees it when it
+                // runs this frame's commands.
+                unsafe {
+                    let p = mapped_ptr.as_ptr().add(*dst_offset as usize);
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), p as *mut u8, bytes.len());
+                }
+            }
+            // Drained by the frame pipeline after the fence (CPU read); nothing
+            // to encode here.
+            TransferOperation::ReadbackBuffer { .. } => {}
             TransferOperation::TextureToBuffer { src, dst, regions } => {
                 use crate::types::TextureDimension;
 
@@ -2674,6 +2734,22 @@ impl VulkanBackend {
                                 });
                             }
                         }
+                        BoundResource::BufferRange {
+                            buffer,
+                            offset,
+                            size,
+                        } => {
+                            if let GpuBuffer::Vulkan {
+                                buffer: vk_buffer, ..
+                            } = buffer.gpu_handle()
+                            {
+                                scratch_buffer_infos.push(vk::DescriptorBufferInfo {
+                                    buffer: *vk_buffer,
+                                    offset: *offset,
+                                    range: *size,
+                                });
+                            }
+                        }
                         BoundResource::Texture(texture) => {
                             if let GpuTexture::Vulkan { view, .. } = texture.gpu_handle() {
                                 scratch_image_infos.push(vk::DescriptorImageInfo {
@@ -2729,15 +2805,17 @@ impl VulkanBackend {
                     });
 
                     let write = match &entry.resource {
-                        BoundResource::Buffer(_) => {
+                        BoundResource::Buffer(_) | BoundResource::BufferRange { .. } => {
                             let info = &scratch_buffer_infos[buffer_idx..buffer_idx + 1];
                             buffer_idx += 1;
-                            let descriptor_type = if binding_type
-                                == Some(crate::materials::BindingType::StorageBuffer)
-                            {
-                                vk::DescriptorType::STORAGE_BUFFER
-                            } else {
-                                vk::DescriptorType::UNIFORM_BUFFER
+                            let descriptor_type = match binding_type {
+                                Some(crate::materials::BindingType::StorageBuffer) => {
+                                    vk::DescriptorType::STORAGE_BUFFER
+                                }
+                                Some(crate::materials::BindingType::DynamicUniformBuffer) => {
+                                    vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC
+                                }
+                                _ => vk::DescriptorType::UNIFORM_BUFFER,
                             };
                             vk::WriteDescriptorSet::default()
                                 .dst_set(descriptor_set)

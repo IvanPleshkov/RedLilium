@@ -172,6 +172,23 @@ impl RingBuffer {
         &self.buffer
     }
 
+    /// Write `data` into the region described by `alloc`.
+    ///
+    /// This is a direct CPU write into the ring's host-visible memory — the
+    /// sanctioned per-frame upload path. It needs no GPU synchronization because
+    /// each frame uses a different ring slot, so the written region is never
+    /// in flight. `data` must fit within `alloc`.
+    pub fn write(&self, alloc: &RingAllocation, data: &[u8]) -> Result<(), GraphicsError> {
+        if data.len() as u64 > alloc.size {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "RingBuffer::write data ({} bytes) exceeds allocation ({} bytes)",
+                data.len(),
+                alloc.size
+            )));
+        }
+        self.buffer.write_mapped(alloc.offset, data)
+    }
+
     /// Get the total capacity of the ring buffer.
     pub fn capacity(&self) -> u64 {
         self.capacity

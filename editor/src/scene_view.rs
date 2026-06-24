@@ -6,18 +6,20 @@
 //!
 //! Also maintains an R32Uint entity-index texture for GPU-based object picking.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use redlilium_core::material::CpuMaterial;
+use redlilium_core::math::mat4_to_cols_array_2d;
 use redlilium_ecs::{
-    MeshRenderer, PerEntityBuffers, PrimitiveMaterial, RenderPassType, Visibility, World, shaders,
+    Camera, GlobalTransform, MeshRenderer, PrimitiveMaterial, RenderPassType, Visibility, World,
+    shaders,
 };
 use redlilium_graphics::{
     Buffer, BufferDescriptor, BufferTextureCopyRegion, BufferTextureLayout, BufferUsage,
-    ColorAttachment, DepthStencilAttachment, GraphicsDevice, GraphicsPass, LoadOp, Material,
-    RenderTarget, RenderTargetConfig, ScissorRect, StoreOp, SurfaceTexture, TextureCopyLocation,
-    TextureDescriptor, TextureFormat, TextureOrigin, TextureUsage, TransferConfig,
-    TransferOperation, TransferPass, Viewport,
+    ColorAttachment, DepthStencilAttachment, DrawCommand, GraphicsDevice, GraphicsPass, LoadOp,
+    Material, RenderTarget, RenderTargetConfig, RingBuffer, ScissorRect, StoreOp, SurfaceTexture,
+    TextureCopyLocation, TextureDescriptor, TextureFormat, TextureOrigin, TextureUsage,
+    TransferConfig, TransferOperation, TransferPass, Viewport,
 };
 
 /// Manages GPU resources and rendering for the editor's SceneView panel.
@@ -36,17 +38,26 @@ pub struct SceneViewState {
     readback_buffer: Arc<Buffer>,
     /// Pixel coordinates (physical) of a pending pick request, resolved next frame.
     pending_pick: Option<[u32; 2]>,
-    /// Frames remaining until the readback buffer is ready to read.
-    /// Set to 2 when a readback is submitted (GPU needs at least one full
-    /// frame to finish the transfer). Decremented each frame; read at 0.
-    pick_frames_remaining: u32,
+    /// Single-pixel pick result bytes, filled by the frame pipeline after the GPU
+    /// readback completes (one or more frames later). Polled by `resolve_pick`.
+    pick_result: Arc<Mutex<Vec<u8>>>,
 
     // --- Rect selection readback ---
     pending_rect_pick: Option<[u32; 4]>,
     rect_readback_buffer: Arc<Buffer>,
-    rect_pick_frames_remaining: u32,
-    /// Dimensions [w, h] and padded bytes_per_row of the in-flight rect readback.
+    /// Rect pick result bytes, filled by the frame pipeline post-readback.
+    rect_result: Arc<Mutex<Vec<u8>>>,
+    /// Dimensions [w, h] and padded bytes_per_row of the last rect readback.
     rect_pick_layout: [u32; 3],
+
+    // --- Per-entity transform rings (dynamic uniforms) ---
+    /// Ring of `OpaqueColorUniforms` (forward pass), filled per frame.
+    forward_ring: RingBuffer,
+    /// Ring of `EntityIndexUniforms` (picking pass), filled per frame.
+    entity_index_ring: RingBuffer,
+    /// Per-entity ring offsets recorded by [`fill_transform_rings`], keyed by
+    /// entity index: `(forward_offset, entity_index_offset)`.
+    transform_offsets: std::collections::HashMap<u32, (u32, u32)>,
 }
 
 impl SceneViewState {
@@ -81,6 +92,24 @@ impl SceneViewState {
             ))
             .expect("Failed to create rect readback buffer");
 
+        // Persistent per-entity transform rings (filled each frame, monotonic
+        // with wrap; sized generously so a region is reused only many frames
+        // later — after its fence — avoiding frames-in-flight races).
+        let forward_ring = RingBuffer::new(
+            &device,
+            1 << 20,
+            BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+            "scene_view_transform_fwd",
+        )
+        .expect("Failed to create forward transform ring");
+        let entity_index_ring = RingBuffer::new(
+            &device,
+            1 << 20,
+            BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+            "scene_view_transform_ei",
+        )
+        .expect("Failed to create entity-index transform ring");
+
         Self {
             device,
             depth_texture,
@@ -93,11 +122,14 @@ impl SceneViewState {
             entity_index_texture,
             readback_buffer,
             pending_pick: None,
-            pick_frames_remaining: 0,
+            pick_result: Arc::new(Mutex::new(Vec::new())),
             pending_rect_pick: None,
             rect_readback_buffer,
-            rect_pick_frames_remaining: 0,
+            rect_result: Arc::new(Mutex::new(Vec::new())),
             rect_pick_layout: [0; 3],
+            forward_ring,
+            entity_index_ring,
+            transform_offsets: std::collections::HashMap::new(),
         }
     }
 
@@ -109,16 +141,16 @@ impl SceneViewState {
     pub fn create_entity_resources(
         &self,
         cpu_mesh: &redlilium_core::mesh::CpuMesh,
-    ) -> (
-        PerEntityBuffers,
-        PrimitiveMaterial,
-        Arc<redlilium_graphics::Mesh>,
-    ) {
-        let (per_entity, material) = shaders::create_opaque_color_entity_full(
+    ) -> (PrimitiveMaterial, Arc<redlilium_graphics::Mesh>) {
+        // Group 0 binds the shared transform rings (dynamic); per-entity offsets
+        // are supplied per draw and filled each frame by `fill_transform_rings`.
+        let material = shaders::create_opaque_color_primitive_material_ring(
             &self.device,
             &self.opaque_material,
-            &self.entity_index_material,
+            Some(&self.entity_index_material),
             &self.cpu_material,
+            self.forward_ring.buffer(),
+            Some(self.entity_index_ring.buffer()),
         );
 
         let gpu_mesh = self
@@ -126,7 +158,70 @@ impl SceneViewState {
             .create_mesh_from_cpu(cpu_mesh)
             .expect("Failed to create entity GPU mesh");
 
-        (per_entity, material, gpu_mesh)
+        (material, gpu_mesh)
+    }
+
+    /// Fill the per-entity transform rings for this frame and record each
+    /// entity's dynamic offsets. Call once per frame before building the scene
+    /// and pick passes. The data is written into a persistent ring via
+    /// `RingBuffer::write` (no synchronous GPU writes); offsets advance
+    /// monotonically and wrap when full.
+    pub fn fill_transform_rings(&mut self, world: &World) {
+        self.transform_offsets.clear();
+
+        let Ok(cameras) = world.read_all::<Camera>() else {
+            return;
+        };
+        let vp = match cameras.iter().next() {
+            Some((_, camera)) => mat4_to_cols_array_2d(&camera.view_projection()),
+            None => return,
+        };
+        drop(cameras);
+
+        let Ok(renderers) = world.read::<MeshRenderer>() else {
+            return;
+        };
+        let Ok(globals) = world.read::<GlobalTransform>() else {
+            return;
+        };
+
+        for (idx, _renderer) in renderers.iter() {
+            let model = globals
+                .get(idx)
+                .map(|g| mat4_to_cols_array_2d(&g.0))
+                .unwrap_or_else(|| mat4_to_cols_array_2d(&redlilium_core::math::Mat4::identity()));
+
+            let fwd = shaders::OpaqueColorUniforms {
+                view_projection: vp,
+                model,
+            };
+            let fwd_off = Self::ring_push(&mut self.forward_ring, bytemuck::bytes_of(&fwd));
+
+            let ei = shaders::EntityIndexUniforms {
+                view_projection: vp,
+                model,
+                entity_index: idx,
+                _padding: [0; 3],
+            };
+            let ei_off = Self::ring_push(&mut self.entity_index_ring, bytemuck::bytes_of(&ei));
+
+            self.transform_offsets.insert(idx, (fwd_off, ei_off));
+        }
+    }
+
+    /// Allocate a slot in `ring` (wrapping when full) and write `data`,
+    /// returning its byte offset.
+    fn ring_push(ring: &mut RingBuffer, data: &[u8]) -> u32 {
+        let size = data.len() as u64;
+        let alloc = ring.allocate(size).unwrap_or_else(|| {
+            // Wrap: the start of the ring was written many frames ago, so its
+            // GPU work has completed (ring sized well above frames-in-flight).
+            ring.reset();
+            ring.allocate(size)
+                .expect("transform ring too small for one element")
+        });
+        let _ = ring.write(&alloc, data);
+        alloc.offset as u32
     }
 
     /// Update the viewport and scissor from an egui panel rect.
@@ -192,9 +287,16 @@ impl SceneViewState {
             {
                 continue;
             }
+            let fwd_off = self
+                .transform_offsets
+                .get(&entity_idx)
+                .map_or(0, |(f, _)| *f);
             for primitive in &renderer.primitives {
                 if let Some(instance) = primitive.material.pass(RenderPassType::Forward) {
-                    pass.add_draw(primitive.mesh.clone(), Arc::clone(instance));
+                    pass.add_draw_command(
+                        DrawCommand::new(primitive.mesh.clone(), Arc::clone(instance))
+                            .with_dynamic_offsets(vec![vec![fwd_off]]),
+                    );
                 }
             }
         }
@@ -239,9 +341,16 @@ impl SceneViewState {
             {
                 continue;
             }
+            let ei_off = self
+                .transform_offsets
+                .get(&entity_idx)
+                .map_or(0, |(_, e)| *e);
             for primitive in &renderer.primitives {
                 if let Some(instance) = primitive.material.pass(RenderPassType::EntityIndex) {
-                    pass.add_draw(primitive.mesh.clone(), Arc::clone(instance));
+                    pass.add_draw_command(
+                        DrawCommand::new(primitive.mesh.clone(), Arc::clone(instance))
+                            .with_dynamic_offsets(vec![vec![ei_off]]),
+                    );
                     draw_count += 1;
                 }
             }
@@ -271,14 +380,28 @@ impl SceneViewState {
             },
         );
 
+        // Clear any stale result so `resolve_pick` only sees this readback.
+        if let Ok(mut g) = self.pick_result.lock() {
+            g.clear();
+        }
+
         let mut pass = TransferPass::new("pick_readback".into());
-        pass.set_transfer_config(TransferConfig::new().with_operation(
+        pass.set_transfer_config(TransferConfig::new().with_operations(vec![
+            // 1. Copy the picked pixel from the entity-index texture into the
+            //    host-visible readback buffer.
             TransferOperation::readback_texture(
                 self.entity_index_texture.clone(),
                 self.readback_buffer.clone(),
                 vec![region],
             ),
-        ));
+            // 2. After the fence, the frame pipeline copies the buffer into
+            //    `pick_result` for `resolve_pick` to poll.
+            TransferOperation::readback_buffer(
+                self.readback_buffer.clone(),
+                0..4,
+                self.pick_result.clone(),
+            ),
+        ]));
         pass
     }
 
@@ -298,42 +421,20 @@ impl SceneViewState {
         self.pending_pick.take()
     }
 
-    /// Mark that a readback was submitted. The result will be ready after
-    /// `pick_frames_remaining` frames have elapsed (typically 2).
-    pub fn set_pick_in_flight(&mut self) {
-        self.pick_frames_remaining = 2;
-    }
-
-    /// Read the pick result from the readback buffer (call after GPU has finished).
+    /// Poll the pick result, filled asynchronously by the frame pipeline once
+    /// the GPU readback completes.
     ///
-    /// Returns `Some(entity_index)` if an entity was hit, `None` if empty space.
-    /// Returns `None` while still waiting for the GPU to finish the readback.
+    /// Returns `Some(entity_index)` if an entity was hit, `None` if empty space
+    /// or while still waiting for the GPU. The result is consumed once read.
     pub fn resolve_pick(&mut self) -> Option<u32> {
-        if self.pick_frames_remaining == 0 {
-            return None;
-        }
-        self.pick_frames_remaining -= 1;
-        if self.pick_frames_remaining > 0 {
-            return None; // still waiting for GPU
-        }
-
-        let data = self.device.read_buffer(&self.readback_buffer, 0, 4);
-        if data.len() < 4 {
-            log::warn!(
-                "Pick readback: buffer returned {} bytes (expected 4)",
-                data.len()
-            );
-            return None;
-        }
-        let value = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-        log::info!(
-            "Pick readback: raw value = {value}, decoded = {}",
-            if value == 0 {
-                "None (background)".to_string()
-            } else {
-                format!("Some({})", value - 1)
+        let data = {
+            let mut guard = self.pick_result.lock().ok()?;
+            if guard.len() < 4 {
+                return None; // not ready yet
             }
-        );
+            std::mem::take(&mut *guard)
+        };
+        let value = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
         if value == 0 {
             None // cleared background — no entity
         } else {
@@ -391,21 +492,32 @@ impl SceneViewState {
             },
         );
 
+        let total_bytes = (bytes_per_row * h) as usize;
+
+        if let Ok(mut g) = self.rect_result.lock() {
+            g.clear();
+        }
+
         let mut pass = TransferPass::new("rect_pick_readback".into());
-        pass.set_transfer_config(TransferConfig::new().with_operation(
+        pass.set_transfer_config(TransferConfig::new().with_operations(vec![
             TransferOperation::readback_texture(
                 self.entity_index_texture.clone(),
                 self.rect_readback_buffer.clone(),
                 vec![region],
             ),
-        ));
+            TransferOperation::readback_buffer(
+                self.rect_readback_buffer.clone(),
+                0..total_bytes,
+                self.rect_result.clone(),
+            ),
+        ]));
         pass
     }
 
-    /// Mark that a rect readback was submitted with the given dimensions.
-    pub fn set_rect_pick_in_flight(&mut self, w: u32, h: u32) {
+    /// Record the layout [w, h, bytes_per_row] of the in-flight rect readback,
+    /// used by [`resolve_rect_pick`] to decode the result bytes.
+    pub fn set_rect_layout(&mut self, w: u32, h: u32) {
         let bytes_per_row = (w * 4).div_ceil(256) * 256;
-        self.rect_pick_frames_remaining = 2;
         self.rect_pick_layout = [w, h, bytes_per_row];
     }
 
@@ -414,19 +526,15 @@ impl SceneViewState {
     /// Returns `Some(entity_indices)` with unique entity indices found in the
     /// rectangle, or `None` if still waiting for the GPU.
     pub fn resolve_rect_pick(&mut self) -> Option<Vec<u32>> {
-        if self.rect_pick_frames_remaining == 0 {
-            return None;
-        }
-        self.rect_pick_frames_remaining -= 1;
-        if self.rect_pick_frames_remaining > 0 {
-            return None;
-        }
+        let data = {
+            let mut guard = self.rect_result.lock().ok()?;
+            if guard.is_empty() {
+                return None; // not ready yet
+            }
+            std::mem::take(&mut *guard)
+        };
 
         let [w, h, bytes_per_row] = self.rect_pick_layout;
-        let total_bytes = bytes_per_row as u64 * h as u64;
-        let data = self
-            .device
-            .read_buffer(&self.rect_readback_buffer, 0, total_bytes);
 
         let mut unique = std::collections::HashSet::new();
         let pixel_bytes = (w * 4) as usize;

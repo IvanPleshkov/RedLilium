@@ -268,6 +268,11 @@ pub struct MaterialDescriptor {
     /// Depth attachment format, if any.
     pub depth_format: Option<TextureFormat>,
 
+    /// `(group, binding)` pairs whose reflected `UniformBuffer` should be made a
+    /// [`DynamicUniformBuffer`](crate::BindingType::DynamicUniformBuffer) (bound
+    /// with a per-draw offset). Applied after reflection in `create_material`.
+    pub dynamic_uniforms: Vec<(u32, u32)>,
+
     /// Optional label for debugging.
     pub label: Option<String>,
 }
@@ -283,6 +288,7 @@ impl Default for MaterialDescriptor {
             polygon_mode: PolygonMode::Fill,
             color_formats: Vec::new(),
             depth_format: None,
+            dynamic_uniforms: Vec::new(),
             label: None,
         }
     }
@@ -337,6 +343,13 @@ impl MaterialDescriptor {
     }
 
     /// Set the depth attachment format.
+    /// Mark a reflected uniform binding `(group, binding)` as a dynamic uniform
+    /// (bound once, offset supplied per draw). Applied after reflection.
+    pub fn with_dynamic_uniform(mut self, group: u32, binding: u32) -> Self {
+        self.dynamic_uniforms.push((group, binding));
+        self
+    }
+
     pub fn with_depth_format(mut self, format: TextureFormat) -> Self {
         self.depth_format = Some(format);
         self

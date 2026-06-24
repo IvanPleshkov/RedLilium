@@ -194,6 +194,42 @@ impl FramePipeline {
     ///     pipeline.end_frame(schedule);
     /// }
     /// ```
+    /// Drain `ReadbackBuffer` operations from a slot's retired graphs.
+    ///
+    /// Must be called only after the slot's fence has signalled (GPU finished
+    /// writing the readback sources). Copies each `src[src_range]` into the
+    /// op's CPU `dst`, making GPU→CPU readbacks available one or more frames
+    /// after they were requested.
+    fn process_readbacks(&self, slot: usize) {
+        use crate::graph::TransferOperation;
+        for graph in &self.slot_graphs[slot] {
+            for pass in graph.passes() {
+                let Some(transfer) = pass.as_transfer() else {
+                    continue;
+                };
+                let Some(config) = transfer.transfer_config() else {
+                    continue;
+                };
+                for op in &config.operations {
+                    if let TransferOperation::ReadbackBuffer {
+                        src,
+                        src_range,
+                        dst,
+                    } = op
+                    {
+                        let bytes = src.read_mapped(
+                            src_range.start as u64,
+                            (src_range.end - src_range.start) as u64,
+                        );
+                        if let Ok(mut guard) = dst.lock() {
+                            *guard = bytes;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub fn begin_frame(&mut self) -> FrameSchedule {
         profile_scope!("begin_frame");
 
@@ -202,6 +238,10 @@ impl FramePipeline {
             profile_scope!("wait_fence");
             fence.wait();
         }
+
+        // Fence passed: the GPU finished this slot's work, so readback source
+        // buffers are safe to read. Drain them before recycling the graphs.
+        self.process_readbacks(self.current_slot);
 
         // Advance backend frame state (layout tracker, descriptor pool,
         // command buffer cleanup)
@@ -281,6 +321,9 @@ impl FramePipeline {
         {
             return None;
         }
+
+        // Fence passed: drain readbacks before recycling this slot's graphs.
+        self.process_readbacks(self.current_slot);
 
         // Advance backend frame state (layout tracker, descriptor pool,
         // command buffer cleanup)

@@ -242,6 +242,20 @@ impl WgpuBackend {
                                 size: None,
                             })
                         }
+                        crate::materials::BoundResource::BufferRange {
+                            buffer,
+                            offset,
+                            size,
+                        } => {
+                            let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() else {
+                                return Err(mismatch("buffer"));
+                            };
+                            wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: wgpu_buffer,
+                                offset: *offset,
+                                size: std::num::NonZeroU64::new(*size),
+                            })
+                        }
                         crate::materials::BoundResource::Texture(texture) => {
                             let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() else {
                                 return Err(mismatch("texture"));
@@ -279,7 +293,11 @@ impl WgpuBackend {
             render_pass.set_pipeline(pipeline);
 
             for (index, bind_group) in scratch_bind_groups.iter().enumerate() {
-                render_pass.set_bind_group(index as u32, bind_group, &[]);
+                let offsets: &[u32] = draw_cmd
+                    .dynamic_offsets
+                    .get(index)
+                    .map_or(&[], |v| v.as_slice());
+                render_pass.set_bind_group(index as u32, bind_group, offsets);
             }
 
             for (slot, buffer) in mesh.vertex_buffers().iter().enumerate() {
@@ -375,6 +393,29 @@ impl WgpuBackend {
                     );
                 }
             }
+            TransferOperation::WriteBuffer {
+                dst,
+                dst_offset,
+                data,
+                src_range,
+            } => {
+                let GpuBuffer::Wgpu(dst_buffer) = dst.gpu_handle() else {
+                    return Ok(());
+                };
+                let bytes = data.get(src_range.clone()).ok_or_else(|| {
+                    GraphicsError::InvalidParameter(format!(
+                        "WriteBuffer src_range {:?} out of bounds (data len {})",
+                        src_range,
+                        data.len()
+                    ))
+                })?;
+                // queue.write_buffer stages internally and is ordered before this
+                // command buffer's submission.
+                self.queue.write_buffer(dst_buffer, *dst_offset, bytes);
+            }
+            // Drained by the frame pipeline after the fence (CPU read); nothing
+            // to encode here.
+            TransferOperation::ReadbackBuffer { .. } => {}
             TransferOperation::TextureToBuffer { src, dst, regions } => {
                 let GpuTexture::Wgpu {
                     texture: src_texture,
@@ -650,6 +691,20 @@ impl WgpuBackend {
                                 buffer: wgpu_buffer,
                                 offset: 0,
                                 size: None,
+                            })
+                        }
+                        crate::materials::BoundResource::BufferRange {
+                            buffer,
+                            offset,
+                            size,
+                        } => {
+                            let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() else {
+                                return Err(mismatch("buffer"));
+                            };
+                            wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: wgpu_buffer,
+                                offset: *offset,
+                                size: std::num::NonZeroU64::new(*size),
                             })
                         }
                         crate::materials::BoundResource::Texture(texture) => {

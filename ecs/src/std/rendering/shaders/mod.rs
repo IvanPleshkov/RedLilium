@@ -14,5 +14,5 @@ pub use opaque_color::{
     EntityTransform, OpaqueColorUniforms, create_entity_transform,
     create_opaque_color_cpu_material, create_opaque_color_entity_full,
     create_opaque_color_material, create_opaque_color_primitive_material,
-    update_opaque_color_uniforms,
+    create_opaque_color_primitive_material_ring, update_opaque_color_uniforms,
 };
