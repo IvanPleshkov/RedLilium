@@ -64,6 +64,9 @@ pub struct SceneViewState {
     /// Per-entity ring offsets recorded by [`fill_transform_rings`], keyed by
     /// entity index.
     draw_offsets: std::collections::HashMap<u32, EntityDrawOffsets>,
+    /// Pending mesh-data uploads (from [`create_entity_resources`]), flushed into
+    /// the frame graph by [`flush_uploads`](Self::flush_uploads).
+    pending_uploads: Vec<TransferOperation>,
 }
 
 /// Per-frame dynamic-offset slots for one entity's draws.
@@ -155,7 +158,19 @@ impl SceneViewState {
             entity_index_ring,
             material_props_ring,
             draw_offsets: std::collections::HashMap::new(),
+            pending_uploads: Vec::new(),
         }
+    }
+
+    /// Flush queued mesh uploads into the current frame's render graph.
+    pub fn flush_uploads(&mut self, graph: &mut redlilium_graphics::RenderGraph) {
+        if self.pending_uploads.is_empty() {
+            return;
+        }
+        let ops = std::mem::take(&mut self.pending_uploads);
+        let mut pass = TransferPass::new("scene_view_mesh_uploads".into());
+        pass.set_transfer_config(TransferConfig::new().with_operations(ops));
+        graph.add_transfer_pass(pass);
     }
 
     /// Create GPU resources for a renderable entity with picking support.
@@ -164,7 +179,7 @@ impl SceneViewState {
     /// assembles these into a [`Primitive`](redlilium_ecs::Primitive) +
     /// [`MeshRenderer`](redlilium_ecs::MeshRenderer).
     pub fn create_entity_resources(
-        &self,
+        &mut self,
         cpu_mesh: &redlilium_core::mesh::CpuMesh,
     ) -> (PrimitiveMaterial, Arc<redlilium_graphics::Mesh>) {
         // Group 0 (transform) and group 1 (material props) bind shared rings as
@@ -179,10 +194,13 @@ impl SceneViewState {
             self.material_props_ring.buffer(),
         );
 
-        let gpu_mesh = self
+        // Allocate the mesh now; its data uploads through the frame graph on the
+        // next `flush_uploads` (no synchronous GPU write).
+        let (gpu_mesh, ops) = self
             .device
-            .create_mesh_from_cpu(cpu_mesh)
+            .create_mesh_deferred(cpu_mesh)
             .expect("Failed to create entity GPU mesh");
+        self.pending_uploads.extend(ops);
 
         (material, gpu_mesh)
     }

@@ -6,6 +6,7 @@
 use std::sync::{Arc, RwLock, Weak};
 
 use crate::error::GraphicsError;
+use crate::graph::TransferOperation;
 use crate::instance::GraphicsInstance;
 use crate::materials::{Material, MaterialDescriptor};
 use crate::mesh::{CpuMesh, Mesh, MeshDescriptor};
@@ -560,6 +561,51 @@ impl GraphicsDevice {
         }
 
         Ok(mesh)
+    }
+
+    /// Allocate a GPU mesh from CPU data and return the transfer operations that
+    /// upload its vertex/index data **through the frame graph**.
+    ///
+    /// Unlike [`create_mesh_from_cpu`](Self::create_mesh_from_cpu), this performs
+    /// no synchronous GPU writes: the returned [`TransferOperation`]s must be
+    /// added to a frame's render graph (e.g. via a manager's `flush_uploads`).
+    /// Mesh data is static (written once before first use), so the upload is
+    /// safe and effectively same-frame once the graph executes.
+    pub fn create_mesh_deferred(
+        self: &Arc<Self>,
+        cpu_mesh: &CpuMesh,
+    ) -> Result<(Arc<Mesh>, Vec<TransferOperation>), GraphicsError> {
+        profile_scope!("create_mesh_deferred");
+
+        let descriptor = cpu_mesh.to_descriptor();
+        let mesh = self.create_mesh(&descriptor)?;
+        let mut ops = Vec::new();
+
+        for i in 0..cpu_mesh.buffer_count() {
+            if let (Some(gpu_buffer), Some(cpu_data)) =
+                (mesh.vertex_buffer(i), cpu_mesh.vertex_buffer_data(i))
+                && !cpu_data.is_empty()
+            {
+                ops.push(TransferOperation::write_buffer(
+                    Arc::clone(gpu_buffer),
+                    0,
+                    Arc::from(cpu_data),
+                ));
+            }
+        }
+
+        if let (Some(gpu_index_buffer), Some(cpu_index_data)) =
+            (mesh.index_buffer(), cpu_mesh.index_data())
+            && !cpu_index_data.is_empty()
+        {
+            ops.push(TransferOperation::write_buffer(
+                Arc::clone(gpu_index_buffer),
+                0,
+                Arc::from(cpu_index_data),
+            ));
+        }
+
+        Ok((mesh, ops))
     }
 
     /// Create a frame pipeline for managing multiple frames in flight.

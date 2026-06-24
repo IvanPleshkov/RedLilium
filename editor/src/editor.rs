@@ -166,7 +166,7 @@ impl Editor {
     }
 
     /// Create a new editor world with a simple demo scene.
-    fn create_editor_world(&self, scene_view: &SceneViewState, aspect: f32) -> EditorWorld {
+    fn create_editor_world(&self, scene_view: &mut SceneViewState, aspect: f32) -> EditorWorld {
         let mut world = World::new();
         register_std_components(&mut world);
         redlilium_ecs::register_rendering_components(&mut world);
@@ -412,7 +412,7 @@ impl AppHandler for Editor {
 
         // Create the editor world with a demo scene
         let aspect = ctx.aspect_ratio();
-        let editor_world = self.create_editor_world(&scene_view, aspect);
+        let editor_world = self.create_editor_world(&mut scene_view, aspect);
         self.world = Some(editor_world);
 
         self.scene_view = Some(scene_view);
@@ -1024,6 +1024,8 @@ impl AppHandler for Editor {
             && scene_view.has_viewport()
         {
             scene_view.fill_transform_rings(&ew.world);
+            // Upload meshes created since last frame through this frame's graph.
+            scene_view.flush_uploads(&mut graph);
         }
 
         if let Some(scene_view) = &self.scene_view
@@ -1032,11 +1034,16 @@ impl AppHandler for Editor {
         {
             let ew = self.world.as_ref().unwrap();
 
-            // Upload any textures created since last frame through this frame's
-            // graph (deferred, graph-ordered — never a synchronous GPU write).
+            // Upload any textures/meshes created since last frame through this
+            // frame's graph (deferred, graph-ordered — never a synchronous write).
             if ew.world.has_resource::<TextureManager>() {
                 ew.world
                     .resource_mut::<TextureManager>()
+                    .flush_uploads(&mut graph);
+            }
+            if ew.world.has_resource::<MeshManager>() {
+                ew.world
+                    .resource_mut::<MeshManager>()
                     .flush_uploads(&mut graph);
             }
 

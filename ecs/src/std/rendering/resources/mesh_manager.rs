@@ -3,7 +3,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use redlilium_graphics::{CpuMesh, GraphicsDevice, GraphicsError, Mesh};
+use redlilium_graphics::{
+    CpuMesh, GraphicsDevice, GraphicsError, Mesh, RenderGraph, TransferConfig, TransferOperation,
+    TransferPass,
+};
 
 /// Resource for managing GPU meshes by name.
 ///
@@ -15,6 +18,10 @@ pub struct MeshManager {
     meshes: HashMap<String, Arc<Mesh>>,
     /// Cached local-space AABBs keyed by mesh name.
     aabbs: HashMap<String, redlilium_core::math::Aabb>,
+    /// Pending mesh-data uploads, flushed into the frame graph by
+    /// [`flush_uploads`](Self::flush_uploads). Mesh data goes through the render
+    /// graph (never synchronously); a mesh is renderable once that upload runs.
+    pending_uploads: Vec<TransferOperation>,
 }
 
 impl MeshManager {
@@ -24,6 +31,7 @@ impl MeshManager {
             device,
             meshes: HashMap::new(),
             aabbs: HashMap::new(),
+            pending_uploads: Vec::new(),
         }
     }
 
@@ -32,12 +40,30 @@ impl MeshManager {
         &self.device
     }
 
+    /// Flush queued mesh uploads into the current frame's render graph.
+    ///
+    /// Call once per frame while building the frame graph. Does nothing if there
+    /// are no pending uploads.
+    pub fn flush_uploads(&mut self, graph: &mut RenderGraph) {
+        if self.pending_uploads.is_empty() {
+            return;
+        }
+        let ops = std::mem::take(&mut self.pending_uploads);
+        let mut pass = TransferPass::new("mesh_uploads".into());
+        pass.set_transfer_config(TransferConfig::new().with_operations(ops));
+        graph.add_transfer_pass(pass);
+    }
+
     // --- Mesh creation & lookup ---
 
     /// Create a GPU mesh from CPU data.
+    ///
+    /// The mesh is allocated immediately, but its vertex/index data is uploaded
+    /// **through the frame graph** on the next [`flush_uploads`](Self::flush_uploads).
     pub fn create_mesh(&mut self, cpu_mesh: &CpuMesh) -> Result<Arc<Mesh>, GraphicsError> {
         let aabb = cpu_mesh.compute_aabb();
-        let mesh = self.device.create_mesh_from_cpu(cpu_mesh)?;
+        let (mesh, ops) = self.device.create_mesh_deferred(cpu_mesh)?;
+        self.pending_uploads.extend(ops);
         if let Some(label) = mesh.label() {
             self.meshes.insert(label.to_owned(), Arc::clone(&mesh));
             if let Some(aabb) = aabb {
