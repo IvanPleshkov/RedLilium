@@ -593,50 +593,6 @@ impl GraphicsDevice {
             .unwrap_or(0)
     }
 
-    /// Write data to a buffer.
-    ///
-    /// # Arguments
-    ///
-    /// * `buffer` - The buffer to write to
-    /// * `offset` - Byte offset into the buffer
-    /// * `data` - The data to write
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let vertices: &[f32] = &[0.0, 0.0, 1.0, 0.0, 0.5, 1.0];
-    /// device.write_buffer(&buffer, 0, bytemuck::cast_slice(vertices))?;
-    /// ```
-    pub fn write_buffer(
-        &self,
-        buffer: &Buffer,
-        offset: u64,
-        data: &[u8],
-    ) -> Result<(), crate::error::GraphicsError> {
-        self.instance
-            .backend()
-            .write_buffer(buffer.gpu_handle(), offset, data)
-    }
-
-    /// Read data from a buffer.
-    ///
-    /// This is a blocking operation that waits for the GPU to finish.
-    ///
-    /// # Arguments
-    ///
-    /// * `buffer` - The buffer to read from
-    /// * `offset` - Byte offset into the buffer
-    /// * `size` - Number of bytes to read
-    ///
-    /// # Returns
-    ///
-    /// A vector containing the read data.
-    pub fn read_buffer(&self, buffer: &Buffer, offset: u64, size: u64) -> Vec<u8> {
-        self.instance
-            .backend()
-            .read_buffer(buffer.gpu_handle(), offset, size)
-    }
-
     /// Clean up dead weak references to released resources.
     pub fn cleanup_dead_resources(&self) {
         if let Ok(mut buffers) = self.buffers.write() {

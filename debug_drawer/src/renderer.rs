@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use redlilium_graphics::device::GraphicsDevice;
 use redlilium_graphics::graph::{
-    ColorAttachment, DepthStencilAttachment, GraphicsPass, LoadOp, RenderTarget, RenderTargetConfig,
+    ColorAttachment, DepthStencilAttachment, DrawCommand, GraphicsPass, LoadOp, RenderTarget,
+    RenderTargetConfig,
 };
 use redlilium_graphics::materials::{
     BindingGroup, MaterialDescriptor, MaterialInstance, ShaderSource, ShaderStage,
@@ -11,8 +12,8 @@ use redlilium_graphics::mesh::{
     Mesh, PrimitiveTopology, VertexAttribute, VertexAttributeFormat, VertexAttributeSemantic,
     VertexBufferLayout, VertexLayout,
 };
-use redlilium_graphics::resources::{Buffer, Texture};
-use redlilium_graphics::types::{BufferDescriptor, BufferUsage, TextureFormat};
+use redlilium_graphics::resources::{RingBuffer, Texture};
+use redlilium_graphics::types::{BufferUsage, TextureFormat};
 
 use redlilium_graphics::materials::{BlendState, Material};
 
@@ -21,20 +22,30 @@ use crate::vertex::{DebugUniforms, DebugVertex};
 /// Debug draw shader source (Slang).
 const SHADER_SOURCE: &str = include_str!("../../shaders/standard/debug_draw.slang");
 
-/// Default initial capacity for the vertex buffer (number of vertices).
-const DEFAULT_VERTEX_CAPACITY: u32 = 4096;
+/// Capacity (bytes) of the per-frame uniform ring. Sized well above the
+/// frames-in-flight count so a slot is reused only long after its fence.
+const UNIFORM_RING_CAPACITY: u64 = 1 << 16;
+
+/// Capacity (bytes) of the per-frame vertex ring.
+const VERTEX_RING_CAPACITY: u64 = 1 << 22;
 
 /// Manages GPU resources for debug line rendering.
 ///
 /// Create once at initialization. Each frame, call [`create_graphics_pass`](Self::create_graphics_pass)
 /// with the accumulated vertex data to get a renderable pass.
+///
+/// Per-frame data (view-projection uniform, line vertices) is written into
+/// persistent ring buffers so writes never race a frame still in flight; the
+/// uniform is bound as a dynamic offset and the vertices via a mesh buffer
+/// offset.
 pub struct DebugDrawerRenderer {
     device: Arc<GraphicsDevice>,
     material: Arc<Material>,
     vertex_layout: Arc<VertexLayout>,
-    uniform_buffer: Arc<Buffer>,
-    vertex_buffer: Arc<Buffer>,
-    vertex_capacity: u32,
+    uniform_ring: RingBuffer,
+    vertex_ring: RingBuffer,
+    /// This frame's offset into `uniform_ring` (set by `update_view_proj`).
+    uniform_offset: u32,
 }
 
 impl DebugDrawerRenderer {
@@ -88,6 +99,8 @@ impl DebugDrawerRenderer {
             .with_topology(PrimitiveTopology::LineList)
             .with_blend_state(BlendState::alpha_blending())
             .with_color_format(surface_format)
+            // Binding 0 (view-projection) is bound with a per-draw dynamic offset.
+            .with_dynamic_uniform(0, 0)
             .with_label("debug_draw_material");
 
         if let Some(fmt) = depth_format {
@@ -98,48 +111,91 @@ impl DebugDrawerRenderer {
             .create_material(&material_desc)
             .expect("Failed to create debug draw material");
 
-        // Uniform buffer (view-projection matrix)
-        let uniform_buffer = device
-            .create_buffer(
-                &BufferDescriptor::new(
-                    std::mem::size_of::<DebugUniforms>() as u64,
-                    BufferUsage::UNIFORM | BufferUsage::COPY_DST,
-                )
-                .with_label("debug_draw_uniforms"),
-            )
-            .expect("Failed to create debug draw uniform buffer");
+        let uniform_ring = RingBuffer::new(
+            &device,
+            UNIFORM_RING_CAPACITY,
+            BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+            "debug_draw_uniform_ring",
+        )
+        .expect("Failed to create debug draw uniform ring");
 
-        // Initial vertex buffer
-        let vertex_stride = std::mem::size_of::<DebugVertex>() as u64;
-        let vertex_buffer = device
-            .create_buffer(
-                &BufferDescriptor::new(
-                    DEFAULT_VERTEX_CAPACITY as u64 * vertex_stride,
-                    BufferUsage::VERTEX | BufferUsage::COPY_DST,
-                )
-                .with_label("debug_draw_vertices"),
-            )
-            .expect("Failed to create debug draw vertex buffer");
+        let vertex_ring = RingBuffer::new(
+            &device,
+            VERTEX_RING_CAPACITY,
+            BufferUsage::VERTEX | BufferUsage::COPY_DST,
+            "debug_draw_vertex_ring",
+        )
+        .expect("Failed to create debug draw vertex ring");
 
         Self {
             device,
             material,
             vertex_layout,
-            uniform_buffer,
-            vertex_buffer,
-            vertex_capacity: DEFAULT_VERTEX_CAPACITY,
+            uniform_ring,
+            vertex_ring,
+            uniform_offset: 0,
         }
+    }
+
+    /// Allocate a slot in `ring` (wrapping when full) and write `data`,
+    /// returning its byte offset.
+    fn ring_push(ring: &mut RingBuffer, data: &[u8]) -> u64 {
+        let size = data.len() as u64;
+        let alloc = ring.allocate(size).unwrap_or_else(|| {
+            ring.reset();
+            ring.allocate(size).expect("debug draw ring too small")
+        });
+        let _ = ring.write(&alloc, data);
+        alloc.offset
     }
 
     /// Update the view-projection matrix uniform.
     ///
     /// Call once per frame before [`create_graphics_pass`](Self::create_graphics_pass).
     /// The matrix should be column-major `[[f32; 4]; 4]`.
-    pub fn update_view_proj(&self, view_proj: [[f32; 4]; 4]) {
+    pub fn update_view_proj(&mut self, view_proj: [[f32; 4]; 4]) {
         let uniforms = DebugUniforms { view_proj };
-        self.device
-            .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms))
-            .expect("Failed to write debug draw uniform buffer");
+        self.uniform_offset =
+            Self::ring_push(&mut self.uniform_ring, bytemuck::bytes_of(&uniforms)) as u32;
+    }
+
+    /// Build a mesh + material instance for `vertices` written into the vertex
+    /// ring, and the draw command selecting this frame's uniform slot.
+    fn build_draw(&mut self, vertices: &[DebugVertex]) -> DrawCommand {
+        let vertex_count = vertices.len() as u32;
+        let v_off = Self::ring_push(&mut self.vertex_ring, bytemuck::cast_slice(vertices));
+
+        // Non-indexed LineList mesh referencing this frame's vertex ring slot.
+        let gpu_mesh = Arc::new(
+            Mesh::new(
+                Arc::clone(&self.device),
+                self.vertex_layout.clone(),
+                PrimitiveTopology::LineList,
+                vec![self.vertex_ring.buffer().clone()],
+                vertex_count,
+                None,
+                None,
+                0,
+                Some("debug_draw_mesh".into()),
+            )
+            .with_buffer_offsets(vec![v_off], 0),
+        );
+
+        let uniform_size = std::mem::size_of::<DebugUniforms>() as u64;
+        #[allow(clippy::arc_with_non_send_sync)]
+        let uniform_binding = Arc::new(BindingGroup::new().with_buffer_range(
+            0,
+            self.uniform_ring.buffer().clone(),
+            0,
+            uniform_size,
+        ));
+
+        let material_instance = Arc::new(
+            MaterialInstance::new(self.material.clone()).with_binding_group(uniform_binding),
+        );
+
+        DrawCommand::new(gpu_mesh, material_instance)
+            .with_dynamic_offsets(vec![vec![self.uniform_offset]])
     }
 
     /// Append debug draw commands to an existing graphics pass.
@@ -150,57 +206,8 @@ impl DebugDrawerRenderer {
         if vertices.is_empty() {
             return;
         }
-
-        let vertex_count = vertices.len() as u32;
-
-        // Grow vertex buffer if needed (2x strategy)
-        if vertex_count > self.vertex_capacity {
-            let new_capacity = vertex_count
-                .max(self.vertex_capacity.saturating_mul(2))
-                .max(DEFAULT_VERTEX_CAPACITY);
-
-            let vertex_stride = std::mem::size_of::<DebugVertex>() as u64;
-            self.vertex_buffer = self
-                .device
-                .create_buffer(
-                    &BufferDescriptor::new(
-                        new_capacity as u64 * vertex_stride,
-                        BufferUsage::VERTEX | BufferUsage::COPY_DST,
-                    )
-                    .with_label("debug_draw_vertices"),
-                )
-                .expect("Failed to grow debug draw vertex buffer");
-            self.vertex_capacity = new_capacity;
-        }
-
-        // Upload vertex data
-        self.device
-            .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(vertices))
-            .expect("Failed to write debug draw vertex buffer");
-
-        // Construct Mesh (non-indexed, LineList)
-        let gpu_mesh = Arc::new(Mesh::new(
-            Arc::clone(&self.device),
-            self.vertex_layout.clone(),
-            PrimitiveTopology::LineList,
-            vec![self.vertex_buffer.clone()],
-            vertex_count,
-            None,
-            None,
-            0,
-            Some("debug_draw_mesh".into()),
-        ));
-
-        // Binding group and material instance
-        #[allow(clippy::arc_with_non_send_sync)]
-        let uniform_binding =
-            Arc::new(BindingGroup::new().with_buffer(0, self.uniform_buffer.clone()));
-
-        let material_instance = Arc::new(
-            MaterialInstance::new(self.material.clone()).with_binding_group(uniform_binding),
-        );
-
-        pass.add_draw(gpu_mesh, material_instance);
+        let draw = self.build_draw(vertices);
+        pass.add_draw_command(draw);
     }
 
     /// Create a graphics pass for the given debug vertices.
@@ -218,54 +225,7 @@ impl DebugDrawerRenderer {
             return None;
         }
 
-        let vertex_count = vertices.len() as u32;
-
-        // Grow vertex buffer if needed (2x strategy)
-        if vertex_count > self.vertex_capacity {
-            let new_capacity = vertex_count
-                .max(self.vertex_capacity.saturating_mul(2))
-                .max(DEFAULT_VERTEX_CAPACITY);
-
-            let vertex_stride = std::mem::size_of::<DebugVertex>() as u64;
-            self.vertex_buffer = self
-                .device
-                .create_buffer(
-                    &BufferDescriptor::new(
-                        new_capacity as u64 * vertex_stride,
-                        BufferUsage::VERTEX | BufferUsage::COPY_DST,
-                    )
-                    .with_label("debug_draw_vertices"),
-                )
-                .expect("Failed to grow debug draw vertex buffer");
-            self.vertex_capacity = new_capacity;
-        }
-
-        // Upload vertex data
-        self.device
-            .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(vertices))
-            .expect("Failed to write debug draw vertex buffer");
-
-        // Construct Mesh (non-indexed, LineList)
-        let gpu_mesh = Arc::new(Mesh::new(
-            Arc::clone(&self.device),
-            self.vertex_layout.clone(),
-            PrimitiveTopology::LineList,
-            vec![self.vertex_buffer.clone()],
-            vertex_count,
-            None,
-            None,
-            0,
-            Some("debug_draw_mesh".into()),
-        ));
-
-        // Binding group and material instance
-        #[allow(clippy::arc_with_non_send_sync)]
-        let uniform_binding =
-            Arc::new(BindingGroup::new().with_buffer(0, self.uniform_buffer.clone()));
-
-        let material_instance = Arc::new(
-            MaterialInstance::new(self.material.clone()).with_binding_group(uniform_binding),
-        );
+        let draw = self.build_draw(vertices);
 
         // Build the pass (draws with depth testing against existing scene depth)
         let mut pass = GraphicsPass::new("debug_draw".into());
@@ -278,7 +238,7 @@ impl DebugDrawerRenderer {
         }
 
         pass.set_render_targets(target_config);
-        pass.add_draw(gpu_mesh, material_instance);
+        pass.add_draw_command(draw);
 
         Some(pass)
     }

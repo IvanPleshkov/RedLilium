@@ -273,7 +273,7 @@ fn test_render_clear_color(#[case] backend: Backend) {
     ctx.execute_graph(graph);
 
     // Read back and verify clear color
-    let data = ctx.device.read_buffer(&readback, 0, readback_size);
+    let data = ctx.read_buffer(&readback, readback_size);
 
     let expected = ExpectedPixel::from_float(0.25, 0.5, 0.75, 1.0);
     let center_pixel = get_pixel(&data, WIDTH, WIDTH / 2, HEIGHT / 2);
@@ -726,7 +726,7 @@ fn test_shader_render_half_quad(#[case] backend: Backend) {
     ctx.execute_graph(graph);
 
     // Read back the pixel data
-    let data = ctx.device.read_buffer(&readback, 0, readback_size);
+    let data = ctx.read_buffer(&readback, readback_size);
 
     // Verify pixel values
     // Left half (x < WIDTH/2) should be red
@@ -877,7 +877,7 @@ fn test_layout_tracking_multi_pass(#[case] backend: Backend) {
     ctx.execute_graph(graph);
 
     // Read back and verify RT1 (should be red from the rendered quad)
-    let data1 = ctx.device.read_buffer(&readback1, 0, readback_size);
+    let data1 = ctx.read_buffer(&readback1, readback_size);
     let center_x = WIDTH / 2;
     let center_y = HEIGHT / 2;
     let rt1_pixel = get_pixel(&data1, WIDTH, center_x, center_y);
@@ -890,7 +890,7 @@ fn test_layout_tracking_multi_pass(#[case] backend: Backend) {
     );
 
     // Read back and verify RT2 (should be green from clear color)
-    let data2 = ctx.device.read_buffer(&readback2, 0, readback_size);
+    let data2 = ctx.read_buffer(&readback2, readback_size);
     let rt2_pixel = get_pixel(&data2, WIDTH, center_x, center_y);
     assert!(
         verify_pixel(&data2, WIDTH, center_x, center_y, ExpectedPixel::GREEN, 2),
@@ -944,7 +944,7 @@ fn test_texture_contents_persist_across_frames(#[case] backend: Backend) {
     g2.add_transfer_pass(copy);
     ctx.execute_graph(g2);
 
-    let data = ctx.device.read_buffer(&readback, 0, size);
+    let data = ctx.read_buffer(&readback, size);
     let expected = ExpectedPixel::from_float(color[0], color[1], color[2], color[3]);
     assert!(
         verify_pixel(&data, W, W / 2, H / 2, expected, 2),

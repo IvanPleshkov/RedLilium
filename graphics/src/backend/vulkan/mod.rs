@@ -2235,8 +2235,12 @@ impl VulkanBackend {
             } = buffer.gpu_handle()
             {
                 unsafe {
-                    self.device
-                        .cmd_bind_vertex_buffers(cmd, slot as u32, &[*vk_buffer], &[0]);
+                    self.device.cmd_bind_vertex_buffers(
+                        cmd,
+                        slot as u32,
+                        &[*vk_buffer],
+                        &[mesh.vertex_offset(slot)],
+                    );
                 }
             }
         }
@@ -2277,8 +2281,12 @@ impl VulkanBackend {
                     crate::mesh::IndexFormat::Uint32 => vk::IndexType::UINT32,
                 };
                 unsafe {
-                    self.device
-                        .cmd_bind_index_buffer(cmd, *vk_buffer, 0, index_type);
+                    self.device.cmd_bind_index_buffer(
+                        cmd,
+                        *vk_buffer,
+                        mesh.index_offset(),
+                        index_type,
+                    );
                 }
             }
 

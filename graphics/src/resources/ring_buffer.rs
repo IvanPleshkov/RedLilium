@@ -24,8 +24,8 @@
 //! )?;
 //!
 //! // Each frame, allocate space and write data
-//! if let Some(alloc) = ring.allocate(std::mem::size_of::<CameraUniforms>() as u64, 256) {
-//!     device.write_buffer(ring.buffer(), alloc.offset, bytemuck::bytes_of(&camera_data))?;
+//! if let Some(alloc) = ring.allocate(std::mem::size_of::<CameraUniforms>() as u64) {
+//!     ring.write(&alloc, bytemuck::bytes_of(&camera_data))?;
 //!     // Use alloc.offset as the dynamic offset in bind groups
 //! }
 //!

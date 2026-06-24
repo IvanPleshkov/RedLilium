@@ -68,6 +68,12 @@ pub struct Mesh {
     index_format: Option<IndexFormat>,
     index_count: u32,
     label: Option<String>,
+    /// Per-vertex-buffer byte offset at which this mesh's data begins (for
+    /// sub-allocations inside a shared/ring buffer). Empty or all-zero for a
+    /// mesh that owns its buffers from offset 0.
+    vertex_offsets: Vec<u64>,
+    /// Byte offset of the index data within `index_buffer`.
+    index_offset: u64,
 }
 
 impl Mesh {
@@ -100,7 +106,29 @@ impl Mesh {
             index_format,
             index_count,
             label,
+            vertex_offsets: Vec::new(),
+            index_offset: 0,
         }
+    }
+
+    /// Set byte offsets for this mesh's data within its (possibly shared)
+    /// buffers. `vertex_offsets` is per vertex buffer (in binding order);
+    /// `index_offset` applies to the index buffer. Used for ring/sub-allocated
+    /// geometry.
+    pub fn with_buffer_offsets(mut self, vertex_offsets: Vec<u64>, index_offset: u64) -> Self {
+        self.vertex_offsets = vertex_offsets;
+        self.index_offset = index_offset;
+        self
+    }
+
+    /// Byte offset of vertex buffer `index`'s data (0 if unset).
+    pub fn vertex_offset(&self, index: usize) -> u64 {
+        self.vertex_offsets.get(index).copied().unwrap_or(0)
+    }
+
+    /// Byte offset of the index data within the index buffer.
+    pub fn index_offset(&self) -> u64 {
+        self.index_offset
     }
 
     /// Get the parent device.

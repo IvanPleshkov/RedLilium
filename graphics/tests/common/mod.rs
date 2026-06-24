@@ -4,7 +4,7 @@
 //! across different backend implementations.
 
 use std::cell::RefCell;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use redlilium_graphics::{
     BackendType, BindingGroup, Buffer, BufferDescriptor, BufferUsage, ColorAttachment,
@@ -200,6 +200,53 @@ impl TestContext {
 
         // Wait for all GPU work to complete before returning
         pipeline.wait_idle();
+    }
+
+    /// Read back a buffer's contents through the frame graph.
+    ///
+    /// Records a `ReadbackBuffer` transfer op (buffer -> CPU), submits it, then
+    /// drains the result with a second `begin_frame` (the pipeline runs its
+    /// post-fence readback processing when a slot is recycled). This is the
+    /// sanctioned readback path; `GraphicsDevice` no longer exposes a direct
+    /// `read_buffer`.
+    pub fn read_buffer(&self, buffer: &Arc<Buffer>, size: u64) -> Vec<u8> {
+        let dst = Arc::new(Mutex::new(Vec::new()));
+
+        let mut graph = RenderGraph::new();
+        let mut pass = TransferPass::new("test_readback".into());
+        pass.set_transfer_config(TransferConfig::new().with_operation(
+            TransferOperation::readback_buffer(buffer.clone(), 0..size as usize, dst.clone()),
+        ));
+        graph.add_transfer_pass(pass);
+
+        let mut pipeline = self.pipeline.borrow_mut();
+        // Frame 1: record + submit the readback op.
+        let mut schedule = pipeline.begin_frame();
+        schedule.render(graph);
+        pipeline.end_frame(schedule);
+        pipeline.wait_idle();
+        // Frame 2: recycling the slot runs its post-fence readback processing in
+        // begin_frame (filling `dst`); render an empty graph to complete the
+        // frame (the scheduler requires render() before end_frame).
+        let mut schedule = pipeline.begin_frame();
+        schedule.render(RenderGraph::new());
+        pipeline.end_frame(schedule);
+        pipeline.wait_idle();
+
+        dst.lock().unwrap().clone()
+    }
+
+    /// Upload `data` into `buffer` through the frame graph (a `WriteBuffer`
+    /// transfer op), replacing the removed direct `GraphicsDevice::write_buffer`
+    /// for test setup.
+    pub fn write_buffer(&self, buffer: &Arc<Buffer>, data: &[u8]) {
+        let mut graph = RenderGraph::new();
+        let mut pass = TransferPass::new("test_write".into());
+        pass.set_transfer_config(TransferConfig::new().with_operation(
+            TransferOperation::write_buffer(buffer.clone(), 0, Arc::from(data)),
+        ));
+        graph.add_transfer_pass(pass);
+        self.execute_graph(graph);
     }
 }
 
@@ -737,9 +784,7 @@ pub fn write_quad_vertices(ctx: &TestContext, mesh: &Mesh, vertices: &[QuadVerte
             vertices.len() * QuadVertex::SIZE,
         )
     };
-    ctx.device
-        .write_buffer(vb, 0, bytes)
-        .expect("Failed to write quad vertex buffer");
+    ctx.write_buffer(vb, bytes);
 }
 
 /// Create a material that samples a texture and outputs its color.

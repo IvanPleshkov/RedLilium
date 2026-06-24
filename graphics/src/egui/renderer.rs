@@ -10,8 +10,8 @@ use egui::{ClippedPrimitive, TextureId, TexturesDelta};
 
 use crate::GraphicsDevice;
 use crate::graph::{
-    ColorAttachment, GraphicsPass, LoadOp, RenderGraph, RenderTarget, RenderTargetConfig,
-    TransferConfig, TransferOperation, TransferPass,
+    ColorAttachment, DrawCommand, GraphicsPass, LoadOp, RenderGraph, RenderTarget,
+    RenderTargetConfig, TransferConfig, TransferOperation, TransferPass,
 };
 use crate::materials::{
     BindingGroup, Material, MaterialDescriptor, MaterialInstance, ShaderSource, ShaderStage,
@@ -20,11 +20,11 @@ use crate::mesh::{
     IndexFormat, Mesh, PrimitiveTopology, VertexAttribute, VertexAttributeFormat,
     VertexAttributeSemantic, VertexBufferLayout, VertexLayout,
 };
-use crate::resources::{Buffer, Sampler, Texture};
+use crate::resources::{RingBuffer, Sampler, Texture};
 use crate::shader::EGUI_SHADER_SOURCE;
 use crate::types::{
-    AddressMode, BufferDescriptor, BufferUsage, FilterMode, SamplerDescriptor, TextureDescriptor,
-    TextureFormat, TextureUsage,
+    AddressMode, BufferUsage, FilterMode, SamplerDescriptor, TextureDescriptor, TextureFormat,
+    TextureUsage,
 };
 
 /// Egui vertex data matching egui's Vertex structure.
@@ -67,43 +67,34 @@ struct TextureData {
     pixels: Vec<u8>,
 }
 
-/// Default initial capacity for egui mesh vertex buffers.
-const DEFAULT_VERTEX_CAPACITY: u32 = 1024;
+/// Capacity of the per-frame uniform ring (bytes).
+const UNIFORM_RING_CAPACITY: u64 = 1 << 16;
 
-/// Default initial capacity for egui mesh index buffers.
-const DEFAULT_INDEX_CAPACITY: u32 = 3072;
+/// Capacity of the per-frame vertex ring (bytes).
+const VERTEX_RING_CAPACITY: u64 = 1 << 22;
 
-/// Cached GPU buffers for a single egui mesh draw.
-struct CachedEguiMesh {
-    vertex_buffer: Arc<Buffer>,
-    index_buffer: Arc<Buffer>,
-    vertex_capacity: u32,
-    index_capacity: u32,
-}
-
-/// Pool of egui mesh GPU buffers, reused across frames.
-///
-/// Entries persist across frames to avoid GPU buffer reallocation.
-/// The scratch vertex buffer is cleared per-primitive but keeps its capacity.
-struct EguiMeshPool {
-    entries: Vec<CachedEguiMesh>,
-    vertices: Vec<EguiVertex>,
-}
+/// Capacity of the per-frame index ring (bytes).
+const INDEX_RING_CAPACITY: u64 = 1 << 21;
 
 /// Manages GPU resources for egui rendering.
 pub struct EguiRenderer {
     device: Arc<GraphicsDevice>,
     material: Arc<Material>,
     vertex_layout: Arc<VertexLayout>,
-    uniform_buffer: Arc<Buffer>,
+    /// Per-frame uniform ring (screen-size uniform; bound with a dynamic offset).
+    uniform_ring: RingBuffer,
+    /// Per-frame vertex ring; all egui geometry lives here, addressed via offsets.
+    vertex_ring: RingBuffer,
+    /// Per-frame index ring; addressed via offsets.
+    index_ring: RingBuffer,
     sampler: Arc<Sampler>,
     textures: HashMap<TextureId, Arc<Texture>>,
     /// CPU-side texture data for partial update support.
     texture_data: HashMap<TextureId, TextureData>,
     /// Counter for generating unique user texture IDs.
     next_user_texture_id: u64,
-    /// Pool of GPU mesh buffers reused across frames.
-    mesh_pool: EguiMeshPool,
+    /// Scratch buffer reused for per-primitive vertex conversion.
+    scratch_vertices: Vec<EguiVertex>,
     /// Pending atlas uploads, drained into the frame graph by
     /// [`flush_uploads`](Self::flush_uploads). Texture data is uploaded through
     /// the render graph, never synchronously.
@@ -167,17 +158,38 @@ impl EguiRenderer {
                     .with_vertex_layout(vertex_layout.clone())
                     .with_blend_state(crate::materials::BlendState::premultiplied_alpha())
                     .with_color_format(surface_format)
+                    // Binding (0, 0) is the screen-size uniform, supplied per-draw
+                    // as a dynamic offset into `uniform_ring`.
+                    .with_dynamic_uniform(0, 0)
                     .with_label("egui_material"),
             )
             .expect("Failed to create egui material");
 
-        // Create uniform buffer
-        let uniform_buffer = device
-            .create_buffer(&BufferDescriptor::new(
-                std::mem::size_of::<EguiUniforms>() as u64,
-                BufferUsage::UNIFORM | BufferUsage::COPY_DST,
-            ))
-            .expect("Failed to create egui uniform buffer");
+        // Per-frame rings. egui geometry and uniforms are written into a fresh
+        // ring slot each frame, so they never race a frame still in flight.
+        let uniform_ring = RingBuffer::new(
+            &device,
+            UNIFORM_RING_CAPACITY,
+            BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+            "egui_uniform_ring",
+        )
+        .expect("Failed to create egui uniform ring");
+
+        let vertex_ring = RingBuffer::new(
+            &device,
+            VERTEX_RING_CAPACITY,
+            BufferUsage::VERTEX | BufferUsage::COPY_DST,
+            "egui_vertex_ring",
+        )
+        .expect("Failed to create egui vertex ring");
+
+        let index_ring = RingBuffer::new(
+            &device,
+            INDEX_RING_CAPACITY,
+            BufferUsage::INDEX | BufferUsage::COPY_DST,
+            "egui_index_ring",
+        )
+        .expect("Failed to create egui index ring");
 
         // Create sampler
         let sampler = device
@@ -197,15 +209,14 @@ impl EguiRenderer {
             device,
             material,
             vertex_layout,
-            uniform_buffer,
+            uniform_ring,
+            vertex_ring,
+            index_ring,
             sampler,
             textures: HashMap::new(),
             texture_data: HashMap::new(),
             next_user_texture_id: 0,
-            mesh_pool: EguiMeshPool {
-                entries: Vec::new(),
-                vertices: Vec::new(),
-            },
+            scratch_vertices: Vec::new(),
             pending_uploads: Vec::new(),
         }
     }
@@ -223,25 +234,6 @@ impl EguiRenderer {
         let mut pass = TransferPass::new("egui_texture_uploads".into());
         pass.set_transfer_config(TransferConfig::new().with_operations(ops));
         graph.add_transfer_pass(pass);
-    }
-
-    /// Update screen size uniforms (integer version for resize events).
-    pub fn update_screen_size(&self, width: u32, height: u32) {
-        self.update_screen_size_f32(width as f32, height as f32);
-    }
-
-    /// Update screen size uniforms with float values.
-    ///
-    /// This is used when the screen size needs to be in logical points rather than
-    /// physical pixels (e.g., for egui rendering where vertices are in points).
-    pub fn update_screen_size_f32(&self, width: f32, height: f32) {
-        let uniforms = EguiUniforms {
-            screen_size: [width, height],
-            _padding: [0.0, 0.0],
-        };
-        self.device
-            .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms))
-            .expect("Failed to write egui uniform buffer");
     }
 
     /// Process texture updates from egui.
@@ -399,77 +391,47 @@ impl EguiRenderer {
         }
     }
 
-    /// Get or grow a pooled mesh entry at the given index.
+    /// Push one primitive's geometry into the vertex/index rings.
     ///
-    /// If the entry doesn't exist or its buffers are too small, (re)allocates
-    /// with capacity grown by factor 2 from the current size, or the default
-    /// capacity, whichever is larger.
-    fn get_or_grow_mesh_entry<'a>(
-        device: &Arc<GraphicsDevice>,
-        pool: &'a mut EguiMeshPool,
-        index: usize,
-        vertex_count: u32,
-        index_count: u32,
-    ) -> &'a mut CachedEguiMesh {
-        let needs_realloc = if let Some(entry) = pool.entries.get(index) {
-            entry.vertex_capacity < vertex_count || entry.index_capacity < index_count
-        } else {
-            true
-        };
+    /// Writes `verts` and `indices` into fresh ring slots and returns their
+    /// byte offsets `(vertex_offset, index_offset)`. Resets the relevant ring
+    /// (recycling its space) if the current frame's geometry would overflow it.
+    fn push_geometry(
+        vring: &mut RingBuffer,
+        iring: &mut RingBuffer,
+        verts: &[EguiVertex],
+        indices: &[u32],
+    ) -> (u64, u64) {
+        let vbytes: &[u8] = bytemuck::cast_slice(verts);
+        let v_alloc = vring.allocate(vbytes.len() as u64).unwrap_or_else(|| {
+            vring.reset();
+            vring
+                .allocate(vbytes.len() as u64)
+                .expect("egui vertex ring too small")
+        });
+        vring
+            .write(&v_alloc, vbytes)
+            .expect("Failed to write egui vertex ring");
 
-        if needs_realloc {
-            let old_vcap = pool.entries.get(index).map_or(0, |e| e.vertex_capacity);
-            let old_icap = pool.entries.get(index).map_or(0, |e| e.index_capacity);
+        let ibytes: &[u8] = bytemuck::cast_slice(indices);
+        let i_alloc = iring.allocate(ibytes.len() as u64).unwrap_or_else(|| {
+            iring.reset();
+            iring
+                .allocate(ibytes.len() as u64)
+                .expect("egui index ring too small")
+        });
+        iring
+            .write(&i_alloc, ibytes)
+            .expect("Failed to write egui index ring");
 
-            let new_vcap = vertex_count
-                .max(old_vcap.saturating_mul(2))
-                .max(DEFAULT_VERTEX_CAPACITY);
-            let new_icap = index_count
-                .max(old_icap.saturating_mul(2))
-                .max(DEFAULT_INDEX_CAPACITY);
-
-            let vertex_stride = std::mem::size_of::<EguiVertex>() as u64;
-            let vertex_buffer = device
-                .create_buffer(
-                    &BufferDescriptor::new(
-                        new_vcap as u64 * vertex_stride,
-                        BufferUsage::VERTEX | BufferUsage::COPY_DST,
-                    )
-                    .with_label("egui_pool_vertices"),
-                )
-                .expect("Failed to create egui pooled vertex buffer");
-
-            let index_buffer = device
-                .create_buffer(
-                    &BufferDescriptor::new(
-                        new_icap as u64 * std::mem::size_of::<u32>() as u64,
-                        BufferUsage::INDEX | BufferUsage::COPY_DST,
-                    )
-                    .with_label("egui_pool_indices"),
-                )
-                .expect("Failed to create egui pooled index buffer");
-
-            let entry = CachedEguiMesh {
-                vertex_buffer,
-                index_buffer,
-                vertex_capacity: new_vcap,
-                index_capacity: new_icap,
-            };
-
-            if index < pool.entries.len() {
-                pool.entries[index] = entry;
-            } else {
-                pool.entries.push(entry);
-            }
-        }
-
-        &mut pool.entries[index]
+        (v_alloc.offset, i_alloc.offset)
     }
 
     /// Create a graphics pass for rendering egui primitives.
     ///
-    /// Reuses pooled GPU buffers across frames, only reallocating when the
-    /// existing buffers are too small (growing by factor 2).
+    /// All per-frame geometry and the screen-size uniform are written into
+    /// per-frame ring buffers, addressed via per-draw offsets — race-free across
+    /// frames in flight.
     ///
     /// # Arguments
     ///
@@ -494,13 +456,41 @@ impl EguiRenderer {
                 .with_color(ColorAttachment::new(render_target.clone()).with_load_op(LoadOp::Load)),
         );
 
-        // Create uniform binding group
-        #[allow(clippy::arc_with_non_send_sync)]
-        let uniform_binding =
-            Arc::new(BindingGroup::new().with_buffer(0, self.uniform_buffer.clone()));
+        // Write this frame's screen-size uniform once into the uniform ring.
+        // egui outputs vertices in POINTS, so the shader needs the size in points.
+        let uniforms = EguiUniforms {
+            screen_size: [
+                screen_width as f32 / pixels_per_point,
+                screen_height as f32 / pixels_per_point,
+            ],
+            _padding: [0.0, 0.0],
+        };
+        let uniform_size = std::mem::size_of::<EguiUniforms>() as u64;
+        let uniform_offset = {
+            let bytes = bytemuck::bytes_of(&uniforms);
+            let alloc = self.uniform_ring.allocate(uniform_size).unwrap_or_else(|| {
+                self.uniform_ring.reset();
+                self.uniform_ring
+                    .allocate(uniform_size)
+                    .expect("egui uniform ring too small")
+            });
+            self.uniform_ring
+                .write(&alloc, bytes)
+                .expect("Failed to write egui uniform ring");
+            alloc.offset
+        };
 
-        let pool = &mut self.mesh_pool;
-        let mut mesh_index = 0;
+        // Uniform binding: bind the whole element range; the draw selects this
+        // frame's slot via a dynamic offset.
+        #[allow(clippy::arc_with_non_send_sync)]
+        // Base offset 0: the per-frame slot is selected by the dynamic offset
+        // (`uniform_offset`) supplied on each draw, not baked into the binding.
+        let uniform_binding = Arc::new(BindingGroup::new().with_buffer_range(
+            0,
+            self.uniform_ring.buffer().clone(),
+            0,
+            uniform_size,
+        ));
 
         // Process each primitive
         for ClippedPrimitive {
@@ -526,49 +516,35 @@ impl EguiRenderer {
                     let vertex_count = mesh.vertices.len() as u32;
                     let index_count = mesh.indices.len() as u32;
 
-                    // Convert vertices into reusable scratch buffer
-                    pool.vertices.clear();
-                    pool.vertices
+                    // Convert vertices into the reusable scratch buffer.
+                    self.scratch_vertices.clear();
+                    self.scratch_vertices
                         .extend(mesh.vertices.iter().map(EguiVertex::from));
 
-                    // Get or grow pooled GPU buffers for this draw
-                    Self::get_or_grow_mesh_entry(
-                        &self.device,
-                        pool,
-                        mesh_index,
-                        vertex_count,
-                        index_count,
+                    // Write geometry into the per-frame rings, capturing offsets.
+                    let (v_off, i_off) = Self::push_geometry(
+                        &mut self.vertex_ring,
+                        &mut self.index_ring,
+                        &self.scratch_vertices,
+                        &mesh.indices,
                     );
-                    let entry = &pool.entries[mesh_index];
 
-                    // Clone buffer Arcs for upload and mesh construction
-                    let vb = entry.vertex_buffer.clone();
-                    let ib = entry.index_buffer.clone();
-
-                    // Upload vertex data to pooled buffer
-                    self.device
-                        .write_buffer(&vb, 0, bytemuck::cast_slice(&pool.vertices))
-                        .expect("Failed to write egui vertex buffer");
-
-                    // Upload index data to pooled buffer
-                    self.device
-                        .write_buffer(&ib, 0, bytemuck::cast_slice(&mesh.indices))
-                        .expect("Failed to write egui index buffer");
-
-                    // Construct a Mesh referencing the pooled buffers with actual counts
-                    let gpu_mesh = Arc::new(Mesh::new(
-                        Arc::clone(&self.device),
-                        self.vertex_layout.clone(),
-                        PrimitiveTopology::TriangleList,
-                        vec![vb],
-                        vertex_count,
-                        Some(ib),
-                        Some(IndexFormat::Uint32),
-                        index_count,
-                        Some("egui_mesh".into()),
-                    ));
-
-                    mesh_index += 1;
+                    // Construct a Mesh referencing the shared ring buffers, with
+                    // this draw's data addressed via byte offsets.
+                    let gpu_mesh = Arc::new(
+                        Mesh::new(
+                            Arc::clone(&self.device),
+                            self.vertex_layout.clone(),
+                            PrimitiveTopology::TriangleList,
+                            vec![self.vertex_ring.buffer().clone()],
+                            vertex_count,
+                            Some(self.index_ring.buffer().clone()),
+                            Some(IndexFormat::Uint32),
+                            index_count,
+                            Some("egui_mesh".into()),
+                        )
+                        .with_buffer_offsets(vec![v_off], i_off),
+                    );
 
                     // Create texture binding group
                     #[allow(clippy::arc_with_non_send_sync)]
@@ -603,15 +579,15 @@ impl EguiRenderer {
                         scissor_height.min(screen_height.saturating_sub(scissor_y as u32));
 
                     if scissor_width > 0 && scissor_height > 0 {
-                        pass.add_draw_with_scissor(
-                            gpu_mesh,
-                            material_instance,
-                            crate::types::ScissorRect {
-                                x: scissor_x,
-                                y: scissor_y,
-                                width: scissor_width,
-                                height: scissor_height,
-                            },
+                        pass.add_draw_command(
+                            DrawCommand::new(gpu_mesh, material_instance)
+                                .with_dynamic_offsets(vec![vec![uniform_offset as u32]])
+                                .with_scissor_rect(crate::types::ScissorRect {
+                                    x: scissor_x,
+                                    y: scissor_y,
+                                    width: scissor_width,
+                                    height: scissor_height,
+                                }),
                         );
                     }
                 }

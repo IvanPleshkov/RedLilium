@@ -95,7 +95,6 @@ impl EguiController {
     /// Handle window resize.
     pub fn on_resize(&mut self, width: u32, height: u32) {
         self.input_state.set_screen_size(width, height);
-        self.renderer.update_screen_size(width, height);
     }
 
     /// Handle scale factor (DPI) change.
@@ -223,14 +222,8 @@ impl EguiController {
             return None;
         }
 
-        // Update screen size uniforms - egui outputs vertices in POINTS, not pixels
-        // So we need to pass screen size in points to the shader
-        let screen_width_points = screen_width as f32 / output.pixels_per_point;
-        let screen_height_points = screen_height as f32 / output.pixels_per_point;
-        self.renderer
-            .update_screen_size_f32(screen_width_points, screen_height_points);
-
-        // Create graphics pass
+        // Create graphics pass. The screen-size uniform (egui outputs vertices
+        // in POINTS) is written into the renderer's uniform ring inside the pass.
         Some(self.renderer.create_graphics_pass(
             &primitives,
             render_target,

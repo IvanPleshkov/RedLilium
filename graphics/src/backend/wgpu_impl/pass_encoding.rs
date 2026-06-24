@@ -302,7 +302,10 @@ impl WgpuBackend {
 
             for (slot, buffer) in mesh.vertex_buffers().iter().enumerate() {
                 if let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() {
-                    render_pass.set_vertex_buffer(slot as u32, wgpu_buffer.slice(..));
+                    render_pass.set_vertex_buffer(
+                        slot as u32,
+                        wgpu_buffer.slice(mesh.vertex_offset(slot)..),
+                    );
                 }
             }
 
@@ -325,7 +328,8 @@ impl WgpuBackend {
                         IndexFormat::Uint16 => wgpu::IndexFormat::Uint16,
                         IndexFormat::Uint32 => wgpu::IndexFormat::Uint32,
                     };
-                    render_pass.set_index_buffer(wgpu_buffer.slice(..), index_format);
+                    render_pass
+                        .set_index_buffer(wgpu_buffer.slice(mesh.index_offset()..), index_format);
                 }
                 render_pass.draw_indexed(
                     0..mesh.index_count(),
