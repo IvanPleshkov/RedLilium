@@ -16,11 +16,11 @@ use redlilium_app::{App, AppArgs, AppContext, AppHandler, DefaultAppArgs, DrawCo
 use redlilium_core::math::{Mat4, Vec3, look_at_rh, mat4_to_cols_array_2d, orthographic_rh};
 use redlilium_core::mesh::generators;
 use redlilium_graphics::{
-    AddressMode, BindingGroup, BufferDescriptor, BufferTextureCopyRegion, BufferTextureLayout,
-    BufferUsage, ColorAttachment, DepthStencilAttachment, Extent3d, FilterMode, FrameSchedule,
-    GraphicsPass, Material, MaterialDescriptor, MaterialInstance, Mesh, RenderTargetConfig,
-    SamplerDescriptor, ShaderSource, ShaderStage, TextureCopyLocation, TextureDescriptor,
-    TextureFormat, TextureUsage, TransferConfig, TransferOperation, TransferPass, VertexLayout,
+    AddressMode, BindingGroup, BufferUsage, ColorAttachment, DepthStencilAttachment, DrawCommand,
+    FilterMode, FrameSchedule, GraphicsPass, Material, MaterialDescriptor, MaterialInstance, Mesh,
+    RenderTargetConfig, RingBuffer, SamplerDescriptor, ShaderSource, ShaderStage,
+    TextureDescriptor, TextureFormat, TextureUsage, TransferConfig, TransferOperation,
+    TransferPass, VertexLayout,
     resize::{ResizeManager, ResizeStrategy},
 };
 
@@ -103,6 +103,19 @@ fn load_image_from_url(url: &str) -> Result<(u32, u32, Vec<u8>), String> {
     Ok((width, height, rgba.into_raw()))
 }
 
+/// Generate a tightly-packed RGBA8 checkerboard `(width, height, data)`.
+fn generate_checkerboard(width: u32, height: u32, cell: u32) -> (u32, u32, Vec<u8>) {
+    let mut data = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let on = ((x / cell) + (y / cell)).is_multiple_of(2);
+            let (r, g, b) = if on { (220, 90, 90) } else { (40, 40, 60) };
+            data.extend_from_slice(&[r, g, b, 255]);
+        }
+    }
+    (width, height, data)
+}
+
 // === Demo Application ===
 
 struct TexturedQuadDemo {
@@ -110,15 +123,16 @@ struct TexturedQuadDemo {
     material: Option<Arc<Material>>,
     material_instance: Option<Arc<MaterialInstance>>,
     mesh: Option<Arc<Mesh>>,
-    uniform_buffer: Option<Arc<redlilium_graphics::Buffer>>,
+    /// Per-frame MVP uniform ring (dynamic offset per draw) — race-free across
+    /// frames in flight.
+    uniform_ring: Option<RingBuffer>,
+    /// This frame's offset into `uniform_ring`.
+    uniform_offset: u32,
     depth_texture: Option<Arc<redlilium_graphics::Texture>>,
     texture: Option<Arc<redlilium_graphics::Texture>>,
 
-    // Staging buffer for texture upload
-    staging_buffer: Option<Arc<redlilium_graphics::Buffer>>,
-    texture_size: (u32, u32),
-    aligned_bytes_per_row: u32,
-    needs_texture_upload: bool,
+    /// Mesh/texture uploads queued at init, flushed into the first frame's graph.
+    pending_uploads: Vec<TransferOperation>,
 
     // Resize manager
     resize_manager: ResizeManager,
@@ -130,13 +144,11 @@ impl TexturedQuadDemo {
             material: None,
             material_instance: None,
             mesh: None,
-            uniform_buffer: None,
+            uniform_ring: None,
+            uniform_offset: 0,
             depth_texture: None,
             texture: None,
-            staging_buffer: None,
-            texture_size: (0, 0),
-            aligned_bytes_per_row: 0,
-            needs_texture_upload: false,
+            pending_uploads: Vec::new(),
             // Initial size will be updated in on_init
             resize_manager: ResizeManager::new((1280, 720), 50, ResizeStrategy::Stretch),
         }
@@ -148,13 +160,17 @@ impl TexturedQuadDemo {
         // Create vertex layout for position + uv
         let vertex_layout = VertexLayout::position_uv();
 
-        // Load image from URL
+        // Load image from URL, falling back to a generated checkerboard if the
+        // download fails (e.g. offline or rate-limited).
         log::info!("Loading Lenna test image...");
         let (tex_width, tex_height, rgba_data) =
-            load_image_from_url(LENNA_URL).expect("Failed to load Lenna image");
-        self.texture_size = (tex_width, tex_height);
+            load_image_from_url(LENNA_URL).unwrap_or_else(|e| {
+                log::warn!("Image download failed ({e}); using generated checkerboard");
+                generate_checkerboard(512, 512, 32)
+            });
 
-        // Create texture
+        // Create texture and queue its upload through the frame graph (Lenna is
+        // 512×512, so its rows are already 256-byte aligned — no padding needed).
         let texture = device
             .create_texture(
                 &TextureDescriptor::new_2d(
@@ -166,42 +182,11 @@ impl TexturedQuadDemo {
                 .with_label("lenna_texture"),
             )
             .expect("Failed to create texture");
+        self.pending_uploads.push(
+            TransferOperation::upload_texture_data(device, texture.clone(), &rgba_data)
+                .expect("Failed to stage texture upload"),
+        );
         self.texture = Some(texture);
-
-        // Create staging buffer with aligned bytes per row (256-byte alignment for WebGPU)
-        const COPY_BYTES_PER_ROW_ALIGNMENT: u32 = 256;
-        let bytes_per_pixel = 4u32; // RGBA8
-        let bytes_per_row = tex_width * bytes_per_pixel;
-        let aligned_bytes_per_row =
-            bytes_per_row.div_ceil(COPY_BYTES_PER_ROW_ALIGNMENT) * COPY_BYTES_PER_ROW_ALIGNMENT;
-        self.aligned_bytes_per_row = aligned_bytes_per_row;
-
-        // Pad data if alignment is needed
-        let padded_data = if aligned_bytes_per_row != bytes_per_row {
-            let mut padded = vec![0u8; (aligned_bytes_per_row * tex_height) as usize];
-            for y in 0..tex_height {
-                let src_start = (y * bytes_per_row) as usize;
-                let src_end = src_start + bytes_per_row as usize;
-                let dst_start = (y * aligned_bytes_per_row) as usize;
-                padded[dst_start..dst_start + bytes_per_row as usize]
-                    .copy_from_slice(&rgba_data[src_start..src_end]);
-            }
-            padded
-        } else {
-            rgba_data
-        };
-
-        let staging_buffer = device
-            .create_buffer(&BufferDescriptor::new(
-                padded_data.len() as u64,
-                BufferUsage::COPY_SRC | BufferUsage::COPY_DST,
-            ))
-            .expect("Failed to create staging buffer");
-        device
-            .write_buffer(&staging_buffer, 0, &padded_data)
-            .expect("Failed to write staging buffer");
-        self.staging_buffer = Some(staging_buffer);
-        self.needs_texture_upload = true;
 
         // Create sampler
         let sampler = device
@@ -236,39 +221,50 @@ impl TexturedQuadDemo {
                     .with_vertex_layout(vertex_layout.clone())
                     .with_color_format(ctx.surface_format())
                     .with_depth_format(TextureFormat::Depth32Float)
+                    // Binding 0 (MVP) is a per-draw dynamic offset into a ring.
+                    .with_dynamic_uniform(0, 0)
                     .with_label("quad_material"),
             )
             .expect("Failed to create material");
         self.material = Some(material.clone());
 
-        // Create uniform buffer
-        let uniform_buffer = device
-            .create_buffer(&BufferDescriptor::new(
-                std::mem::size_of::<Uniforms>() as u64,
-                BufferUsage::UNIFORM | BufferUsage::COPY_DST,
-            ))
-            .expect("Failed to create uniform buffer");
-        self.uniform_buffer = Some(uniform_buffer.clone());
+        // Per-frame MVP ring (one element bound; the draw picks the frame's slot
+        // via a dynamic offset). Sized well above frames-in-flight.
+        let uniform_ring = RingBuffer::new(
+            device,
+            1 << 16,
+            BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+            "quad_mvp_ring",
+        )
+        .expect("Failed to create uniform ring");
 
         // Create material instance with bindings
         #[allow(clippy::arc_with_non_send_sync)]
         let binding_group = Arc::new(
             BindingGroup::new()
-                .with_buffer(0, uniform_buffer)
+                .with_buffer_range(
+                    0,
+                    uniform_ring.buffer().clone(),
+                    0,
+                    size_of::<Uniforms>() as u64,
+                )
                 .with_texture(1, self.texture.clone().unwrap())
                 .with_sampler(2, sampler),
         );
+        self.uniform_ring = Some(uniform_ring);
 
         let material_instance =
             Arc::new(MaterialInstance::new(material).with_binding_group(binding_group));
         self.material_instance = Some(material_instance);
 
-        // Create quad mesh (centered, aspect-ratio correct)
+        // Create quad mesh (centered, aspect-ratio correct); its data uploads
+        // through the frame graph on the first frame.
         let aspect = tex_width as f32 / tex_height as f32;
         let quad_cpu = generators::generate_quad(0.5 * aspect, 0.5);
-        let mesh = device
-            .create_mesh_from_cpu(&quad_cpu)
+        let (mesh, mesh_ops) = device
+            .create_mesh_deferred(&quad_cpu)
             .expect("Failed to create quad mesh");
+        self.pending_uploads.extend(mesh_ops);
         self.mesh = Some(mesh);
 
         // Create depth texture
@@ -293,7 +289,7 @@ impl TexturedQuadDemo {
         self.depth_texture = Some(depth_texture);
     }
 
-    fn update_uniform_buffer(&self, ctx: &AppContext) {
+    fn update_uniform_buffer(&mut self, ctx: &AppContext) {
         // Create orthographic projection that keeps the quad centered and visible
         // The quad is sized with aspect ratio consideration, so we use a simple ortho
         let aspect = ctx.aspect_ratio();
@@ -320,31 +316,19 @@ impl TexturedQuadDemo {
             mvp: mat4_to_cols_array_2d(&mvp),
         };
 
-        if let Some(buffer) = &self.uniform_buffer {
-            ctx.device()
-                .write_buffer(buffer, 0, bytemuck::bytes_of(&uniforms))
-                .expect("Failed to write uniform buffer");
+        // Write this frame's MVP into the next ring slot; the draw binds it via
+        // a dynamic offset (race-free across frames in flight).
+        if let Some(ring) = &mut self.uniform_ring {
+            let bytes = bytemuck::bytes_of(&uniforms);
+            let size = bytes.len() as u64;
+            let alloc = ring.allocate(size).unwrap_or_else(|| {
+                ring.reset();
+                ring.allocate(size).expect("uniform ring too small")
+            });
+            ring.write(&alloc, bytes)
+                .expect("Failed to write uniform ring");
+            self.uniform_offset = alloc.offset as u32;
         }
-    }
-
-    fn create_texture_transfer_config(&self) -> TransferConfig {
-        let mut config = TransferConfig::new();
-
-        if let (Some(staging), Some(texture)) = (&self.staging_buffer, &self.texture) {
-            let (width, height) = self.texture_size;
-            let region = BufferTextureCopyRegion::new(
-                BufferTextureLayout::new(0, Some(self.aligned_bytes_per_row), None),
-                TextureCopyLocation::base(),
-                Extent3d::new_2d(width, height),
-            );
-            config = config.with_operation(TransferOperation::upload_texture(
-                staging.clone(),
-                texture.clone(),
-                vec![region],
-            ));
-        }
-
-        config
     }
 }
 
@@ -388,14 +372,13 @@ impl AppHandler for TexturedQuadDemo {
     fn on_draw(&mut self, mut ctx: DrawContext) -> FrameSchedule {
         let mut graph = ctx.acquire_graph();
 
-        // Upload texture on first frame via TransferPass
-        if self.needs_texture_upload {
-            let transfer_config = self.create_texture_transfer_config();
-            let mut transfer_pass = TransferPass::new("texture_upload".into());
-            transfer_pass.set_transfer_config(transfer_config);
+        // Flush queued mesh/texture uploads through the frame graph (first frame).
+        if !self.pending_uploads.is_empty() {
+            let ops = std::mem::take(&mut self.pending_uploads);
+            let mut transfer_pass = TransferPass::new("resource_uploads".into());
+            transfer_pass.set_transfer_config(TransferConfig::new().with_operations(ops));
             graph.add_transfer_pass(transfer_pass);
-            self.needs_texture_upload = false;
-            log::info!("Texture uploaded via transfer pass");
+            log::info!("Mesh + texture uploaded via transfer pass");
         }
 
         // Create main render pass
@@ -414,9 +397,12 @@ impl AppHandler for TexturedQuadDemo {
             );
         }
 
-        // Draw the quad
+        // Draw the quad, selecting this frame's MVP ring slot via dynamic offset.
         if let (Some(mesh), Some(material_instance)) = (&self.mesh, &self.material_instance) {
-            render_pass.add_draw(mesh.clone(), material_instance.clone());
+            render_pass.add_draw_command(
+                DrawCommand::new(mesh.clone(), material_instance.clone())
+                    .with_dynamic_offsets(vec![vec![self.uniform_offset]]),
+            );
         }
 
         graph.add_graphics_pass(render_pass);
