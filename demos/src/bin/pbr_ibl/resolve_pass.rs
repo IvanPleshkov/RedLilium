@@ -5,9 +5,9 @@ use std::sync::Arc;
 use redlilium_core::math::Vec3;
 use redlilium_core::profiling::profile_scope;
 use redlilium_graphics::{
-    BindingGroup, BufferDescriptor, BufferUsage, CpuSampler, GraphicsDevice, MaterialDescriptor,
-    MaterialInstance, MeshDescriptor, ShaderSource, ShaderStage, TextureFormat, VertexBufferLayout,
-    VertexLayout,
+    BindingGroup, BufferUsage, CpuSampler, GraphicsDevice, MaterialDescriptor, MaterialInstance,
+    MeshDescriptor, RenderGraph, RingBuffer, ShaderSource, ShaderStage, TextureFormat,
+    TransferConfig, TransferOperation, TransferPass, VertexBufferLayout, VertexLayout,
 };
 
 use crate::gbuffer::GBuffer;
@@ -20,7 +20,14 @@ const RESOLVE_SHADER_SLANG: &str = include_str!("../../../shaders/deferred_resol
 pub struct ResolvePass {
     pub material_instance: Arc<MaterialInstance>,
     pub mesh: Arc<redlilium_graphics::Mesh>,
-    pub uniform_buffer: Arc<redlilium_graphics::Buffer>,
+
+    /// Per-frame uniform ring (dynamic offset per draw).
+    uniform_ring: RingBuffer,
+    /// This frame's offset into `uniform_ring`.
+    uniform_offset: u32,
+
+    /// Dummy vertex buffer data queued at init, flushed into the first frame's graph.
+    pending_uploads: Vec<TransferOperation>,
 }
 
 impl ResolvePass {
@@ -39,13 +46,14 @@ impl ResolvePass {
             .create_sampler_from_cpu(&CpuSampler::nearest().with_name("gbuffer_sampler"))
             .expect("Failed to create G-buffer sampler");
 
-        // Create resolve uniform buffer
-        let uniform_buffer = device
-            .create_buffer(&BufferDescriptor::new(
-                std::mem::size_of::<ResolveUniforms>() as u64,
-                BufferUsage::UNIFORM | BufferUsage::COPY_DST,
-            ))
-            .expect("Failed to create resolve uniform buffer");
+        // Per-frame uniform ring (one slot written per frame).
+        let uniform_ring = RingBuffer::new(
+            device,
+            1 << 16,
+            BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+            "resolve_uniform_ring",
+        )
+        .expect("Failed to create resolve uniform ring");
 
         // Build Slang defines based on HDR mode
         let defines = if hdr_active {
@@ -56,7 +64,8 @@ impl ResolvePass {
             vec![]
         };
 
-        // Create resolve material using Slang shader
+        // Create resolve material using Slang shader. Binding 0 (uniforms, group
+        // 0) is a per-draw dynamic offset.
         let resolve_material = device
             .create_material(
                 &MaterialDescriptor::new()
@@ -73,14 +82,19 @@ impl ResolvePass {
                         defines,
                     ))
                     .with_color_format(surface_format)
+                    .with_dynamic_uniform(0, 0)
                     .with_label("resolve_material"),
             )
             .expect("Failed to create resolve material");
 
         // Create binding groups
         #[allow(clippy::arc_with_non_send_sync)]
-        let resolve_uniform_binding =
-            Arc::new(BindingGroup::new().with_buffer(0, uniform_buffer.clone()));
+        let resolve_uniform_binding = Arc::new(BindingGroup::new().with_buffer_range(
+            0,
+            uniform_ring.buffer().clone(),
+            0,
+            std::mem::size_of::<ResolveUniforms>() as u64,
+        ));
 
         #[allow(clippy::arc_with_non_send_sync)]
         let gbuffer_binding = Arc::new(
@@ -122,11 +136,15 @@ impl ResolvePass {
             )
             .expect("Failed to create resolve mesh");
 
+        // Queue minimal vertex data upload through the frame graph.
+        let mut pending_uploads = Vec::new();
         if let Some(vb) = mesh.vertex_buffer(0) {
             let dummy_data: [f32; 3] = [0.0, 0.0, 0.0];
-            device
-                .write_buffer(vb, 0, bytemuck::cast_slice(&dummy_data))
-                .expect("Failed to write resolve mesh vertex buffer");
+            pending_uploads.push(TransferOperation::write_buffer(
+                vb.clone(),
+                0,
+                Arc::from(bytemuck::cast_slice(&dummy_data)),
+            ));
         }
 
         log::info!("Resolve pass resources created");
@@ -134,18 +152,30 @@ impl ResolvePass {
         Self {
             material_instance,
             mesh,
-            uniform_buffer,
+            uniform_ring,
+            uniform_offset: 0,
+            pending_uploads,
         }
     }
 
-    /// Update resolve uniform buffer.
-    pub fn update_uniforms(
-        &self,
-        device: &Arc<GraphicsDevice>,
-        camera_pos: Vec3,
-        width: u32,
-        height: u32,
-    ) {
+    /// This frame's dynamic offset into the uniform ring (for the draw command).
+    pub fn uniform_offset(&self) -> u32 {
+        self.uniform_offset
+    }
+
+    /// Flush queued vertex-buffer uploads into the current frame's render graph.
+    pub fn flush_uploads(&mut self, graph: &mut RenderGraph) {
+        if self.pending_uploads.is_empty() {
+            return;
+        }
+        let ops = std::mem::take(&mut self.pending_uploads);
+        let mut pass = TransferPass::new("resolve_vertex_upload".into());
+        pass.set_transfer_config(TransferConfig::new().with_operations(ops));
+        graph.add_transfer_pass(pass);
+    }
+
+    /// Update resolve uniforms by writing this frame's slot into the uniform ring.
+    pub fn update_uniforms(&mut self, camera_pos: Vec3, width: u32, height: u32) {
         let uniforms = ResolveUniforms {
             camera_pos: [camera_pos.x, camera_pos.y, camera_pos.z, 1.0],
             screen_size: [
@@ -156,8 +186,17 @@ impl ResolvePass {
             ],
         };
 
-        device
-            .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms))
-            .expect("Failed to write resolve uniform buffer");
+        let bytes = bytemuck::bytes_of(&uniforms);
+        let size = bytes.len() as u64;
+        let alloc = self.uniform_ring.allocate(size).unwrap_or_else(|| {
+            self.uniform_ring.reset();
+            self.uniform_ring
+                .allocate(size)
+                .expect("resolve uniform ring too small")
+        });
+        self.uniform_ring
+            .write(&alloc, bytes)
+            .expect("Failed to write resolve uniform ring");
+        self.uniform_offset = alloc.offset as u32;
     }
 }

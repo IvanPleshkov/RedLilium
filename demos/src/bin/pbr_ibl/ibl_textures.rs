@@ -13,16 +13,24 @@ use crate::ibl::compute_ibl_cpu;
 use crate::resources::{BRDF_LUT_URL, HDR_URL, load_brdf_lut_from_url, load_hdr_from_url};
 use crate::{IRRADIANCE_SIZE, PREFILTER_SIZE};
 
+/// A staging buffer paired with the CPU bytes to fill it through the graph.
+type StagingUpload = (Arc<redlilium_graphics::Buffer>, Arc<[u8]>);
+
 /// IBL cubemap textures, BRDF LUT, and staging buffers for GPU upload.
 pub struct IblTextures {
     pub irradiance_cubemap: Arc<redlilium_graphics::Texture>,
     pub prefilter_cubemap: Arc<redlilium_graphics::Texture>,
     pub brdf_lut: Arc<redlilium_graphics::Texture>,
     pub sampler: Arc<redlilium_graphics::Sampler>,
-    // Staging state for first-frame upload
-    irradiance_staging: Option<Arc<redlilium_graphics::Buffer>>,
-    prefilter_staging: Option<Vec<Arc<redlilium_graphics::Buffer>>>,
+    // Staging state for first-frame upload. The staging buffers are filled
+    // through the frame graph (a `write_buffer` transfer op precedes the
+    // buffer→texture copy in the same transfer pass), so there is no direct GPU
+    // upload at create time.
+    irradiance_staging: Option<StagingUpload>,
+    prefilter_staging: Option<Vec<StagingUpload>>,
     prefilter_aligned_bytes_per_row: Vec<u32>,
+    /// BRDF LUT upload op, staged once and consumed on the first frame.
+    brdf_upload: Option<TransferOperation>,
     needs_upload: bool,
 }
 
@@ -67,21 +75,33 @@ impl IblTextures {
             )
             .expect("Failed to create prefilter cubemap");
 
+        // BRDF LUT (Rg8Unorm). Its CPU data is tightly packed; for the BRDF LUT
+        // (width is a power of two, 2 bytes/pixel) rows are 256-byte aligned, so
+        // `upload_texture_data` can stage and copy it directly through the graph.
         let brdf_lut = device
-            .create_texture_from_cpu(&brdf_cpu)
+            .create_texture(
+                &TextureDescriptor::new_2d(
+                    brdf_cpu.width,
+                    brdf_cpu.height,
+                    brdf_cpu.format,
+                    TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST,
+                )
+                .with_label("brdf_lut"),
+            )
             .expect("Failed to create BRDF LUT");
+        let brdf_upload =
+            TransferOperation::upload_texture_data(device, brdf_lut.clone(), &brdf_cpu.data)
+                .expect("Failed to stage BRDF LUT upload");
 
-        // Create staging buffers for IBL data upload
-        let irradiance_bytes: &[u8] = bytemuck::cast_slice(&irradiance_data);
+        // Create staging buffers for IBL data upload. The buffers are filled by a
+        // `write_buffer` transfer op on the first frame (no direct GPU upload).
+        let irradiance_bytes: Arc<[u8]> = Arc::from(bytemuck::cast_slice(&irradiance_data));
         let irradiance_staging = device
             .create_buffer(&BufferDescriptor::new(
                 irradiance_bytes.len() as u64,
                 BufferUsage::COPY_SRC | BufferUsage::COPY_DST,
             ))
             .expect("Failed to create irradiance staging buffer");
-        device
-            .write_buffer(&irradiance_staging, 0, irradiance_bytes)
-            .expect("Failed to write irradiance staging buffer");
 
         // Create staging buffers for each mip level with aligned bytes per row
         const COPY_BYTES_PER_ROW_ALIGNMENT: u32 = 256;
@@ -118,16 +138,14 @@ impl IblTextures {
                 bytes.to_vec()
             };
 
+            let padded_data: Arc<[u8]> = Arc::from(padded_data.as_slice());
             let buffer = device
                 .create_buffer(&BufferDescriptor::new(
                     padded_data.len() as u64,
                     BufferUsage::COPY_SRC | BufferUsage::COPY_DST,
                 ))
                 .expect("Failed to create prefilter staging buffer");
-            device
-                .write_buffer(&buffer, 0, &padded_data)
-                .expect("Failed to write prefilter staging buffer");
-            prefilter_staging_buffers.push(buffer);
+            prefilter_staging_buffers.push((buffer, padded_data));
         }
 
         // Create IBL sampler
@@ -142,14 +160,19 @@ impl IblTextures {
             prefilter_cubemap,
             brdf_lut,
             sampler,
-            irradiance_staging: Some(irradiance_staging),
+            irradiance_staging: Some((irradiance_staging, irradiance_bytes)),
             prefilter_staging: Some(prefilter_staging_buffers),
             prefilter_aligned_bytes_per_row,
+            brdf_upload: Some(brdf_upload),
             needs_upload: true,
         }
     }
 
     /// If an IBL upload is pending, returns the transfer config and clears the staging state.
+    ///
+    /// Within the returned config, each staging buffer is first filled via a
+    /// `write_buffer` op and then copied into its texture; transfer ops execute
+    /// in order within a pass, so the fill always precedes the copy.
     pub fn take_transfer_config(&mut self) -> Option<TransferConfig> {
         if !self.needs_upload {
             return None;
@@ -158,8 +181,20 @@ impl IblTextures {
 
         let mut config = TransferConfig::new();
 
+        // BRDF LUT (staging fill + copy already encapsulated by upload_texture_data).
+        if let Some(brdf_upload) = self.brdf_upload.take() {
+            config = config.with_operation(brdf_upload);
+        }
+
         // Upload irradiance cubemap (6 faces)
-        if let Some(staging) = &self.irradiance_staging {
+        if let Some((staging, bytes)) = &self.irradiance_staging {
+            // Fill the staging buffer through the graph first.
+            config = config.with_operation(TransferOperation::write_buffer(
+                staging.clone(),
+                0,
+                bytes.clone(),
+            ));
+
             let face_bytes = (IRRADIANCE_SIZE * IRRADIANCE_SIZE * 4 * 2) as u64;
             for face in 0..6u32 {
                 let region = BufferTextureCopyRegion::new(
@@ -181,7 +216,14 @@ impl IblTextures {
 
         // Upload prefilter cubemap (all mip levels, 6 faces each)
         if let Some(staging_buffers) = &self.prefilter_staging {
-            for (mip, staging) in staging_buffers.iter().enumerate() {
+            for (mip, (staging, bytes)) in staging_buffers.iter().enumerate() {
+                // Fill this mip's staging buffer through the graph first.
+                config = config.with_operation(TransferOperation::write_buffer(
+                    staging.clone(),
+                    0,
+                    bytes.clone(),
+                ));
+
                 let mip_size = (PREFILTER_SIZE >> mip).max(1);
                 let aligned_bytes_per_row = self.prefilter_aligned_bytes_per_row[mip];
                 let face_bytes = (aligned_bytes_per_row * mip_size) as u64;

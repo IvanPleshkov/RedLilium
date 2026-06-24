@@ -9,8 +9,8 @@ use redlilium_core::profiling::{
     profile_function, profile_memory_stats, profile_message, profile_scope,
 };
 use redlilium_graphics::{
-    BufferUsage, ColorAttachment, DepthStencilAttachment, FrameSchedule, GraphicsPass, LoadOp,
-    RenderTarget, RenderTargetConfig, RingAllocation, TransferPass, egui::EguiController,
+    ColorAttachment, DepthStencilAttachment, DrawCommand, FrameSchedule, GraphicsPass, LoadOp,
+    RenderTarget, RenderTargetConfig, TransferPass, egui::EguiController,
 };
 use winit::event::KeyEvent;
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -23,17 +23,7 @@ use crate::resolve_pass::ResolvePass;
 use crate::skybox_pass::SkyboxPass;
 use crate::sphere_grid::SphereGrid;
 use crate::ui::PbrUi;
-use crate::uniforms::{CameraUniforms, ResolveUniforms, SkyboxUniforms};
 use crate::{GRID_SIZE, PREFILTER_SIZE};
-
-/// Per-frame uniform allocation offsets from the ring buffer.
-#[derive(Default)]
-#[allow(dead_code)]
-struct FrameUniformAllocations {
-    camera: Option<RingAllocation>,
-    skybox: Option<RingAllocation>,
-    resolve: Option<RingAllocation>,
-}
 
 /// The main PBR IBL demo application.
 pub struct PbrIblDemo {
@@ -44,7 +34,6 @@ pub struct PbrIblDemo {
     shift_pressed: bool,
     needs_instance_update: bool,
     hdr_active: bool,
-    frame_allocations: FrameUniformAllocations,
 
     // ECS scene
     ecs_scene: Option<EcsScene>,
@@ -71,7 +60,6 @@ impl PbrIblDemo {
             shift_pressed: false,
             needs_instance_update: false,
             hdr_active: false,
-            frame_allocations: FrameUniformAllocations::default(),
             ecs_scene: None,
             gbuffer: None,
             ibl: None,
@@ -132,19 +120,8 @@ impl AppHandler for PbrIblDemo {
             self.hdr_active,
         );
 
-        // Initialize per-frame ring buffer
-        ctx.pipeline_mut()
-            .create_ring_buffers(
-                4 * 1024,
-                BufferUsage::UNIFORM | BufferUsage::COPY_DST,
-                "per_frame_uniforms",
-            )
-            .expect("Failed to create per-frame ring buffers");
-        log::info!(
-            "Created per-frame ring buffers: {} frames x {} bytes",
-            ctx.pipeline().frames_in_flight(),
-            ctx.pipeline().ring_buffer_capacity().unwrap_or(0)
-        );
+        // Per-frame uniform data is now written into per-pass ring buffers owned
+        // by each subsystem and addressed via per-draw dynamic offsets.
 
         // Initialize egui controller
         let mut egui_controller = EguiController::new(
@@ -267,19 +244,21 @@ impl AppHandler for PbrIblDemo {
             let (view, proj) = scene.camera_matrices();
             let camera_pos = scene.camera_position();
 
-            // Write GPU buffers from ECS data
-            if let Some(spheres) = &self.spheres {
-                spheres.write_camera_uniforms(ctx.device(), view, proj, camera_pos);
+            // Write per-frame GPU ring slots from ECS data
+            let width = ctx.width();
+            let height = ctx.height();
+            if let Some(spheres) = &mut self.spheres {
+                spheres.write_camera_uniforms(view, proj, camera_pos);
 
                 // Build instance data from ECS entities
                 let instances = scene.build_sphere_instances();
-                spheres.write_instances(ctx.device(), &instances);
+                spheres.write_instances(&instances);
             }
-            if let Some(skybox) = &self.skybox {
-                skybox.update_uniforms(ctx.device(), view, proj, camera_pos);
+            if let Some(skybox) = &mut self.skybox {
+                skybox.update_uniforms(view, proj, camera_pos);
             }
-            if let Some(resolve) = &self.resolve {
-                resolve.update_uniforms(ctx.device(), camera_pos, ctx.width(), ctx.height());
+            if let Some(resolve) = &mut self.resolve {
+                resolve.update_uniforms(camera_pos, width, height);
             }
         }
 
@@ -291,26 +270,6 @@ impl AppHandler for PbrIblDemo {
     fn on_draw(&mut self, mut ctx: DrawContext) -> FrameSchedule {
         profile_scope!("on_draw");
 
-        // Allocate per-frame uniforms from ring buffer
-        if ctx.has_ring_buffer() {
-            self.frame_allocations = FrameUniformAllocations {
-                camera: ctx.allocate(std::mem::size_of::<CameraUniforms>() as u64),
-                skybox: ctx.allocate(std::mem::size_of::<SkyboxUniforms>() as u64),
-                resolve: ctx.allocate(std::mem::size_of::<ResolveUniforms>() as u64),
-            };
-
-            if let Some(ring) = ctx.ring_buffer()
-                && ctx.frame_number() < 3
-            {
-                log::debug!(
-                    "Ring buffer slot {}: allocated {} bytes, {} remaining",
-                    ctx.frame_slot(),
-                    ring.used(),
-                    ring.remaining()
-                );
-            }
-        }
-
         let mut graph = ctx.acquire_graph();
 
         // Upload IBL textures on first frame
@@ -321,6 +280,19 @@ impl AppHandler for PbrIblDemo {
             transfer_pass.set_transfer_config(transfer_config);
             graph.add_transfer_pass(transfer_pass);
             log::info!("IBL textures uploaded via transfer pass");
+        }
+
+        // Flush one-time mesh / vertex-buffer uploads into this frame's graph.
+        // The graph compiler orders these transfer passes before the passes that
+        // consume their resources by resource dependency.
+        if let Some(spheres) = &mut self.spheres {
+            spheres.flush_uploads(&mut graph);
+        }
+        if let Some(skybox) = &mut self.skybox {
+            skybox.flush_uploads(&mut graph);
+        }
+        if let Some(resolve) = &mut self.resolve {
+            resolve.flush_uploads(&mut graph);
         }
 
         // === Pass 1: G-Buffer Pass ===
@@ -355,10 +327,10 @@ impl AppHandler for PbrIblDemo {
             } else {
                 spheres.material_instance.clone()
             };
-            gbuffer_pass.add_draw_instanced(
-                spheres.mesh.clone(),
-                material,
-                (GRID_SIZE * GRID_SIZE) as u32,
+            gbuffer_pass.add_draw_command(
+                DrawCommand::new(spheres.mesh.clone(), material)
+                    .with_instance_count(spheres.instance_count())
+                    .with_dynamic_offsets(vec![vec![spheres.camera_offset()]]),
             );
         }
 
@@ -375,7 +347,10 @@ impl AppHandler for PbrIblDemo {
         );
 
         if let Some(skybox) = &self.skybox {
-            skybox_pass.add_draw(skybox.mesh.clone(), skybox.material_instance.clone());
+            skybox_pass.add_draw_command(
+                DrawCommand::new(skybox.mesh.clone(), skybox.material_instance.clone())
+                    .with_dynamic_offsets(vec![vec![skybox.uniform_offset()]]),
+            );
         }
 
         graph.add_graphics_pass(skybox_pass);
@@ -388,7 +363,10 @@ impl AppHandler for PbrIblDemo {
         ));
 
         if let Some(resolve) = &self.resolve {
-            resolve_pass.add_draw(resolve.mesh.clone(), resolve.material_instance.clone());
+            resolve_pass.add_draw_command(
+                DrawCommand::new(resolve.mesh.clone(), resolve.material_instance.clone())
+                    .with_dynamic_offsets(vec![vec![resolve.uniform_offset()]]),
+            );
         }
 
         let resolve_handle = graph.add_graphics_pass(resolve_pass);

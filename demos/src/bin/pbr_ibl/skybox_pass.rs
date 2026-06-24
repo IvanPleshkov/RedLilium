@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use redlilium_core::profiling::profile_scope;
 use redlilium_graphics::{
-    BindingGroup, BufferDescriptor, BufferUsage, GraphicsDevice, MaterialDescriptor,
-    MaterialInstance, MeshDescriptor, ShaderSource, ShaderStage, TextureFormat, VertexBufferLayout,
-    VertexLayout,
+    BindingGroup, BufferUsage, GraphicsDevice, MaterialDescriptor, MaterialInstance,
+    MeshDescriptor, RenderGraph, RingBuffer, ShaderSource, ShaderStage, TextureFormat,
+    TransferConfig, TransferOperation, TransferPass, VertexBufferLayout, VertexLayout,
 };
 
 use redlilium_core::math::{Mat4, Vec3, mat4_to_cols_array_2d};
@@ -20,12 +20,19 @@ const SKYBOX_SHADER_SLANG: &str = include_str!("../../../shaders/skybox.slang");
 pub struct SkyboxPass {
     pub material_instance: Arc<MaterialInstance>,
     pub mesh: Arc<redlilium_graphics::Mesh>,
-    pub uniform_buffer: Arc<redlilium_graphics::Buffer>,
     pub mip_level: f32,
+
+    /// Per-frame uniform ring (dynamic offset per draw).
+    uniform_ring: RingBuffer,
+    /// This frame's offset into `uniform_ring`.
+    uniform_offset: u32,
+
+    /// Dummy vertex buffer data queued at init, flushed into the first frame's graph.
+    pending_uploads: Vec<TransferOperation>,
 }
 
 impl SkyboxPass {
-    /// Create skybox material, fullscreen triangle mesh, and uniform buffer.
+    /// Create skybox material, fullscreen triangle mesh, and uniform ring.
     pub fn create(
         device: &Arc<GraphicsDevice>,
         ibl: &IblTextures,
@@ -33,7 +40,8 @@ impl SkyboxPass {
     ) -> Self {
         profile_scope!("SkyboxPass::create");
 
-        // Create skybox material using Slang shader (no vertex layout needed for fullscreen triangle)
+        // Create skybox material using Slang shader (no vertex layout needed for
+        // fullscreen triangle). Binding 0 (uniforms) is a per-draw dynamic offset.
         let skybox_material = device
             .create_material(
                 &MaterialDescriptor::new()
@@ -50,23 +58,30 @@ impl SkyboxPass {
                         vec![],
                     ))
                     .with_color_format(surface_format)
+                    .with_dynamic_uniform(0, 0)
                     .with_label("skybox_material"),
             )
             .expect("Failed to create skybox material");
 
-        // Create skybox uniform buffer
-        let uniform_buffer = device
-            .create_buffer(&BufferDescriptor::new(
-                std::mem::size_of::<SkyboxUniforms>() as u64,
-                BufferUsage::UNIFORM | BufferUsage::COPY_DST,
-            ))
-            .expect("Failed to create skybox uniform buffer");
+        // Per-frame uniform ring (one slot written per frame).
+        let uniform_ring = RingBuffer::new(
+            device,
+            1 << 16,
+            BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+            "skybox_uniform_ring",
+        )
+        .expect("Failed to create skybox uniform ring");
 
-        // Create material instance
+        // Create material instance binding the ring by range.
         #[allow(clippy::arc_with_non_send_sync)]
         let skybox_binding_group = Arc::new(
             BindingGroup::new()
-                .with_buffer(0, uniform_buffer.clone())
+                .with_buffer_range(
+                    0,
+                    uniform_ring.buffer().clone(),
+                    0,
+                    std::mem::size_of::<SkyboxUniforms>() as u64,
+                )
                 .with_texture(1, ibl.prefilter_cubemap.clone())
                 .with_sampler(2, ibl.sampler.clone()),
         );
@@ -90,12 +105,16 @@ impl SkyboxPass {
             )
             .expect("Failed to create skybox mesh");
 
-        // Write minimal vertex data (shader doesn't use it, just needs valid buffer)
+        // Queue minimal vertex data upload through the frame graph (shader doesn't
+        // use it, just needs a valid initialized buffer).
+        let mut pending_uploads = Vec::new();
         if let Some(vb) = mesh.vertex_buffer(0) {
             let dummy_data: [f32; 3] = [0.0, 0.0, 0.0];
-            device
-                .write_buffer(vb, 0, bytemuck::cast_slice(&dummy_data))
-                .expect("Failed to write skybox vertex buffer");
+            pending_uploads.push(TransferOperation::write_buffer(
+                vb.clone(),
+                0,
+                Arc::from(bytemuck::cast_slice(&dummy_data)),
+            ));
         }
 
         log::info!("Skybox resources created");
@@ -103,19 +122,31 @@ impl SkyboxPass {
         Self {
             material_instance,
             mesh,
-            uniform_buffer,
             mip_level: 0.0,
+            uniform_ring,
+            uniform_offset: 0,
+            pending_uploads,
         }
     }
 
-    /// Update skybox uniform buffer from pre-computed camera matrices.
-    pub fn update_uniforms(
-        &self,
-        device: &Arc<GraphicsDevice>,
-        view: Mat4,
-        proj: Mat4,
-        camera_pos: Vec3,
-    ) {
+    /// This frame's dynamic offset into the uniform ring (for the draw command).
+    pub fn uniform_offset(&self) -> u32 {
+        self.uniform_offset
+    }
+
+    /// Flush queued vertex-buffer uploads into the current frame's render graph.
+    pub fn flush_uploads(&mut self, graph: &mut RenderGraph) {
+        if self.pending_uploads.is_empty() {
+            return;
+        }
+        let ops = std::mem::take(&mut self.pending_uploads);
+        let mut pass = TransferPass::new("skybox_vertex_upload".into());
+        pass.set_transfer_config(TransferConfig::new().with_operations(ops));
+        graph.add_transfer_pass(pass);
+    }
+
+    /// Update skybox uniforms by writing this frame's slot into the uniform ring.
+    pub fn update_uniforms(&mut self, view: Mat4, proj: Mat4, camera_pos: Vec3) {
         profile_scope!("SkyboxPass::update_uniforms");
         let view_proj = proj * view;
         let inv_view_proj = view_proj.try_inverse().unwrap();
@@ -128,8 +159,17 @@ impl SkyboxPass {
             _pad1: [0.0; 4],
         };
 
-        device
-            .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms))
-            .expect("Failed to write skybox uniform buffer");
+        let bytes = bytemuck::bytes_of(&uniforms);
+        let size = bytes.len() as u64;
+        let alloc = self.uniform_ring.allocate(size).unwrap_or_else(|| {
+            self.uniform_ring.reset();
+            self.uniform_ring
+                .allocate(size)
+                .expect("skybox uniform ring too small")
+        });
+        self.uniform_ring
+            .write(&alloc, bytes)
+            .expect("Failed to write skybox uniform ring");
+        self.uniform_offset = alloc.offset as u32;
     }
 }
