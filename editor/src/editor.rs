@@ -16,9 +16,8 @@ use redlilium_ecs::ui::{
 use redlilium_ecs::{
     Camera, DrawGrid, DrawSelectionAabb, EcsRunner, Entity, FreeFlyCamera, GlobalTransform,
     GridConfig, MaterialManager, MeshManager, MeshRenderer, Name, PostUpdate, Primitive, Schedules,
-    SyncMaterialUniforms, TextureManager, Transform, Update, UpdateCameraMatrices,
-    UpdateFreeFlyCamera, UpdateGlobalTransforms, Visibility, WindowInput, World,
-    register_std_components,
+    TextureManager, Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera,
+    UpdateGlobalTransforms, Visibility, WindowInput, World, register_std_components,
 };
 use redlilium_graphics::egui::{EguiApp, EguiController};
 use redlilium_graphics::{FrameSchedule, RenderTarget, TextureFormat};
@@ -316,15 +315,10 @@ impl Editor {
             .add_edge::<UpdateGlobalTransforms, UpdateCameraMatrices>()
             .expect("No cycle");
 
-        // Per-entity transforms are uploaded via the scene-view ring in
-        // `on_draw` (not a per-frame ECS system), so `UpdatePerEntityUniforms`
-        // and `InitializeRenderEntities` (per-entity transform buffers) are not
-        // used here. Material property uniforms still sync via SyncMaterialUniforms.
-        schedules.get_mut::<PostUpdate>().add(SyncMaterialUniforms);
-        schedules
-            .get_mut::<PostUpdate>()
-            .add_edge::<UpdateCameraMatrices, SyncMaterialUniforms>()
-            .expect("No cycle");
+        // All per-draw uniforms (group 0 transforms, group 1 material props) are
+        // written into the scene-view rings in `on_draw`, so there are no
+        // per-frame GPU-sync ECS systems (UpdatePerEntityUniforms,
+        // InitializeRenderEntities, SyncMaterialUniforms) in the editor schedule.
 
         EditorWorld {
             world,

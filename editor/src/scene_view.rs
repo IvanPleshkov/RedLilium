@@ -22,6 +22,10 @@ use redlilium_graphics::{
     TransferConfig, TransferOperation, TransferPass, Viewport,
 };
 
+/// Default material props (base_color) for primitives with no CPU instance —
+/// matches `create_opaque_color_primitive_material_ring`'s default gray.
+const DEFAULT_MATERIAL_PROPS: [f32; 4] = [0.6, 0.6, 0.65, 1.0];
+
 /// Manages GPU resources and rendering for the editor's SceneView panel.
 pub struct SceneViewState {
     device: Arc<GraphicsDevice>,
@@ -50,14 +54,27 @@ pub struct SceneViewState {
     /// Dimensions [w, h] and padded bytes_per_row of the last rect readback.
     rect_pick_layout: [u32; 3],
 
-    // --- Per-entity transform rings (dynamic uniforms) ---
+    // --- Per-draw dynamic-uniform rings ---
     /// Ring of `OpaqueColorUniforms` (forward pass), filled per frame.
     forward_ring: RingBuffer,
     /// Ring of `EntityIndexUniforms` (picking pass), filled per frame.
     entity_index_ring: RingBuffer,
+    /// Ring of per-primitive material-property bytes (group 1), filled per frame.
+    material_props_ring: RingBuffer,
     /// Per-entity ring offsets recorded by [`fill_transform_rings`], keyed by
-    /// entity index: `(forward_offset, entity_index_offset)`.
-    transform_offsets: std::collections::HashMap<u32, (u32, u32)>,
+    /// entity index.
+    draw_offsets: std::collections::HashMap<u32, EntityDrawOffsets>,
+}
+
+/// Per-frame dynamic-offset slots for one entity's draws.
+#[derive(Default)]
+struct EntityDrawOffsets {
+    /// Forward-pass transform ring offset (group 0), shared by all primitives.
+    forward: u32,
+    /// Entity-index-pass transform ring offset (group 0).
+    entity_index: u32,
+    /// Material-props ring offset (group 1), one per primitive in order.
+    props: Vec<u32>,
 }
 
 impl SceneViewState {
@@ -109,6 +126,13 @@ impl SceneViewState {
             "scene_view_transform_ei",
         )
         .expect("Failed to create entity-index transform ring");
+        let material_props_ring = RingBuffer::new(
+            &device,
+            1 << 20,
+            BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+            "scene_view_material_props",
+        )
+        .expect("Failed to create material props ring");
 
         Self {
             device,
@@ -129,7 +153,8 @@ impl SceneViewState {
             rect_pick_layout: [0; 3],
             forward_ring,
             entity_index_ring,
-            transform_offsets: std::collections::HashMap::new(),
+            material_props_ring,
+            draw_offsets: std::collections::HashMap::new(),
         }
     }
 
@@ -142,15 +167,16 @@ impl SceneViewState {
         &self,
         cpu_mesh: &redlilium_core::mesh::CpuMesh,
     ) -> (PrimitiveMaterial, Arc<redlilium_graphics::Mesh>) {
-        // Group 0 binds the shared transform rings (dynamic); per-entity offsets
-        // are supplied per draw and filled each frame by `fill_transform_rings`.
+        // Group 0 (transform) and group 1 (material props) bind shared rings as
+        // dynamic uniforms; per-draw offsets are filled each frame by
+        // `fill_transform_rings`.
         let material = shaders::create_opaque_color_primitive_material_ring(
-            &self.device,
             &self.opaque_material,
             Some(&self.entity_index_material),
             &self.cpu_material,
             self.forward_ring.buffer(),
             Some(self.entity_index_ring.buffer()),
+            self.material_props_ring.buffer(),
         );
 
         let gpu_mesh = self
@@ -161,13 +187,13 @@ impl SceneViewState {
         (material, gpu_mesh)
     }
 
-    /// Fill the per-entity transform rings for this frame and record each
-    /// entity's dynamic offsets. Call once per frame before building the scene
-    /// and pick passes. The data is written into a persistent ring via
-    /// `RingBuffer::write` (no synchronous GPU writes); offsets advance
-    /// monotonically and wrap when full.
+    /// Fill the per-draw dynamic-uniform rings for this frame and record each
+    /// entity's offsets. Call once per frame before building the scene and pick
+    /// passes. Transforms (group 0) and material props (group 1) are written into
+    /// persistent rings via `RingBuffer::write` (no synchronous GPU writes);
+    /// offsets advance monotonically and wrap when full.
     pub fn fill_transform_rings(&mut self, world: &World) {
-        self.transform_offsets.clear();
+        self.draw_offsets.clear();
 
         let Ok(cameras) = world.read_all::<Camera>() else {
             return;
@@ -185,7 +211,7 @@ impl SceneViewState {
             return;
         };
 
-        for (idx, _renderer) in renderers.iter() {
+        for (idx, renderer) in renderers.iter() {
             let model = globals
                 .get(idx)
                 .map(|g| mat4_to_cols_array_2d(&g.0))
@@ -195,7 +221,7 @@ impl SceneViewState {
                 view_projection: vp,
                 model,
             };
-            let fwd_off = Self::ring_push(&mut self.forward_ring, bytemuck::bytes_of(&fwd));
+            let forward = Self::ring_push(&mut self.forward_ring, bytemuck::bytes_of(&fwd));
 
             let ei = shaders::EntityIndexUniforms {
                 view_projection: vp,
@@ -203,9 +229,32 @@ impl SceneViewState {
                 entity_index: idx,
                 _padding: [0; 3],
             };
-            let ei_off = Self::ring_push(&mut self.entity_index_ring, bytemuck::bytes_of(&ei));
+            let entity_index =
+                Self::ring_push(&mut self.entity_index_ring, bytemuck::bytes_of(&ei));
 
-            self.transform_offsets.insert(idx, (fwd_off, ei_off));
+            // Material props (group 1), one ring slot per primitive in order.
+            let props: Vec<u32> = renderer
+                .primitives
+                .iter()
+                .map(|primitive| {
+                    let bytes = primitive
+                        .material
+                        .cpu_instance()
+                        .map(|ci| redlilium_ecs::pack_uniform_bytes(&ci.material, &ci.values))
+                        .filter(|b| !b.is_empty())
+                        .unwrap_or_else(|| bytemuck::bytes_of(&DEFAULT_MATERIAL_PROPS).to_vec());
+                    Self::ring_push(&mut self.material_props_ring, &bytes)
+                })
+                .collect();
+
+            self.draw_offsets.insert(
+                idx,
+                EntityDrawOffsets {
+                    forward,
+                    entity_index,
+                    props,
+                },
+            );
         }
     }
 
@@ -287,15 +336,17 @@ impl SceneViewState {
             {
                 continue;
             }
-            let fwd_off = self
-                .transform_offsets
-                .get(&entity_idx)
-                .map_or(0, |(f, _)| *f);
-            for primitive in &renderer.primitives {
+            let offsets = self.draw_offsets.get(&entity_idx);
+            let fwd_off = offsets.map_or(0, |o| o.forward);
+            for (prim_idx, primitive) in renderer.primitives.iter().enumerate() {
                 if let Some(instance) = primitive.material.pass(RenderPassType::Forward) {
+                    // group 0 = entity transform, group 1 = this primitive's props.
+                    let props_off = offsets
+                        .and_then(|o| o.props.get(prim_idx).copied())
+                        .unwrap_or(0);
                     pass.add_draw_command(
                         DrawCommand::new(primitive.mesh.clone(), Arc::clone(instance))
-                            .with_dynamic_offsets(vec![vec![fwd_off]]),
+                            .with_dynamic_offsets(vec![vec![fwd_off], vec![props_off]]),
                     );
                 }
             }
@@ -342,9 +393,9 @@ impl SceneViewState {
                 continue;
             }
             let ei_off = self
-                .transform_offsets
+                .draw_offsets
                 .get(&entity_idx)
-                .map_or(0, |(_, e)| *e);
+                .map_or(0, |o| o.entity_index);
             for primitive in &renderer.primitives {
                 if let Some(instance) = primitive.material.pass(RenderPassType::EntityIndex) {
                     pass.add_draw_command(

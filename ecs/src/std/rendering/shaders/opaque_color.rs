@@ -8,14 +8,15 @@
 //!
 //! ```ignore
 //! // At init time:
-//! let (material, _layout) = create_opaque_color_material(&device, color_fmt, depth_fmt);
+//! let material = create_opaque_color_material(&device, color_fmt, depth_fmt);
 //! let cpu_material = create_opaque_color_cpu_material();
 //!
-//! // Per entity:
-//! let (per_entity, render_mat, bundle) =
-//!     create_opaque_color_entity_full(&device, &material, &ei_material, &cpu_material);
-//! world.insert(entity, render_mat);
-//! world.insert(entity, per_entity);
+//! // Per primitive — group 0 binds the shared transform rings as dynamic
+//! // uniforms; the caller fills a ring slot per frame and draws with its offset.
+//! let prim_mat = create_opaque_color_primitive_material_ring(
+//!     &device, &material, Some(&ei_material), &cpu_material,
+//!     forward_ring.buffer(), Some(entity_index_ring.buffer()),
+//! );
 //! ```
 
 use std::sync::Arc;
@@ -24,8 +25,8 @@ use redlilium_core::material::{
     CpuMaterial, CpuMaterialInstance, MaterialBindingDef, MaterialValueType,
 };
 use redlilium_graphics::{
-    BindingGroup, Buffer, BufferDescriptor, BufferUsage, GraphicsDevice, Material,
-    MaterialDescriptor, MaterialInstance, ShaderSource, ShaderStage, TextureFormat, VertexLayout,
+    BindingGroup, Buffer, GraphicsDevice, Material, MaterialDescriptor, MaterialInstance,
+    ShaderSource, ShaderStage, TextureFormat, VertexLayout,
 };
 
 use crate::std::rendering::components::{MaterialBundle, PrimitiveMaterial, RenderPassType};
@@ -72,9 +73,11 @@ pub fn create_opaque_color_material(
                 .with_vertex_layout(VertexLayout::position_normal())
                 .with_color_format(color_format)
                 .with_depth_format(depth_format)
-                // Group 0 binding 0 (per-entity transform) is bound with a
-                // per-draw dynamic offset (ring-allocated each frame).
+                // Group 0 binding 0 (per-entity transform) and group 1 binding 0
+                // (material props) are both bound with per-draw dynamic offsets
+                // (ring-allocated each frame).
                 .with_dynamic_uniform(0, 0)
+                .with_dynamic_uniform(1, 0)
                 .with_label("std_opaque_color"),
         )
         .expect("Failed to create opaque color material")
@@ -104,15 +107,22 @@ pub fn create_opaque_color_cpu_material() -> Arc<CpuMaterial> {
 /// `forward_ring` holds [`OpaqueColorUniforms`] elements; `entity_index_ring`
 /// (when picking) holds [`EntityIndexUniforms`](super::entity_index::EntityIndexUniforms).
 pub fn create_opaque_color_primitive_material_ring(
-    device: &Arc<GraphicsDevice>,
     forward_material: &Arc<Material>,
     entity_index_material: Option<&Arc<Material>>,
     cpu_material: &Arc<CpuMaterial>,
     forward_ring: &Arc<Buffer>,
     entity_index_ring: Option<&Arc<Buffer>>,
+    material_props_ring: &Arc<Buffer>,
 ) -> PrimitiveMaterial {
-    let mat_props_buffer = create_material_props_buffer(device);
-    let mat_props_group = Arc::new(BindingGroup::new().with_buffer(0, mat_props_buffer.clone()));
+    // Group 1 (material props) binds one element of the props ring; the per-draw
+    // dynamic offset selects this primitive's slot (filled each frame).
+    let props_size = std::mem::size_of::<[f32; 4]>() as u64;
+    let mat_props_group = Arc::new(BindingGroup::new().with_buffer_range(
+        0,
+        material_props_ring.clone(),
+        0,
+        props_size,
+    ));
 
     // Group 0 binds one element of the forward ring; the per-draw dynamic offset
     // selects the entity's slot.
@@ -150,20 +160,4 @@ pub fn create_opaque_color_primitive_material_ring(
         cpu_instance,
         vec![(RenderPassType::Forward, "opaque_color".into())],
     )
-    .with_material_uniform_buffer(mat_props_buffer)
-}
-
-/// Create the material properties GPU buffer with default base_color.
-fn create_material_props_buffer(device: &Arc<GraphicsDevice>) -> Arc<Buffer> {
-    let buffer = device
-        .create_buffer(
-            &BufferDescriptor::new(
-                std::mem::size_of::<[f32; 4]>() as u64,
-                BufferUsage::UNIFORM | BufferUsage::COPY_DST,
-            )
-            .with_label("opaque_color_material_props"),
-        )
-        .expect("Failed to create material props buffer");
-    let _ = device.write_buffer(&buffer, 0, bytemuck::bytes_of(&DEFAULT_BASE_COLOR));
-    buffer
 }
