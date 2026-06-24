@@ -9,7 +9,8 @@ use redlilium_core::material::{
 };
 use redlilium_graphics::{
     BindingGroup, Buffer, BufferDescriptor, BufferUsage, CpuSampler, GraphicsDevice, GraphicsError,
-    Material, MaterialInstance, Sampler, Texture,
+    Material, MaterialInstance, RenderGraph, Sampler, Texture, TransferConfig, TransferOperation,
+    TransferPass,
 };
 
 use super::texture_manager::TextureManager;
@@ -79,6 +80,10 @@ pub struct MaterialManager {
     materials: HashMap<String, (Arc<CpuMaterial>, Arc<Material>)>,
     /// CPU bundle info keyed by MaterialBundle Arc pointer.
     cpu_bundles: HashMap<usize, CpuBundleInfo>,
+    /// Pending material-uniform uploads, flushed into the frame graph by
+    /// [`flush_uploads`](Self::flush_uploads). Material props go through the
+    /// render graph (never synchronously).
+    pending_uploads: Vec<TransferOperation>,
 }
 
 impl MaterialManager {
@@ -88,12 +93,25 @@ impl MaterialManager {
             device,
             materials: HashMap::new(),
             cpu_bundles: HashMap::new(),
+            pending_uploads: Vec::new(),
         }
     }
 
     /// Get the graphics device.
     pub fn device(&self) -> &Arc<GraphicsDevice> {
         &self.device
+    }
+
+    /// Flush queued material-uniform uploads into the current frame's render
+    /// graph. Call once per frame while building the frame graph.
+    pub fn flush_uploads(&mut self, graph: &mut RenderGraph) {
+        if self.pending_uploads.is_empty() {
+            return;
+        }
+        let ops = std::mem::take(&mut self.pending_uploads);
+        let mut pass = TransferPass::new("material_uploads".into());
+        pass.set_transfer_config(TransferConfig::new().with_operations(ops));
+        graph.add_transfer_pass(pass);
     }
 
     // --- Material registration ---
@@ -279,7 +297,7 @@ impl MaterialManager {
 
     /// Build a [`BindingGroup`] from a CPU material instance's values.
     pub(in crate::std::rendering) fn build_binding_group(
-        &self,
+        &mut self,
         cpu_instance: &CpuMaterialInstance,
         textures: &mut TextureManager,
     ) -> Result<BindingGroup, MaterialManagerError> {
@@ -310,8 +328,12 @@ impl MaterialManager {
     }
 
     /// Pack uniform (Float/Vec3/Vec4) values into a GPU buffer at binding 0.
+    ///
+    /// The buffer is allocated immediately; its data is uploaded **through the
+    /// frame graph** on the next [`flush_uploads`](Self::flush_uploads) (never a
+    /// synchronous GPU write).
     fn pack_uniforms(
-        &self,
+        &mut self,
         cpu_mat: &CpuMaterial,
         values: &[MaterialValue],
     ) -> Result<Option<Arc<Buffer>>, MaterialManagerError> {
@@ -328,7 +350,11 @@ impl MaterialManager {
             )
             .with_label("material_uniforms"),
         )?;
-        self.device.write_buffer(&buffer, 0, &uniform_data)?;
+        self.pending_uploads.push(TransferOperation::write_buffer(
+            Arc::clone(&buffer),
+            0,
+            Arc::from(uniform_data.as_slice()),
+        ));
         Ok(Some(buffer))
     }
 

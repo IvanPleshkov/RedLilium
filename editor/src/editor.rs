@@ -1046,6 +1046,11 @@ impl AppHandler for Editor {
                     .resource_mut::<MeshManager>()
                     .flush_uploads(&mut graph);
             }
+            if ew.world.has_resource::<MaterialManager>() {
+                ew.world
+                    .resource_mut::<MaterialManager>()
+                    .flush_uploads(&mut graph);
+            }
 
             if let Some(mut scene_pass) =
                 scene_view.build_scene_pass(&ew.world, ctx.swapchain_texture())

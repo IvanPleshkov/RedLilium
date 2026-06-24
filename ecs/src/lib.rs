@@ -159,8 +159,7 @@ pub use redlilium_debug_drawer::{DebugDrawer, DebugDrawerRenderer};
 pub use rendering::{
     CameraTarget, CpuBundleInfo, MaterialBundle, MaterialManager, MaterialManagerError,
     MeshManager, MeshRenderer, Primitive, PrimitiveMaterial, RenderPassType, RenderSchedule,
-    SyncMaterialUniforms, TextureManager, pack_uniform_bytes, register_rendering_components,
-    shaders,
+    TextureManager, pack_uniform_bytes, register_rendering_components, shaders,
 };
 
 /// Register all standard component types with the world.

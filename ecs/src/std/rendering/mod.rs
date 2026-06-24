@@ -26,7 +26,6 @@ pub mod components;
 pub(crate) mod material_inspector;
 pub mod resources;
 pub mod shaders;
-pub mod systems;
 
 pub use components::{
     CameraTarget, MaterialBundle, MeshRenderer, Primitive, PrimitiveMaterial, RenderPassType,
@@ -35,7 +34,6 @@ pub use resources::{
     CpuBundleInfo, MaterialManager, MaterialManagerError, MeshManager, RenderSchedule,
     TextureManager, TextureManagerError, pack_uniform_bytes,
 };
-pub use systems::SyncMaterialUniforms;
 
 use crate::World;
 
