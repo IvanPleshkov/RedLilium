@@ -10,10 +10,10 @@ use redlilium_core::math::{self, Mat4, Vec3, mat4_to_cols_array_2d};
 use redlilium_ecs::physics::physics2d::PhysicsWorld2D;
 use redlilium_ecs::physics::physics3d::PhysicsWorld3D;
 use redlilium_graphics::{
-    BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, Buffer, BufferDescriptor,
-    BufferUsage, GraphicsDevice, GraphicsPass, Material, MaterialDescriptor, MaterialInstance,
-    Mesh, ShaderSource, ShaderStage, ShaderStageFlags, Texture, TextureDescriptor, TextureFormat,
-    TextureUsage,
+    BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferUsage, GraphicsDevice,
+    GraphicsPass, Material, MaterialDescriptor, MaterialInstance, Mesh, RenderGraph, RingBuffer,
+    ShaderSource, ShaderStage, ShaderStageFlags, Texture, TextureDescriptor, TextureFormat,
+    TextureUsage, TransferConfig, TransferOperation, TransferPass,
 };
 
 const MAX_INSTANCES: usize = 4096;
@@ -181,7 +181,7 @@ fn generate_box_cpu() -> redlilium_graphics::CpuMesh {
 
 struct ShapeBatch {
     mesh: Arc<Mesh>,
-    instance_buffer: Arc<Buffer>,
+    /// Rebuilt each frame to bind this frame's camera + instance ring slots.
     material_instance: Arc<MaterialInstance>,
     count: u32,
 }
@@ -192,13 +192,17 @@ struct ShapeBatch {
 
 pub struct PhysicsRenderer {
     depth_texture: Arc<Texture>,
-    camera_buffer: Arc<Buffer>,
-    #[allow(dead_code)]
+    /// Per-frame camera uniform ring (one slot written per frame).
+    camera_ring: RingBuffer,
+    /// Per-frame instance storage ring (sphere + box slots written per frame).
+    instance_ring: RingBuffer,
     material: Arc<Material>,
     #[allow(dead_code)]
     binding_layout: Arc<BindingLayout>,
     sphere_batch: ShapeBatch,
     box_batch: ShapeBatch,
+    /// Mesh uploads queued at init, flushed into the first frame's graph.
+    pending_uploads: Vec<TransferOperation>,
 }
 
 impl PhysicsRenderer {
@@ -219,13 +223,22 @@ impl PhysicsRenderer {
             ))
             .expect("depth texture");
 
-        // Camera uniform buffer
-        let camera_buffer = device
-            .create_buffer(&BufferDescriptor::new(
-                std::mem::size_of::<CameraUniforms>() as u64,
-                BufferUsage::UNIFORM | BufferUsage::COPY_DST,
-            ))
-            .expect("camera buffer");
+        // Camera uniform ring + instance storage ring — one slot written per
+        // frame so writes never race the GPU reading a previous frame in flight.
+        let camera_ring = RingBuffer::new(
+            device,
+            1 << 16,
+            BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+            "physics_camera_ring",
+        )
+        .expect("camera ring");
+        let instance_ring = RingBuffer::new(
+            device,
+            (MAX_INSTANCES * INSTANCE_STRIDE * 8) as u64,
+            BufferUsage::STORAGE | BufferUsage::COPY_DST,
+            "physics_instance_ring",
+        )
+        .expect("instance ring");
 
         // Binding layout: binding 0 = camera uniform, binding 1 = instance storage
         let binding_layout = Arc::new(
@@ -263,67 +276,132 @@ impl PhysicsRenderer {
 
         let material = device.create_material(&descriptor).expect("shape material");
 
-        // Generate meshes
+        // Generate meshes; their data uploads through the frame graph.
         let sphere_cpu = redlilium_core::mesh::generators::generate_sphere(1.0, 16, 8);
-        let sphere_mesh = device
-            .create_mesh_from_cpu(&sphere_cpu)
+        let (sphere_mesh, sphere_ops) = device
+            .create_mesh_deferred(&sphere_cpu)
             .expect("sphere mesh");
 
         let box_cpu = generate_box_cpu();
-        let box_mesh = device.create_mesh_from_cpu(&box_cpu).expect("box mesh");
+        let (box_mesh, box_ops) = device.create_mesh_deferred(&box_cpu).expect("box mesh");
 
-        // Create instance buffers
-        let instance_buf_size = (MAX_INSTANCES * INSTANCE_STRIDE) as u64;
-        let sphere_instance_buf = device
-            .create_buffer(&BufferDescriptor::new(
-                instance_buf_size,
-                BufferUsage::STORAGE | BufferUsage::COPY_DST,
-            ))
-            .expect("sphere instance buffer");
+        let mut pending_uploads = Vec::new();
+        pending_uploads.extend(sphere_ops);
+        pending_uploads.extend(box_ops);
 
-        let box_instance_buf = device
-            .create_buffer(&BufferDescriptor::new(
-                instance_buf_size,
-                BufferUsage::STORAGE | BufferUsage::COPY_DST,
-            ))
-            .expect("box instance buffer");
-
-        // Binding groups and material instances (one per shape type)
-        #[allow(clippy::arc_with_non_send_sync)]
-        let sphere_bg = Arc::new(
-            BindingGroup::new()
-                .with_buffer(0, camera_buffer.clone())
-                .with_buffer(1, sphere_instance_buf.clone()),
-        );
-        let sphere_mi =
-            Arc::new(MaterialInstance::new(material.clone()).with_binding_group(sphere_bg));
-
-        #[allow(clippy::arc_with_non_send_sync)]
-        let box_bg = Arc::new(
-            BindingGroup::new()
-                .with_buffer(0, camera_buffer.clone())
-                .with_buffer(1, box_instance_buf.clone()),
-        );
-        let box_mi = Arc::new(MaterialInstance::new(material.clone()).with_binding_group(box_bg));
+        // Initial material instances binding the rings' first slots; rebuilt each
+        // frame by `upload_batch` to point at the frame's camera + instance slots.
+        let sphere_mi = Self::make_instance(&material, &camera_ring, 0, &instance_ring, 0, 1);
+        let box_mi = Self::make_instance(&material, &camera_ring, 0, &instance_ring, 0, 1);
 
         Self {
             depth_texture,
-            camera_buffer,
+            camera_ring,
+            instance_ring,
             material,
             binding_layout,
             sphere_batch: ShapeBatch {
                 mesh: sphere_mesh,
-                instance_buffer: sphere_instance_buf,
                 material_instance: sphere_mi,
                 count: 0,
             },
             box_batch: ShapeBatch {
                 mesh: box_mesh,
-                instance_buffer: box_instance_buf,
                 material_instance: box_mi,
                 count: 0,
             },
+            pending_uploads,
         }
+    }
+
+    /// Build a material instance binding the camera slot (group 0, binding 0) and
+    /// an instance ring slot (binding 1) by range.
+    fn make_instance(
+        material: &Arc<Material>,
+        camera_ring: &RingBuffer,
+        camera_off: u64,
+        instance_ring: &RingBuffer,
+        instance_off: u64,
+        instance_size: u64,
+    ) -> Arc<MaterialInstance> {
+        let camera_size = std::mem::size_of::<CameraUniforms>() as u64;
+        #[allow(clippy::arc_with_non_send_sync)]
+        let bg = Arc::new(
+            BindingGroup::new()
+                .with_buffer_range(0, camera_ring.buffer().clone(), camera_off, camera_size)
+                .with_buffer_range(
+                    1,
+                    instance_ring.buffer().clone(),
+                    instance_off,
+                    instance_size,
+                ),
+        );
+        #[allow(clippy::arc_with_non_send_sync)]
+        Arc::new(MaterialInstance::new(material.clone()).with_binding_group(bg))
+    }
+
+    /// Write this frame's camera uniforms into the camera ring; returns the slot
+    /// offset.
+    fn write_camera_ring(&mut self, view_proj: Mat4, camera_pos: Vec3) -> u64 {
+        let uniforms = CameraUniforms {
+            view_proj: mat4_to_cols_array_2d(&view_proj),
+            camera_pos: [camera_pos.x, camera_pos.y, camera_pos.z, 0.0],
+            light_dir: [0.4, 0.8, 0.5, 0.0],
+        };
+        let bytes = bytemuck::bytes_of(&uniforms);
+        let size = bytes.len() as u64;
+        let alloc = self.camera_ring.allocate(size).unwrap_or_else(|| {
+            self.camera_ring.reset();
+            self.camera_ring
+                .allocate(size)
+                .expect("camera ring too small")
+        });
+        self.camera_ring
+            .write(&alloc, bytes)
+            .expect("write camera ring");
+        alloc.offset
+    }
+
+    /// Write a batch's instances into the instance ring and rebuild its material
+    /// instance to bind this frame's camera + instance slots. Returns the count.
+    fn upload_batch(
+        &mut self,
+        camera_off: u64,
+        instances: &[ShapeInstance],
+    ) -> Arc<MaterialInstance> {
+        let count = instances.len().min(MAX_INSTANCES);
+        let size = (count.max(1) * INSTANCE_STRIDE) as u64;
+        let alloc = self.instance_ring.allocate(size).unwrap_or_else(|| {
+            self.instance_ring.reset();
+            self.instance_ring
+                .allocate(size)
+                .expect("instance ring too small")
+        });
+        if count > 0 {
+            let bytes = bytemuck::cast_slice(&instances[..count]);
+            self.instance_ring
+                .write(&alloc, bytes)
+                .expect("write instance ring");
+        }
+        Self::make_instance(
+            &self.material,
+            &self.camera_ring,
+            camera_off,
+            &self.instance_ring,
+            alloc.offset,
+            size,
+        )
+    }
+
+    /// Flush queued mesh uploads into the current frame's render graph.
+    pub fn flush_uploads(&mut self, graph: &mut RenderGraph) {
+        if self.pending_uploads.is_empty() {
+            return;
+        }
+        let ops = std::mem::take(&mut self.pending_uploads);
+        let mut pass = TransferPass::new("physics_mesh_uploads".into());
+        pass.set_transfer_config(TransferConfig::new().with_operations(ops));
+        graph.add_transfer_pass(pass);
     }
 
     /// Recreate the depth texture on resize.
@@ -343,27 +421,11 @@ impl PhysicsRenderer {
         &self.depth_texture
     }
 
-    /// Update camera uniforms.
-    fn write_camera(&self, device: &Arc<GraphicsDevice>, view_proj: Mat4, camera_pos: Vec3) {
-        let uniforms = CameraUniforms {
-            view_proj: mat4_to_cols_array_2d(&view_proj),
-            camera_pos: [camera_pos.x, camera_pos.y, camera_pos.z, 0.0],
-            light_dir: [0.4, 0.8, 0.5, 0.0], // Directional light
-        };
-        let _ = device.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniforms));
-    }
-
-    /// Build instance data from a 3D physics world and upload to GPU.
-    pub fn update_3d(
-        &mut self,
-        device: &Arc<GraphicsDevice>,
-        physics: &PhysicsWorld3D,
-        view_proj: Mat4,
-        camera_pos: Vec3,
-    ) {
+    /// Build instance data from a 3D physics world and upload to the rings.
+    pub fn update_3d(&mut self, physics: &PhysicsWorld3D, view_proj: Mat4, camera_pos: Vec3) {
         use redlilium_ecs::physics::rapier3d::prelude::*;
 
-        self.write_camera(device, view_proj, camera_pos);
+        let camera_off = self.write_camera_ring(view_proj, camera_pos);
 
         let mut sphere_instances = Vec::new();
         let mut box_instances = Vec::new();
@@ -451,31 +513,18 @@ impl PhysicsRenderer {
             }
         }
 
-        // Upload to GPU (clamp to buffer capacity)
+        // Upload instances into the ring and rebuild the batches' bindings.
+        self.sphere_batch.material_instance = self.upload_batch(camera_off, &sphere_instances);
         self.sphere_batch.count = sphere_instances.len().min(MAX_INSTANCES) as u32;
-        if self.sphere_batch.count > 0 {
-            let data = bytemuck::cast_slice(&sphere_instances[..self.sphere_batch.count as usize]);
-            let _ = device.write_buffer(&self.sphere_batch.instance_buffer, 0, data);
-        }
-
+        self.box_batch.material_instance = self.upload_batch(camera_off, &box_instances);
         self.box_batch.count = box_instances.len().min(MAX_INSTANCES) as u32;
-        if self.box_batch.count > 0 {
-            let data = bytemuck::cast_slice(&box_instances[..self.box_batch.count as usize]);
-            let _ = device.write_buffer(&self.box_batch.instance_buffer, 0, data);
-        }
     }
 
-    /// Build instance data from a 2D physics world and upload to GPU.
-    pub fn update_2d(
-        &mut self,
-        device: &Arc<GraphicsDevice>,
-        physics: &PhysicsWorld2D,
-        view_proj: Mat4,
-        camera_pos: Vec3,
-    ) {
+    /// Build instance data from a 2D physics world and upload to the rings.
+    pub fn update_2d(&mut self, physics: &PhysicsWorld2D, view_proj: Mat4, camera_pos: Vec3) {
         use redlilium_ecs::physics::rapier2d::prelude::*;
 
-        self.write_camera(device, view_proj, camera_pos);
+        let camera_off = self.write_camera_ring(view_proj, camera_pos);
 
         let mut sphere_instances = Vec::new();
         let mut box_instances = Vec::new();
@@ -555,17 +604,10 @@ impl PhysicsRenderer {
             }
         }
 
+        self.sphere_batch.material_instance = self.upload_batch(camera_off, &sphere_instances);
         self.sphere_batch.count = sphere_instances.len().min(MAX_INSTANCES) as u32;
-        if self.sphere_batch.count > 0 {
-            let data = bytemuck::cast_slice(&sphere_instances[..self.sphere_batch.count as usize]);
-            let _ = device.write_buffer(&self.sphere_batch.instance_buffer, 0, data);
-        }
-
+        self.box_batch.material_instance = self.upload_batch(camera_off, &box_instances);
         self.box_batch.count = box_instances.len().min(MAX_INSTANCES) as u32;
-        if self.box_batch.count > 0 {
-            let data = bytemuck::cast_slice(&box_instances[..self.box_batch.count as usize]);
-            let _ = device.write_buffer(&self.box_batch.instance_buffer, 0, data);
-        }
     }
 
     /// Add draw commands for all shape batches to the graphics pass.

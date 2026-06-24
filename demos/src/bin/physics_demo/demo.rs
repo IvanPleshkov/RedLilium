@@ -349,20 +349,19 @@ impl AppHandler for PhysicsDemoApp {
         };
 
         if let (Some(renderer), Some(world)) = (&mut self.renderer, &self.world) {
-            let device = ctx.device();
             match dim {
                 Dimension::ThreeD => {
                     if world.has_resource::<redlilium_ecs::physics::physics3d::PhysicsWorld3D>() {
                         let physics =
                             world.resource::<redlilium_ecs::physics::physics3d::PhysicsWorld3D>();
-                        renderer.update_3d(device, &physics, view_proj, camera_pos);
+                        renderer.update_3d(&physics, view_proj, camera_pos);
                     }
                 }
                 Dimension::TwoD => {
                     if world.has_resource::<redlilium_ecs::physics::physics2d::PhysicsWorld2D>() {
                         let physics =
                             world.resource::<redlilium_ecs::physics::physics2d::PhysicsWorld2D>();
-                        renderer.update_2d(device, &physics, view_proj, camera_pos);
+                        renderer.update_2d(&physics, view_proj, camera_pos);
                     }
                 }
             }
@@ -382,6 +381,11 @@ impl AppHandler for PhysicsDemoApp {
         profile_scope!("on_draw");
 
         let mut graph = ctx.acquire_graph();
+
+        // Flush queued mesh uploads through the frame graph (first frame).
+        if let Some(renderer) = &mut self.renderer {
+            renderer.flush_uploads(&mut graph);
+        }
 
         // Shape rendering pass with depth buffer
         let mut shape_pass = GraphicsPass::new("shapes".into());
