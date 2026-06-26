@@ -17,29 +17,31 @@
 // The slot's setters/token are driven by the request processor (next chunk).
 #![allow(dead_code)]
 
-use std::cell::RefCell;
 use std::sync::Arc;
+
+use parking_lot::RwLock;
 
 use crate::error::AssetError;
 
 /// The result-delivery channel behind an [`AssetHandle`]: a one-shot cell the
-/// processor fills on the main thread. Demand is the handle's `Arc` strong count
-/// (the processor holds only a `Weak`); cancellation lives in the processor's
-/// request state (it owns the `CancellationToken` and hands clones to stages).
+/// processor fills. Behind an `RwLock` so the handle is `Send + Sync` (it can
+/// ride in an ECS component) — the processor only locks to write the result and
+/// consumers lock to read it. Demand is the handle's `Arc` strong count (the
+/// processor holds only a `Weak`).
 pub(crate) struct RequestSlot<T> {
     /// `None` while loading; `Some(Ok)` ready; `Some(Err)` failed.
-    result: RefCell<Option<Result<Arc<T>, AssetError>>>,
+    result: RwLock<Option<Result<Arc<T>, AssetError>>>,
 }
 
 impl<T> RequestSlot<T> {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
-            result: RefCell::new(None),
+            result: RwLock::new(None),
         })
     }
 
     pub(crate) fn fulfill(&self, result: Result<Arc<T>, AssetError>) {
-        *self.result.borrow_mut() = Some(result);
+        *self.result.write() = Some(result);
     }
 }
 
@@ -59,7 +61,7 @@ impl<T> AssetHandle<T> {
     /// The current result: `None` while loading, `Some(Ok)` when ready,
     /// `Some(Err)` on failure. Cheap (clones the `Arc<T>` / error).
     pub fn get(&self) -> Option<Result<Arc<T>, AssetError>> {
-        self.slot.result.borrow().clone()
+        self.slot.result.read().clone()
     }
 
     /// The loaded resource if ready, else `None`.

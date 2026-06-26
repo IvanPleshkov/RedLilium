@@ -28,8 +28,9 @@ pub trait AssetLoader: 'static {
     /// Identity / cache key, serialized in components & prefabs.
     type Source: AssetSource;
     /// The final resident produced by the pipeline (e.g. `Mesh`, `Prefab`).
-    /// `request` returns an `AssetHandle<Asset>`.
-    type Asset: 'static;
+    /// `request` returns an `AssetHandle<Asset>`. `Send + Sync` so the handle can
+    /// ride in an ECS component and the resolved `Arc<Asset>` can be shared.
+    type Asset: Send + Sync + 'static;
 
     /// Assemble the stage sequence for `source`. Decided at runtime — omit the
     /// IO stage for generated sources, the decode stage for GPU-ready formats,

@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
+use parking_lot::Mutex;
 use redlilium_graphics::{GraphicsDevice, RenderGraph, TransferConfig, TransferPass};
 use redlilium_vfs::Vfs;
 
@@ -35,7 +36,8 @@ type RequestId = u64;
 pub type AsyncTask = (Executor, Pin<Box<dyn Future<Output = ()> + Send>>);
 
 /// Delivers the final (erased) value into the typed handle slot, or an error.
-type Deliver = Box<dyn FnOnce(Result<Box<dyn Any>, AssetError>)>;
+/// `Send + Sync` (captures only a `Weak<RequestSlot>`) so the request stays so.
+type Deliver = Box<dyn FnOnce(Result<Box<dyn Any>, AssetError>) + Send + Sync>;
 
 /// Distinguishes concurrent processors (e.g. blue-green swap) so their per-frame
 /// transfer passes don't collide on a name.
@@ -48,7 +50,7 @@ struct Request {
     value: Option<AnyAsset>,
     deliver: Option<Deliver>,
     /// Demand check: false once the consumer dropped the handle.
-    alive: Box<dyn Fn() -> bool>,
+    alive: Box<dyn Fn() -> bool + Send + Sync>,
     in_flight: bool,
 }
 
@@ -64,7 +66,9 @@ pub struct AssetProcessor {
     next_id: RequestId,
     requests: HashMap<RequestId, Request>,
     result_tx: Sender<(RequestId, Result<AnyAsset, AssetError>)>,
-    result_rx: Receiver<(RequestId, Result<AnyAsset, AssetError>)>,
+    /// `mpsc::Receiver` is `!Sync`; the `Mutex` makes the processor `Sync` so it
+    /// can be an ECS resource. Only `collect` locks it (briefly, to drain).
+    result_rx: Mutex<Receiver<(RequestId, Result<AnyAsset, AssetError>)>>,
     /// Max requests in flight (trivial RAM proxy).
     ram_budget: usize,
     /// Max GPU stages run per frame.
@@ -99,7 +103,7 @@ impl AssetProcessor {
             next_id: 0,
             requests: HashMap::new(),
             result_tx,
-            result_rx,
+            result_rx: Mutex::new(result_rx),
             ram_budget: usize::MAX,
             gpu_per_frame: usize::MAX,
         }
@@ -229,7 +233,10 @@ impl AssetProcessor {
     /// Apply finished async stage results, advancing each request (and
     /// delivering when its last stage was async).
     pub fn collect(&mut self) {
-        while let Ok((id, result)) = self.result_rx.try_recv() {
+        // Drain under the lock, then process (the body needs `&mut self`).
+        let drained: Vec<(RequestId, Result<AnyAsset, AssetError>)> =
+            self.result_rx.lock().try_iter().collect();
+        for (id, result) in drained {
             let Some(r) = self.requests.get_mut(&id) else {
                 continue; // request was abandoned
             };
@@ -239,7 +246,8 @@ impl AssetProcessor {
                     r.next += 1;
                     if r.next >= r.stages.len() {
                         let deliver = r.deliver.take().unwrap();
-                        deliver(Ok(value));
+                        let final_value: Box<dyn Any> = value; // drop +Send+Sync for delivery
+                        deliver(Ok(final_value));
                         self.requests.remove(&id);
                     } else {
                         r.value = Some(value);
@@ -403,6 +411,15 @@ mod tests {
         let src = MeshSource::File { guid, primitive: 0 };
         let path = resolve_path(&db, &src).unwrap().unwrap();
         assert_eq!(path, AssetPath::new("assets", "a.glb"));
+    }
+
+    #[test]
+    fn processor_and_handle_are_send_sync() {
+        // The whole point of the retrofit: usable as an ECS resource, and the
+        // handle can ride in an ECS component.
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<AssetProcessor>();
+        assert_send_sync::<crate::AssetHandle<redlilium_graphics::Mesh>>();
     }
 
     #[test]

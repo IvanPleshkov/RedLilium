@@ -13,9 +13,10 @@ use redlilium_graphics::{GraphicsDevice, TransferOperation};
 
 use crate::error::AssetError;
 
-/// Type-erased value flowing between stages (e.g. file bytes, `CpuMesh`). `Send`
-/// so it can cross into the IO/compute task that produces it.
-pub type AnyAsset = Box<dyn Any + Send>;
+/// Type-erased value flowing between stages (e.g. file bytes, `CpuMesh`).
+/// `Send + Sync` so the request (and the processor holding it) stays `Send +
+/// Sync` — it crosses into the IO/compute task that produces it.
+pub type AnyAsset = Box<dyn Any + Send + Sync>;
 
 /// Type-erased resident produced by a GPU stage (holds e.g. `Arc<Mesh>`). Lives
 /// on the render thread, so it is **not** `Send`.
@@ -39,7 +40,11 @@ pub enum Executor {
 /// IO/CPU); a GPU stage instead implements [`run_gpu`](Self::run_gpu) (sync,
 /// render thread, returns transfer ops for the frame graph). The processor picks
 /// the method by [`executor`](Self::executor).
-pub trait AssetStage {
+///
+/// `Send + Sync`: a built pipeline lives inside the processor (an ECS resource),
+/// and async stages run on the compute/IO pools. Stages capture only `Send +
+/// Sync` data (vfs, device, settings).
+pub trait AssetStage: Send + Sync {
     /// The executor this stage runs on.
     fn executor(&self) -> Executor;
 

@@ -4312,6 +4312,7 @@ name = "redlilium-assets"
 version = "0.1.0"
 dependencies = [
  "log",
+ "parking_lot",
  "redlilium-core",
  "redlilium-graphics",
  "redlilium-vfs",
