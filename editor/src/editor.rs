@@ -14,11 +14,11 @@ use redlilium_ecs::ui::{
     PrefabFileDragPayload, SelectAction, SpawnPrefabAction,
 };
 use redlilium_ecs::{
-    Camera, DrawGrid, DrawSelectionAabb, EcsRunner, Entity, FreeFlyCamera, GlobalTransform,
-    GridConfig, MaterialManager, MeshManager, MeshRenderer, Name, PostUpdate, Primitive, Render,
-    RenderSchedule, Schedules, TextureManager, Transform, Update, UpdateCameraMatrices,
-    UpdateFreeFlyCamera, UpdateGlobalTransforms, Visibility, WindowInput, World,
-    register_std_components,
+    Camera, DrawGrid, DrawSelectionAabb, EcsRunner, Entity, FlushUploads, FreeFlyCamera,
+    GlobalTransform, GridConfig, MaterialManager, MeshManager, MeshRenderer, Name, PostUpdate,
+    Primitive, Render, RenderSchedule, Schedules, TextureManager, Transform, Update,
+    UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms, Visibility, WindowInput,
+    World, register_std_components,
 };
 use redlilium_graphics::egui::{EguiApp, EguiController};
 use redlilium_graphics::{FrameSchedule, RenderTarget, TextureFormat};
@@ -300,6 +300,9 @@ impl Editor {
             .get_mut::<Update>()
             .add(DrawSelectionAabb::default());
         schedules.get_mut::<Update>().set_read_only(true);
+
+        // Render schedule: flush GPU-upload managers into the frame graph.
+        schedules.get_mut::<Render>().add(FlushUploads);
 
         // PostUpdate: camera input -> transform propagation -> camera matrices.
         // Camera movement is viewport navigation, not a scene mutation, so it
@@ -1055,23 +1058,8 @@ impl AppHandler for Editor {
         {
             let ew = self.world.as_ref().unwrap();
 
-            // Upload any textures/meshes created since last frame through this
-            // frame's graph (deferred, graph-ordered — never a synchronous write).
-            if ew.world.has_resource::<TextureManager>() {
-                ew.world
-                    .resource_mut::<TextureManager>()
-                    .flush_uploads(&mut graph);
-            }
-            if ew.world.has_resource::<MeshManager>() {
-                ew.world
-                    .resource_mut::<MeshManager>()
-                    .flush_uploads(&mut graph);
-            }
-            if ew.world.has_resource::<MaterialManager>() {
-                ew.world
-                    .resource_mut::<MaterialManager>()
-                    .flush_uploads(&mut graph);
-            }
+            // (Manager uploads now flush in the `Render` schedule via
+            // `FlushUploads`, before this scene pass — see the bracket above.)
 
             if let Some(mut scene_pass) =
                 scene_view.build_scene_pass(&ew.world, ctx.swapchain_texture())
