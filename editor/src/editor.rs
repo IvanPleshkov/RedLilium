@@ -88,6 +88,8 @@ pub struct Editor {
     // Scene rendering
     scene_view: Option<SceneViewState>,
     debug_drawer_renderer: Option<DebugDrawerRenderer>,
+    /// egui texture id for the scene color target shown in the SceneView panel.
+    scene_texture_id: Option<egui::TextureId>,
 
     // Input state for egui feedback
     egui_wants_pointer: bool,
@@ -152,6 +154,7 @@ impl Editor {
             native_menu: None,
             scene_view: None,
             debug_drawer_renderer: None,
+            scene_texture_id: None,
             egui_wants_pointer: false,
             egui_wants_keyboard: false,
             scene_view_rect_phys: None,
@@ -758,6 +761,23 @@ impl AppHandler for Editor {
                 .expect("RenderSchedule must hold the graph after the Render schedule");
         }
 
+        // Size the off-screen scene target to the SceneView panel (last frame's
+        // physical rect) and make sure egui has a texture id for this frame's
+        // image. The scene pass below fills this texture; egui samples it (the
+        // egui pass depends on the scene pass).
+        if let (Some(scene_view), Some(egui)) =
+            (self.scene_view.as_mut(), self.egui_controller.as_mut())
+        {
+            if let Some([_, _, w, h]) = self.scene_view_rect_phys {
+                scene_view.resize_scene_target(w as u32, h as u32);
+            }
+            let color = scene_view.color_texture().clone();
+            match self.scene_texture_id {
+                Some(id) => egui.update_user_texture(id, color),
+                None => self.scene_texture_id = Some(egui.register_user_texture(color)),
+            }
+        }
+
         let mut egui_handle = None;
         let mut scene_view_rect = None;
         let mut pixels_per_point = 1.0;
@@ -893,6 +913,7 @@ impl AppHandler for Editor {
                             history: &ew.history,
                             scene_view_rect: None,
                             drag_rect,
+                            scene_texture: self.scene_texture_id,
                         };
                         let mut dock_style = egui_dock::Style::from_egui(ui.style().as_ref());
                         dock_style.tab_bar.corner_radius = egui::CornerRadius::ZERO;
@@ -1061,9 +1082,7 @@ impl AppHandler for Editor {
             // (Manager uploads now flush in the `Render` schedule via
             // `FlushUploads`, before this scene pass — see the bracket above.)
 
-            if let Some(mut scene_pass) =
-                scene_view.build_scene_pass(&ew.world, ctx.swapchain_texture())
-            {
+            if let Some(mut scene_pass) = scene_view.build_scene_pass(&ew.world) {
                 // Append debug draw lines into the scene pass if available
                 if let Some(renderer) = &mut self.debug_drawer_renderer {
                     let drawer = ew.debug_drawer.read();

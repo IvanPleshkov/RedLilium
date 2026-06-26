@@ -76,6 +76,8 @@ pub struct EditorTabViewer<'a> {
     pub scene_view_rect: Option<egui::Rect>,
     /// Optional drag selection rectangle to draw over the SceneView (egui logical points).
     pub drag_rect: Option<egui::Rect>,
+    /// egui texture id of the off-screen scene color target (the SceneView image).
+    pub scene_texture: Option<egui::TextureId>,
 }
 
 impl TabViewer for EditorTabViewer<'_> {
@@ -94,9 +96,19 @@ impl TabViewer for EditorTabViewer<'_> {
                 redlilium_ecs::ui::show_component_inspector(ui, self.world, self.inspector_state);
             }
             Tab::SceneView => {
-                // Record the available rect; the scene pass renders directly
-                // to the swapchain in this area.
-                self.scene_view_rect = Some(ui.available_rect_before_wrap());
+                // Record the panel rect (drives picking + next frame's target
+                // size), then composite the off-screen scene color target here.
+                let rect = ui.available_rect_before_wrap();
+                self.scene_view_rect = Some(rect);
+
+                if let Some(texture_id) = self.scene_texture {
+                    ui.painter().image(
+                        texture_id,
+                        rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                }
 
                 // Draw box selection rectangle overlay if dragging.
                 if let Some(rect) = self.drag_rect {
@@ -125,9 +137,9 @@ impl TabViewer for EditorTabViewer<'_> {
         }
     }
 
-    fn clear_background(&self, tab: &Self::Tab) -> bool {
-        // SceneView renders directly to the swapchain — don't paint over it.
-        !matches!(tab, Tab::SceneView)
+    fn clear_background(&self, _tab: &Self::Tab) -> bool {
+        // SceneView now composites the scene as an egui image, so paint normally.
+        true
     }
 
     fn closeable(&mut self, _tab: &mut Tab) -> bool {
