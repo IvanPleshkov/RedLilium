@@ -373,7 +373,7 @@ fn downcast_final<T: 'static>(value: Box<dyn Any>) -> Result<Arc<T>, AssetError>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mesh::{MeshGenerator, MeshSource};
+    use crate::loaders::{MeshGenerator, MeshSource};
     use crate::source::Guid;
 
     #[test]
@@ -407,9 +407,9 @@ mod tests {
 
     #[test]
     fn mesh_loader_declares_its_formats() {
-        use crate::loader::AssetLoader;
+        use crate::loaders::MeshLoader;
         // the loader owns its format list; the builder turns this into routes
-        assert_eq!(crate::mesh::MeshLoader::EXTENSIONS, &["glb", "gltf"]);
-        assert_eq!(crate::mesh::MeshLoader::NAME, "mesh");
+        assert_eq!(MeshLoader::EXTENSIONS, &["glb", "gltf"]);
+        assert_eq!(MeshLoader::NAME, "mesh");
     }
 }
