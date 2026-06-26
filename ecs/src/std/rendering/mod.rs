@@ -32,7 +32,7 @@ pub use components::{
     CameraTarget, MaterialBundle, MeshRenderer, Primitive, PrimitiveMaterial, RenderPassType,
 };
 pub use resources::{
-    CpuBundleInfo, MaterialManager, MaterialManagerError, MeshManager, RenderSchedule,
+    CpuBundleInfo, FrameRing, MaterialManager, MaterialManagerError, MeshManager, RenderSchedule,
     TextureManager, TextureManagerError, pack_uniform_bytes,
 };
 pub use systems::FlushUploads;
