@@ -15,9 +15,10 @@ use redlilium_ecs::ui::{
 };
 use redlilium_ecs::{
     Camera, DrawGrid, DrawSelectionAabb, EcsRunner, Entity, FreeFlyCamera, GlobalTransform,
-    GridConfig, MaterialManager, MeshManager, MeshRenderer, Name, PostUpdate, Primitive, Schedules,
-    TextureManager, Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera,
-    UpdateGlobalTransforms, Visibility, WindowInput, World, register_std_components,
+    GridConfig, MaterialManager, MeshManager, MeshRenderer, Name, PostUpdate, Primitive, Render,
+    RenderSchedule, Schedules, TextureManager, Transform, Update, UpdateCameraMatrices,
+    UpdateFreeFlyCamera, UpdateGlobalTransforms, Visibility, WindowInput, World,
+    register_std_components,
 };
 use redlilium_graphics::egui::{EguiApp, EguiController};
 use redlilium_graphics::{FrameSchedule, RenderTarget, TextureFormat};
@@ -175,6 +176,8 @@ impl Editor {
         world.insert_resource(MaterialManager::new(scene_view.device().clone()));
         world.insert_resource(TextureManager::new(scene_view.device().clone()));
         world.insert_resource(MeshManager::new(scene_view.device().clone()));
+        // Holds the per-frame render graph while the `Render` schedule runs.
+        world.insert_resource(RenderSchedule::empty());
 
         // Register materials so prefab deserialization can find them
         {
@@ -734,6 +737,24 @@ impl AppHandler for Editor {
         // One render graph per frame: scene passes and the egui overlay pass all
         // go into this graph; ordering is an explicit intra-graph dependency.
         let mut graph = ctx.acquire_graph();
+
+        // Render-schedule bracket: hand the frame graph to the ECS, run the
+        // `Render` schedule (systems contribute passes via the `RenderSchedule`
+        // resource), then take it back to keep building imperatively. Passes are
+        // ordered by intra-graph dependencies, so this round-trip is position-
+        // independent. (No render systems yet — currently a no-op pass-through;
+        // imperative passes migrate into `Render` systems incrementally.)
+        if let Some(ew) = self.world.as_mut() {
+            ew.world.resource_mut::<RenderSchedule>().set(graph);
+            ew.schedules
+                .run_schedule::<Render>(&mut ew.world, &self.runner);
+            graph = ew
+                .world
+                .resource_mut::<RenderSchedule>()
+                .take()
+                .expect("RenderSchedule must hold the graph after the Render schedule");
+        }
+
         let mut egui_handle = None;
         let mut scene_view_rect = None;
         let mut pixels_per_point = 1.0;

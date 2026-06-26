@@ -101,6 +101,16 @@ impl ScheduleLabel for Update {}
 pub struct PostUpdate;
 impl ScheduleLabel for PostUpdate {}
 
+/// The render schedule: systems here contribute passes to the frame's
+/// `RenderGraph`, held in the `RenderSchedule` resource. **Not** run by
+/// [`Schedules::run_frame`] — the app brackets it (acquire graph → put it in the
+/// resource → `run_schedule::<Render>` → take graph → submit) so render systems
+/// run with the graph present. Order passes via system dependency edges
+/// (`add_edge`) and read another system's pass via
+/// [`SystemContext::system_result`](crate::SystemContext::system_result).
+pub struct Render;
+impl ScheduleLabel for Render {}
+
 // ---------------------------------------------------------------------------
 // ScheduleId
 // ---------------------------------------------------------------------------

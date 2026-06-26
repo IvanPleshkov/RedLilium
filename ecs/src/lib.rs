@@ -127,7 +127,8 @@ pub use system::{
     run_read_only_exclusive_system_blocking, run_system_blocking, run_system_once,
 };
 pub use system::{
-    FixedUpdate, PostUpdate, PreUpdate, ScheduleId, ScheduleLabel, Schedules, Startup, Time, Update,
+    FixedUpdate, PostUpdate, PreUpdate, Render, ScheduleId, ScheduleLabel, Schedules, Startup,
+    Time, Update,
 };
 pub use system::{
     ForEach, ForEachAccess, ForEachSystem, FunctionSystem, IntoSystem, ParForEach,
