@@ -4315,6 +4315,7 @@ dependencies = [
  "redlilium-core",
  "redlilium-graphics",
  "redlilium-vfs",
+ "ron",
  "serde",
  "uuid",
 ]

@@ -264,7 +264,76 @@ impl AssetDb {
         }
         (db, conflicts)
     }
+
+    /// Serialize one mount's records to RON (the editor format — human-readable,
+    /// diffable). Paths are stored **mount-relative**: the `mount` is dropped and
+    /// re-stamped on load, so a pack is portable across mount names. This file
+    /// lives at the mount root and ships with the pack.
+    pub fn to_ron_for_mount(&self, mount: &str) -> Result<String, ron::Error> {
+        let entries: Vec<DbEntry> = self
+            .by_guid
+            .iter()
+            .filter(|(_, r)| r.path.mount == mount)
+            .map(|(guid, r)| DbEntry {
+                guid: *guid,
+                path: r.path.path.clone(),
+                kind: r.kind.clone(),
+                source_hash: r.source_hash,
+                settings: r.settings.clone(),
+            })
+            .collect();
+        let file = DbFile {
+            version: DB_VERSION,
+            entries,
+        };
+        ron::ser::to_string_pretty(&file, ron::ser::PrettyConfig::default())
+    }
+
+    /// Merge a mount's RON DB file into this (global) registry, stamping `mount`
+    /// onto every path. The bijection guard reports cross-pack guid/path
+    /// conflicts (returned, skipped) rather than overwriting. Re-merging the same
+    /// mount is idempotent.
+    pub fn merge_ron(
+        &mut self,
+        mount: &str,
+        text: &str,
+    ) -> Result<Vec<DbError>, ron::error::SpannedError> {
+        let file: DbFile = ron::from_str(text)?;
+        let mut conflicts = Vec::new();
+        for entry in file.entries {
+            let record = AssetRecord {
+                path: AssetPath::new(mount, entry.path),
+                kind: entry.kind,
+                source_hash: entry.source_hash,
+                settings: entry.settings,
+            };
+            if let Err(e) = self.insert(entry.guid, record) {
+                conflicts.push(e);
+            }
+        }
+        Ok(conflicts)
+    }
 }
+
+/// On-disk form of one mount's DB, versioned for forward-compatible migrations.
+#[derive(Serialize, Deserialize)]
+struct DbFile {
+    version: u32,
+    entries: Vec<DbEntry>,
+}
+
+/// One serialized record. `path` is mount-relative (no mount segment).
+#[derive(Serialize, Deserialize)]
+struct DbEntry {
+    guid: Guid,
+    path: String,
+    kind: String,
+    source_hash: u64,
+    #[serde(default)]
+    settings: Option<String>,
+}
+
+const DB_VERSION: u32 = 1;
 
 #[cfg(test)]
 mod tests {
@@ -345,6 +414,39 @@ mod tests {
             db.rebind(Guid::new(), AssetPath::new("assets", "x.glb")),
             Err(DbError::UnknownGuid(_))
         ));
+    }
+
+    #[test]
+    fn per_mount_ron_is_relative_and_restampable() {
+        let mut db = AssetDb::new();
+        let g = db.register_path(AssetPath::new("packA", "mesh/a.glb"), "mesh", 7);
+        db.register_path(AssetPath::new("packB", "b.png"), "texture", 0); // other mount, excluded
+
+        let text = db.to_ron_for_mount("packA").unwrap();
+
+        // Mount the same pack file under a *different* name → mount is re-stamped.
+        let mut global = AssetDb::new();
+        let conflicts = global.merge_ron("mounted", &text).unwrap();
+        assert!(conflicts.is_empty());
+        assert_eq!(global.len(), 1); // only packA's record was in the file
+        let rec = global.record(&g).unwrap();
+        assert_eq!(rec.path, AssetPath::new("mounted", "mesh/a.glb"));
+        assert_eq!(rec.source_hash, 7);
+    }
+
+    #[test]
+    fn merge_reports_cross_pack_guid_conflict() {
+        let g = Guid::new();
+        let mut packa = AssetDb::new();
+        packa.insert(g, rec("packA", "a.glb")).unwrap();
+        let text = packa.to_ron_for_mount("packA").unwrap();
+
+        // A second pack reusing the same guid (a fork) → merge surfaces it.
+        let mut global = AssetDb::new();
+        global.insert(g, rec("packB", "other.glb")).unwrap();
+        let conflicts = global.merge_ron("packA", &text).unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert!(matches!(conflicts[0], DbError::GuidConflict { .. }));
     }
 
     #[test]

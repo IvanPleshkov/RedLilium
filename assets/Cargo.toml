@@ -10,5 +10,6 @@ redlilium-core = { path = "../core" }
 redlilium-vfs = { path = "../vfs" }
 redlilium-graphics = { path = "../graphics" }
 serde = { workspace = true }
+ron = { workspace = true }
 log = { workspace = true }
 uuid = { version = "1", features = ["v4", "serde"] }

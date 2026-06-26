@@ -17,11 +17,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use redlilium_graphics::{RenderGraph, TransferConfig, TransferPass};
+use redlilium_graphics::{GraphicsDevice, RenderGraph, TransferConfig, TransferPass};
+use redlilium_vfs::Vfs;
 
+use crate::db::{AssetDb, AssetPath};
 use crate::error::AssetError;
 use crate::handle::{AssetHandle, RequestSlot};
 use crate::loader::AssetLoader;
+use crate::source::AssetSource;
 use crate::stage::{AnyAsset, Executor, LoadEnv};
 
 /// Identifies one in-flight request (for routing async results back).
@@ -46,7 +49,9 @@ struct Request {
 
 /// Runs requests through their stage pipelines.
 pub struct AssetProcessor {
-    env: LoadEnv,
+    /// Stable env parts; the per-request `path` is resolved from the DB.
+    vfs: Vfs,
+    device: Arc<GraphicsDevice>,
     next_id: RequestId,
     requests: HashMap<RequestId, Request>,
     result_tx: Sender<(RequestId, Result<AnyAsset, AssetError>)>,
@@ -58,12 +63,13 @@ pub struct AssetProcessor {
 }
 
 impl AssetProcessor {
-    /// Create a processor over the given load environment (vfs + device + path
-    /// resolver). Budgets default high; set them from project settings.
-    pub fn new(env: LoadEnv) -> Self {
+    /// Create a processor over the VFS + graphics device. Budgets default high;
+    /// set them from project settings.
+    pub fn new(vfs: Vfs, device: Arc<GraphicsDevice>) -> Self {
         let (result_tx, result_rx) = channel();
         Self {
-            env,
+            vfs,
+            device,
             next_id: 0,
             requests: HashMap::new(),
             result_tx,
@@ -79,17 +85,33 @@ impl AssetProcessor {
         self.gpu_per_frame = gpu_per_frame;
     }
 
-    /// Request an asset: builds its pipeline and returns a handle. The handle is
-    /// the demand — drop it before completion to cancel the load.
+    /// Request an asset: resolves the source, builds its pipeline, returns a
+    /// handle. The handle is the demand — drop it before completion to cancel.
+    /// A file source whose guid isn't in `db` fails immediately (the returned
+    /// handle is already `Err(NotResolved)`).
     pub fn request<L: AssetLoader>(
         &mut self,
+        db: &AssetDb,
         loader: &L,
         source: L::Source,
     ) -> AssetHandle<L::Asset> {
-        let stages = loader.pipeline(&source, &self.env);
-
         let slot = RequestSlot::<L::Asset>::new();
         let handle = AssetHandle::new(Arc::clone(&slot));
+
+        let path = match resolve_path(db, &source) {
+            Ok(path) => path,
+            Err(e) => {
+                slot.fulfill(Err(e)); // unresolved → nothing queued
+                return handle;
+            }
+        };
+        let env = LoadEnv {
+            path,
+            vfs: self.vfs.clone(),
+            device: Arc::clone(&self.device),
+        };
+        let stages = loader.pipeline(&source, &env);
+
         let demand = Arc::downgrade(&slot);
         let alive = Box::new(move || demand.strong_count() > 0);
         let deliver_slot = Arc::downgrade(&slot);
@@ -230,6 +252,18 @@ impl AssetProcessor {
     }
 }
 
+/// Resolve a source's primary path: `None` for non-file sources (generated);
+/// the DB path for a file source; `NotResolved` if its guid is unknown.
+fn resolve_path(db: &AssetDb, source: &impl AssetSource) -> Result<Option<AssetPath>, AssetError> {
+    match source.file_guid() {
+        None => Ok(None),
+        Some(guid) => db
+            .record(&guid)
+            .map(|r| Some(r.path.clone()))
+            .ok_or(AssetError::NotResolved),
+    }
+}
+
 /// Downcast a pipeline's final erased value to `Arc<T>`: a GPU stage already
 /// produced `Arc<T>`; a CPU-final pipeline produced an owned `T` to wrap.
 fn downcast_final<T: 'static>(value: Box<dyn Any>) -> Result<Arc<T>, AssetError> {
@@ -241,5 +275,41 @@ fn downcast_final<T: 'static>(value: Box<dyn Any>) -> Result<Arc<T>, AssetError>
                 "pipeline produced an unexpected final type".into(),
             )),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mesh::{MeshGenerator, MeshSource};
+    use crate::source::Guid;
+
+    #[test]
+    fn generated_source_needs_no_path() {
+        let db = AssetDb::new();
+        let src = MeshSource::Generated(MeshGenerator::cube(1.0));
+        assert!(matches!(resolve_path(&db, &src), Ok(None)));
+    }
+
+    #[test]
+    fn unknown_file_guid_is_not_resolved() {
+        let db = AssetDb::new();
+        let src = MeshSource::File {
+            guid: Guid::new(),
+            primitive: 0,
+        };
+        assert!(matches!(
+            resolve_path(&db, &src),
+            Err(AssetError::NotResolved)
+        ));
+    }
+
+    #[test]
+    fn known_file_guid_resolves_to_its_path() {
+        let mut db = AssetDb::new();
+        let guid = db.register_path(AssetPath::new("assets", "a.glb"), "mesh", 0);
+        let src = MeshSource::File { guid, primitive: 0 };
+        let path = resolve_path(&db, &src).unwrap().unwrap();
+        assert_eq!(path, AssetPath::new("assets", "a.glb"));
     }
 }
