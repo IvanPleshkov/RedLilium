@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use redlilium_graphics::{GraphicsDevice, RenderGraph, TransferConfig, TransferPass};
@@ -36,6 +37,10 @@ pub type AsyncTask = (Executor, Pin<Box<dyn Future<Output = ()> + Send>>);
 /// Delivers the final (erased) value into the typed handle slot, or an error.
 type Deliver = Box<dyn FnOnce(Result<Box<dyn Any>, AssetError>)>;
 
+/// Distinguishes concurrent processors (e.g. blue-green swap) so their per-frame
+/// transfer passes don't collide on a name.
+static PROCESSOR_SEQ: AtomicU64 = AtomicU64::new(0);
+
 struct Request {
     stages: Vec<Box<dyn crate::stage::AssetStage>>,
     next: usize,
@@ -49,9 +54,13 @@ struct Request {
 
 /// Runs requests through their stage pipelines.
 pub struct AssetProcessor {
+    /// Unique per instance (transfer-pass naming across concurrent processors).
+    id: u64,
     /// Stable env parts; the per-request `path` is resolved from the DB.
     vfs: Vfs,
     device: Arc<GraphicsDevice>,
+    /// `extension -> kind` routes (from registered loaders), for scan/import.
+    routes: HashMap<String, String>,
     next_id: RequestId,
     requests: HashMap<RequestId, Request>,
     result_tx: Sender<(RequestId, Result<AnyAsset, AssetError>)>,
@@ -63,13 +72,30 @@ pub struct AssetProcessor {
 }
 
 impl AssetProcessor {
-    /// Create a processor over the VFS + graphics device. Budgets default high;
-    /// set them from project settings.
-    pub fn new(vfs: Vfs, device: Arc<GraphicsDevice>) -> Self {
-        let (result_tx, result_rx) = channel();
-        Self {
+    /// Builder for a processor with a static set of loaders/routes. The loaders
+    /// are fixed at build (no dynamic registration); the editor/game assembles
+    /// them on top of the built-ins here.
+    pub fn builder(vfs: Vfs, device: Arc<GraphicsDevice>) -> AssetProcessorBuilder {
+        AssetProcessorBuilder {
             vfs,
             device,
+            routes: HashMap::new(),
+        }
+    }
+
+    /// Create a processor with no extension routes (loading still works via
+    /// `request::<L>`; only scan/import needs routes). Budgets default high.
+    pub fn new(vfs: Vfs, device: Arc<GraphicsDevice>) -> Self {
+        Self::with_routes(vfs, device, HashMap::new())
+    }
+
+    fn with_routes(vfs: Vfs, device: Arc<GraphicsDevice>, routes: HashMap<String, String>) -> Self {
+        let (result_tx, result_rx) = channel();
+        Self {
+            id: PROCESSOR_SEQ.fetch_add(1, Ordering::Relaxed),
+            vfs,
+            device,
+            routes,
             next_id: 0,
             requests: HashMap::new(),
             result_tx,
@@ -77,6 +103,29 @@ impl AssetProcessor {
             ram_budget: usize::MAX,
             gpu_per_frame: usize::MAX,
         }
+    }
+
+    /// The kind a file extension routes to (case-insensitive), if any.
+    pub fn kind_for_extension(&self, ext: &str) -> Option<&str> {
+        self.routes
+            .get(&ext.to_ascii_lowercase())
+            .map(String::as_str)
+    }
+
+    /// Scan `mount` (or the subtree `scope`) using this processor's routes,
+    /// registering assets in `db`. Returns the change delta. See [`scan_mount`].
+    ///
+    /// [`scan_mount`]: crate::scan::scan_mount
+    pub async fn scan(
+        &self,
+        db: &mut AssetDb,
+        mount: &str,
+        scope: Option<&str>,
+    ) -> Result<crate::scan::ScanReport, AssetError> {
+        crate::scan::scan_mount(&self.vfs, db, mount, scope, |ext| {
+            self.kind_for_extension(ext).map(str::to_string)
+        })
+        .await
     }
 
     /// Set the (mutable, per-tick) budgets.
@@ -92,7 +141,6 @@ impl AssetProcessor {
     pub fn request<L: AssetLoader>(
         &mut self,
         db: &AssetDb,
-        loader: &L,
         source: L::Source,
     ) -> AssetHandle<L::Asset> {
         let slot = RequestSlot::<L::Asset>::new();
@@ -110,7 +158,7 @@ impl AssetProcessor {
             vfs: self.vfs.clone(),
             device: Arc::clone(&self.device),
         };
-        let stages = loader.pipeline(&source, &env);
+        let stages = L::pipeline(&source, &env);
 
         let demand = Arc::downgrade(&slot);
         let alive = Box::new(move || demand.strong_count() > 0);
@@ -245,10 +293,54 @@ impl AssetProcessor {
         }
 
         if !ops.is_empty() {
-            let mut pass = TransferPass::new("asset_uploads".into());
+            let mut pass = TransferPass::new(format!("asset_uploads_{}", self.id));
             pass.set_transfer_config(TransferConfig::new().with_operations(ops));
             graph.add_transfer_pass(pass);
         }
+    }
+
+    /// Number of requests still in flight (queued, running, or awaiting GPU).
+    pub fn pending(&self) -> usize {
+        self.requests.len()
+    }
+
+    /// Whether the pool has fully drained — every request delivered or abandoned.
+    /// A blue-green swap ticks the old processor until this is true, then drops
+    /// it (stop calling `request`; keep calling `drain_tasks`/`collect`/
+    /// `flush_gpu`).
+    pub fn is_idle(&self) -> bool {
+        self.requests.is_empty()
+    }
+}
+
+/// Builds an [`AssetProcessor`] with a fixed set of loaders + routes.
+pub struct AssetProcessorBuilder {
+    vfs: Vfs,
+    device: Arc<GraphicsDevice>,
+    routes: HashMap<String, String>,
+}
+
+impl AssetProcessorBuilder {
+    /// Register a loader: adds its `EXTENSIONS -> NAME` routes (later
+    /// registrations override earlier ones — overlay your own on the built-ins).
+    pub fn with_loader<L: AssetLoader>(mut self) -> Self {
+        for ext in L::EXTENSIONS {
+            self.routes
+                .insert(ext.to_ascii_lowercase(), L::NAME.to_string());
+        }
+        self
+    }
+
+    /// Add or override a single `extension -> kind` route.
+    pub fn with_route(mut self, ext: impl Into<String>, kind: impl Into<String>) -> Self {
+        self.routes
+            .insert(ext.into().to_ascii_lowercase(), kind.into());
+        self
+    }
+
+    /// Finish, producing the processor.
+    pub fn build(self) -> AssetProcessor {
+        AssetProcessor::with_routes(self.vfs, self.device, self.routes)
     }
 }
 
@@ -311,5 +403,13 @@ mod tests {
         let src = MeshSource::File { guid, primitive: 0 };
         let path = resolve_path(&db, &src).unwrap().unwrap();
         assert_eq!(path, AssetPath::new("assets", "a.glb"));
+    }
+
+    #[test]
+    fn mesh_loader_declares_its_formats() {
+        use crate::loader::AssetLoader;
+        // the loader owns its format list; the builder turns this into routes
+        assert_eq!(crate::mesh::MeshLoader::EXTENSIONS, &["glb", "gltf"]);
+        assert_eq!(crate::mesh::MeshLoader::NAME, "mesh");
     }
 }

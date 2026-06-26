@@ -30,6 +30,7 @@ mod loader;
 mod mesh;
 mod persist;
 mod processor;
+mod scan;
 mod source;
 mod stage;
 
@@ -39,6 +40,7 @@ pub use handle::AssetHandle;
 pub use loader::AssetLoader;
 pub use mesh::{MeshGenerator, MeshLoader, MeshSource};
 pub use persist::{DB_FILE_NAME, load_mount_db, save_mount_db};
-pub use processor::{AssetProcessor, AsyncTask};
+pub use processor::{AssetProcessor, AssetProcessorBuilder, AsyncTask};
+pub use scan::{ScanReport, scan_mount};
 pub use source::{AssetSource, Guid};
 pub use stage::{AnyAsset, AssetStage, Executor, GpuValue, LoadEnv, StageFuture};

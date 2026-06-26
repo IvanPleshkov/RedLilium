@@ -9,11 +9,21 @@
 use crate::source::AssetSource;
 use crate::stage::{AssetStage, LoadEnv};
 
-/// One asset type = one loader: its identity + how to build the pipeline for a
-/// given source.
+/// One asset type = one loader: its identity, the file formats it imports, and
+/// how to build the pipeline for a given source.
+///
+/// Loaders are **stateless and type-level** (no instance, no erasure): the
+/// processor builder registers them by type (`with_loader::<L>()`), and a load
+/// is `request::<L>(db, source)`. A loader lives in whatever crate owns its
+/// dependencies (mesh/texture here; a prefab loader in `ecs/std`; etc.).
 pub trait AssetLoader: 'static {
-    /// Stable name (DB routing + diagnostics).
+    /// Stable kind name (DB `kind` field + extension routing + diagnostics).
     const NAME: &'static str;
+
+    /// File extensions this loader imports (lowercase, no dot) — populates the
+    /// builder's `ext -> kind` route table for scanning. Empty for loaders with
+    /// no file form (purely generated).
+    const EXTENSIONS: &'static [&'static str] = &[];
 
     /// Identity / cache key, serialized in components & prefabs.
     type Source: AssetSource;
@@ -25,5 +35,5 @@ pub trait AssetLoader: 'static {
     /// IO stage for generated sources, the decode stage for GPU-ready formats,
     /// the GPU stage for prefabs, etc. The last stage's output must be the
     /// (boxed) `Asset`.
-    fn pipeline(&self, source: &Self::Source, env: &LoadEnv) -> Vec<Box<dyn AssetStage>>;
+    fn pipeline(source: &Self::Source, env: &LoadEnv) -> Vec<Box<dyn AssetStage>>;
 }

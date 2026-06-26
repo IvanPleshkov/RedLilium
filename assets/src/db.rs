@@ -249,6 +249,16 @@ impl AssetDb {
         self.by_guid.iter().map(|(g, r)| (*g, r.clone())).collect()
     }
 
+    /// `(guid, relative-path)` for every record under `mount` whose path starts
+    /// with `prefix` (mount-relative). Used by scan to detect deletions.
+    pub fn entries_under(&self, mount: &str, prefix: &str) -> Vec<(Guid, String)> {
+        self.by_guid
+            .iter()
+            .filter(|(_, r)| r.path.mount == mount && r.path.path.starts_with(prefix))
+            .map(|(g, r)| (*g, r.path.path.clone()))
+            .collect()
+    }
+
     /// Build a DB from deserialized records, **validating the bijection**. A
     /// hand-merged DB file can contain duplicate guids/paths; every offending
     /// record is skipped and its conflict returned for the caller to resolve.
