@@ -158,10 +158,10 @@ pub use self::std::systems::{UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGl
 pub use redlilium_debug_drawer::{DebugDrawer, DebugDrawerRenderer};
 #[cfg(feature = "rendering")]
 pub use rendering::{
-    CameraTarget, CpuBundleInfo, FlushUploads, ForwardRender, FrameRing, MaterialBundle,
-    MaterialManager, MaterialManagerError, MeshManager, MeshRenderer, Primitive, PrimitiveMaterial,
-    RenderPassType, RenderSchedule, ScenePass, TextureManager, pack_uniform_bytes,
-    register_rendering_components, shaders,
+    CameraTarget, CpuBundleInfo, DebugRender, FlushUploads, ForwardRender, FrameRing,
+    MaterialBundle, MaterialManager, MaterialManagerError, MeshManager, MeshRenderer, Primitive,
+    PrimitiveMaterial, RenderPassType, RenderSchedule, ScenePass, TextureManager,
+    pack_uniform_bytes, register_rendering_components, shaders,
 };
 
 /// Register all standard component types with the world.

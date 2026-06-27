@@ -6,7 +6,7 @@ use parking_lot::RwLock;
 use egui_dock::DockState;
 use redlilium_app::{AppContext, AppHandler, DrawContext};
 use redlilium_core::abstract_editor::{ActionQueue, DEFAULT_MAX_UNDO, EditActionHistory};
-use redlilium_core::math::{Vec3, mat4_to_cols_array_2d};
+use redlilium_core::math::Vec3;
 use redlilium_core::mesh::generators;
 use redlilium_debug_drawer::{DebugDrawer, DebugDrawerRenderer};
 use redlilium_ecs::ui::{
@@ -14,7 +14,7 @@ use redlilium_ecs::ui::{
     PrefabFileDragPayload, SelectAction, SpawnPrefabAction,
 };
 use redlilium_ecs::{
-    Camera, CameraTarget, DrawGrid, DrawSelectionAabb, EcsRunner, Entity, FlushUploads,
+    Camera, DebugRender, DrawGrid, DrawSelectionAabb, EcsRunner, Entity, FlushUploads,
     ForwardRender, FrameRing, FreeFlyCamera, GlobalTransform, GridConfig, MaterialManager,
     MeshManager, MeshRenderer, Name, PostUpdate, Primitive, Render, RenderSchedule, ScenePass,
     Schedules, TextureManager, Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera,
@@ -87,7 +87,6 @@ pub struct Editor {
 
     // Scene rendering
     scene_view: Option<SceneViewState>,
-    debug_drawer_renderer: Option<DebugDrawerRenderer>,
     /// egui texture id for the scene color target shown in the SceneView panel.
     scene_texture_id: Option<egui::TextureId>,
 
@@ -153,7 +152,6 @@ impl Editor {
             #[cfg(target_os = "macos")]
             native_menu: None,
             scene_view: None,
-            debug_drawer_renderer: None,
             scene_texture_id: None,
             egui_wants_pointer: false,
             egui_wants_keyboard: false,
@@ -315,14 +313,20 @@ impl Editor {
             .add(DrawSelectionAabb::default());
         schedules.get_mut::<Update>().set_read_only(true);
 
-        // Render schedule: flush GPU-upload managers, then render the forward
-        // scene into the camera target (reads the just-uploaded meshes).
+        // Render schedule: flush uploads -> render the forward scene -> overlay
+        // debug lines (each ordered after the previous via dependency edges; the
+        // debug pass reads the forward pass handle through system_result).
         schedules.get_mut::<Render>().add(FlushUploads);
         schedules.get_mut::<Render>().add(ForwardRender);
+        schedules.get_mut::<Render>().add(DebugRender);
         schedules
             .get_mut::<Render>()
             .add_edge::<FlushUploads, ForwardRender>()
             .expect("FlushUploads -> ForwardRender edge");
+        schedules
+            .get_mut::<Render>()
+            .add_edge::<ForwardRender, DebugRender>()
+            .expect("ForwardRender -> DebugRender edge");
 
         // PostUpdate: camera input -> transform propagation -> camera matrices.
         // Camera movement is viewport navigation, not a scene mutation, so it
@@ -443,12 +447,15 @@ impl AppHandler for Editor {
 
         self.scene_view = Some(scene_view);
 
-        // Create debug drawer renderer (with depth testing against scene)
-        self.debug_drawer_renderer = Some(DebugDrawerRenderer::new(
-            ctx.device().clone(),
-            ctx.surface_format(),
-            Some(TextureFormat::Depth32Float),
-        ));
+        // Debug drawer renderer as a resource — the DebugRender system draws it
+        // each frame into the camera target, after the forward pass.
+        if let Some(ew) = self.world.as_mut() {
+            ew.world.insert_resource(DebugDrawerRenderer::new(
+                ctx.device().clone(),
+                ctx.surface_format(),
+                Some(TextureFormat::Depth32Float),
+            ));
+        }
 
         // Run startup schedules
         let runner = &self.runner;
@@ -1097,37 +1104,11 @@ impl AppHandler for Editor {
 
         if render_active && let Some(ew) = self.world.as_ref() {
             let scene_view = self.scene_view.as_ref().unwrap();
-            let scene_handle = ew.world.resource::<ScenePass>().0;
-            // The last pass that writes the CameraTarget (egui depends on it).
-            let mut last_target_writer = scene_handle;
 
-            // Debug lines: a separate pass that loads the CameraTarget, ordered
-            // after the forward scene pass.
-            if let Some(scene_h) = scene_handle
-                && let Some(renderer) = &mut self.debug_drawer_renderer
-            {
-                let vertices = ew.debug_drawer.read().take_render_data();
-                if !vertices.is_empty()
-                    && let Ok(targets) = ew.world.read_all::<CameraTarget>()
-                    && let Some((_, target)) = targets.iter().next()
-                {
-                    if let Ok(cameras) = ew.world.read_all::<Camera>()
-                        && let Some((_, camera)) = cameras.iter().next()
-                    {
-                        renderer.update_view_proj(mat4_to_cols_array_2d(&camera.view_projection()));
-                    }
-                    let rt = RenderTarget::from_texture(target.color.clone());
-                    if let Some(debug_pass) =
-                        renderer.create_graphics_pass(&vertices, &rt, Some(&target.depth))
-                    {
-                        let debug_h = graph.add_graphics_pass(debug_pass);
-                        graph.add_dependency(debug_h, scene_h);
-                        last_target_writer = Some(debug_h);
-                    }
-                }
-            }
-
-            // The egui overlay samples the CameraTarget; depend on its last writer.
+            // The ForwardRender + DebugRender systems wrote the scene (and debug)
+            // passes into the graph; `ScenePass` holds the last CameraTarget
+            // writer. The egui overlay samples the CameraTarget, so depend on it.
+            let last_target_writer = ew.world.resource::<ScenePass>().0;
             if let (Some(eh), Some(lw)) = (egui_handle, last_target_writer) {
                 graph.add_dependency(eh, lw);
             }

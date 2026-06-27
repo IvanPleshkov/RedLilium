@@ -5,13 +5,13 @@ use std::sync::Arc;
 
 use redlilium_core::math::{Mat4, mat4_to_cols_array_2d};
 use redlilium_graphics::{
-    ColorAttachment, DepthStencilAttachment, DrawCommand, GraphicsPass, PassHandle,
+    ColorAttachment, DepthStencilAttachment, DrawCommand, GraphicsPass, PassHandle, RenderTarget,
     RenderTargetConfig,
 };
 
 use crate::std::components::{Camera, GlobalTransform, Visibility};
 use crate::system::SystemError;
-use crate::{System, SystemContext};
+use crate::{DebugDrawer, DebugDrawerRenderer, System, SystemContext};
 
 use super::{
     CameraTarget, FrameRing, MaterialManager, MeshManager, MeshRenderer, RenderPassType,
@@ -66,14 +66,16 @@ impl System for FlushUploads {
 pub struct ForwardRender;
 
 impl System for ForwardRender {
-    type Result = ();
+    /// The scene pass's handle (so a dependent render system can order after it
+    /// via [`SystemContext::system_result`](crate::SystemContext::system_result)).
+    type Result = Option<PassHandle>;
     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<Self::Result, SystemError> {
         let world = ctx.world();
         if !world.has_resource::<RenderSchedule>()
             || !world.has_resource::<FrameRing>()
             || !world.has_resource::<ScenePass>()
         {
-            return Ok(());
+            return Ok(None);
         }
         world.resource_mut::<ScenePass>().0 = None;
 
@@ -83,7 +85,7 @@ impl System for ForwardRender {
                 .next()
                 .map(|(_, cam)| mat4_to_cols_array_2d(&cam.view_projection()))
         }) else {
-            return Ok(());
+            return Ok(None);
         };
         let Some((color, depth, clear)) = world.read_all::<CameraTarget>().ok().and_then(|t| {
             t.iter().next().map(|(_, target)| {
@@ -94,7 +96,7 @@ impl System for ForwardRender {
                 )
             })
         }) else {
-            return Ok(());
+            return Ok(None);
         };
 
         let mut pass = GraphicsPass::new("scene_view".into());
@@ -118,7 +120,7 @@ impl System for ForwardRender {
                 world.read::<GlobalTransform>(),
                 world.read::<Visibility>(),
             ) else {
-                return Ok(());
+                return Ok(None);
             };
             for (idx, renderer) in renderers.iter() {
                 if let Some(vis) = visibilities.get(idx)
@@ -164,6 +166,67 @@ impl System for ForwardRender {
         };
         if let Some(handle) = handle {
             world.resource_mut::<ScenePass>().0 = Some(handle);
+        }
+        Ok(handle)
+    }
+}
+
+/// Renders debug-drawer lines as a separate pass that loads the camera's
+/// [`CameraTarget`] and is ordered after the forward scene pass — whose handle it
+/// reads the native way, via [`system_result`](SystemContext::system_result)
+/// (requires a `ForwardRender -> DebugRender` edge). Updates [`ScenePass`] to its
+/// own handle so it becomes the CameraTarget's last writer (egui depends on that).
+pub struct DebugRender;
+
+impl System for DebugRender {
+    type Result = ();
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<Self::Result, SystemError> {
+        let world = ctx.world();
+        // The forward pass we order after (its handle comes from system_result).
+        let Some(scene_handle) = *ctx.system_result::<ForwardRender>() else {
+            return Ok(());
+        };
+        if !world.has_resource::<DebugDrawer>()
+            || !world.has_resource::<DebugDrawerRenderer>()
+            || !world.has_resource::<RenderSchedule>()
+        {
+            return Ok(());
+        }
+        let vertices = world.resource::<DebugDrawer>().take_render_data();
+        if vertices.is_empty() {
+            return Ok(());
+        }
+        let Some((color, depth)) = world.read_all::<CameraTarget>().ok().and_then(|t| {
+            t.iter()
+                .next()
+                .map(|(_, target)| (target.color.clone(), target.depth.clone()))
+        }) else {
+            return Ok(());
+        };
+        let vp = world.read_all::<Camera>().ok().and_then(|c| {
+            c.iter()
+                .next()
+                .map(|(_, cam)| mat4_to_cols_array_2d(&cam.view_projection()))
+        });
+
+        let debug_handle = {
+            let mut renderer = world.resource_mut::<DebugDrawerRenderer>();
+            if let Some(vp) = vp {
+                renderer.update_view_proj(vp);
+            }
+            let rt = RenderTarget::from_texture(color);
+            let Some(pass) = renderer.create_graphics_pass(&vertices, &rt, Some(&depth)) else {
+                return Ok(());
+            };
+            let mut schedule = world.resource_mut::<RenderSchedule>();
+            schedule.graph_mut().map(|graph| {
+                let h = graph.add_graphics_pass(pass);
+                graph.add_dependency(h, scene_handle);
+                h
+            })
+        };
+        if let Some(h) = debug_handle {
+            world.resource_mut::<ScenePass>().0 = Some(h);
         }
         Ok(())
     }
