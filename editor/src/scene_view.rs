@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 use redlilium_core::material::CpuMaterial;
 use redlilium_core::math::mat4_to_cols_array_2d;
 use redlilium_ecs::{
-    Camera, CameraTarget, Entity, GlobalTransform, MeshRenderer, PrimitiveMaterial, RenderPassType,
-    Visibility, World, shaders,
+    Camera, CameraTarget, Entity, FrameRing, GlobalTransform, MeshRenderer, PrimitiveMaterial,
+    RenderPassType, Visibility, World, shaders,
 };
 use redlilium_graphics::{
     Buffer, BufferDescriptor, BufferTextureCopyRegion, BufferTextureLayout, BufferUsage,
@@ -63,12 +63,14 @@ pub struct SceneViewState {
     rect_pick_layout: [u32; 3],
 
     // --- Per-draw dynamic-uniform rings ---
-    /// Ring of `OpaqueColorUniforms` (forward pass), filled per frame.
-    forward_ring: RingBuffer,
-    /// Ring of `EntityIndexUniforms` (picking pass), filled per frame.
+    /// Scene forward-pass dynamic uniforms. One `FrameRing` serves both the
+    /// transform group and the material-props group — distinct allocations in
+    /// the same buffer, bound at different dynamic offsets. (Becomes an ECS
+    /// resource for the ForwardRender system.)
+    frame_ring: FrameRing,
+    /// Ring of `EntityIndexUniforms` (picking pass), filled per frame. Stays
+    /// editor-side with picking.
     entity_index_ring: RingBuffer,
-    /// Ring of per-primitive material-property bytes (group 1), filled per frame.
-    material_props_ring: RingBuffer,
     /// Per-entity ring offsets recorded by [`fill_transform_rings`], keyed by
     /// entity index.
     draw_offsets: std::collections::HashMap<u32, EntityDrawOffsets>,
@@ -123,13 +125,8 @@ impl SceneViewState {
         // Persistent per-entity transform rings (filled each frame, monotonic
         // with wrap; sized generously so a region is reused only many frames
         // later — after its fence — avoiding frames-in-flight races).
-        let forward_ring = RingBuffer::new(
-            &device,
-            1 << 20,
-            BufferUsage::UNIFORM | BufferUsage::COPY_DST,
-            "scene_view_transform_fwd",
-        )
-        .expect("Failed to create forward transform ring");
+        let frame_ring = FrameRing::new(&device, 1 << 20, "scene_frame_ring")
+            .expect("Failed to create scene frame ring");
         let entity_index_ring = RingBuffer::new(
             &device,
             1 << 20,
@@ -137,13 +134,6 @@ impl SceneViewState {
             "scene_view_transform_ei",
         )
         .expect("Failed to create entity-index transform ring");
-        let material_props_ring = RingBuffer::new(
-            &device,
-            1 << 20,
-            BufferUsage::UNIFORM | BufferUsage::COPY_DST,
-            "scene_view_material_props",
-        )
-        .expect("Failed to create material props ring");
 
         Self {
             device,
@@ -164,9 +154,8 @@ impl SceneViewState {
             rect_readback_buffer,
             rect_result: Arc::new(Mutex::new(Vec::new())),
             rect_pick_layout: [0; 3],
-            forward_ring,
+            frame_ring,
             entity_index_ring,
-            material_props_ring,
             draw_offsets: std::collections::HashMap::new(),
             pending_uploads: Vec::new(),
         }
@@ -199,9 +188,9 @@ impl SceneViewState {
             &self.opaque_material,
             Some(&self.entity_index_material),
             &self.cpu_material,
-            self.forward_ring.buffer(),
+            self.frame_ring.buffer(), // group 0 (transform)
             Some(self.entity_index_ring.buffer()),
-            self.material_props_ring.buffer(),
+            self.frame_ring.buffer(), // group 1 (material props) — same ring
         );
 
         // Allocate the mesh now; its data uploads through the frame graph on the
@@ -249,7 +238,7 @@ impl SceneViewState {
                 view_projection: vp,
                 model,
             };
-            let forward = Self::ring_push(&mut self.forward_ring, bytemuck::bytes_of(&fwd));
+            let forward = self.frame_ring.push(bytemuck::bytes_of(&fwd));
 
             let ei = shaders::EntityIndexUniforms {
                 view_projection: vp,
@@ -271,7 +260,7 @@ impl SceneViewState {
                         .map(|ci| redlilium_ecs::pack_uniform_bytes(&ci.material, &ci.values))
                         .filter(|b| !b.is_empty())
                         .unwrap_or_else(|| bytemuck::bytes_of(&DEFAULT_MATERIAL_PROPS).to_vec());
-                    Self::ring_push(&mut self.material_props_ring, &bytes)
+                    self.frame_ring.push(&bytes)
                 })
                 .collect();
 
