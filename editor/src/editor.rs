@@ -77,8 +77,7 @@ pub struct Editor {
     asset_browser: AssetBrowser,
     console: ConsolePanel,
 
-    // UI
-    egui_controller: Option<EguiController>,
+    // UI (the egui controller is an ECS resource — see on_init)
     dock_state: DockState<Tab>,
     inspector_state: InspectorState,
     play_state: PlayState,
@@ -145,7 +144,6 @@ impl Editor {
             vfs,
             asset_browser,
             console,
-            egui_controller: None,
             dock_state: dock::create_default_layout(),
             inspector_state: InspectorState::new(),
             play_state: PlayState::Editing,
@@ -372,6 +370,14 @@ impl Editor {
             .is_some_and(|ew| ew.history.has_unsaved_changes())
     }
 
+    /// Run `f` with the egui controller resource, if the world (and thus the
+    /// controller) exists. The controller is an ECS resource (see `on_init`).
+    fn with_egui(&self, f: impl FnOnce(&mut EguiController)) {
+        if let Some(ew) = self.world.as_ref() {
+            f(&mut ew.world.resource_mut::<EguiController>());
+        }
+    }
+
     /// Whether the cursor is currently inside the scene view panel.
     fn cursor_in_scene_view(&self) -> bool {
         if let Some([x, y, w, h]) = self.scene_view_rect_phys {
@@ -427,14 +433,14 @@ impl AppHandler for Editor {
         log::info!("Editor initialized");
 
         let null_app: Arc<RwLock<dyn EguiApp>> = Arc::new(RwLock::new(NullEguiApp));
-        self.egui_controller = Some(EguiController::new(
+        let egui_controller = EguiController::new(
             ctx.device().clone(),
             null_app,
             ctx.width(),
             ctx.height(),
             ctx.scale_factor(),
             ctx.surface_format(),
-        ));
+        );
 
         // Create scene view GPU resources
         let mut scene_view = SceneViewState::new(ctx.device().clone(), ctx.surface_format());
@@ -446,6 +452,12 @@ impl AppHandler for Editor {
         self.world = Some(editor_world);
 
         self.scene_view = Some(scene_view);
+
+        // The egui controller is an ECS resource so the egui render pass can be a
+        // render system (and future systems can build egui UI).
+        if let Some(ew) = self.world.as_mut() {
+            ew.world.insert_resource(egui_controller);
+        }
 
         // Debug drawer renderer as a resource — the DebugRender system draws it
         // each frame into the camera target, after the forward pass.
@@ -470,9 +482,8 @@ impl AppHandler for Editor {
     }
 
     fn on_resize(&mut self, ctx: &mut AppContext) {
-        if let Some(egui) = &mut self.egui_controller {
-            egui.on_resize(ctx.width(), ctx.height());
-        }
+        let (w, h) = (ctx.width(), ctx.height());
+        self.with_egui(|egui| egui.on_resize(w, h));
         if let Some(sv) = &mut self.scene_view {
             sv.resize_if_needed(ctx.width(), ctx.height());
         }
@@ -777,15 +788,14 @@ impl AppHandler for Editor {
         // physical rect) and make sure egui has a texture id for this frame's
         // image. The scene pass below fills this texture; egui samples it (the
         // egui pass depends on the scene pass).
-        if let (Some(scene_view), Some(egui), Some(ew)) = (
-            self.scene_view.as_mut(),
-            self.egui_controller.as_mut(),
-            self.world.as_mut(),
-        ) {
+        if let (Some(scene_view), Some(ew)) = (self.scene_view.as_mut(), self.world.as_mut()) {
             let (w, h) = self
                 .scene_view_rect_phys
                 .map_or((256, 256), |[_, _, w, h]| (w as u32, h as u32));
             let color = scene_view.ensure_camera_target(&mut ew.world, ew.editor_camera, w, h);
+            // The `ensure_camera_target` mutable-world borrow has ended; access the
+            // egui controller resource to (re)register the scene texture.
+            let mut egui = ew.world.resource_mut::<EguiController>();
             match self.scene_texture_id {
                 Some(id) => egui.update_user_texture(id, color),
                 None => self.scene_texture_id = Some(egui.register_user_texture(color)),
@@ -796,15 +806,21 @@ impl AppHandler for Editor {
         let mut scene_view_rect = None;
         let mut pixels_per_point = 1.0;
 
-        if let Some(egui) = &mut self.egui_controller {
+        if self.world.is_some() {
             let width = ctx.width();
             let height = ctx.height();
             let elapsed = ctx.elapsed_time() as f64;
             let render_target = RenderTarget::from_surface(ctx.swapchain_texture());
 
-            egui.begin_frame(elapsed);
-
-            let egui_ctx = egui.context().clone();
+            // begin_frame + grab the (cloned) egui context; the dock below builds
+            // UI through the context, so we don't hold the controller resource
+            // across it. (end_frame happens at the bottom, also via the resource.)
+            let egui_ctx = {
+                let ew = self.world.as_ref().unwrap();
+                let mut egui = ew.world.resource_mut::<EguiController>();
+                egui.begin_frame(elapsed);
+                egui.context().clone()
+            };
             pixels_per_point = egui_ctx.pixels_per_point();
 
             // macOS: reserve space for the native titlebar area (traffic lights)
@@ -1027,6 +1043,10 @@ impl AppHandler for Editor {
                 });
             self.egui_wants_keyboard = egui_ctx.wants_keyboard_input();
 
+            // Finish the egui frame and add its pass — via the controller resource
+            // (the dock above is done, so it's free to borrow now).
+            let ew = self.world.as_ref().unwrap();
+            let mut egui = ew.world.resource_mut::<EguiController>();
             if let Some(egui_pass) = egui.end_frame(&render_target, width, height) {
                 egui_handle = Some(graph.add_graphics_pass(egui_pass));
             }
@@ -1143,9 +1163,9 @@ impl AppHandler for Editor {
 
     fn on_mouse_move(&mut self, _ctx: &mut AppContext, x: f64, y: f64) {
         self.cursor_pos = [x as f32, y as f32];
-        if let Some(egui) = &mut self.egui_controller {
+        self.with_egui(|egui| {
             egui.on_mouse_move(x, y);
-        }
+        });
         if self.world.is_some() {
             let ew = self.active_world();
             {
@@ -1167,9 +1187,9 @@ impl AppHandler for Editor {
     }
 
     fn on_mouse_button(&mut self, _ctx: &mut AppContext, button: MouseButton, pressed: bool) {
-        if let Some(egui) = &mut self.egui_controller {
+        self.with_egui(|egui| {
             egui.on_mouse_button(button, pressed);
-        }
+        });
         // Only forward presses when cursor is in scene view and egui doesn't
         // want the pointer (e.g. color picker popup over scene view).
         // Always forward releases so buttons don't get stuck.
@@ -1225,9 +1245,9 @@ impl AppHandler for Editor {
     }
 
     fn on_mouse_scroll(&mut self, _ctx: &mut AppContext, dx: f32, dy: f32) {
-        if let Some(egui) = &mut self.egui_controller {
+        self.with_egui(|egui| {
             egui.on_mouse_scroll(MouseScrollDelta::LineDelta(dx, dy));
-        }
+        });
         if self.world.is_some() && self.cursor_in_scene_view() && !self.egui_wants_pointer {
             let ew = self.active_world();
             {
@@ -1238,21 +1258,15 @@ impl AppHandler for Editor {
     }
 
     fn on_file_dropped(&mut self, _ctx: &mut AppContext, path: std::path::PathBuf) {
-        if let Some(egui) = &mut self.egui_controller {
-            egui.on_file_dropped(path);
-        }
+        self.with_egui(|egui| egui.on_file_dropped(path));
     }
 
     fn on_file_hovered(&mut self, _ctx: &mut AppContext, path: std::path::PathBuf) {
-        if let Some(egui) = &mut self.egui_controller {
-            egui.on_file_hovered(path);
-        }
+        self.with_egui(|egui| egui.on_file_hovered(path));
     }
 
     fn on_file_hover_cancelled(&mut self, _ctx: &mut AppContext) {
-        if let Some(egui) = &mut self.egui_controller {
-            egui.on_file_hover_cancelled();
-        }
+        self.with_egui(|egui| egui.on_file_hover_cancelled());
     }
 
     fn on_modifiers_changed(
@@ -1260,15 +1274,13 @@ impl AppHandler for Editor {
         _ctx: &mut AppContext,
         modifiers: winit::keyboard::ModifiersState,
     ) {
-        if let Some(egui) = &mut self.egui_controller {
-            egui.on_modifiers_changed(modifiers);
-        }
+        self.with_egui(|egui| egui.on_modifiers_changed(modifiers));
     }
 
     fn on_key(&mut self, _ctx: &mut AppContext, event: &KeyEvent) {
-        if let Some(egui) = &mut self.egui_controller {
+        self.with_egui(|egui| {
             egui.on_key(event);
-        }
+        });
         // Only forward key presses when egui doesn't want keyboard; always
         // forward releases so keys don't get stuck.
         if self.world.is_some()
