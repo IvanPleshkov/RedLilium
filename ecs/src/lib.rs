@@ -153,6 +153,11 @@ pub use self::std::systems::DrawGrid;
 pub use self::std::systems::{DrawSelectionAabb, SelectionAabbMode};
 pub use self::std::systems::{UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms};
 
+// Asset-system ECS bridge (feature-gated): loader-agnostic systems that tick an
+// AssetProcessor resource. Consumers dep `redlilium-assets` directly.
+#[cfg(feature = "assets")]
+pub use self::std::assets::{AssetGpuFlush, AssetPump};
+
 // Rendering components, resources, and systems (feature-gated)
 #[cfg(feature = "rendering")]
 pub use redlilium_debug_drawer::{DebugDrawer, DebugDrawerRenderer};

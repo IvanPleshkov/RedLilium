@@ -4,6 +4,8 @@
 //! lights, hierarchy, etc.) and the systems that operate on them
 //! (global transform propagation, camera matrix updates).
 
+#[cfg(feature = "assets")]
+pub mod assets;
 pub mod components;
 pub mod hierarchy;
 #[cfg(any(
