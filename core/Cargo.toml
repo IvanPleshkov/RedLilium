@@ -15,6 +15,9 @@ physics-f32 = []
 log.workspace = true
 bytemuck = { workspace = true }
 nalgebra = { workspace = true }
+# Serialization of core asset data (vertex layouts, meshes, …). The workspace
+# serde enables `derive` + `rc` (Arc<VertexLayout> rides through serde's rc).
+serde = { workspace = true }
 
 # glTF loading (mandatory part of core)
 gltf-dep = { workspace = true }

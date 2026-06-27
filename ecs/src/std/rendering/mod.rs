@@ -23,6 +23,8 @@
 //! This module is only available when the `rendering` feature is enabled.
 
 pub mod components;
+#[cfg(feature = "assets")]
+pub mod loaders;
 pub(crate) mod material_inspector;
 pub mod resources;
 pub mod shaders;
@@ -31,6 +33,10 @@ pub mod systems;
 pub use components::{
     CameraTarget, MaterialBundle, MeshRenderer, Primitive, PrimitiveMaterial, RenderPassType,
 };
+#[cfg(feature = "assets")]
+pub use loaders::{VertexLayoutLoader, VertexLayoutSource};
+#[cfg(feature = "assets")]
+pub use resources::VertexLayoutManager;
 pub use resources::{
     CpuBundleInfo, FrameRing, MaterialManager, MaterialManagerError, MeshManager, RenderSchedule,
     TextureManager, TextureManagerError, pack_uniform_bytes,

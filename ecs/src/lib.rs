@@ -157,6 +157,9 @@ pub use self::std::systems::{UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGl
 // AssetProcessor resource. Consumers dep `redlilium-assets` directly.
 #[cfg(feature = "assets")]
 pub use self::std::assets::{AssetGpuFlush, AssetPump};
+// Rendering asset loaders + their sharing managers (feature-gated).
+#[cfg(feature = "assets")]
+pub use rendering::{VertexLayoutLoader, VertexLayoutManager, VertexLayoutSource};
 
 // Rendering components, resources, and systems (feature-gated)
 #[cfg(feature = "rendering")]

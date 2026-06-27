@@ -54,7 +54,7 @@ use std::sync::Arc;
 /// Semantic meaning of a vertex attribute.
 ///
 /// Semantics are used to match mesh attributes with shader inputs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum VertexAttributeSemantic {
     /// Vertex position (typically float3).
     Position,
@@ -91,7 +91,7 @@ impl VertexAttributeSemantic {
 }
 
 /// Format of a vertex attribute.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum VertexAttributeFormat {
     /// Single 32-bit float.
     Float,
@@ -141,7 +141,9 @@ impl VertexAttributeFormat {
 }
 
 /// How the vertex buffer advances: per-vertex or per-instance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 pub enum VertexStepMode {
     /// Buffer advances once per vertex (default).
     #[default]
@@ -151,7 +153,7 @@ pub enum VertexStepMode {
 }
 
 /// Describes a single vertex buffer binding.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct VertexBufferLayout {
     /// Stride in bytes between consecutive elements.
     pub stride: u32,
@@ -184,7 +186,7 @@ impl VertexBufferLayout {
 }
 
 /// A single vertex attribute description.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct VertexAttribute {
     /// Semantic meaning of this attribute.
     pub semantic: VertexAttributeSemantic,
@@ -321,7 +323,7 @@ impl VertexAttribute {
 ///     .with_attribute(VertexAttribute::position(0).at_buffer(1))
 ///     .with_attribute(VertexAttribute::normal(12).at_buffer(1)));
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct VertexLayout {
     /// Descriptions of each vertex buffer binding.
     pub buffers: Vec<VertexBufferLayout>,

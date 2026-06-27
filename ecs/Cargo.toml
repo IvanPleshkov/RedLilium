@@ -15,8 +15,9 @@ physics-2d-f32 = ["dep:rapier2d", "redlilium-core/physics-math", "redlilium-core
 physics = ["physics-3d", "physics-2d"]
 rendering = ["dep:redlilium-graphics", "dep:redlilium-debug-drawer", "dep:image"]
 # ECS bridge for the asset system: ticks an AssetProcessor resource (async load +
-# GPU flush into the frame graph). Needs `rendering` for the RenderSchedule.
-assets = ["rendering", "dep:redlilium-assets"]
+# GPU flush into the frame graph) and the rendering asset loaders (which read the
+# VFS and deserialize RON). Needs `rendering` for the RenderSchedule.
+assets = ["rendering", "dep:redlilium-assets", "dep:redlilium-vfs", "dep:ron"]
 serialize-ron = ["dep:ron"]
 serialize-bincode = ["dep:bincode"]
 
@@ -39,6 +40,7 @@ rapier2d = { workspace = true, optional = true }
 redlilium-graphics = { path = "../graphics", optional = true }
 redlilium-debug-drawer = { path = "../debug_drawer", optional = true }
 redlilium-assets = { path = "../assets", optional = true }
+redlilium-vfs = { path = "../vfs", optional = true }
 image = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
