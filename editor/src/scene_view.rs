@@ -72,21 +72,23 @@ pub struct SceneViewState {
     /// Ring of `EntityIndexUniforms` (picking pass), filled per frame. Stays
     /// editor-side with picking.
     entity_index_ring: RingBuffer,
-    /// Per-entity ring offsets recorded by [`fill_transform_rings`], keyed by
-    /// entity index.
+    /// Per-entity forward-pass ring offsets recorded by [`fill_transform_rings`],
+    /// keyed by entity index.
     draw_offsets: std::collections::HashMap<u32, EntityDrawOffsets>,
+    /// Per-entity entity-index (picking) ring offset, recorded by
+    /// [`fill_picking_rings`]. Separate from `draw_offsets` because picking stays
+    /// editor-side while the forward fill moves to the ForwardRender system.
+    picking_offsets: std::collections::HashMap<u32, u32>,
     /// Pending mesh-data uploads (from [`create_entity_resources`]), flushed into
     /// the frame graph by [`flush_uploads`](Self::flush_uploads).
     pending_uploads: Vec<TransferOperation>,
 }
 
-/// Per-frame dynamic-offset slots for one entity's draws.
+/// Per-frame forward-pass dynamic-offset slots for one entity's draws.
 #[derive(Default)]
 struct EntityDrawOffsets {
     /// Forward-pass transform ring offset (group 0), shared by all primitives.
     forward: u32,
-    /// Entity-index-pass transform ring offset (group 0).
-    entity_index: u32,
     /// Material-props ring offset (group 1), one per primitive in order.
     props: Vec<u32>,
 }
@@ -156,6 +158,7 @@ impl SceneViewState {
             frame_ring_buffer: None,
             entity_index_ring,
             draw_offsets: std::collections::HashMap::new(),
+            picking_offsets: std::collections::HashMap::new(),
             pending_uploads: Vec::new(),
         }
     }
@@ -246,15 +249,6 @@ impl SceneViewState {
             };
             let forward = ring.push(bytemuck::bytes_of(&fwd));
 
-            let ei = shaders::EntityIndexUniforms {
-                view_projection: vp,
-                model,
-                entity_index: idx,
-                _padding: [0; 3],
-            };
-            let entity_index =
-                Self::ring_push(&mut self.entity_index_ring, bytemuck::bytes_of(&ei));
-
             // Material props (group 1), one ring slot per primitive in order.
             let props: Vec<u32> = renderer
                 .primitives
@@ -270,14 +264,46 @@ impl SceneViewState {
                 })
                 .collect();
 
-            self.draw_offsets.insert(
-                idx,
-                EntityDrawOffsets {
-                    forward,
-                    entity_index,
-                    props,
-                },
-            );
+            self.draw_offsets
+                .insert(idx, EntityDrawOffsets { forward, props });
+        }
+    }
+
+    /// Fill the picking (entity-index) ring for this frame and record each
+    /// entity's offset. Editor-side (picking is editor-only); the forward fill
+    /// lives in `fill_transform_rings` (heading for the ForwardRender system).
+    pub fn fill_picking_rings(&mut self, world: &World) {
+        self.picking_offsets.clear();
+
+        let Ok(cameras) = world.read_all::<Camera>() else {
+            return;
+        };
+        let vp = match cameras.iter().next() {
+            Some((_, camera)) => mat4_to_cols_array_2d(&camera.view_projection()),
+            None => return,
+        };
+        drop(cameras);
+
+        let Ok(renderers) = world.read::<MeshRenderer>() else {
+            return;
+        };
+        let Ok(globals) = world.read::<GlobalTransform>() else {
+            return;
+        };
+
+        for (idx, _renderer) in renderers.iter() {
+            let model = globals
+                .get(idx)
+                .map(|g| mat4_to_cols_array_2d(&g.0))
+                .unwrap_or_else(|| mat4_to_cols_array_2d(&redlilium_core::math::Mat4::identity()));
+            let ei = shaders::EntityIndexUniforms {
+                view_projection: vp,
+                model,
+                entity_index: idx,
+                _padding: [0; 3],
+            };
+            let offset = Self::ring_push(&mut self.entity_index_ring, bytemuck::bytes_of(&ei));
+            self.picking_offsets.insert(idx, offset);
         }
     }
 
@@ -449,10 +475,7 @@ impl SceneViewState {
             {
                 continue;
             }
-            let ei_off = self
-                .draw_offsets
-                .get(&entity_idx)
-                .map_or(0, |o| o.entity_index);
+            let ei_off = self.picking_offsets.get(&entity_idx).copied().unwrap_or(0);
             for primitive in &renderer.primitives {
                 if let Some(instance) = primitive.material.pass(RenderPassType::EntityIndex) {
                     pass.add_draw_command(

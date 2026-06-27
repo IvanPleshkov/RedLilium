@@ -1079,6 +1079,7 @@ impl AppHandler for Editor {
             && scene_view.has_viewport()
         {
             scene_view.fill_transform_rings(&ew.world);
+            scene_view.fill_picking_rings(&ew.world);
             // Upload meshes created since last frame through this frame's graph.
             scene_view.flush_uploads(&mut graph);
         }
