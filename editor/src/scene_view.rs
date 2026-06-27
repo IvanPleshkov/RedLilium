@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 use redlilium_core::material::CpuMaterial;
 use redlilium_core::math::mat4_to_cols_array_2d;
 use redlilium_ecs::{
-    Camera, GlobalTransform, MeshRenderer, PrimitiveMaterial, RenderPassType, Visibility, World,
-    shaders,
+    Camera, CameraTarget, Entity, GlobalTransform, MeshRenderer, PrimitiveMaterial, RenderPassType,
+    Visibility, World, shaders,
 };
 use redlilium_graphics::{
     Buffer, BufferDescriptor, BufferTextureCopyRegion, BufferTextureLayout, BufferUsage,
@@ -29,16 +29,12 @@ const DEFAULT_MATERIAL_PROPS: [f32; 4] = [0.6, 0.6, 0.65, 1.0];
 /// Manages GPU resources and rendering for the editor's SceneView panel.
 pub struct SceneViewState {
     device: Arc<GraphicsDevice>,
-    /// Off-screen scene color target (the "presentation texture" egui samples).
-    /// Rendered into instead of the swapchain — see the (ii) render-to-texture
-    /// model: the scene is its own off-screen pipeline; egui composites this.
-    color_texture: Arc<redlilium_graphics::Texture>,
-    /// Format of `color_texture` (swapchain format), for resize recreation.
+    /// Format of the scene color target (swapchain format), for (re)creation. The
+    /// scene's off-screen color+depth now live in a [`CameraTarget`] on the
+    /// camera (the (ii) render-to-texture model); `ensure_camera_target` manages
+    /// them. Separate from the window-sized `depth_texture` used by the
+    /// entity-index/picking pass (decoupled — that pass clears its own depth).
     color_format: TextureFormat,
-    /// Depth target paired with `color_texture` (panel-sized). Separate from the
-    /// window-sized `depth_texture` used by the entity-index/picking pass, so the
-    /// scene's render-to-texture is decoupled from picking.
-    scene_depth: Arc<redlilium_graphics::Texture>,
     depth_texture: Arc<redlilium_graphics::Texture>,
     opaque_material: Arc<Material>,
     cpu_material: Arc<CpuMaterial>,
@@ -105,8 +101,6 @@ impl SceneViewState {
         let entity_index_material =
             shaders::create_entity_index_material(&device, TextureFormat::Depth32Float);
 
-        let color_texture = Self::create_color_texture(&device, 256, 256, surface_format);
-        let scene_depth = Self::create_depth_texture(&device, 256, 256);
         let depth_texture = Self::create_depth_texture(&device, 256, 256);
         let entity_index_texture = Self::create_entity_index_texture(&device, 256, 256);
 
@@ -153,9 +147,7 @@ impl SceneViewState {
 
         Self {
             device,
-            color_texture,
             color_format: surface_format,
-            scene_depth,
             depth_texture,
             opaque_material,
             cpu_material,
@@ -335,40 +327,68 @@ impl SceneViewState {
         true
     }
 
-    /// Resize the scene color + depth targets to the SceneView panel's physical
-    /// size (the scene renders into the full texture; egui shows it 1:1). Returns
-    /// the (possibly recreated) color texture so the caller can refresh egui.
-    pub fn resize_scene_target(&mut self, width: u32, height: u32) {
+    /// Ensure the `camera` entity has a [`CameraTarget`] sized to the SceneView
+    /// panel (the scene renders into it; egui shows it 1:1). Recreates the
+    /// color+depth on size change. Returns the color texture so the caller can
+    /// (re)register it with egui.
+    pub fn ensure_camera_target(
+        &mut self,
+        world: &mut World,
+        camera: Entity,
+        width: u32,
+        height: u32,
+    ) -> Arc<redlilium_graphics::Texture> {
         let width = width.max(1);
         let height = height.max(1);
-        if (width, height) == self.scene_target_size {
-            return;
+        let stale = (width, height) != self.scene_target_size
+            || world.get::<CameraTarget>(camera).is_none();
+        if stale {
+            let color = Self::create_color_texture(&self.device, width, height, self.color_format);
+            let depth = Self::create_depth_texture(&self.device, width, height);
+            let _ = world.insert(
+                camera,
+                CameraTarget::new(color.clone(), depth, [0.055, 0.063, 0.078, 1.0]),
+            );
+            self.scene_target_size = (width, height);
+            color
+        } else {
+            world
+                .get::<CameraTarget>(camera)
+                .map(|t| t.color.clone())
+                .expect("CameraTarget present (checked above)")
         }
-        self.color_texture =
-            Self::create_color_texture(&self.device, width, height, self.color_format);
-        self.scene_depth = Self::create_depth_texture(&self.device, width, height);
-        self.scene_target_size = (width, height);
     }
 
-    /// Build a graphics pass that renders ECS entities to the swapchain
-    /// at the SceneView panel's viewport.
+    /// Build a graphics pass that renders ECS entities into the camera's
+    /// off-screen [`CameraTarget`] (egui samples it). The texture is the whole
+    /// viewport — no viewport/scissor needed.
     pub fn build_scene_pass(&self, world: &World) -> Option<GraphicsPass> {
         let renderers = world.read::<MeshRenderer>().ok()?;
         let visibilities = world.read::<Visibility>().ok()?;
 
+        // The scene's color+depth live on the camera (set by ensure_camera_target).
+        // The editor camera is EDITOR-flagged, so use `read_all` (the filtered
+        // `read` iterator skips editor/disabled entities).
+        let (color, depth, clear) = {
+            let targets = world.read_all::<CameraTarget>().ok()?;
+            let (_, target) = targets.iter().next()?;
+            (
+                target.color.clone(),
+                target.depth.clone(),
+                target.clear_color,
+            )
+        };
+
         let mut pass = GraphicsPass::new("scene_view".into());
 
-        // Render into the off-screen color target (egui samples it). The texture
-        // is the whole viewport — no viewport/scissor needed.
         pass.set_render_targets(
             RenderTargetConfig::new()
                 .with_color(
-                    ColorAttachment::from_texture(self.color_texture.clone())
-                        .with_clear_color(0.055, 0.063, 0.078, 1.0),
+                    ColorAttachment::from_texture(color)
+                        .with_clear_color(clear[0], clear[1], clear[2], clear[3]),
                 )
                 .with_depth_stencil(
-                    DepthStencilAttachment::from_texture(self.scene_depth.clone())
-                        .with_clear_depth(1.0),
+                    DepthStencilAttachment::from_texture(depth).with_clear_depth(1.0),
                 ),
         );
 
@@ -674,12 +694,6 @@ impl SceneViewState {
     /// The graphics device used by this scene view.
     pub fn device(&self) -> &Arc<GraphicsDevice> {
         &self.device
-    }
-
-    /// The off-screen scene color target — register/show this in egui as the
-    /// SceneView panel image (the presentation texture).
-    pub fn color_texture(&self) -> &Arc<redlilium_graphics::Texture> {
-        &self.color_texture
     }
 
     /// Get the GPU material for the opaque color shader.

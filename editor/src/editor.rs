@@ -765,13 +765,15 @@ impl AppHandler for Editor {
         // physical rect) and make sure egui has a texture id for this frame's
         // image. The scene pass below fills this texture; egui samples it (the
         // egui pass depends on the scene pass).
-        if let (Some(scene_view), Some(egui)) =
-            (self.scene_view.as_mut(), self.egui_controller.as_mut())
-        {
-            if let Some([_, _, w, h]) = self.scene_view_rect_phys {
-                scene_view.resize_scene_target(w as u32, h as u32);
-            }
-            let color = scene_view.color_texture().clone();
+        if let (Some(scene_view), Some(egui), Some(ew)) = (
+            self.scene_view.as_mut(),
+            self.egui_controller.as_mut(),
+            self.world.as_mut(),
+        ) {
+            let (w, h) = self
+                .scene_view_rect_phys
+                .map_or((256, 256), |[_, _, w, h]| (w as u32, h as u32));
+            let color = scene_view.ensure_camera_target(&mut ew.world, ew.editor_camera, w, h);
             match self.scene_texture_id {
                 Some(id) => egui.update_user_texture(id, color),
                 None => self.scene_texture_id = Some(egui.register_user_texture(color)),
