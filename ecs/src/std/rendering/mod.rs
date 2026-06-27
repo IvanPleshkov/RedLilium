@@ -35,7 +35,7 @@ pub use resources::{
     CpuBundleInfo, FrameRing, MaterialManager, MaterialManagerError, MeshManager, RenderSchedule,
     TextureManager, TextureManagerError, pack_uniform_bytes,
 };
-pub use systems::{DebugRender, FlushUploads, ForwardRender, ScenePass};
+pub use systems::{DebugRender, EguiRender, FlushUploads, ForwardRender, FrameTarget, ScenePass};
 
 use crate::World;
 

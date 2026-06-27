@@ -14,11 +14,12 @@ use redlilium_ecs::ui::{
     PrefabFileDragPayload, SelectAction, SpawnPrefabAction,
 };
 use redlilium_ecs::{
-    Camera, DebugRender, DrawGrid, DrawSelectionAabb, EcsRunner, Entity, FlushUploads,
-    ForwardRender, FrameRing, FreeFlyCamera, GlobalTransform, GridConfig, MaterialManager,
-    MeshManager, MeshRenderer, Name, PostUpdate, Primitive, Render, RenderSchedule, ScenePass,
-    Schedules, TextureManager, Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera,
-    UpdateGlobalTransforms, Visibility, WindowInput, World, register_std_components,
+    Camera, DebugRender, DrawGrid, DrawSelectionAabb, EcsRunner, EguiRender, Entity, FlushUploads,
+    ForwardRender, FrameRing, FrameTarget, FreeFlyCamera, GlobalTransform, GridConfig,
+    MaterialManager, MeshManager, MeshRenderer, Name, PostUpdate, Primitive, Render,
+    RenderSchedule, ScenePass, Schedules, TextureManager, Transform, Update, UpdateCameraMatrices,
+    UpdateFreeFlyCamera, UpdateGlobalTransforms, Visibility, WindowInput, World,
+    register_std_components,
 };
 use redlilium_graphics::egui::{EguiApp, EguiController};
 use redlilium_graphics::{FrameSchedule, RenderTarget, TextureFormat};
@@ -317,6 +318,7 @@ impl Editor {
         schedules.get_mut::<Render>().add(FlushUploads);
         schedules.get_mut::<Render>().add(ForwardRender);
         schedules.get_mut::<Render>().add(DebugRender);
+        schedules.get_mut::<Render>().add(EguiRender);
         schedules
             .get_mut::<Render>()
             .add_edge::<FlushUploads, ForwardRender>()
@@ -325,6 +327,12 @@ impl Editor {
             .get_mut::<Render>()
             .add_edge::<ForwardRender, DebugRender>()
             .expect("ForwardRender -> DebugRender edge");
+        // egui composites on top of the scene/debug passes; it reads the last
+        // CameraTarget writer (ScenePass) to depend on it, so order it last.
+        schedules
+            .get_mut::<Render>()
+            .add_edge::<DebugRender, EguiRender>()
+            .expect("DebugRender -> EguiRender edge");
 
         // PostUpdate: camera input -> transform propagation -> camera matrices.
         // Camera movement is viewport navigation, not a scene mutation, so it
@@ -802,15 +810,11 @@ impl AppHandler for Editor {
             }
         }
 
-        let mut egui_handle = None;
         let mut scene_view_rect = None;
         let mut pixels_per_point = 1.0;
 
         if self.world.is_some() {
-            let width = ctx.width();
-            let height = ctx.height();
             let elapsed = ctx.elapsed_time() as f64;
-            let render_target = RenderTarget::from_surface(ctx.swapchain_texture());
 
             // begin_frame + grab the (cloned) egui context; the dock below builds
             // UI through the context, so we don't hold the controller resource
@@ -1042,17 +1046,9 @@ impl AppHandler for Editor {
                     )
                 });
             self.egui_wants_keyboard = egui_ctx.wants_keyboard_input();
-
-            // Finish the egui frame and add its pass — via the controller resource
-            // (the dock above is done, so it's free to borrow now).
-            let ew = self.world.as_ref().unwrap();
-            let mut egui = ew.world.resource_mut::<EguiController>();
-            if let Some(egui_pass) = egui.end_frame(&render_target, width, height) {
-                egui_handle = Some(graph.add_graphics_pass(egui_pass));
-            }
-            // Upload any egui atlas changes through this frame's graph (ordered
-            // before the egui draw by the compiler).
-            egui.flush_uploads(&mut graph);
+            // end_frame (finishing the egui frame, producing its draw pass, and
+            // flushing atlas uploads) is now done by the `EguiRender` system in the
+            // Render schedule below — it reads the `FrameTarget` resource set there.
         }
 
         // Update viewport/scissor from SceneView panel rect (outside egui block)
@@ -1109,9 +1105,24 @@ impl AppHandler for Editor {
         let render_active =
             self.scene_view.as_ref().is_some_and(|sv| sv.has_viewport()) && self.world.is_some();
 
-        // Run the `Render` schedule (FlushUploads -> ForwardRender): the scene
-        // pass is added to the graph and its handle recorded in `ScenePass`.
-        if render_active && let Some(ew) = self.world.as_mut() {
+        // Provide this frame's swapchain target to the render systems — the
+        // EguiRender system composites the egui overlay onto it. Set every frame
+        // (the surface texture is per-frame).
+        if let Some(ew) = self.world.as_mut() {
+            let target = RenderTarget::from_surface(ctx.swapchain_texture());
+            ew.world.insert_resource(FrameTarget {
+                target,
+                width: ctx.width(),
+                height: ctx.height(),
+            });
+        }
+
+        // Run the `Render` schedule (FlushUploads -> ForwardRender -> DebugRender ->
+        // EguiRender). Always run it so the egui overlay is drawn even when the
+        // scene view is hidden; the scene/debug systems no-op without a viewport.
+        // EguiRender adds the egui pass and depends it on the last CameraTarget
+        // writer (`ScenePass`), so no editor-side dependency wiring is needed.
+        if let Some(ew) = self.world.as_mut() {
             ew.world.resource_mut::<RenderSchedule>().set(graph);
             ew.schedules
                 .run_schedule::<Render>(&mut ew.world, &self.runner);
@@ -1124,14 +1135,6 @@ impl AppHandler for Editor {
 
         if render_active && let Some(ew) = self.world.as_ref() {
             let scene_view = self.scene_view.as_ref().unwrap();
-
-            // The ForwardRender + DebugRender systems wrote the scene (and debug)
-            // passes into the graph; `ScenePass` holds the last CameraTarget
-            // writer. The egui overlay samples the CameraTarget, so depend on it.
-            let last_target_writer = ew.world.resource::<ScenePass>().0;
-            if let (Some(eh), Some(lw)) = (egui_handle, last_target_writer) {
-                graph.add_dependency(eh, lw);
-            }
 
             // Entity index pass (picking) — independent target + depth now.
             if let Some(ei_pass) = scene_view.build_entity_index_pass(&ew.world) {

@@ -9,6 +9,8 @@ use redlilium_graphics::{
     RenderTargetConfig,
 };
 
+use redlilium_graphics::egui::EguiController;
+
 use crate::std::components::{Camera, GlobalTransform, Visibility};
 use crate::system::SystemError;
 use crate::{DebugDrawer, DebugDrawerRenderer, System, SystemContext};
@@ -227,6 +229,63 @@ impl System for DebugRender {
         };
         if let Some(h) = debug_handle {
             world.resource_mut::<ScenePass>().0 = Some(h);
+        }
+        Ok(())
+    }
+}
+
+/// The frame's final (swapchain) render target plus its size, set by the app each
+/// frame BEFORE running the [`Render`](crate::Render) schedule. Render systems
+/// that composite to the screen — currently [`EguiRender`] — read it. `RenderTarget`
+/// is owned + Send + Sync, so this lives in the world; the app replaces it each
+/// frame. (Off-screen passes target a [`CameraTarget`] texture instead.)
+pub struct FrameTarget {
+    pub target: RenderTarget,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Finishes the egui frame (the app calls `begin_frame` + builds UI before the
+/// Render schedule) and contributes its draw pass to the frame graph, targeting
+/// [`FrameTarget`] (the swapchain). Edge `DebugRender -> EguiRender` orders it last
+/// so it can depend on the CameraTarget's last writer ([`ScenePass`]) — an egui
+/// overlay samples that texture, so its draw must come after the scene/debug passes.
+///
+/// The egui controller is the [`EguiController`] resource (see the editor's
+/// `on_init`); this system is a no-op when any of its inputs are absent.
+pub struct EguiRender;
+
+impl System for EguiRender {
+    type Result = ();
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<Self::Result, SystemError> {
+        let world = ctx.world();
+        if !world.has_resource::<EguiController>()
+            || !world.has_resource::<FrameTarget>()
+            || !world.has_resource::<RenderSchedule>()
+        {
+            return Ok(());
+        }
+        // The pass egui must order after (the CameraTarget's last writer), if any.
+        let scene_handle = world
+            .has_resource::<ScenePass>()
+            .then(|| world.resource::<ScenePass>().0)
+            .flatten();
+
+        let mut egui = world.resource_mut::<EguiController>();
+        let pass = {
+            let ft = world.resource::<FrameTarget>();
+            egui.end_frame(&ft.target, ft.width, ft.height)
+        };
+        let mut schedule = world.resource_mut::<RenderSchedule>();
+        if let Some(graph) = schedule.graph_mut() {
+            // Atlas uploads first (graph-ordered before the egui draw).
+            egui.flush_uploads(graph);
+            if let Some(pass) = pass {
+                let handle = graph.add_graphics_pass(pass);
+                if let Some(scene_handle) = scene_handle {
+                    graph.add_dependency(handle, scene_handle);
+                }
+            }
         }
         Ok(())
     }
