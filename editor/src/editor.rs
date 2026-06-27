@@ -14,7 +14,7 @@ use redlilium_ecs::ui::{
     PrefabFileDragPayload, SelectAction, SpawnPrefabAction,
 };
 use redlilium_ecs::{
-    Camera, DrawGrid, DrawSelectionAabb, EcsRunner, Entity, FlushUploads, FreeFlyCamera,
+    Camera, DrawGrid, DrawSelectionAabb, EcsRunner, Entity, FlushUploads, FrameRing, FreeFlyCamera,
     GlobalTransform, GridConfig, MaterialManager, MeshManager, MeshRenderer, Name, PostUpdate,
     Primitive, Render, RenderSchedule, Schedules, TextureManager, Transform, Update,
     UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms, Visibility, WindowInput,
@@ -181,6 +181,14 @@ impl Editor {
         world.insert_resource(MeshManager::new(scene_view.device().clone()));
         // Holds the per-frame render graph while the `Render` schedule runs.
         world.insert_resource(RenderSchedule::empty());
+
+        // Scene forward-pass dynamic-uniform ring (an ECS resource). Give the
+        // scene view its buffer so per-primitive materials bind it; the buffer is
+        // needed before any entity is created below.
+        let frame_ring = FrameRing::new(scene_view.device(), 1 << 20, "scene_frame_ring")
+            .expect("Failed to create scene frame ring");
+        scene_view.set_frame_ring_buffer(frame_ring.buffer().clone());
+        world.insert_resource(frame_ring);
 
         // Register materials so prefab deserialization can find them
         {

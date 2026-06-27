@@ -63,11 +63,12 @@ pub struct SceneViewState {
     rect_pick_layout: [u32; 3],
 
     // --- Per-draw dynamic-uniform rings ---
-    /// Scene forward-pass dynamic uniforms. One `FrameRing` serves both the
-    /// transform group and the material-props group — distinct allocations in
-    /// the same buffer, bound at different dynamic offsets. (Becomes an ECS
-    /// resource for the ForwardRender system.)
-    frame_ring: FrameRing,
+    /// Buffer of the scene forward `FrameRing` — now an ECS resource (filled by
+    /// fill_transform_rings via the world, pushed to by the ForwardRender system
+    /// later). Held here so the per-primitive material can bind it (group 0
+    /// transform + group 1 material props, same buffer, different dyn offsets).
+    /// Set by `set_frame_ring_buffer` after the resource is created.
+    frame_ring_buffer: Option<Arc<Buffer>>,
     /// Ring of `EntityIndexUniforms` (picking pass), filled per frame. Stays
     /// editor-side with picking.
     entity_index_ring: RingBuffer,
@@ -125,8 +126,6 @@ impl SceneViewState {
         // Persistent per-entity transform rings (filled each frame, monotonic
         // with wrap; sized generously so a region is reused only many frames
         // later — after its fence — avoiding frames-in-flight races).
-        let frame_ring = FrameRing::new(&device, 1 << 20, "scene_frame_ring")
-            .expect("Failed to create scene frame ring");
         let entity_index_ring = RingBuffer::new(
             &device,
             1 << 20,
@@ -154,7 +153,7 @@ impl SceneViewState {
             rect_readback_buffer,
             rect_result: Arc::new(Mutex::new(Vec::new())),
             rect_pick_layout: [0; 3],
-            frame_ring,
+            frame_ring_buffer: None,
             entity_index_ring,
             draw_offsets: std::collections::HashMap::new(),
             pending_uploads: Vec::new(),
@@ -184,13 +183,17 @@ impl SceneViewState {
         // Group 0 (transform) and group 1 (material props) bind shared rings as
         // dynamic uniforms; per-draw offsets are filled each frame by
         // `fill_transform_rings`.
+        let frame_ring_buffer = self
+            .frame_ring_buffer
+            .as_ref()
+            .expect("frame ring buffer set before entities are created");
         let material = shaders::create_opaque_color_primitive_material_ring(
             &self.opaque_material,
             Some(&self.entity_index_material),
             &self.cpu_material,
-            self.frame_ring.buffer(), // group 0 (transform)
+            frame_ring_buffer, // group 0 (transform)
             Some(self.entity_index_ring.buffer()),
-            self.frame_ring.buffer(), // group 1 (material props) — same ring
+            frame_ring_buffer, // group 1 (material props) — same ring
         );
 
         // Allocate the mesh now; its data uploads through the frame graph on the
@@ -227,6 +230,9 @@ impl SceneViewState {
         let Ok(globals) = world.read::<GlobalTransform>() else {
             return;
         };
+        // The forward ring is an ECS resource (the ForwardRender system will push
+        // to it directly; for now fill does, through the world).
+        let mut ring = world.resource_mut::<FrameRing>();
 
         for (idx, renderer) in renderers.iter() {
             let model = globals
@@ -238,7 +244,7 @@ impl SceneViewState {
                 view_projection: vp,
                 model,
             };
-            let forward = self.frame_ring.push(bytemuck::bytes_of(&fwd));
+            let forward = ring.push(bytemuck::bytes_of(&fwd));
 
             let ei = shaders::EntityIndexUniforms {
                 view_projection: vp,
@@ -260,7 +266,7 @@ impl SceneViewState {
                         .map(|ci| redlilium_ecs::pack_uniform_bytes(&ci.material, &ci.values))
                         .filter(|b| !b.is_empty())
                         .unwrap_or_else(|| bytemuck::bytes_of(&DEFAULT_MATERIAL_PROPS).to_vec());
-                    self.frame_ring.push(&bytes)
+                    ring.push(&bytes)
                 })
                 .collect();
 
@@ -683,6 +689,12 @@ impl SceneViewState {
     /// The graphics device used by this scene view.
     pub fn device(&self) -> &Arc<GraphicsDevice> {
         &self.device
+    }
+
+    /// Set the forward `FrameRing`'s buffer (the resource it wraps), so
+    /// per-primitive materials can bind it. Call once, before creating entities.
+    pub fn set_frame_ring_buffer(&mut self, buffer: Arc<Buffer>) {
+        self.frame_ring_buffer = Some(buffer);
     }
 
     /// Get the GPU material for the opaque color shader.
