@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex};
 use redlilium_core::material::CpuMaterial;
 use redlilium_core::math::mat4_to_cols_array_2d;
 use redlilium_ecs::{
-    Camera, CameraTarget, Entity, FrameRing, GlobalTransform, MeshRenderer, PrimitiveMaterial,
-    RenderPassType, Visibility, World, shaders,
+    Camera, CameraTarget, Entity, GlobalTransform, MeshRenderer, PrimitiveMaterial, RenderPassType,
+    Visibility, World, shaders,
 };
 use redlilium_graphics::{
     Buffer, BufferDescriptor, BufferTextureCopyRegion, BufferTextureLayout, BufferUsage,
@@ -21,10 +21,6 @@ use redlilium_graphics::{
     TextureCopyLocation, TextureDescriptor, TextureFormat, TextureOrigin, TextureUsage,
     TransferConfig, TransferOperation, TransferPass, Viewport,
 };
-
-/// Default material props (base_color) for primitives with no CPU instance —
-/// matches `create_opaque_color_primitive_material_ring`'s default gray.
-const DEFAULT_MATERIAL_PROPS: [f32; 4] = [0.6, 0.6, 0.65, 1.0];
 
 /// Manages GPU resources and rendering for the editor's SceneView panel.
 pub struct SceneViewState {
@@ -72,25 +68,13 @@ pub struct SceneViewState {
     /// Ring of `EntityIndexUniforms` (picking pass), filled per frame. Stays
     /// editor-side with picking.
     entity_index_ring: RingBuffer,
-    /// Per-entity forward-pass ring offsets recorded by [`fill_transform_rings`],
-    /// keyed by entity index.
-    draw_offsets: std::collections::HashMap<u32, EntityDrawOffsets>,
     /// Per-entity entity-index (picking) ring offset, recorded by
-    /// [`fill_picking_rings`]. Separate from `draw_offsets` because picking stays
-    /// editor-side while the forward fill moves to the ForwardRender system.
+    /// [`fill_picking_rings`]. The forward-pass offsets now live in the
+    /// ForwardRender system (computed inline per draw).
     picking_offsets: std::collections::HashMap<u32, u32>,
     /// Pending mesh-data uploads (from [`create_entity_resources`]), flushed into
     /// the frame graph by [`flush_uploads`](Self::flush_uploads).
     pending_uploads: Vec<TransferOperation>,
-}
-
-/// Per-frame forward-pass dynamic-offset slots for one entity's draws.
-#[derive(Default)]
-struct EntityDrawOffsets {
-    /// Forward-pass transform ring offset (group 0), shared by all primitives.
-    forward: u32,
-    /// Material-props ring offset (group 1), one per primitive in order.
-    props: Vec<u32>,
 }
 
 impl SceneViewState {
@@ -157,7 +141,6 @@ impl SceneViewState {
             rect_pick_layout: [0; 3],
             frame_ring_buffer: None,
             entity_index_ring,
-            draw_offsets: std::collections::HashMap::new(),
             picking_offsets: std::collections::HashMap::new(),
             pending_uploads: Vec::new(),
         }
@@ -208,65 +191,6 @@ impl SceneViewState {
         self.pending_uploads.extend(ops);
 
         (material, gpu_mesh)
-    }
-
-    /// Fill the per-draw dynamic-uniform rings for this frame and record each
-    /// entity's offsets. Call once per frame before building the scene and pick
-    /// passes. Transforms (group 0) and material props (group 1) are written into
-    /// persistent rings via `RingBuffer::write` (no synchronous GPU writes);
-    /// offsets advance monotonically and wrap when full.
-    pub fn fill_transform_rings(&mut self, world: &World) {
-        self.draw_offsets.clear();
-
-        let Ok(cameras) = world.read_all::<Camera>() else {
-            return;
-        };
-        let vp = match cameras.iter().next() {
-            Some((_, camera)) => mat4_to_cols_array_2d(&camera.view_projection()),
-            None => return,
-        };
-        drop(cameras);
-
-        let Ok(renderers) = world.read::<MeshRenderer>() else {
-            return;
-        };
-        let Ok(globals) = world.read::<GlobalTransform>() else {
-            return;
-        };
-        // The forward ring is an ECS resource (the ForwardRender system will push
-        // to it directly; for now fill does, through the world).
-        let mut ring = world.resource_mut::<FrameRing>();
-
-        for (idx, renderer) in renderers.iter() {
-            let model = globals
-                .get(idx)
-                .map(|g| mat4_to_cols_array_2d(&g.0))
-                .unwrap_or_else(|| mat4_to_cols_array_2d(&redlilium_core::math::Mat4::identity()));
-
-            let fwd = shaders::OpaqueColorUniforms {
-                view_projection: vp,
-                model,
-            };
-            let forward = ring.push(bytemuck::bytes_of(&fwd));
-
-            // Material props (group 1), one ring slot per primitive in order.
-            let props: Vec<u32> = renderer
-                .primitives
-                .iter()
-                .map(|primitive| {
-                    let bytes = primitive
-                        .material
-                        .cpu_instance()
-                        .map(|ci| redlilium_ecs::pack_uniform_bytes(&ci.material, &ci.values))
-                        .filter(|b| !b.is_empty())
-                        .unwrap_or_else(|| bytemuck::bytes_of(&DEFAULT_MATERIAL_PROPS).to_vec());
-                    ring.push(&bytes)
-                })
-                .collect();
-
-            self.draw_offsets
-                .insert(idx, EntityDrawOffsets { forward, props });
-        }
     }
 
     /// Fill the picking (entity-index) ring for this frame and record each
@@ -378,64 +302,6 @@ impl SceneViewState {
                 .map(|t| t.color.clone())
                 .expect("CameraTarget present (checked above)")
         }
-    }
-
-    /// Build a graphics pass that renders ECS entities into the camera's
-    /// off-screen [`CameraTarget`] (egui samples it). The texture is the whole
-    /// viewport — no viewport/scissor needed.
-    pub fn build_scene_pass(&self, world: &World) -> Option<GraphicsPass> {
-        let renderers = world.read::<MeshRenderer>().ok()?;
-        let visibilities = world.read::<Visibility>().ok()?;
-
-        // The scene's color+depth live on the camera (set by ensure_camera_target).
-        // The editor camera is EDITOR-flagged, so use `read_all` (the filtered
-        // `read` iterator skips editor/disabled entities).
-        let (color, depth, clear) = {
-            let targets = world.read_all::<CameraTarget>().ok()?;
-            let (_, target) = targets.iter().next()?;
-            (
-                target.color.clone(),
-                target.depth.clone(),
-                target.clear_color,
-            )
-        };
-
-        let mut pass = GraphicsPass::new("scene_view".into());
-
-        pass.set_render_targets(
-            RenderTargetConfig::new()
-                .with_color(
-                    ColorAttachment::from_texture(color)
-                        .with_clear_color(clear[0], clear[1], clear[2], clear[3]),
-                )
-                .with_depth_stencil(
-                    DepthStencilAttachment::from_texture(depth).with_clear_depth(1.0),
-                ),
-        );
-
-        for (entity_idx, renderer) in renderers.iter() {
-            if let Some(vis) = visibilities.get(entity_idx)
-                && !vis.is_visible()
-            {
-                continue;
-            }
-            let offsets = self.draw_offsets.get(&entity_idx);
-            let fwd_off = offsets.map_or(0, |o| o.forward);
-            for (prim_idx, primitive) in renderer.primitives.iter().enumerate() {
-                if let Some(instance) = primitive.material.pass(RenderPassType::Forward) {
-                    // group 0 = entity transform, group 1 = this primitive's props.
-                    let props_off = offsets
-                        .and_then(|o| o.props.get(prim_idx).copied())
-                        .unwrap_or(0);
-                    pass.add_draw_command(
-                        DrawCommand::new(primitive.mesh.clone(), Arc::clone(instance))
-                            .with_dynamic_offsets(vec![vec![fwd_off], vec![props_off]]),
-                    );
-                }
-            }
-        }
-
-        Some(pass)
     }
 
     /// Build a graphics pass that renders entity indices to the entity-index

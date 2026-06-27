@@ -14,11 +14,11 @@ use redlilium_ecs::ui::{
     PrefabFileDragPayload, SelectAction, SpawnPrefabAction,
 };
 use redlilium_ecs::{
-    Camera, DrawGrid, DrawSelectionAabb, EcsRunner, Entity, FlushUploads, FrameRing, FreeFlyCamera,
-    GlobalTransform, GridConfig, MaterialManager, MeshManager, MeshRenderer, Name, PostUpdate,
-    Primitive, Render, RenderSchedule, Schedules, TextureManager, Transform, Update,
-    UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms, Visibility, WindowInput,
-    World, register_std_components,
+    Camera, CameraTarget, DrawGrid, DrawSelectionAabb, EcsRunner, Entity, FlushUploads,
+    ForwardRender, FrameRing, FreeFlyCamera, GlobalTransform, GridConfig, MaterialManager,
+    MeshManager, MeshRenderer, Name, PostUpdate, Primitive, Render, RenderSchedule, ScenePass,
+    Schedules, TextureManager, Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera,
+    UpdateGlobalTransforms, Visibility, WindowInput, World, register_std_components,
 };
 use redlilium_graphics::egui::{EguiApp, EguiController};
 use redlilium_graphics::{FrameSchedule, RenderTarget, TextureFormat};
@@ -189,6 +189,9 @@ impl Editor {
             .expect("Failed to create scene frame ring");
         scene_view.set_frame_ring_buffer(frame_ring.buffer().clone());
         world.insert_resource(frame_ring);
+        // The ForwardRender system records its scene-pass handle here so the egui
+        // overlay + debug pass can depend on it.
+        world.insert_resource(ScenePass::default());
 
         // Register materials so prefab deserialization can find them
         {
@@ -312,8 +315,14 @@ impl Editor {
             .add(DrawSelectionAabb::default());
         schedules.get_mut::<Update>().set_read_only(true);
 
-        // Render schedule: flush GPU-upload managers into the frame graph.
+        // Render schedule: flush GPU-upload managers, then render the forward
+        // scene into the camera target (reads the just-uploaded meshes).
         schedules.get_mut::<Render>().add(FlushUploads);
+        schedules.get_mut::<Render>().add(ForwardRender);
+        schedules
+            .get_mut::<Render>()
+            .add_edge::<FlushUploads, ForwardRender>()
+            .expect("FlushUploads -> ForwardRender edge");
 
         // PostUpdate: camera input -> transform propagation -> camera matrices.
         // Camera movement is viewport navigation, not a scene mutation, so it
@@ -752,22 +761,10 @@ impl AppHandler for Editor {
         // go into this graph; ordering is an explicit intra-graph dependency.
         let mut graph = ctx.acquire_graph();
 
-        // Render-schedule bracket: hand the frame graph to the ECS, run the
-        // `Render` schedule (systems contribute passes via the `RenderSchedule`
-        // resource), then take it back to keep building imperatively. Passes are
-        // ordered by intra-graph dependencies, so this round-trip is position-
-        // independent. (No render systems yet — currently a no-op pass-through;
-        // imperative passes migrate into `Render` systems incrementally.)
-        if let Some(ew) = self.world.as_mut() {
-            ew.world.resource_mut::<RenderSchedule>().set(graph);
-            ew.schedules
-                .run_schedule::<Render>(&mut ew.world, &self.runner);
-            graph = ew
-                .world
-                .resource_mut::<RenderSchedule>()
-                .take()
-                .expect("RenderSchedule must hold the graph after the Render schedule");
-        }
+        // The `Render` schedule (FlushUploads + ForwardRender) is run further
+        // below, AFTER ensure_camera_target + the scene mesh uploads, so the
+        // ForwardRender system renders into this frame's CameraTarget with the
+        // meshes already uploaded.
 
         // Size the off-screen scene target to the SceneView panel (last frame's
         // physical rect) and make sure egui has a texture id for this frame's
@@ -1073,69 +1070,80 @@ impl AppHandler for Editor {
             .as_mut()
             .and_then(|sv| sv.take_pending_rect_pick());
 
-        // Fill per-entity transform rings for this frame (writes VP*model into a
-        // persistent ring; draws select their entity's slot via a dynamic offset).
+        // The forward fill is done by the ForwardRender system; here we fill only
+        // the picking ring and upload scene meshes (before the scene pass).
         if let (Some(scene_view), Some(ew)) = (&mut self.scene_view, self.world.as_ref())
             && scene_view.has_viewport()
         {
-            scene_view.fill_transform_rings(&ew.world);
             scene_view.fill_picking_rings(&ew.world);
-            // Upload meshes created since last frame through this frame's graph.
             scene_view.flush_uploads(&mut graph);
         }
 
-        if let Some(scene_view) = &self.scene_view
-            && scene_view.has_viewport()
-            && self.world.is_some()
-        {
-            let ew = self.world.as_ref().unwrap();
+        let render_active =
+            self.scene_view.as_ref().is_some_and(|sv| sv.has_viewport()) && self.world.is_some();
 
-            // (Manager uploads now flush in the `Render` schedule via
-            // `FlushUploads`, before this scene pass — see the bracket above.)
+        // Run the `Render` schedule (FlushUploads -> ForwardRender): the scene
+        // pass is added to the graph and its handle recorded in `ScenePass`.
+        if render_active && let Some(ew) = self.world.as_mut() {
+            ew.world.resource_mut::<RenderSchedule>().set(graph);
+            ew.schedules
+                .run_schedule::<Render>(&mut ew.world, &self.runner);
+            graph = ew
+                .world
+                .resource_mut::<RenderSchedule>()
+                .take()
+                .expect("RenderSchedule must hold the graph after the Render schedule");
+        }
 
-            if let Some(mut scene_pass) = scene_view.build_scene_pass(&ew.world) {
-                // Append debug draw lines into the scene pass if available
-                if let Some(renderer) = &mut self.debug_drawer_renderer {
-                    let drawer = ew.debug_drawer.read();
-                    let vertices = drawer.take_render_data();
-                    if !vertices.is_empty() {
-                        if let Ok(cameras) = ew.world.read_all::<Camera>()
-                            && let Some((_, camera)) = cameras.iter().next()
-                        {
-                            renderer
-                                .update_view_proj(mat4_to_cols_array_2d(&camera.view_projection()));
-                        }
-                        renderer.append_to_pass(&mut scene_pass, &vertices);
+        if render_active && let Some(ew) = self.world.as_ref() {
+            let scene_view = self.scene_view.as_ref().unwrap();
+            let scene_handle = ew.world.resource::<ScenePass>().0;
+            // The last pass that writes the CameraTarget (egui depends on it).
+            let mut last_target_writer = scene_handle;
+
+            // Debug lines: a separate pass that loads the CameraTarget, ordered
+            // after the forward scene pass.
+            if let Some(scene_h) = scene_handle
+                && let Some(renderer) = &mut self.debug_drawer_renderer
+            {
+                let vertices = ew.debug_drawer.read().take_render_data();
+                if !vertices.is_empty()
+                    && let Ok(targets) = ew.world.read_all::<CameraTarget>()
+                    && let Some((_, target)) = targets.iter().next()
+                {
+                    if let Ok(cameras) = ew.world.read_all::<Camera>()
+                        && let Some((_, camera)) = cameras.iter().next()
+                    {
+                        renderer.update_view_proj(mat4_to_cols_array_2d(&camera.view_projection()));
+                    }
+                    let rt = RenderTarget::from_texture(target.color.clone());
+                    if let Some(debug_pass) =
+                        renderer.create_graphics_pass(&vertices, &rt, Some(&target.depth))
+                    {
+                        let debug_h = graph.add_graphics_pass(debug_pass);
+                        graph.add_dependency(debug_h, scene_h);
+                        last_target_writer = Some(debug_h);
                     }
                 }
+            }
 
-                let scene_pass_handle = graph.add_graphics_pass(scene_pass);
+            // The egui overlay samples the CameraTarget; depend on its last writer.
+            if let (Some(eh), Some(lw)) = (egui_handle, last_target_writer) {
+                graph.add_dependency(eh, lw);
+            }
 
-                // The egui overlay (already added) draws on top of the scene.
-                if let Some(eh) = egui_handle {
-                    graph.add_dependency(eh, scene_pass_handle);
+            // Entity index pass (picking) — independent target + depth now.
+            if let Some(ei_pass) = scene_view.build_entity_index_pass(&ew.world) {
+                let ei_handle = graph.add_graphics_pass(ei_pass);
+                if let Some([px, py]) = pending_pick {
+                    let readback_pass = scene_view.build_pick_readback(px, py);
+                    let readback_handle = graph.add_transfer_pass(readback_pass);
+                    graph.add_dependency(readback_handle, ei_handle);
                 }
-
-                // Entity index pass (for picking) — renders to R32Uint texture
-                // Depends on scene pass because both write to the shared depth texture.
-                if let Some(ei_pass) = scene_view.build_entity_index_pass(&ew.world) {
-                    let ei_handle = graph.add_graphics_pass(ei_pass);
-                    graph.add_dependency(ei_handle, scene_pass_handle);
-
-                    // Single-pixel readback transfer.
-                    if let Some([px, py]) = pending_pick {
-                        log::info!("Submitting pick readback at ({px}, {py})");
-                        let readback_pass = scene_view.build_pick_readback(px, py);
-                        let readback_handle = graph.add_transfer_pass(readback_pass);
-                        graph.add_dependency(readback_handle, ei_handle);
-                    }
-
-                    // Rect selection readback transfer.
-                    if let Some([rx, ry, rw, rh]) = pending_rect {
-                        let rect_readback_pass = scene_view.build_rect_readback(rx, ry, rw, rh);
-                        let rect_rb_handle = graph.add_transfer_pass(rect_readback_pass);
-                        graph.add_dependency(rect_rb_handle, ei_handle);
-                    }
+                if let Some([rx, ry, rw, rh]) = pending_rect {
+                    let rect_readback_pass = scene_view.build_rect_readback(rx, ry, rw, rh);
+                    let rect_rb_handle = graph.add_transfer_pass(rect_readback_pass);
+                    graph.add_dependency(rect_rb_handle, ei_handle);
                 }
             }
         }
