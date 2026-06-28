@@ -16,6 +16,8 @@ use super::material_bundle::{
     MaterialBundle, RenderPassType, deserialize_material_value, serialize_material_value,
 };
 use crate::serialize::Value;
+use crate::std::rendering::MeshHandle;
+use crate::std::rendering::loaders::MeshSource;
 
 // ---------------------------------------------------------------------------
 // PrimitiveMaterial — the per-primitive material instance
@@ -130,35 +132,41 @@ impl PrimitiveMaterial {
 // Primitive — one (mesh, material) pair
 // ---------------------------------------------------------------------------
 
-/// A single renderable primitive: a mesh drawn with a material. All primitives
-/// of a [`MeshRenderer`] share the entity's transform.
+/// A single renderable primitive: a mesh (bound by asset source) drawn with a
+/// material. All primitives of a [`MeshRenderer`] share the entity's transform.
+///
+/// The mesh resolves **asynchronously**: `source` is the serialized identity and
+/// `handle` (from [`MeshManager::request`](super::super::MeshManager::request))
+/// resolves to the `Arc<Mesh>` once it loads. Use [`mesh`](Self::mesh) /
+/// [`aabb`](Self::aabb), which return `None` until then.
 #[derive(Debug, Clone)]
 pub struct Primitive {
-    /// The GPU mesh handle.
-    pub mesh: Arc<Mesh>,
+    /// The mesh's asset identity (serialized).
+    pub source: MeshSource,
+    /// Demand-to-load handle resolving to the shared `Arc<Mesh>` (not serialized).
+    pub handle: MeshHandle,
     /// The material instance for this primitive.
     pub material: PrimitiveMaterial,
-    /// Cached local-space AABB (from CPU mesh data at creation time).
-    pub aabb: Option<Aabb>,
 }
 
 impl Primitive {
-    /// Create a primitive from a mesh and material (no cached AABB).
-    pub fn new(mesh: Arc<Mesh>, material: PrimitiveMaterial) -> Self {
+    /// Create a primitive from a mesh source + its request handle and a material.
+    pub fn new(source: MeshSource, handle: MeshHandle, material: PrimitiveMaterial) -> Self {
         Self {
-            mesh,
+            source,
+            handle,
             material,
-            aabb: None,
         }
     }
 
-    /// Create a primitive with a precomputed local-space AABB.
-    pub fn with_aabb(mesh: Arc<Mesh>, material: PrimitiveMaterial, aabb: Aabb) -> Self {
-        Self {
-            mesh,
-            material,
-            aabb: Some(aabb),
-        }
+    /// The resolved GPU mesh, if it has finished loading.
+    pub fn mesh(&self) -> Option<Arc<Mesh>> {
+        self.handle.get()
+    }
+
+    /// The mesh's local-space AABB, once loaded (carried on the `Mesh`).
+    pub fn aabb(&self) -> Option<Aabb> {
+        self.handle.get().and_then(|m| m.aabb())
     }
 }
 
@@ -232,7 +240,7 @@ impl crate::Component for MeshRenderer {
     fn aabb(&self, _world: &crate::World) -> Option<Aabb> {
         self.primitives
             .iter()
-            .filter_map(|p| p.aabb)
+            .filter_map(|p| p.aabb())
             .reduce(|acc, a| acc.union(&a))
     }
 
@@ -242,27 +250,16 @@ impl crate::Component for MeshRenderer {
     ) -> Result<Value, crate::serialize::SerializeError> {
         let mut prims: Vec<Value> = Vec::with_capacity(self.primitives.len());
         for primitive in &self.primitives {
-            let mesh_name = {
-                let world = ctx.world();
-                if !world.has_resource::<super::super::MeshManager>() {
-                    return Err(crate::serialize::SerializeError::FieldError {
-                        field: "mesh".to_owned(),
-                        message: "MeshManager resource not found".into(),
-                    });
+            // The mesh is bound by asset source (serialized as RON), not by name.
+            let source = ron::to_string(&primitive.source).map_err(|e| {
+                crate::serialize::SerializeError::FieldError {
+                    field: "mesh".to_owned(),
+                    message: format!("serialize mesh source: {e}"),
                 }
-                let manager = world.resource::<super::super::MeshManager>();
-                manager
-                    .find_name(&primitive.mesh)
-                    .or_else(|| primitive.mesh.label())
-                    .ok_or_else(|| crate::serialize::SerializeError::FieldError {
-                        field: "mesh".to_owned(),
-                        message: "mesh has no registered name and no label".into(),
-                    })?
-                    .to_owned()
-            };
+            })?;
             let material = serialize_primitive_material(&primitive.material, ctx)?;
             prims.push(Value::Map(vec![
-                ("mesh".to_owned(), Value::String(mesh_name)),
+                ("mesh".to_owned(), Value::String(source)),
                 ("material".to_owned(), material),
             ]));
         }
@@ -313,32 +310,25 @@ impl crate::Component for MeshRenderer {
                 )
             })?;
 
-            // Resolve the mesh first (immutable world borrow), then build the
-            // material (which needs a mutable borrow for MaterialManager).
-            let (mesh, aabb) = {
+            // The "mesh" field is the RON-encoded asset source; request it from
+            // the MeshManager (which loads it asynchronously and shares the Arc).
+            let source: MeshSource = ron::from_str(&mesh_name).map_err(|e| {
+                crate::serialize::DeserializeError::FormatError(format!("mesh source: {e}"))
+            })?;
+            let handle = {
                 let world = ctx.world();
                 if !world.has_resource::<super::super::MeshManager>() {
                     return Err(crate::serialize::DeserializeError::FormatError(
                         "MeshManager resource not found".into(),
                     ));
                 }
-                let manager = world.resource::<super::super::MeshManager>();
-                let mesh = manager.get_mesh(&mesh_name).ok_or_else(|| {
-                    crate::serialize::DeserializeError::FormatError(format!(
-                        "mesh '{mesh_name}' not found in MeshManager"
-                    ))
-                })?;
-                let mesh = Arc::clone(mesh);
-                let aabb = manager.get_aabb_by_mesh(&mesh);
-                (mesh, aabb)
+                world
+                    .resource_mut::<super::super::MeshManager>()
+                    .request(source.clone())
             };
 
             let material = deserialize_primitive_material(&material_val, ctx)?;
-            primitives.push(Primitive {
-                mesh,
-                material,
-                aabb,
-            });
+            primitives.push(Primitive::new(source, handle, material));
         }
 
         ctx.end_struct()?;

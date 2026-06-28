@@ -40,9 +40,9 @@ pub(crate) fn inspect_mesh_renderer_ui(
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("mesh");
-                    match primitive.mesh.label() {
+                    match primitive.mesh().and_then(|m| m.label().map(str::to_owned)) {
                         Some(label) => ui.label(format!("Mesh: {label}")),
-                        None => ui.weak("Mesh (unnamed)"),
+                        None => ui.weak("Mesh (loading…)"),
                     };
                 });
 

@@ -37,8 +37,13 @@ impl AssetLoader for VertexLayoutLoader {
     const EXTENSIONS: &'static [&'static str] = &["vlayout"];
     type Source = VertexLayoutSource;
     type Asset = VertexLayout;
+    type Deps = ();
 
-    fn pipeline(_source: &VertexLayoutSource, env: &LoadEnv) -> Vec<Box<dyn AssetStage>> {
+    fn pipeline(
+        _source: &VertexLayoutSource,
+        _deps: &(),
+        env: &LoadEnv,
+    ) -> Vec<Box<dyn AssetStage>> {
         let mut stages: Vec<Box<dyn AssetStage>> = Vec::new();
         // The read is omitted only if the path didn't resolve — then the decode
         // stage fails cleanly (it receives the unit input instead of bytes).

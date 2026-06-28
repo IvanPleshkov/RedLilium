@@ -5,21 +5,22 @@ use parking_lot::RwLock;
 
 use egui_dock::DockState;
 use redlilium_app::{AppContext, AppHandler, DrawContext};
+use redlilium_assets::{AssetDb, AssetProcessor};
 use redlilium_core::abstract_editor::{ActionQueue, DEFAULT_MAX_UNDO, EditActionHistory};
 use redlilium_core::math::Vec3;
-use redlilium_core::mesh::generators;
 use redlilium_debug_drawer::{DebugDrawer, DebugDrawerRenderer};
 use redlilium_ecs::ui::{
     ComponentDragPayload, ComponentFileDragPayload, ImportComponentAction, InspectorState,
     PrefabFileDragPayload, SelectAction, SpawnPrefabAction,
 };
 use redlilium_ecs::{
-    Camera, DebugRender, DrawGrid, DrawSelectionAabb, EcsRunner, EguiRender, Entity, FlushUploads,
-    ForwardRender, FrameRing, FrameTarget, FreeFlyCamera, GlobalTransform, GridConfig,
-    MaterialManager, MeshManager, MeshRenderer, Name, PostUpdate, Primitive, Render,
-    RenderSchedule, ScenePass, Schedules, TextureManager, Transform, Update, UpdateCameraMatrices,
-    UpdateFreeFlyCamera, UpdateGlobalTransforms, Visibility, WindowInput, World,
-    register_std_components,
+    AssetGpuFlush, AssetPump, Camera, DebugRender, DrawGrid, DrawSelectionAabb, EcsRunner,
+    EguiRender, Entity, FlushUploads, ForwardRender, FrameRing, FrameTarget, FreeFlyCamera,
+    GlobalTransform, GridConfig, MaterialManager, MeshGenerator, MeshLoad, MeshLoader, MeshManager,
+    MeshRenderer, MeshSource, Name, PostUpdate, Primitive, Render, RenderSchedule, ScenePass,
+    Schedules, TextureManager, Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera,
+    UpdateGlobalTransforms, VertexLayoutLoader, VertexLayoutManager, Visibility, WindowInput,
+    World, register_std_components,
 };
 use redlilium_graphics::egui::{EguiApp, EguiController};
 use redlilium_graphics::{FrameSchedule, RenderTarget, TextureFormat};
@@ -175,7 +176,18 @@ impl Editor {
         // Insert rendering manager resources
         world.insert_resource(MaterialManager::new(scene_view.device().clone()));
         world.insert_resource(TextureManager::new(scene_view.device().clone()));
-        world.insert_resource(MeshManager::new(scene_view.device().clone()));
+        world.insert_resource(MeshManager::new());
+        world.insert_resource(VertexLayoutManager::new());
+
+        // Asset system: one processor (with the rendering loaders) + one DB. The
+        // AssetPump / MeshLoad / AssetGpuFlush systems drive these each frame.
+        let processor = AssetProcessor::builder(self.vfs.clone(), scene_view.device().clone())
+            .with_loader::<MeshLoader>()
+            .with_loader::<VertexLayoutLoader>()
+            .build();
+        world.insert_resource(processor);
+        world.insert_resource(AssetDb::new());
+
         // Holds the per-frame render graph while the `Render` schedule runs.
         world.insert_resource(RenderSchedule::empty());
 
@@ -234,14 +246,9 @@ impl Editor {
         redlilium_ecs::mark_editor(&mut world, editor_camera);
 
         // --- Demo scene entities ---
-        let cpu_cube = generators::generate_cube(0.5);
-        let cube_aabb = cpu_cube.compute_aabb();
-
-        // Register the cube mesh in MeshManager so prefab deserialization can find it
-        world
-            .resource_mut::<MeshManager>()
-            .create_mesh(&cpu_cube)
-            .expect("Failed to register cube mesh");
+        // The cube is a generated mesh asset; all cube entities share this source
+        // (the MeshManager dedups it to one Arc<Mesh>, loaded asynchronously).
+        let cube_source = MeshSource::Generated(MeshGenerator::cube(0.5));
 
         // Ground plane (scaled flat cube)
         {
@@ -257,11 +264,11 @@ impl Editor {
                 .unwrap();
             world.insert(entity, Visibility::VISIBLE).unwrap();
 
-            let (material, mesh) = scene_view.create_entity_resources(&cpu_cube);
-            let primitive = match cube_aabb {
-                Some(aabb) => Primitive::with_aabb(mesh, material, aabb),
-                None => Primitive::new(mesh, material),
-            };
+            let material = scene_view.create_entity_material();
+            let handle = world
+                .resource_mut::<MeshManager>()
+                .request(cube_source.clone());
+            let primitive = Primitive::new(cube_source.clone(), handle, material);
             register_render_material(&world, &primitive.material);
             world
                 .insert(entity, MeshRenderer::single(primitive))
@@ -283,11 +290,11 @@ impl Editor {
                 .unwrap();
             world.insert(entity, Visibility::VISIBLE).unwrap();
 
-            let (material, mesh) = scene_view.create_entity_resources(&cpu_cube);
-            let primitive = match cube_aabb {
-                Some(aabb) => Primitive::with_aabb(mesh, material, aabb),
-                None => Primitive::new(mesh, material),
-            };
+            let material = scene_view.create_entity_material();
+            let handle = world
+                .resource_mut::<MeshManager>()
+                .request(cube_source.clone());
+            let primitive = Primitive::new(cube_source.clone(), handle, material);
             register_render_material(&world, &primitive.material);
             world
                 .insert(entity, MeshRenderer::single(primitive))
@@ -316,6 +323,7 @@ impl Editor {
         // debug lines (each ordered after the previous via dependency edges; the
         // debug pass reads the forward pass handle through system_result).
         schedules.get_mut::<Render>().add(FlushUploads);
+        schedules.get_mut::<Render>().add(AssetGpuFlush);
         schedules.get_mut::<Render>().add(ForwardRender);
         schedules.get_mut::<Render>().add(DebugRender);
         schedules.get_mut::<Render>().add(EguiRender);
@@ -323,6 +331,12 @@ impl Editor {
             .get_mut::<Render>()
             .add_edge::<FlushUploads, ForwardRender>()
             .expect("FlushUploads -> ForwardRender edge");
+        // Asset GPU uploads (e.g. freshly loaded meshes) must land before the
+        // scene draw that uses them.
+        schedules
+            .get_mut::<Render>()
+            .add_edge::<AssetGpuFlush, ForwardRender>()
+            .expect("AssetGpuFlush -> ForwardRender edge");
         schedules
             .get_mut::<Render>()
             .add_edge::<ForwardRender, DebugRender>()
@@ -350,6 +364,15 @@ impl Editor {
             .get_mut::<PostUpdate>()
             .add_edge::<UpdateGlobalTransforms, UpdateCameraMatrices>()
             .expect("No cycle");
+
+        // Asset loading: MeshLoad resolves layouts + requests meshes, then
+        // AssetPump drains the async stages onto the compute/IO pools + collects.
+        schedules.get_mut::<PostUpdate>().add(MeshLoad);
+        schedules.get_mut::<PostUpdate>().add(AssetPump);
+        schedules
+            .get_mut::<PostUpdate>()
+            .add_edge::<MeshLoad, AssetPump>()
+            .expect("MeshLoad -> AssetPump edge");
 
         // All per-draw uniforms (group 0 transforms, group 1 material props) are
         // written into the scene-view rings in `on_draw`, so there are no

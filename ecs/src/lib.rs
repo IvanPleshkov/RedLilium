@@ -155,11 +155,14 @@ pub use self::std::systems::{UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGl
 
 // Asset-system ECS bridge (feature-gated): loader-agnostic systems that tick an
 // AssetProcessor resource. Consumers dep `redlilium-assets` directly.
-#[cfg(feature = "assets")]
+#[cfg(feature = "rendering")]
 pub use self::std::assets::{AssetGpuFlush, AssetPump};
 // Rendering asset loaders + their sharing managers (feature-gated).
-#[cfg(feature = "assets")]
-pub use rendering::{VertexLayoutLoader, VertexLayoutManager, VertexLayoutSource};
+#[cfg(feature = "rendering")]
+pub use rendering::{
+    MeshGenerator, MeshLoader, MeshSource, VertexLayoutLoader, VertexLayoutManager,
+    VertexLayoutSource,
+};
 
 // Rendering components, resources, and systems (feature-gated)
 #[cfg(feature = "rendering")]
@@ -167,9 +170,9 @@ pub use redlilium_debug_drawer::{DebugDrawer, DebugDrawerRenderer};
 #[cfg(feature = "rendering")]
 pub use rendering::{
     CameraTarget, CpuBundleInfo, DebugRender, EguiRender, FlushUploads, ForwardRender, FrameRing,
-    FrameTarget, MaterialBundle, MaterialManager, MaterialManagerError, MeshManager, MeshRenderer,
-    Primitive, PrimitiveMaterial, RenderPassType, RenderSchedule, ScenePass, TextureManager,
-    pack_uniform_bytes, register_rendering_components, shaders,
+    FrameTarget, MaterialBundle, MaterialManager, MaterialManagerError, MeshHandle, MeshLoad,
+    MeshManager, MeshRenderer, Primitive, PrimitiveMaterial, RenderPassType, RenderSchedule,
+    ScenePass, TextureManager, pack_uniform_bytes, register_rendering_components, shaders,
 };
 
 /// Register all standard component types with the world.

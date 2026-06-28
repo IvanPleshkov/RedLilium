@@ -162,35 +162,23 @@ impl SceneViewState {
     /// Returns `(per_entity_buffers, primitive_material, gpu_mesh)`. The caller
     /// assembles these into a [`Primitive`](redlilium_ecs::Primitive) +
     /// [`MeshRenderer`](redlilium_ecs::MeshRenderer).
-    pub fn create_entity_resources(
-        &mut self,
-        cpu_mesh: &redlilium_core::mesh::CpuMesh,
-    ) -> (PrimitiveMaterial, Arc<redlilium_graphics::Mesh>) {
-        // Group 0 (transform) and group 1 (material props) bind shared rings as
-        // dynamic uniforms; per-draw offsets are filled each frame by
-        // `fill_transform_rings`.
+    /// Build the per-entity material (the mesh is now an asset, requested
+    /// separately via `MeshManager`). Group 0 (transform) and group 1 (material
+    /// props) bind shared rings as dynamic uniforms; per-draw offsets are filled
+    /// each frame by `fill_transform_rings`.
+    pub fn create_entity_material(&mut self) -> PrimitiveMaterial {
         let frame_ring_buffer = self
             .frame_ring_buffer
             .as_ref()
             .expect("frame ring buffer set before entities are created");
-        let material = shaders::create_opaque_color_primitive_material_ring(
+        shaders::create_opaque_color_primitive_material_ring(
             &self.opaque_material,
             Some(&self.entity_index_material),
             &self.cpu_material,
             frame_ring_buffer, // group 0 (transform)
             Some(self.entity_index_ring.buffer()),
             frame_ring_buffer, // group 1 (material props) — same ring
-        );
-
-        // Allocate the mesh now; its data uploads through the frame graph on the
-        // next `flush_uploads` (no synchronous GPU write).
-        let (gpu_mesh, ops) = self
-            .device
-            .create_mesh_deferred(cpu_mesh)
-            .expect("Failed to create entity GPU mesh");
-        self.pending_uploads.extend(ops);
-
-        (material, gpu_mesh)
+        )
     }
 
     /// Fill the picking (entity-index) ring for this frame and record each
@@ -343,9 +331,13 @@ impl SceneViewState {
             }
             let ei_off = self.picking_offsets.get(&entity_idx).copied().unwrap_or(0);
             for primitive in &renderer.primitives {
+                // Skip primitives whose mesh hasn't finished loading.
+                let Some(mesh) = primitive.mesh() else {
+                    continue;
+                };
                 if let Some(instance) = primitive.material.pass(RenderPassType::EntityIndex) {
                     pass.add_draw_command(
-                        DrawCommand::new(primitive.mesh.clone(), Arc::clone(instance))
+                        DrawCommand::new(mesh, Arc::clone(instance))
                             .with_dynamic_offsets(vec![vec![ei_off]]),
                     );
                     draw_count += 1;

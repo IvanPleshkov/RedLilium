@@ -14,6 +14,8 @@
 
 use std::sync::Arc;
 
+use redlilium_core::math::Aabb;
+
 use crate::device::GraphicsDevice;
 use crate::resources::Buffer;
 
@@ -74,6 +76,10 @@ pub struct Mesh {
     vertex_offsets: Vec<u64>,
     /// Byte offset of the index data within `index_buffer`.
     index_offset: u64,
+    /// Local-space bounds, computed from the source `CpuMesh` at creation
+    /// (`create_mesh_deferred`). `None` for meshes created from a descriptor
+    /// without CPU data.
+    aabb: Option<Aabb>,
 }
 
 impl Mesh {
@@ -108,7 +114,19 @@ impl Mesh {
             label,
             vertex_offsets: Vec::new(),
             index_offset: 0,
+            aabb: None,
         }
+    }
+
+    /// The mesh's local-space bounds, if known (set when created from CPU data).
+    pub fn aabb(&self) -> Option<Aabb> {
+        self.aabb
+    }
+
+    /// Set the local-space bounds (called by `create_mesh_deferred` once the
+    /// bounds are computed from the source `CpuMesh`).
+    pub fn set_aabb(&mut self, aabb: Option<Aabb>) {
+        self.aabb = aabb;
     }
 
     /// Set byte offsets for this mesh's data within its (possibly shared)

@@ -96,7 +96,7 @@ impl VertexLayoutManager {
             }
         }
 
-        let handle = processor.request::<VertexLayoutLoader>(db, VertexLayoutSource { guid });
+        let handle = processor.request::<VertexLayoutLoader>(db, VertexLayoutSource { guid }, ());
         self.pending.insert(guid, handle);
         None
     }

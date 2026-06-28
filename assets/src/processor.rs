@@ -146,6 +146,7 @@ impl AssetProcessor {
         &mut self,
         db: &AssetDb,
         source: L::Source,
+        deps: L::Deps,
     ) -> AssetHandle<L::Asset> {
         let slot = RequestSlot::<L::Asset>::new();
         let handle = AssetHandle::new(Arc::clone(&slot));
@@ -162,7 +163,7 @@ impl AssetProcessor {
             vfs: self.vfs.clone(),
             device: Arc::clone(&self.device),
         };
-        let stages = L::pipeline(&source, &env);
+        let stages = L::pipeline(&source, &deps, &env);
 
         let demand = Arc::downgrade(&slot);
         let alive = Box::new(move || demand.strong_count() > 0);

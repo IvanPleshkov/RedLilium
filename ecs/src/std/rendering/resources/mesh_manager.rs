@@ -1,123 +1,145 @@
-//! GPU mesh management.
+//! Asset-based GPU mesh management.
+//!
+//! `MeshManager` is the consumer-facing facade for meshes: you `request` a mesh
+//! by [`MeshSource`] and get a [`MeshHandle`] that resolves to an `Arc<Mesh>`
+//! once loaded — you never touch the vertex layout, the asset processor, or the
+//! DB. The actual loading is driven by the `MeshLoad` system (which co-locks this
+//! manager + the layout manager + processor + DB), so the consumer side here has
+//! no dependencies of its own.
+//!
+//! This manager is the single requester per `MeshSource` (the asset processor
+//! does not dedup), so all consumers of the same source share one `Arc<Mesh>`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use redlilium_graphics::{
-    CpuMesh, GraphicsDevice, GraphicsError, Mesh, RenderGraph, TransferConfig, TransferOperation,
-    TransferPass,
-};
+use parking_lot::RwLock;
+use redlilium_assets::{AssetDb, AssetHandle, AssetProcessor};
+use redlilium_graphics::Mesh;
 
-/// Resource for managing GPU meshes by name.
-///
-/// Holds a reference to the [`GraphicsDevice`] and caches created meshes
-/// by name for reuse. Also enables serialization of `Arc<Mesh>` references
-/// by mapping between mesh names and GPU mesh handles.
+use super::VertexLayoutManager;
+use crate::std::rendering::loaders::{MeshLoader, MeshSource};
+
+/// A demand-to-load handle for a mesh. Cloneable and cheap; poll [`get`](Self::get)
+/// for the resident `Arc<Mesh>` once it has loaded (`None` until then).
+#[derive(Clone, Default, Debug)]
+pub struct MeshHandle {
+    slot: Arc<RwLock<Option<Arc<Mesh>>>>,
+}
+
+impl MeshHandle {
+    /// The resident mesh, if it has finished loading.
+    pub fn get(&self) -> Option<Arc<Mesh>> {
+        self.slot.read().clone()
+    }
+
+    fn fulfill(&self, mesh: Arc<Mesh>) {
+        *self.slot.write() = Some(mesh);
+    }
+}
+
+/// In-flight mesh request: the consumer handle to fulfil, and the inner mesh-asset
+/// request (set once the layout dependency has resolved).
+struct PendingMesh {
+    handle: MeshHandle,
+    asset: Option<AssetHandle<Mesh>>,
+}
+
+/// Owns and shares resident meshes (an ECS resource).
+#[derive(Default)]
 pub struct MeshManager {
-    device: Arc<GraphicsDevice>,
-    meshes: HashMap<String, Arc<Mesh>>,
-    /// Cached local-space AABBs keyed by mesh name.
-    aabbs: HashMap<String, redlilium_core::math::Aabb>,
-    /// Pending mesh-data uploads, flushed into the frame graph by
-    /// [`flush_uploads`](Self::flush_uploads). Mesh data goes through the render
-    /// graph (never synchronously); a mesh is renderable once that upload runs.
-    pending_uploads: Vec<TransferOperation>,
+    resident: HashMap<MeshSource, Arc<Mesh>>,
+    pending: HashMap<MeshSource, PendingMesh>,
 }
 
 impl MeshManager {
-    /// Create a new mesh manager for the given device.
-    pub fn new(device: Arc<GraphicsDevice>) -> Self {
-        Self {
-            device,
-            meshes: HashMap::new(),
-            aabbs: HashMap::new(),
-            pending_uploads: Vec::new(),
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Request a mesh by source, returning a handle that resolves once loaded.
+    /// Deduplicates by source: repeat requests of an in-flight source share the
+    /// same handle, and a resident source resolves immediately.
+    pub fn request(&mut self, source: MeshSource) -> MeshHandle {
+        if let Some(mesh) = self.resident.get(&source) {
+            let handle = MeshHandle::default();
+            handle.fulfill(mesh.clone());
+            return handle;
         }
-    }
-
-    /// Get the graphics device.
-    pub fn device(&self) -> &Arc<GraphicsDevice> {
-        &self.device
-    }
-
-    /// Flush queued mesh uploads into the current frame's render graph.
-    ///
-    /// Call once per frame while building the frame graph. Does nothing if there
-    /// are no pending uploads.
-    pub fn flush_uploads(&mut self, graph: &mut RenderGraph) {
-        if self.pending_uploads.is_empty() {
-            return;
+        if let Some(pending) = self.pending.get(&source) {
+            return pending.handle.clone();
         }
-        let ops = std::mem::take(&mut self.pending_uploads);
-        let mut pass = TransferPass::new("mesh_uploads".into());
-        pass.set_transfer_config(TransferConfig::new().with_operations(ops));
-        graph.add_transfer_pass(pass);
+        let handle = MeshHandle::default();
+        self.pending.insert(
+            source,
+            PendingMesh {
+                handle: handle.clone(),
+                asset: None,
+            },
+        );
+        handle
     }
 
-    // --- Mesh creation & lookup ---
+    /// The resident mesh for `source` if already loaded — no request side effect.
+    pub fn get(&self, source: &MeshSource) -> Option<Arc<Mesh>> {
+        self.resident.get(source).cloned()
+    }
 
-    /// Create a GPU mesh from CPU data.
-    ///
-    /// The mesh is allocated immediately, but its vertex/index data is uploaded
-    /// **through the frame graph** on the next [`flush_uploads`](Self::flush_uploads).
-    pub fn create_mesh(&mut self, cpu_mesh: &CpuMesh) -> Result<Arc<Mesh>, GraphicsError> {
-        let aabb = cpu_mesh.compute_aabb();
-        let (mesh, ops) = self.device.create_mesh_deferred(cpu_mesh)?;
-        self.pending_uploads.extend(ops);
-        if let Some(label) = mesh.label() {
-            self.meshes.insert(label.to_owned(), Arc::clone(&mesh));
-            if let Some(aabb) = aabb {
-                self.aabbs.insert(label.to_owned(), aabb);
+    /// Advance all in-flight mesh requests: resolve each one's shared vertex
+    /// layout (a file mesh references it in its DB record; a generated mesh gets
+    /// it from the generator), request the mesh asset with that layout injected,
+    /// then fulfil handles as meshes finish. Call from the `MeshLoad` system,
+    /// which provides the co-locked processor / DB / layout manager.
+    pub fn drive(
+        &mut self,
+        processor: &mut AssetProcessor,
+        db: &AssetDb,
+        layout_mgr: &mut VertexLayoutManager,
+    ) {
+        let mut done: Vec<(MeshSource, Option<Arc<Mesh>>)> = Vec::new();
+
+        for (source, pending) in self.pending.iter_mut() {
+            // Resolve the shared layout and kick off the mesh asset request once.
+            if pending.asset.is_none() {
+                let layout = match source {
+                    MeshSource::File(guid) => {
+                        let Some(layout_guid) = db.record(guid).and_then(|r| r.reference("layout"))
+                        else {
+                            continue; // record/layout reference not (yet) known
+                        };
+                        match layout_mgr.get_or_request(processor, db, layout_guid) {
+                            Some(layout) => layout,
+                            None => continue, // layout still loading
+                        }
+                    }
+                    MeshSource::Generated(generator) => {
+                        layout_mgr.intern((*generator.layout()).clone())
+                    }
+                };
+                pending.asset = Some(processor.request::<MeshLoader>(db, source.clone(), layout));
+            }
+
+            // Poll the mesh asset; fulfil the handle when it lands.
+            if let Some(handle) = &pending.asset {
+                match handle.get() {
+                    None => {}
+                    Some(Ok(mesh)) => {
+                        pending.handle.fulfill(mesh.clone());
+                        done.push((source.clone(), Some(mesh)));
+                    }
+                    Some(Err(e)) => {
+                        log::warn!("mesh {source:?} failed to load: {e}");
+                        done.push((source.clone(), None));
+                    }
+                }
             }
         }
-        Ok(mesh)
-    }
 
-    /// Look up a previously created mesh by name.
-    pub fn get_mesh(&self, name: &str) -> Option<&Arc<Mesh>> {
-        self.meshes.get(name)
-    }
-
-    /// Insert a mesh into the cache under a given name.
-    pub fn insert_mesh(&mut self, name: impl Into<String>, mesh: Arc<Mesh>) {
-        self.meshes.insert(name.into(), mesh);
-    }
-
-    /// Remove a mesh from the cache by name, returning it if present.
-    pub fn remove_mesh(&mut self, name: &str) -> Option<Arc<Mesh>> {
-        self.meshes.remove(name)
-    }
-
-    /// Find the registered name for a mesh by Arc pointer identity.
-    pub fn find_name(&self, mesh: &Arc<Mesh>) -> Option<&str> {
-        self.meshes
-            .iter()
-            .find(|(_, v)| Arc::ptr_eq(v, mesh))
-            .map(|(k, _)| k.as_str())
-    }
-
-    // --- AABB ---
-
-    /// Look up the cached local-space AABB for a mesh by Arc pointer identity.
-    pub fn get_aabb_by_mesh(&self, mesh: &Arc<Mesh>) -> Option<redlilium_core::math::Aabb> {
-        let name = self.find_name(mesh)?;
-        self.aabbs.get(name).copied()
-    }
-
-    // --- Iteration ---
-
-    /// Get a reference to all cached meshes.
-    pub fn meshes(&self) -> &HashMap<String, Arc<Mesh>> {
-        &self.meshes
-    }
-
-    /// Iterate over all cached mesh names.
-    pub fn mesh_names(&self) -> impl Iterator<Item = &str> {
-        self.meshes.keys().map(|s| s.as_str())
-    }
-
-    /// Returns the number of cached meshes.
-    pub fn mesh_count(&self) -> usize {
-        self.meshes.len()
+        for (source, mesh) in done {
+            self.pending.remove(&source);
+            if let Some(mesh) = mesh {
+                self.resident.insert(source, mesh);
+            }
+        }
     }
 }

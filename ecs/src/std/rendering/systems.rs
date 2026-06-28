@@ -11,13 +11,15 @@ use redlilium_graphics::{
 
 use redlilium_graphics::egui::EguiController;
 
+use redlilium_assets::{AssetDb, AssetProcessor};
+
 use crate::std::components::{Camera, GlobalTransform, Visibility};
 use crate::system::SystemError;
 use crate::{DebugDrawer, DebugDrawerRenderer, System, SystemContext};
 
 use super::{
     CameraTarget, FrameRing, MaterialManager, MeshManager, MeshRenderer, RenderPassType,
-    RenderSchedule, TextureManager, pack_uniform_bytes, shaders,
+    RenderSchedule, TextureManager, VertexLayoutManager, pack_uniform_bytes, shaders,
 };
 
 /// Default material props (base color) for a primitive with no CPU instance —
@@ -44,11 +46,10 @@ impl System for FlushUploads {
         let Some(graph) = schedule.graph_mut() else {
             return Ok(()); // no frame graph bound (not in the render bracket)
         };
+        // Mesh uploads now flow through the asset pipeline (the mesh loader's GPU
+        // stage + AssetGpuFlush), so only texture/material managers flush here.
         if world.has_resource::<TextureManager>() {
             world.resource_mut::<TextureManager>().flush_uploads(graph);
-        }
-        if world.has_resource::<MeshManager>() {
-            world.resource_mut::<MeshManager>().flush_uploads(graph);
         }
         if world.has_resource::<MaterialManager>() {
             world.resource_mut::<MaterialManager>().flush_uploads(graph);
@@ -140,6 +141,10 @@ impl System for ForwardRender {
                 };
                 let fwd_off = ring.push(bytemuck::bytes_of(&fwd));
                 for primitive in &renderer.primitives {
+                    // The mesh loads asynchronously — skip until it's resident.
+                    let Some(mesh) = primitive.mesh() else {
+                        continue;
+                    };
                     if let Some(instance) = primitive.material.pass(RenderPassType::Forward) {
                         let bytes = primitive
                             .material
@@ -151,7 +156,7 @@ impl System for ForwardRender {
                             });
                         let props_off = ring.push(&bytes);
                         pass.add_draw_command(
-                            DrawCommand::new(primitive.mesh.clone(), Arc::clone(instance))
+                            DrawCommand::new(mesh, Arc::clone(instance))
                                 .with_dynamic_offsets(vec![vec![fwd_off], vec![props_off]]),
                         );
                     }
@@ -287,6 +292,33 @@ impl System for EguiRender {
                 }
             }
         }
+        Ok(())
+    }
+}
+
+/// Drives mesh loading: advances every in-flight [`MeshManager`] request,
+/// resolving each one's shared vertex layout (via [`VertexLayoutManager`]) and
+/// kicking off / polling its mesh asset. This is the consumer-facing meshes'
+/// driver — co-locks the manager + layout manager + processor + DB so that
+/// callers only ever touch `MeshManager::request`. No-op if any input is absent.
+pub struct MeshLoad;
+
+impl System for MeshLoad {
+    type Result = ();
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<Self::Result, SystemError> {
+        let world = ctx.world();
+        if !world.has_resource::<MeshManager>()
+            || !world.has_resource::<VertexLayoutManager>()
+            || !world.has_resource::<AssetProcessor>()
+            || !world.has_resource::<AssetDb>()
+        {
+            return Ok(());
+        }
+        let mut mesh_mgr = world.resource_mut::<MeshManager>();
+        let mut layout_mgr = world.resource_mut::<VertexLayoutManager>();
+        let mut processor = world.resource_mut::<AssetProcessor>();
+        let db = world.resource::<AssetDb>();
+        mesh_mgr.drive(&mut processor, &db, &mut layout_mgr);
         Ok(())
     }
 }

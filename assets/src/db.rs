@@ -22,7 +22,7 @@
 //! Persistence (RON in editor, baked binary at runtime) goes through
 //! [`to_records`](AssetDb::to_records) / [`from_records`](AssetDb::from_records).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -62,6 +62,19 @@ pub struct AssetRecord {
     /// Serialized per-kind import settings (deserialized into `K::Settings`).
     #[serde(default)]
     pub settings: Option<String>,
+    /// References to other assets this one depends on, keyed by role — e.g. a
+    /// mesh's `"layout"` -> the vertex-layout asset's guid. Lets a consumer (a
+    /// manager) resolve a dependency's shared resource without the data living in
+    /// this asset's blob, and gives reload a dependency edge to follow.
+    #[serde(default)]
+    pub references: BTreeMap<String, Guid>,
+}
+
+impl AssetRecord {
+    /// The guid this asset references under `role`, if any (e.g. `"layout"`).
+    pub fn reference(&self, role: &str) -> Option<Guid> {
+        self.references.get(role).copied()
+    }
 }
 
 /// A violation (attempt) of the `guid <-> path` bijection.
@@ -171,6 +184,7 @@ impl AssetDb {
                 kind: kind.to_owned(),
                 source_hash,
                 settings: None,
+                references: BTreeMap::new(),
             },
         );
         self.by_path.insert(path, guid);
@@ -290,6 +304,7 @@ impl AssetDb {
                 kind: r.kind.clone(),
                 source_hash: r.source_hash,
                 settings: r.settings.clone(),
+                references: r.references.clone(),
             })
             .collect();
         let file = DbFile {
@@ -316,6 +331,7 @@ impl AssetDb {
                 kind: entry.kind,
                 source_hash: entry.source_hash,
                 settings: entry.settings,
+                references: entry.references,
             };
             if let Err(e) = self.insert(entry.guid, record) {
                 conflicts.push(e);
@@ -341,6 +357,8 @@ struct DbEntry {
     source_hash: u64,
     #[serde(default)]
     settings: Option<String>,
+    #[serde(default)]
+    references: BTreeMap<String, Guid>,
 }
 
 const DB_VERSION: u32 = 1;
@@ -355,6 +373,7 @@ mod tests {
             kind: "mesh".into(),
             source_hash: 0,
             settings: None,
+            references: BTreeMap::new(),
         }
     }
 

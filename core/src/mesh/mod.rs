@@ -13,7 +13,7 @@ mod data;
 pub mod generators;
 mod layout;
 
-pub use data::{CpuMesh, IndexFormat, MeshDescriptor, PrimitiveTopology};
+pub use data::{CpuMesh, CpuMeshData, IndexFormat, MeshDescriptor, PrimitiveTopology};
 pub use layout::{
     VertexAttribute, VertexAttributeFormat, VertexAttributeSemantic, VertexBufferLayout,
     VertexLayout, VertexStepMode,

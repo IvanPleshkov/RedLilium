@@ -9,6 +9,7 @@ description = "Editor application for RedLilium Engine"
 [dependencies]
 redlilium-core = { path = "../core" }
 redlilium-ecs = { path = "../ecs", features = ["rendering", "serialize-ron"] }
+redlilium-assets = { path = "../assets" }
 redlilium-graphics = { path = "../graphics" }
 redlilium-app = { path = "../app" }
 redlilium-debug-drawer = { path = "../debug_drawer" }

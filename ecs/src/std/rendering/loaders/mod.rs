@@ -6,6 +6,8 @@
 //! is a consumer concern (typically a manager — see
 //! [`VertexLayoutManager`](super::VertexLayoutManager)).
 
+mod mesh;
 mod vertex_layout;
 
+pub use mesh::{MeshGenerator, MeshLoader, MeshSource};
 pub use vertex_layout::{VertexLayoutLoader, VertexLayoutSource};

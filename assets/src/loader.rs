@@ -31,10 +31,20 @@ pub trait AssetLoader: 'static {
     /// `request` returns an `AssetHandle<Asset>`. `Send + Sync` so the handle can
     /// ride in an ECS component and the resolved `Arc<Asset>` can be shared.
     type Asset: Send + Sync + 'static;
+    /// Runtime dependencies the caller resolves and injects into the pipeline —
+    /// e.g. a shared `Arc<VertexLayout>` for a mesh, so the loaded mesh binds the
+    /// *same* layout `Arc` as everything else (pointer-equality drives batching).
+    /// `()` when the loader needs none. The deps are consumed when the pipeline
+    /// is assembled (the stages capture what they need), so they need no bounds.
+    type Deps;
 
-    /// Assemble the stage sequence for `source`. Decided at runtime — omit the
-    /// IO stage for generated sources, the decode stage for GPU-ready formats,
-    /// the GPU stage for prefabs, etc. The last stage's output must be the
-    /// (boxed) `Asset`.
-    fn pipeline(source: &Self::Source, env: &LoadEnv) -> Vec<Box<dyn AssetStage>>;
+    /// Assemble the stage sequence for `source`, given any resolved `deps`.
+    /// Decided at runtime — omit the IO stage for generated sources, the decode
+    /// stage for GPU-ready formats, the GPU stage for prefabs, etc. The last
+    /// stage's output must be the (boxed) `Asset`.
+    fn pipeline(
+        source: &Self::Source,
+        deps: &Self::Deps,
+        env: &LoadEnv,
+    ) -> Vec<Box<dyn AssetStage>>;
 }

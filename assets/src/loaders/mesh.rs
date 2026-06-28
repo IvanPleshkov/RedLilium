@@ -105,8 +105,9 @@ impl AssetLoader for MeshLoader {
     const EXTENSIONS: &'static [&'static str] = &["glb", "gltf"];
     type Source = MeshSource;
     type Asset = Mesh;
+    type Deps = ();
 
-    fn pipeline(source: &MeshSource, env: &LoadEnv) -> Vec<Box<dyn AssetStage>> {
+    fn pipeline(source: &MeshSource, _deps: &(), env: &LoadEnv) -> Vec<Box<dyn AssetStage>> {
         match source {
             // No IO — generate on the CPU, then upload.
             MeshSource::Generated(generator) => vec![

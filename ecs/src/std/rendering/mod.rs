@@ -23,7 +23,7 @@
 //! This module is only available when the `rendering` feature is enabled.
 
 pub mod components;
-#[cfg(feature = "assets")]
+#[cfg(feature = "rendering")]
 pub mod loaders;
 pub(crate) mod material_inspector;
 pub mod resources;
@@ -33,15 +33,17 @@ pub mod systems;
 pub use components::{
     CameraTarget, MaterialBundle, MeshRenderer, Primitive, PrimitiveMaterial, RenderPassType,
 };
-#[cfg(feature = "assets")]
-pub use loaders::{VertexLayoutLoader, VertexLayoutSource};
-#[cfg(feature = "assets")]
+#[cfg(feature = "rendering")]
+pub use loaders::{MeshGenerator, MeshLoader, MeshSource, VertexLayoutLoader, VertexLayoutSource};
+#[cfg(feature = "rendering")]
 pub use resources::VertexLayoutManager;
 pub use resources::{
-    CpuBundleInfo, FrameRing, MaterialManager, MaterialManagerError, MeshManager, RenderSchedule,
-    TextureManager, TextureManagerError, pack_uniform_bytes,
+    CpuBundleInfo, FrameRing, MaterialManager, MaterialManagerError, MeshHandle, MeshManager,
+    RenderSchedule, TextureManager, TextureManagerError, pack_uniform_bytes,
 };
-pub use systems::{DebugRender, EguiRender, FlushUploads, ForwardRender, FrameTarget, ScenePass};
+pub use systems::{
+    DebugRender, EguiRender, FlushUploads, ForwardRender, FrameTarget, MeshLoad, ScenePass,
+};
 
 use crate::World;
 

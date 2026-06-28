@@ -4331,6 +4331,7 @@ dependencies = [
  "image",
  "log",
  "nalgebra 0.33.2",
+ "serde",
  "tracy-client",
 ]
 
@@ -4384,9 +4385,11 @@ dependencies = [
  "rapier2d-f64",
  "rapier3d",
  "rapier3d-f64",
+ "redlilium-assets",
  "redlilium-core",
  "redlilium-debug-drawer",
  "redlilium-graphics",
+ "redlilium-vfs",
  "ron",
  "serde",
  "smallvec",
@@ -4407,6 +4410,7 @@ dependencies = [
  "notify",
  "parking_lot",
  "redlilium-app",
+ "redlilium-assets",
  "redlilium-core",
  "redlilium-debug-drawer",
  "redlilium-ecs",

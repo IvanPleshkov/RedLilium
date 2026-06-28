@@ -11,7 +11,9 @@ use std::sync::Arc;
 use super::layout::VertexLayout;
 
 /// Primitive topology describing how vertices are assembled into primitives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 pub enum PrimitiveTopology {
     /// Each vertex is a separate point.
     PointList,
@@ -39,7 +41,9 @@ impl PrimitiveTopology {
 }
 
 /// Index format for indexed drawing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 pub enum IndexFormat {
     /// 16-bit unsigned integers (max 65535 vertices).
     #[default]
@@ -93,6 +97,9 @@ pub struct MeshDescriptor {
     pub index_count: u32,
     /// Optional label for debugging.
     pub label: Option<String>,
+    /// Local-space bounds (carried onto the created `Mesh`). `None` when created
+    /// from a descriptor without CPU data.
+    pub aabb: Option<crate::math::Aabb>,
 }
 
 impl MeshDescriptor {
@@ -105,7 +112,14 @@ impl MeshDescriptor {
             index_format: None,
             index_count: 0,
             label: None,
+            aabb: None,
         }
+    }
+
+    /// Set the local-space bounds.
+    pub fn with_aabb(mut self, aabb: Option<crate::math::Aabb>) -> Self {
+        self.aabb = aabb;
+        self
     }
 
     /// Set the primitive topology.
@@ -181,6 +195,56 @@ pub struct CpuMesh {
     index_count: u32,
     material: Option<usize>,
     label: Option<String>,
+}
+
+/// The serializable form of a [`CpuMesh`] — every field **except** the
+/// [`VertexLayout`], which a mesh asset references separately (a shared layout
+/// asset) so meshes and materials can bind the *same* `Arc<VertexLayout>`.
+///
+/// This is the on-disk mesh blob: combine it with a (shared) layout via
+/// [`into_cpu_mesh`](CpuMeshData::into_cpu_mesh), or split one out of an existing
+/// mesh with [`from_cpu_mesh`](CpuMeshData::from_cpu_mesh).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CpuMeshData {
+    pub topology: PrimitiveTopology,
+    pub vertex_buffers: Vec<Vec<u8>>,
+    pub vertex_count: u32,
+    pub index_data: Option<Vec<u8>>,
+    pub index_format: Option<IndexFormat>,
+    pub index_count: u32,
+    pub material: Option<usize>,
+    pub label: Option<String>,
+}
+
+impl CpuMeshData {
+    /// Split the layout off a mesh, keeping the serializable remainder.
+    pub fn from_cpu_mesh(mesh: &CpuMesh) -> Self {
+        Self {
+            topology: mesh.topology,
+            vertex_buffers: mesh.vertex_buffers.clone(),
+            vertex_count: mesh.vertex_count,
+            index_data: mesh.index_data.clone(),
+            index_format: mesh.index_format,
+            index_count: mesh.index_count,
+            material: mesh.material,
+            label: mesh.label.clone(),
+        }
+    }
+
+    /// Recombine with a (typically shared) layout into a full [`CpuMesh`].
+    pub fn into_cpu_mesh(self, layout: Arc<VertexLayout>) -> CpuMesh {
+        CpuMesh {
+            layout,
+            topology: self.topology,
+            vertex_buffers: self.vertex_buffers,
+            vertex_count: self.vertex_count,
+            index_data: self.index_data,
+            index_format: self.index_format,
+            index_count: self.index_count,
+            material: self.material,
+            label: self.label,
+        }
+    }
 }
 
 impl CpuMesh {
@@ -391,7 +455,8 @@ impl CpuMesh {
     pub fn to_descriptor(&self) -> MeshDescriptor {
         let mut desc = MeshDescriptor::new(self.layout.clone())
             .with_topology(self.topology)
-            .with_vertex_count(self.vertex_count);
+            .with_vertex_count(self.vertex_count)
+            .with_aabb(self.compute_aabb());
         if let Some(format) = self.index_format {
             desc = desc.with_indices(format, self.index_count);
         }
