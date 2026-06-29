@@ -172,8 +172,8 @@ pub use rendering::{
     CameraTarget, CpuBundleInfo, DebugRender, EguiRender, FlushUploads, ForwardRender, FrameRing,
     FrameTarget, MaterialBundle, MaterialManager, MaterialManagerError, MeshHandle, MeshLoad,
     MeshManager, MeshRenderer, Primitive, PrimitiveMaterial, RenderPassType, RenderSchedule,
-    ScenePass, TextureManager, inspect_asset_settings, pack_uniform_bytes,
-    register_rendering_components, shaders,
+    ScenePass, Shader, ShaderLoader, ShaderManager, ShaderSource, TextureManager,
+    inspect_asset_settings, pack_uniform_bytes, register_rendering_components, shaders,
 };
 
 /// Register all standard component types with the world.

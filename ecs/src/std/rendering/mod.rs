@@ -36,13 +36,16 @@ pub use components::{
     CameraTarget, MaterialBundle, MeshRenderer, Primitive, PrimitiveMaterial, RenderPassType,
 };
 #[cfg(feature = "rendering")]
-pub use loaders::{MeshGenerator, MeshLoader, MeshSource, VertexLayoutLoader, VertexLayoutSource};
-#[cfg(feature = "rendering")]
-pub use resources::VertexLayoutManager;
+pub use loaders::{
+    MeshGenerator, MeshLoader, MeshSource, Shader, ShaderLoader, ShaderSource, VertexLayoutLoader,
+    VertexLayoutSource,
+};
 pub use resources::{
     CpuBundleInfo, FrameRing, MaterialManager, MaterialManagerError, MeshHandle, MeshManager,
     RenderSchedule, TextureManager, TextureManagerError, pack_uniform_bytes,
 };
+#[cfg(feature = "rendering")]
+pub use resources::{ShaderManager, VertexLayoutManager};
 pub use systems::{
     DebugRender, EguiRender, FlushUploads, ForwardRender, FrameTarget, MeshLoad, ScenePass,
 };

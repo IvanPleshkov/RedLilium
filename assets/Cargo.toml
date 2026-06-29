@@ -13,4 +13,4 @@ serde = { workspace = true }
 ron = { workspace = true }
 parking_lot = { workspace = true }
 log = { workspace = true }
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }

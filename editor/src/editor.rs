@@ -18,9 +18,9 @@ use redlilium_ecs::{
     EguiRender, Entity, FlushUploads, ForwardRender, FrameRing, FrameTarget, FreeFlyCamera,
     GlobalTransform, GridConfig, MaterialManager, MeshGenerator, MeshLoad, MeshLoader, MeshManager,
     MeshRenderer, MeshSource, Name, PostUpdate, Primitive, Render, RenderSchedule, ScenePass,
-    Schedules, TextureManager, Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera,
-    UpdateGlobalTransforms, VertexLayoutLoader, VertexLayoutManager, Visibility, WindowInput,
-    World, register_std_components,
+    Schedules, ShaderLoader, ShaderManager, TextureManager, Transform, Update,
+    UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms, VertexLayoutLoader,
+    VertexLayoutManager, Visibility, WindowInput, World, register_std_components,
 };
 use redlilium_graphics::egui::{EguiApp, EguiController};
 use redlilium_graphics::{FrameSchedule, RenderTarget, TextureFormat};
@@ -186,12 +186,14 @@ impl Editor {
         world.insert_resource(TextureManager::new(scene_view.device().clone()));
         world.insert_resource(MeshManager::new());
         world.insert_resource(VertexLayoutManager::new());
+        world.insert_resource(ShaderManager::new());
 
         // Asset system: one processor (with the rendering loaders) + one DB. The
         // AssetPump / MeshLoad / AssetGpuFlush systems drive these each frame.
         let processor = AssetProcessor::builder(self.vfs.clone(), scene_view.device().clone())
             .with_loader::<MeshLoader>()
             .with_loader::<VertexLayoutLoader>()
+            .with_loader::<ShaderLoader>()
             .build();
         world.insert_resource(processor);
 

@@ -13,6 +13,16 @@ impl Guid {
     pub fn new() -> Self {
         Self(uuid::Uuid::new_v4())
     }
+
+    /// A deterministic identity derived from a stable `name` (e.g. an asset's
+    /// mount-relative path). The same name always yields the same guid, so a
+    /// generated/committed pack regenerates without churn and references to it
+    /// survive regeneration.
+    pub fn stable(name: &str) -> Self {
+        // Fixed namespace for RedLilium engine assets (UUIDv5).
+        const NS: uuid::Uuid = uuid::Uuid::from_u128(0x52ed_1111_0000_0000_0000_0000_0000_0001);
+        Self(uuid::Uuid::new_v5(&NS, name.as_bytes()))
+    }
 }
 
 impl Default for Guid {

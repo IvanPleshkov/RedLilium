@@ -16,6 +16,9 @@ redlilium-debug-drawer = { path = "../debug_drawer" }
 redlilium-vfs = { path = "../vfs", features = ["sftp"] }
 
 parking_lot = { workspace = true }
+# Used by the `gen_std_assets` bin (regenerates the std asset pack).
+bincode = { workspace = true }
+ron = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 serde = { workspace = true }
