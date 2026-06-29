@@ -155,6 +155,19 @@ impl AssetDb {
         self.by_path.get(path).copied()
     }
 
+    /// Replace a record's per-kind `settings` (the asset's editable data — e.g. a
+    /// vertex layout's parameters). Returns `false` if the guid is unknown. Does
+    /// not touch the `guid <-> path` bijection.
+    pub fn set_settings(&mut self, guid: &Guid, settings: Option<String>) -> bool {
+        match self.by_guid.get_mut(guid) {
+            Some(record) => {
+                record.settings = settings;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Mint a fresh guid not already present. The loop guards the *invariant*
     /// (uniqueness), not random collisions — it effectively never iterates.
     fn mint(&self) -> Guid {

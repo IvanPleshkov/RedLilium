@@ -20,6 +20,12 @@ pub struct AssetBrowser {
     mount_names: Vec<String>,
     /// Currently selected path: (source_name, directory_path_within_source).
     selected: Option<(String, String)>,
+    /// Currently selected file as an asset: (source_name, file_path_within_source).
+    /// Drives the asset inspector.
+    selected_file: Option<(String, String)>,
+    /// A mount whose in-memory DB was edited and needs persisting (set by the
+    /// asset inspector, drained by the editor).
+    db_dirty: Option<String>,
     /// Tree nodes that are currently expanded (keys: "source/dir/subdir").
     expanded: HashSet<String>,
     /// Cached file listing for the right panel.
@@ -55,6 +61,8 @@ impl AssetBrowser {
         Self {
             mount_names: config.mount.iter().map(|m| m.name.clone()).collect(),
             selected: None,
+            selected_file: None,
+            db_dirty: None,
             expanded: HashSet::new(),
             cached_entries: Vec::new(),
             cached_key: None,
@@ -68,6 +76,26 @@ impl AssetBrowser {
             pending_component_export: None,
             pending_prefab_export: None,
         }
+    }
+
+    /// The file currently selected as an asset: `(source, path_within_source)`.
+    pub fn selected_file(&self) -> Option<&(String, String)> {
+        self.selected_file.as_ref()
+    }
+
+    /// Clear the asset selection (e.g. when an entity is selected instead).
+    pub fn clear_selected_file(&mut self) {
+        self.selected_file = None;
+    }
+
+    /// Mark a mount's in-memory DB as edited (needs persisting).
+    pub fn mark_db_dirty(&mut self, mount: impl Into<String>) {
+        self.db_dirty = Some(mount.into());
+    }
+
+    /// Take the mount whose DB needs persisting, if any (clears the flag).
+    pub fn take_db_dirty(&mut self) -> Option<String> {
+        self.db_dirty.take()
     }
 
     /// Register an extra mount as a browser tree root (e.g. the engine `std`
@@ -404,6 +432,16 @@ impl AssetBrowser {
                     format!("{source}/{dir_path}/{}", entry.name)
                 };
                 response.dnd_set_drag_payload(PrefabFileDragPayload { vfs_path });
+            }
+
+            // Select a file as an asset (drives the asset inspector).
+            if !entry.is_dir && response.clicked() {
+                let path = if dir_path.is_empty() {
+                    entry.name.clone()
+                } else {
+                    format!("{dir_path}/{}", entry.name)
+                };
+                self.selected_file = Some((source.clone(), path));
             }
 
             if response.double_clicked() && entry.is_dir {

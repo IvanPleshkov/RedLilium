@@ -93,7 +93,22 @@ impl TabViewer for EditorTabViewer<'_> {
                 redlilium_ecs::ui::show_world_inspector(ui, self.world, self.inspector_state);
             }
             Tab::ComponentInspector => {
-                redlilium_ecs::ui::show_component_inspector(ui, self.world, self.inspector_state);
+                // An asset selected in the browser takes precedence over the
+                // entity inspector.
+                if let Some((source, path)) = self.asset_browser.selected_file().cloned() {
+                    let edited = crate::asset_inspector::show_asset_inspector(
+                        ui, self.world, &source, &path,
+                    );
+                    if edited {
+                        self.asset_browser.mark_db_dirty(source);
+                    }
+                } else {
+                    redlilium_ecs::ui::show_component_inspector(
+                        ui,
+                        self.world,
+                        self.inspector_state,
+                    );
+                }
             }
             Tab::SceneView => {
                 // Record the panel rect (drives picking + next frame's target

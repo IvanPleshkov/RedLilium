@@ -119,6 +119,10 @@ pub struct Editor {
     show_close_dialog: bool,
     /// Set to `true` when the user confirms closing (with or without saving).
     should_close: bool,
+
+    /// Last frame's entity selection — when it changes to a non-empty set, the
+    /// asset selection is cleared so the inspector switches back to the entity.
+    last_selection: Vec<Entity>,
 }
 
 /// Tracks an in-flight VFS read for component import.
@@ -167,6 +171,7 @@ impl Editor {
             pending_prefab_import: None,
             show_close_dialog: false,
             should_close: false,
+            last_selection: Vec::new(),
         }
     }
 
@@ -584,8 +589,40 @@ impl AppHandler for Editor {
             return false;
         }
 
+        // Persist an asset DB edited via the asset inspector. The std mount lives
+        // at "std-assets/" (other mounts: generic persistence is a follow-up).
+        if let Some(mount) = self.asset_browser.take_db_dirty()
+            && let Some(ew) = self.world.as_ref()
+        {
+            let text = ew.world.resource::<AssetDb>().to_ron_for_mount(&mount);
+            match (mount.as_str(), text) {
+                ("std", Ok(text)) => {
+                    if let Err(e) = std::fs::write("std-assets/assets.db", text) {
+                        log::error!("failed to persist std assets.db: {e}");
+                    }
+                }
+                (other, _) => log::warn!("no persistence wired for mount '{other}' yet"),
+            }
+        }
+
         if self.world.is_none() {
             return true;
+        }
+
+        // When the entity selection changes to a non-empty set, drop the asset
+        // selection so the inspector switches back to the entity.
+        if let Some(ew) = self.world.as_ref() {
+            let current = ew
+                .world
+                .resource::<redlilium_ecs::ui::Selection>()
+                .entities()
+                .to_vec();
+            if current != self.last_selection {
+                if !current.is_empty() {
+                    self.asset_browser.clear_selected_file();
+                }
+                self.last_selection = current;
+            }
         }
 
         // Resolve GPU pick from the previous frame's readback

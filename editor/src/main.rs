@@ -1,4 +1,5 @@
 mod asset_browser;
+mod asset_inspector;
 mod background_vfs;
 mod console;
 mod dock;

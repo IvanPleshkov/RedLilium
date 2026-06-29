@@ -22,6 +22,7 @@
 //!
 //! This module is only available when the `rendering` feature is enabled.
 
+mod asset_inspect;
 pub mod components;
 #[cfg(feature = "rendering")]
 pub mod loaders;
@@ -30,6 +31,7 @@ pub mod resources;
 pub mod shaders;
 pub mod systems;
 
+pub use asset_inspect::inspect_asset_settings;
 pub use components::{
     CameraTarget, MaterialBundle, MeshRenderer, Primitive, PrimitiveMaterial, RenderPassType,
 };
