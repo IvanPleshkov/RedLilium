@@ -1,20 +1,20 @@
-//! The vertex-layout loader: reads a serialized [`VertexLayout`] (RON) from a
-//! file. `Asset = VertexLayout`, so an `AssetHandle<VertexLayout>` resolves to a
-//! shared `Arc<VertexLayout>`.
+//! The vertex-layout loader. `Asset = VertexLayout`, so an
+//! `AssetHandle<VertexLayout>` resolves to a shared `Arc<VertexLayout>`.
 //!
-//! A vertex layout is pure data — no GPU residency — so the pipeline is just
-//! `File -> [read (IO), deserialize (CPU)]`. Sharing across consumers (so a mesh
-//! and a material bind the *same* `Arc<VertexLayout>` for pointer-equality
-//! batching) is the job of the
-//! [`VertexLayoutManager`](super::super::VertexLayoutManager), which is the sole
-//! requester per source.
+//! A vertex layout has **no file content** — its `.vlayout` file is empty and its
+//! parameters live in the DB record's `settings` (RON-encoded `VertexLayout`).
+//! The pipeline is therefore a single CPU stage that deserializes
+//! [`LoadEnv::settings`]; no IO. Sharing across consumers (so a mesh and a
+//! material bind the *same* `Arc<VertexLayout>` for pointer-equality batching) is
+//! the job of the
+//! [`VertexLayoutManager`](super::super::VertexLayoutManager), the sole requester
+//! per source.
 
 use redlilium_assets::{
-    AnyAsset, AssetError, AssetLoader, AssetPath, AssetSource, AssetStage, Executor, Guid, LoadEnv,
+    AnyAsset, AssetError, AssetLoader, AssetSource, AssetStage, Executor, Guid, LoadEnv,
     StageFuture,
 };
 use redlilium_core::mesh::VertexLayout;
-use redlilium_vfs::Vfs;
 
 /// Identity of a vertex-layout asset: a file resolved from `guid` via the DB.
 /// Serialized in components / prefabs that bind a layout.
@@ -29,7 +29,8 @@ impl AssetSource for VertexLayoutSource {
     }
 }
 
-/// Loads a serialized [`VertexLayout`] (RON) from a file.
+/// Loads a [`VertexLayout`] from its DB record's `settings` (the empty file is
+/// only the asset's VFS presence).
 pub struct VertexLayoutLoader;
 
 impl AssetLoader for VertexLayoutLoader {
@@ -44,59 +45,28 @@ impl AssetLoader for VertexLayoutLoader {
         _deps: &(),
         env: &LoadEnv,
     ) -> Vec<Box<dyn AssetStage>> {
-        let mut stages: Vec<Box<dyn AssetStage>> = Vec::new();
-        // The read is omitted only if the path didn't resolve — then the decode
-        // stage fails cleanly (it receives the unit input instead of bytes).
-        if let Some(path) = &env.path {
-            stages.push(Box::new(ReadFileStage {
-                path: path.clone(),
-                vfs: env.vfs.clone(),
-            }));
-        }
-        stages.push(Box::new(DeserializeLayoutStage));
-        stages
+        vec![Box::new(LayoutFromSettingsStage {
+            settings: env.settings.clone(),
+        })]
     }
 }
 
-/// IO stage: read the layout file's bytes.
-struct ReadFileStage {
-    path: AssetPath,
-    vfs: Vfs,
+/// CPU stage: deserialize the layout from the record's settings (RON).
+struct LayoutFromSettingsStage {
+    settings: Option<String>,
 }
 
-impl AssetStage for ReadFileStage {
-    fn executor(&self) -> Executor {
-        Executor::Io
-    }
-    fn run_async(&self, _input: AnyAsset) -> StageFuture {
-        let path = self.path.clone();
-        let vfs = self.vfs.clone();
-        Box::pin(async move {
-            let raw = format!("{}/{}", path.mount, path.path);
-            let bytes = vfs
-                .read(&raw)
-                .await
-                .map_err(|e| AssetError::Io(e.to_string()))?;
-            Ok(Box::new(bytes) as AnyAsset)
-        })
-    }
-}
-
-/// CPU stage: deserialize the RON bytes into a [`VertexLayout`].
-struct DeserializeLayoutStage;
-
-impl AssetStage for DeserializeLayoutStage {
+impl AssetStage for LayoutFromSettingsStage {
     fn executor(&self) -> Executor {
         Executor::Cpu
     }
-    fn run_async(&self, input: AnyAsset) -> StageFuture {
+    fn run_async(&self, _input: AnyAsset) -> StageFuture {
+        let settings = self.settings.clone();
         Box::pin(async move {
-            let bytes = input
-                .downcast::<Vec<u8>>()
-                .map_err(|_| AssetError::Decode("vertex_layout: expected file bytes".into()))?;
-            let text = std::str::from_utf8(&bytes)
-                .map_err(|e| AssetError::Decode(format!("vertex_layout: invalid utf-8: {e}")))?;
-            let layout: VertexLayout = ron::from_str(text)
+            let text = settings.ok_or_else(|| {
+                AssetError::Decode("vertex_layout: no parameters in the DB record".into())
+            })?;
+            let layout: VertexLayout = ron::from_str(&text)
                 .map_err(|e| AssetError::Decode(format!("vertex_layout: ron: {e}")))?;
             Ok(Box::new(layout) as AnyAsset)
         })
@@ -107,8 +77,8 @@ impl AssetStage for DeserializeLayoutStage {
 mod tests {
     use redlilium_core::mesh::VertexLayout;
 
-    /// The on-disk RON form round-trips back to an equal `VertexLayout` — this is
-    /// the contract the deserialize stage relies on.
+    /// The settings RON form round-trips back to an equal `VertexLayout` — this is
+    /// the contract the loader relies on.
     #[test]
     fn ron_roundtrip() {
         for layout in [

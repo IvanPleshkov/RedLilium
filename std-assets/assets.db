@@ -1,0 +1,33 @@
+(
+    version: 1,
+    entries: [
+        (
+            guid: ("c1f14851-5a8d-4c3f-ad4c-0cd982076ec1"),
+            path: "meshes/cube.rmesh",
+            kind: "mesh",
+            source_hash: 0,
+            settings: None,
+            references: {
+                "layout": ("5268b679-1be7-43d7-9ed7-a0d6aad85e0b"),
+            },
+        ),
+        (
+            guid: ("8bf3805b-cdd9-4d25-8fbf-8f92311aac1b"),
+            path: "meshes/sphere.rmesh",
+            kind: "mesh",
+            source_hash: 0,
+            settings: None,
+            references: {
+                "layout": ("5268b679-1be7-43d7-9ed7-a0d6aad85e0b"),
+            },
+        ),
+        (
+            guid: ("5268b679-1be7-43d7-9ed7-a0d6aad85e0b"),
+            path: "layouts/position_normal.vlayout",
+            kind: "vertex_layout",
+            source_hash: 0,
+            settings: Some("(buffers:[(stride:24,step_mode:Vertex)],attributes:[(semantic:Position,format:Float3,offset:0,buffer_index:0),(semantic:Normal,format:Float3,offset:12,buffer_index:0)],label:Some(\"position_normal\"))"),
+            references: {},
+        ),
+    ],
+)

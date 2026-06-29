@@ -70,6 +70,15 @@ impl AssetBrowser {
         }
     }
 
+    /// Register an extra mount as a browser tree root (e.g. the engine `std`
+    /// mount, which is added to the VFS programmatically rather than via config).
+    pub fn add_mount(&mut self, name: impl Into<String>) {
+        let name = name.into();
+        if !self.mount_names.contains(&name) {
+            self.mount_names.push(name);
+        }
+    }
+
     /// Poll completed background VFS results and filesystem changes. Call once per frame.
     pub fn poll(&mut self) {
         // Check for external filesystem changes

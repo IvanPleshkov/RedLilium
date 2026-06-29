@@ -158,8 +158,14 @@ impl AssetProcessor {
                 return handle;
             }
         };
+        // Per-kind settings from the record (for sources that store their data
+        // there, e.g. a vertex layout's parameters).
+        let settings = source
+            .file_guid()
+            .and_then(|guid| db.record(&guid).and_then(|r| r.settings.clone()));
         let env = LoadEnv {
             path,
+            settings,
             vfs: self.vfs.clone(),
             device: Arc::clone(&self.device),
         };

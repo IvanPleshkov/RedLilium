@@ -71,6 +71,10 @@ pub trait AssetStage: Send + Sync {
 pub struct LoadEnv {
     /// Resolved primary path for file-backed sources (`None` for generated).
     pub path: Option<crate::db::AssetPath>,
+    /// The asset record's serialized per-kind settings, if any. For some assets
+    /// the settings *are* the data — e.g. a vertex layout, whose file is empty
+    /// and whose parameters live in the DB record.
+    pub settings: Option<String>,
     /// VFS router (captured by IO stages).
     pub vfs: redlilium_vfs::Vfs,
     /// Graphics device (captured by GPU stages).

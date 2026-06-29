@@ -5,7 +5,7 @@ use parking_lot::RwLock;
 
 use egui_dock::DockState;
 use redlilium_app::{AppContext, AppHandler, DrawContext};
-use redlilium_assets::{AssetDb, AssetProcessor};
+use redlilium_assets::{AssetDb, AssetPath, AssetProcessor};
 use redlilium_core::abstract_editor::{ActionQueue, DEFAULT_MAX_UNDO, EditActionHistory};
 use redlilium_core::math::Vec3;
 use redlilium_debug_drawer::{DebugDrawer, DebugDrawerRenderer};
@@ -24,7 +24,7 @@ use redlilium_ecs::{
 };
 use redlilium_graphics::egui::{EguiApp, EguiController};
 use redlilium_graphics::{FrameSchedule, RenderTarget, TextureFormat};
-use redlilium_vfs::Vfs;
+use redlilium_vfs::{FileSystemProvider, Vfs};
 use winit::event::{KeyEvent, MouseButton, MouseScrollDelta};
 use winit::keyboard::PhysicalKey;
 
@@ -136,8 +136,11 @@ struct PendingPrefabImport {
 impl Editor {
     pub fn new() -> Self {
         let project_path = std::path::Path::new("project.toml");
-        let (config, vfs) = crate::project::load_or_default(project_path);
-        let asset_browser = AssetBrowser::new(&config);
+        let (config, mut vfs) = crate::project::load_or_default(project_path);
+        // Engine/editor built-in assets (cube/sphere meshes, vertex layouts).
+        vfs.mount("std", FileSystemProvider::new("std-assets"));
+        let mut asset_browser = AssetBrowser::new(&config);
+        asset_browser.add_mount("std");
         let console = ConsolePanel::new(crate::log_capture::log_buffer());
 
         Self {
@@ -186,7 +189,27 @@ impl Editor {
             .with_loader::<VertexLayoutLoader>()
             .build();
         world.insert_resource(processor);
-        world.insert_resource(AssetDb::new());
+
+        // Load the `std` mount's asset DB (mesh/layout records).
+        let mut asset_db = AssetDb::new();
+        match std::fs::read_to_string("std-assets/assets.db") {
+            Ok(text) => {
+                if let Err(e) = asset_db.merge_ron("std", &text) {
+                    log::error!("failed to parse std assets.db: {e}");
+                }
+            }
+            Err(e) => log::warn!("std assets.db not found: {e}"),
+        }
+        // Resolve the demo meshes by path (fall back to generated if absent).
+        let cube_source = asset_db
+            .guid_of(&AssetPath::new("std", "meshes/cube.rmesh"))
+            .map(MeshSource::File)
+            .unwrap_or_else(|| MeshSource::Generated(MeshGenerator::cube(0.5)));
+        let sphere_source = asset_db
+            .guid_of(&AssetPath::new("std", "meshes/sphere.rmesh"))
+            .map(MeshSource::File)
+            .unwrap_or_else(|| MeshSource::Generated(MeshGenerator::sphere(0.5, 32, 16)));
+        world.insert_resource(asset_db);
 
         // Holds the per-frame render graph while the `Render` schedule runs.
         world.insert_resource(RenderSchedule::empty());
@@ -246,9 +269,9 @@ impl Editor {
         redlilium_ecs::mark_editor(&mut world, editor_camera);
 
         // --- Demo scene entities ---
-        // The cube is a generated mesh asset; all cube entities share this source
-        // (the MeshManager dedups it to one Arc<Mesh>, loaded asynchronously).
-        let cube_source = MeshSource::Generated(MeshGenerator::cube(0.5));
+        // `cube_source` / `sphere_source` were resolved above (File assets from the
+        // std mount, or generated fallbacks). Entities sharing a source share one
+        // Arc<Mesh> (loaded asynchronously by the MeshManager).
 
         // Ground plane (scaled flat cube)
         {
@@ -295,6 +318,28 @@ impl Editor {
                 .resource_mut::<MeshManager>()
                 .request(cube_source.clone());
             let primitive = Primitive::new(cube_source.clone(), handle, material);
+            register_render_material(&world, &primitive.material);
+            world
+                .insert(entity, MeshRenderer::single(primitive))
+                .unwrap();
+        }
+
+        // A sphere (a different mesh + a different vertex layout) — exercises the
+        // second File asset and the layout switch.
+        {
+            let entity = world.spawn();
+            let transform = Transform::from_translation(Vec3::new(2.0, 0.7, -0.5));
+            world.insert(entity, transform).unwrap();
+            world
+                .insert(entity, GlobalTransform(transform.to_matrix()))
+                .unwrap();
+            world.insert(entity, Visibility::VISIBLE).unwrap();
+
+            let material = scene_view.create_entity_material();
+            let handle = world
+                .resource_mut::<MeshManager>()
+                .request(sphere_source.clone());
+            let primitive = Primitive::new(sphere_source.clone(), handle, material);
             register_render_material(&world, &primitive.material);
             world
                 .insert(entity, MeshRenderer::single(primitive))
