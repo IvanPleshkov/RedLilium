@@ -6,10 +6,14 @@
 //! is a consumer concern (typically a manager — see
 //! [`VertexLayoutManager`](super::VertexLayoutManager)).
 
+mod material;
+mod material_instance;
 mod mesh;
 mod shader;
 mod vertex_layout;
 
+pub use material::{MaterialData, MaterialSource};
+pub use material_instance::{MaterialInstanceData, MaterialInstanceSource};
 pub use mesh::{MeshGenerator, MeshLoader, MeshSource};
 pub use shader::{Shader, ShaderLoader, ShaderSource};
 pub use vertex_layout::{VertexLayoutLoader, VertexLayoutSource};

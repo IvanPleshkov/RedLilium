@@ -28,6 +28,8 @@ pub mod components;
 pub mod loaders;
 pub(crate) mod material_inspector;
 pub mod resources;
+#[cfg(feature = "rendering")]
+pub mod shading;
 pub mod shaders;
 pub mod systems;
 
@@ -37,9 +39,12 @@ pub use components::{
 };
 #[cfg(feature = "rendering")]
 pub use loaders::{
-    MeshGenerator, MeshLoader, MeshSource, Shader, ShaderLoader, ShaderSource, VertexLayoutLoader,
+    MaterialData, MaterialInstanceData, MaterialInstanceSource, MaterialSource, MeshGenerator,
+    MeshLoader, MeshSource, Shader, ShaderLoader, ShaderSource, VertexLayoutLoader,
     VertexLayoutSource,
 };
+#[cfg(feature = "rendering")]
+pub use shading::{PropDef, PropValue, ShadingModel, ShadingRegistry};
 pub use resources::{
     CpuBundleInfo, FrameRing, MaterialManager, MaterialManagerError, MeshHandle, MeshManager,
     RenderSchedule, TextureManager, TextureManagerError, pack_uniform_bytes,
