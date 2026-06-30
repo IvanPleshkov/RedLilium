@@ -4,7 +4,9 @@
 //! (RON); the file is empty. It resolves to a graphics `MaterialInstance`, and a
 //! `Primitive` binds one of these.
 
-use redlilium_assets::{AssetSource, Guid};
+use redlilium_assets::{
+    AnyAsset, AssetError, AssetLoader, AssetSource, AssetStage, Executor, Guid, LoadEnv, StageFuture,
+};
 
 use crate::std::rendering::shading::PropValue;
 
@@ -28,6 +30,52 @@ pub struct MaterialInstanceData {
     pub parent: Guid,
     /// Overridden property values by name; unset slots inherit from the parent.
     pub overrides: Vec<(String, PropValue)>,
+}
+
+/// Loads a [`MaterialInstanceData`] from its DB record's `settings` (empty file).
+/// The resident data is resolved against its parent material + built into a static
+/// property binding by the
+/// [`MaterialInstanceManager`](super::super::MaterialInstanceManager).
+pub struct MaterialInstanceLoader;
+
+impl AssetLoader for MaterialInstanceLoader {
+    const NAME: &'static str = "material_instance";
+    const EXTENSIONS: &'static [&'static str] = &["matinst"];
+    type Source = MaterialInstanceSource;
+    type Asset = MaterialInstanceData;
+    type Deps = ();
+
+    fn pipeline(
+        _source: &MaterialInstanceSource,
+        _deps: &(),
+        env: &LoadEnv,
+    ) -> Vec<Box<dyn AssetStage>> {
+        vec![Box::new(InstanceFromSettingsStage {
+            settings: env.settings.clone(),
+        })]
+    }
+}
+
+/// CPU stage: deserialize the instance data from the record's settings (RON).
+struct InstanceFromSettingsStage {
+    settings: Option<String>,
+}
+
+impl AssetStage for InstanceFromSettingsStage {
+    fn executor(&self) -> Executor {
+        Executor::Cpu
+    }
+    fn run_async(&self, _input: AnyAsset) -> StageFuture {
+        let settings = self.settings.clone();
+        Box::pin(async move {
+            let text = settings.ok_or_else(|| {
+                AssetError::Decode("material_instance: no parameters in the DB record".into())
+            })?;
+            let data: MaterialInstanceData = ron::from_str(&text)
+                .map_err(|e| AssetError::Decode(format!("material_instance: ron: {e}")))?;
+            Ok(Box::new(data) as AnyAsset)
+        })
+    }
 }
 
 #[cfg(test)]

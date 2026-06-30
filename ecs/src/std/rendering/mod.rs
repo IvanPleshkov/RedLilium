@@ -39,18 +39,21 @@ pub use components::{
 };
 #[cfg(feature = "rendering")]
 pub use loaders::{
-    MaterialData, MaterialInstanceData, MaterialInstanceSource, MaterialSource, MeshGenerator,
-    MeshLoader, MeshSource, Shader, ShaderLoader, ShaderSource, VertexLayoutLoader,
-    VertexLayoutSource,
+    MaterialData, MaterialInstanceData, MaterialInstanceLoader, MaterialInstanceSource,
+    MaterialLoader, MaterialSource, MeshGenerator, MeshLoader, MeshSource, Shader, ShaderLoader,
+    ShaderSource, VertexLayoutLoader, VertexLayoutSource,
 };
 #[cfg(feature = "rendering")]
-pub use shading::{PropDef, PropValue, ShadingModel, ShadingRegistry};
+pub use shading::{PropDef, PropValue, ShadingModel, ShadingRegistry, pack_props};
 pub use resources::{
     CpuBundleInfo, FrameRing, MaterialManager, MaterialManagerError, MeshHandle, MeshManager,
     RenderSchedule, TextureManager, TextureManagerError, pack_uniform_bytes,
 };
 #[cfg(feature = "rendering")]
-pub use resources::{ShaderManager, VertexLayoutManager};
+pub use resources::{
+    InstanceHandle, MaterialAssetManager, MaterialInstanceManager, PipelineCache, ResolvedInstance,
+    ResolvedMaterial, ShaderManager, VertexLayoutManager,
+};
 pub use systems::{
     DebugRender, EguiRender, FlushUploads, ForwardRender, FrameTarget, MeshLoad, ScenePass,
 };

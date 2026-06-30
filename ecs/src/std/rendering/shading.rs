@@ -19,6 +19,27 @@ pub enum PropValue {
     Vec4([f32; 4]),
 }
 
+impl PropValue {
+    /// Append this value's little-endian float bytes to `out` (uniform packing).
+    pub fn pack_into(&self, out: &mut Vec<u8>) {
+        match self {
+            PropValue::Float(v) => out.extend_from_slice(&v.to_le_bytes()),
+            PropValue::Vec3(v) => v.iter().for_each(|f| out.extend_from_slice(&f.to_le_bytes())),
+            PropValue::Vec4(v) => v.iter().for_each(|f| out.extend_from_slice(&f.to_le_bytes())),
+        }
+    }
+}
+
+/// Pack a resolved property list (schema order) into a contiguous uniform byte
+/// buffer for upload to the material's static binding (group 1).
+pub fn pack_props(props: &[(String, PropValue)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (_, v) in props {
+        v.pack_into(&mut out);
+    }
+    out
+}
+
 /// One property slot in a shading model's schema: a name and its default value
 /// (the value type is implied by the default's variant).
 #[derive(Debug, Clone, PartialEq)]
@@ -46,6 +67,23 @@ impl ShadingModel {
             .iter()
             .find(|p| p.name == name)
             .map(|p| &p.default)
+    }
+
+    /// Resolve property values against this model's schema: every schema slot in
+    /// order, taking the supplied value (matched by name) or the model default.
+    /// The result is the canonical packing order for the material binding.
+    pub fn resolve(&self, values: &[(String, PropValue)]) -> Vec<(String, PropValue)> {
+        self.schema
+            .iter()
+            .map(|slot| {
+                let value = values
+                    .iter()
+                    .find(|(n, _)| n == &slot.name)
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_else(|| slot.default.clone());
+                (slot.name.clone(), value)
+            })
+            .collect()
     }
 }
 
