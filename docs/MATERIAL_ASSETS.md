@@ -261,3 +261,14 @@ without rework:
 
 Later (separate efforts): the variant/preset/hardware/define system; deferred
 path; textures as assets; per-material custom effects via new shading models.
+
+## glTF is not a runtime source
+
+glTF is **not** a runtime mesh/material source. There is no "insert this glTF as a
+mesh" path. Instead glTF becomes an offline **glTF → prefab conversion** that
+explicitly maps glTF materials onto **engine** materials (shading models +
+instances), so the result is a correct, engine-native prefab. Consequently the
+old name-based material path (`PrimitiveMaterial`, the name-keyed `MaterialManager`,
+`MaterialBundle`, the ring `create_opaque_color_*` builders) can be removed wholesale
+during the swap — nothing runtime depends on it once the demo uses asset instances.
+The glTF importer is a separate future effort.
