@@ -18,8 +18,9 @@ use crate::system::SystemError;
 use crate::{DebugDrawer, DebugDrawerRenderer, System, SystemContext};
 
 use super::{
-    CameraTarget, FrameRing, MaterialManager, MeshManager, MeshRenderer, RenderPassType,
-    RenderSchedule, TextureManager, VertexLayoutManager, pack_uniform_bytes, shaders,
+    CameraTarget, FrameRing, MaterialAssetManager, MaterialInstanceManager, MaterialManager,
+    MeshManager, MeshRenderer, RenderPassType, RenderSchedule, ShaderManager, ShadingRegistry,
+    TextureManager, VertexLayoutManager, pack_uniform_bytes, shaders,
 };
 
 /// Default material props (base color) for a primitive with no CPU instance —
@@ -53,6 +54,12 @@ impl System for FlushUploads {
         }
         if world.has_resource::<MaterialManager>() {
             world.resource_mut::<MaterialManager>().flush_uploads(graph);
+        }
+        // Asset-based material instances flush their static property buffers here too.
+        if world.has_resource::<MaterialInstanceManager>() {
+            world
+                .resource_mut::<MaterialInstanceManager>()
+                .flush_uploads(graph);
         }
         Ok(())
     }
@@ -319,6 +326,44 @@ impl System for MeshLoad {
         let mut processor = world.resource_mut::<AssetProcessor>();
         let db = world.resource::<AssetDb>();
         mesh_mgr.drive(&mut processor, &db, &mut layout_mgr);
+        Ok(())
+    }
+}
+
+/// Drives material-instance loading: advances every in-flight
+/// [`MaterialInstanceManager`] request — loading its data, resolving its parent
+/// template (via [`MaterialAssetManager`], which itself pulls the shader through
+/// [`ShaderManager`]), and building the static property binding. Co-locks the
+/// managers + [`ShadingRegistry`] + processor + DB so consumers only ever touch
+/// `MaterialInstanceManager::request`. No-op if any input is absent.
+pub struct MaterialInstanceLoad;
+
+impl System for MaterialInstanceLoad {
+    type Result = ();
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<Self::Result, SystemError> {
+        let world = ctx.world();
+        if !world.has_resource::<MaterialInstanceManager>()
+            || !world.has_resource::<MaterialAssetManager>()
+            || !world.has_resource::<ShaderManager>()
+            || !world.has_resource::<ShadingRegistry>()
+            || !world.has_resource::<AssetProcessor>()
+            || !world.has_resource::<AssetDb>()
+        {
+            return Ok(());
+        }
+        let mut instance_mgr = world.resource_mut::<MaterialInstanceManager>();
+        let mut material_mgr = world.resource_mut::<MaterialAssetManager>();
+        let mut shader_mgr = world.resource_mut::<ShaderManager>();
+        let registry = world.resource::<ShadingRegistry>();
+        let mut processor = world.resource_mut::<AssetProcessor>();
+        let db = world.resource::<AssetDb>();
+        instance_mgr.drive(
+            &mut processor,
+            &db,
+            &mut material_mgr,
+            &mut shader_mgr,
+            &registry,
+        );
         Ok(())
     }
 }

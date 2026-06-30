@@ -55,7 +55,8 @@ pub use resources::{
     ResolvedMaterial, ShaderManager, VertexLayoutManager,
 };
 pub use systems::{
-    DebugRender, EguiRender, FlushUploads, ForwardRender, FrameTarget, MeshLoad, ScenePass,
+    DebugRender, EguiRender, FlushUploads, ForwardRender, FrameTarget, MaterialInstanceLoad,
+    MeshLoad, ScenePass,
 };
 
 use crate::World;

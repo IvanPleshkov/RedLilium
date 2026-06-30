@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 
 use redlilium_assets::{AssetDb, AssetPath, AssetRecord, Guid};
 use redlilium_core::mesh::{CpuMeshData, VertexLayout, generators};
+use redlilium_ecs::std::rendering::{MaterialData, MaterialInstanceData, PropValue};
 
 /// Insert a record with a deterministic guid keyed by its mount-relative path.
 fn add(
@@ -109,6 +110,39 @@ fn main() {
         None,
         BTreeMap::new(),
     );
+
+    // --- Materials: a surface (shading model + values) + a bindable instance. ---
+    // The material references no shader — the `opaque` shading model (engine code)
+    // owns that. Data lives in the record settings; the files are empty.
+    std::fs::create_dir_all("std-assets/materials").unwrap();
+    let mat_data = MaterialData {
+        shading_model: "opaque".to_owned(),
+        properties: vec![(
+            "base_color".to_owned(),
+            PropValue::Vec4([0.6, 0.6, 0.65, 1.0]),
+        )],
+    };
+    let mat_guid = add(
+        &mut db,
+        "materials/opaque.material",
+        "material",
+        Some(ron::to_string(&mat_data).expect("material -> ron")),
+        BTreeMap::new(),
+    );
+    std::fs::write("std-assets/materials/opaque.material", b"").unwrap();
+
+    let inst_data = MaterialInstanceData {
+        parent: mat_guid,
+        overrides: Vec::new(),
+    };
+    add(
+        &mut db,
+        "materials/default.matinst",
+        "material_instance",
+        Some(ron::to_string(&inst_data).expect("instance -> ron")),
+        BTreeMap::new(),
+    );
+    std::fs::write("std-assets/materials/default.matinst", b"").unwrap();
 
     std::fs::write(
         "std-assets/assets.db",
