@@ -40,7 +40,7 @@ pub fn show_asset_inspector(
     ui.separator();
 
     // Per-kind editing lives in ECS (next to the loaders); the editor is generic.
-    match redlilium_ecs::inspect_asset_settings(&kind, settings.as_deref(), ui) {
+    match redlilium_ecs::inspect_asset_settings(&kind, settings.as_deref(), ui, world) {
         Some(new_settings) => {
             world
                 .resource_mut::<AssetDb>()
