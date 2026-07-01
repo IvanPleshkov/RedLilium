@@ -528,6 +528,44 @@ impl Editor {
                 redlilium_core::math::perspective_rh(FRAC_PI_4, aspect, 0.1, 500.0);
         }
     }
+
+    /// Apply a rename/move: rebind the DB record (if the file is a registered
+    /// asset) and move the VFS file. Both are same-mount path changes; the guid is
+    /// preserved so references by guid survive.
+    fn perform_asset_move(&mut self, source: &str, old_path: &str, new_path: &str) {
+        if new_path == old_path {
+            return;
+        }
+        let rebound = {
+            let ew = self.world.as_mut().unwrap();
+            let guid = ew
+                .world
+                .resource::<AssetDb>()
+                .guid_of(&AssetPath::new(source, old_path));
+            match guid {
+                Some(g) => match ew
+                    .world
+                    .resource_mut::<AssetDb>()
+                    .rebind(g, AssetPath::new(source, new_path))
+                {
+                    Ok(()) => true,
+                    Err(e) => {
+                        log::error!("rebind {old_path} -> {new_path} failed: {e:?}");
+                        return;
+                    }
+                },
+                None => false,
+            }
+        };
+        if rebound {
+            self.asset_browser.mark_db_dirty(source);
+        }
+        let from = format!("{source}/{old_path}");
+        let to = format!("{source}/{new_path}");
+        self.asset_browser.dispatch_move(&self.vfs, &from, &to);
+        self.asset_browser.notify_asset_moved(source, new_path);
+        log::info!("Asset {from} -> {to}");
+    }
 }
 
 impl AppHandler for Editor {
@@ -824,6 +862,28 @@ impl AppHandler for Editor {
                 }
                 None => log::warn!("Cannot create asset of kind '{kind}' (missing parent?)"),
             }
+        }
+
+        // Rename an asset (browser context menu → inline edit): same dir, new name.
+        if let Some((source, old_path, new_name)) = self.asset_browser.take_pending_rename() {
+            let dir = old_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+            let new_path = if dir.is_empty() {
+                new_name
+            } else {
+                format!("{dir}/{new_name}")
+            };
+            self.perform_asset_move(&source, &old_path, &new_path);
+        }
+
+        // Move an asset (drag onto a directory): keep name, new directory.
+        if let Some((source, old_path, new_dir)) = self.asset_browser.take_pending_move() {
+            let name = old_path.rsplit('/').next().unwrap_or(&old_path).to_owned();
+            let new_path = if new_dir.is_empty() {
+                name
+            } else {
+                format!("{new_dir}/{name}")
+            };
+            self.perform_asset_move(&source, &old_path, &new_path);
         }
 
         // Process component import (asset browser → inspector): dispatch read

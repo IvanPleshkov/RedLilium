@@ -11,6 +11,9 @@ pub enum VfsResult {
     ListDir(Result<Vec<VfsDirEntry>, VfsError>),
     Write(Result<(), VfsError>),
     Read(Result<Vec<u8>, VfsError>),
+    /// A move (read → write → delete). Carries `(from, to)` so the UI can refresh
+    /// both directories.
+    Move(Result<(), VfsError>, String, String),
 }
 
 /// Non-blocking VFS dispatcher for the editor UI.
@@ -72,6 +75,31 @@ impl BackgroundVfs {
         self.runtime.spawn(async move {
             let result = future.await;
             let _ = tx.send((id, VfsResult::Write(result)));
+        });
+
+        id
+    }
+
+    /// Dispatch an async file move (`read` → `write` → `delete`). Works for any
+    /// provider; returns an ID to match the result.
+    pub fn move_file(&mut self, vfs: &Vfs, from: &str, to: &str) -> VfsRequestId {
+        let id = VfsRequestId(self.next_id);
+        self.next_id += 1;
+
+        let vfs = vfs.clone();
+        let from = from.to_owned();
+        let to = to.to_owned();
+        let tx = self.result_tx.clone();
+
+        self.runtime.spawn(async move {
+            let result = async {
+                let data = vfs.read(&from).await?;
+                vfs.write(&to, data).await?;
+                vfs.delete(&from).await?;
+                Ok(())
+            }
+            .await;
+            let _ = tx.send((id, VfsResult::Move(result, from, to)));
         });
 
         id

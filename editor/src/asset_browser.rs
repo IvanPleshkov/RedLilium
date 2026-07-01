@@ -56,6 +56,19 @@ pub struct AssetBrowser {
     /// Pending asset creation from the "New" context menu: (source, dir, kind).
     /// Drained by the editor, which writes the file + DB record.
     pending_new: Option<(String, String, String)>,
+    /// Active inline rename: (source, file_path, edit_buffer).
+    renaming: Option<(String, String, String)>,
+    /// Committed rename to apply: (source, old_path, new_name). Drained by editor.
+    pending_rename: Option<(String, String, String)>,
+    /// Committed move to apply: (source, old_path, new_dir). Drained by editor.
+    pending_move: Option<(String, String, String)>,
+}
+
+/// Drag payload for moving an asset file between directories.
+#[derive(Clone)]
+struct AssetFileDrag {
+    source: String,
+    path: String,
 }
 
 impl AssetBrowser {
@@ -79,7 +92,27 @@ impl AssetBrowser {
             pending_component_export: None,
             pending_prefab_export: None,
             pending_new: None,
+            renaming: None,
+            pending_rename: None,
+            pending_move: None,
         }
+    }
+
+    /// Take the pending rename intent: `(source, old_path, new_name)`.
+    pub fn take_pending_rename(&mut self) -> Option<(String, String, String)> {
+        self.pending_rename.take()
+    }
+
+    /// Take the pending move intent: `(source, old_path, new_dir)`.
+    pub fn take_pending_move(&mut self) -> Option<(String, String, String)> {
+        self.pending_move.take()
+    }
+
+    /// After a rename/move, refresh the affected directories and update the
+    /// selection to the new path.
+    pub fn notify_asset_moved(&mut self, source: &str, new_path: &str) {
+        self.cached_key = None;
+        self.selected_file = Some((source.to_owned(), new_path.to_owned()));
     }
 
     /// Take the pending "New asset" intent: `(source, dir, kind)`, if any.
@@ -181,6 +214,18 @@ impl AssetBrowser {
                     log::error!("VFS read failed: {e}");
                     self.pending_reads.remove(&id);
                 }
+                VfsResult::Move(Ok(()), from, to) => {
+                    log::info!("Moved: {from} -> {to}");
+                    for p in [&from, &to] {
+                        if let Some((parent, _)) = p.rsplit_once('/') {
+                            self.dir_cache.remove(parent);
+                        }
+                    }
+                    self.cached_key = None;
+                }
+                VfsResult::Move(Err(e), from, to) => {
+                    log::error!("VFS move {from} -> {to} failed: {e}");
+                }
             }
         }
     }
@@ -209,6 +254,11 @@ impl AssetBrowser {
     pub fn dispatch_write(&mut self, vfs: &Vfs, vfs_path: &str, data: Vec<u8>) {
         let id = self.bg_vfs.write(vfs, vfs_path, data);
         self.pending_writes.insert(vfs_path.to_owned(), id);
+    }
+
+    /// Dispatch an async VFS file move (rename or move-between-dirs).
+    pub fn dispatch_move(&mut self, vfs: &Vfs, from: &str, to: &str) {
+        self.bg_vfs.move_file(vfs, from, to);
     }
 
     /// Draw the asset browser UI.
@@ -341,6 +391,24 @@ impl AssetBrowser {
             }
             self.selected = Some(new_sel);
         }
+
+        // Accept an asset file dropped onto this directory → move it here
+        // (same-mount only). Hover-check first (non-destructive), then release.
+        let hdr = &header.header_response;
+        if hdr.dnd_hover_payload::<AssetFileDrag>().is_some() {
+            ui.painter().rect_stroke(
+                hdr.rect,
+                2.0,
+                egui::Stroke::new(2.0, crate::theme::ACCENT),
+                egui::StrokeKind::Outside,
+            );
+            if let Some(payload) = hdr.dnd_release_payload::<AssetFileDrag>()
+                && payload.source == source
+            {
+                self.pending_move =
+                    Some((payload.source.clone(), payload.path.clone(), dir_path.to_owned()));
+            }
+        }
     }
 
     /// List only subdirectories under a given path.
@@ -414,13 +482,68 @@ impl AssetBrowser {
         ui.strong(&display_path);
         ui.separator();
 
+        // Panel-background context menu for "New" — created BEFORE the file entries
+        // so their clicks land on the entries (a later/top interact would steal
+        // them). Also covers an empty directory.
+        let bg = ui.interact(
+            ui.max_rect(),
+            ui.id().with("browser_new_ctx"),
+            egui::Sense::click(),
+        );
+        let mut new_kind: Option<&'static str> = None;
+        bg.context_menu(|ui| {
+            ui.menu_button("New", |ui| {
+                for (label, kind) in [
+                    ("Vertex Layout", "vertex_layout"),
+                    ("Material", "material"),
+                    ("Material Instance", "material_instance"),
+                ] {
+                    if ui.button(label).clicked() {
+                        new_kind = Some(kind);
+                        ui.close();
+                    }
+                }
+            });
+        });
+        if let Some(kind) = new_kind {
+            self.pending_new = Some((source.clone(), dir_path.clone(), kind.to_owned()));
+        }
+
         if self.cached_entries.is_empty() {
             ui.weak("(empty)");
             return;
         }
 
         // File listing
+        let mut rename_start: Option<(String, String, String)> = None;
         for entry in &self.cached_entries {
+            // path within the source (dir_path/name), used for both files + dirs.
+            let file_path = if dir_path.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{dir_path}/{}", entry.name)
+            };
+
+            // Inline rename mode for this file (Enter commits, Esc cancels).
+            let is_renaming = !entry.is_dir
+                && self
+                    .renaming
+                    .as_ref()
+                    .is_some_and(|(s, p, _)| s == &source && p == &file_path);
+            if is_renaming {
+                let buf = &mut self.renaming.as_mut().unwrap().2;
+                ui.text_edit_singleline(buf).request_focus();
+                if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    let (s, p, new_name) = self.renaming.take().unwrap();
+                    if !new_name.is_empty() && new_name != entry.name {
+                        self.pending_rename = Some((s, p, new_name));
+                    }
+                } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    self.renaming = None;
+                }
+                continue;
+            }
+
             let icon = if entry.is_dir {
                 "\u{1F4C1}"
             } else {
@@ -436,48 +559,46 @@ impl AssetBrowser {
                     .sense(egui::Sense::click_and_drag()),
             );
 
-            // Make .component files draggable for import into inspector
-            if !entry.is_dir && entry.name.ends_with(".component") {
-                let vfs_path = if dir_path.is_empty() {
-                    format!("{source}/{}", entry.name)
+            // Drag payloads: .component / .prefab keep their import payloads; any
+            // other file becomes movable between directories (AssetFileDrag).
+            if !entry.is_dir {
+                let vfs_path = format!("{source}/{file_path}");
+                if entry.name.ends_with(".component") {
+                    response.dnd_set_drag_payload(ComponentFileDragPayload { vfs_path });
+                } else if entry.name.ends_with(".prefab") {
+                    response.dnd_set_drag_payload(PrefabFileDragPayload { vfs_path });
                 } else {
-                    format!("{source}/{dir_path}/{}", entry.name)
-                };
-                response.dnd_set_drag_payload(ComponentFileDragPayload { vfs_path });
-            }
+                    response.dnd_set_drag_payload(AssetFileDrag {
+                        source: source.clone(),
+                        path: file_path.clone(),
+                    });
+                }
 
-            // Make .prefab files draggable for import into world inspector
-            if !entry.is_dir && entry.name.ends_with(".prefab") {
-                let vfs_path = if dir_path.is_empty() {
-                    format!("{source}/{}", entry.name)
-                } else {
-                    format!("{source}/{dir_path}/{}", entry.name)
-                };
-                response.dnd_set_drag_payload(PrefabFileDragPayload { vfs_path });
+                // Right-click a file → Rename (starts the inline editor).
+                response.context_menu(|ui| {
+                    if ui.button("Rename").clicked() {
+                        rename_start =
+                            Some((source.clone(), file_path.clone(), entry.name.clone()));
+                        ui.close();
+                    }
+                });
             }
 
             // Select a file as an asset (drives the asset inspector).
             if !entry.is_dir && response.clicked() {
-                let path = if dir_path.is_empty() {
-                    entry.name.clone()
-                } else {
-                    format!("{dir_path}/{}", entry.name)
-                };
-                self.selected_file = Some((source.clone(), path));
+                self.selected_file = Some((source.clone(), file_path.clone()));
             }
 
             if response.double_clicked() && entry.is_dir {
-                let new_dir = if dir_path.is_empty() {
-                    entry.name.clone()
-                } else {
-                    format!("{dir_path}/{}", entry.name)
-                };
-                let tree_key = format!("{source}/{new_dir}");
+                let tree_key = format!("{source}/{file_path}");
                 self.expanded.insert(tree_key);
-                self.selected = Some((source.clone(), new_dir));
+                self.selected = Some((source.clone(), file_path.clone()));
                 self.cached_key = None;
                 break;
             }
+        }
+        if let Some(r) = rename_start {
+            self.renaming = Some(r);
         }
 
         // Drop target: accept payloads dragged from inspector or world inspector.
@@ -524,29 +645,5 @@ impl AssetBrowser {
             );
         }
 
-        // Right-click the panel → create a new asset in the current directory.
-        let bg = ui.interact(
-            ui.max_rect(),
-            ui.id().with("browser_new_ctx"),
-            egui::Sense::click(),
-        );
-        let mut new_kind: Option<&'static str> = None;
-        bg.context_menu(|ui| {
-            ui.menu_button("New", |ui| {
-                for (label, kind) in [
-                    ("Vertex Layout", "vertex_layout"),
-                    ("Material", "material"),
-                    ("Material Instance", "material_instance"),
-                ] {
-                    if ui.button(label).clicked() {
-                        new_kind = Some(kind);
-                        ui.close();
-                    }
-                }
-            });
-        });
-        if let Some(kind) = new_kind {
-            self.pending_new = Some((source.clone(), dir_path.clone(), kind.to_owned()));
-        }
     }
 }
