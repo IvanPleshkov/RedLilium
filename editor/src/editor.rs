@@ -16,11 +16,13 @@ use redlilium_ecs::ui::{
 use redlilium_ecs::{
     AssetGpuFlush, AssetPump, Camera, DebugRender, DrawGrid, DrawSelectionAabb, EcsRunner,
     EguiRender, Entity, FlushUploads, ForwardRender, FrameRing, FrameTarget, FreeFlyCamera,
-    GlobalTransform, GridConfig, MaterialManager, MeshGenerator, MeshLoad, MeshLoader, MeshManager,
-    MeshRenderer, MeshSource, Name, PostUpdate, Primitive, Render, RenderSchedule, ScenePass,
-    Schedules, ShaderLoader, ShaderManager, TextureManager, Transform, Update,
-    UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms, VertexLayoutLoader,
-    VertexLayoutManager, Visibility, WindowInput, World, register_std_components,
+    GlobalTransform, GridConfig, MaterialAssetManager, MaterialInstanceLoad, MaterialInstanceLoader,
+    MaterialInstanceManager, MaterialInstanceSource, MaterialLoader, MeshGenerator, MeshLoad,
+    MeshLoader, MeshManager, MeshRenderer, MeshSource, Name, PipelineCache, PostUpdate, Primitive,
+    Render, RenderSchedule, ScenePass, Schedules, ShaderLoader, ShaderManager, ShadingRegistry,
+    TextureManager, Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera,
+    UpdateGlobalTransforms, VertexLayoutLoader, VertexLayoutManager, Visibility, WindowInput, World,
+    register_std_components,
 };
 use redlilium_graphics::egui::{EguiApp, EguiController};
 use redlilium_graphics::{FrameSchedule, RenderTarget, TextureFormat};
@@ -182,11 +184,16 @@ impl Editor {
         redlilium_ecs::register_rendering_components(&mut world);
 
         // Insert rendering manager resources
-        world.insert_resource(MaterialManager::new(scene_view.device().clone()));
         world.insert_resource(TextureManager::new(scene_view.device().clone()));
         world.insert_resource(MeshManager::new());
         world.insert_resource(VertexLayoutManager::new());
         world.insert_resource(ShaderManager::new());
+        // Asset-based material system: the shading registry (engine code), the
+        // template + instance resolvers, and the draw-time pipeline cache.
+        world.insert_resource(ShadingRegistry::with_builtins());
+        world.insert_resource(MaterialAssetManager::new());
+        world.insert_resource(MaterialInstanceManager::new(scene_view.device().clone()));
+        world.insert_resource(PipelineCache::new(scene_view.device().clone()));
 
         // Asset system: one processor (with the rendering loaders) + one DB. The
         // AssetPump / MeshLoad / AssetGpuFlush systems drive these each frame.
@@ -194,6 +201,8 @@ impl Editor {
             .with_loader::<MeshLoader>()
             .with_loader::<VertexLayoutLoader>()
             .with_loader::<ShaderLoader>()
+            .with_loader::<MaterialLoader>()
+            .with_loader::<MaterialInstanceLoader>()
             .build();
         world.insert_resource(processor);
 
@@ -216,6 +225,12 @@ impl Editor {
             .guid_of(&AssetPath::new("std", "meshes/sphere.rmesh"))
             .map(MeshSource::File)
             .unwrap_or_else(|| MeshSource::Generated(MeshGenerator::sphere(0.5, 32, 16)));
+        // The std `default` material instance every demo primitive binds.
+        let material_source = MaterialInstanceSource {
+            guid: asset_db
+                .guid_of(&AssetPath::new("std", "materials/default.matinst"))
+                .expect("std default.matinst record present"),
+        };
         world.insert_resource(asset_db);
 
         // Holds the per-frame render graph while the `Render` schedule runs.
@@ -231,21 +246,6 @@ impl Editor {
         // The ForwardRender system records its scene-pass handle here so the egui
         // overlay + debug pass can depend on it.
         world.insert_resource(ScenePass::default());
-
-        // Register materials so prefab deserialization can find them
-        {
-            let mut mat_manager = world.resource_mut::<MaterialManager>();
-            mat_manager.register_material(
-                "opaque_color",
-                Arc::clone(scene_view.cpu_material()),
-                Arc::clone(scene_view.opaque_material()),
-            );
-            mat_manager.register_material(
-                "entity_index",
-                Arc::new(redlilium_core::material::CpuMaterial::new()),
-                Arc::clone(scene_view.entity_index_material()),
-            );
-        }
 
         // Insert WindowInput resource
         let window_input_handle = world.insert_resource(WindowInput::default());
@@ -294,12 +294,18 @@ impl Editor {
                 .unwrap();
             world.insert(entity, Visibility::VISIBLE).unwrap();
 
-            let material = scene_view.create_entity_material();
             let handle = world
                 .resource_mut::<MeshManager>()
                 .request(cube_source.clone());
-            let primitive = Primitive::new(cube_source.clone(), handle, material);
-            register_render_material(&world, &primitive.material);
+            let material_handle = world
+                .resource_mut::<MaterialInstanceManager>()
+                .request(material_source.clone());
+            let primitive = Primitive::new(
+                cube_source.clone(),
+                handle,
+                material_source.clone(),
+                material_handle,
+            );
             world
                 .insert(entity, MeshRenderer::single(primitive))
                 .unwrap();
@@ -320,12 +326,18 @@ impl Editor {
                 .unwrap();
             world.insert(entity, Visibility::VISIBLE).unwrap();
 
-            let material = scene_view.create_entity_material();
             let handle = world
                 .resource_mut::<MeshManager>()
                 .request(cube_source.clone());
-            let primitive = Primitive::new(cube_source.clone(), handle, material);
-            register_render_material(&world, &primitive.material);
+            let material_handle = world
+                .resource_mut::<MaterialInstanceManager>()
+                .request(material_source.clone());
+            let primitive = Primitive::new(
+                cube_source.clone(),
+                handle,
+                material_source.clone(),
+                material_handle,
+            );
             world
                 .insert(entity, MeshRenderer::single(primitive))
                 .unwrap();
@@ -342,12 +354,18 @@ impl Editor {
                 .unwrap();
             world.insert(entity, Visibility::VISIBLE).unwrap();
 
-            let material = scene_view.create_entity_material();
             let handle = world
                 .resource_mut::<MeshManager>()
                 .request(sphere_source.clone());
-            let primitive = Primitive::new(sphere_source.clone(), handle, material);
-            register_render_material(&world, &primitive.material);
+            let material_handle = world
+                .resource_mut::<MaterialInstanceManager>()
+                .request(material_source.clone());
+            let primitive = Primitive::new(
+                sphere_source.clone(),
+                handle,
+                material_source.clone(),
+                material_handle,
+            );
             world
                 .insert(entity, MeshRenderer::single(primitive))
                 .unwrap();
@@ -420,6 +438,7 @@ impl Editor {
         // Asset loading: MeshLoad resolves layouts + requests meshes, then
         // AssetPump drains the async stages onto the compute/IO pools + collects.
         schedules.get_mut::<PostUpdate>().add(MeshLoad);
+        schedules.get_mut::<PostUpdate>().add(MaterialInstanceLoad);
         schedules.get_mut::<PostUpdate>().add(AssetPump);
         schedules
             .get_mut::<PostUpdate>()
@@ -1455,18 +1474,3 @@ fn show_drag_overlay(ctx: &egui::Context, world: &World) {
     }
 }
 
-/// Register a [`PrimitiveMaterial`](redlilium_ecs::PrimitiveMaterial)'s bundle
-/// in the world's [`MaterialManager`] so prefab serialization can look up its
-/// CPU source data.
-fn register_render_material(world: &World, render_mat: &redlilium_ecs::PrimitiveMaterial) {
-    if let (Some(cpu_instance), Some(pass_materials)) =
-        (render_mat.cpu_instance(), render_mat.pass_materials())
-    {
-        let mut mat_manager = world.resource_mut::<MaterialManager>();
-        mat_manager.register_bundle(
-            render_mat.bundle(),
-            Arc::clone(cpu_instance),
-            pass_materials.to_vec(),
-        );
-    }
-}

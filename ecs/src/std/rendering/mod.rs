@@ -34,9 +34,7 @@ pub mod shaders;
 pub mod systems;
 
 pub use asset_inspect::inspect_asset_settings;
-pub use components::{
-    CameraTarget, MaterialBundle, MeshRenderer, Primitive, PrimitiveMaterial, RenderPassType,
-};
+pub use components::{CameraTarget, MeshRenderer, Primitive};
 #[cfg(feature = "rendering")]
 pub use loaders::{
     MaterialData, MaterialInstanceData, MaterialInstanceLoader, MaterialInstanceSource,
@@ -46,8 +44,7 @@ pub use loaders::{
 #[cfg(feature = "rendering")]
 pub use shading::{PropDef, PropValue, ShadingModel, ShadingRegistry, pack_props};
 pub use resources::{
-    CpuBundleInfo, FrameRing, MaterialManager, MaterialManagerError, MeshHandle, MeshManager,
-    RenderSchedule, TextureManager, TextureManagerError, pack_uniform_bytes,
+    FrameRing, MeshHandle, MeshManager, RenderSchedule, TextureManager, TextureManagerError,
 };
 #[cfg(feature = "rendering")]
 pub use resources::{

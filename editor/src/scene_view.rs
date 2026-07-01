@@ -8,17 +8,15 @@
 
 use std::sync::{Arc, Mutex};
 
-use redlilium_core::material::CpuMaterial;
 use redlilium_core::math::mat4_to_cols_array_2d;
 use redlilium_ecs::{
-    Camera, CameraTarget, Entity, GlobalTransform, MeshRenderer, PrimitiveMaterial, RenderPassType,
-    Visibility, World, shaders,
+    Camera, CameraTarget, Entity, GlobalTransform, MeshRenderer, Visibility, World, shaders,
 };
 use redlilium_graphics::{
-    Buffer, BufferDescriptor, BufferTextureCopyRegion, BufferTextureLayout, BufferUsage,
-    ColorAttachment, DepthStencilAttachment, DrawCommand, GraphicsDevice, GraphicsPass, LoadOp,
-    Material, RenderTarget, RenderTargetConfig, RingBuffer, ScissorRect, StoreOp,
-    TextureCopyLocation, TextureDescriptor, TextureFormat, TextureOrigin, TextureUsage,
+    BindingGroup, Buffer, BufferDescriptor, BufferTextureCopyRegion, BufferTextureLayout,
+    BufferUsage, ColorAttachment, DepthStencilAttachment, DrawCommand, GraphicsDevice, GraphicsPass,
+    LoadOp, Material, MaterialInstance, RenderTarget, RenderTargetConfig, RingBuffer, ScissorRect,
+    StoreOp, TextureCopyLocation, TextureDescriptor, TextureFormat, TextureOrigin, TextureUsage,
     TransferConfig, TransferOperation, TransferPass, Viewport,
 };
 
@@ -32,8 +30,6 @@ pub struct SceneViewState {
     /// entity-index/picking pass (decoupled — that pass clears its own depth).
     color_format: TextureFormat,
     depth_texture: Arc<redlilium_graphics::Texture>,
-    opaque_material: Arc<Material>,
-    cpu_material: Arc<CpuMaterial>,
     viewport: Option<Viewport>,
     scissor: Option<ScissorRect>,
     last_size: (u32, u32),
@@ -80,13 +76,6 @@ pub struct SceneViewState {
 impl SceneViewState {
     /// Create scene view resources.
     pub fn new(device: Arc<GraphicsDevice>, surface_format: TextureFormat) -> Self {
-        let opaque_material = shaders::create_opaque_color_material(
-            &device,
-            surface_format,
-            TextureFormat::Depth32Float,
-        );
-        let cpu_material = shaders::create_opaque_color_cpu_material();
-
         let entity_index_material =
             shaders::create_entity_index_material(&device, TextureFormat::Depth32Float);
 
@@ -124,8 +113,6 @@ impl SceneViewState {
             device,
             color_format: surface_format,
             depth_texture,
-            opaque_material,
-            cpu_material,
             viewport: None,
             scissor: None,
             last_size: (256, 256),
@@ -155,30 +142,6 @@ impl SceneViewState {
         let mut pass = TransferPass::new("scene_view_mesh_uploads".into());
         pass.set_transfer_config(TransferConfig::new().with_operations(ops));
         graph.add_transfer_pass(pass);
-    }
-
-    /// Create GPU resources for a renderable entity with picking support.
-    ///
-    /// Returns `(per_entity_buffers, primitive_material, gpu_mesh)`. The caller
-    /// assembles these into a [`Primitive`](redlilium_ecs::Primitive) +
-    /// [`MeshRenderer`](redlilium_ecs::MeshRenderer).
-    /// Build the per-entity material (the mesh is now an asset, requested
-    /// separately via `MeshManager`). Group 0 (transform) and group 1 (material
-    /// props) bind shared rings as dynamic uniforms; per-draw offsets are filled
-    /// each frame by `fill_transform_rings`.
-    pub fn create_entity_material(&mut self) -> PrimitiveMaterial {
-        let frame_ring_buffer = self
-            .frame_ring_buffer
-            .as_ref()
-            .expect("frame ring buffer set before entities are created");
-        shaders::create_opaque_color_primitive_material_ring(
-            &self.opaque_material,
-            Some(&self.entity_index_material),
-            &self.cpu_material,
-            frame_ring_buffer, // group 0 (transform)
-            Some(self.entity_index_ring.buffer()),
-            frame_ring_buffer, // group 1 (material props) — same ring
-        )
     }
 
     /// Fill the picking (entity-index) ring for this frame and record each
@@ -322,7 +285,18 @@ impl SceneViewState {
             pass.set_scissor_rect(*scissor);
         }
 
-        let mut draw_count = 0u32;
+        // The picking pipeline is a single global material (fixed layout); group 0
+        // binds the shared entity-index ring, the per-draw offset selecting the
+        // entity's slot. No per-primitive material is involved (picking writes only
+        // the entity id), so the instance is assembled here on the fly.
+        let ei_size = std::mem::size_of::<shaders::EntityIndexUniforms>() as u64;
+        let ei_group = Arc::new(BindingGroup::new().with_buffer_range(
+            0,
+            self.entity_index_ring.buffer().clone(),
+            0,
+            ei_size,
+        ));
+
         for (entity_idx, renderer) in renderers.iter() {
             if let Some(vis) = visibilities.get(entity_idx)
                 && !vis.is_visible()
@@ -331,22 +305,19 @@ impl SceneViewState {
             }
             let ei_off = self.picking_offsets.get(&entity_idx).copied().unwrap_or(0);
             for primitive in &renderer.primitives {
-                // Skip primitives whose mesh hasn't finished loading.
+                // Skip primitives whose mesh hasn't finished loading (0 draws while
+                // meshes stream in is expected, not an error).
                 let Some(mesh) = primitive.mesh() else {
                     continue;
                 };
-                if let Some(instance) = primitive.material.pass(RenderPassType::EntityIndex) {
-                    pass.add_draw_command(
-                        DrawCommand::new(mesh, Arc::clone(instance))
-                            .with_dynamic_offsets(vec![vec![ei_off]]),
-                    );
-                    draw_count += 1;
-                }
+                let instance = Arc::new(
+                    MaterialInstance::new(Arc::clone(&self.entity_index_material))
+                        .with_binding_group(Arc::clone(&ei_group)),
+                );
+                pass.add_draw_command(
+                    DrawCommand::new(mesh, instance).with_dynamic_offsets(vec![vec![ei_off]]),
+                );
             }
-        }
-
-        if draw_count == 0 {
-            log::warn!("Entity index pass has 0 draws — no EntityIndex pass on any material");
         }
 
         Some(pass)
@@ -576,21 +547,6 @@ impl SceneViewState {
     /// per-primitive materials can bind it. Call once, before creating entities.
     pub fn set_frame_ring_buffer(&mut self, buffer: Arc<Buffer>) {
         self.frame_ring_buffer = Some(buffer);
-    }
-
-    /// Get the GPU material for the opaque color shader.
-    pub fn opaque_material(&self) -> &Arc<Material> {
-        &self.opaque_material
-    }
-
-    /// Get the CPU material definition for the opaque color shader.
-    pub fn cpu_material(&self) -> &Arc<CpuMaterial> {
-        &self.cpu_material
-    }
-
-    /// Get the GPU material for the entity-index picking shader.
-    pub fn entity_index_material(&self) -> &Arc<Material> {
-        &self.entity_index_material
     }
 
     fn create_color_texture(

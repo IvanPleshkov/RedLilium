@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use redlilium_core::math::{Mat4, mat4_to_cols_array_2d};
 use redlilium_graphics::{
-    ColorAttachment, DepthStencilAttachment, DrawCommand, GraphicsPass, PassHandle, RenderTarget,
-    RenderTargetConfig,
+    BindingGroup, ColorAttachment, DepthStencilAttachment, DrawCommand, GraphicsPass,
+    MaterialInstance, PassHandle, RenderTarget, RenderTargetConfig,
 };
 
 use redlilium_graphics::egui::EguiController;
@@ -18,14 +18,10 @@ use crate::system::SystemError;
 use crate::{DebugDrawer, DebugDrawerRenderer, System, SystemContext};
 
 use super::{
-    CameraTarget, FrameRing, MaterialAssetManager, MaterialInstanceManager, MaterialManager,
-    MeshManager, MeshRenderer, RenderPassType, RenderSchedule, ShaderManager, ShadingRegistry,
-    TextureManager, VertexLayoutManager, pack_uniform_bytes, shaders,
+    CameraTarget, FrameRing, MaterialAssetManager, MaterialInstanceManager, MeshManager,
+    MeshRenderer, PipelineCache, RenderSchedule, ShaderManager, ShadingRegistry, TextureManager,
+    VertexLayoutManager, shaders,
 };
-
-/// Default material props (base color) for a primitive with no CPU instance —
-/// matches the editor's previous `DEFAULT_MATERIAL_PROPS`.
-const DEFAULT_MATERIAL_PROPS: [f32; 4] = [0.6, 0.6, 0.65, 1.0];
 
 /// Holds the forward scene pass's graph handle so other passes (an egui overlay,
 /// debug lines) can depend on it. Written by [`ForwardRender`] each frame (set to
@@ -52,10 +48,7 @@ impl System for FlushUploads {
         if world.has_resource::<TextureManager>() {
             world.resource_mut::<TextureManager>().flush_uploads(graph);
         }
-        if world.has_resource::<MaterialManager>() {
-            world.resource_mut::<MaterialManager>().flush_uploads(graph);
-        }
-        // Asset-based material instances flush their static property buffers here too.
+        // Asset-based material instances flush their static property buffers here.
         if world.has_resource::<MaterialInstanceManager>() {
             world
                 .resource_mut::<MaterialInstanceManager>()
@@ -84,6 +77,7 @@ impl System for ForwardRender {
         if !world.has_resource::<RenderSchedule>()
             || !world.has_resource::<FrameRing>()
             || !world.has_resource::<ScenePass>()
+            || !world.has_resource::<PipelineCache>()
         {
             return Ok(None);
         }
@@ -108,6 +102,8 @@ impl System for ForwardRender {
         }) else {
             return Ok(None);
         };
+        let color_fmt = color.format();
+        let depth_fmt = depth.format();
 
         let mut pass = GraphicsPass::new("scene_view".into());
         pass.set_render_targets(
@@ -125,6 +121,7 @@ impl System for ForwardRender {
         // the graph resource).
         {
             let mut ring = world.resource_mut::<FrameRing>();
+            let mut pipelines = world.resource_mut::<PipelineCache>();
             let (Ok(renderers), Ok(globals), Ok(visibilities)) = (
                 world.read::<MeshRenderer>(),
                 world.read::<GlobalTransform>(),
@@ -132,6 +129,13 @@ impl System for ForwardRender {
             ) else {
                 return Ok(None);
             };
+            // Group 0 (per-entity transform) binds one element of the shared ring;
+            // the per-draw dynamic offset selects the entity's slot. The binding is
+            // identical for every draw, so it is built once.
+            let fwd_size = std::mem::size_of::<shaders::OpaqueColorUniforms>() as u64;
+            let transform_group = Arc::new(
+                BindingGroup::new().with_buffer_range(0, ring.buffer().clone(), 0, fwd_size),
+            );
             for (idx, renderer) in renderers.iter() {
                 if let Some(vis) = visibilities.get(idx)
                     && !vis.is_visible()
@@ -148,25 +152,34 @@ impl System for ForwardRender {
                 };
                 let fwd_off = ring.push(bytemuck::bytes_of(&fwd));
                 for primitive in &renderer.primitives {
-                    // The mesh loads asynchronously — skip until it's resident.
-                    let Some(mesh) = primitive.mesh() else {
+                    // The mesh and the material instance load asynchronously — skip
+                    // until both are resident.
+                    let (Some(mesh), Some(instance)) = (primitive.mesh(), primitive.material())
+                    else {
                         continue;
                     };
-                    if let Some(instance) = primitive.material.pass(RenderPassType::Forward) {
-                        let bytes = primitive
-                            .material
-                            .cpu_instance()
-                            .map(|ci| pack_uniform_bytes(&ci.material, &ci.values))
-                            .filter(|b| !b.is_empty())
-                            .unwrap_or_else(|| {
-                                bytemuck::bytes_of(&DEFAULT_MATERIAL_PROPS).to_vec()
-                            });
-                        let props_off = ring.push(&bytes);
-                        pass.add_draw_command(
-                            DrawCommand::new(mesh, Arc::clone(instance))
-                                .with_dynamic_offsets(vec![vec![fwd_off], vec![props_off]]),
-                        );
-                    }
+                    // Specialize the pipeline for this shader + the mesh's vertex
+                    // layout + the target formats (built once, then cached).
+                    let Ok(pipeline) = pipelines.get_or_build(
+                        instance.shader_guid,
+                        &instance.shader.source,
+                        mesh.layout(),
+                        color_fmt,
+                        depth_fmt,
+                    ) else {
+                        continue;
+                    };
+                    // Draw-time material instance: pipeline + transform ring (group 0,
+                    // dynamic) + the instance's static material props (group 1).
+                    let gfx_instance = Arc::new(
+                        MaterialInstance::new(pipeline)
+                            .with_binding_group(Arc::clone(&transform_group))
+                            .with_binding_group(Arc::clone(&instance.props_group)),
+                    );
+                    pass.add_draw_command(
+                        DrawCommand::new(mesh, gfx_instance)
+                            .with_dynamic_offsets(vec![vec![fwd_off]]),
+                    );
                 }
             }
         }
