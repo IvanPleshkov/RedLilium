@@ -122,6 +122,12 @@ fn inspect_render_asset(
 #[cfg(feature = "rendering")]
 use render_assets::inspect_render_asset;
 
+/// The default file extension + record `settings` for a newly-created asset of a
+/// given kind — used by the editor's "New" menu. Kind-knowledge stays here (next
+/// to the loaders); the editor just writes the file + record.
+#[cfg(feature = "rendering")]
+pub use render_assets::{NewAssetSpec, new_asset_spec};
+
 /// Material / material-instance settings editing — schema-aware via the
 /// [`ShadingRegistry`](super::ShadingRegistry): each shading-model property slot
 /// is shown with the right widget (a color picker for `*_color`), the current
@@ -130,9 +136,53 @@ use render_assets::inspect_render_asset;
 #[cfg(feature = "rendering")]
 mod render_assets {
     use redlilium_assets::{AssetDb, Guid};
+    use redlilium_core::mesh::VertexLayout;
 
     use super::super::{MaterialData, MaterialInstanceData, PropValue, ShadingRegistry};
     use crate::World;
+
+    /// Default extension + record `settings` for a newly-created asset (the "New"
+    /// menu). See [`new_asset_spec`].
+    pub struct NewAssetSpec {
+        pub extension: &'static str,
+        pub settings: Option<String>,
+    }
+
+    /// The default spec for creating an asset of `kind`. A material instance needs
+    /// a `parent_material` guid (there is no valid instance without a parent), so
+    /// creation of one returns `None` if the caller can't supply a parent.
+    pub fn new_asset_spec(kind: &str, parent_material: Option<Guid>) -> Option<NewAssetSpec> {
+        match kind {
+            "vertex_layout" => {
+                let layout = (*VertexLayout::position_normal()).clone();
+                Some(NewAssetSpec {
+                    extension: "vlayout",
+                    settings: ron::to_string(&layout).ok(),
+                })
+            }
+            "material" => {
+                let data = MaterialData {
+                    shading_model: "opaque".to_owned(),
+                    properties: Vec::new(),
+                };
+                Some(NewAssetSpec {
+                    extension: "material",
+                    settings: ron::to_string(&data).ok(),
+                })
+            }
+            "material_instance" => {
+                let data = MaterialInstanceData {
+                    parent: parent_material?,
+                    overrides: Vec::new(),
+                };
+                Some(NewAssetSpec {
+                    extension: "matinst",
+                    settings: ron::to_string(&data).ok(),
+                })
+            }
+            _ => None,
+        }
+    }
 
     /// Dispatch the render-asset kinds. `Some(result)` = handled.
     pub(super) fn inspect_render_asset(

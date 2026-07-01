@@ -34,6 +34,8 @@ pub mod shaders;
 pub mod systems;
 
 pub use asset_inspect::inspect_asset_settings;
+#[cfg(feature = "rendering")]
+pub use asset_inspect::{NewAssetSpec, new_asset_spec};
 pub use components::{CameraTarget, MeshRenderer, Primitive};
 #[cfg(feature = "rendering")]
 pub use loaders::{

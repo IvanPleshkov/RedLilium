@@ -793,6 +793,39 @@ impl AppHandler for Editor {
             }
         }
 
+        // Process "New asset" creation (asset browser context menu → file + record).
+        if let Some((source, dir, kind)) = self.asset_browser.take_pending_new() {
+            let ew = self.world.as_mut().unwrap();
+            // A material instance parents to the std opaque material by default.
+            let parent = if kind == "material_instance" {
+                ew.world
+                    .resource::<AssetDb>()
+                    .guid_of(&AssetPath::new("std", "materials/opaque.material"))
+            } else {
+                None
+            };
+            match redlilium_ecs::new_asset_spec(&kind, parent) {
+                Some(spec) => {
+                    let path = unique_asset_path(&ew.world, &source, &dir, spec.extension);
+                    let asset_path = AssetPath::new(&source, &path);
+                    let guid = ew
+                        .world
+                        .resource_mut::<AssetDb>()
+                        .register_path(asset_path, &kind, 0);
+                    ew.world
+                        .resource_mut::<AssetDb>()
+                        .set_settings(&guid, spec.settings);
+                    let vfs_path = format!("{source}/{path}");
+                    self.asset_browser
+                        .dispatch_write(&self.vfs, &vfs_path, Vec::new());
+                    self.asset_browser.mark_db_dirty(&source);
+                    self.asset_browser.notify_asset_created(&source, &dir, &path);
+                    log::info!("Created asset: {vfs_path}");
+                }
+                None => log::warn!("Cannot create asset of kind '{kind}' (missing parent?)"),
+            }
+        }
+
         // Process component import (asset browser → inspector): dispatch read
         if let Some((vfs_path, entity)) = self.inspector_state.pending_component_import.take() {
             self.asset_browser.dispatch_read(&self.vfs, &vfs_path);
@@ -1472,5 +1505,27 @@ fn show_drag_overlay(ctx: &egui::Context, world: &World) {
                 });
             });
     }
+}
+
+/// A free asset path `dir/new[.N].<ext>` under `source` not already in the DB.
+fn unique_asset_path(world: &World, source: &str, dir: &str, ext: &str) -> String {
+    let db = world.resource::<AssetDb>();
+    (0u32..)
+        .find_map(|i| {
+            let name = if i == 0 {
+                format!("new.{ext}")
+            } else {
+                format!("new_{i}.{ext}")
+            };
+            let path = if dir.is_empty() {
+                name
+            } else {
+                format!("{dir}/{name}")
+            };
+            db.guid_of(&AssetPath::new(source, &path))
+                .is_none()
+                .then_some(path)
+        })
+        .expect("infinite range yields a free name")
 }
 

@@ -53,6 +53,9 @@ pub struct AssetBrowser {
     /// Pending prefab export: (root_entity, target_vfs_dir).
     /// Set when an entity is dropped from world inspector onto the file list.
     pub pending_prefab_export: Option<(Entity, String)>,
+    /// Pending asset creation from the "New" context menu: (source, dir, kind).
+    /// Drained by the editor, which writes the file + DB record.
+    pending_new: Option<(String, String, String)>,
 }
 
 impl AssetBrowser {
@@ -75,7 +78,26 @@ impl AssetBrowser {
             fs_watcher: FsWatcher::new(config),
             pending_component_export: None,
             pending_prefab_export: None,
+            pending_new: None,
         }
+    }
+
+    /// Take the pending "New asset" intent: `(source, dir, kind)`, if any.
+    pub fn take_pending_new(&mut self) -> Option<(String, String, String)> {
+        self.pending_new.take()
+    }
+
+    /// After the editor creates an asset, refresh the directory listing and select
+    /// the new file (drives the inspector).
+    pub fn notify_asset_created(&mut self, source: &str, dir: &str, file_path: &str) {
+        let vfs_dir = if dir.is_empty() {
+            source.to_owned()
+        } else {
+            format!("{source}/{dir}")
+        };
+        self.dir_cache.remove(&vfs_dir);
+        self.cached_key = None;
+        self.selected_file = Some((source.to_owned(), file_path.to_owned()));
     }
 
     /// The file currently selected as an asset: `(source, path_within_source)`.
@@ -500,6 +522,31 @@ impl AssetBrowser {
                 egui::Stroke::new(2.0, crate::theme::ACCENT),
                 egui::StrokeKind::Outside,
             );
+        }
+
+        // Right-click the panel → create a new asset in the current directory.
+        let bg = ui.interact(
+            ui.max_rect(),
+            ui.id().with("browser_new_ctx"),
+            egui::Sense::click(),
+        );
+        let mut new_kind: Option<&'static str> = None;
+        bg.context_menu(|ui| {
+            ui.menu_button("New", |ui| {
+                for (label, kind) in [
+                    ("Vertex Layout", "vertex_layout"),
+                    ("Material", "material"),
+                    ("Material Instance", "material_instance"),
+                ] {
+                    if ui.button(label).clicked() {
+                        new_kind = Some(kind);
+                        ui.close();
+                    }
+                }
+            });
+        });
+        if let Some(kind) = new_kind {
+            self.pending_new = Some((source.clone(), dir_path.clone(), kind.to_owned()));
         }
     }
 }
