@@ -566,6 +566,31 @@ impl Editor {
         self.asset_browser.notify_asset_moved(source, new_path);
         log::info!("Asset {from} -> {to}");
     }
+
+    /// Delete an asset: remove its DB record (if registered) and the VFS file.
+    fn perform_asset_delete(&mut self, source: &str, path: &str) {
+        let removed = {
+            let ew = self.world.as_mut().unwrap();
+            let guid = ew
+                .world
+                .resource::<AssetDb>()
+                .guid_of(&AssetPath::new(source, path));
+            match guid {
+                Some(g) => {
+                    ew.world.resource_mut::<AssetDb>().remove(&g);
+                    true
+                }
+                None => false,
+            }
+        };
+        if removed {
+            self.asset_browser.mark_db_dirty(source);
+        }
+        let vfs_path = format!("{source}/{path}");
+        self.asset_browser.dispatch_delete(&self.vfs, &vfs_path);
+        self.asset_browser.notify_asset_deleted(source, path);
+        log::info!("Deleted asset {vfs_path}");
+    }
 }
 
 impl AppHandler for Editor {
@@ -884,6 +909,11 @@ impl AppHandler for Editor {
                 format!("{new_dir}/{name}")
             };
             self.perform_asset_move(&source, &old_path, &new_path);
+        }
+
+        // Delete an asset (browser context menu): remove the record + the file.
+        if let Some((source, path)) = self.asset_browser.take_pending_delete() {
+            self.perform_asset_delete(&source, &path);
         }
 
         // Process component import (asset browser → inspector): dispatch read

@@ -62,6 +62,8 @@ pub struct AssetBrowser {
     pending_rename: Option<(String, String, String)>,
     /// Committed move to apply: (source, old_path, new_dir). Drained by editor.
     pending_move: Option<(String, String, String)>,
+    /// Committed delete to apply: (source, path). Drained by editor.
+    pending_delete: Option<(String, String)>,
 }
 
 /// Drag payload for moving an asset file between directories.
@@ -69,6 +71,13 @@ pub struct AssetBrowser {
 struct AssetFileDrag {
     source: String,
     path: String,
+}
+
+/// Split a full VFS path `source/dir/name` into `(source, path-within-source)`.
+fn split_source_path(vfs_path: &str) -> Option<(String, String)> {
+    vfs_path
+        .split_once('/')
+        .map(|(s, rel)| (s.to_owned(), rel.to_owned()))
 }
 
 impl AssetBrowser {
@@ -95,7 +104,27 @@ impl AssetBrowser {
             renaming: None,
             pending_rename: None,
             pending_move: None,
+            pending_delete: None,
         }
+    }
+
+    /// Take the pending delete intent: `(source, path)`.
+    pub fn take_pending_delete(&mut self) -> Option<(String, String)> {
+        self.pending_delete.take()
+    }
+
+    /// After a delete, refresh the directory and clear the selection if it pointed
+    /// at the deleted file.
+    pub fn notify_asset_deleted(&mut self, source: &str, path: &str) {
+        self.cached_key = None;
+        if self.selected_file.as_ref() == Some(&(source.to_owned(), path.to_owned())) {
+            self.selected_file = None;
+        }
+    }
+
+    /// Dispatch an async VFS delete.
+    pub fn dispatch_delete(&mut self, vfs: &Vfs, vfs_path: &str) {
+        self.bg_vfs.delete(vfs, vfs_path);
     }
 
     /// Take the pending rename intent: `(source, old_path, new_name)`.
@@ -225,6 +254,16 @@ impl AssetBrowser {
                 }
                 VfsResult::Move(Err(e), from, to) => {
                     log::error!("VFS move {from} -> {to} failed: {e}");
+                }
+                VfsResult::Delete(Ok(()), path) => {
+                    log::info!("Deleted: {path}");
+                    if let Some((parent, _)) = path.rsplit_once('/') {
+                        self.dir_cache.remove(parent);
+                    }
+                    self.cached_key = None;
+                }
+                VfsResult::Delete(Err(e), path) => {
+                    log::error!("VFS delete {path} failed: {e}");
                 }
             }
         }
@@ -392,22 +431,41 @@ impl AssetBrowser {
             self.selected = Some(new_sel);
         }
 
-        // Accept an asset file dropped onto this directory → move it here
-        // (same-mount only). Hover-check first (non-destructive), then release.
+        // Accept a file dropped onto this directory → move it here (same-mount).
+        // Any of the file drag payloads is accepted: AssetFileDrag (materials,
+        // layouts, meshes, …) plus the .component / .prefab import payloads, which
+        // carry a `vfs_path` we can move by. Hover-check each type first
+        // (non-destructive), then release only the hovered one (release is
+        // destructive regardless of the downcast).
         let hdr = &header.header_response;
-        if hdr.dnd_hover_payload::<AssetFileDrag>().is_some() {
+        let hover_asset = hdr.dnd_hover_payload::<AssetFileDrag>().is_some();
+        let hover_comp = hdr.dnd_hover_payload::<ComponentFileDragPayload>().is_some();
+        let hover_prefab = hdr.dnd_hover_payload::<PrefabFileDragPayload>().is_some();
+        if hover_asset || hover_comp || hover_prefab {
             ui.painter().rect_stroke(
                 hdr.rect,
                 2.0,
                 egui::Stroke::new(2.0, crate::theme::ACCENT),
                 egui::StrokeKind::Outside,
             );
-            if let Some(payload) = hdr.dnd_release_payload::<AssetFileDrag>()
-                && payload.source == source
-            {
-                self.pending_move =
-                    Some((payload.source.clone(), payload.path.clone(), dir_path.to_owned()));
-            }
+        }
+        // Resolve the dropped file to (source, path-within-source).
+        let moved: Option<(String, String)> = if hover_asset {
+            hdr.dnd_release_payload::<AssetFileDrag>()
+                .map(|p| (p.source.clone(), p.path.clone()))
+        } else if hover_comp {
+            hdr.dnd_release_payload::<ComponentFileDragPayload>()
+                .and_then(|p| split_source_path(&p.vfs_path))
+        } else if hover_prefab {
+            hdr.dnd_release_payload::<PrefabFileDragPayload>()
+                .and_then(|p| split_source_path(&p.vfs_path))
+        } else {
+            None
+        };
+        if let Some((s, rel)) = moved
+            && s == source
+        {
+            self.pending_move = Some((s, rel, dir_path.to_owned()));
         }
     }
 
@@ -516,6 +574,7 @@ impl AssetBrowser {
 
         // File listing
         let mut rename_start: Option<(String, String, String)> = None;
+        let mut delete_start: Option<(String, String)> = None;
         for entry in &self.cached_entries {
             // path within the source (dir_path/name), used for both files + dirs.
             let file_path = if dir_path.is_empty() {
@@ -574,11 +633,15 @@ impl AssetBrowser {
                     });
                 }
 
-                // Right-click a file → Rename (starts the inline editor).
+                // Right-click a file → Rename / Delete.
                 response.context_menu(|ui| {
                     if ui.button("Rename").clicked() {
                         rename_start =
                             Some((source.clone(), file_path.clone(), entry.name.clone()));
+                        ui.close();
+                    }
+                    if ui.button("Delete").clicked() {
+                        delete_start = Some((source.clone(), file_path.clone()));
                         ui.close();
                     }
                 });
@@ -599,6 +662,9 @@ impl AssetBrowser {
         }
         if let Some(r) = rename_start {
             self.renaming = Some(r);
+        }
+        if let Some(d) = delete_start {
+            self.pending_delete = Some(d);
         }
 
         // Drop target: accept payloads dragged from inspector or world inspector.

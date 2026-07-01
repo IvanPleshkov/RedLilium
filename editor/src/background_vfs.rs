@@ -14,6 +14,8 @@ pub enum VfsResult {
     /// A move (read → write → delete). Carries `(from, to)` so the UI can refresh
     /// both directories.
     Move(Result<(), VfsError>, String, String),
+    /// A delete. Carries the path so the UI can refresh its directory.
+    Delete(Result<(), VfsError>, String),
 }
 
 /// Non-blocking VFS dispatcher for the editor UI.
@@ -100,6 +102,23 @@ impl BackgroundVfs {
             }
             .await;
             let _ = tx.send((id, VfsResult::Move(result, from, to)));
+        });
+
+        id
+    }
+
+    /// Dispatch an async `delete` request. Returns an ID to match the result.
+    pub fn delete(&mut self, vfs: &Vfs, path: &str) -> VfsRequestId {
+        let id = VfsRequestId(self.next_id);
+        self.next_id += 1;
+
+        let future = vfs.delete(path);
+        let path = path.to_owned();
+        let tx = self.result_tx.clone();
+
+        self.runtime.spawn(async move {
+            let result = future.await;
+            let _ = tx.send((id, VfsResult::Delete(result, path)));
         });
 
         id
