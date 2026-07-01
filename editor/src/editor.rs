@@ -5,7 +5,7 @@ use parking_lot::RwLock;
 
 use egui_dock::DockState;
 use redlilium_app::{AppContext, AppHandler, DrawContext};
-use redlilium_assets::{AssetDb, AssetPath, AssetProcessor};
+use redlilium_assets::{AssetDb, AssetPath, AssetProcessor, Guid};
 use redlilium_core::abstract_editor::{ActionQueue, DEFAULT_MAX_UNDO, EditActionHistory};
 use redlilium_core::math::Vec3;
 use redlilium_debug_drawer::{DebugDrawer, DebugDrawerRenderer};
@@ -121,6 +121,8 @@ pub struct Editor {
     show_close_dialog: bool,
     /// Set to `true` when the user confirms closing (with or without saving).
     should_close: bool,
+    /// An asset pending delete-confirmation: `(source, path)`. Shows a modal.
+    pending_delete_confirm: Option<(String, String)>,
 
     /// Last frame's entity selection — when it changes to a non-empty set, the
     /// asset selection is cleared so the inspector switches back to the entity.
@@ -172,6 +174,7 @@ impl Editor {
             pending_import: None,
             pending_prefab_import: None,
             show_close_dialog: false,
+            pending_delete_confirm: None,
             should_close: false,
             last_selection: Vec::new(),
         }
@@ -225,11 +228,12 @@ impl Editor {
             .guid_of(&AssetPath::new("std", "meshes/sphere.rmesh"))
             .map(MeshSource::File)
             .unwrap_or_else(|| MeshSource::Generated(MeshGenerator::sphere(0.5, 32, 16)));
-        // The std `default` material instance every demo primitive binds.
+        // The std `default` material instance every demo primitive binds. Bound by
+        // its stable guid (not a path lookup) so it survives a rename/move of the
+        // asset and merely fails to resolve — rather than crashing the editor — if
+        // it is deleted.
         let material_source = MaterialInstanceSource {
-            guid: asset_db
-                .guid_of(&AssetPath::new("std", "materials/default.matinst"))
-                .expect("std default.matinst record present"),
+            guid: Guid::stable("materials/default.matinst"),
         };
         world.insert_resource(asset_db);
 
@@ -911,9 +915,9 @@ impl AppHandler for Editor {
             self.perform_asset_move(&source, &old_path, &new_path);
         }
 
-        // Delete an asset (browser context menu): remove the record + the file.
+        // Delete an asset (browser context menu): ask for confirmation first.
         if let Some((source, path)) = self.asset_browser.take_pending_delete() {
-            self.perform_asset_delete(&source, &path);
+            self.pending_delete_confirm = Some((source, path));
         }
 
         // Process component import (asset browser → inspector): dispatch read
@@ -1276,6 +1280,43 @@ impl AppHandler for Editor {
                             }
                             if ui.button("Cancel").clicked() {
                                 self.show_close_dialog = false;
+                            }
+                        });
+                    });
+            }
+
+            // Modal "Delete asset?" confirmation.
+            if let Some((source, path)) = self.pending_delete_confirm.clone() {
+                egui::Area::new("delete_dialog_overlay".into())
+                    .fixed_pos(egui::pos2(0.0, 0.0))
+                    .order(egui::Order::Foreground)
+                    .interactable(true)
+                    .show(&egui_ctx, |ui| {
+                        let screen = ui.ctx().input(|i| i.viewport_rect());
+                        ui.allocate_rect(screen, egui::Sense::click());
+                        ui.painter().rect_filled(
+                            screen,
+                            egui::CornerRadius::ZERO,
+                            egui::Color32::from_black_alpha(128),
+                        );
+                    });
+
+                egui::Window::new("Delete asset?")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                    .order(egui::Order::Foreground)
+                    .show(&egui_ctx, |ui| {
+                        ui.label(format!("Delete \"{source}/{path}\"?"));
+                        ui.weak("This deletes the file and cannot be undone.");
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Delete").clicked() {
+                                self.perform_asset_delete(&source, &path);
+                                self.pending_delete_confirm = None;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                self.pending_delete_confirm = None;
                             }
                         });
                     });
