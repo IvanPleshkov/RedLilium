@@ -5,7 +5,8 @@
 //! `Material` pipeline (loader added in a later step).
 
 use redlilium_assets::{
-    AnyAsset, AssetError, AssetLoader, AssetSource, AssetStage, Executor, Guid, LoadEnv, StageFuture,
+    AnyAsset, AssetError, AssetLoader, AssetSource, AssetStage, Executor, Guid, LoadEnv,
+    StageFuture,
 };
 
 use crate::std::rendering::shading::PropValue;

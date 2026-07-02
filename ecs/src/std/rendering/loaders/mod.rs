@@ -13,9 +13,7 @@ mod shader;
 mod vertex_layout;
 
 pub use material::{MaterialData, MaterialLoader, MaterialSource};
-pub use material_instance::{
-    MaterialInstanceData, MaterialInstanceLoader, MaterialInstanceSource,
-};
+pub use material_instance::{MaterialInstanceData, MaterialInstanceLoader, MaterialInstanceSource};
 pub use mesh::{MeshGenerator, MeshLoader, MeshSource};
 pub use shader::{Shader, ShaderLoader, ShaderSource};
 pub use vertex_layout::{VertexLayoutLoader, VertexLayoutSource};

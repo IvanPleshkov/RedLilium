@@ -28,9 +28,9 @@ pub mod components;
 pub mod loaders;
 pub(crate) mod material_inspector;
 pub mod resources;
+pub mod shaders;
 #[cfg(feature = "rendering")]
 pub mod shading;
-pub mod shaders;
 pub mod systems;
 
 pub use asset_inspect::inspect_asset_settings;
@@ -43,16 +43,14 @@ pub use loaders::{
     MaterialLoader, MaterialSource, MeshGenerator, MeshLoader, MeshSource, Shader, ShaderLoader,
     ShaderSource, VertexLayoutLoader, VertexLayoutSource,
 };
-#[cfg(feature = "rendering")]
-pub use shading::{PropDef, PropValue, ShadingModel, ShadingRegistry, pack_props};
-pub use resources::{
-    FrameRing, MeshHandle, MeshManager, RenderSchedule, TextureManager, TextureManagerError,
-};
+pub use resources::{FrameRing, MeshManager, RenderSchedule, TextureManager, TextureManagerError};
 #[cfg(feature = "rendering")]
 pub use resources::{
-    InstanceHandle, MaterialAssetManager, MaterialInstanceManager, PipelineCache, ResolvedInstance,
+    MaterialAssetManager, MaterialInstanceManager, PipelineCache, ResolvedInstance,
     ResolvedMaterial, ShaderManager, VertexLayoutManager,
 };
+#[cfg(feature = "rendering")]
+pub use shading::{PropDef, PropValue, ShadingModel, ShadingRegistry, pack_props};
 pub use systems::{
     DebugRender, EguiRender, FlushUploads, ForwardRender, FrameTarget, MaterialInstanceLoad,
     MeshLoad, ScenePass,

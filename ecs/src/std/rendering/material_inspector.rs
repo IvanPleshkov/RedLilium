@@ -31,7 +31,7 @@ pub(crate) fn inspect_mesh_renderer_ui(
                 });
                 ui.horizontal(|ui| {
                     ui.label("material");
-                    let guid = primitive.material_source.guid;
+                    let guid = primitive.material.source().guid;
                     match primitive.material() {
                         Some(_) => ui.label(format!("{guid:?}")),
                         None => ui.weak(format!("{guid:?} (loading…)")),

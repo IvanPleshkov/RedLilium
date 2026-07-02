@@ -24,8 +24,12 @@ impl PropValue {
     pub fn pack_into(&self, out: &mut Vec<u8>) {
         match self {
             PropValue::Float(v) => out.extend_from_slice(&v.to_le_bytes()),
-            PropValue::Vec3(v) => v.iter().for_each(|f| out.extend_from_slice(&f.to_le_bytes())),
-            PropValue::Vec4(v) => v.iter().for_each(|f| out.extend_from_slice(&f.to_le_bytes())),
+            PropValue::Vec3(v) => v
+                .iter()
+                .for_each(|f| out.extend_from_slice(&f.to_le_bytes())),
+            PropValue::Vec4(v) => v
+                .iter()
+                .for_each(|f| out.extend_from_slice(&f.to_le_bytes())),
         }
     }
 }

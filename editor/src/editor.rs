@@ -16,13 +16,13 @@ use redlilium_ecs::ui::{
 use redlilium_ecs::{
     AssetGpuFlush, AssetPump, Camera, DebugRender, DrawGrid, DrawSelectionAabb, EcsRunner,
     EguiRender, Entity, FlushUploads, ForwardRender, FrameRing, FrameTarget, FreeFlyCamera,
-    GlobalTransform, GridConfig, MaterialAssetManager, MaterialInstanceLoad, MaterialInstanceLoader,
-    MaterialInstanceManager, MaterialInstanceSource, MaterialLoader, MeshGenerator, MeshLoad,
-    MeshLoader, MeshManager, MeshRenderer, MeshSource, Name, PipelineCache, PostUpdate, Primitive,
-    Render, RenderSchedule, ScenePass, Schedules, ShaderLoader, ShaderManager, ShadingRegistry,
-    TextureManager, Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera,
-    UpdateGlobalTransforms, VertexLayoutLoader, VertexLayoutManager, Visibility, WindowInput, World,
-    register_std_components,
+    GlobalTransform, GridConfig, MaterialAssetManager, MaterialInstanceLoad,
+    MaterialInstanceLoader, MaterialInstanceManager, MaterialInstanceSource, MaterialLoader,
+    MeshGenerator, MeshLoad, MeshLoader, MeshManager, MeshRenderer, MeshSource, Name,
+    PipelineCache, PostUpdate, Primitive, Render, RenderSchedule, ScenePass, Schedules,
+    ShaderLoader, ShaderManager, ShadingRegistry, TextureManager, Transform, Update,
+    UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms, VertexLayoutLoader,
+    VertexLayoutManager, Visibility, WindowInput, World, register_std_components,
 };
 use redlilium_graphics::egui::{EguiApp, EguiController};
 use redlilium_graphics::{FrameSchedule, RenderTarget, TextureFormat};
@@ -298,18 +298,8 @@ impl Editor {
                 .unwrap();
             world.insert(entity, Visibility::VISIBLE).unwrap();
 
-            let handle = world
-                .resource_mut::<MeshManager>()
-                .request(cube_source.clone());
-            let material_handle = world
-                .resource_mut::<MaterialInstanceManager>()
-                .request(material_source.clone());
-            let primitive = Primitive::new(
-                cube_source.clone(),
-                handle,
-                material_source.clone(),
-                material_handle,
-            );
+            // Both refs resolve asynchronously once the MeshLoad sync system runs.
+            let primitive = Primitive::new(cube_source.clone(), material_source.clone());
             world
                 .insert(entity, MeshRenderer::single(primitive))
                 .unwrap();
@@ -330,18 +320,8 @@ impl Editor {
                 .unwrap();
             world.insert(entity, Visibility::VISIBLE).unwrap();
 
-            let handle = world
-                .resource_mut::<MeshManager>()
-                .request(cube_source.clone());
-            let material_handle = world
-                .resource_mut::<MaterialInstanceManager>()
-                .request(material_source.clone());
-            let primitive = Primitive::new(
-                cube_source.clone(),
-                handle,
-                material_source.clone(),
-                material_handle,
-            );
+            // Both refs resolve asynchronously once the MeshLoad sync system runs.
+            let primitive = Primitive::new(cube_source.clone(), material_source.clone());
             world
                 .insert(entity, MeshRenderer::single(primitive))
                 .unwrap();
@@ -358,18 +338,7 @@ impl Editor {
                 .unwrap();
             world.insert(entity, Visibility::VISIBLE).unwrap();
 
-            let handle = world
-                .resource_mut::<MeshManager>()
-                .request(sphere_source.clone());
-            let material_handle = world
-                .resource_mut::<MaterialInstanceManager>()
-                .request(material_source.clone());
-            let primitive = Primitive::new(
-                sphere_source.clone(),
-                handle,
-                material_source.clone(),
-                material_handle,
-            );
+            let primitive = Primitive::new(sphere_source.clone(), material_source.clone());
             world
                 .insert(entity, MeshRenderer::single(primitive))
                 .unwrap();
@@ -886,7 +855,8 @@ impl AppHandler for Editor {
                     self.asset_browser
                         .dispatch_write(&self.vfs, &vfs_path, Vec::new());
                     self.asset_browser.mark_db_dirty(&source);
-                    self.asset_browser.notify_asset_created(&source, &dir, &path);
+                    self.asset_browser
+                        .notify_asset_created(&source, &dir, &path);
                     log::info!("Created asset: {vfs_path}");
                 }
                 None => log::warn!("Cannot create asset of kind '{kind}' (missing parent?)"),
@@ -1659,4 +1629,3 @@ fn unique_asset_path(world: &World, source: &str, dir: &str, ext: &str) -> Strin
         })
         .expect("infinite range yields a free name")
 }
-

@@ -23,6 +23,7 @@
 //! *This module currently provides the contract shapes (loaders + handle); the
 //! request processor / ECS bridge is the next step.*
 
+mod asset_ref;
 mod db;
 mod error;
 mod handle;
@@ -34,6 +35,7 @@ mod scan;
 mod source;
 mod stage;
 
+pub use asset_ref::{AssetRef, AssetRefSource};
 pub use db::{AssetDb, AssetPath, AssetRecord, DbError};
 pub use error::AssetError;
 pub use handle::AssetHandle;

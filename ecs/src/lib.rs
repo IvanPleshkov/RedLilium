@@ -171,10 +171,10 @@ pub use redlilium_debug_drawer::{DebugDrawer, DebugDrawerRenderer};
 pub use rendering::{
     CameraTarget, DebugRender, EguiRender, FlushUploads, ForwardRender, FrameRing, FrameTarget,
     MaterialAssetManager, MaterialInstanceLoad, MaterialInstanceLoader, MaterialInstanceManager,
-    MaterialInstanceSource, MaterialLoader, MeshHandle, MeshLoad, MeshManager, MeshRenderer,
-    NewAssetSpec, PipelineCache, Primitive, RenderSchedule, ScenePass, Shader, ShaderLoader,
-    ShaderManager, ShaderSource, ShadingRegistry, TextureManager, inspect_asset_settings,
-    new_asset_spec, register_rendering_components, shaders,
+    MaterialInstanceSource, MaterialLoader, MeshLoad, MeshManager, MeshRenderer, NewAssetSpec,
+    PipelineCache, Primitive, RenderSchedule, ScenePass, Shader, ShaderLoader, ShaderManager,
+    ShaderSource, ShadingRegistry, TextureManager, inspect_asset_settings, new_asset_spec,
+    register_rendering_components, shaders,
 };
 
 /// Register all standard component types with the world.

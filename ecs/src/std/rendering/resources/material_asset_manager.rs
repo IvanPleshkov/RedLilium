@@ -78,7 +78,8 @@ impl MaterialAssetManager {
         if !self.data_ready.contains_key(&guid) {
             match self.data_pending.get(&guid).map(|h| h.get()) {
                 None => {
-                    let handle = processor.request::<MaterialLoader>(db, MaterialSource { guid }, ());
+                    let handle =
+                        processor.request::<MaterialLoader>(db, MaterialSource { guid }, ());
                     self.data_pending.insert(guid, handle);
                     return None;
                 }
@@ -97,7 +98,10 @@ impl MaterialAssetManager {
         }
 
         // Phase 2: resolve the shading model + its shader.
-        let data = self.data_ready.get(&guid).expect("data_ready populated above");
+        let data = self
+            .data_ready
+            .get(&guid)
+            .expect("data_ready populated above");
         let Some(model) = registry.get(&data.shading_model) else {
             log::warn!(
                 "material {guid:?}: unknown shading model '{}'",

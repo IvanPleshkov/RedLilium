@@ -19,8 +19,8 @@ pub use frame_ring::FrameRing;
 #[cfg(feature = "rendering")]
 pub use material_asset_manager::{MaterialAssetManager, ResolvedMaterial};
 #[cfg(feature = "rendering")]
-pub use material_instance_manager::{InstanceHandle, MaterialInstanceManager, ResolvedInstance};
-pub use mesh_manager::{MeshHandle, MeshManager};
+pub use material_instance_manager::{MaterialInstanceManager, ResolvedInstance};
+pub use mesh_manager::MeshManager;
 #[cfg(feature = "rendering")]
 pub use pipeline_cache::PipelineCache;
 pub use render_schedule::RenderSchedule;

@@ -439,7 +439,9 @@ impl AssetBrowser {
         // destructive regardless of the downcast).
         let hdr = &header.header_response;
         let hover_asset = hdr.dnd_hover_payload::<AssetFileDrag>().is_some();
-        let hover_comp = hdr.dnd_hover_payload::<ComponentFileDragPayload>().is_some();
+        let hover_comp = hdr
+            .dnd_hover_payload::<ComponentFileDragPayload>()
+            .is_some();
         let hover_prefab = hdr.dnd_hover_payload::<PrefabFileDragPayload>().is_some();
         if hover_asset || hover_comp || hover_prefab {
             ui.painter().rect_stroke(
@@ -710,6 +712,5 @@ impl AssetBrowser {
                 egui::StrokeKind::Outside,
             );
         }
-
     }
 }

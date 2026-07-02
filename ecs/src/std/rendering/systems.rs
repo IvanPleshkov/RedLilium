@@ -133,9 +133,12 @@ impl System for ForwardRender {
             // the per-draw dynamic offset selects the entity's slot. The binding is
             // identical for every draw, so it is built once.
             let fwd_size = std::mem::size_of::<shaders::OpaqueColorUniforms>() as u64;
-            let transform_group = Arc::new(
-                BindingGroup::new().with_buffer_range(0, ring.buffer().clone(), 0, fwd_size),
-            );
+            let transform_group = Arc::new(BindingGroup::new().with_buffer_range(
+                0,
+                ring.buffer().clone(),
+                0,
+                fwd_size,
+            ));
             for (idx, renderer) in renderers.iter() {
                 if let Some(vis) = visibilities.get(idx)
                     && !vis.is_visible()
@@ -316,12 +319,23 @@ impl System for EguiRender {
     }
 }
 
-/// Drives mesh loading: advances every in-flight [`MeshManager`] request,
-/// resolving each one's shared vertex layout (via [`VertexLayoutManager`]) and
-/// kicking off / polling its mesh asset. This is the consumer-facing meshes'
-/// driver — co-locks the manager + layout manager + processor + DB so that
-/// callers only ever touch `MeshManager::request`. No-op if any input is absent.
+/// Drives mesh loading and syncs component [`AssetRef`](redlilium_assets::AssetRef)s.
+///
+/// First advances every in-flight [`MeshManager`] load (resolving each one's
+/// shared vertex layout via [`VertexLayoutManager`]). Then walks the
+/// [`MeshRenderer`]s and resolves their primitives' mesh + material refs against
+/// the managers — demand-driven (an unresolved source gets requested) and
+/// reload-aware (a ref whose `Arc` no longer matches the resident one is
+/// re-resolved; `Arc` pointer identity is the version). Writes go through `Mut`,
+/// so a re-resolve marks the component dirty and stateful consumers can react
+/// through ordinary change detection. No-op if any input is absent.
 pub struct MeshLoad;
+
+/// One collected ref fix: `(entity index, primitive index, new resolution)`.
+enum RefFix {
+    Mesh(u32, usize, Arc<redlilium_graphics::Mesh>),
+    Material(u32, usize, Arc<super::ResolvedInstance>),
+}
 
 impl System for MeshLoad {
     type Result = ();
@@ -335,10 +349,69 @@ impl System for MeshLoad {
             return Ok(());
         }
         let mut mesh_mgr = world.resource_mut::<MeshManager>();
-        let mut layout_mgr = world.resource_mut::<VertexLayoutManager>();
-        let mut processor = world.resource_mut::<AssetProcessor>();
-        let db = world.resource::<AssetDb>();
-        mesh_mgr.drive(&mut processor, &db, &mut layout_mgr);
+        {
+            let mut layout_mgr = world.resource_mut::<VertexLayoutManager>();
+            let mut processor = world.resource_mut::<AssetProcessor>();
+            let db = world.resource::<AssetDb>();
+            mesh_mgr.drive(&mut processor, &db, &mut layout_mgr);
+        }
+
+        // Sync pass A (read): collect stale/unresolved refs, requesting unknown
+        // sources. Nothing is written here, so untouched components stay clean.
+        let mut instance_mgr = world
+            .has_resource::<MaterialInstanceManager>()
+            .then(|| world.resource_mut::<MaterialInstanceManager>());
+        let mut fixes: Vec<RefFix> = Vec::new();
+        {
+            let Ok(renderers) = world.read::<MeshRenderer>() else {
+                return Ok(());
+            };
+            for (idx, renderer) in renderers.iter() {
+                for (pi, primitive) in renderer.primitives.iter().enumerate() {
+                    match mesh_mgr.get(primitive.mesh.source()) {
+                        Some(mesh) if !primitive.mesh.is_current(mesh) => {
+                            fixes.push(RefFix::Mesh(idx, pi, mesh.clone()));
+                        }
+                        Some(_) => {}
+                        None => mesh_mgr.request(primitive.mesh.source()),
+                    }
+                    if let Some(instance_mgr) = instance_mgr.as_mut() {
+                        let source = primitive.material.source();
+                        match instance_mgr.get(source.guid) {
+                            Some(instance) if !primitive.material.is_current(instance) => {
+                                fixes.push(RefFix::Material(idx, pi, instance.clone()));
+                            }
+                            Some(_) => {}
+                            None => instance_mgr.request(source),
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sync pass B (write): apply only the actual changes (marks dirty).
+        if !fixes.is_empty()
+            && let Ok(mut renderers) = world.write::<MeshRenderer>()
+        {
+            for fix in fixes {
+                match fix {
+                    RefFix::Mesh(idx, pi, mesh) => {
+                        if let Some(mut renderer) = renderers.get_mut(idx)
+                            && let Some(primitive) = renderer.primitives.get_mut(pi)
+                        {
+                            primitive.mesh.resolve(mesh);
+                        }
+                    }
+                    RefFix::Material(idx, pi, instance) => {
+                        if let Some(mut renderer) = renderers.get_mut(idx)
+                            && let Some(primitive) = renderer.primitives.get_mut(pi)
+                        {
+                            primitive.material.resolve(instance);
+                        }
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }

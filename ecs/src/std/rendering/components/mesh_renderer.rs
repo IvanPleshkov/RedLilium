@@ -6,73 +6,62 @@
 //! material) and keeps the entity count low: one renderable entity instead of one
 //! entity per primitive.
 //!
-//! Both the mesh and the material instance bind through the **asset system**:
-//! each is a serialized `Source` plus a demand-to-load handle that resolves to the
-//! shared GPU resource once it loads (`docs/MATERIAL_ASSETS.md`). The material is a
-//! [`MaterialInstanceSource`] resolving to a [`ResolvedInstance`].
+//! Both fields are [`AssetRef`]s: plain data carrying the serialized source plus
+//! the cached resolved `Arc`. The `MeshLoad` system resolves them against the
+//! managers (demand-driven — constructing a primitive requests nothing), and
+//! re-resolves on hot reload; reads are a field access.
 
+use redlilium_assets::AssetRef;
 use redlilium_core::math::Aabb;
 use redlilium_graphics::Mesh;
 use std::sync::Arc;
 
 use crate::serialize::Value;
+use crate::std::rendering::ResolvedInstance;
 use crate::std::rendering::loaders::{MaterialInstanceSource, MeshSource};
-use crate::std::rendering::{InstanceHandle, MeshHandle, ResolvedInstance};
 
 // ---------------------------------------------------------------------------
 // Primitive — one (mesh, material instance) pair
 // ---------------------------------------------------------------------------
 
 /// A single renderable primitive: a mesh drawn with a material instance, both
-/// bound by asset source. All primitives of a [`MeshRenderer`] share the entity's
-/// transform.
+/// bound by asset reference. All primitives of a [`MeshRenderer`] share the
+/// entity's transform.
 ///
-/// Both resolve **asynchronously**: each `*_source` is the serialized identity and
-/// each `*_handle` resolves to the shared GPU resource once it loads. Use
-/// [`mesh`](Self::mesh) / [`material`](Self::material) / [`aabb`](Self::aabb),
-/// which return `None` until then.
+/// Both refs resolve **asynchronously** (filled by the `MeshLoad` sync system);
+/// [`mesh`](Self::mesh) / [`material`](Self::material) / [`aabb`](Self::aabb)
+/// return `None` until then.
 #[derive(Debug, Clone)]
 pub struct Primitive {
-    /// The mesh's asset identity (serialized).
-    pub source: MeshSource,
-    /// Demand-to-load handle resolving to the shared `Arc<Mesh>` (not serialized).
-    pub handle: MeshHandle,
-    /// The material instance's asset identity (serialized).
-    pub material_source: MaterialInstanceSource,
-    /// Demand-to-load handle resolving to the [`ResolvedInstance`] (not serialized).
-    pub material_handle: InstanceHandle,
+    /// The mesh reference (source is serialized; resolution is runtime-only).
+    pub mesh: AssetRef<MeshSource>,
+    /// The material-instance reference.
+    pub material: AssetRef<MaterialInstanceSource>,
 }
 
 impl Primitive {
-    /// Create a primitive from a mesh source + handle and a material-instance
-    /// source + handle (both from their managers' `request`).
-    pub fn new(
-        source: MeshSource,
-        handle: MeshHandle,
-        material_source: MaterialInstanceSource,
-        material_handle: InstanceHandle,
-    ) -> Self {
+    /// Create a primitive from a mesh source and a material-instance source.
+    /// Both resolve asynchronously once the sync system sees the component.
+    pub fn new(mesh: MeshSource, material: MaterialInstanceSource) -> Self {
         Self {
-            source,
-            handle,
-            material_source,
-            material_handle,
+            mesh: AssetRef::new(mesh),
+            material: AssetRef::new(material),
         }
     }
 
     /// The resolved GPU mesh, if it has finished loading.
     pub fn mesh(&self) -> Option<Arc<Mesh>> {
-        self.handle.get()
+        self.mesh.get().cloned()
     }
 
     /// The resolved material instance, if it has finished loading.
     pub fn material(&self) -> Option<Arc<ResolvedInstance>> {
-        self.material_handle.get()
+        self.material.get().cloned()
     }
 
     /// The mesh's local-space AABB, once loaded (carried on the `Mesh`).
     pub fn aabb(&self) -> Option<Aabb> {
-        self.handle.get().and_then(|m| m.aabb())
+        self.mesh.get().and_then(|m| m.aabb())
     }
 }
 
@@ -116,9 +105,9 @@ impl MeshRenderer {
 
 // NOTE: This is a manual `Component` impl rather than `#[derive(Component)]`.
 // The derive is all-or-nothing and can't express a custom `aabb()` (union over
-// primitives), a per-primitive inspector, and manager-based async (de)serialization
-// (meshes + material instances bound by asset source). This matches how GPU
-// components have always been written in this engine.
+// primitives), a per-primitive inspector, and source-only serialization of the
+// `AssetRef` fields. This matches how GPU components have always been written in
+// this engine.
 impl crate::Component for MeshRenderer {
     const NAME: &'static str = "MeshRenderer";
 
@@ -154,15 +143,14 @@ impl crate::Component for MeshRenderer {
     ) -> Result<Value, crate::serialize::SerializeError> {
         let mut prims: Vec<Value> = Vec::with_capacity(self.primitives.len());
         for primitive in &self.primitives {
-            // Both the mesh and the material instance are bound by asset source
-            // (serialized as RON), not by name.
-            let mesh = ron::to_string(&primitive.source).map_err(|e| {
+            // Only the sources are serialized (as RON); resolution is runtime state.
+            let mesh = ron::to_string(primitive.mesh.source()).map_err(|e| {
                 crate::serialize::SerializeError::FieldError {
                     field: "mesh".to_owned(),
                     message: format!("serialize mesh source: {e}"),
                 }
             })?;
-            let material = ron::to_string(&primitive.material_source).map_err(|e| {
+            let material = ron::to_string(primitive.material.source()).map_err(|e| {
                 crate::serialize::SerializeError::FieldError {
                     field: "material".to_owned(),
                     message: format!("serialize material source: {e}"),
@@ -223,39 +211,16 @@ impl crate::Component for MeshRenderer {
                 }
             };
 
-            let source: MeshSource = ron::from_str(&mesh_src).map_err(|e| {
+            let mesh: MeshSource = ron::from_str(&mesh_src).map_err(|e| {
                 crate::serialize::DeserializeError::FormatError(format!("mesh source: {e}"))
             })?;
-            let material_source: MaterialInstanceSource =
-                ron::from_str(&material_src).map_err(|e| {
-                    crate::serialize::DeserializeError::FormatError(format!(
-                        "material source: {e}"
-                    ))
-                })?;
+            let material: MaterialInstanceSource = ron::from_str(&material_src).map_err(|e| {
+                crate::serialize::DeserializeError::FormatError(format!("material source: {e}"))
+            })?;
 
-            // Request both from their managers (async load + shared resolution).
-            let (handle, material_handle) = {
-                let world = ctx.world();
-                if !world.has_resource::<super::super::MeshManager>() {
-                    return Err(crate::serialize::DeserializeError::FormatError(
-                        "MeshManager resource not found".into(),
-                    ));
-                }
-                if !world.has_resource::<super::super::MaterialInstanceManager>() {
-                    return Err(crate::serialize::DeserializeError::FormatError(
-                        "MaterialInstanceManager resource not found".into(),
-                    ));
-                }
-                let handle = world
-                    .resource_mut::<super::super::MeshManager>()
-                    .request(source.clone());
-                let material_handle = world
-                    .resource_mut::<super::super::MaterialInstanceManager>()
-                    .request(material_source.clone());
-                (handle, material_handle)
-            };
-
-            primitives.push(Primitive::new(source, handle, material_source, material_handle));
+            // No manager access here: the refs start unresolved and the sync
+            // system requests + resolves them once it sees the component.
+            primitives.push(Primitive::new(mesh, material));
         }
 
         ctx.end_struct()?;

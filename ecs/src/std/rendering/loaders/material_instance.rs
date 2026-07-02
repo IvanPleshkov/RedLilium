@@ -5,7 +5,8 @@
 //! `Primitive` binds one of these.
 
 use redlilium_assets::{
-    AnyAsset, AssetError, AssetLoader, AssetSource, AssetStage, Executor, Guid, LoadEnv, StageFuture,
+    AnyAsset, AssetError, AssetLoader, AssetSource, AssetStage, Executor, Guid, LoadEnv,
+    StageFuture,
 };
 
 use crate::std::rendering::shading::PropValue;

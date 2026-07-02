@@ -198,7 +198,11 @@ mod render_assets {
         }
     }
 
-    fn inspect_material(settings: Option<&str>, ui: &mut egui::Ui, world: &World) -> Option<String> {
+    fn inspect_material(
+        settings: Option<&str>,
+        ui: &mut egui::Ui,
+        world: &World,
+    ) -> Option<String> {
         let text = settings?;
         let mut data: MaterialData = match ron::from_str(text) {
             Ok(d) => d,
@@ -224,7 +228,8 @@ mod render_assets {
 
         let mut changed = false;
         for slot in &schema {
-            let mut val = find_prop(&data.properties, &slot.name).unwrap_or_else(|| slot.default.clone());
+            let mut val =
+                find_prop(&data.properties, &slot.name).unwrap_or_else(|| slot.default.clone());
             if inspect_prop(ui, &slot.name, &mut val) {
                 set_prop(&mut data.properties, &slot.name, val);
                 changed = true;
