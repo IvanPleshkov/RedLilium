@@ -69,6 +69,18 @@ impl MeshManager {
         self.generation
     }
 
+    /// Drop all state for the file mesh `guid` so it reloads (hot reload).
+    /// Component refs keep serving the old `Arc` until the demand-driven sync
+    /// re-requests and the new mesh lands.
+    pub fn invalidate_file(&mut self, guid: redlilium_assets::Guid) {
+        let source = MeshSource::File(guid);
+        if self.resident.remove(&source).is_some() {
+            self.generation += 1;
+        }
+        self.pending.remove(&source);
+        self.failed.remove(&source);
+    }
+
     /// Advance all in-flight loads: resolve each one's shared vertex layout (a
     /// file mesh references it in its DB record; a generated mesh gets it from
     /// the generator), request the mesh asset with that layout injected, then
@@ -79,6 +91,27 @@ impl MeshManager {
         db: &AssetDb,
         layout_mgr: &mut VertexLayoutManager,
     ) {
+        // Pull-validation (hot reload): a file mesh whose shared layout has been
+        // re-resolved to a *different* `Arc` (content changed — an unchanged
+        // layout re-interns to the same one) rebuilds through the normal pending
+        // flow; the resident mesh keeps serving until the new one lands.
+        for (source, mesh) in &self.resident {
+            if self.pending.contains_key(source) || self.failed.contains(source) {
+                continue;
+            }
+            let MeshSource::File(guid) = source else {
+                continue; // generated meshes derive their layout from the generator
+            };
+            let Some(layout_guid) = db.record(guid).and_then(|r| r.reference("layout")) else {
+                continue;
+            };
+            if let Some(layout) = layout_mgr.get_or_request(processor, db, layout_guid)
+                && !Arc::ptr_eq(&layout, mesh.layout())
+            {
+                self.pending.insert(source.clone(), None);
+            }
+        }
+
         let mut done: Vec<(MeshSource, Option<Arc<Mesh>>)> = Vec::new();
 
         for (source, request) in self.pending.iter_mut() {

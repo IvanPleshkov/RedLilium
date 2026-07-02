@@ -14,12 +14,12 @@ use redlilium_ecs::ui::{
     PrefabFileDragPayload, SelectAction, SpawnPrefabAction,
 };
 use redlilium_ecs::{
-    AssetGpuFlush, AssetPump, Camera, DebugRender, DrawGrid, DrawSelectionAabb, EcsRunner,
-    EguiRender, Entity, FlushUploads, ForwardRender, FrameRing, FrameTarget, FreeFlyCamera,
-    GlobalTransform, GridConfig, MaterialAssetManager, MaterialInstanceLoad,
-    MaterialInstanceLoader, MaterialInstanceManager, MaterialInstanceSource, MaterialLoader,
-    MeshGenerator, MeshLoad, MeshLoader, MeshManager, MeshRenderer, MeshSource, Name,
-    PipelineCache, PostUpdate, Primitive, Render, RenderSchedule, ScenePass, Schedules,
+    AssetGpuFlush, AssetPump, Camera, ChangedAssets, DebugRender, DrawGrid, DrawSelectionAabb,
+    EcsRunner, EguiRender, Entity, FlushUploads, ForwardRender, FrameRing, FrameTarget,
+    FreeFlyCamera, GlobalTransform, GridConfig, HotReload, MaterialAssetManager,
+    MaterialInstanceLoad, MaterialInstanceLoader, MaterialInstanceManager, MaterialInstanceSource,
+    MaterialLoader, MeshGenerator, MeshLoad, MeshLoader, MeshManager, MeshRenderer, MeshSource,
+    Name, PipelineCache, PostUpdate, Primitive, Render, RenderSchedule, ScenePass, Schedules,
     ShaderLoader, ShaderManager, ShadingRegistry, TextureManager, Transform, Update,
     UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms, VertexLayoutLoader,
     VertexLayoutManager, Visibility, WindowInput, World, register_std_components,
@@ -149,6 +149,9 @@ impl Editor {
         vfs.mount("std", FileSystemProvider::new("std-assets"));
         let mut asset_browser = AssetBrowser::new(&config);
         asset_browser.add_mount("std");
+        // Watch std-assets for external edits (e.g. .slang in another editor) so
+        // they hot-reload like project-mount files.
+        asset_browser.watch_local_mount("std", "std-assets");
         let console = ConsolePanel::new(crate::log_capture::log_buffer());
 
         Self {
@@ -197,6 +200,9 @@ impl Editor {
         world.insert_resource(MaterialAssetManager::new());
         world.insert_resource(MaterialInstanceManager::new(scene_view.device().clone()));
         world.insert_resource(PipelineCache::new(scene_view.device().clone()));
+        // Hot-reload inbox: inspector edits + fs-watcher changes land here; the
+        // HotReload system drains it and invalidates the owning managers.
+        world.insert_resource(ChangedAssets::new());
 
         // Asset system: one processor (with the rendering loaders) + one DB. The
         // AssetPump / MeshLoad / AssetGpuFlush systems drive these each frame.
@@ -410,6 +416,7 @@ impl Editor {
 
         // Asset loading: MeshLoad resolves layouts + requests meshes, then
         // AssetPump drains the async stages onto the compute/IO pools + collects.
+        schedules.get_mut::<PostUpdate>().add(HotReload);
         schedules.get_mut::<PostUpdate>().add(MeshLoad);
         schedules.get_mut::<PostUpdate>().add(MaterialInstanceLoad);
         schedules.get_mut::<PostUpdate>().add(AssetPump);
@@ -774,6 +781,26 @@ impl AppHandler for Editor {
 
         // Poll completed background VFS results for the asset browser
         self.asset_browser.poll();
+
+        // Externally changed files → hot reload (map VFS path → guid via the DB).
+        let changed_files = self.asset_browser.take_changed_files();
+        if !changed_files.is_empty()
+            && let Some(ew) = self.world.as_mut()
+            && ew.world.has_resource::<AssetDb>()
+        {
+            for vfs_path in changed_files {
+                let Some((source, rel)) = vfs_path.split_once('/') else {
+                    continue;
+                };
+                let guid = ew
+                    .world
+                    .resource::<AssetDb>()
+                    .guid_of(&AssetPath::new(source, rel));
+                if let Some(guid) = guid {
+                    ew.world.resource_mut::<ChangedAssets>().push(guid);
+                }
+            }
+        }
 
         // Advance debug drawer tick (systems will write to the new tick)
         {

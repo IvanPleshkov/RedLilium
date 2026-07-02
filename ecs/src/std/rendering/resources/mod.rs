@@ -1,5 +1,7 @@
 //! Rendering resource types.
 
+#[cfg(feature = "rendering")]
+mod changed_assets;
 mod frame_ring;
 #[cfg(feature = "rendering")]
 mod material_asset_manager;
@@ -15,6 +17,8 @@ mod texture_manager;
 #[cfg(feature = "rendering")]
 mod vertex_layout_manager;
 
+#[cfg(feature = "rendering")]
+pub use changed_assets::ChangedAssets;
 pub use frame_ring::FrameRing;
 #[cfg(feature = "rendering")]
 pub use material_asset_manager::{MaterialAssetManager, ResolvedMaterial};

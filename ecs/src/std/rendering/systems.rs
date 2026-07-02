@@ -165,7 +165,7 @@ impl System for ForwardRender {
                     // layout + the target formats (built once, then cached).
                     let Ok(pipeline) = pipelines.get_or_build(
                         instance.shader_guid,
-                        &instance.shader.source,
+                        &instance.shader,
                         mesh.layout(),
                         color_fmt,
                         depth_fmt,
@@ -450,6 +450,58 @@ impl System for MaterialInstanceLoad {
             &mut shader_mgr,
             &registry,
         );
+        Ok(())
+    }
+}
+
+/// Hot reload: drains [`ChangedAssets`](super::ChangedAssets) and invalidates
+/// the **owning** manager per guid (routed by the DB record's kind). Everything
+/// downstream catches up by itself — dependent managers pull-validate their
+/// input `Arc`s, the pipeline cache revalidates its shader, and the `MeshLoad`
+/// sync re-resolves component refs (`docs/ASSETS.md` §9). Consumers keep serving
+/// the last-good resource while the new one loads.
+pub struct HotReload;
+
+impl System for HotReload {
+    type Result = ();
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<Self::Result, SystemError> {
+        let world = ctx.world();
+        if !world.has_resource::<super::ChangedAssets>() || !world.has_resource::<AssetDb>() {
+            return Ok(());
+        }
+        let changed = world.resource_mut::<super::ChangedAssets>().drain();
+        if changed.is_empty() {
+            return Ok(());
+        }
+        let db = world.resource::<AssetDb>();
+        for guid in changed {
+            let Some(record) = db.record(&guid) else {
+                continue; // not a registered asset (e.g. the db file itself)
+            };
+            log::info!("hot reload: {} ({guid:?})", record.path.path);
+            match record.kind.as_str() {
+                "mesh" if world.has_resource::<MeshManager>() => {
+                    world.resource_mut::<MeshManager>().invalidate_file(guid);
+                }
+                "vertex_layout" if world.has_resource::<VertexLayoutManager>() => {
+                    world.resource_mut::<VertexLayoutManager>().invalidate(guid);
+                }
+                "shader" if world.has_resource::<ShaderManager>() => {
+                    world.resource_mut::<ShaderManager>().invalidate(guid);
+                }
+                "material" if world.has_resource::<MaterialAssetManager>() => {
+                    world
+                        .resource_mut::<MaterialAssetManager>()
+                        .invalidate(guid);
+                }
+                "material_instance" if world.has_resource::<MaterialInstanceManager>() => {
+                    world
+                        .resource_mut::<MaterialInstanceManager>()
+                        .invalidate(guid);
+                }
+                _ => {}
+            }
+        }
         Ok(())
     }
 }

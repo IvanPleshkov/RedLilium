@@ -67,8 +67,17 @@ impl MaterialAssetManager {
         registry: &ShadingRegistry,
         guid: Guid,
     ) -> Option<Arc<ResolvedMaterial>> {
-        if let Some(resolved) = self.resident.get(&guid) {
-            return Some(resolved.clone());
+        if let Some(resolved) = self.resident.get(&guid).cloned() {
+            // Pull-validation (hot reload): is the shader we resolved with still
+            // current? `get_or_request` re-requests an invalidated shader; while
+            // it reloads (`None`) we keep serving the last-good resolution, and
+            // once a *different* `Arc` lands we drop ours and re-resolve below.
+            match shader_mgr.get_or_request(processor, db, resolved.shader_guid) {
+                Some(shader) if !Arc::ptr_eq(&shader, &resolved.shader) => {
+                    self.resident.remove(&guid);
+                }
+                _ => return Some(resolved),
+            }
         }
         if self.failed.contains(&guid) {
             return None;
@@ -128,5 +137,15 @@ impl MaterialAssetManager {
     /// The resolved template for `guid` if already resident — no request side effect.
     pub fn get(&self, guid: Guid) -> Option<Arc<ResolvedMaterial>> {
         self.resident.get(&guid).cloned()
+    }
+
+    /// Drop all state for `guid` so the next `get_or_request` re-resolves it from
+    /// fresh data (hot reload). Dependants keep serving the old resolution until
+    /// the new one lands, then rebuild by pointer identity.
+    pub fn invalidate(&mut self, guid: Guid) {
+        self.resident.remove(&guid);
+        self.data_pending.remove(&guid);
+        self.data_ready.remove(&guid);
+        self.failed.remove(&guid);
     }
 }

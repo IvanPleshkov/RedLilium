@@ -64,6 +64,9 @@ pub struct AssetBrowser {
     pending_move: Option<(String, String, String)>,
     /// Committed delete to apply: (source, path). Drained by editor.
     pending_delete: Option<(String, String)>,
+    /// VFS file paths changed externally (from the fs watcher), pending hot
+    /// reload. Drained by the editor, which maps them to guids.
+    changed_files: Vec<String>,
 }
 
 /// Drag payload for moving an asset file between directories.
@@ -105,6 +108,20 @@ impl AssetBrowser {
             pending_rename: None,
             pending_move: None,
             pending_delete: None,
+            changed_files: Vec::new(),
+        }
+    }
+
+    /// Take the externally changed VFS file paths (for asset hot reload).
+    pub fn take_changed_files(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.changed_files)
+    }
+
+    /// Watch a programmatically added local mount (e.g. `std`) so its files hot
+    /// reload like config mounts do.
+    pub fn watch_local_mount(&mut self, name: &str, local_path: &str) {
+        if let Some(watcher) = &mut self.fs_watcher {
+            watcher.watch_mount(name, local_path);
         }
     }
 
@@ -195,11 +212,14 @@ impl AssetBrowser {
     pub fn poll(&mut self) {
         // Check for external filesystem changes
         if let Some(watcher) = &self.fs_watcher {
-            for vfs_dir in watcher.poll_changes() {
+            let changes = watcher.poll_changes();
+            for vfs_dir in changes.dirs {
                 log::debug!("Filesystem change detected: {vfs_dir}");
                 self.dir_cache.remove(&vfs_dir);
                 self.cached_key = None;
             }
+            // Changed files feed asset hot reload (drained by the editor).
+            self.changed_files.extend(changes.files);
         }
 
         for (id, result) in self.bg_vfs.poll_results() {

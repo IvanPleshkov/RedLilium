@@ -45,6 +45,13 @@ pub fn show_asset_inspector(
             world
                 .resource_mut::<AssetDb>()
                 .set_settings(&guid, Some(new_settings));
+            // Feed hot reload: the HotReload system invalidates the owning
+            // manager, so the edit applies live.
+            if world.has_resource::<redlilium_ecs::ChangedAssets>() {
+                world
+                    .resource_mut::<redlilium_ecs::ChangedAssets>()
+                    .push(guid);
+            }
             true
         }
         None => false,

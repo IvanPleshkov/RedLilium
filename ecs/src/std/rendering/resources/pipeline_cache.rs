@@ -22,6 +22,8 @@ use redlilium_graphics::{
     TextureFormat,
 };
 
+use crate::std::rendering::loaders::Shader;
+
 /// Cache key: the shader asset, the (shared, interned) vertex layout by pointer
 /// identity, and the render target formats. Layouts are interned by the
 /// [`VertexLayoutManager`](super::VertexLayoutManager), so pointer identity is
@@ -34,11 +36,21 @@ struct PipelineKey {
     depth: Option<TextureFormat>,
 }
 
+/// A cached specialization: the pipeline plus the shader `Arc` it was compiled
+/// from (pointer identity is the version — a hot-reloaded shader recompiles).
+/// `broken` remembers a shader `Arc` whose recompile failed so the last-good
+/// pipeline keeps serving without retrying every frame.
+struct PipelineEntry {
+    shader: Arc<Shader>,
+    material: Arc<Material>,
+    broken: Option<usize>,
+}
+
 /// Owns and shares specialized GPU pipelines (`Arc<Material>`) — an ECS resource
 /// consulted by the render system at draw time.
 pub struct PipelineCache {
     device: Arc<GraphicsDevice>,
-    cache: HashMap<PipelineKey, Arc<Material>>,
+    cache: HashMap<PipelineKey, PipelineEntry>,
 }
 
 impl PipelineCache {
@@ -51,12 +63,14 @@ impl PipelineCache {
     }
 
     /// Get (or build + cache) the pipeline specialized for this shader + mesh
-    /// vertex layout + target formats. `shader_guid` keys the cache; `source` is
-    /// the `.slang` content compiled on a miss.
+    /// vertex layout + target formats. `shader_guid` keys the cache; `shader` is
+    /// the resident source compiled on a miss — and revalidated by pointer
+    /// identity on a hit, so a hot-reloaded shader recompiles. If the recompile
+    /// fails (broken source mid-edit), the last-good pipeline keeps serving.
     pub fn get_or_build(
         &mut self,
         shader_guid: Guid,
-        source: &[u8],
+        shader: &Arc<Shader>,
         layout: &Arc<VertexLayout>,
         color: TextureFormat,
         depth: TextureFormat,
@@ -67,21 +81,61 @@ impl PipelineCache {
             color,
             depth: Some(depth),
         };
-        if let Some(mat) = self.cache.get(&key) {
-            return Ok(Arc::clone(mat));
+        if let Some(entry) = self.cache.get_mut(&key) {
+            if Arc::ptr_eq(&entry.shader, shader) {
+                return Ok(Arc::clone(&entry.material));
+            }
+            // The shader was reloaded — recompile; keep the last-good pipeline
+            // (and don't retry the same broken Arc every frame) on failure.
+            if entry.broken == Some(Arc::as_ptr(shader) as usize) {
+                return Ok(Arc::clone(&entry.material));
+            }
+            match Self::build(&self.device, shader, layout, color, depth) {
+                Ok(material) => {
+                    entry.shader = Arc::clone(shader);
+                    entry.material = Arc::clone(&material);
+                    entry.broken = None;
+                    return Ok(material);
+                }
+                Err(e) => {
+                    log::warn!("shader {shader_guid:?} recompile failed (keeping last-good): {e}");
+                    entry.broken = Some(Arc::as_ptr(shader) as usize);
+                    return Ok(Arc::clone(&entry.material));
+                }
+            }
         }
 
-        let material = self.device.create_material(
+        let material = Self::build(&self.device, shader, layout, color, depth)?;
+        self.cache.insert(
+            key,
+            PipelineEntry {
+                shader: Arc::clone(shader),
+                material: Arc::clone(&material),
+                broken: None,
+            },
+        );
+        Ok(material)
+    }
+
+    /// Compile the pipeline for this shader source + layout + formats.
+    fn build(
+        device: &Arc<GraphicsDevice>,
+        shader: &Arc<Shader>,
+        layout: &Arc<VertexLayout>,
+        color: TextureFormat,
+        depth: TextureFormat,
+    ) -> Result<Arc<Material>, GraphicsError> {
+        device.create_material(
             &MaterialDescriptor::new()
                 .with_shader(ShaderSource::slang(
                     ShaderStage::Vertex,
-                    source.to_vec(),
+                    shader.source.clone(),
                     "vs_main",
                     vec![],
                 ))
                 .with_shader(ShaderSource::slang(
                     ShaderStage::Fragment,
-                    source.to_vec(),
+                    shader.source.clone(),
                     "fs_main",
                     vec![],
                 ))
@@ -92,9 +146,7 @@ impl PipelineCache {
                 // (material props) stays a static uniform buffer (Decision 7).
                 .with_dynamic_uniform(0, 0)
                 .with_label("opaque"),
-        )?;
-        self.cache.insert(key, Arc::clone(&material));
-        Ok(material)
+        )
     }
 
     /// Number of distinct specialized pipelines currently cached.

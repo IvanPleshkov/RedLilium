@@ -63,4 +63,13 @@ impl ShaderManager {
     pub fn get(&self, guid: Guid) -> Option<Arc<Shader>> {
         self.resident.get(&guid).cloned()
     }
+
+    /// Drop the resident/failed state for `guid` so the next `get_or_request`
+    /// reloads it (hot reload). Consumers keep serving the old `Arc` until the
+    /// new one lands, then re-resolve by pointer identity.
+    pub fn invalidate(&mut self, guid: Guid) {
+        self.resident.remove(&guid);
+        self.pending.remove(&guid);
+        self.failed.remove(&guid);
+    }
 }

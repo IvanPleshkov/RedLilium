@@ -43,14 +43,16 @@ pub use loaders::{
     MaterialLoader, MaterialSource, MeshGenerator, MeshLoader, MeshSource, Shader, ShaderLoader,
     ShaderSource, VertexLayoutLoader, VertexLayoutSource,
 };
-pub use resources::{FrameRing, MeshManager, RenderSchedule, TextureManager, TextureManagerError};
 #[cfg(feature = "rendering")]
 pub use resources::{
-    MaterialAssetManager, MaterialInstanceManager, PipelineCache, ResolvedInstance,
+    ChangedAssets, MaterialAssetManager, MaterialInstanceManager, PipelineCache, ResolvedInstance,
     ResolvedMaterial, ShaderManager, VertexLayoutManager,
 };
+pub use resources::{FrameRing, MeshManager, RenderSchedule, TextureManager, TextureManagerError};
 #[cfg(feature = "rendering")]
 pub use shading::{PropDef, PropValue, ShadingModel, ShadingRegistry, pack_props};
+#[cfg(feature = "rendering")]
+pub use systems::HotReload;
 pub use systems::{
     DebugRender, EguiRender, FlushUploads, ForwardRender, FrameTarget, MaterialInstanceLoad,
     MeshLoad, ScenePass,

@@ -31,8 +31,15 @@ use crate::std::rendering::shading::{PropValue, pack_props};
 
 /// A fully resolved material instance: the shader to specialize a pipeline from
 /// (carried from the parent template) and the static property binding (group 1).
+/// The parent template it was resolved against is retained so hot reload can
+/// pull-validate: a re-resolved parent (`Arc` mismatch) triggers a rebuild.
 #[derive(Debug)]
 pub struct ResolvedInstance {
+    /// The parent material template guid.
+    pub parent_guid: Guid,
+    /// The parent resolution this instance was built from (pointer identity is
+    /// the version — compared against the material manager's current one).
+    pub parent: Arc<super::ResolvedMaterial>,
     /// The shader source asset guid (the pipeline cache key).
     pub shader_guid: Guid,
     /// The resident shader source (from the parent template).
@@ -102,6 +109,17 @@ impl MaterialInstanceManager {
         self.generation
     }
 
+    /// Drop all state for `guid` so it re-resolves from fresh data (hot reload).
+    /// Component refs keep serving the old `Arc` until the demand-driven sync
+    /// re-requests and the new resolution lands.
+    pub fn invalidate(&mut self, guid: Guid) {
+        if self.resident.remove(&guid).is_some() {
+            self.generation += 1;
+        }
+        self.pending.remove(&guid);
+        self.failed.remove(&guid);
+    }
+
     /// Advance all in-flight instance requests: load each one's data, resolve its
     /// parent template (via the material manager, which itself pulls the shader),
     /// overlay overrides, and build the static property binding. Call from the
@@ -114,10 +132,35 @@ impl MaterialInstanceManager {
         shader_mgr: &mut ShaderManager,
         registry: &crate::std::rendering::shading::ShadingRegistry,
     ) {
-        // Phase 1+2 produce, for each ready instance, the packed property bytes and
-        // the carried shader. The static buffer (needs `&mut self`) is built after
-        // the `pending` borrow is released.
-        let mut ready: Vec<(Guid, Vec<u8>, Guid, Arc<Shader>)> = Vec::new();
+        // Pull-validation (hot reload): re-resolve resident instances whose parent
+        // template has been re-resolved (`Arc` mismatch — pointer identity is the
+        // version). `get_or_request` also advances an invalidated parent's own
+        // reload; while it returns `None` the old instance keeps serving
+        // (last-good). The rebuild goes through the normal pending flow — the
+        // resident entry stays until the new resolution replaces it.
+        for (guid, resolved) in &self.resident {
+            if self.pending.contains_key(guid) || self.failed.contains(guid) {
+                continue;
+            }
+            let parent = material_mgr.get_or_request(
+                processor,
+                db,
+                shader_mgr,
+                registry,
+                resolved.parent_guid,
+            );
+            if let Some(parent) = parent
+                && !Arc::ptr_eq(&parent, &resolved.parent)
+            {
+                self.pending.insert(*guid, PendingInstance::default());
+            }
+        }
+
+        // Phase 1+2 produce, for each ready instance, the packed property bytes,
+        // the parent guid, and the parent it was resolved against. The static
+        // buffer (needs `&mut self`) is built after the `pending` borrow drops.
+        #[allow(clippy::type_complexity)]
+        let mut ready: Vec<(Guid, Vec<u8>, Guid, Arc<super::ResolvedMaterial>)> = Vec::new();
         let mut failed_now: Vec<Guid> = Vec::new();
 
         for (guid, pending) in self.pending.iter_mut() {
@@ -156,21 +199,18 @@ impl MaterialInstanceManager {
             };
 
             let merged = merge_overrides(&parent.properties, &data.overrides);
-            ready.push((
-                *guid,
-                pack_props(&merged),
-                parent.shader_guid,
-                parent.shader.clone(),
-            ));
+            ready.push((*guid, pack_props(&merged), data.parent, parent));
         }
 
         // Build static buffers + publish (the `pending` borrow is now released).
-        for (guid, bytes, shader_guid, shader) in ready {
+        for (guid, bytes, parent_guid, parent) in ready {
             match self.build_props_group(&bytes) {
                 Ok(props_group) => {
                     let resolved = Arc::new(ResolvedInstance {
-                        shader_guid,
-                        shader,
+                        parent_guid,
+                        shader_guid: parent.shader_guid,
+                        shader: parent.shader.clone(),
+                        parent,
                         props_group,
                     });
                     self.pending.remove(&guid);

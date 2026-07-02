@@ -105,6 +105,16 @@ impl VertexLayoutManager {
     pub fn get(&self, guid: Guid) -> Option<Arc<VertexLayout>> {
         self.resident.get(&guid).cloned()
     }
+
+    /// Drop the resident/failed state for `guid` so the next `get_or_request`
+    /// reloads it (hot reload). The content-intern map is left as is: an
+    /// unchanged layout re-interns to the *same* `Arc` (dependants see ptr-eq and
+    /// skip rebuilding), while changed content interns to a new one.
+    pub fn invalidate(&mut self, guid: Guid) {
+        self.resident.remove(&guid);
+        self.pending.remove(&guid);
+        self.failed.remove(&guid);
+    }
 }
 
 #[cfg(test)]
