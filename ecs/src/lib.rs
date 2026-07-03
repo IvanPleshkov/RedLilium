@@ -38,6 +38,7 @@
 #[doc(hidden)]
 extern crate self as redlilium_ecs;
 
+pub mod asset_refs;
 mod bundle;
 mod commands;
 pub mod component;
@@ -169,11 +170,11 @@ pub use rendering::{
 pub use redlilium_debug_drawer::{DebugDrawer, DebugDrawerRenderer};
 #[cfg(feature = "rendering")]
 pub use rendering::{
-    CameraTarget, ChangedAssets, DebugRender, EguiRender, FlushUploads, ForwardRender, FrameRing,
-    FrameTarget, HotReload, MaterialAssetManager, MaterialInstanceLoad, MaterialInstanceLoader,
-    MaterialInstanceManager, MaterialInstanceSource, MaterialLoader, MeshLoad, MeshManager,
-    MeshRenderer, NewAssetSpec, PipelineCache, Primitive, RenderSchedule, ScenePass, Shader,
-    ShaderLoader, ShaderManager, ShaderSource, ShadingRegistry, TextureManager,
+    AssetRef, AssetRefSource, CameraTarget, ChangedAssets, DebugRender, EguiRender, FlushUploads,
+    ForwardRender, FrameRing, FrameTarget, HotReload, MaterialAssetManager, MaterialInstanceLoad,
+    MaterialInstanceLoader, MaterialInstanceManager, MaterialInstanceSource, MaterialLoader,
+    MeshLoad, MeshManager, MeshRenderer, NewAssetSpec, PipelineCache, Primitive, RenderSchedule,
+    ScenePass, Shader, ShaderLoader, ShaderManager, ShaderSource, ShadingRegistry, TextureManager,
     inspect_asset_settings, new_asset_spec, register_rendering_components, shaders,
 };
 

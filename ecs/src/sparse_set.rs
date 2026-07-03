@@ -87,6 +87,12 @@ impl<T: 'static> DerefMut for Mut<'_, T> {
 pub(crate) type ExtractFn = fn(&World, Entity) -> Option<Box<dyn crate::prefab::ComponentBag>>;
 
 /// Type-erased serialize: reads a component from the world and serializes it.
+/// Scan all instances' asset refs (read-only): `(entity_index, ref as Any)`.
+pub(crate) type ScanAssetRefsFn = fn(&World, &mut dyn FnMut(u32, &dyn std::any::Any));
+
+/// Re-visit one instance's asset refs mutably (marks the component changed).
+pub(crate) type PatchAssetRefsFn = fn(&World, u32, &mut dyn FnMut(&mut dyn std::any::Any));
+
 pub(crate) type SerializeComponentFn =
     fn(
         &World,
@@ -143,6 +149,13 @@ pub(crate) struct ComponentMeta {
     pub deserialize_fn: DeserializeComponentFn,
     /// Get the axis-aligned bounding box contributed by this component on an entity.
     pub aabb_fn: fn(&World, Entity) -> Option<redlilium_core::math::Aabb>,
+    /// Scan all instances' asset references (read-only): the callback receives
+    /// `(entity_index, &AssetRef<S> as &dyn Any)` for every ref of every
+    /// instance. No-op for components without asset refs.
+    pub scan_asset_refs_fn: ScanAssetRefsFn,
+    /// Re-visit one instance's asset references mutably (marks the component
+    /// changed) so the callback can apply re-resolutions.
+    pub patch_asset_refs_fn: PatchAssetRefsFn,
     /// Display order in the inspector panel. Lower values appear first.
     pub display_order: u32,
 }

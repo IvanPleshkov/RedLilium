@@ -103,6 +103,20 @@ impl World {
                 let comp = world.get::<T>(entity)?;
                 comp.aabb(world)
             },
+            scan_asset_refs_fn: |world, f| {
+                if let Ok(storage) = world.read_all::<T>() {
+                    for (idx, comp) in storage.iter() {
+                        comp.visit_asset_refs(&mut |r| f(idx, r));
+                    }
+                }
+            },
+            patch_asset_refs_fn: |world, idx, f| {
+                if let Ok(mut storage) = world.write_all::<T>()
+                    && let Some(mut comp) = storage.get_mut(idx)
+                {
+                    comp.visit_asset_refs_mut(f);
+                }
+            },
             serialize_fn: serialize_component_fn::<T>,
             deserialize_fn: deserialize_component_fn::<T>,
             display_order: 100,
@@ -160,6 +174,20 @@ impl World {
             aabb_fn: |world, entity| {
                 let comp = world.get::<T>(entity)?;
                 comp.aabb(world)
+            },
+            scan_asset_refs_fn: |world, f| {
+                if let Ok(storage) = world.read_all::<T>() {
+                    for (idx, comp) in storage.iter() {
+                        comp.visit_asset_refs(&mut |r| f(idx, r));
+                    }
+                }
+            },
+            patch_asset_refs_fn: |world, idx, f| {
+                if let Ok(mut storage) = world.write_all::<T>()
+                    && let Some(mut comp) = storage.get_mut(idx)
+                {
+                    comp.visit_asset_refs_mut(f);
+                }
             },
             serialize_fn: serialize_component_fn::<T>,
             deserialize_fn: deserialize_component_fn::<T>,

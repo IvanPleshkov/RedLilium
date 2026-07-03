@@ -26,6 +26,35 @@ impl World {
         })
     }
 
+    // ---- Asset references (generic sync / hot reload) ----
+
+    /// Scan the asset references of every instance of every inspector-registered
+    /// component type (read-only). The callback receives
+    /// `(component_name, entity_index, &AssetRef<S> as &dyn Any)`; downcast to
+    /// the concrete `AssetRef<S>` types you have resolvers for. Components
+    /// without asset refs contribute nothing.
+    pub fn scan_asset_refs(&self, f: &mut dyn FnMut(&'static str, u32, &dyn std::any::Any)) {
+        for meta in self.iter_meta() {
+            let name = meta.name;
+            (meta.scan_asset_refs_fn)(self, &mut |idx, r| f(name, idx, r));
+        }
+    }
+
+    /// Re-visit one component instance's asset references mutably so the
+    /// callback can apply re-resolutions (marks the component changed). The
+    /// `(component, entity_index)` pair comes from
+    /// [`scan_asset_refs`](Self::scan_asset_refs).
+    pub fn patch_asset_refs(
+        &self,
+        component: &str,
+        entity_index: u32,
+        f: &mut dyn FnMut(&mut dyn std::any::Any),
+    ) {
+        if let Some(meta) = self.meta_by_name(component) {
+            (meta.patch_asset_refs_fn)(self, entity_index, f);
+        }
+    }
+
     // ---- Inspector ----
 
     /// Returns the names of all inspector-registered components that an entity has.

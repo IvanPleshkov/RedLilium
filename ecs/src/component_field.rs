@@ -79,6 +79,17 @@ pub trait ComponentField: Send + Sync + 'static {
     ) -> Result<Self, DeserializeError>
     where
         Self: Sized;
+
+    /// Visit the asset references carried by this field (read-only), passing
+    /// each as `&dyn Any` (a concrete `AssetRef<S>`). Default: no refs. An
+    /// `AssetRef` field yields itself; container/compound fields forward to
+    /// their elements. Drives the generic asset-sync system.
+    fn visit_asset_refs(&self, _f: &mut dyn FnMut(&dyn std::any::Any)) {}
+
+    /// Visit the asset references carried by this field (mutably) — the write
+    /// half of [`visit_asset_refs`](Self::visit_asset_refs), used to apply a
+    /// re-resolution. Default: no refs.
+    fn visit_asset_refs_mut(&mut self, _f: &mut dyn FnMut(&mut dyn std::any::Any)) {}
 }
 
 // ---------------------------------------------------------------------------

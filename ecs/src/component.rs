@@ -85,6 +85,25 @@ pub trait Component: Clone + Send + Sync + 'static {
     /// The default implementation is a no-op (no entity references).
     fn remap_entities(&mut self, _map: &mut dyn FnMut(crate::Entity) -> crate::Entity) {}
 
+    /// Visit all asset references stored in this component (read-only), each
+    /// passed as `&dyn Any` (a concrete `AssetRef<S>`).
+    ///
+    /// The derive macro generates this by wrapping each field in
+    /// [`AssetRefsRef`](crate::asset_refs::AssetRefsRef) — fields implementing
+    /// [`ComponentField`](crate::ComponentField) forward to its hook (an
+    /// `AssetRef` yields itself), all others are skipped. The generic asset-sync
+    /// system uses this to find refs to resolve / hot-reload.
+    ///
+    /// The default implementation is a no-op (no asset references).
+    fn visit_asset_refs(&self, _f: &mut dyn FnMut(&dyn std::any::Any)) {}
+
+    /// Visit all asset references stored in this component (mutably) — the
+    /// write half of [`visit_asset_refs`](Self::visit_asset_refs), used by the
+    /// sync system to apply re-resolutions.
+    ///
+    /// The default implementation is a no-op (no asset references).
+    fn visit_asset_refs_mut(&mut self, _f: &mut dyn FnMut(&mut dyn std::any::Any)) {}
+
     /// Register required components for this type.
     ///
     /// Called automatically by [`World::register_inspector`](crate::World::register_inspector)

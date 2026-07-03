@@ -322,24 +322,27 @@ impl System for EguiRender {
 /// Drives mesh loading and syncs component [`AssetRef`](redlilium_assets::AssetRef)s.
 ///
 /// First advances every in-flight [`MeshManager`] load (resolving each one's
-/// shared vertex layout via [`VertexLayoutManager`]). Then walks the
-/// [`MeshRenderer`]s and resolves their primitives' mesh + material refs against
-/// the managers — demand-driven (an unresolved source gets requested) and
-/// reload-aware (a ref whose `Arc` no longer matches the resident one is
-/// re-resolved; `Arc` pointer identity is the version). Writes go through `Mut`,
-/// so a re-resolve marks the component dirty and stateful consumers can react
-/// through ordinary change detection. No-op if any input is absent.
+/// shared vertex layout via [`VertexLayoutManager`]). Then scans the asset refs
+/// of **every registered component** (via
+/// [`World::scan_asset_refs`] — the derive-generated
+/// [`Component::visit_asset_refs`](crate::Component::visit_asset_refs) hooks)
+/// and resolves them against the managers: demand-driven (an unresolved source
+/// gets requested) and reload-aware (a ref whose `Arc` no longer matches the
+/// resident one is re-resolved; `Arc` pointer identity is the version). Writes
+/// go through `Mut`, so a re-resolve marks the component dirty and stateful
+/// consumers can react through ordinary change detection.
+///
+/// A user component with an `AssetRef` field gets loading + hot reload with no
+/// extra code. No-op if any input is absent.
 pub struct MeshLoad;
-
-/// One collected ref fix: `(entity index, primitive index, new resolution)`.
-enum RefFix {
-    Mesh(u32, usize, Arc<redlilium_graphics::Mesh>),
-    Material(u32, usize, Arc<super::ResolvedInstance>),
-}
 
 impl System for MeshLoad {
     type Result = ();
     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<Self::Result, SystemError> {
+        use redlilium_assets::AssetRef;
+
+        use super::loaders::{MaterialInstanceSource, MeshSource};
+
         let world = ctx.world();
         if !world.has_resource::<MeshManager>()
             || !world.has_resource::<VertexLayoutManager>()
@@ -356,61 +359,51 @@ impl System for MeshLoad {
             mesh_mgr.drive(&mut processor, &db, &mut layout_mgr);
         }
 
-        // Sync pass A (read): collect stale/unresolved refs, requesting unknown
-        // sources. Nothing is written here, so untouched components stay clean.
+        // Sync pass A (read): scan all components' refs, collecting the
+        // (component, entity) pairs that need a re-resolve and demand-requesting
+        // unknown sources. Nothing is written, so untouched components stay clean.
         let mut instance_mgr = world
             .has_resource::<MaterialInstanceManager>()
             .then(|| world.resource_mut::<MaterialInstanceManager>());
-        let mut fixes: Vec<RefFix> = Vec::new();
-        {
-            let Ok(renderers) = world.read::<MeshRenderer>() else {
-                return Ok(());
-            };
-            for (idx, renderer) in renderers.iter() {
-                for (pi, primitive) in renderer.primitives.iter().enumerate() {
-                    match mesh_mgr.get(primitive.mesh.source()) {
-                        Some(mesh) if !primitive.mesh.is_current(mesh) => {
-                            fixes.push(RefFix::Mesh(idx, pi, mesh.clone()));
-                        }
-                        Some(_) => {}
-                        None => mesh_mgr.request(primitive.mesh.source()),
-                    }
-                    if let Some(instance_mgr) = instance_mgr.as_mut() {
-                        let source = primitive.material.source();
-                        match instance_mgr.get(source.guid) {
-                            Some(instance) if !primitive.material.is_current(instance) => {
-                                fixes.push(RefFix::Material(idx, pi, instance.clone()));
-                            }
-                            Some(_) => {}
-                            None => instance_mgr.request(source),
-                        }
-                    }
+        let mut stale: Vec<(&'static str, u32)> = Vec::new();
+        world.scan_asset_refs(&mut |component, idx, any| {
+            if let Some(r) = any.downcast_ref::<AssetRef<MeshSource>>() {
+                match mesh_mgr.get(r.source()) {
+                    Some(mesh) if !r.is_current(mesh) => stale.push((component, idx)),
+                    Some(_) => {}
+                    None => mesh_mgr.request(r.source()),
+                }
+            } else if let Some(r) = any.downcast_ref::<AssetRef<MaterialInstanceSource>>()
+                && let Some(instance_mgr) = instance_mgr.as_mut()
+            {
+                match instance_mgr.get(r.source().guid) {
+                    Some(instance) if !r.is_current(instance) => stale.push((component, idx)),
+                    Some(_) => {}
+                    None => instance_mgr.request(r.source()),
                 }
             }
-        }
+        });
 
-        // Sync pass B (write): apply only the actual changes (marks dirty).
-        if !fixes.is_empty()
-            && let Ok(mut renderers) = world.write::<MeshRenderer>()
-        {
-            for fix in fixes {
-                match fix {
-                    RefFix::Mesh(idx, pi, mesh) => {
-                        if let Some(mut renderer) = renderers.get_mut(idx)
-                            && let Some(primitive) = renderer.primitives.get_mut(pi)
-                        {
-                            primitive.mesh.resolve(mesh);
-                        }
+        // Sync pass B (write): re-visit only the stale components and apply the
+        // new resolutions (marks each patched component dirty exactly once).
+        stale.sort_unstable();
+        stale.dedup();
+        for (component, idx) in stale {
+            world.patch_asset_refs(component, idx, &mut |any| {
+                if let Some(r) = any.downcast_mut::<AssetRef<MeshSource>>() {
+                    if let Some(mesh) = mesh_mgr.get(r.source())
+                        && !r.is_current(mesh)
+                    {
+                        r.resolve(mesh.clone());
                     }
-                    RefFix::Material(idx, pi, instance) => {
-                        if let Some(mut renderer) = renderers.get_mut(idx)
-                            && let Some(primitive) = renderer.primitives.get_mut(pi)
-                        {
-                            primitive.material.resolve(instance);
-                        }
-                    }
+                } else if let Some(r) = any.downcast_mut::<AssetRef<MaterialInstanceSource>>()
+                    && let Some(instance_mgr) = instance_mgr.as_mut()
+                    && let Some(instance) = instance_mgr.get(r.source().guid)
+                    && !r.is_current(instance)
+                {
+                    r.resolve(instance.clone());
                 }
-            }
+            });
         }
         Ok(())
     }

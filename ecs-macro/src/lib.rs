@@ -62,9 +62,15 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
         }
     }
 
-    let (inspect_body, collect_body, remap_body, serialize_body, deserialize_body) = match &input
-        .data
-    {
+    let (
+        inspect_body,
+        collect_body,
+        remap_body,
+        visit_refs_body,
+        visit_refs_mut_body,
+        serialize_body,
+        deserialize_body,
+    ) = match &input.data {
         Data::Struct(data) => match &data.fields {
             Fields::Named(fields) => {
                 let all_fields: Vec<_> = fields.named.iter().collect();
@@ -115,6 +121,18 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                         let fname = f.ident.as_ref().unwrap();
                         quote! {
                             redlilium_ecs::map_entities::EntityMut(&mut self.#fname).remap_entities(map);
+                        }
+                    });
+                let visit_refs_stmts = visible_fields.iter().map(|f| {
+                    let fname = f.ident.as_ref().unwrap();
+                    quote! {
+                        redlilium_ecs::asset_refs::AssetRefsRef(&self.#fname).visit_asset_refs(__f);
+                    }
+                });
+                let visit_refs_mut_stmts = visible_fields.iter().map(|f| {
+                        let fname = f.ident.as_ref().unwrap();
+                        quote! {
+                            redlilium_ecs::asset_refs::AssetRefsMut(&mut self.#fname).visit_asset_refs_mut(__f);
                         }
                     });
 
@@ -194,6 +212,8 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                     },
                     quote! { #(#collect_stmts)* },
                     quote! { #(#remap_stmts)* },
+                    quote! { #(#visit_refs_stmts)* },
+                    quote! { #(#visit_refs_mut_stmts)* },
                     serialize_body,
                     deserialize_body,
                 )
@@ -227,6 +247,16 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                 let remap_stmts = indices.iter().map(|idx| {
                     quote! {
                         redlilium_ecs::map_entities::EntityMut(&mut self.#idx).remap_entities(map);
+                    }
+                });
+                let visit_refs_stmts = indices.iter().map(|idx| {
+                    quote! {
+                        redlilium_ecs::asset_refs::AssetRefsRef(&self.#idx).visit_asset_refs(__f);
+                    }
+                });
+                let visit_refs_mut_stmts = indices.iter().map(|idx| {
+                    quote! {
+                        redlilium_ecs::asset_refs::AssetRefsMut(&mut self.#idx).visit_asset_refs_mut(__f);
                     }
                 });
 
@@ -313,6 +343,8 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                     },
                     quote! { #(#collect_stmts)* },
                     quote! { #(#remap_stmts)* },
+                    quote! { #(#visit_refs_stmts)* },
+                    quote! { #(#visit_refs_mut_stmts)* },
                     serialize_body,
                     deserialize_body,
                 )
@@ -321,6 +353,8 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                 quote! { let _ = (__ui, _entity); None },
                 quote! { let _ = collector; },
                 quote! { let _ = map; },
+                quote! { let _ = __f; },
+                quote! { let _ = __f; },
                 if skip_serialization {
                     quote! {}
                 } else {
@@ -397,6 +431,18 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
                 #[allow(unused_imports)]
                 use redlilium_ecs::map_entities::EntityMutFallback as _;
                 #remap_body
+            }
+
+            fn visit_asset_refs(&self, __f: &mut dyn FnMut(&dyn std::any::Any)) {
+                #[allow(unused_imports)]
+                use redlilium_ecs::asset_refs::AssetRefsRefFallback as _;
+                #visit_refs_body
+            }
+
+            fn visit_asset_refs_mut(&mut self, __f: &mut dyn FnMut(&mut dyn std::any::Any)) {
+                #[allow(unused_imports)]
+                use redlilium_ecs::asset_refs::AssetRefsMutFallback as _;
+                #visit_refs_mut_body
             }
 
             #register_required_body

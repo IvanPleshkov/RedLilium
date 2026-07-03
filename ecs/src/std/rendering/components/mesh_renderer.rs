@@ -124,6 +124,20 @@ impl crate::Component for MeshRenderer {
 
     fn remap_entities(&mut self, _map: &mut dyn FnMut(crate::Entity) -> crate::Entity) {}
 
+    fn visit_asset_refs(&self, f: &mut dyn FnMut(&dyn std::any::Any)) {
+        for primitive in &self.primitives {
+            f(&primitive.mesh);
+            f(&primitive.material);
+        }
+    }
+
+    fn visit_asset_refs_mut(&mut self, f: &mut dyn FnMut(&mut dyn std::any::Any)) {
+        for primitive in &mut self.primitives {
+            f(&mut primitive.mesh);
+            f(&mut primitive.material);
+        }
+    }
+
     fn register_required(world: &mut crate::World) {
         world.register_required::<Self, crate::Transform>();
         world.register_required::<Self, crate::GlobalTransform>();

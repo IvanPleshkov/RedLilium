@@ -23,6 +23,8 @@
 //! This module is only available when the `rendering` feature is enabled.
 
 mod asset_inspect;
+#[cfg(feature = "rendering")]
+mod asset_ref_field;
 pub mod components;
 #[cfg(feature = "rendering")]
 pub mod loaders;
@@ -43,6 +45,8 @@ pub use loaders::{
     MaterialLoader, MaterialSource, MeshGenerator, MeshLoader, MeshSource, Shader, ShaderLoader,
     ShaderSource, VertexLayoutLoader, VertexLayoutSource,
 };
+#[cfg(feature = "rendering")]
+pub use redlilium_assets::{AssetRef, AssetRefSource};
 #[cfg(feature = "rendering")]
 pub use resources::{
     ChangedAssets, MaterialAssetManager, MaterialInstanceManager, PipelineCache, ResolvedInstance,
