@@ -322,7 +322,7 @@ impl AssetDb {
     /// re-stamped on load, so a pack is portable across mount names. This file
     /// lives at the mount root and ships with the pack.
     pub fn to_ron_for_mount(&self, mount: &str) -> Result<String, ron::Error> {
-        let entries: Vec<DbEntry> = self
+        let mut entries: Vec<DbEntry> = self
             .by_guid
             .iter()
             .filter(|(_, r)| r.path.mount == mount)
@@ -335,6 +335,9 @@ impl AssetDb {
                 references: r.references.clone(),
             })
             .collect();
+        // Deterministic output (the registry map iterates in arbitrary order):
+        // sorted by path, so persisting produces stable VCS-friendly diffs.
+        entries.sort_by(|a, b| a.path.cmp(&b.path));
         let file = DbFile {
             version: DB_VERSION,
             entries,
