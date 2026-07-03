@@ -74,11 +74,16 @@ impl<K: Eq + Hash, T> ResidentCache<K, T> {
 
     /// Drop the resident/failed state for `key` so it reloads (hot reload).
     /// Consumers keep serving the old `Arc` until the new one is published.
+    ///
+    /// Always bumps the generation — even when nothing was resident (e.g. the
+    /// key was still loading or failed). Invalidation clears the manager's
+    /// in-flight expectations, and consumers gate their demand-scan on the
+    /// generation: without the bump, an invalidate landing mid-load would
+    /// never be re-requested (gated scans skip unchanged components).
     pub fn invalidate(&mut self, key: &K) {
-        if self.resident.remove(key).is_some() {
-            self.generation += 1;
-        }
+        self.resident.remove(key);
         self.failed.remove(key);
+        self.generation += 1;
     }
 
     /// Iterate the resident entries (e.g. for pull-validation passes).
@@ -86,7 +91,8 @@ impl<K: Eq + Hash, T> ResidentCache<K, T> {
         self.resident.iter()
     }
 
-    /// Bumped whenever the resident set changes (load / reload / invalidate).
+    /// Bumped on every change of the manager's state that consumers must react
+    /// to: publish (load / reload) and invalidate.
     pub fn generation(&self) -> u64 {
         self.generation
     }
@@ -191,5 +197,38 @@ where
     /// Bumped whenever the resident set changes (load / reload / invalidate).
     pub fn generation(&self) -> u64 {
         self.cache.generation()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Invalidation must bump the generation even when nothing was resident
+    /// (mid-load / failed): consumers gate their demand-scan on the generation,
+    /// and an unbumped invalidate would wedge the reload forever (nobody would
+    /// re-request). Regression test for the rapid-edit hot-reload wedge.
+    #[test]
+    fn invalidate_always_bumps_generation() {
+        let mut cache: ResidentCache<u32, String> = ResidentCache::new();
+
+        // Not resident at all (e.g. a load is still in flight).
+        let g0 = cache.generation();
+        cache.invalidate(&1);
+        assert!(cache.generation() > g0, "mid-load invalidate must bump");
+
+        // Failed (latched).
+        cache.fail(2);
+        let g1 = cache.generation();
+        cache.invalidate(&2);
+        assert!(cache.generation() > g1, "failed-latch invalidate must bump");
+        assert!(!cache.is_failed(&2), "invalidate clears the failure latch");
+
+        // Resident.
+        cache.publish(3, Arc::new("x".into()));
+        let g2 = cache.generation();
+        cache.invalidate(&3);
+        assert!(cache.generation() > g2, "resident invalidate must bump");
+        assert!(cache.get(&3).is_none());
     }
 }

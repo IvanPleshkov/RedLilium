@@ -103,9 +103,14 @@ impl World {
                 let comp = world.get::<T>(entity)?;
                 comp.aabb(world)
             },
-            scan_asset_refs_fn: |world, f| {
+            scan_asset_refs_fn: |world, since, f| {
                 if let Ok(storage) = world.read_all::<T>() {
                     for (idx, comp) in storage.iter() {
+                        if let Some(t) = since
+                            && !storage.changed_since(idx, t)
+                        {
+                            continue;
+                        }
                         comp.visit_asset_refs(&mut |r| f(idx, r));
                     }
                 }
@@ -175,9 +180,14 @@ impl World {
                 let comp = world.get::<T>(entity)?;
                 comp.aabb(world)
             },
-            scan_asset_refs_fn: |world, f| {
+            scan_asset_refs_fn: |world, since, f| {
                 if let Ok(storage) = world.read_all::<T>() {
                     for (idx, comp) in storage.iter() {
+                        if let Some(t) = since
+                            && !storage.changed_since(idx, t)
+                        {
+                            continue;
+                        }
                         comp.visit_asset_refs(&mut |r| f(idx, r));
                     }
                 }

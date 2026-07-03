@@ -482,7 +482,7 @@ impl Editor {
         // Asset loading: MeshLoad resolves layouts + requests meshes, then
         // AssetPump drains the async stages onto the compute/IO pools + collects.
         schedules.get_mut::<PostUpdate>().add(HotReload);
-        schedules.get_mut::<PostUpdate>().add(MeshLoad);
+        schedules.get_mut::<PostUpdate>().add(MeshLoad::default());
         schedules.get_mut::<PostUpdate>().add(MaterialInstanceLoad);
         schedules.get_mut::<PostUpdate>().add(AssetPump);
         schedules

@@ -331,7 +331,25 @@ impl System for EguiRender {
 ///
 /// A user component with an `AssetRef` field gets loading + hot reload with no
 /// extra code. No-op if any input is absent.
-pub struct MeshLoad;
+///
+/// The scan is gen-gated: while every manager's `generation()` is unchanged
+/// (no resident asset appeared or reloaded), only components changed since the
+/// previous scan are visited — new/edited refs still get demand-requested, but
+/// an idle scene costs nothing per frame. Any generation bump falls back to a
+/// full walk (a reload must re-resolve refs anywhere in the world).
+#[derive(Default)]
+pub struct MeshLoad {
+    /// Gating state (`run` takes `&self`; PostUpdate runs it single-threaded).
+    gate: std::sync::Mutex<SyncGate>,
+}
+
+#[derive(Default)]
+struct SyncGate {
+    /// Manager generations at the previous scan.
+    last_gens: Option<[u64; 3]>,
+    /// World tick of the previous scan.
+    scanned_at: u64,
+}
 
 impl System for MeshLoad {
     type Result = ();
@@ -356,7 +374,7 @@ impl System for MeshLoad {
             mesh_mgr.drive(&mut processor, &db, &mut layout_mgr);
         }
 
-        // Sync pass A (read): scan all components' refs, collecting the
+        // Sync pass A (read): scan components' refs, collecting the
         // (component, entity) pairs that need a re-resolve and demand-requesting
         // unknown sources. Nothing is written, so untouched components stay clean.
         let mut instance_mgr = world
@@ -365,8 +383,25 @@ impl System for MeshLoad {
         let mut texture_mgr = world
             .has_resource::<TextureManager>()
             .then(|| world.resource_mut::<TextureManager>());
+
+        // Gen-gating: unchanged generations → visit only components changed
+        // since the previous scan. The `- 1` guard: the whole frame shares one
+        // tick, so writes later in the scan's own frame carry the same tick and
+        // `changed_since` is strict — back off by one and re-visit that frame's
+        // components once more (cheap no-ops when already current).
+        let gens = [
+            mesh_mgr.generation(),
+            instance_mgr.as_ref().map_or(0, |m| m.generation()),
+            texture_mgr.as_ref().map_or(0, |m| m.generation()),
+        ];
+        let mut gate = self.gate.lock().expect("sync gate poisoned");
+        let since = (gate.last_gens == Some(gens)).then(|| gate.scanned_at.saturating_sub(1));
+        gate.last_gens = Some(gens);
+        gate.scanned_at = world.current_tick();
+        drop(gate);
+
         let mut stale: Vec<(&'static str, u32)> = Vec::new();
-        world.scan_asset_refs(&mut |component, idx, any| {
+        world.scan_asset_refs(since, &mut |component, idx, any| {
             if let Some(r) = any.downcast_ref::<AssetRef<MeshSource>>() {
                 match mesh_mgr.get(r.source()) {
                     Some(mesh) if !r.is_current(mesh) => stale.push((component, idx)),

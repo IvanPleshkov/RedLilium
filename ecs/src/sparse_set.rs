@@ -88,7 +88,7 @@ pub(crate) type ExtractFn = fn(&World, Entity) -> Option<Box<dyn crate::prefab::
 
 /// Type-erased serialize: reads a component from the world and serializes it.
 /// Scan all instances' asset refs (read-only): `(entity_index, ref as Any)`.
-pub(crate) type ScanAssetRefsFn = fn(&World, &mut dyn FnMut(u32, &dyn std::any::Any));
+pub(crate) type ScanAssetRefsFn = fn(&World, Option<u64>, &mut dyn FnMut(u32, &dyn std::any::Any));
 
 /// Re-visit one instance's asset refs mutably (marks the component changed).
 pub(crate) type PatchAssetRefsFn = fn(&World, u32, &mut dyn FnMut(&mut dyn std::any::Any));

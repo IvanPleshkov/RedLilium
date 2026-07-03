@@ -33,10 +33,19 @@ impl World {
     /// `(component_name, entity_index, &AssetRef<S> as &dyn Any)`; downcast to
     /// the concrete `AssetRef<S>` types you have resolvers for. Components
     /// without asset refs contribute nothing.
-    pub fn scan_asset_refs(&self, f: &mut dyn FnMut(&'static str, u32, &dyn std::any::Any)) {
+    ///
+    /// `since` gates the walk by change detection: `Some(tick)` visits only
+    /// components changed (or inserted) after that tick — the caller's cheap
+    /// path when its resolvers' resident sets are unchanged. `None` visits
+    /// everything.
+    pub fn scan_asset_refs(
+        &self,
+        since: Option<u64>,
+        f: &mut dyn FnMut(&'static str, u32, &dyn std::any::Any),
+    ) {
         for meta in self.iter_meta() {
             let name = meta.name;
-            (meta.scan_asset_refs_fn)(self, &mut |idx, r| f(name, idx, r));
+            (meta.scan_asset_refs_fn)(self, since, &mut |idx, r| f(name, idx, r));
         }
     }
 
