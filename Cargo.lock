@@ -4410,6 +4410,7 @@ dependencies = [
  "muda",
  "notify",
  "parking_lot",
+ "pollster",
  "redlilium-app",
  "redlilium-assets",
  "redlilium-core",

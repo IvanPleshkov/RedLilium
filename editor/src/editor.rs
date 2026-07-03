@@ -79,6 +79,10 @@ pub struct Editor {
     // VFS and asset browser
     vfs: Vfs,
     asset_browser: AssetBrowser,
+    /// Local asset-pack mounts `(name, dir)` — each carries its own
+    /// `<dir>/assets.db`, loaded + scanned at world creation and persisted
+    /// when edited.
+    local_mounts: Vec<(&'static str, &'static str)>,
     console: ConsolePanel,
 
     // UI (the egui controller is an ECS resource — see on_init)
@@ -145,13 +149,21 @@ impl Editor {
     pub fn new() -> Self {
         let project_path = std::path::Path::new("project.toml");
         let (config, mut vfs) = crate::project::load_or_default(project_path);
-        // Engine/editor built-in assets (cube/sphere meshes, vertex layouts).
-        vfs.mount("std", FileSystemProvider::new("std-assets"));
+        // Local asset-pack mounts: the engine's built-ins plus the project
+        // sandbox (user-authored / experimental assets, gitignored — so playing
+        // with materials never dirties the committed std pack). Each carries
+        // its own assets.db, is watched for external edits, and is scanned on
+        // startup.
+        let local_mounts = [("std", "std-assets"), ("project", "project-assets")];
         let mut asset_browser = AssetBrowser::new(&config);
-        asset_browser.add_mount("std");
-        // Watch std-assets for external edits (e.g. .slang in another editor) so
-        // they hot-reload like project-mount files.
-        asset_browser.watch_local_mount("std", "std-assets");
+        for (name, dir) in local_mounts {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                log::error!("failed to create mount dir '{dir}': {e}");
+            }
+            vfs.mount(name, FileSystemProvider::new(dir));
+            asset_browser.add_mount(name);
+            asset_browser.watch_local_mount(name, dir);
+        }
         let console = ConsolePanel::new(crate::log_capture::log_buffer());
 
         Self {
@@ -159,6 +171,7 @@ impl Editor {
             runner: EcsRunner::single_thread(),
             vfs,
             asset_browser,
+            local_mounts: local_mounts.to_vec(),
             console,
             dock_state: dock::create_default_layout(),
             inspector_state: InspectorState::new(),
@@ -214,18 +227,41 @@ impl Editor {
             .with_loader::<MaterialInstanceLoader>()
             .with_loader::<TextureLoader>()
             .build();
-        world.insert_resource(processor);
 
-        // Load the `std` mount's asset DB (mesh/layout records).
+        // Load each local mount's asset DB into the one merged in-memory DB,
+        // then scan the mount: files added/changed/removed while the editor was
+        // closed get registered (routed by the loaders' extensions), rehashed,
+        // or dropped. A non-empty delta is persisted right back.
         let mut asset_db = AssetDb::new();
-        match std::fs::read_to_string("std-assets/assets.db") {
-            Ok(text) => {
-                if let Err(e) = asset_db.merge_ron("std", &text) {
-                    log::error!("failed to parse std assets.db: {e}");
+        for (mount, dir) in &self.local_mounts {
+            match std::fs::read_to_string(format!("{dir}/assets.db")) {
+                Ok(text) => {
+                    if let Err(e) = asset_db.merge_ron(mount, &text) {
+                        log::error!("failed to parse {mount} assets.db: {e}");
+                    }
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => log::warn!("{mount} assets.db not readable: {e}"),
             }
-            Err(e) => log::warn!("std assets.db not found: {e}"),
+            match pollster::block_on(processor.scan(&mut asset_db, mount, None)) {
+                Ok(report) => {
+                    let changed = report.added.len() + report.modified.len() + report.removed.len();
+                    log::info!(
+                        "scanned mount '{mount}': +{} ~{} -{} ({} unchanged, {} unrouted)",
+                        report.added.len(),
+                        report.modified.len(),
+                        report.removed.len(),
+                        report.unchanged,
+                        report.unrouted,
+                    );
+                    if changed > 0 {
+                        persist_mount_db(&asset_db, mount, dir);
+                    }
+                }
+                Err(e) => log::error!("scan of mount '{mount}' failed: {e}"),
+            }
         }
+        world.insert_resource(processor);
         // Resolve the demo meshes by path (fall back to generated if absent).
         let cube_source = asset_db
             .guid_of(&AssetPath::new("std", "meshes/cube.rmesh"))
@@ -679,19 +715,16 @@ impl AppHandler for Editor {
             return false;
         }
 
-        // Persist an asset DB edited via the asset inspector. The std mount lives
-        // at "std-assets/" (other mounts: generic persistence is a follow-up).
+        // Persist an asset DB edited via the asset inspector — any local mount
+        // writes back to its own `<dir>/assets.db`.
         if let Some(mount) = self.asset_browser.take_db_dirty()
             && let Some(ew) = self.world.as_ref()
         {
-            let text = ew.world.resource::<AssetDb>().to_ron_for_mount(&mount);
-            match (mount.as_str(), text) {
-                ("std", Ok(text)) => {
-                    if let Err(e) = std::fs::write("std-assets/assets.db", text) {
-                        log::error!("failed to persist std assets.db: {e}");
-                    }
+            match self.local_mounts.iter().find(|(name, _)| *name == mount) {
+                Some((mount, dir)) => {
+                    persist_mount_db(&ew.world.resource::<AssetDb>(), mount, dir);
                 }
-                (other, _) => log::warn!("no persistence wired for mount '{other}' yet"),
+                None => log::warn!("no persistence wired for mount '{mount}'"),
             }
         }
 
@@ -822,14 +855,24 @@ impl AppHandler for Editor {
                 let guid = ew.world.resource::<AssetDb>().guid_of(&asset_path);
                 if let Some(guid) = guid {
                     ew.world.resource_mut::<ChangedAssets>().push(guid);
-                } else if let Some(kind) = asset_kind_of_new_file(rel) {
-                    // A new file of a known asset kind appeared on disk —
-                    // register it so it becomes referenceable immediately.
-                    let guid = ew
-                        .world
-                        .resource_mut::<AssetDb>()
-                        .register_path(asset_path, kind, 0);
-                    log::info!("registered new {kind} asset: {vfs_path} ({guid:?})");
+                } else {
+                    // A new file appeared on disk: if its extension routes to a
+                    // loader (same table the startup scan uses), register it so
+                    // it becomes referenceable immediately, and persist the DB.
+                    let kind = rel.rsplit_once('.').and_then(|(_, ext)| {
+                        ew.world
+                            .resource::<AssetProcessor>()
+                            .kind_for_extension(ext)
+                            .map(str::to_owned)
+                    });
+                    if let Some(kind) = kind {
+                        let guid = ew
+                            .world
+                            .resource_mut::<AssetDb>()
+                            .register_path(asset_path, &kind, 0);
+                        log::info!("registered new {kind} asset: {vfs_path} ({guid:?})");
+                        self.asset_browser.mark_db_dirty(source);
+                    }
                 }
             }
         }
@@ -1624,19 +1667,6 @@ impl AppHandler for Editor {
 }
 
 /// Show a floating label near the cursor for any active drag payload.
-/// The asset kind to auto-register for a file that appeared on disk without a
-/// DB record, by extension. Only kinds whose data is self-contained in the file
-/// qualify (registering them needs no settings/references); authored kinds
-/// (materials, layouts) are created through the browser instead.
-fn asset_kind_of_new_file(rel_path: &str) -> Option<&'static str> {
-    let ext = rel_path.rsplit_once('.')?.1.to_ascii_lowercase();
-    match ext.as_str() {
-        "png" | "jpg" | "jpeg" => Some("texture"),
-        "slang" => Some("shader"),
-        _ => None,
-    }
-}
-
 fn show_drag_overlay(ctx: &egui::Context, world: &World) {
     let label = if let Some(entity) = egui::DragAndDrop::payload::<Entity>(ctx) {
         let name = world
@@ -1685,6 +1715,18 @@ fn show_drag_overlay(ctx: &egui::Context, world: &World) {
                     ui.label(label);
                 });
             });
+    }
+}
+
+/// Write the mount's records to its local `<dir>/assets.db` (RON, mount-relative).
+fn persist_mount_db(db: &AssetDb, mount: &str, dir: &str) {
+    match db.to_ron_for_mount(mount) {
+        Ok(text) => {
+            if let Err(e) = std::fs::write(format!("{dir}/assets.db"), text) {
+                log::error!("failed to persist {mount} assets.db: {e}");
+            }
+        }
+        Err(e) => log::error!("failed to serialize {mount} assets.db: {e}"),
     }
 }
 
