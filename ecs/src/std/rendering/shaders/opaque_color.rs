@@ -1,15 +1,22 @@
-//! Per-entity transform uniforms for the opaque forward pass.
+//! Forward-pass uniform layouts, split by update frequency
+//! (`docs/MATERIAL_ASSETS.md` Decision 7).
 //!
-//! The opaque pipeline itself is now specialized on demand by the
-//! [`PipelineCache`](crate::std::rendering::PipelineCache) from the `opaque`
-//! shading model's shader asset (`docs/MATERIAL_ASSETS.md`). This module only
-//! carries the GPU uniform layout the forward renderer fills into the shared
-//! per-entity ring (group 0, bound as a dynamic uniform).
+//! The opaque pipelines are specialized on demand by the
+//! [`PipelineCache`](crate::std::rendering::PipelineCache) from the shading
+//! models' shader assets; this module only carries the GPU uniform layouts the
+//! forward renderer fills into the shared ring — the camera block (external,
+//! pushed once per view) and the model block (dynamic, one slot per draw).
 
-/// Per-entity uniform data: view-projection matrix + model matrix (group 0).
+/// Per-view camera uniforms (the `external` set: `gCamera`).
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct OpaqueColorUniforms {
+pub struct CameraUniforms {
     pub view_projection: [[f32; 4]; 4],
+}
+
+/// Per-draw model uniforms (the `dynamic` set: `gModel`, ring-buffered).
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ModelUniforms {
     pub model: [[f32; 4]; 4],
 }

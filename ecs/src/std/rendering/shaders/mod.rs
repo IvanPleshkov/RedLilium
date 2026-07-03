@@ -7,4 +7,4 @@ pub mod entity_index;
 pub mod opaque_color;
 
 pub use entity_index::{EntityIndexUniforms, create_entity_index_material};
-pub use opaque_color::OpaqueColorUniforms;
+pub use opaque_color::{CameraUniforms, ModelUniforms};

@@ -126,15 +126,29 @@ impl System for ForwardRender {
             ) else {
                 return Ok(None);
             };
-            // Group 0 (per-entity transform) binds one element of the shared ring;
-            // the per-draw dynamic offset selects the entity's slot. The binding is
-            // identical for every draw, so it is built once.
-            let fwd_size = std::mem::size_of::<shaders::OpaqueColorUniforms>() as u64;
-            let transform_group = Arc::new(BindingGroup::new().with_buffer_range(
+            // Binding sets are assembled per the shader's declared update rates
+            // (docs/MATERIAL_ASSETS.md Decision 7):
+            // - external: the camera block — pushed into the shared ring once
+            //   per view, bound at its fixed offset;
+            // - dynamic: the model block — one ring binding, the per-draw
+            //   dynamic offset selects the entity's slot;
+            // - static: the instance's material props group, built once by the
+            //   instance manager.
+            let camera = shaders::CameraUniforms {
+                view_projection: vp,
+            };
+            let camera_off = ring.push(bytemuck::bytes_of(&camera));
+            let camera_group = Arc::new(BindingGroup::new().with_buffer_range(
+                0,
+                ring.buffer().clone(),
+                camera_off as u64,
+                std::mem::size_of::<shaders::CameraUniforms>() as u64,
+            ));
+            let model_group = Arc::new(BindingGroup::new().with_buffer_range(
                 0,
                 ring.buffer().clone(),
                 0,
-                fwd_size,
+                std::mem::size_of::<shaders::ModelUniforms>() as u64,
             ));
             for (idx, renderer) in renderers.iter() {
                 if let Some(vis) = visibilities.get(idx)
@@ -146,11 +160,7 @@ impl System for ForwardRender {
                     .get(idx)
                     .map(|g| mat4_to_cols_array_2d(&g.0))
                     .unwrap_or_else(|| mat4_to_cols_array_2d(&Mat4::identity()));
-                let fwd = shaders::OpaqueColorUniforms {
-                    view_projection: vp,
-                    model,
-                };
-                let fwd_off = ring.push(bytemuck::bytes_of(&fwd));
+                let model_off = ring.push(bytemuck::bytes_of(&shaders::ModelUniforms { model }));
                 for primitive in &renderer.primitives {
                     // The mesh and the material instance load asynchronously — skip
                     // until both are resident.
@@ -169,16 +179,34 @@ impl System for ForwardRender {
                     ) else {
                         continue;
                     };
-                    // Draw-time material instance: pipeline + transform ring (group 0,
-                    // dynamic) + the instance's static material props (group 1).
-                    let gfx_instance = Arc::new(
-                        MaterialInstance::new(pipeline)
-                            .with_binding_group(Arc::clone(&transform_group))
-                            .with_binding_group(Arc::clone(&instance.props_group)),
-                    );
+                    // Assemble the sets in declaration order by their rates.
+                    let rates = pipeline.set_update_rates().to_vec();
+                    if rates.iter().all(Option::is_none) {
+                        log::debug!(
+                            "shader {:?} declares no rate-classified sets; skipping draw",
+                            instance.shader_guid
+                        );
+                        continue;
+                    }
+                    let mut gfx_instance = MaterialInstance::new(pipeline);
+                    let mut offsets: Vec<Vec<u32>> = Vec::with_capacity(rates.len());
+                    for rate in &rates {
+                        use redlilium_graphics::UpdateRate;
+                        let group = match rate {
+                            Some(UpdateRate::External) => Arc::clone(&camera_group),
+                            Some(UpdateRate::Dynamic) => Arc::clone(&model_group),
+                            Some(UpdateRate::Static) => Arc::clone(&instance.props_group),
+                            None => Arc::new(BindingGroup::new()),
+                        };
+                        gfx_instance = gfx_instance.with_binding_group(group);
+                        offsets.push(match rate {
+                            Some(UpdateRate::Dynamic) => vec![model_off],
+                            _ => Vec::new(),
+                        });
+                    }
                     pass.add_draw_command(
-                        DrawCommand::new(mesh, gfx_instance)
-                            .with_dynamic_offsets(vec![vec![fwd_off]]),
+                        DrawCommand::new(mesh, Arc::new(gfx_instance))
+                            .with_dynamic_offsets(offsets),
                     );
                 }
             }

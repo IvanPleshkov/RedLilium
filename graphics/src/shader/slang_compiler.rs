@@ -7,7 +7,7 @@ use std::ffi::CString;
 
 use crate::error::GraphicsError;
 use crate::materials::{
-    BindingLayout, BindingLayoutEntry, BindingType, ShaderStage, ShaderStageFlags,
+    BindingLayout, BindingLayoutEntry, BindingType, ShaderStage, ShaderStageFlags, UpdateRate,
 };
 
 use shader_slang as slang;
@@ -19,32 +19,42 @@ pub struct CompiledShader {
     pub bytecode: Vec<u8>,
     /// Binding layouts reflected from the shader.
     pub binding_layouts: Vec<BindingLayout>,
+    /// Per-set update-frequency classes (parallel to `binding_layouts`; `None`
+    /// for legacy sets not declared as rate-classified `ParameterBlock`s).
+    pub update_rates: Vec<Option<UpdateRate>>,
 }
 
 /// Input tuple for [`SlangCompiler::reflect_all_bindings`]:
 /// `(source, entry_point, stage, defines)`.
 pub type ShaderReflectInput<'a> = (&'a str, &'a str, ShaderStage, &'a [(&'a str, &'a str)]);
 
-/// Converts `(binding_space, layout)` pairs (sorted ascending, unique spaces)
-/// into a dense `Vec` where the vector index equals the binding space.
+/// Converts `(binding_space, layout, rate)` tuples (sorted ascending, unique
+/// spaces) into dense parallel `Vec`s where the vector index equals the
+/// binding space.
 ///
 /// Bind-group layouts are consumed positionally downstream (vector index ==
 /// `@group(N)` / `space N`). When a shader uses non-contiguous spaces (e.g. 0
-/// and 2), the missing spaces are filled with empty layouts so each remaining
-/// layout stays at its correct group index instead of being shifted down.
-fn densify_binding_layouts(by_space: Vec<(u32, BindingLayout)>) -> Vec<BindingLayout> {
+/// and 2), the missing spaces are filled with empty layouts (rate `None`) so
+/// each remaining layout stays at its correct group index instead of being
+/// shifted down.
+fn densify_binding_layouts(
+    by_space: Vec<(u32, BindingLayout, Option<UpdateRate>)>,
+) -> (Vec<BindingLayout>, Vec<Option<UpdateRate>>) {
     let mut dense: Vec<BindingLayout> = Vec::new();
-    for (space, layout) in by_space {
+    let mut rates: Vec<Option<UpdateRate>> = Vec::new();
+    for (space, layout, rate) in by_space {
         let space = space as usize;
         while dense.len() < space {
             dense.push(BindingLayout {
                 entries: Vec::new(),
                 label: None,
             });
+            rates.push(None);
         }
         dense.push(layout);
+        rates.push(rate);
     }
-    dense
+    (dense, rates)
 }
 
 /// Slang shader compiler.
@@ -146,25 +156,38 @@ impl SlangCompiler {
             .as_slice()
             .to_vec();
 
-        let binding_layouts = densify_binding_layouts(self.reflect_bindings(&linked, stage)?);
+        let (binding_layouts, update_rates) =
+            densify_binding_layouts(self.reflect_bindings(&linked, stage)?);
 
         Ok(CompiledShader {
             bytecode,
             binding_layouts,
+            update_rates,
         })
     }
 
     /// Reflect binding layouts from a compiled Slang program.
     ///
-    /// Returns `(binding_space, layout)` pairs keyed by the **real** Slang
-    /// binding space, sorted ascending. Callers must map space → bind-group
-    /// index themselves (see [`densify_binding_layouts`]); the space is *not*
-    /// the position in the returned vector when spaces are non-contiguous.
+    /// Returns `(binding_space, layout, update_rate)` tuples keyed by the
+    /// **real** Slang binding space, sorted ascending. Callers must map
+    /// space → bind-group index themselves (see [`densify_binding_layouts`]);
+    /// the space is *not* the position in the returned vector when spaces are
+    /// non-contiguous.
+    ///
+    /// Two parameter shapes coexist:
+    /// - `ParameterBlock<T>` globals — one whole space per block (the space is
+    ///   the parameter's `SubElementRegisterSpace` offset). Uniform fields
+    ///   become the implicit constant buffer at binding 0; opaque fields
+    ///   (textures/samplers) get their `DescriptorTableSlot` offsets. The
+    ///   block's `[UpdateRate("...")]` user attribute classifies the set
+    ///   (`docs/MATERIAL_ASSETS.md` Decision 7).
+    /// - legacy `[[vk::binding(b, s)]]` globals — space/binding as declared,
+    ///   no rate class.
     fn reflect_bindings(
         &self,
         linked: &slang::ComponentType,
         stage: ShaderStage,
-    ) -> Result<Vec<(u32, BindingLayout)>, GraphicsError> {
+    ) -> Result<Vec<(u32, BindingLayout, Option<UpdateRate>)>, GraphicsError> {
         let reflection = linked.layout(0).map_err(|e| {
             GraphicsError::ShaderCompilationFailed(format!("Slang reflection failed: {e}"))
         })?;
@@ -178,8 +201,55 @@ impl SlangCompiler {
         // Group parameters by binding space (group).
         let mut groups: std::collections::BTreeMap<u32, Vec<BindingLayoutEntry>> =
             std::collections::BTreeMap::new();
+        let mut rates: std::collections::BTreeMap<u32, UpdateRate> =
+            std::collections::BTreeMap::new();
 
         for param in reflection.parameters() {
+            if param.type_layout().kind() == slang::TypeKind::ParameterBlock {
+                let space = param.offset(slang::ParameterCategory::SubElementRegisterSpace) as u32;
+                if let Some(rate) = self.block_update_rate(param)? {
+                    rates.insert(space, rate);
+                }
+                let entries = groups.entry(space).or_default();
+
+                // Uniform fields live in the block's implicit constant buffer
+                // at binding 0; each opaque field owns a descriptor slot.
+                let element = param.type_layout().element_type_layout();
+                let mut has_uniforms = false;
+                let mut opaque: Vec<BindingLayoutEntry> = Vec::new();
+                for field in element.fields() {
+                    let mut is_uniform = false;
+                    for i in 0..field.category_count() {
+                        match field.category_by_index(i) {
+                            slang::ParameterCategory::Uniform => is_uniform = true,
+                            slang::ParameterCategory::DescriptorTableSlot => {
+                                opaque.push(BindingLayoutEntry {
+                                    binding: field
+                                        .offset(slang::ParameterCategory::DescriptorTableSlot)
+                                        as u32,
+                                    binding_type: self
+                                        .slang_type_to_binding_type(field.type_layout()),
+                                    visibility,
+                                    label: field.name().map(|n| n.to_string()),
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                    has_uniforms |= is_uniform;
+                }
+                if has_uniforms {
+                    entries.push(BindingLayoutEntry {
+                        binding: 0,
+                        binding_type: BindingType::UniformBuffer,
+                        visibility,
+                        label: param.name().map(|n| n.to_string()),
+                    });
+                }
+                entries.extend(opaque);
+                continue;
+            }
+
             let space = param.binding_space();
             let binding = param.binding_index();
             let type_layout = param.type_layout();
@@ -195,7 +265,7 @@ impl SlangCompiler {
             });
         }
 
-        let layouts: Vec<(u32, BindingLayout)> = groups
+        let layouts: Vec<(u32, BindingLayout, Option<UpdateRate>)> = groups
             .into_iter()
             .map(|(space, entries)| {
                 (
@@ -204,6 +274,7 @@ impl SlangCompiler {
                         entries,
                         label: None,
                     },
+                    rates.get(&space).copied(),
                 )
             })
             .collect();
@@ -211,21 +282,53 @@ impl SlangCompiler {
         Ok(layouts)
     }
 
-    /// Reflect binding layouts from multiple shader stages, merging visibility.
+    /// The `[UpdateRate("...")]` class of a `ParameterBlock` parameter, if
+    /// declared. An unknown rate string is an error (a typo would otherwise
+    /// silently degrade to legacy binding).
+    fn block_update_rate(
+        &self,
+        param: &slang::reflection::VariableLayout,
+    ) -> Result<Option<UpdateRate>, GraphicsError> {
+        let Some(var) = param.variable() else {
+            return Ok(None);
+        };
+        let Some(attr) = var.user_attributes().find(|a| a.name() == "UpdateRate") else {
+            return Ok(None);
+        };
+        let value = attr.argument_value_string(0).ok_or_else(|| {
+            GraphicsError::ShaderCompilationFailed(format!(
+                "ParameterBlock '{}': [UpdateRate] needs a string argument",
+                param.name().unwrap_or("?")
+            ))
+        })?;
+        UpdateRate::parse(value).map(Some).ok_or_else(|| {
+            GraphicsError::ShaderCompilationFailed(format!(
+                "ParameterBlock '{}': unknown update rate '{value}' \
+                 (expected external | dynamic | static)",
+                param.name().unwrap_or("?")
+            ))
+        })
+    }
+
+    /// Reflect binding layouts from multiple shader stages, merging visibility
+    /// and per-set update rates (a rate conflict across stages is an error).
     ///
     /// Each shader entry is `(source, entry_point, stage, defines)`. Shaders sharing
     /// the same binding slot (space, binding) have their visibility flags OR-ed together.
     ///
-    /// Returns one `BindingLayout` per binding space, ordered by space index.
+    /// Returns one `BindingLayout` per binding space, ordered by space index,
+    /// with the parallel per-space [`UpdateRate`] classes.
     pub fn reflect_all_bindings(
         &self,
         shaders: &[ShaderReflectInput<'_>],
-    ) -> Result<Vec<BindingLayout>, GraphicsError> {
+    ) -> Result<(Vec<BindingLayout>, Vec<Option<UpdateRate>>), GraphicsError> {
         use std::collections::BTreeMap;
 
         type BindingInfo = (BindingType, ShaderStageFlags, Option<String>);
         let mut merged: BTreeMap<u32, BTreeMap<u32, BindingInfo>> = BTreeMap::new();
 
+        let mut space_rates: std::collections::BTreeMap<u32, UpdateRate> =
+            std::collections::BTreeMap::new();
         for &(source, entry_point, stage, defines) in shaders {
             let (linked, _session) = self.compile_linked(
                 source,
@@ -238,7 +341,20 @@ impl SlangCompiler {
 
             let layouts = self.reflect_bindings(&linked, stage)?;
 
-            for (space, layout) in layouts.into_iter() {
+            for (space, layout, rate) in layouts.into_iter() {
+                if let Some(rate) = rate {
+                    match space_rates.get(&space) {
+                        Some(&existing) if existing != rate => {
+                            return Err(GraphicsError::ShaderCompilationFailed(format!(
+                                "Conflicting [UpdateRate] at space {space}: \
+                                 {existing:?} vs {rate:?} across stages"
+                            )));
+                        }
+                        _ => {
+                            space_rates.insert(space, rate);
+                        }
+                    }
+                }
                 let space_map = merged.entry(space).or_default();
 
                 for entry in layout.entries {
@@ -267,7 +383,7 @@ impl SlangCompiler {
             }
         }
 
-        let by_space: Vec<(u32, BindingLayout)> = merged
+        let by_space: Vec<(u32, BindingLayout, Option<UpdateRate>)> = merged
             .into_iter()
             .map(|(space, bindings)| {
                 let entries = bindings
@@ -287,6 +403,7 @@ impl SlangCompiler {
                         entries,
                         label: None,
                     },
+                    space_rates.get(&space).copied(),
                 )
             })
             .collect();
@@ -527,12 +644,20 @@ mod tests {
             }],
             label: None,
         };
-        let dense = densify_binding_layouts(vec![(0, l0), (2, l2)]);
+        let (dense, rates) = densify_binding_layouts(vec![
+            (0, l0, Some(UpdateRate::External)),
+            (2, l2, Some(UpdateRate::Static)),
+        ]);
         assert_eq!(dense.len(), 3);
         assert_eq!(dense[0].entries.len(), 1);
         assert_eq!(dense[0].entries[0].label.as_deref(), Some("a"));
         assert!(dense[1].entries.is_empty(), "gap space 1 must be empty");
         assert_eq!(dense[2].entries[0].label.as_deref(), Some("b"));
+        assert_eq!(
+            rates,
+            vec![Some(UpdateRate::External), None, Some(UpdateRate::Static)],
+            "rates ride along, gaps are None"
+        );
     }
 
     #[test]
@@ -546,13 +671,185 @@ mod tests {
             }],
             label: None,
         };
-        let dense = densify_binding_layouts(vec![
-            (0, mk(ShaderStageFlags::VERTEX)),
-            (1, mk(ShaderStageFlags::FRAGMENT)),
+        let (dense, rates) = densify_binding_layouts(vec![
+            (0, mk(ShaderStageFlags::VERTEX), None),
+            (1, mk(ShaderStageFlags::FRAGMENT), None),
         ]);
         assert_eq!(dense.len(), 2);
         assert!(!dense[0].entries.is_empty());
         assert!(!dense[1].entries.is_empty());
+        assert_eq!(rates, vec![None, None]);
+    }
+
+    /// Decision 7 probe: a slang user attribute (`[UpdateRate("...")]`) on
+    /// `ParameterBlock` globals is readable through reflection — per parameter,
+    /// via `VariableLayout::variable()` → `user_attributes()`. This pins the
+    /// attribute-definition boilerplate and the reflection path the frequency-
+    /// classified binding sets build on.
+    #[test]
+    fn user_attribute_update_rate_reflects() {
+        let compiler = SlangCompiler::new().unwrap();
+
+        let source = r#"
+[__AttributeUsage(_AttributeTargets.Var)]
+struct UpdateRateAttribute {
+    string rate;
+};
+
+struct CameraParams {
+    column_major float4x4 view_projection;
+};
+struct ModelParams {
+    column_major float4x4 model;
+};
+struct MaterialParams {
+    float4 base_color;
+};
+
+[UpdateRate("external")]
+ParameterBlock<CameraParams> gCamera;
+
+[UpdateRate("dynamic")]
+ParameterBlock<ModelParams> gModel;
+
+[UpdateRate("static")]
+ParameterBlock<MaterialParams> gMaterial;
+
+[shader("vertex")]
+float4 vs_main(float3 position : POSITION) : SV_Position {
+    return mul(gCamera.view_projection, mul(gModel.model, float4(position, 1.0)));
+}
+
+[shader("fragment")]
+float4 fs_main(float4 pos : SV_Position) : SV_Target {
+    return gMaterial.base_color;
+}
+"#;
+
+        let (linked, _session) = compiler
+            .compile_linked(
+                source,
+                "vs_main",
+                slang::CompileTarget::Spirv,
+                "spirv_1_5",
+                &[],
+                &[],
+            )
+            .expect("probe shader compiles");
+        let reflection = linked.layout(0).expect("reflection");
+
+        let mut rates: std::collections::BTreeMap<String, (u32, String)> = Default::default();
+        for param in reflection.parameters() {
+            let Some(var) = param.variable() else {
+                continue;
+            };
+            let rate = var
+                .user_attributes()
+                .find(|a| a.name() == "UpdateRate")
+                .and_then(|a| a.argument_value_string(0).map(str::to_owned));
+            if let Some(rate) = rate {
+                let space = param.offset(slang::ParameterCategory::SubElementRegisterSpace) as u32;
+                rates.insert(param.name().unwrap_or("?").to_owned(), (space, rate));
+            }
+        }
+
+        assert_eq!(
+            rates.get("gCamera").map(|(_, r)| r.as_str()),
+            Some("external"),
+            "camera block carries its rate; got {rates:?}"
+        );
+        assert_eq!(
+            rates.get("gModel").map(|(_, r)| r.as_str()),
+            Some("dynamic")
+        );
+        assert_eq!(
+            rates.get("gMaterial").map(|(_, r)| r.as_str()),
+            Some("static")
+        );
+        // Each ParameterBlock occupies its own register space; the space
+        // index is the parameter's offset in the SubElementRegisterSpace
+        // category (NOT `binding_space()`, which stays 0 for blocks).
+        assert_eq!(rates.get("gCamera").map(|(s, _)| *s), Some(0));
+        assert_eq!(rates.get("gModel").map(|(s, _)| *s), Some(1));
+        assert_eq!(rates.get("gMaterial").map(|(s, _)| *s), Some(2));
+    }
+
+    /// A `ParameterBlock` mixing uniform fields with textures/samplers
+    /// reflects to our group-1 convention: the implicit constant buffer at
+    /// binding 0, opaque fields at their descriptor slots — and the block's
+    /// `[UpdateRate]` classifies the whole set (Decision 7).
+    #[test]
+    fn parameter_block_reflects_buffer_and_opaque_fields() {
+        let compiler = SlangCompiler::new().unwrap();
+
+        let source = r#"
+[__AttributeUsage(_AttributeTargets.Var)]
+struct UpdateRateAttribute {
+    string rate;
+};
+
+struct MaterialParams {
+    float4 base_color;
+    Texture2D base_texture;
+    SamplerState base_sampler;
+};
+
+[UpdateRate("static")]
+ParameterBlock<MaterialParams> gMaterial;
+
+[shader("fragment")]
+float4 fs_main(float2 uv : TEXCOORD0) : SV_Target {
+    return gMaterial.base_texture.Sample(gMaterial.base_sampler, uv) * gMaterial.base_color;
+}
+"#;
+
+        let (layouts, rates) = compiler
+            .reflect_all_bindings(&[(source, "fs_main", ShaderStage::Fragment, &[])])
+            .expect("reflection");
+
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(rates, vec![Some(UpdateRate::Static)]);
+        let entries = &layouts[0].entries;
+        assert_eq!(entries.len(), 3, "buffer + texture + sampler: {entries:?}");
+        assert_eq!(entries[0].binding, 0);
+        assert_eq!(entries[0].binding_type, BindingType::UniformBuffer);
+        assert_eq!(entries[1].binding, 1);
+        assert_eq!(entries[1].binding_type, BindingType::Texture);
+        assert_eq!(entries[2].binding, 2);
+        assert_eq!(entries[2].binding_type, BindingType::Sampler);
+    }
+
+    /// The `[UpdateRate]` attribute lives in the `engine` library module —
+    /// shaders `import engine;` instead of redeclaring the boilerplate, and
+    /// the attribute still reflects (the real std-shader path).
+    #[test]
+    fn update_rate_attribute_imports_from_engine_module() {
+        let compiler = SlangCompiler::new().unwrap();
+        compiler
+            .write_library_modules(&crate::shader::ShaderLibrary::standard_slang())
+            .unwrap();
+
+        let source = r#"
+import engine;
+
+struct CameraParams {
+    column_major float4x4 view_projection;
+};
+
+[UpdateRate("external")]
+ParameterBlock<CameraParams> gCamera;
+
+[shader("vertex")]
+float4 vs_main(float3 position : POSITION) : SV_Position {
+    return mul(gCamera.view_projection, float4(position, 1.0));
+}
+"#;
+
+        let (layouts, rates) = compiler
+            .reflect_all_bindings(&[(source, "vs_main", ShaderStage::Vertex, &[])])
+            .expect("reflection through the engine module");
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(rates, vec![Some(UpdateRate::External)]);
     }
 
     #[test]
@@ -719,7 +1016,7 @@ float4 fs_main(VsOutput input) : SV_Target {
             (source, "fs_main", ShaderStage::Fragment, &[]),
         ];
 
-        let layouts = compiler
+        let (layouts, _rates) = compiler
             .reflect_all_bindings(&shaders)
             .expect("reflect_all_bindings failed");
 
@@ -787,7 +1084,7 @@ float4 vs_main(float3 position : POSITION, uint id : SV_InstanceID) : SV_Positio
 
         let shaders: Vec<ShaderReflectInput<'_>> =
             vec![(source, "vs_main", ShaderStage::Vertex, &[])];
-        let layouts = compiler
+        let (layouts, _rates) = compiler
             .reflect_all_bindings(&shaders)
             .expect("reflect_all_bindings failed");
 

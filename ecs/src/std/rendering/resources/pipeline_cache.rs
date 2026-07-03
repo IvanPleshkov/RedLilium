@@ -142,9 +142,9 @@ impl PipelineCache {
                 .with_vertex_layout(Arc::clone(layout))
                 .with_color_format(color)
                 .with_depth_format(depth)
-                // Group 0 (per-entity transform) is the dynamic ring set; group 1
-                // (material props) stays a static uniform buffer (Decision 7).
-                .with_dynamic_uniform(0, 0)
+                // Which set is dynamic/static/external is self-describing: the
+                // shader's [UpdateRate] blocks classify each set through
+                // reflection (Decision 7) — no hardcoded set indices here.
                 .with_label("opaque"),
         )
     }

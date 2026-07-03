@@ -177,9 +177,29 @@ camera (`view_projection`, per view) and `model` (per draw) in one cbuffer (set 
 split into camera→external, model→dynamic, material→static, each a
 `ParameterBlock` carrying its `[UpdateRate]`.
 
-Open detail: the exact slang attribute-definition boilerplate
-(`[__AttributeUsage(...)]` + an attribute struct) — verify syntax at
-implementation.
+**Implemented.** The attribute boilerplate lives in the `engine` shader
+library module (`shaders/library/engine.slang`, auto-written next to the other
+modules) — shaders `import engine;` and declare
+`[UpdateRate("...")] ParameterBlock<T> gBlock;`. Reflection facts (pinned by
+tests in `slang_compiler.rs` + `ecs/tests/std_shaders_reflect.rs`):
+
+- a block's register space = its offset in the `SubElementRegisterSpace`
+  category (`binding_space()` stays 0 for blocks);
+- inside a block, uniform fields become the implicit constant buffer at
+  binding 0 and each opaque field (texture/sampler) takes the next
+  `DescriptorTableSlot` — matching the instance manager's static group
+  convention (props buffer @0, texture/sampler pairs after);
+- the attribute reads back per parameter via `VariableLayout::variable()` →
+  `user_attributes()`; rates merge across stages (conflict = compile error).
+
+`create_material` stores the per-set rates on the `Material`
+(`set_update_rates()`) and auto-promotes a `dynamic` block's uniform buffer to
+a dynamic-offset binding. `ForwardRender` assembles bind groups purely from
+the rates: external → the camera block pushed once per view into the shared
+ring (bound at fixed offset), dynamic → the model block (per-draw ring
+offset), static → the instance's props group. The std opaque shaders declare
+the canonical order camera/model/material; legacy `[[vk::binding]]` shaders
+(entity_index, debug) still reflect through the old path with no rate class.
 
 ## How other engines escape the same corner
 

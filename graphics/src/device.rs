@@ -319,8 +319,22 @@ impl GraphicsDevice {
                     })
                     .collect();
 
-                let mut layouts = compiler.reflect_all_bindings(&shaders_for_reflect)?;
-                // Promote requested uniform bindings to dynamic (per-draw offset).
+                let (mut layouts, update_rates) =
+                    compiler.reflect_all_bindings(&shaders_for_reflect)?;
+                // Rate-classified sets are self-describing: a `dynamic` block's
+                // implicit uniform buffer binds with a per-draw offset
+                // (docs/MATERIAL_ASSETS.md Decision 7).
+                for (layout, rate) in layouts.iter_mut().zip(&update_rates) {
+                    if *rate == Some(crate::materials::UpdateRate::Dynamic) {
+                        for entry in &mut layout.entries {
+                            if entry.binding_type == crate::materials::BindingType::UniformBuffer {
+                                entry.binding_type =
+                                    crate::materials::BindingType::DynamicUniformBuffer;
+                            }
+                        }
+                    }
+                }
+                // Legacy path: explicitly requested dynamic uniform bindings.
                 for &(group, binding) in &desc.dynamic_uniforms {
                     if let Some(layout) = layouts.get_mut(group as usize) {
                         for entry in &mut layout.entries {
@@ -335,6 +349,7 @@ impl GraphicsDevice {
                     }
                 }
                 desc.binding_layouts = layouts.into_iter().map(std::sync::Arc::new).collect();
+                desc.set_update_rates = update_rates;
             }
             desc
         };

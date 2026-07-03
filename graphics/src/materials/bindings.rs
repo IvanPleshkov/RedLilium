@@ -4,6 +4,32 @@
 //! to enable efficient batching - the renderer can compare `Arc` pointers to group
 //! draw calls that share the same binding layouts.
 
+/// Update-frequency class of a whole binding set (descriptor set / slang
+/// `ParameterBlock`), declared **in the shader** via the `[UpdateRate("...")]`
+/// user attribute and read back through reflection — the render system binds
+/// each set according to its class (`docs/MATERIAL_ASSETS.md` Decision 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UpdateRate {
+    /// Owned by the render system; bound per view/frame (camera, lights).
+    External,
+    /// Ring-buffered, rebound per draw via a dynamic offset (transforms).
+    Dynamic,
+    /// A per-instance binding built once (material properties + textures).
+    Static,
+}
+
+impl UpdateRate {
+    /// Parse the attribute argument (`"external" | "dynamic" | "static"`).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "external" => Some(Self::External),
+            "dynamic" => Some(Self::Dynamic),
+            "static" => Some(Self::Static),
+            _ => None,
+        }
+    }
+}
+
 /// Type of resource that can be bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BindingType {

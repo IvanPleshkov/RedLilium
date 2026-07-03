@@ -273,6 +273,12 @@ pub struct MaterialDescriptor {
     /// with a per-draw offset). Applied after reflection in `create_material`.
     pub dynamic_uniforms: Vec<(u32, u32)>,
 
+    /// Per-set update-frequency classes reflected from rate-classified
+    /// `ParameterBlock`s (parallel to `binding_layouts`; empty for legacy
+    /// shaders). Filled by reflection in `create_material`, read by render
+    /// systems to decide how each set is bound (Decision 7).
+    pub set_update_rates: Vec<Option<super::UpdateRate>>,
+
     /// Optional label for debugging.
     pub label: Option<String>,
 }
@@ -289,6 +295,7 @@ impl Default for MaterialDescriptor {
             color_formats: Vec::new(),
             depth_format: None,
             dynamic_uniforms: Vec::new(),
+            set_update_rates: Vec::new(),
             label: None,
         }
     }
@@ -423,6 +430,13 @@ impl Material {
     /// Get the binding layouts.
     pub fn binding_layouts(&self) -> &[Arc<BindingLayout>] {
         &self.descriptor.binding_layouts
+    }
+
+    /// Per-set update-frequency classes (parallel to
+    /// [`binding_layouts`](Self::binding_layouts); empty for legacy shaders
+    /// without rate-classified `ParameterBlock`s).
+    pub fn set_update_rates(&self) -> &[Option<super::UpdateRate>] {
+        &self.descriptor.set_update_rates
     }
 
     /// Get the expected vertex layout.

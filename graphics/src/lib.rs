@@ -97,7 +97,7 @@ pub use instance::{
 pub use materials::{
     BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BlendComponent, BlendFactor,
     BlendOperation, BlendState, BoundResource, Material, MaterialDescriptor, MaterialInstance,
-    PolygonMode, ShaderSource, ShaderSourceLanguage, ShaderStage, ShaderStageFlags,
+    PolygonMode, ShaderSource, ShaderSourceLanguage, ShaderStage, ShaderStageFlags, UpdateRate,
 };
 pub use mesh::{
     CpuMesh, IndexFormat, Mesh, MeshDescriptor, PrimitiveTopology, VertexAttribute,

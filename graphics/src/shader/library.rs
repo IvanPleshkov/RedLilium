@@ -28,6 +28,7 @@
 // =============================================================================
 
 /// Mathematical constants and utility functions (Slang).
+const ENGINE_MODULE: &str = include_str!("../../../shaders/library/engine.slang");
 const MATH_MODULE: &str = include_str!("../../../shaders/library/math.slang");
 
 /// Color space conversions and tone mapping functions (Slang).
@@ -68,6 +69,7 @@ impl ShaderLibrary {
     pub fn standard_slang() -> Self {
         Self {
             modules: vec![
+                ("engine", ENGINE_MODULE),
                 ("math", MATH_MODULE),
                 ("color", COLOR_MODULE),
                 ("brdf", BRDF_MODULE),
@@ -104,7 +106,8 @@ mod tests {
         let library = ShaderLibrary::standard_slang();
         let modules: Vec<_> = library.modules().collect();
 
-        assert_eq!(modules.len(), 4);
+        assert_eq!(modules.len(), 5);
+        assert!(modules.iter().any(|(name, _)| *name == "engine"));
         assert!(modules.iter().any(|(name, _)| *name == "math"));
         assert!(modules.iter().any(|(name, _)| *name == "color"));
         assert!(modules.iter().any(|(name, _)| *name == "brdf"));
