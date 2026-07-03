@@ -15,6 +15,7 @@ use redlilium_assets::{
     AnyAsset, AssetError, AssetLoader, AssetPath, AssetSource, AssetStage, Executor, GpuValue,
     Guid, LoadEnv, StageFuture,
 };
+use redlilium_core::sampler::{AddressMode, CpuSampler, FilterMode};
 use redlilium_core::texture::{CpuTexture, TextureFormat};
 use redlilium_graphics::{
     Extent3d, GraphicsDevice, Texture, TextureDescriptor, TextureUsage, TransferOperation,
@@ -50,17 +51,65 @@ impl AssetSource for TextureSource {
 }
 
 /// Per-record import settings for a texture asset (the DB record's `settings`,
-/// RON). Defaults apply when the record has none.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// RON). Defaults apply when the record has none; every field is
+/// `#[serde(default)]` so partial records stay parseable as settings grow.
+///
+/// Sampling parameters live here too — a sampler is texture metadata, not an
+/// asset of its own (it has no payload and only a handful of meaningful
+/// combinations). The texture manager interns the resulting GPU samplers by
+/// content, so textures sharing parameters share one `Arc<Sampler>`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct TextureSettings {
     /// Decode as sRGB (color data — base color, emissive). Linear (`false`)
     /// suits data textures: normal maps, roughness/metallic masks.
+    #[serde(default = "default_srgb")]
     pub srgb: bool,
+    /// Mag/min/mip filtering.
+    #[serde(default = "default_filter")]
+    pub filter: FilterMode,
+    /// UV(W) wrapping.
+    #[serde(default = "default_address")]
+    pub address: AddressMode,
+    /// Maximum anisotropy level (1 = off).
+    #[serde(default = "default_anisotropy")]
+    pub anisotropy: u16,
+}
+
+fn default_srgb() -> bool {
+    true
+}
+fn default_filter() -> FilterMode {
+    FilterMode::Linear
+}
+fn default_address() -> AddressMode {
+    AddressMode::Repeat
+}
+fn default_anisotropy() -> u16 {
+    1
 }
 
 impl Default for TextureSettings {
     fn default() -> Self {
-        Self { srgb: true }
+        Self {
+            srgb: default_srgb(),
+            filter: default_filter(),
+            address: default_address(),
+            anisotropy: default_anisotropy(),
+        }
+    }
+}
+
+impl TextureSettings {
+    /// The sampler these settings describe (interned by the texture manager).
+    pub fn to_sampler(&self) -> CpuSampler {
+        CpuSampler {
+            mag_filter: self.filter,
+            min_filter: self.filter,
+            mipmap_filter: self.filter,
+            anisotropy_clamp: self.anisotropy,
+            ..CpuSampler::default()
+        }
+        .with_address_mode(self.address)
     }
 }
 
@@ -202,5 +251,40 @@ impl AssetStage for UploadTextureStage {
         let op =
             TransferOperation::upload_texture_data(&self.device, Arc::clone(&texture), &cpu.data)?;
         Ok((Box::new(texture) as GpuValue, vec![op]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Partial settings RON (old records / hand-authored) parses with defaults
+    /// filling the omitted fields — settings can grow without breaking records.
+    #[test]
+    fn settings_parse_with_defaults() {
+        let s: TextureSettings = ron::from_str("(srgb:false)").expect("partial settings parse");
+        assert!(!s.srgb);
+        assert_eq!(s.filter, FilterMode::Linear);
+        assert_eq!(s.address, AddressMode::Repeat);
+        assert_eq!(s.anisotropy, 1);
+    }
+
+    /// The settings→sampler mapping applies filter to all three filters and the
+    /// address mode to all three axes.
+    #[test]
+    fn settings_to_sampler() {
+        let s = TextureSettings {
+            filter: FilterMode::Nearest,
+            address: AddressMode::ClampToEdge,
+            anisotropy: 4,
+            ..Default::default()
+        };
+        let cpu = s.to_sampler();
+        assert_eq!(cpu.mag_filter, FilterMode::Nearest);
+        assert_eq!(cpu.min_filter, FilterMode::Nearest);
+        assert_eq!(cpu.mipmap_filter, FilterMode::Nearest);
+        assert_eq!(cpu.address_mode_u, AddressMode::ClampToEdge);
+        assert_eq!(cpu.address_mode_w, AddressMode::ClampToEdge);
+        assert_eq!(cpu.anisotropy_clamp, 4);
     }
 }

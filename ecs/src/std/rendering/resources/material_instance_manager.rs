@@ -53,7 +53,7 @@ pub struct ResolvedInstance {
     /// The resolved texture properties this instance was built with (schema
     /// order — the binding order). Retained so hot reload can pull-validate: a
     /// re-resolved texture (`Arc` mismatch) triggers a rebuild.
-    pub textures: Vec<(TextureSource, Arc<redlilium_graphics::Texture>)>,
+    pub textures: Vec<(TextureSource, Arc<super::ResolvedTexture>)>,
     /// The static material-property binding group (group 1): the packed uniform
     /// buffer at binding 0, then texture/sampler pairs per texture property.
     pub props_group: Arc<BindingGroup>,
@@ -75,9 +75,6 @@ pub struct MaterialInstanceManager {
     /// Instances being (re)resolved by `drive` — demanded but not yet published
     /// (or republished after a parent change).
     demanded: HashSet<Guid>,
-    /// The shared sampler all instance textures bind (linear, repeat), created
-    /// lazily on the first textured instance.
-    sampler: Option<Arc<redlilium_graphics::Sampler>>,
     pending_uploads: Vec<TransferOperation>,
 }
 
@@ -89,7 +86,6 @@ impl MaterialInstanceManager {
             data: AssetManager::new(),
             cache: ResidentCache::new(),
             demanded: HashSet::new(),
-            sampler: None,
             pending_uploads: Vec::new(),
         }
     }
@@ -186,7 +182,7 @@ impl MaterialInstanceManager {
             Vec<u8>,
             Guid,
             Arc<super::ResolvedMaterial>,
-            Vec<(TextureSource, Arc<redlilium_graphics::Texture>)>,
+            Vec<(TextureSource, Arc<super::ResolvedTexture>)>,
         )> = Vec::new();
         let mut failed_now: Vec<Guid> = Vec::new();
 
@@ -273,11 +269,12 @@ impl MaterialInstanceManager {
     /// graph on the next [`flush_uploads`](Self::flush_uploads)), then a
     /// texture/sampler pair per texture property in schema order (texture at
     /// `1 + 2*i`, sampler at `2 + 2*i` — the convention the model's shader
-    /// declares).
+    /// declares). The sampler is the texture's own resolved one (record
+    /// settings, interned by the texture manager).
     fn build_props_group(
         &mut self,
         bytes: &[u8],
-        textures: &[(TextureSource, Arc<redlilium_graphics::Texture>)],
+        textures: &[(TextureSource, Arc<super::ResolvedTexture>)],
     ) -> Result<Arc<BindingGroup>, GraphicsError> {
         let mut group = BindingGroup::new();
         if !bytes.is_empty() {
@@ -295,28 +292,11 @@ impl MaterialInstanceManager {
             ));
             group = group.with_buffer(0, buffer);
         }
-        if !textures.is_empty() {
-            let sampler = match &self.sampler {
-                Some(sampler) => sampler.clone(),
-                None => {
-                    let cpu = redlilium_graphics::CpuSampler {
-                        mag_filter: redlilium_graphics::FilterMode::Linear,
-                        min_filter: redlilium_graphics::FilterMode::Linear,
-                        ..Default::default()
-                    }
-                    .with_name("material_default")
-                    .with_address_mode(redlilium_graphics::AddressMode::Repeat);
-                    let sampler = self.device.create_sampler_from_cpu(&cpu)?;
-                    self.sampler = Some(sampler.clone());
-                    sampler
-                }
-            };
-            for (i, (_, texture)) in textures.iter().enumerate() {
-                let base = 1 + 2 * i as u32;
-                group = group
-                    .with_texture(base, texture.clone())
-                    .with_sampler(base + 1, sampler.clone());
-            }
+        for (i, (_, resolved)) in textures.iter().enumerate() {
+            let base = 1 + 2 * i as u32;
+            group = group
+                .with_texture(base, resolved.texture.clone())
+                .with_sampler(base + 1, resolved.sampler.clone());
         }
         Ok(Arc::new(group))
     }

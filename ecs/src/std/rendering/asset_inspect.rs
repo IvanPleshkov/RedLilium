@@ -139,7 +139,8 @@ mod render_assets {
     use redlilium_core::mesh::VertexLayout;
 
     use super::super::{
-        MaterialData, MaterialInstanceData, PropValue, ShadingRegistry, TextureSource,
+        MaterialData, MaterialInstanceData, PropValue, ShadingRegistry, TextureSettings,
+        TextureSource,
     };
     use crate::World;
 
@@ -196,8 +197,54 @@ mod render_assets {
         match kind {
             "material" => Some(inspect_material(settings, ui, world)),
             "material_instance" => Some(inspect_material_instance(settings, ui, world)),
+            "texture" => Some(inspect_texture(settings, ui)),
             _ => None,
         }
+    }
+
+    /// Texture import + sampling settings ([`TextureSettings`]). Absent record
+    /// settings edit as the defaults; any change persists the full struct.
+    fn inspect_texture(settings: Option<&str>, ui: &mut egui::Ui) -> Option<String> {
+        use redlilium_core::sampler::{AddressMode, FilterMode};
+
+        let mut data = settings
+            .and_then(|s| ron::from_str::<TextureSettings>(s).ok())
+            .unwrap_or_default();
+        let mut changed = false;
+
+        ui.horizontal(|ui| {
+            ui.label("srgb");
+            changed |= ui.checkbox(&mut data.srgb, "").changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("filter");
+            for (mode, label) in [
+                (FilterMode::Linear, "linear"),
+                (FilterMode::Nearest, "nearest"),
+            ] {
+                changed |= ui.selectable_value(&mut data.filter, mode, label).changed();
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("address");
+            for (mode, label) in [
+                (AddressMode::Repeat, "repeat"),
+                (AddressMode::ClampToEdge, "clamp"),
+                (AddressMode::MirrorRepeat, "mirror"),
+            ] {
+                changed |= ui
+                    .selectable_value(&mut data.address, mode, label)
+                    .changed();
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("anisotropy");
+            changed |= ui
+                .add(egui::DragValue::new(&mut data.anisotropy).range(1..=16))
+                .changed();
+        });
+
+        changed.then(|| ron::to_string(&data).ok()).flatten()
     }
 
     fn inspect_material(

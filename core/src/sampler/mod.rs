@@ -5,7 +5,9 @@
 //! enums shared between CPU and GPU code.
 
 /// Texture filtering mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 pub enum FilterMode {
     /// Nearest neighbor filtering.
     #[default]
@@ -15,7 +17,9 @@ pub enum FilterMode {
 }
 
 /// Texture address mode (wrapping behavior).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 pub enum AddressMode {
     /// Clamp to edge.
     #[default]

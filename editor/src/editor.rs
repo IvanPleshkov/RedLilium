@@ -190,7 +190,7 @@ impl Editor {
         redlilium_ecs::register_rendering_components(&mut world);
 
         // Insert rendering manager resources
-        world.insert_resource(TextureManager::new());
+        world.insert_resource(TextureManager::new(scene_view.device().clone()));
         world.insert_resource(MeshManager::new());
         world.insert_resource(VertexLayoutManager::new());
         world.insert_resource(ShaderManager::new());

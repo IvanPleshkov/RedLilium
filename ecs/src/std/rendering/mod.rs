@@ -35,9 +35,9 @@ pub mod shaders;
 pub mod shading;
 pub mod systems;
 
-pub use asset_inspect::inspect_asset_settings;
 #[cfg(feature = "rendering")]
 pub use asset_inspect::{NewAssetSpec, new_asset_spec};
+pub use asset_inspect::inspect_asset_settings;
 pub use components::{CameraTarget, MeshRenderer, Primitive};
 #[cfg(feature = "rendering")]
 pub use loaders::{
@@ -51,7 +51,7 @@ pub use redlilium_assets::{AssetRef, AssetRefSource};
 #[cfg(feature = "rendering")]
 pub use resources::{
     ChangedAssets, MaterialAssetManager, MaterialInstanceManager, PipelineCache, ResolvedInstance,
-    ResolvedMaterial, ShaderManager, VertexLayoutManager,
+    ResolvedMaterial, ResolvedTexture, ShaderManager, VertexLayoutManager,
 };
 pub use resources::{FrameRing, MeshManager, RenderSchedule, TextureManager};
 #[cfg(feature = "rendering")]

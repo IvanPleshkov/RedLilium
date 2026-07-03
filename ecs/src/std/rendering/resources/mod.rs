@@ -30,6 +30,6 @@ pub use pipeline_cache::PipelineCache;
 pub use render_schedule::RenderSchedule;
 #[cfg(feature = "rendering")]
 pub use shader_manager::ShaderManager;
-pub use texture_manager::TextureManager;
+pub use texture_manager::{ResolvedTexture, TextureManager};
 #[cfg(feature = "rendering")]
 pub use vertex_layout_manager::VertexLayoutManager;
