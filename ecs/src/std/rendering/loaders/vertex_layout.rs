@@ -29,6 +29,12 @@ impl AssetSource for VertexLayoutSource {
     }
 }
 
+impl From<Guid> for VertexLayoutSource {
+    fn from(guid: Guid) -> Self {
+        Self { guid }
+    }
+}
+
 /// Loads a [`VertexLayout`] from its DB record's `settings` (the empty file is
 /// only the asset's VFS presence).
 pub struct VertexLayoutLoader;

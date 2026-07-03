@@ -2,32 +2,31 @@
 //!
 //! `VertexLayout` must be shared via `Arc` between meshes and materials — the
 //! renderer batches by `Arc` pointer-equality, so two consumers binding the same
-//! layout must hold the *same* `Arc`. The [`AssetProcessor`] does not deduplicate
-//! requests (sharing is a consumer concern by design), so this manager is the
-//! **single requester per source guid**: it caches the resident `Arc`, and
-//! additionally interns by content so distinct sources (or generated layouts) of
-//! equal content collapse to one `Arc`.
+//! layout must hold the *same* `Arc`. On top of the standard
+//! [`AssetManager`](redlilium_assets::AssetManager) (single requester, failure
+//! latch, hot reload), this manager **interns by content**: distinct sources (or
+//! generated layouts) of equal content collapse to one `Arc`. On hot reload an
+//! unchanged layout re-interns to the *same* `Arc`, so dependants (which
+//! pull-validate by pointer identity) skip rebuilding.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use redlilium_assets::{AssetDb, AssetHandle, AssetProcessor, Guid};
+use redlilium_assets::{AssetDb, AssetManager, AssetProcessor, Guid};
 use redlilium_core::mesh::VertexLayout;
 
-use crate::std::rendering::loaders::{VertexLayoutLoader, VertexLayoutSource};
+use crate::std::rendering::loaders::VertexLayoutLoader;
 
 /// Owns and shares `Arc<VertexLayout>` instances (an ECS resource).
 #[derive(Default)]
 pub struct VertexLayoutManager {
-    /// guid → the single shared resident layout for that source.
-    resident: HashMap<Guid, Arc<VertexLayout>>,
-    /// In-flight requests awaiting delivery (this manager is the sole requester).
-    pending: HashMap<Guid, AssetHandle<VertexLayout>>,
-    /// Content → shared `Arc`: identical layouts (across guids, or generated)
-    /// collapse to one `Arc` so pointer-equality (and thus batching) holds.
+    inner: AssetManager<VertexLayoutLoader>,
+    /// Content → the canonical shared `Arc`: identical layouts (across guids, or
+    /// generated) collapse to one `Arc` so pointer-equality batching holds.
     interned: HashMap<VertexLayout, Arc<VertexLayout>>,
-    /// Sources whose load failed — not re-requested (avoids per-frame retry spam).
-    failed: HashSet<Guid>,
+    /// Per-guid memo `(inner Arc ptr → interned Arc)` so a resident hit skips
+    /// the content hash; invalidated implicitly when the inner `Arc` changes.
+    memo: HashMap<Guid, (usize, Arc<VertexLayout>)>,
 }
 
 impl VertexLayoutManager {
@@ -58,62 +57,33 @@ impl VertexLayoutManager {
         arc
     }
 
-    /// The resident layout for `guid`, requesting it once if not yet seen.
-    /// Returns `None` while loading (or after a failure). Call again next frame to
-    /// advance the request.
+    /// The shared (interned) layout for `guid`, requesting it once if not yet
+    /// seen. `None` while loading (or after a failure) — call again next frame.
     pub fn get_or_request(
         &mut self,
         processor: &mut AssetProcessor,
         db: &AssetDb,
         guid: Guid,
     ) -> Option<Arc<VertexLayout>> {
-        if let Some(arc) = self.resident.get(&guid) {
-            return Some(arc.clone());
+        let raw = self.inner.get_or_request(processor, db, guid)?;
+        let raw_ptr = Arc::as_ptr(&raw) as usize;
+        if let Some((ptr, shared)) = self.memo.get(&guid)
+            && *ptr == raw_ptr
+        {
+            return Some(shared.clone());
         }
-        if self.failed.contains(&guid) {
-            return None;
-        }
-
-        // Poll the pending handle (if any) without holding a borrow of `pending`.
-        match self.pending.get(&guid).map(|h| h.get()) {
-            // Not requested yet → request below.
-            None => {}
-            // Requested, still loading.
-            Some(None) => return None,
-            // Delivered: intern by content and cache as resident.
-            Some(Some(Ok(arc))) => {
-                self.pending.remove(&guid);
-                let shared = self.intern_arc(arc);
-                self.resident.insert(guid, shared.clone());
-                return Some(shared);
-            }
-            // Failed: drop and remember so we don't re-request every frame.
-            Some(Some(Err(e))) => {
-                log::warn!("vertex layout {guid:?} failed to load: {e}");
-                self.pending.remove(&guid);
-                self.failed.insert(guid);
-                return None;
-            }
-        }
-
-        let handle = processor.request::<VertexLayoutLoader>(db, VertexLayoutSource { guid }, ());
-        self.pending.insert(guid, handle);
-        None
+        let shared = self.intern_arc(raw);
+        self.memo.insert(guid, (raw_ptr, shared.clone()));
+        Some(shared)
     }
 
-    /// The resident layout for `guid` if already loaded — no request side effect.
-    pub fn get(&self, guid: Guid) -> Option<Arc<VertexLayout>> {
-        self.resident.get(&guid).cloned()
-    }
-
-    /// Drop the resident/failed state for `guid` so the next `get_or_request`
-    /// reloads it (hot reload). The content-intern map is left as is: an
-    /// unchanged layout re-interns to the *same* `Arc` (dependants see ptr-eq and
-    /// skip rebuilding), while changed content interns to a new one.
+    /// Drop the loaded state for `guid` so it reloads (hot reload). Unchanged
+    /// content re-interns to the same `Arc` — dependants see pointer equality
+    /// and skip rebuilding.
     pub fn invalidate(&mut self, guid: Guid) {
-        self.resident.remove(&guid);
-        self.pending.remove(&guid);
-        self.failed.remove(&guid);
+        self.inner.invalidate(guid);
+        // The memo entry self-invalidates: the reloaded inner `Arc` is new, so
+        // the stored pointer no longer matches.
     }
 }
 

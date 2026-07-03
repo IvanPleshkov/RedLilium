@@ -388,23 +388,37 @@ fn downcast_final<T: 'static>(value: Box<dyn Any>) -> Result<Arc<T>, AssetError>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::loaders::{MeshGenerator, MeshSource};
-    use crate::source::Guid;
+    use crate::source::{AssetSource, Guid};
+
+    /// Minimal source fixture: a file-backed or generated identity.
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    enum TestSource {
+        File(Guid),
+        Generated,
+    }
+
+    impl AssetSource for TestSource {
+        fn file_guid(&self) -> Option<Guid> {
+            match self {
+                Self::File(guid) => Some(*guid),
+                Self::Generated => None,
+            }
+        }
+    }
 
     #[test]
     fn generated_source_needs_no_path() {
         let db = AssetDb::new();
-        let src = MeshSource::Generated(MeshGenerator::cube(1.0));
-        assert!(matches!(resolve_path(&db, &src), Ok(None)));
+        assert!(matches!(
+            resolve_path(&db, &TestSource::Generated),
+            Ok(None)
+        ));
     }
 
     #[test]
     fn unknown_file_guid_is_not_resolved() {
         let db = AssetDb::new();
-        let src = MeshSource::File {
-            guid: Guid::new(),
-            primitive: 0,
-        };
+        let src = TestSource::File(Guid::new());
         assert!(matches!(
             resolve_path(&db, &src),
             Err(AssetError::NotResolved)
@@ -414,10 +428,10 @@ mod tests {
     #[test]
     fn known_file_guid_resolves_to_its_path() {
         let mut db = AssetDb::new();
-        let guid = db.register_path(AssetPath::new("assets", "a.glb"), "mesh", 0);
-        let src = MeshSource::File { guid, primitive: 0 };
+        let guid = db.register_path(AssetPath::new("assets", "a.rmesh"), "mesh", 0);
+        let src = TestSource::File(guid);
         let path = resolve_path(&db, &src).unwrap().unwrap();
-        assert_eq!(path, AssetPath::new("assets", "a.glb"));
+        assert_eq!(path, AssetPath::new("assets", "a.rmesh"));
     }
 
     #[test]
@@ -427,13 +441,5 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<AssetProcessor>();
         assert_send_sync::<crate::AssetHandle<redlilium_graphics::Mesh>>();
-    }
-
-    #[test]
-    fn mesh_loader_declares_its_formats() {
-        use crate::loaders::MeshLoader;
-        // the loader owns its format list; the builder turns this into routes
-        assert_eq!(MeshLoader::EXTENSIONS, &["glb", "gltf"]);
-        assert_eq!(MeshLoader::NAME, "mesh");
     }
 }

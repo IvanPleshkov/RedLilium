@@ -8,16 +8,17 @@
 //! co-locks this manager + the layout manager + processor + DB), so consumers
 //! never touch the vertex layout, the asset processor, or the DB.
 //!
-//! This manager is the single requester per `MeshSource` (the asset processor
-//! does not dedup), so all consumers of the same source share one `Arc<Mesh>`.
-//! [`generation`](Self::generation) bumps whenever the resident set changes —
-//! `Arc` pointer identity is the version, the generation is the cheap "anything
-//! changed?" gate for sync/hot-reload passes.
+//! The mesh pipeline takes a **dependency** (the shared vertex layout `Arc`,
+//! injected per request) and its sources aren't plain guids (`File | Generated`),
+//! so this manager keeps its drive logic explicit on top of a
+//! [`ResidentCache`](redlilium_assets::ResidentCache) — unlike the plain
+//! guid-keyed managers, which are just
+//! [`AssetManager`](redlilium_assets::AssetManager)s.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use redlilium_assets::{AssetDb, AssetHandle, AssetProcessor};
+use redlilium_assets::{AssetDb, AssetHandle, AssetProcessor, ResidentCache};
 use redlilium_graphics::Mesh;
 
 use super::VertexLayoutManager;
@@ -31,15 +32,10 @@ impl redlilium_assets::AssetRefSource for MeshSource {
 /// Owns and shares resident meshes (an ECS resource).
 #[derive(Default)]
 pub struct MeshManager {
-    resident: HashMap<MeshSource, Arc<Mesh>>,
+    cache: ResidentCache<MeshSource, Mesh>,
     /// In-flight loads; the inner request is `None` until the layout dependency
     /// has resolved.
     pending: HashMap<MeshSource, Option<AssetHandle<Mesh>>>,
-    /// Sources whose load failed — not re-requested (the demand-driven sync would
-    /// otherwise retry every frame).
-    failed: HashSet<MeshSource>,
-    /// Bumped whenever `resident` changes.
-    generation: u64,
 }
 
 impl MeshManager {
@@ -50,9 +46,9 @@ impl MeshManager {
     /// Ensure `source` is loading (idempotent; no-op if resident, in flight, or
     /// failed). The sync system calls this for unresolved refs.
     pub fn request(&mut self, source: &MeshSource) {
-        if self.resident.contains_key(source)
+        if self.cache.get(source).is_some()
             || self.pending.contains_key(source)
-            || self.failed.contains(source)
+            || self.cache.is_failed(source)
         {
             return;
         }
@@ -61,12 +57,12 @@ impl MeshManager {
 
     /// The resident mesh for `source`, if loaded.
     pub fn get(&self, source: &MeshSource) -> Option<&Arc<Mesh>> {
-        self.resident.get(source)
+        self.cache.get(source)
     }
 
     /// Bumped whenever the resident set changes (load / reload).
     pub fn generation(&self) -> u64 {
-        self.generation
+        self.cache.generation()
     }
 
     /// Drop all state for the file mesh `guid` so it reloads (hot reload).
@@ -74,17 +70,16 @@ impl MeshManager {
     /// re-requests and the new mesh lands.
     pub fn invalidate_file(&mut self, guid: redlilium_assets::Guid) {
         let source = MeshSource::File(guid);
-        if self.resident.remove(&source).is_some() {
-            self.generation += 1;
-        }
+        self.cache.invalidate(&source);
         self.pending.remove(&source);
-        self.failed.remove(&source);
     }
 
     /// Advance all in-flight loads: resolve each one's shared vertex layout (a
     /// file mesh references it in its DB record; a generated mesh gets it from
     /// the generator), request the mesh asset with that layout injected, then
-    /// publish finished meshes as resident. Call from the `MeshLoad` system.
+    /// publish finished meshes as resident. Also pull-validates resident file
+    /// meshes against their shared layout (hot reload — an unchanged layout
+    /// re-interns to the same `Arc` and is skipped). Call from `MeshLoad`.
     pub fn drive(
         &mut self,
         processor: &mut AssetProcessor,
@@ -92,11 +87,11 @@ impl MeshManager {
         layout_mgr: &mut VertexLayoutManager,
     ) {
         // Pull-validation (hot reload): a file mesh whose shared layout has been
-        // re-resolved to a *different* `Arc` (content changed — an unchanged
-        // layout re-interns to the same one) rebuilds through the normal pending
+        // re-resolved to a *different* `Arc` rebuilds through the normal pending
         // flow; the resident mesh keeps serving until the new one lands.
-        for (source, mesh) in &self.resident {
-            if self.pending.contains_key(source) || self.failed.contains(source) {
+        let mut revalidate: Vec<MeshSource> = Vec::new();
+        for (source, mesh) in self.cache.iter() {
+            if self.pending.contains_key(source) {
                 continue;
             }
             let MeshSource::File(guid) = source else {
@@ -108,8 +103,11 @@ impl MeshManager {
             if let Some(layout) = layout_mgr.get_or_request(processor, db, layout_guid)
                 && !Arc::ptr_eq(&layout, mesh.layout())
             {
-                self.pending.insert(source.clone(), None);
+                revalidate.push(source.clone());
             }
+        }
+        for source in revalidate {
+            self.pending.insert(source, None);
         }
 
         let mut done: Vec<(MeshSource, Option<Arc<Mesh>>)> = Vec::new();
@@ -151,13 +149,8 @@ impl MeshManager {
         for (source, mesh) in done {
             self.pending.remove(&source);
             match mesh {
-                Some(mesh) => {
-                    self.resident.insert(source, mesh);
-                    self.generation += 1;
-                }
-                None => {
-                    self.failed.insert(source);
-                }
+                Some(mesh) => self.cache.publish(source, mesh),
+                None => self.cache.fail(source),
             }
         }
     }

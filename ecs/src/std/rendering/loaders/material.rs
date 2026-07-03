@@ -23,6 +23,12 @@ impl AssetSource for MaterialSource {
     }
 }
 
+impl From<Guid> for MaterialSource {
+    fn from(guid: Guid) -> Self {
+        Self { guid }
+    }
+}
+
 /// A material's authored data (stored in the DB record `settings` as RON): the
 /// shading model it uses and its property values. Settings-agnostic surface.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

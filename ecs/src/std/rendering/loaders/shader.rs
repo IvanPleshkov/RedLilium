@@ -30,6 +30,12 @@ impl AssetSource for ShaderSource {
     }
 }
 
+impl From<Guid> for ShaderSource {
+    fn from(guid: Guid) -> Self {
+        Self { guid }
+    }
+}
+
 /// Loads a `.slang` shader's source from a file.
 pub struct ShaderLoader;
 

@@ -3,30 +3,34 @@
 //! `MaterialInstanceManager` is the consumer facade a [`Primitive`] binds (via an
 //! `AssetRef<MaterialInstanceSource>`) and the single source of truth for
 //! resolved instances. Resolution (in [`drive`](Self::drive)) loads the instance
-//! data (parent guid + overrides), pulls the parent template via the
-//! [`MaterialAssetManager`], overlays the overrides onto the parent's
-//! schema-ordered properties, and builds the **static** material-property binding
-//! (group 1 — a uniform buffer uploaded once through the frame graph,
-//! `docs/MATERIAL_ASSETS.md` Decision 7). The pipeline itself is specialized
-//! later at draw time from the carried shader + the mesh's layout.
+//! data (via an embedded [`AssetManager`](redlilium_assets::AssetManager) — the
+//! data phase), pulls the parent template via the [`MaterialAssetManager`],
+//! overlays the overrides onto the parent's schema-ordered properties, and
+//! builds the **static** material-property binding (group 1 — a uniform buffer
+//! uploaded once through the frame graph, `docs/MATERIAL_ASSETS.md` Decision 7).
+//! The pipeline itself is specialized later at draw time from the carried shader
+//! + the mesh's layout.
 //!
-//! This is the single requester per instance guid. The buffer upload follows the
-//! GPU-upload-through-frame-graph rule: allocate now, queue a `TransferOperation`,
-//! and flush it into the render graph via [`flush_uploads`](Self::flush_uploads).
+//! Hot reload: `drive` pull-validates every resident instance's parent `Arc`
+//! (a re-resolved parent rebuilds the instance, serving last-good meanwhile),
+//! and [`invalidate`](Self::invalidate) drops the resolution + data so an edited
+//! record reloads from fresh settings.
+//!
+//! The buffer upload follows the GPU-upload-through-frame-graph rule: allocate
+//! now, queue a `TransferOperation`, and flush it into the render graph via
+//! [`flush_uploads`](Self::flush_uploads).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
-use redlilium_assets::{AssetDb, AssetHandle, AssetProcessor, Guid};
+use redlilium_assets::{AssetDb, AssetManager, AssetProcessor, Guid, ResidentCache};
 use redlilium_graphics::{
     BindingGroup, BufferDescriptor, BufferUsage, GraphicsDevice, GraphicsError, RenderGraph,
     TransferConfig, TransferOperation, TransferPass,
 };
 
 use super::{MaterialAssetManager, ShaderManager};
-use crate::std::rendering::loaders::{
-    MaterialInstanceData, MaterialInstanceLoader, MaterialInstanceSource, Shader,
-};
+use crate::std::rendering::loaders::{MaterialInstanceLoader, MaterialInstanceSource, Shader};
 use crate::std::rendering::shading::{PropValue, pack_props};
 
 /// A fully resolved material instance: the shader to specialize a pipeline from
@@ -54,23 +58,17 @@ impl redlilium_assets::AssetRefSource for MaterialInstanceSource {
     type Asset = ResolvedInstance;
 }
 
-/// In-flight instance resolution: the instance-data request and (once landed)
-/// the loaded data while its parent resolves.
-#[derive(Default)]
-struct PendingInstance {
-    data: Option<AssetHandle<MaterialInstanceData>>,
-    data_loaded: Option<Arc<MaterialInstanceData>>,
-}
-
 /// Owns and shares resolved material instances (an ECS resource).
 pub struct MaterialInstanceManager {
     device: Arc<GraphicsDevice>,
-    resident: HashMap<Guid, Arc<ResolvedInstance>>,
-    pending: HashMap<Guid, PendingInstance>,
-    failed: HashSet<Guid>,
+    /// The data phase: guid → resident [`MaterialInstanceData`].
+    data: AssetManager<MaterialInstanceLoader>,
+    /// The resolution: guid → the single shared [`ResolvedInstance`].
+    cache: ResidentCache<Guid, ResolvedInstance>,
+    /// Instances being (re)resolved by `drive` — demanded but not yet published
+    /// (or republished after a parent change).
+    demanded: HashSet<Guid>,
     pending_uploads: Vec<TransferOperation>,
-    /// Bumped whenever `resident` changes.
-    generation: u64,
 }
 
 impl MaterialInstanceManager {
@@ -78,11 +76,10 @@ impl MaterialInstanceManager {
     pub fn new(device: Arc<GraphicsDevice>) -> Self {
         Self {
             device,
-            resident: HashMap::new(),
-            pending: HashMap::new(),
-            failed: HashSet::new(),
+            data: AssetManager::new(),
+            cache: ResidentCache::new(),
+            demanded: HashSet::new(),
             pending_uploads: Vec::new(),
-            generation: 0,
         }
     }
 
@@ -90,40 +87,37 @@ impl MaterialInstanceManager {
     /// flight, or failed). The sync system calls this for unresolved refs.
     pub fn request(&mut self, source: &MaterialInstanceSource) {
         let guid = source.guid;
-        if self.resident.contains_key(&guid)
-            || self.pending.contains_key(&guid)
-            || self.failed.contains(&guid)
-        {
+        if self.cache.get(&guid).is_some() || self.cache.is_failed(&guid) {
             return;
         }
-        self.pending.insert(guid, PendingInstance::default());
+        self.demanded.insert(guid);
     }
 
     /// The resolved instance for `guid`, if resolved.
     pub fn get(&self, guid: Guid) -> Option<&Arc<ResolvedInstance>> {
-        self.resident.get(&guid)
+        self.cache.get(&guid)
     }
 
     /// Bumped whenever the resident set changes (load / reload).
     pub fn generation(&self) -> u64 {
-        self.generation
+        self.cache.generation()
     }
 
-    /// Drop all state for `guid` so it re-resolves from fresh data (hot reload).
-    /// Component refs keep serving the old `Arc` until the demand-driven sync
-    /// re-requests and the new resolution lands.
+    /// Drop all state for `guid` — the resolution *and* the data — so it
+    /// re-resolves from fresh record settings (hot reload). Component refs keep
+    /// serving the old `Arc` until the demand-driven sync re-requests and the
+    /// new resolution lands.
     pub fn invalidate(&mut self, guid: Guid) {
-        if self.resident.remove(&guid).is_some() {
-            self.generation += 1;
-        }
-        self.pending.remove(&guid);
-        self.failed.remove(&guid);
+        self.cache.invalidate(&guid);
+        self.data.invalidate(guid);
+        self.demanded.remove(&guid);
     }
 
-    /// Advance all in-flight instance requests: load each one's data, resolve its
-    /// parent template (via the material manager, which itself pulls the shader),
-    /// overlay overrides, and build the static property binding. Call from the
-    /// instance-load system, which co-locks the processor / DB / managers.
+    /// Advance all demanded instances: load the data, resolve the parent
+    /// template (via the material manager, which itself pulls the shader),
+    /// overlay overrides, build the static property binding, publish. Also
+    /// pull-validates resident instances against their parent (hot reload).
+    /// Call from the instance-load system, which co-locks the managers.
     pub fn drive(
         &mut self,
         processor: &mut AssetProcessor,
@@ -132,14 +126,13 @@ impl MaterialInstanceManager {
         shader_mgr: &mut ShaderManager,
         registry: &crate::std::rendering::shading::ShadingRegistry,
     ) {
-        // Pull-validation (hot reload): re-resolve resident instances whose parent
-        // template has been re-resolved (`Arc` mismatch — pointer identity is the
-        // version). `get_or_request` also advances an invalidated parent's own
-        // reload; while it returns `None` the old instance keeps serving
-        // (last-good). The rebuild goes through the normal pending flow — the
-        // resident entry stays until the new resolution replaces it.
-        for (guid, resolved) in &self.resident {
-            if self.pending.contains_key(guid) || self.failed.contains(guid) {
+        // Pull-validation (hot reload): re-resolve resident instances whose
+        // parent template has been re-resolved (`Arc` mismatch — pointer
+        // identity is the version). While the parent itself reloads (`None`)
+        // the old instance keeps serving (last-good); the rebuild goes through
+        // the normal demanded flow and republishes over the resident entry.
+        for (guid, resolved) in self.cache.iter() {
+            if self.demanded.contains(guid) {
                 continue;
             }
             let parent = material_mgr.get_or_request(
@@ -152,46 +145,26 @@ impl MaterialInstanceManager {
             if let Some(parent) = parent
                 && !Arc::ptr_eq(&parent, &resolved.parent)
             {
-                self.pending.insert(*guid, PendingInstance::default());
+                self.demanded.insert(*guid);
             }
         }
 
-        // Phase 1+2 produce, for each ready instance, the packed property bytes,
-        // the parent guid, and the parent it was resolved against. The static
-        // buffer (needs `&mut self`) is built after the `pending` borrow drops.
+        // Resolve the demanded instances; the static buffer (needs `&mut self`)
+        // is built after this pass, so collect the ready ones first.
         #[allow(clippy::type_complexity)]
         let mut ready: Vec<(Guid, Vec<u8>, Guid, Arc<super::ResolvedMaterial>)> = Vec::new();
         let mut failed_now: Vec<Guid> = Vec::new();
 
-        for (guid, pending) in self.pending.iter_mut() {
-            // Phase 1: instance data (request once, then poll).
-            if pending.data_loaded.is_none() {
-                match &pending.data {
-                    None => {
-                        pending.data = Some(processor.request::<MaterialInstanceLoader>(
-                            db,
-                            MaterialInstanceSource { guid: *guid },
-                            (),
-                        ));
-                        continue;
-                    }
-                    Some(handle) => match handle.get() {
-                        None => continue,
-                        Some(Ok(data)) => {
-                            pending.data_loaded = Some(data);
-                            pending.data = None;
-                        }
-                        Some(Err(e)) => {
-                            log::warn!("material instance {guid:?} data failed to load: {e}");
-                            failed_now.push(*guid);
-                            continue;
-                        }
-                    },
+        for guid in self.demanded.iter().copied() {
+            // Phase 1: the instance data (request once, then poll).
+            let Some(data) = self.data.get_or_request(processor, db, guid) else {
+                if self.data.is_failed(guid) {
+                    failed_now.push(guid);
                 }
-            }
+                continue;
+            };
 
             // Phase 2: resolve the parent template (pulls its shader).
-            let data = pending.data_loaded.as_ref().expect("data_loaded set above");
             let Some(parent) =
                 material_mgr.get_or_request(processor, db, shader_mgr, registry, data.parent)
             else {
@@ -199,10 +172,10 @@ impl MaterialInstanceManager {
             };
 
             let merged = merge_overrides(&parent.properties, &data.overrides);
-            ready.push((*guid, pack_props(&merged), data.parent, parent));
+            ready.push((guid, pack_props(&merged), data.parent, parent));
         }
 
-        // Build static buffers + publish (the `pending` borrow is now released).
+        // Build static buffers + publish.
         for (guid, bytes, parent_guid, parent) in ready {
             match self.build_props_group(&bytes) {
                 Ok(props_group) => {
@@ -213,9 +186,8 @@ impl MaterialInstanceManager {
                         parent,
                         props_group,
                     });
-                    self.pending.remove(&guid);
-                    self.resident.insert(guid, resolved);
-                    self.generation += 1;
+                    self.demanded.remove(&guid);
+                    self.cache.publish(guid, resolved);
                 }
                 Err(e) => {
                     log::warn!("material instance {guid:?}: props buffer failed: {e}");
@@ -225,8 +197,8 @@ impl MaterialInstanceManager {
         }
 
         for guid in failed_now {
-            self.pending.remove(&guid);
-            self.failed.insert(guid);
+            self.demanded.remove(&guid);
+            self.cache.fail(guid);
         }
     }
 

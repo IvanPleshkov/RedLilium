@@ -23,6 +23,12 @@ impl AssetSource for MaterialInstanceSource {
     }
 }
 
+impl From<Guid> for MaterialInstanceSource {
+    fn from(guid: Guid) -> Self {
+        Self { guid }
+    }
+}
+
 /// A material instance's authored data (DB record `settings`, RON): the parent
 /// material asset and the property values it overrides (others inherit).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
