@@ -168,12 +168,15 @@ impl AssetDb {
         }
     }
 
-    /// Set (or replace) the record's named reference — e.g. rebinding a mesh's
-    /// `"layout"`. Returns `false` if `guid` is unknown.
-    pub fn set_reference(&mut self, guid: &Guid, role: &str, target: Guid) -> bool {
+    /// Set, replace, or remove (`None`) the record's named reference — e.g.
+    /// rebinding a mesh's `"layout"`. Returns `false` if `guid` is unknown.
+    pub fn set_reference(&mut self, guid: &Guid, role: &str, target: Option<Guid>) -> bool {
         match self.by_guid.get_mut(guid) {
             Some(record) => {
-                record.references.insert(role.to_owned(), target);
+                match target {
+                    Some(target) => record.references.insert(role.to_owned(), target),
+                    None => record.references.remove(role),
+                };
                 true
             }
             None => false,

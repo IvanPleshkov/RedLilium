@@ -47,6 +47,12 @@ pub fn asset_drop_target(
         .asset
         .as_ref()
         .is_some_and(|(_, kind)| kind == accept_kind);
+    if ui.input(|i| i.pointer.any_released()) {
+        log::debug!(
+            "dnd: release over target accepting '{accept_kind}': payload {:?} (accepted: {accepted})",
+            payload.asset
+        );
+    }
     let stroke_color = if accepted {
         ui.visuals().selection.stroke.color
     } else {

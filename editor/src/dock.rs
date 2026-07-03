@@ -96,12 +96,9 @@ impl TabViewer for EditorTabViewer<'_> {
                 // An asset selected in the browser takes precedence over the
                 // entity inspector.
                 if let Some((source, path)) = self.asset_browser.selected_file().cloned() {
-                    let edited = crate::asset_inspector::show_asset_inspector(
-                        ui, self.world, &source, &path,
-                    );
-                    if edited {
-                        self.asset_browser.mark_db_dirty(source);
-                    }
+                    // Edits flow through the ActionQueue (undoable); the
+                    // actions themselves mark the mount dirty for persistence.
+                    crate::asset_inspector::show_asset_inspector(ui, self.world, &source, &path);
                 } else {
                     redlilium_ecs::ui::show_component_inspector(
                         ui,

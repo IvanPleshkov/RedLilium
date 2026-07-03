@@ -216,6 +216,9 @@ impl Editor {
         // Hot-reload inbox: inspector edits + fs-watcher changes land here; the
         // HotReload system drains it and invalidates the owning managers.
         world.insert_resource(ChangedAssets::new());
+        // Mounts with un-persisted asset-DB edits (written by the undoable
+        // asset-edit actions); drained + persisted once per frame.
+        world.insert_resource(redlilium_ecs::DirtyMounts::new());
 
         // Asset system: one processor (with the rendering loaders) + one DB. The
         // AssetPump / MeshLoad / AssetGpuFlush systems drive these each frame.
@@ -715,16 +718,26 @@ impl AppHandler for Editor {
             return false;
         }
 
-        // Persist an asset DB edited via the asset inspector — any local mount
-        // writes back to its own `<dir>/assets.db`.
-        if let Some(mount) = self.asset_browser.take_db_dirty()
-            && let Some(ew) = self.world.as_ref()
-        {
-            match self.local_mounts.iter().find(|(name, _)| *name == mount) {
-                Some((mount, dir)) => {
-                    persist_mount_db(&ew.world.resource::<AssetDb>(), mount, dir);
+        // Persist edited asset DBs — any local mount writes back to its own
+        // `<dir>/assets.db`. Two dirt sources: browser file operations
+        // (create/move/delete) and the undoable asset-edit actions.
+        if let Some(ew) = self.world.as_ref() {
+            let mut dirty: Vec<String> = ew
+                .world
+                .resource_mut::<redlilium_ecs::DirtyMounts>()
+                .drain();
+            if let Some(mount) = self.asset_browser.take_db_dirty()
+                && !dirty.contains(&mount)
+            {
+                dirty.push(mount);
+            }
+            for mount in dirty {
+                match self.local_mounts.iter().find(|(name, _)| *name == mount) {
+                    Some((mount, dir)) => {
+                        persist_mount_db(&ew.world.resource::<AssetDb>(), mount, dir);
+                    }
+                    None => log::warn!("no persistence wired for mount '{mount}'"),
                 }
-                None => log::warn!("no persistence wired for mount '{mount}'"),
             }
         }
 
@@ -892,6 +905,7 @@ impl AppHandler for Editor {
             let ew = self.world.as_mut().unwrap();
             let actions = ew.world.resource::<ActionQueue<World>>().drain();
             for action in actions {
+                log::debug!("history: executing '{}'", action.description());
                 if let Err(e) = ew.history.execute(action, &mut ew.world) {
                     log::warn!("Action failed: {e}");
                 }

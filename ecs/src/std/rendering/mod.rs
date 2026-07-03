@@ -23,6 +23,8 @@
 //! This module is only available when the `rendering` feature is enabled.
 
 #[cfg(feature = "rendering")]
+mod asset_actions;
+#[cfg(feature = "rendering")]
 mod asset_drag;
 mod asset_inspect;
 #[cfg(feature = "rendering")]
@@ -37,6 +39,8 @@ pub mod shaders;
 pub mod shading;
 pub mod systems;
 
+#[cfg(feature = "rendering")]
+pub use asset_actions::{DirtyMounts, SetAssetReferenceAction, SetAssetSettingsAction};
 #[cfg(feature = "rendering")]
 pub use asset_drag::{AssetDragPayload, asset_drop_target};
 #[cfg(feature = "rendering")]

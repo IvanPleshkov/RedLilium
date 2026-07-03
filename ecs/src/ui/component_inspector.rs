@@ -436,6 +436,7 @@ pub fn show_component_inspector(ui: &mut egui::Ui, world: &mut World, state: &mu
 
     // Dispatch actions: push to ActionQueue if present, otherwise apply directly
     if !actions.is_empty() {
+        log::debug!("inspector: dispatching {} action(s)", actions.len());
         if world.has_resource::<ActionQueue<World>>() {
             let queue = world.resource::<ActionQueue<World>>();
             for action in actions {
