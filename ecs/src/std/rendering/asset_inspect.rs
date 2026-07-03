@@ -270,9 +270,24 @@ mod render_assets {
                 return None;
             }
         };
+        // The shading model is the material's one "shader" knob (the model owns
+        // the shader + the property schema — `docs/MATERIAL_ASSETS.md` Decision
+        // 3), so it's selected from the registry, never a raw shader reference.
+        let mut changed = false;
         ui.horizontal(|ui| {
             ui.label("shading_model");
-            ui.monospace(&data.shading_model);
+            egui::ComboBox::from_id_salt("shading_model")
+                .selected_text(&data.shading_model)
+                .show_ui(ui, |ui| {
+                    for id in world.resource::<ShadingRegistry>().ids() {
+                        if ui.selectable_label(data.shading_model == id, id).clicked()
+                            && data.shading_model != id
+                        {
+                            data.shading_model = id.to_owned();
+                            changed = true;
+                        }
+                    }
+                });
         });
         ui.separator();
 
@@ -285,7 +300,6 @@ mod render_assets {
             return None;
         };
 
-        let mut changed = false;
         for slot in &schema {
             let mut val =
                 find_prop(&data.properties, &slot.name).unwrap_or_else(|| slot.default.clone());

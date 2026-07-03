@@ -167,6 +167,13 @@ impl ShadingRegistry {
     pub fn get(&self, id: &str) -> Option<&ShadingModel> {
         self.models.get(id)
     }
+
+    /// All registered model ids, sorted (stable order for UI lists).
+    pub fn ids(&self) -> Vec<&str> {
+        let mut ids: Vec<&str> = self.models.keys().map(String::as_str).collect();
+        ids.sort_unstable();
+        ids
+    }
 }
 
 impl Default for ShadingRegistry {
