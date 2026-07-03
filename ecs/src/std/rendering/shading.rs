@@ -9,18 +9,23 @@ use std::collections::HashMap;
 
 use redlilium_assets::Guid;
 
-/// A serializable material property value (asset-layer; **ref-based**, unlike the
-/// inline `redlilium_core::material::MaterialValue`). Textures will later be a
-/// `Guid` asset reference rather than inline data.
+use crate::std::rendering::loaders::TextureSource;
+
+/// A serializable material property value (asset-layer; **ref-based**, unlike
+/// the inline `redlilium_core::material::MaterialValue`). A texture property
+/// holds a [`TextureSource`] (an asset reference / solid color), not pixels.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PropValue {
     Float(f32),
     Vec3([f32; 3]),
     Vec4([f32; 4]),
+    Texture(TextureSource),
 }
 
 impl PropValue {
     /// Append this value's little-endian float bytes to `out` (uniform packing).
+    /// Textures contribute nothing — they bind as texture/sampler slots, not
+    /// uniform bytes (see [`texture_props`]).
     pub fn pack_into(&self, out: &mut Vec<u8>) {
         match self {
             PropValue::Float(v) => out.extend_from_slice(&v.to_le_bytes()),
@@ -30,18 +35,34 @@ impl PropValue {
             PropValue::Vec4(v) => v
                 .iter()
                 .for_each(|f| out.extend_from_slice(&f.to_le_bytes())),
+            PropValue::Texture(_) => {}
         }
     }
 }
 
 /// Pack a resolved property list (schema order) into a contiguous uniform byte
-/// buffer for upload to the material's static binding (group 1).
+/// buffer for upload to the material's static binding (group 1). Texture
+/// properties are skipped — they bind as texture/sampler slots.
 pub fn pack_props(props: &[(String, PropValue)]) -> Vec<u8> {
     let mut out = Vec::new();
     for (_, v) in props {
         v.pack_into(&mut out);
     }
     out
+}
+
+/// The texture properties of a resolved list, in schema order — the canonical
+/// binding order. In group 1, binding 0 is the packed uniform buffer; the
+/// `i`-th texture property binds as texture `1 + 2*i`, sampler `2 + 2*i` (the
+/// shader implementing the model declares the matching slots).
+pub fn texture_props(props: &[(String, PropValue)]) -> Vec<(String, TextureSource)> {
+    props
+        .iter()
+        .filter_map(|(name, v)| match v {
+            PropValue::Texture(source) => Some((name.clone(), source.clone())),
+            _ => None,
+        })
+        .collect()
 }
 
 /// One property slot in a shading model's schema: a name and its default value
@@ -103,8 +124,9 @@ impl ShadingRegistry {
     /// Build the registry with the built-in engine shading models.
     pub fn with_builtins() -> Self {
         let mut models = HashMap::new();
-        let opaque = Self::opaque();
-        models.insert(opaque.id.clone(), opaque);
+        for model in [Self::opaque(), Self::opaque_textured()] {
+            models.insert(model.id.clone(), model);
+        }
         Self { models }
     }
 
@@ -118,6 +140,26 @@ impl ShadingRegistry {
                 name: "base_color".to_owned(),
                 default: PropValue::Vec4([1.0, 1.0, 1.0, 1.0]),
             }],
+        }
+    }
+
+    /// The `opaque_textured` model: `opaque` plus a `base_texture` sampled in
+    /// UV space and multiplied into the base color. Needs a UV-carrying vertex
+    /// layout (e.g. position_normal_uv). Backed by `opaque_textured.slang`.
+    fn opaque_textured() -> ShadingModel {
+        ShadingModel {
+            id: "opaque_textured".to_owned(),
+            shader: Guid::stable("shaders/opaque_textured.slang"),
+            schema: vec![
+                PropDef {
+                    name: "base_color".to_owned(),
+                    default: PropValue::Vec4([1.0, 1.0, 1.0, 1.0]),
+                },
+                PropDef {
+                    name: "base_texture".to_owned(),
+                    default: PropValue::Texture(TextureSource::WHITE),
+                },
+            ],
         }
     }
 
@@ -136,6 +178,35 @@ impl Default for ShadingRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Texture properties contribute no uniform bytes (they bind as
+    /// texture/sampler slots) and are extracted in schema order.
+    #[test]
+    fn texture_props_bind_not_pack() {
+        let props = vec![
+            ("base_color".to_owned(), PropValue::Vec4([1.0; 4])),
+            (
+                "base_texture".to_owned(),
+                PropValue::Texture(TextureSource::WHITE),
+            ),
+        ];
+        assert_eq!(pack_props(&props).len(), 16, "only the Vec4 packs");
+        assert_eq!(
+            texture_props(&props),
+            vec![("base_texture".to_owned(), TextureSource::WHITE)]
+        );
+    }
+
+    #[test]
+    fn opaque_textured_model_registered() {
+        let reg = ShadingRegistry::with_builtins();
+        let m = reg.get("opaque_textured").expect("model present");
+        assert_eq!(m.shader, Guid::stable("shaders/opaque_textured.slang"));
+        assert_eq!(
+            m.default_of("base_texture"),
+            Some(&PropValue::Texture(TextureSource::WHITE))
+        );
+    }
 
     #[test]
     fn opaque_model_registered_with_schema() {

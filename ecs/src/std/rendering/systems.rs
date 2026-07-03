@@ -43,11 +43,8 @@ impl System for FlushUploads {
         let Some(graph) = schedule.graph_mut() else {
             return Ok(()); // no frame graph bound (not in the render bracket)
         };
-        // Mesh uploads now flow through the asset pipeline (the mesh loader's GPU
-        // stage + AssetGpuFlush), so only texture/material managers flush here.
-        if world.has_resource::<TextureManager>() {
-            world.resource_mut::<TextureManager>().flush_uploads(graph);
-        }
+        // Mesh and texture uploads flow through the asset pipeline (the loaders'
+        // GPU stages + AssetGpuFlush), so only the material manager flushes here.
         // Asset-based material instances flush their static property buffers here.
         if world.has_resource::<MaterialInstanceManager>() {
             world
@@ -341,7 +338,7 @@ impl System for MeshLoad {
     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<Self::Result, SystemError> {
         use redlilium_assets::AssetRef;
 
-        use super::loaders::{MaterialInstanceSource, MeshSource};
+        use super::loaders::{MaterialInstanceSource, MeshSource, TextureSource};
 
         let world = ctx.world();
         if !world.has_resource::<MeshManager>()
@@ -365,6 +362,9 @@ impl System for MeshLoad {
         let mut instance_mgr = world
             .has_resource::<MaterialInstanceManager>()
             .then(|| world.resource_mut::<MaterialInstanceManager>());
+        let mut texture_mgr = world
+            .has_resource::<TextureManager>()
+            .then(|| world.resource_mut::<TextureManager>());
         let mut stale: Vec<(&'static str, u32)> = Vec::new();
         world.scan_asset_refs(&mut |component, idx, any| {
             if let Some(r) = any.downcast_ref::<AssetRef<MeshSource>>() {
@@ -380,6 +380,14 @@ impl System for MeshLoad {
                     Some(instance) if !r.is_current(instance) => stale.push((component, idx)),
                     Some(_) => {}
                     None => instance_mgr.request(r.source()),
+                }
+            } else if let Some(r) = any.downcast_ref::<AssetRef<TextureSource>>()
+                && let Some(texture_mgr) = texture_mgr.as_mut()
+            {
+                match texture_mgr.get(r.source()) {
+                    Some(texture) if !r.is_current(texture) => stale.push((component, idx)),
+                    Some(_) => {}
+                    None => texture_mgr.request(r.source()),
                 }
             }
         });
@@ -402,6 +410,12 @@ impl System for MeshLoad {
                     && !r.is_current(instance)
                 {
                     r.resolve(instance.clone());
+                } else if let Some(r) = any.downcast_mut::<AssetRef<TextureSource>>()
+                    && let Some(texture_mgr) = texture_mgr.as_mut()
+                    && let Some(texture) = texture_mgr.get(r.source())
+                    && !r.is_current(texture)
+                {
+                    r.resolve(texture.clone());
                 }
             });
         }
@@ -424,6 +438,7 @@ impl System for MaterialInstanceLoad {
         if !world.has_resource::<MaterialInstanceManager>()
             || !world.has_resource::<MaterialAssetManager>()
             || !world.has_resource::<ShaderManager>()
+            || !world.has_resource::<TextureManager>()
             || !world.has_resource::<ShadingRegistry>()
             || !world.has_resource::<AssetProcessor>()
             || !world.has_resource::<AssetDb>()
@@ -433,14 +448,18 @@ impl System for MaterialInstanceLoad {
         let mut instance_mgr = world.resource_mut::<MaterialInstanceManager>();
         let mut material_mgr = world.resource_mut::<MaterialAssetManager>();
         let mut shader_mgr = world.resource_mut::<ShaderManager>();
+        let mut texture_mgr = world.resource_mut::<TextureManager>();
         let registry = world.resource::<ShadingRegistry>();
         let mut processor = world.resource_mut::<AssetProcessor>();
         let db = world.resource::<AssetDb>();
+        // Textures first, so instances demanding them this frame poll fresh state.
+        texture_mgr.drive(&mut processor, &db);
         instance_mgr.drive(
             &mut processor,
             &db,
             &mut material_mgr,
             &mut shader_mgr,
+            &mut texture_mgr,
             &registry,
         );
         Ok(())
@@ -478,6 +497,9 @@ impl System for HotReload {
                 }
                 "vertex_layout" if world.has_resource::<VertexLayoutManager>() => {
                     world.resource_mut::<VertexLayoutManager>().invalidate(guid);
+                }
+                "texture" if world.has_resource::<TextureManager>() => {
+                    world.resource_mut::<TextureManager>().invalidate_file(guid);
                 }
                 "shader" if world.has_resource::<ShaderManager>() => {
                     world.resource_mut::<ShaderManager>().invalidate(guid);

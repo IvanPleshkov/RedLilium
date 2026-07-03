@@ -10,7 +10,7 @@
 //!
 //! # Resources
 //!
-//! - [`TextureManager`] — Caches GPU textures and samplers
+//! - [`TextureManager`] — Owns and shares resident GPU textures (asset-based)
 //! - [`RenderSchedule`] — Holds the current frame's [`FrameSchedule`](redlilium_graphics::FrameSchedule)
 //!
 //! # Systems
@@ -43,7 +43,8 @@ pub use components::{CameraTarget, MeshRenderer, Primitive};
 pub use loaders::{
     MaterialData, MaterialInstanceData, MaterialInstanceLoader, MaterialInstanceSource,
     MaterialLoader, MaterialSource, MeshGenerator, MeshLoader, MeshSource, Shader, ShaderLoader,
-    ShaderSource, VertexLayoutLoader, VertexLayoutSource,
+    ShaderSource, TextureLoader, TextureSettings, TextureSource, VertexLayoutLoader,
+    VertexLayoutSource,
 };
 #[cfg(feature = "rendering")]
 pub use redlilium_assets::{AssetRef, AssetRefSource};
@@ -52,9 +53,9 @@ pub use resources::{
     ChangedAssets, MaterialAssetManager, MaterialInstanceManager, PipelineCache, ResolvedInstance,
     ResolvedMaterial, ShaderManager, VertexLayoutManager,
 };
-pub use resources::{FrameRing, MeshManager, RenderSchedule, TextureManager, TextureManagerError};
+pub use resources::{FrameRing, MeshManager, RenderSchedule, TextureManager};
 #[cfg(feature = "rendering")]
-pub use shading::{PropDef, PropValue, ShadingModel, ShadingRegistry, pack_props};
+pub use shading::{PropDef, PropValue, ShadingModel, ShadingRegistry, pack_props, texture_props};
 #[cfg(feature = "rendering")]
 pub use systems::HotReload;
 pub use systems::{

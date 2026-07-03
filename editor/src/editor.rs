@@ -20,7 +20,7 @@ use redlilium_ecs::{
     MaterialInstanceLoad, MaterialInstanceLoader, MaterialInstanceManager, MaterialInstanceSource,
     MaterialLoader, MeshGenerator, MeshLoad, MeshLoader, MeshManager, MeshRenderer, MeshSource,
     Name, PipelineCache, PostUpdate, Primitive, Render, RenderSchedule, ScenePass, Schedules,
-    ShaderLoader, ShaderManager, ShadingRegistry, TextureManager, Transform, Update,
+    ShaderLoader, ShaderManager, ShadingRegistry, TextureLoader, TextureManager, Transform, Update,
     UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms, VertexLayoutLoader,
     VertexLayoutManager, Visibility, WindowInput, World, register_std_components,
 };
@@ -190,7 +190,7 @@ impl Editor {
         redlilium_ecs::register_rendering_components(&mut world);
 
         // Insert rendering manager resources
-        world.insert_resource(TextureManager::new(scene_view.device().clone()));
+        world.insert_resource(TextureManager::new());
         world.insert_resource(MeshManager::new());
         world.insert_resource(VertexLayoutManager::new());
         world.insert_resource(ShaderManager::new());
@@ -212,6 +212,7 @@ impl Editor {
             .with_loader::<ShaderLoader>()
             .with_loader::<MaterialLoader>()
             .with_loader::<MaterialInstanceLoader>()
+            .with_loader::<TextureLoader>()
             .build();
         world.insert_resource(processor);
 
@@ -348,6 +349,31 @@ impl Editor {
             world
                 .insert(entity, MeshRenderer::single(primitive))
                 .unwrap();
+        }
+
+        // A textured sphere (generated — its layout carries UVs) binding the std
+        // `textured` material instance. Only spawned if the asset exists, so the
+        // demo doesn't add an invisible entity on a stripped-down mount.
+        if let Some(guid) = {
+            let db = world.resource::<AssetDb>();
+            db.guid_of(&AssetPath::new("std", "materials/textured.matinst"))
+        } {
+            let entity = world.spawn();
+            let transform = Transform::from_translation(Vec3::new(-1.0, 0.7, -2.0));
+            world.insert(entity, transform).unwrap();
+            world
+                .insert(entity, GlobalTransform(transform.to_matrix()))
+                .unwrap();
+            world.insert(entity, Visibility::VISIBLE).unwrap();
+
+            let primitive = Primitive::new(
+                MeshSource::Generated(MeshGenerator::sphere(0.5, 32, 16)),
+                MaterialInstanceSource { guid },
+            );
+            world
+                .insert(entity, MeshRenderer::single(primitive))
+                .unwrap();
+            world.insert(entity, Name::new("Textured Sphere")).unwrap();
         }
 
         // Insert ActionQueue for editor action dispatch
@@ -792,12 +818,18 @@ impl AppHandler for Editor {
                 let Some((source, rel)) = vfs_path.split_once('/') else {
                     continue;
                 };
-                let guid = ew
-                    .world
-                    .resource::<AssetDb>()
-                    .guid_of(&AssetPath::new(source, rel));
+                let asset_path = AssetPath::new(source, rel);
+                let guid = ew.world.resource::<AssetDb>().guid_of(&asset_path);
                 if let Some(guid) = guid {
                     ew.world.resource_mut::<ChangedAssets>().push(guid);
+                } else if let Some(kind) = asset_kind_of_new_file(rel) {
+                    // A new file of a known asset kind appeared on disk —
+                    // register it so it becomes referenceable immediately.
+                    let guid = ew
+                        .world
+                        .resource_mut::<AssetDb>()
+                        .register_path(asset_path, kind, 0);
+                    log::info!("registered new {kind} asset: {vfs_path} ({guid:?})");
                 }
             }
         }
@@ -1592,6 +1624,19 @@ impl AppHandler for Editor {
 }
 
 /// Show a floating label near the cursor for any active drag payload.
+/// The asset kind to auto-register for a file that appeared on disk without a
+/// DB record, by extension. Only kinds whose data is self-contained in the file
+/// qualify (registering them needs no settings/references); authored kinds
+/// (materials, layouts) are created through the browser instead.
+fn asset_kind_of_new_file(rel_path: &str) -> Option<&'static str> {
+    let ext = rel_path.rsplit_once('.')?.1.to_ascii_lowercase();
+    match ext.as_str() {
+        "png" | "jpg" | "jpeg" => Some("texture"),
+        "slang" => Some("shader"),
+        _ => None,
+    }
+}
+
 fn show_drag_overlay(ctx: &egui::Context, world: &World) {
     let label = if let Some(entity) = egui::DragAndDrop::payload::<Entity>(ctx) {
         let name = world

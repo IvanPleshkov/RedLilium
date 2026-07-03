@@ -10,10 +10,12 @@ mod material;
 mod material_instance;
 mod mesh;
 mod shader;
+mod texture;
 mod vertex_layout;
 
 pub use material::{MaterialData, MaterialLoader, MaterialSource};
 pub use material_instance::{MaterialInstanceData, MaterialInstanceLoader, MaterialInstanceSource};
 pub use mesh::{MeshGenerator, MeshLoader, MeshSource};
 pub use shader::{Shader, ShaderLoader, ShaderSource};
+pub use texture::{TextureLoader, TextureSettings, TextureSource};
 pub use vertex_layout::{VertexLayoutLoader, VertexLayoutSource};

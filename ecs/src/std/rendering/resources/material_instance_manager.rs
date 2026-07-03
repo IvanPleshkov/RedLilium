@@ -29,9 +29,11 @@ use redlilium_graphics::{
     TransferConfig, TransferOperation, TransferPass,
 };
 
-use super::{MaterialAssetManager, ShaderManager};
-use crate::std::rendering::loaders::{MaterialInstanceLoader, MaterialInstanceSource, Shader};
-use crate::std::rendering::shading::{PropValue, pack_props};
+use super::{MaterialAssetManager, ShaderManager, TextureManager};
+use crate::std::rendering::loaders::{
+    MaterialInstanceLoader, MaterialInstanceSource, Shader, TextureSource,
+};
+use crate::std::rendering::shading::{PropValue, pack_props, texture_props};
 
 /// A fully resolved material instance: the shader to specialize a pipeline from
 /// (carried from the parent template) and the static property binding (group 1).
@@ -48,7 +50,12 @@ pub struct ResolvedInstance {
     pub shader_guid: Guid,
     /// The resident shader source (from the parent template).
     pub shader: Arc<Shader>,
-    /// The static material-property binding group (group 1).
+    /// The resolved texture properties this instance was built with (schema
+    /// order — the binding order). Retained so hot reload can pull-validate: a
+    /// re-resolved texture (`Arc` mismatch) triggers a rebuild.
+    pub textures: Vec<(TextureSource, Arc<redlilium_graphics::Texture>)>,
+    /// The static material-property binding group (group 1): the packed uniform
+    /// buffer at binding 0, then texture/sampler pairs per texture property.
     pub props_group: Arc<BindingGroup>,
 }
 
@@ -68,6 +75,9 @@ pub struct MaterialInstanceManager {
     /// Instances being (re)resolved by `drive` — demanded but not yet published
     /// (or republished after a parent change).
     demanded: HashSet<Guid>,
+    /// The shared sampler all instance textures bind (linear, repeat), created
+    /// lazily on the first textured instance.
+    sampler: Option<Arc<redlilium_graphics::Sampler>>,
     pending_uploads: Vec<TransferOperation>,
 }
 
@@ -79,6 +89,7 @@ impl MaterialInstanceManager {
             data: AssetManager::new(),
             cache: ResidentCache::new(),
             demanded: HashSet::new(),
+            sampler: None,
             pending_uploads: Vec::new(),
         }
     }
@@ -115,22 +126,26 @@ impl MaterialInstanceManager {
 
     /// Advance all demanded instances: load the data, resolve the parent
     /// template (via the material manager, which itself pulls the shader),
-    /// overlay overrides, build the static property binding, publish. Also
-    /// pull-validates resident instances against their parent (hot reload).
-    /// Call from the instance-load system, which co-locks the managers.
+    /// overlay overrides, resolve the texture properties (via the texture
+    /// manager), build the static property binding, publish. Also
+    /// pull-validates resident instances against their parent and textures
+    /// (hot reload). Call from the instance-load system, which co-locks the
+    /// managers.
     pub fn drive(
         &mut self,
         processor: &mut AssetProcessor,
         db: &AssetDb,
         material_mgr: &mut MaterialAssetManager,
         shader_mgr: &mut ShaderManager,
+        texture_mgr: &mut TextureManager,
         registry: &crate::std::rendering::shading::ShadingRegistry,
     ) {
         // Pull-validation (hot reload): re-resolve resident instances whose
-        // parent template has been re-resolved (`Arc` mismatch — pointer
-        // identity is the version). While the parent itself reloads (`None`)
-        // the old instance keeps serving (last-good); the rebuild goes through
-        // the normal demanded flow and republishes over the resident entry.
+        // parent template or any bound texture has been re-resolved (`Arc`
+        // mismatch — pointer identity is the version). While the input itself
+        // reloads (`None`) the old instance keeps serving (last-good); the
+        // rebuild goes through the normal demanded flow and republishes over
+        // the resident entry.
         for (guid, resolved) in self.cache.iter() {
             if self.demanded.contains(guid) {
                 continue;
@@ -146,16 +161,36 @@ impl MaterialInstanceManager {
                 && !Arc::ptr_eq(&parent, &resolved.parent)
             {
                 self.demanded.insert(*guid);
+                continue;
+            }
+            for (source, texture) in &resolved.textures {
+                match texture_mgr.get(source) {
+                    // A different Arc landed — rebuild the instance with it.
+                    Some(current) if !Arc::ptr_eq(current, texture) => {
+                        self.demanded.insert(*guid);
+                        break;
+                    }
+                    Some(_) => {}
+                    // Invalidated (hot reload) — re-request the reload; we keep
+                    // serving the old texture until the new Arc lands above.
+                    None => texture_mgr.request(source),
+                }
             }
         }
 
         // Resolve the demanded instances; the static buffer (needs `&mut self`)
         // is built after this pass, so collect the ready ones first.
         #[allow(clippy::type_complexity)]
-        let mut ready: Vec<(Guid, Vec<u8>, Guid, Arc<super::ResolvedMaterial>)> = Vec::new();
+        let mut ready: Vec<(
+            Guid,
+            Vec<u8>,
+            Guid,
+            Arc<super::ResolvedMaterial>,
+            Vec<(TextureSource, Arc<redlilium_graphics::Texture>)>,
+        )> = Vec::new();
         let mut failed_now: Vec<Guid> = Vec::new();
 
-        for guid in self.demanded.iter().copied() {
+        'demanded: for guid in self.demanded.iter().copied() {
             // Phase 1: the instance data (request once, then poll).
             let Some(data) = self.data.get_or_request(processor, db, guid) else {
                 if self.data.is_failed(guid) {
@@ -171,26 +206,44 @@ impl MaterialInstanceManager {
                 continue; // parent (or its shader) still loading
             };
 
+            // Phase 3: resolve the texture properties (schema order — the
+            // binding order). All must be resident before the group is built.
             let merged = merge_overrides(&parent.properties, &data.overrides);
-            ready.push((guid, pack_props(&merged), data.parent, parent));
+            let mut textures = Vec::new();
+            for (name, source) in texture_props(&merged) {
+                if texture_mgr.is_failed(&source) {
+                    log::warn!("material instance {guid:?}: texture '{name}' failed to load");
+                    failed_now.push(guid);
+                    continue 'demanded;
+                }
+                match texture_mgr.get(&source) {
+                    Some(texture) => textures.push((source, texture.clone())),
+                    None => {
+                        texture_mgr.request(&source);
+                        continue 'demanded; // still loading
+                    }
+                }
+            }
+            ready.push((guid, pack_props(&merged), data.parent, parent, textures));
         }
 
         // Build static buffers + publish.
-        for (guid, bytes, parent_guid, parent) in ready {
-            match self.build_props_group(&bytes) {
+        for (guid, bytes, parent_guid, parent, textures) in ready {
+            match self.build_props_group(&bytes, &textures) {
                 Ok(props_group) => {
                     let resolved = Arc::new(ResolvedInstance {
                         parent_guid,
                         shader_guid: parent.shader_guid,
                         shader: parent.shader.clone(),
                         parent,
+                        textures,
                         props_group,
                     });
                     self.demanded.remove(&guid);
                     self.cache.publish(guid, resolved);
                 }
                 Err(e) => {
-                    log::warn!("material instance {guid:?}: props buffer failed: {e}");
+                    log::warn!("material instance {guid:?}: props binding failed: {e}");
                     failed_now.push(guid);
                 }
             }
@@ -216,25 +269,56 @@ impl MaterialInstanceManager {
     }
 
     /// Build the static group-1 binding: a uniform buffer holding the packed
-    /// property bytes, allocated now and uploaded through the frame graph on the
-    /// next [`flush_uploads`](Self::flush_uploads).
-    fn build_props_group(&mut self, bytes: &[u8]) -> Result<Arc<BindingGroup>, GraphicsError> {
-        if bytes.is_empty() {
-            return Ok(Arc::new(BindingGroup::new()));
+    /// property bytes at binding 0 (allocated now, uploaded through the frame
+    /// graph on the next [`flush_uploads`](Self::flush_uploads)), then a
+    /// texture/sampler pair per texture property in schema order (texture at
+    /// `1 + 2*i`, sampler at `2 + 2*i` — the convention the model's shader
+    /// declares).
+    fn build_props_group(
+        &mut self,
+        bytes: &[u8],
+        textures: &[(TextureSource, Arc<redlilium_graphics::Texture>)],
+    ) -> Result<Arc<BindingGroup>, GraphicsError> {
+        let mut group = BindingGroup::new();
+        if !bytes.is_empty() {
+            let buffer = self.device.create_buffer(
+                &BufferDescriptor::new(
+                    bytes.len() as u64,
+                    BufferUsage::UNIFORM | BufferUsage::COPY_DST,
+                )
+                .with_label("material_props"),
+            )?;
+            self.pending_uploads.push(TransferOperation::write_buffer(
+                Arc::clone(&buffer),
+                0,
+                Arc::from(bytes),
+            ));
+            group = group.with_buffer(0, buffer);
         }
-        let buffer = self.device.create_buffer(
-            &BufferDescriptor::new(
-                bytes.len() as u64,
-                BufferUsage::UNIFORM | BufferUsage::COPY_DST,
-            )
-            .with_label("material_props"),
-        )?;
-        self.pending_uploads.push(TransferOperation::write_buffer(
-            Arc::clone(&buffer),
-            0,
-            Arc::from(bytes),
-        ));
-        Ok(Arc::new(BindingGroup::new().with_buffer(0, buffer)))
+        if !textures.is_empty() {
+            let sampler = match &self.sampler {
+                Some(sampler) => sampler.clone(),
+                None => {
+                    let cpu = redlilium_graphics::CpuSampler {
+                        mag_filter: redlilium_graphics::FilterMode::Linear,
+                        min_filter: redlilium_graphics::FilterMode::Linear,
+                        ..Default::default()
+                    }
+                    .with_name("material_default")
+                    .with_address_mode(redlilium_graphics::AddressMode::Repeat);
+                    let sampler = self.device.create_sampler_from_cpu(&cpu)?;
+                    self.sampler = Some(sampler.clone());
+                    sampler
+                }
+            };
+            for (i, (_, texture)) in textures.iter().enumerate() {
+                let base = 1 + 2 * i as u32;
+                group = group
+                    .with_texture(base, texture.clone())
+                    .with_sampler(base + 1, sampler.clone());
+            }
+        }
+        Ok(Arc::new(group))
     }
 }
 

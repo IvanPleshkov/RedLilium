@@ -1,3 +1,8 @@
+// The trait solver recurses deeply proving Send/Sync for resources holding
+// wgpu-backed types (e.g. the texture manager's resident cache); the default
+// limit of 128 overflows.
+#![recursion_limit = "256"]
+
 mod asset_browser;
 mod asset_inspector;
 mod background_vfs;

@@ -161,8 +161,8 @@ pub use self::std::assets::{AssetGpuFlush, AssetPump};
 // Rendering asset loaders + their sharing managers (feature-gated).
 #[cfg(feature = "rendering")]
 pub use rendering::{
-    MeshGenerator, MeshLoader, MeshSource, VertexLayoutLoader, VertexLayoutManager,
-    VertexLayoutSource,
+    MeshGenerator, MeshLoader, MeshSource, TextureLoader, TextureSettings, TextureSource,
+    VertexLayoutLoader, VertexLayoutManager, VertexLayoutSource,
 };
 
 // Rendering components, resources, and systems (feature-gated)

@@ -138,7 +138,9 @@ mod render_assets {
     use redlilium_assets::{AssetDb, Guid};
     use redlilium_core::mesh::VertexLayout;
 
-    use super::super::{MaterialData, MaterialInstanceData, PropValue, ShadingRegistry};
+    use super::super::{
+        MaterialData, MaterialInstanceData, PropValue, ShadingRegistry, TextureSource,
+    };
     use crate::World;
 
     /// Default extension + record `settings` for a newly-created asset (the "New"
@@ -333,6 +335,24 @@ mod render_assets {
                         drag_n(ui, v)
                     }
                 }
+                // Texture identity editing (asset picking / drag-drop) is a
+                // separate editor feature; a solid color is editable inline.
+                PropValue::Texture(source) => match source {
+                    TextureSource::Solid(rgba) => {
+                        let mut srgba = egui::Color32::from_rgba_unmultiplied(
+                            rgba[0], rgba[1], rgba[2], rgba[3],
+                        );
+                        let changed = ui.color_edit_button_srgba(&mut srgba).changed();
+                        if changed {
+                            *rgba = srgba.to_srgba_unmultiplied();
+                        }
+                        changed
+                    }
+                    TextureSource::File(guid) => {
+                        ui.label(egui::RichText::new(format!("{guid:?}")).monospace().weak());
+                        false
+                    }
+                },
             }
         })
         .inner
