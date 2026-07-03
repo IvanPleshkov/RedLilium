@@ -168,6 +168,18 @@ impl AssetDb {
         }
     }
 
+    /// Set (or replace) the record's named reference — e.g. rebinding a mesh's
+    /// `"layout"`. Returns `false` if `guid` is unknown.
+    pub fn set_reference(&mut self, guid: &Guid, role: &str, target: Guid) -> bool {
+        match self.by_guid.get_mut(guid) {
+            Some(record) => {
+                record.references.insert(role.to_owned(), target);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Mint a fresh guid not already present. The loop guards the *invariant*
     /// (uniqueness), not random collisions — it effectively never iterates.
     fn mint(&self) -> Guid {

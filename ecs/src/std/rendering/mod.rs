@@ -22,6 +22,8 @@
 //!
 //! This module is only available when the `rendering` feature is enabled.
 
+#[cfg(feature = "rendering")]
+mod asset_drag;
 mod asset_inspect;
 #[cfg(feature = "rendering")]
 mod asset_ref_field;
@@ -36,8 +38,10 @@ pub mod shading;
 pub mod systems;
 
 #[cfg(feature = "rendering")]
+pub use asset_drag::{AssetDragPayload, asset_drop_target};
+#[cfg(feature = "rendering")]
 pub use asset_inspect::{NewAssetSpec, new_asset_spec};
-pub use asset_inspect::inspect_asset_settings;
+pub use asset_inspect::{inspect_asset_settings, reference_accepted_kind};
 pub use components::{CameraTarget, MeshRenderer, Primitive};
 #[cfg(feature = "rendering")]
 pub use loaders::{

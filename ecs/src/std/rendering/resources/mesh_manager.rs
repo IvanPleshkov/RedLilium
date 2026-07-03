@@ -27,6 +27,7 @@ use crate::std::rendering::loaders::{MeshLoader, MeshSource};
 // A component-side `AssetRef<MeshSource>` resolves to the shared GPU mesh.
 impl redlilium_assets::AssetRefSource for MeshSource {
     type Asset = Mesh;
+    const KIND: &'static str = "mesh";
 }
 
 /// Owns and shares resident meshes (an ECS resource).

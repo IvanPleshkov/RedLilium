@@ -109,6 +109,16 @@ pub fn inspect_asset_settings(
     }
 }
 
+/// The record kind a named reference of a `record_kind` asset accepts — what
+/// its inspector drop target allows (e.g. a mesh's `"layout"` reference takes a
+/// vertex layout). `None` = the reference is not editable by drop.
+pub fn reference_accepted_kind(record_kind: &str, role: &str) -> Option<&'static str> {
+    match (record_kind, role) {
+        ("mesh", "layout") => Some("vertex_layout"),
+        _ => None,
+    }
+}
+
 #[cfg(not(feature = "rendering"))]
 fn inspect_render_asset(
     _kind: &str,
@@ -382,24 +392,35 @@ mod render_assets {
                         drag_n(ui, v)
                     }
                 }
-                // Texture identity editing (asset picking / drag-drop) is a
-                // separate editor feature; a solid color is editable inline.
-                PropValue::Texture(source) => match source {
-                    TextureSource::Solid(rgba) => {
-                        let mut srgba = egui::Color32::from_rgba_unmultiplied(
-                            rgba[0], rgba[1], rgba[2], rgba[3],
-                        );
-                        let changed = ui.color_edit_button_srgba(&mut srgba).changed();
-                        if changed {
-                            *rgba = srgba.to_srgba_unmultiplied();
+                // A texture slot: inline color editing for a solid value, and a
+                // drop target either way — dropping a texture asset from the
+                // browser sets the slot to its file source.
+                PropValue::Texture(source) => {
+                    let mut changed = false;
+                    let label = match source {
+                        TextureSource::Solid(rgba) => {
+                            let mut srgba = egui::Color32::from_rgba_unmultiplied(
+                                rgba[0], rgba[1], rgba[2], rgba[3],
+                            );
+                            if ui.color_edit_button_srgba(&mut srgba).changed() {
+                                *rgba = srgba.to_srgba_unmultiplied();
+                                changed = true;
+                            }
+                            "solid".to_owned()
                         }
-                        changed
+                        TextureSource::File(guid) => format!("{guid:?}"),
+                    };
+                    if let Some(guid) = super::super::asset_drop_target(
+                        ui,
+                        &label,
+                        false,
+                        <TextureSource as redlilium_assets::AssetRefSource>::KIND,
+                    ) {
+                        *source = TextureSource::File(guid);
+                        changed = true;
                     }
-                    TextureSource::File(guid) => {
-                        ui.label(egui::RichText::new(format!("{guid:?}")).monospace().weak());
-                        false
-                    }
-                },
+                    changed
+                }
             }
         })
         .inner

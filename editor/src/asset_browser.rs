@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use redlilium_ecs::Entity;
+use redlilium_assets::{AssetDb, AssetPath};
 use redlilium_ecs::ui::{ComponentDragPayload, ComponentFileDragPayload, PrefabFileDragPayload};
+use redlilium_ecs::{AssetDragPayload, Entity};
 use redlilium_vfs::{Vfs, VfsDirEntry};
 
 use crate::background_vfs::{BackgroundVfs, VfsRequestId, VfsResult};
@@ -67,13 +68,6 @@ pub struct AssetBrowser {
     /// VFS file paths changed externally (from the fs watcher), pending hot
     /// reload. Drained by the editor, which maps them to guids.
     changed_files: Vec<String>,
-}
-
-/// Drag payload for moving an asset file between directories.
-#[derive(Clone)]
-struct AssetFileDrag {
-    source: String,
-    path: String,
 }
 
 /// Split a full VFS path `source/dir/name` into `(source, path-within-source)`.
@@ -320,8 +314,10 @@ impl AssetBrowser {
         self.bg_vfs.move_file(vfs, from, to);
     }
 
-    /// Draw the asset browser UI.
-    pub fn show(&mut self, ui: &mut egui::Ui, vfs: &Vfs) {
+    /// Draw the asset browser UI. `db` (when present) stamps dragged files
+    /// with their asset identity (guid + kind) so inspector reference fields
+    /// can accept them.
+    pub fn show(&mut self, ui: &mut egui::Ui, vfs: &Vfs, db: Option<&AssetDb>) {
         // Handle files dropped from external apps (Finder, Explorer, etc.)
         self.handle_dropped_files(ui, vfs);
 
@@ -346,7 +342,7 @@ impl AssetBrowser {
             .id_salt("asset_files")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                self.draw_file_list(ui, vfs);
+                self.draw_file_list(ui, vfs, db);
             });
 
         if hovering && self.selected.is_some() {
@@ -452,13 +448,13 @@ impl AssetBrowser {
         }
 
         // Accept a file dropped onto this directory → move it here (same-mount).
-        // Any of the file drag payloads is accepted: AssetFileDrag (materials,
-        // layouts, meshes, …) plus the .component / .prefab import payloads, which
+        // Any of the file drag payloads is accepted: AssetDragPayload (materials,
+        // layouts, meshes, …) plus the .component / .prefab import payloads; all
         // carry a `vfs_path` we can move by. Hover-check each type first
         // (non-destructive), then release only the hovered one (release is
         // destructive regardless of the downcast).
         let hdr = &header.header_response;
-        let hover_asset = hdr.dnd_hover_payload::<AssetFileDrag>().is_some();
+        let hover_asset = hdr.dnd_hover_payload::<AssetDragPayload>().is_some();
         let hover_comp = hdr
             .dnd_hover_payload::<ComponentFileDragPayload>()
             .is_some();
@@ -473,8 +469,8 @@ impl AssetBrowser {
         }
         // Resolve the dropped file to (source, path-within-source).
         let moved: Option<(String, String)> = if hover_asset {
-            hdr.dnd_release_payload::<AssetFileDrag>()
-                .map(|p| (p.source.clone(), p.path.clone()))
+            hdr.dnd_release_payload::<AssetDragPayload>()
+                .and_then(|p| split_source_path(&p.vfs_path))
         } else if hover_comp {
             hdr.dnd_release_payload::<ComponentFileDragPayload>()
                 .and_then(|p| split_source_path(&p.vfs_path))
@@ -511,7 +507,7 @@ impl AssetBrowser {
     }
 
     /// Draw the file listing (right panel).
-    fn draw_file_list(&mut self, ui: &mut egui::Ui, vfs: &Vfs) {
+    fn draw_file_list(&mut self, ui: &mut egui::Ui, vfs: &Vfs, db: Option<&AssetDb>) {
         let Some((source, dir_path)) = &self.selected else {
             ui.weak("Select a directory");
             return;
@@ -641,7 +637,9 @@ impl AssetBrowser {
             );
 
             // Drag payloads: .component / .prefab keep their import payloads; any
-            // other file becomes movable between directories (AssetFileDrag).
+            // other file drags as an AssetDragPayload — movable between
+            // directories, and (when the file has a DB record) droppable onto
+            // matching inspector reference fields.
             if !entry.is_dir {
                 let vfs_path = format!("{source}/{file_path}");
                 if entry.name.ends_with(".component") {
@@ -649,10 +647,12 @@ impl AssetBrowser {
                 } else if entry.name.ends_with(".prefab") {
                     response.dnd_set_drag_payload(PrefabFileDragPayload { vfs_path });
                 } else {
-                    response.dnd_set_drag_payload(AssetFileDrag {
-                        source: source.clone(),
-                        path: file_path.clone(),
+                    let asset = db.and_then(|db| {
+                        let guid = db.guid_of(&AssetPath::new(&source, &file_path))?;
+                        let kind = db.record(&guid)?.kind.clone();
+                        Some((guid, kind))
                     });
+                    response.dnd_set_drag_payload(AssetDragPayload { vfs_path, asset });
                 }
 
                 // Right-click a file → Rename / Delete.

@@ -38,6 +38,7 @@ pub struct ResolvedTexture {
 // A component-side `AssetRef<TextureSource>` resolves to the manager's product.
 impl redlilium_assets::AssetRefSource for TextureSource {
     type Asset = ResolvedTexture;
+    const KIND: &'static str = "texture";
 }
 
 /// Owns and shares resident GPU textures (an ECS resource).

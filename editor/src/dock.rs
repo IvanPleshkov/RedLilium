@@ -141,7 +141,13 @@ impl TabViewer for EditorTabViewer<'_> {
                 }
             }
             Tab::Assets => {
-                self.asset_browser.show(ui, self.vfs);
+                // The DB stamps dragged files with their asset identity so
+                // inspector reference fields can accept the drop.
+                let db = self
+                    .world
+                    .has_resource::<redlilium_assets::AssetDb>()
+                    .then(|| self.world.resource::<redlilium_assets::AssetDb>());
+                self.asset_browser.show(ui, self.vfs, db.as_deref());
             }
             Tab::Console => {
                 self.console.show(ui);

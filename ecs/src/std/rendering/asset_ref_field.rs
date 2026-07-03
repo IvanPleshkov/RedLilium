@@ -7,16 +7,18 @@
 
 use std::any::Any;
 
-use redlilium_assets::{AssetRef, AssetRefSource};
+use redlilium_assets::{AssetRef, AssetRefSource, Guid};
 
 use crate::ComponentField;
 use crate::serialize::{DeserializeContext, DeserializeError, SerializeContext, SerializeError};
+use crate::std::rendering::asset_drag::asset_drop_target;
 
 impl<S> ComponentField for AssetRef<S>
 where
     S: AssetRefSource
         + Clone
         + std::fmt::Debug
+        + From<Guid>
         + serde::Serialize
         + serde::de::DeserializeOwned
         + Send
@@ -25,18 +27,18 @@ where
     S::Asset: Send + Sync,
 {
     fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
-        // Identity + load state, read-only. Editing the identity (e.g. dropping
-        // an asset from the browser) is a future step.
+        // Identity + load state; a matching asset dropped from the browser
+        // (`S::KIND`) replaces the identity — the new ref starts unresolved and
+        // the sync system loads it like any other.
+        let mut edited = None;
         ui.horizontal(|ui| {
             ui.label(name);
             let source = format!("{:?}", self.source());
-            if self.get().is_some() {
-                ui.monospace(source);
-            } else {
-                ui.weak(format!("{source} (loading…)"));
+            if let Some(guid) = asset_drop_target(ui, &source, self.get().is_none(), S::KIND) {
+                edited = Some(AssetRef::new(S::from(guid)));
             }
         });
-        None
+        edited
     }
 
     fn serialize_field(

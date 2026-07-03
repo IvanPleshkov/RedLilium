@@ -100,6 +100,13 @@ pub enum MeshSource {
     Generated(MeshGenerator),
 }
 
+// A dropped/bare guid references the file-backed variant.
+impl From<Guid> for MeshSource {
+    fn from(guid: Guid) -> Self {
+        Self::File(guid)
+    }
+}
+
 impl AssetSource for MeshSource {
     fn file_guid(&self) -> Option<Guid> {
         match self {

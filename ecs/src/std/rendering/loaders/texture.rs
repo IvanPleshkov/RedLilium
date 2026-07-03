@@ -41,6 +41,13 @@ impl TextureSource {
     pub const FLAT_NORMAL: Self = Self::Solid([128, 128, 255, 255]);
 }
 
+// A dropped/bare guid references the file-backed variant.
+impl From<Guid> for TextureSource {
+    fn from(guid: Guid) -> Self {
+        Self::File(guid)
+    }
+}
+
 impl AssetSource for TextureSource {
     fn file_guid(&self) -> Option<Guid> {
         match self {

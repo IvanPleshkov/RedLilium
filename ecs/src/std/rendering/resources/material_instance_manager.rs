@@ -63,6 +63,7 @@ pub struct ResolvedInstance {
 // product — the fully resolved instance, not the loader's raw data.
 impl redlilium_assets::AssetRefSource for MaterialInstanceSource {
     type Asset = ResolvedInstance;
+    const KIND: &'static str = "material_instance";
 }
 
 /// Owns and shares resolved material instances (an ECS resource).

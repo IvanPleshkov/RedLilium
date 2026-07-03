@@ -1655,13 +1655,21 @@ fn show_drag_overlay(ctx: &egui::Context, world: &World) {
                 .unwrap_or(&file.vfs_path)
                 .to_string(),
         )
-    } else {
-        egui::DragAndDrop::payload::<PrefabFileDragPayload>(ctx).map(|file| {
+    } else if let Some(file) = egui::DragAndDrop::payload::<PrefabFileDragPayload>(ctx) {
+        Some(
             file.vfs_path
                 .rsplit('/')
                 .next()
                 .unwrap_or(&file.vfs_path)
-                .to_string()
+                .to_string(),
+        )
+    } else {
+        egui::DragAndDrop::payload::<redlilium_ecs::AssetDragPayload>(ctx).map(|file| {
+            let name = file.vfs_path.rsplit('/').next().unwrap_or(&file.vfs_path);
+            match &file.asset {
+                Some((_, kind)) => format!("{name} ({kind})"),
+                None => name.to_string(),
+            }
         })
     };
 

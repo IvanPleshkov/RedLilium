@@ -18,6 +18,9 @@ use crate::AssetSource;
 /// than what the loader produces.
 pub trait AssetRefSource: AssetSource {
     type Asset;
+    /// The DB record kind a file-backed source of this type references —
+    /// what an inspector drop target accepts (e.g. `"mesh"`, `"texture"`).
+    const KIND: &'static str;
 }
 
 /// An asset reference in component data: the source (serialized identity) plus
