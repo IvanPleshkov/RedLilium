@@ -137,6 +137,15 @@ impl<T: Editable> EditActionHistory<T> {
     /// Undoes the most recent action.
     ///
     /// Returns an error if the undo stack is empty or the undo failed.
+    /// Prevents the next recorded action from merging with the current top
+    /// undo entry — a **gesture boundary**. Merging exists to coalesce
+    /// continuous edits (a slider drag emits an action per frame); the editor
+    /// calls this when a gesture ends (e.g. the pointer button is released) so
+    /// two discrete edits of the same target stay separate undo entries.
+    pub fn break_merge(&mut self) {
+        self.merge_broken = true;
+    }
+
     pub fn undo(&mut self, target: &mut T) -> EditActionResult {
         let mut action = self
             .undo_stack

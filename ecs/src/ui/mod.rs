@@ -98,10 +98,11 @@ impl Selection {
 
 /// Undoable editor action that changes the current entity selection.
 ///
-/// Pushed to the [`ActionQueue`] by the world inspector on click.
-/// Returns `false` from [`modifies_content()`](EditAction::modifies_content)
-/// so that selection changes are undoable but do not count as unsaved
-/// document changes.
+/// Pushed to the [`ActionQueue`] by the world inspector on click. Selection is
+/// **transient** (`is_recorded` = false): it never lands on the undo stack —
+/// Cmd+Z always reverts a real edit, not an invisible selection change — but
+/// it does break the merge chain, so edits separated by a selection change
+/// stay separate undo entries.
 #[derive(Debug)]
 pub struct SelectAction {
     new_selection: Vec<Entity>,
@@ -154,6 +155,14 @@ impl EditAction<World> for SelectAction {
 
     fn modifies_content(&self) -> bool {
         false
+    }
+
+    fn is_recorded(&self) -> bool {
+        false
+    }
+
+    fn breaks_merge(&self) -> bool {
+        true
     }
 }
 

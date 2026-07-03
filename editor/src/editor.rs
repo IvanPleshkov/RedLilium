@@ -1569,6 +1569,15 @@ impl AppHandler for Editor {
         self.with_egui(|egui| {
             egui.on_mouse_button(button, pressed);
         });
+        // Releasing the primary button ends an edit gesture: the next recorded
+        // action starts a fresh undo entry (drag-long edits keep coalescing
+        // while the button is held).
+        if button == MouseButton::Left
+            && !pressed
+            && let Some(ew) = &mut self.world
+        {
+            ew.history.break_merge();
+        }
         // Only forward presses when cursor is in scene view and egui doesn't
         // want the pointer (e.g. color picker popup over scene view).
         // Always forward releases so buttons don't get stuck.
