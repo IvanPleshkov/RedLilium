@@ -263,7 +263,86 @@ fn handle_drop_target(
         if let Some(payload) = response.dnd_release_payload::<PrefabFileDragPayload>() {
             state.pending_prefab_import = Some((payload.vfs_path.clone(), Some(target_entity)));
         }
+    } else {
+        handle_asset_drop(ui, response, world, target_entity);
     }
+}
+
+/// Accept a mesh / material-instance asset dropped onto an entity node: apply
+/// it to the entity's [`MeshRenderer`](crate::MeshRenderer) (a mesh replaces
+/// the first primitive's mesh, a material instance rebinds every primitive) as
+/// an undoable component edit through the [`ActionQueue`].
+#[cfg(feature = "rendering")]
+fn handle_asset_drop(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    world: &World,
+    target_entity: Entity,
+) {
+    use crate::std::rendering::loaders::{MaterialInstanceSource, MeshSource};
+    use crate::std::rendering::{AssetDragPayload, MeshRenderer};
+    use redlilium_assets::AssetRef;
+
+    let Some(payload) = response.dnd_hover_payload::<AssetDragPayload>() else {
+        return;
+    };
+    let kind = payload
+        .asset
+        .as_ref()
+        .map(|(_, kind)| kind.as_str())
+        .filter(|k| matches!(*k, "mesh" | "material_instance"));
+    let acceptable = kind.is_some() && world.get::<MeshRenderer>(target_entity).is_some();
+    let color = if acceptable {
+        egui::Color32::from_rgb(100, 160, 255) // blue — valid
+    } else {
+        egui::Color32::from_rgb(255, 80, 80) // red — invalid
+    };
+    ui.painter().rect_stroke(
+        response.rect,
+        egui::CornerRadius::same(2),
+        egui::Stroke::new(2.0, color),
+        egui::StrokeKind::Outside,
+    );
+    if !acceptable {
+        return;
+    }
+
+    if let Some(payload) = response.dnd_release_payload::<AssetDragPayload>()
+        && let Some((guid, kind)) = &payload.asset
+        && let Some(renderer) = world.get::<MeshRenderer>(target_entity)
+    {
+        let mut edited = renderer.clone();
+        match kind.as_str() {
+            "mesh" => {
+                if let Some(primitive) = edited.primitives.first_mut() {
+                    primitive.mesh = AssetRef::new(MeshSource::File(*guid));
+                }
+            }
+            "material_instance" => {
+                for primitive in &mut edited.primitives {
+                    primitive.material = AssetRef::new(MaterialInstanceSource { guid: *guid });
+                }
+            }
+            _ => return,
+        }
+        if let Some(actions) = crate::set_component_actions(target_entity, renderer.clone(), edited)
+            && world.has_resource::<ActionQueue<World>>()
+        {
+            let queue = world.resource::<ActionQueue<World>>();
+            for action in actions {
+                queue.push(action);
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "rendering"))]
+fn handle_asset_drop(
+    _ui: &egui::Ui,
+    _response: &egui::Response,
+    _world: &World,
+    _target_entity: Entity,
+) {
 }
 
 /// Submit a reparent operation. If an [`ActionQueue`] resource is present, the
