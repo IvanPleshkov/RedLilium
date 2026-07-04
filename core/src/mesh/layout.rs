@@ -76,6 +76,10 @@ pub enum VertexAttributeSemantic {
 
 impl VertexAttributeSemantic {
     /// Get a unique index for this semantic (used for matching).
+    ///
+    /// This is **not** a shader location: both backends assign shader
+    /// locations sequentially in [`VertexLayout`] attribute declaration
+    /// order (see ADR-019 in `docs/DECISIONS.md`).
     pub fn index(&self) -> u32 {
         match self {
             Self::Position => 0,

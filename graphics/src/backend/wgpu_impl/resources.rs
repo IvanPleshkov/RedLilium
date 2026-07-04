@@ -174,7 +174,8 @@ impl WgpuBackend {
         // Vertex attributes per buffer.
         // Use sequential shader_location values (0, 1, 2, ...) to match Slang's WGSL output,
         // which ignores [[vk::location(N)]] annotations on vertex inputs and assigns sequential
-        // @location values in struct declaration order.
+        // @location values in struct declaration order. The Vulkan backend follows the same
+        // convention (ADR-019 in docs/DECISIONS.md).
         let buffer_count = layout.buffers.len();
         let mut vertex_attrs: Vec<Vec<wgpu::VertexAttribute>> = vec![Vec::new(); buffer_count];
         for (location, attr) in layout.attributes.iter().enumerate() {

@@ -898,3 +898,65 @@ Rely on command buffer ordering for synchronization.
 - ⚠️ **Conservative barriers**: May insert barriers where not strictly needed
 - ⚠️ **No per-buffer state tracking**: Future optimization opportunity
 - ⚠️ **Vulkan-specific**: Only affects Vulkan backend complexity
+
+## ADR-019: Sequential Vertex Attribute Locations in Layout Declaration Order
+
+**Date**: 2026-07-04
+**Status**: Accepted
+
+### Context
+
+The two backends assigned vertex shader locations differently (audit finding
+XB-C1, `docs/audits/2026-07-graphics-backends/`):
+
+- **wgpu** numbered attributes sequentially (0, 1, 2, ...) in `VertexLayout`
+  declaration order.
+- **Vulkan** used the fixed semantic-index table (`Position=0` ... `Weights=7`,
+  so e.g. `TexCoord0=3`).
+
+The same `VertexLayout` therefore produced different locations per backend, and
+shader annotations in the tree were split between the two conventions: shaders
+annotated with semantic indices (`egui.slang`, `debug_draw.slang`) worked on
+Vulkan only by construction, while sequentially-annotated ones
+(`opaque_textured.slang`, `entity_index.slang`) had broken UV input on Vulkan.
+
+A semantic-index convention cannot be implemented on the wgpu path at all:
+Slang's WGSL emission ignores `[[vk::location(N)]]` on vertex inputs and always
+numbers them sequentially in struct declaration order.
+
+### Decision
+
+Shader locations are **sequential (0, 1, 2, ...) in `VertexLayout` attribute
+declaration order** on both backends.
+
+Contract for shader authors:
+
+1. Declare vertex shader inputs in the same order as the mesh layout's
+   attributes.
+2. A shader may consume a **prefix** of the layout's attributes (e.g. use only
+   position + normal of a position/normal/uv layout), but not an arbitrary
+   subset — skipping an attribute shifts every later location on the WGSL path.
+3. `[[vk::location(N)]]` annotations must match the declaration index; they are
+   kept for documentation and SPIR-V explicitness, but WGSL output ignores them.
+
+`VertexAttributeSemantic::index()` remains for semantic-set comparison and is
+**not** a shader location.
+
+### Alternatives Considered
+
+**1. Semantic-index locations everywhere**
+
+- ❌ Impossible on wgpu: Slang WGSL output cannot produce location gaps
+- ✅ Would allow arbitrary attribute subsets in shaders
+
+**2. Reflection-based matching (match shader inputs to attributes by semantic)**
+
+- ✅ Most robust
+- ❌ SPIR-V does not reliably carry HLSL semantics; significant complexity
+
+### Consequences
+
+- ✅ Identical attribute binding on both backends
+- ✅ Fixes UV input for sequentially-annotated shaders on Vulkan
+- ⚠️ Shaders consuming a non-prefix attribute subset are not expressible;
+  use a dedicated `VertexLayout` for such passes

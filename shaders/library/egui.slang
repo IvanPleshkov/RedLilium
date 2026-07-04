@@ -29,10 +29,12 @@ SamplerState egui_sampler;
 // Vertex Shader
 // =============================================================================
 
+// Vertex input locations are sequential in mesh-layout attribute order
+// (position, tex_coords, color) — matching both backends' convention.
 struct VsInput {
     [[vk::location(0)]] float2 position : POSITION;
-    [[vk::location(3)]] float2 tex_coords : TEXCOORD0;
-    [[vk::location(5)]] float4 color : COLOR;
+    [[vk::location(1)]] float2 tex_coords : TEXCOORD0;
+    [[vk::location(2)]] float4 color : COLOR;
 };
 
 struct VsOutput {

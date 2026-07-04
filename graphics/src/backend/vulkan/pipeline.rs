@@ -415,12 +415,18 @@ impl PipelineManager {
             })
             .collect();
 
+        // Shader locations are sequential (0, 1, 2, ...) in VertexLayout attribute
+        // declaration order — the same convention as the wgpu backend. This is
+        // forced by Slang's WGSL output, which ignores [[vk::location(N)]] on
+        // vertex inputs and numbers them sequentially, so shaders must declare
+        // their inputs in the layout's attribute order on both backends.
         let attribute_descriptions: Vec<vk::VertexInputAttributeDescription> = vertex_layout
             .attributes
             .iter()
-            .map(|attr| {
+            .enumerate()
+            .map(|(location, attr)| {
                 vk::VertexInputAttributeDescription::default()
-                    .location(attr.semantic.index())
+                    .location(location as u32)
                     .binding(attr.buffer_index)
                     .format(convert_vertex_format(attr.format))
                     .offset(attr.offset)

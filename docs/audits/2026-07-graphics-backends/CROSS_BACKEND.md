@@ -11,7 +11,7 @@ enums, present modes, stencil/depth clears) **except** where noted below.
 
 ## Critical
 
-### [ ] XB-C1. Vertex attribute `shader_location` conventions diverge between backends
+### [x] XB-C1. Vertex attribute `shader_location` conventions diverge between backends
 - **Where:** `wgpu_impl/resources.rs:163-177` (sequential `enumerate()` order) vs
   `vulkan/pipeline.rs:413-423` (`attr.semantic.index()`; fixed table Position=0…Weights=7 in
   `core/src/mesh/layout.rs:79-90`)
