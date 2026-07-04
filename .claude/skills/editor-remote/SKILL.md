@@ -9,13 +9,21 @@ Protocol reference: `docs/REMOTE.md`. Everything below uses the CLI.
 
 ## Launch
 
+Headless (preferred for automation — no window, frames tick on demand, idle
+editor costs nothing):
+
 ```bash
 rm -f .redlilium/editor.port
-REDLILIUM_REMOTE=1 cargo run -p redlilium-editor --bin redlilium-editor > /tmp/editor.log 2>&1 &
+REDLILIUM_HEADLESS=1 cargo run -p redlilium-editor --bin redlilium-editor > /tmp/editor.log 2>&1 &
 # wait for .redlilium/editor.port to appear (up to ~60s on first build)
 ```
 
-Kill with `pkill -f redlilium-editor` when done. If a command reports
+Windowed (when the user should see the editor too): use `REDLILIUM_REMOTE=1`
+instead. `REDLILIUM_HEADLESS_SIZE=WxH` sets the headless scene size
+(default 1280x720).
+
+Stop with `editor_ctl shutdown` (graceful; discards unsaved changes), or
+`pkill -f redlilium-editor` if unresponsive. If a command reports
 "connection closed", the editor likely crashed — check /tmp/editor.log.
 
 ## CLI
@@ -29,7 +37,9 @@ Kill with `pkill -f redlilium-editor` when done. If a command reports
 - `wait-assets [timeout_ms]` — until the asset pipeline is calm (use after
   edits that trigger loads/hot-reload, BEFORE verifying)
 - `wait-frames <n>`, `logs [since_seq]`
+- `step [n]` — advance n frames (drives the frames in headless mode)
 - `screenshot <path.png>` — the scene render target, then Read the PNG
+- `shutdown` — close the editor
 - `raw '(id: 1, cmd: "…")'` — arbitrary envelope
 
 ## Recipes

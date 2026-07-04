@@ -108,8 +108,12 @@ fn build_envelope(args: &[String]) -> Result<String, String> {
             need(1, "raw '<RON envelope>'")?;
             rest[0].clone()
         }
-        "hello" | "state" | "undo" | "redo" => {
+        "hello" | "state" | "undo" | "redo" | "shutdown" => {
             format!("(id: 1, cmd: {})", q(cmd))
+        }
+        "step" => {
+            let n = rest.first().map(String::as_str).unwrap_or("1");
+            format!("(id: 1, cmd: \"step\", n: {n})")
         }
         "inspect" => {
             need(1, "inspect <entity>")?;

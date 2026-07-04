@@ -41,7 +41,9 @@ const COMMANDS: &[&str] = &[
     "redo",
     "logs",
     "wait",
+    "step",
     "screenshot",
+    "shutdown",
 ];
 
 /// Per-editor remote protocol state (parked writes/waits, screenshot job).
@@ -49,6 +51,21 @@ const COMMANDS: &[&str] = &[
 pub struct RemoteCommands {
     parked: Vec<Parked>,
     screenshot: Option<ScreenshotJob>,
+    shutdown: bool,
+}
+
+impl RemoteCommands {
+    /// Whether parked work (writes, waits, a screenshot) still needs frames to
+    /// resolve. The headless shell keeps ticking while this is true.
+    pub fn has_pending(&self) -> bool {
+        !self.parked.is_empty() || self.screenshot.is_some()
+    }
+
+    /// Take the `shutdown` request, if one arrived. The shell decides how to
+    /// exit (the headless loop breaks; the windowed editor closes the window).
+    pub fn take_shutdown(&mut self) -> bool {
+        std::mem::take(&mut self.shutdown)
+    }
 }
 
 enum Parked {
@@ -202,7 +219,11 @@ fn complete_parked(rc: &mut RemoteCommands, world: &World) {
     }
 }
 
-fn assets_idle(world: &World) -> bool {
+/// Whether the asset pipeline is quiet: no in-flight processor work and no
+/// pending hot-reload notifications. One calm frame is not proof the pipeline
+/// is done (see [`CALM_FRAMES`]) — used both for `wait(assets_idle)` and for
+/// the headless shell's quiescence check.
+pub fn assets_idle(world: &World) -> bool {
     let processor_idle =
         !world.has_resource::<AssetProcessor>() || world.resource::<AssetProcessor>().is_idle();
     let no_pending_reloads =
@@ -526,6 +547,22 @@ fn dispatch(
                 &format!("unknown wait condition {other:?} (assets_idle | frames)"),
             ),
         },
+        // Tick-on-demand: advance N frames, ack when they ran. In the headless
+        // shell this *drives* the frames (the loop ticks while work is
+        // parked); in the windowed shell frames run anyway, so it degenerates
+        // to `wait(for: "frames")`.
+        "step" => {
+            let n = int_param("n").unwrap_or(1).max(1) as u64;
+            rc.parked.push(Parked::WaitFrames {
+                conn,
+                id,
+                remaining: n,
+            });
+        }
+        "shutdown" => {
+            rc.shutdown = true;
+            send(world, conn, &OkResp { id, ok: true });
+        }
         "screenshot" => {
             let Some(path) = str_param("path") else {
                 return send_err(world, conn, id, "missing 'path'");

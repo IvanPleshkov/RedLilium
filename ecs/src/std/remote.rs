@@ -14,10 +14,11 @@
 //! channel) and a write task (per-connection outbound channel). No dedicated
 //! threads.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::mpsc;
+use std::time::Duration;
 
 use crate::system::SystemError;
 use crate::{IoRunner, System, SystemContext};
@@ -39,6 +40,9 @@ pub struct RemoteTransport {
     port_file: PathBuf,
     /// Inbound lines from all connections (async reader tasks → pump).
     incoming_rx: Mutex<mpsc::Receiver<RemoteLine>>,
+    /// Lines pulled off the channel by [`wait_incoming`](Self::wait_incoming)
+    /// while blocking; drained ahead of the channel by `try_recv`.
+    buffered: Mutex<VecDeque<RemoteLine>>,
     /// Kept to clone into the accept loop at serve time.
     incoming_tx: mpsc::Sender<RemoteLine>,
     /// Outbound lines to route to per-connection writers (pump → router task).
@@ -57,6 +61,7 @@ impl RemoteTransport {
         Self {
             port_file: port_file.into(),
             incoming_rx: Mutex::new(incoming_rx),
+            buffered: Mutex::new(VecDeque::new()),
             incoming_tx,
             outgoing_tx,
             outgoing_rx: Mutex::new(Some(outgoing_rx)),
@@ -66,12 +71,46 @@ impl RemoteTransport {
 
     /// Drain inbound lines received since the last pump.
     pub fn try_recv(&self) -> Vec<RemoteLine> {
+        let mut lines: Vec<RemoteLine> = self
+            .buffered
+            .lock()
+            .expect("remote buffered poisoned")
+            .drain(..)
+            .collect();
         let rx = self.incoming_rx.lock().expect("remote incoming poisoned");
-        let mut lines = Vec::new();
         while let Ok(line) = rx.try_recv() {
             lines.push(line);
         }
         lines
+    }
+
+    /// Block up to `timeout` for an inbound line. Returns `true` if at least
+    /// one line is available (it stays queued for the next [`try_recv`]).
+    /// Lets a headless shell sleep between remote commands instead of
+    /// free-running frames (tick-on-demand).
+    pub fn wait_incoming(&self, timeout: Duration) -> bool {
+        if !self
+            .buffered
+            .lock()
+            .expect("remote buffered poisoned")
+            .is_empty()
+        {
+            return true;
+        }
+        let received = {
+            let rx = self.incoming_rx.lock().expect("remote incoming poisoned");
+            rx.recv_timeout(timeout)
+        };
+        match received {
+            Ok(line) => {
+                self.buffered
+                    .lock()
+                    .expect("remote buffered poisoned")
+                    .push_back(line);
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     /// Queue a response line for a connection (newline appended on the wire).

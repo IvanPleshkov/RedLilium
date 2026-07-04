@@ -9,7 +9,9 @@ You drive the RedLilium game editor through its text remote-control channel.
 
 Read `.claude/skills/editor-remote/SKILL.md` and `docs/REMOTE.md` first if you
 need details. The editor is usually already running (port file
-`.redlilium/editor.port`); if not, launch it as the skill describes.
+`.redlilium/editor.port`); if not, launch it as the skill describes —
+headless (`REDLILIUM_HEADLESS=1`) unless the user wants to watch. In headless
+mode frames advance on demand: `step`/`wait` commands drive them.
 
 Work in small verify-as-you-go steps: after every mutating command, confirm the
 result (snapshot in the response, `inspect`, or a screenshot you Read). Use
