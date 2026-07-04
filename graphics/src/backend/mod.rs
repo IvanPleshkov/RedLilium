@@ -893,7 +893,19 @@ impl GpuBackend {
         }
     }
 
-    /// Write data to a buffer.
+    /// Low-level host write into a buffer's memory.
+    ///
+    /// This is the primitive behind [`RingBuffer`](crate::RingBuffer)-style
+    /// streaming and is intentionally weak: the caller must guarantee that no
+    /// in-flight GPU work reads the written region. Timing differs per
+    /// backend — Vulkan writes the mapped memory immediately (visible even to
+    /// already-submitted work), wgpu stages the write and applies it at the
+    /// start of the next submission. Both satisfy the ring-buffer contract
+    /// (fresh region each frame); nothing else should rely on this method.
+    ///
+    /// For a synchronized, graph-ordered write use
+    /// [`TransferOperation::WriteBuffer`](crate::TransferOperation::WriteBuffer),
+    /// which copies at the transfer pass's position on both backends.
     pub fn write_buffer(
         &self,
         buffer: &GpuBuffer,

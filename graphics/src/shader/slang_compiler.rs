@@ -427,8 +427,16 @@ impl SlangCompiler {
                     match shape {
                         ResourceShape::SlangTextureCube => BindingType::TextureCube,
                         // Structured / byte-address buffers are SSBOs, not textures.
+                        // Distinguish RW (RWStructuredBuffer) from read-only
+                        // (StructuredBuffer): wgpu validates the access mode exactly.
                         ResourceShape::SlangStructuredBuffer
-                        | ResourceShape::SlangByteAddressBuffer => BindingType::StorageBuffer,
+                        | ResourceShape::SlangByteAddressBuffer => {
+                            if Self::is_read_write_access(type_layout) {
+                                BindingType::StorageBuffer
+                            } else {
+                                BindingType::StorageBufferReadOnly
+                            }
+                        }
                         _ => BindingType::Texture,
                     }
                 } else {
@@ -436,7 +444,7 @@ impl SlangCompiler {
                 }
             }
             TypeKind::SamplerState => BindingType::Sampler,
-            TypeKind::TextureBuffer => BindingType::StorageBuffer,
+            TypeKind::TextureBuffer => BindingType::StorageBufferReadOnly,
             _ => {
                 // Fallback: check the parameter category
                 let category = type_layout.parameter_category();
@@ -450,6 +458,17 @@ impl SlangCompiler {
                 }
             }
         }
+    }
+
+    /// Whether a resource type reflects with read-write (UAV) access.
+    ///
+    /// `RWStructuredBuffer` / `RWByteAddressBuffer` report `ReadWrite`;
+    /// plain `StructuredBuffer` / `ByteAddressBuffer` report `Read`.
+    fn is_read_write_access(type_layout: &slang::reflection::TypeLayout) -> bool {
+        matches!(
+            type_layout.resource_access(),
+            Some(slang::ResourceAccess::ReadWrite)
+        )
     }
 
     /// Write standard library modules to the temp shader directory.
@@ -1096,9 +1115,47 @@ float4 vs_main(float3 position : POSITION, uint id : SV_InstanceID) : SV_Positio
             .expect("binding 1 (instances) present");
         assert_eq!(
             instances.binding_type,
-            BindingType::StorageBuffer,
-            "StructuredBuffer must reflect as StorageBuffer, got {:?}",
+            BindingType::StorageBufferReadOnly,
+            "StructuredBuffer must reflect as a read-only storage buffer, got {:?}",
             instances.binding_type
+        );
+    }
+
+    #[test]
+    fn test_reflect_rw_structured_buffer_is_read_write_storage() {
+        // RWStructuredBuffer must keep read-write access: wgpu validates the
+        // layout access mode exactly against the shader declaration.
+        let compiler = SlangCompiler::new().unwrap();
+
+        let source = r#"
+struct Particle { float4 position; };
+
+[[vk::binding(0, 0)]]
+RWStructuredBuffer<Particle> particles;
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cs_main(uint3 id : SV_DispatchThreadID) {
+    particles[id.x].position += float4(0.0, 1.0, 0.0, 0.0);
+}
+"#;
+
+        let shaders: Vec<ShaderReflectInput<'_>> =
+            vec![(source, "cs_main", ShaderStage::Compute, &[])];
+        let (layouts, _rates) = compiler
+            .reflect_all_bindings(&shaders)
+            .expect("reflect_all_bindings failed");
+
+        let particles = layouts[0]
+            .entries
+            .iter()
+            .find(|e| e.binding == 0)
+            .expect("binding 0 (particles) present");
+        assert_eq!(
+            particles.binding_type,
+            BindingType::StorageBuffer,
+            "RWStructuredBuffer must reflect as read-write StorageBuffer, got {:?}",
+            particles.binding_type
         );
     }
 }

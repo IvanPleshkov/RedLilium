@@ -63,7 +63,10 @@ pub fn convert_texture_format(format: TextureFormat) -> wgpu::TextureFormat {
         TextureFormat::Bgra8Unorm => wgpu::TextureFormat::Bgra8Unorm,
         TextureFormat::Bgra8UnormSrgb => wgpu::TextureFormat::Bgra8UnormSrgb,
         TextureFormat::Rgba10a2Unorm => wgpu::TextureFormat::Rgb10a2Unorm,
-        TextureFormat::Bgra10a2Unorm => wgpu::TextureFormat::Rgb10a2Unorm, // wgpu uses RGB order
+        // No BGRA-ordered 10-bit format exists in WebGPU; create_texture rejects
+        // this format before conversion, so this arm is only reachable via
+        // surface-format paths where the mismatch is caught by wgpu itself.
+        TextureFormat::Bgra10a2Unorm => wgpu::TextureFormat::Rgb10a2Unorm,
 
         // 64-bit formats
         TextureFormat::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
@@ -499,6 +502,11 @@ pub fn convert_binding_type(binding_type: crate::materials::BindingType) -> wgpu
             min_binding_size: None,
         },
         crate::materials::BindingType::StorageBuffer => wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: false },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        crate::materials::BindingType::StorageBufferReadOnly => wgpu::BindingType::Buffer {
             ty: wgpu::BufferBindingType::Storage { read_only: true },
             has_dynamic_offset: false,
             min_binding_size: None,

@@ -45,7 +45,18 @@ pub enum BindingType {
     DynamicUniformBuffer,
 
     /// Storage buffer (read-write, larger data).
+    ///
+    /// On wgpu the shader must declare the binding with `read_write` access;
+    /// use [`StorageBufferReadOnly`](Self::StorageBufferReadOnly) for bindings
+    /// the shader only reads (WebGPU validates the access mode exactly).
     StorageBuffer,
+
+    /// Read-only storage buffer.
+    ///
+    /// Maps to the same descriptor type as [`StorageBuffer`](Self::StorageBuffer)
+    /// on Vulkan, but to a `read_only` storage binding on wgpu, matching shaders
+    /// that declare `var<storage, read>` / Slang `StructuredBuffer`.
+    StorageBufferReadOnly,
 
     /// Sampled texture (for reading in shaders).
     Texture,

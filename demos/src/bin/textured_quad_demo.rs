@@ -40,7 +40,7 @@ SamplerState quad_sampler;
 
 struct VsInput {
     [[vk::location(0)]] float3 position : POSITION;
-    [[vk::location(3)]] float2 uv : TEXCOORD0;
+    [[vk::location(1)]] float2 uv : TEXCOORD0;
 };
 
 struct VsOutput {

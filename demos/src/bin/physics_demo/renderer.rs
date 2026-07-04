@@ -248,7 +248,9 @@ impl PhysicsRenderer {
                         .with_visibility(ShaderStageFlags::VERTEX | ShaderStageFlags::FRAGMENT),
                 )
                 .with_entry(
-                    BindingLayoutEntry::new(1, BindingType::StorageBuffer)
+                    // The WGSL shader declares `var<storage, read>` — wgpu
+                    // requires the layout access mode to match exactly.
+                    BindingLayoutEntry::new(1, BindingType::StorageBufferReadOnly)
                         .with_visibility(ShaderStageFlags::VERTEX),
                 )
                 .with_label("shape_bindings"),

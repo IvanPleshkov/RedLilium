@@ -244,12 +244,21 @@ pub enum TransferOperation {
 
     /// Upload CPU bytes into a GPU buffer through the frame graph.
     ///
+    /// The write is a GPU copy (via a transient staging buffer) encoded **at
+    /// this transfer pass's position in the graph** on both backends: passes
+    /// ordered before it see the old contents, passes after it see the new.
+    /// Ordering against neighbouring passes is handled by the automatic
+    /// barrier system (the destination is declared `TransferWrite`), so —
+    /// unlike [`GpuBackend::write_buffer`](crate::backend::GpuBackend) — this
+    /// does not race in-flight frames.
+    ///
+    /// Requirements: `dst` must have `BufferUsage::COPY_DST`; `dst_offset` and
+    /// the written size must be 4-byte aligned (wgpu `COPY_BUFFER_ALIGNMENT`;
+    /// enforced on both backends for identical behavior).
+    ///
     /// The `data` source is held by `Arc`, so its memory stays alive for the
     /// duration of the operation (no use-after-free / access violation); the
-    /// backend bounds-checks `src_range` against it. This does **not** guard
-    /// against data races on `dst` — the caller must not write to a buffer the
-    /// GPU is still reading (use a [`RingBuffer`](crate::RingBuffer) or
-    /// double-buffer for per-frame data).
+    /// backend bounds-checks `src_range` against it.
     WriteBuffer {
         /// Destination GPU buffer.
         dst: Arc<Buffer>,
