@@ -384,9 +384,11 @@ impl SceneViewState {
     /// Poll the pick result, filled asynchronously by the frame pipeline once
     /// the GPU readback completes.
     ///
-    /// Returns `Some(entity_index)` if an entity was hit, `None` if empty space
-    /// or while still waiting for the GPU. The result is consumed once read.
-    pub fn resolve_pick(&mut self) -> Option<u32> {
+    /// The outer `Option` is readiness (`None` while the GPU readback is in
+    /// flight); the inner one is the hit — `Some(entity_index)` or `None` for
+    /// empty space. A miss is a completed result, not a pending one: remote
+    /// picks must answer it. The result is consumed once read.
+    pub fn resolve_pick(&mut self) -> Option<Option<u32>> {
         let data = {
             let mut guard = self.pick_result.lock().ok()?;
             if guard.len() < 4 {
@@ -396,9 +398,9 @@ impl SceneViewState {
         };
         let value = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
         if value == 0 {
-            None // cleared background — no entity
+            Some(None) // cleared background — no entity
         } else {
-            Some(value - 1) // shader wrote entity_index + 1
+            Some(Some(value - 1)) // shader wrote entity_index + 1
         }
     }
 

@@ -135,6 +135,17 @@ fn build_envelope(args: &[String]) -> Result<String, String> {
             envelope.push(')');
             envelope
         }
+        "pick" => {
+            need(2, "pick <x> <y>")?;
+            format!("(id: 1, cmd: \"pick\", x: {}, y: {})", rest[0], rest[1])
+        }
+        "pick-rect" => {
+            need(4, "pick-rect <x> <y> <w> <h>")?;
+            format!(
+                "(id: 1, cmd: \"pick_rect\", x: {}, y: {}, w: {}, h: {})",
+                rest[0], rest[1], rest[2], rest[3]
+            )
+        }
         "save-prefab" => {
             need(2, "save-prefab <entity> <mount/path.prefab>")?;
             format!(

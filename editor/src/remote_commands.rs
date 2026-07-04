@@ -53,6 +53,8 @@ const COMMANDS: &[&str] = &[
     "new_asset",
     "save_prefab",
     "spawn_prefab",
+    "pick",
+    "pick_rect",
 ];
 
 /// Per-editor remote protocol state (parked writes/waits, screenshot job).
@@ -60,14 +62,15 @@ const COMMANDS: &[&str] = &[
 pub struct RemoteCommands {
     parked: Vec<Parked>,
     screenshot: Option<ScreenshotJob>,
+    pick: Option<PickJob>,
     shutdown: bool,
 }
 
 impl RemoteCommands {
-    /// Whether parked work (writes, waits, a screenshot) still needs frames to
-    /// resolve. The headless shell keeps ticking while this is true.
+    /// Whether parked work (writes, waits, a screenshot, a pick) still needs
+    /// frames to resolve. The headless shell keeps ticking while this is true.
     pub fn has_pending(&self) -> bool {
-        !self.parked.is_empty() || self.screenshot.is_some()
+        !self.parked.is_empty() || self.screenshot.is_some() || self.pick.is_some()
     }
 
     /// Take the `shutdown` request, if one arrived. The shell decides how to
@@ -75,6 +78,113 @@ impl RemoteCommands {
     pub fn take_shutdown(&mut self) -> bool {
         std::mem::take(&mut self.shutdown)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Picking
+// ---------------------------------------------------------------------------
+
+/// A pending `pick` / `pick_rect`, in **scene-image coordinates** (the same
+/// pixel space `screenshot` produces — what a remote agent actually sees).
+/// The shell translates to its own pick space (the windowed editor offsets by
+/// the SceneView panel origin) and drives the entity-index readback.
+#[derive(Clone, Copy)]
+pub enum PickRequest {
+    Point { x: u32, y: u32 },
+    Rect { x: u32, y: u32, w: u32, h: u32 },
+}
+
+struct PickJob {
+    conn: u64,
+    id: i64,
+    request: PickRequest,
+    /// Set once the shell submitted the readback to the scene view.
+    in_flight: bool,
+}
+
+/// Take the not-yet-submitted pick request, marking it in flight. The shell
+/// calls this each frame after `pump` and forwards to the scene view.
+pub fn take_pick_request(rc: &mut RemoteCommands) -> Option<PickRequest> {
+    let job = rc.pick.as_mut()?;
+    if job.in_flight {
+        return None;
+    }
+    job.in_flight = true;
+    Some(job.request)
+}
+
+/// Whether a remote pick is waiting on the GPU readback — the shell routes
+/// scene-view pick results here instead of into its own selection.
+pub fn pick_in_flight(rc: &RemoteCommands) -> bool {
+    rc.pick.as_ref().is_some_and(|j| j.in_flight)
+}
+
+/// Fail the current pick (scene view hidden, out-of-bounds coordinates, …).
+pub fn fail_pick(rc: &mut RemoteCommands, world: &World, error: &str) {
+    if let Some(job) = rc.pick.take() {
+        send_err(world, job.conn, job.id, error);
+    }
+}
+
+/// Map a picked entity index to the entity, mirroring the editor's click
+/// selection: only indices belonging to a renderable count as hits (the
+/// clear value / stale indices resolve to `None`).
+fn pick_index_to_entity(world: &World, index: u32) -> Option<Entity> {
+    let renderable = world
+        .read::<redlilium_ecs::MeshRenderer>()
+        .ok()
+        .is_some_and(|renderers| renderers.get(index).is_some());
+    if renderable {
+        world.entity_at_index(index)
+    } else {
+        None
+    }
+}
+
+/// Complete a point pick with the readback's hit (`None` = empty space).
+pub fn complete_point_pick(rc: &mut RemoteCommands, world: &World, hit: Option<u32>) {
+    let Some(job) = rc.pick.take() else { return };
+    #[derive(Serialize)]
+    struct PickResp {
+        id: i64,
+        ok: bool,
+        entity: Option<String>,
+    }
+    send(
+        world,
+        job.conn,
+        &PickResp {
+            id: job.id,
+            ok: true,
+            entity: hit
+                .and_then(|index| pick_index_to_entity(world, index))
+                .map(entity_spec),
+        },
+    );
+}
+
+/// Complete a rect pick with the readback's entity indices.
+pub fn complete_rect_pick(rc: &mut RemoteCommands, world: &World, indices: &[u32]) {
+    let Some(job) = rc.pick.take() else { return };
+    #[derive(Serialize)]
+    struct PickRectResp {
+        id: i64,
+        ok: bool,
+        entities: Vec<String>,
+    }
+    send(
+        world,
+        job.conn,
+        &PickRectResp {
+            id: job.id,
+            ok: true,
+            entities: indices
+                .iter()
+                .filter_map(|&idx| pick_index_to_entity(world, idx))
+                .map(entity_spec)
+                .collect(),
+        },
+    );
 }
 
 /// The apply outcome of a queued action, filled by [`ReportedAction`] when
@@ -812,6 +922,39 @@ fn dispatch(
                 }
                 Err(e) => send_err(world, conn, id, &format!("write {path}: {e}")),
             }
+        }
+        // Entity under a point / all entities in a region, in scene-image
+        // coordinates (what `screenshot` shows). Resolved by the entity-index
+        // GPU pass a frame later.
+        "pick" | "pick_rect" => {
+            if rc.pick.is_some() {
+                return send_err(world, conn, id, "a pick is already in flight");
+            }
+            let (Some(x), Some(y)) = (int_param("x"), int_param("y")) else {
+                return send_err(world, conn, id, "missing 'x'/'y'");
+            };
+            let request = if cmd == "pick" {
+                PickRequest::Point {
+                    x: x.max(0) as u32,
+                    y: y.max(0) as u32,
+                }
+            } else {
+                let (Some(w), Some(h)) = (int_param("w"), int_param("h")) else {
+                    return send_err(world, conn, id, "missing 'w'/'h'");
+                };
+                PickRequest::Rect {
+                    x: x.max(0) as u32,
+                    y: y.max(0) as u32,
+                    w: w.max(1) as u32,
+                    h: h.max(1) as u32,
+                }
+            };
+            rc.pick = Some(PickJob {
+                conn,
+                id,
+                request,
+                in_flight: false,
+            });
         }
         // Spawn a `.prefab` file (undoable; response carries the new ids).
         "spawn_prefab" => {

@@ -48,6 +48,8 @@ Stop with `editor_ctl shutdown` (graceful; discards unsaved changes), or
 - `new-asset <source> <kind> [dir] [name]` — create asset file + DB record
   (kinds: material_instance, material, vertex_layout, …) → guid
 - `save-prefab <entity> <mount/path.prefab>`, `spawn-prefab <path> [parent]`
+- `pick <x> <y>` / `pick-rect <x> <y> <w> <h>` — entity under a point / all
+  in a region, coordinates in screenshot-pixel space
 - `raw '(id: 1, cmd: "…")'` — arbitrary envelope
 
 ## Recipes

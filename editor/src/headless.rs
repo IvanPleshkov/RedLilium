@@ -62,6 +62,17 @@ pub fn run() {
     // with); sRGB so screenshot PNGs come out gamma-correct.
     let color_format = TextureFormat::Bgra8UnormSrgb;
     let mut scene_view = SceneViewState::new(device.clone(), color_format);
+    // Picking works in scene-image space: the entity-index target matches the
+    // scene size and the viewport covers it fully, so remote pick coordinates
+    // equal screenshot pixels with no offset.
+    scene_view.resize_if_needed(width, height);
+    scene_view.set_viewport(
+        egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(width as f32, height as f32),
+        ),
+        1.0,
+    );
 
     let runner = EcsRunner::single_thread();
     let mut ew = create_editor_world(
@@ -142,12 +153,39 @@ fn tick(
     ew.persist_dirty_mounts(local_mounts);
     ew.debug_drawer.read().advance_tick();
 
+    // Resolve last tick's pick readback into its remote response.
+    if let Some(hit) = scene_view.resolve_pick() {
+        remote_commands::complete_point_pick(rc, &ew.world, hit);
+    }
+    if let Some(indices) = scene_view.resolve_rect_pick() {
+        remote_commands::complete_rect_pick(rc, &ew.world, &indices);
+    }
+
     // Actions queued by last tick's remote commands apply here…
     ew.drain_actions();
     // …and the pump completes their parked responses, then dispatches newly
     // arrived commands (their actions drain next tick).
     remote_commands::pump(rc, &mut ew.world, &mut ew.history);
     let shutdown = rc.take_shutdown();
+
+    // Submit a freshly arrived pick — coordinates are already scene-image
+    // space here (viewport == scene texture, no offset).
+    if let Some(request) = remote_commands::take_pick_request(rc) {
+        use remote_commands::PickRequest;
+        match request {
+            PickRequest::Point { x, y } if x < width && y < height => {
+                scene_view.request_pick(x, y);
+            }
+            PickRequest::Rect { x, y, w, h } if x < width && y < height => {
+                scene_view.request_rect_pick(x, y, w.min(width - x), h.min(height - y));
+            }
+            _ => remote_commands::fail_pick(
+                rc,
+                &ew.world,
+                "pick coordinates outside the scene image",
+            ),
+        }
+    }
 
     ew.schedules.run_frame(&mut ew.world, runner, FIXED_DT);
 
@@ -163,6 +201,31 @@ fn tick(
         .take()
         .expect("RenderSchedule must hold the graph after the Render schedule");
     remote_commands::inject_screenshot_pass(rc, &ew.world, scene_view.device(), &mut graph);
+
+    // Entity-index pass + readback, only while a remote pick is in flight
+    // (mirrors the windowed shell's on_draw picking block).
+    let pending_pick = scene_view.take_pending_pick();
+    let pending_rect = scene_view.take_pending_rect_pick();
+    if pending_pick.is_some() || pending_rect.is_some() {
+        scene_view.fill_picking_rings(&ew.world);
+        if let Some(ei_pass) = scene_view.build_entity_index_pass(&ew.world) {
+            let ei_handle = graph.add_graphics_pass(ei_pass);
+            if let Some([px, py]) = pending_pick {
+                let readback = scene_view.build_pick_readback(px, py);
+                let handle = graph.add_transfer_pass(readback);
+                graph.add_dependency(handle, ei_handle);
+            }
+            if let Some([rx, ry, rw, rh]) = pending_rect {
+                let readback = scene_view.build_rect_readback(rx, ry, rw, rh);
+                let handle = graph.add_transfer_pass(readback);
+                graph.add_dependency(handle, ei_handle);
+            }
+        }
+        if let Some([_, _, rw, rh]) = pending_rect {
+            scene_view.set_rect_layout(rw, rh);
+        }
+    }
+
     schedule.render(graph);
     pipeline.end_frame(schedule);
 

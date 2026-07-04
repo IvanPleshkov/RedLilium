@@ -435,30 +435,37 @@ impl AppHandler for Editor {
 
         // Resolve GPU pick from the previous frame's readback
         if let Some(scene_view) = &mut self.scene_view
-            && let Some(entity_index) = scene_view.resolve_pick()
+            && let Some(hit) = scene_view.resolve_pick()
         {
             let ew = self.world.as_mut().unwrap();
-            // Find entity whose sparse-set index matches the picked index
-            let target = ew.world.read::<MeshRenderer>().ok().and_then(|buffers| {
-                buffers
-                    .iter()
-                    .find(|(idx, _)| *idx == entity_index)
-                    .map(|(_, _)| ())
-            });
-            // Reconstruct full Entity from world (need spawn_tick etc.)
-            let target_entity = if target.is_some() {
-                ew.world.entity_at_index(entity_index)
+            // A remote `pick` owns this readback — answer it, don't select.
+            if self
+                .remote
+                .as_ref()
+                .is_some_and(crate::remote_commands::pick_in_flight)
+            {
+                let rc = self.remote.as_mut().unwrap();
+                crate::remote_commands::complete_point_pick(rc, &ew.world, hit);
             } else {
-                None
-            };
-            let action: Box<dyn redlilium_core::abstract_editor::EditAction<World>> =
-                if let Some(entity) = target_entity {
-                    Box::new(SelectAction::single(entity))
-                } else {
-                    Box::new(SelectAction::clear())
-                };
-            if let Err(e) = ew.history.execute(action, &mut ew.world) {
-                log::warn!("Pick selection failed: {e}");
+                // Find entity whose sparse-set index matches the picked index
+                let target = hit.filter(|&entity_index| {
+                    ew.world
+                        .read::<MeshRenderer>()
+                        .ok()
+                        .is_some_and(|buffers| buffers.iter().any(|(idx, _)| idx == entity_index))
+                });
+                // Reconstruct full Entity from world (need spawn_tick etc.)
+                let target_entity =
+                    target.and_then(|entity_index| ew.world.entity_at_index(entity_index));
+                let action: Box<dyn redlilium_core::abstract_editor::EditAction<World>> =
+                    if let Some(entity) = target_entity {
+                        Box::new(SelectAction::single(entity))
+                    } else {
+                        Box::new(SelectAction::clear())
+                    };
+                if let Err(e) = ew.history.execute(action, &mut ew.world) {
+                    log::warn!("Pick selection failed: {e}");
+                }
             }
         }
 
@@ -467,30 +474,40 @@ impl AppHandler for Editor {
             && let Some(entity_indices) = scene_view.resolve_rect_pick()
         {
             let ew = self.world.as_mut().unwrap();
-            let selected: Vec<Entity> = if let Ok(renderers) = ew.world.read::<MeshRenderer>() {
-                entity_indices
-                    .iter()
-                    .filter_map(|&idx| {
-                        // Verify the index is a renderable entity.
-                        if renderers.get(idx).is_some() {
-                            ew.world.entity_at_index(idx)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
+            // A remote `pick_rect` owns this readback — answer it, don't select.
+            if self
+                .remote
+                .as_ref()
+                .is_some_and(crate::remote_commands::pick_in_flight)
+            {
+                let rc = self.remote.as_mut().unwrap();
+                crate::remote_commands::complete_rect_pick(rc, &ew.world, &entity_indices);
             } else {
-                Vec::new()
-            };
-
-            let action: Box<dyn redlilium_core::abstract_editor::EditAction<World>> =
-                if selected.is_empty() {
-                    Box::new(SelectAction::clear())
+                let selected: Vec<Entity> = if let Ok(renderers) = ew.world.read::<MeshRenderer>() {
+                    entity_indices
+                        .iter()
+                        .filter_map(|&idx| {
+                            // Verify the index is a renderable entity.
+                            if renderers.get(idx).is_some() {
+                                ew.world.entity_at_index(idx)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
                 } else {
-                    Box::new(SelectAction::set(selected))
+                    Vec::new()
                 };
-            if let Err(e) = ew.history.execute(action, &mut ew.world) {
-                log::warn!("Rect selection failed: {e}");
+
+                let action: Box<dyn redlilium_core::abstract_editor::EditAction<World>> =
+                    if selected.is_empty() {
+                        Box::new(SelectAction::clear())
+                    } else {
+                        Box::new(SelectAction::set(selected))
+                    };
+                if let Err(e) = ew.history.execute(action, &mut ew.world) {
+                    log::warn!("Rect selection failed: {e}");
+                }
             }
         }
 
@@ -585,6 +602,37 @@ impl AppHandler for Editor {
             // the caller asked for an exit, there is no one to click it.
             if rc.take_shutdown() {
                 self.should_close = true;
+            }
+            // Submit a remote pick to the scene view. Wire coordinates are in
+            // scene-image space (what `screenshot` shows); the pick pass works
+            // in window space, so offset by the SceneView panel origin.
+            if let Some(request) = crate::remote_commands::take_pick_request(rc) {
+                match (self.scene_view_rect_phys, &mut self.scene_view) {
+                    (Some([ox, oy, pw, ph]), Some(sv)) => {
+                        use crate::remote_commands::PickRequest;
+                        let (ox, oy) = (ox as u32, oy as u32);
+                        match request {
+                            PickRequest::Point { x, y } if x < pw as u32 && y < ph as u32 => {
+                                sv.request_pick(ox + x, oy + y);
+                            }
+                            PickRequest::Rect { x, y, w, h } if x < pw as u32 && y < ph as u32 => {
+                                let w = w.min(pw as u32 - x);
+                                let h = h.min(ph as u32 - y);
+                                sv.request_rect_pick(ox + x, oy + y, w, h);
+                            }
+                            _ => crate::remote_commands::fail_pick(
+                                rc,
+                                &ew.world,
+                                "pick coordinates outside the scene image",
+                            ),
+                        }
+                    }
+                    _ => crate::remote_commands::fail_pick(
+                        rc,
+                        &ew.world,
+                        "scene view is not visible",
+                    ),
+                }
             }
         }
 
