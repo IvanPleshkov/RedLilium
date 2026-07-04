@@ -72,6 +72,16 @@ If wasm-pack is not installed, skip web build:
 - Check `docs/ARCHITECTURE.md` for system design context
 - Check `docs/DECISIONS.md` for architecture decision records
 
+### Task Tracking
+
+- Tasks live in **GitHub Issues** (`IvanPleshkov/RedLilium`), not in markdown
+  files — do NOT create TODO/roadmap .md files
+- Delegate issue operations (create/digest/close) to the `gh-tasks` agent
+  (model: haiku); issue bodies are written by the orchestrator, the agent
+  only executes `gh` commands
+- Reference issues in commits (`#N`); `Closes #N` auto-closes on push
+- `docs/` holds durable design only (architecture, decisions, contracts)
+
 ### Adding New Features
 
 1. Read relevant crate README and `docs/ARCHITECTURE.md`

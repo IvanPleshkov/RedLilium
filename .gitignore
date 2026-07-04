@@ -34,3 +34,4 @@ demos/web/pkg/
 /redlilium-book.zip
 project-assets/
 .redlilium/
+.claude/settings.local.json

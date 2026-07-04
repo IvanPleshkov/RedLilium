@@ -98,7 +98,7 @@ The `docs/` folder contains high-level documentation:
 
 - `docs/ARCHITECTURE.md` - System design and module interactions
 - `docs/DECISIONS.md` - Architecture Decision Records (ADRs)
-- `docs/ROADMAP.md` - Feature roadmap and milestones
+- [GitHub Issues](https://github.com/IvanPleshkov/RedLilium/issues) - Task tracking and milestones
 
 ### 3. Crate READMEs
 
