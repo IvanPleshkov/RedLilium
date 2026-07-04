@@ -43,7 +43,11 @@ Stop with `editor_ctl shutdown` (graceful; discards unsaved changes), or
 - `actions` — list the action registry (name + usage)
 - `action <name> '(params…)'` — invoke any registered action: `spawn_entity`
   (response carries the new entity id), `delete_entity`, `reparent`,
-  `add_component`, `remove_component`, `set_component`, `select`
+  `add_component`, `remove_component`, `set_component`, `select`,
+  `set_asset_settings`, `set_asset_reference` (assets addressed by guid)
+- `new-asset <source> <kind> [dir] [name]` — create asset file + DB record
+  (kinds: material_instance, material, vertex_layout, …) → guid
+- `save-prefab <entity> <mount/path.prefab>`, `spawn-prefab <path> [parent]`
 - `raw '(id: 1, cmd: "…")'` — arbitrary envelope
 
 ## Recipes

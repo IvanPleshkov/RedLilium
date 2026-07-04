@@ -326,6 +326,13 @@ impl AssetProcessor {
     pub fn is_idle(&self) -> bool {
         self.requests.is_empty()
     }
+
+    /// The VFS the processor loads from — shared with consumers that need
+    /// direct file access on the same mounts (e.g. the editor's remote
+    /// channel writing a freshly created asset).
+    pub fn vfs(&self) -> &Vfs {
+        &self.vfs
+    }
 }
 
 /// Builds an [`AssetProcessor`] with a fixed set of loaders + routes.

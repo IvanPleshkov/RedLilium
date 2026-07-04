@@ -151,6 +151,62 @@ impl ActionRegistry {
                 Ok(RegisteredAction::plain(super::SelectAction::set(entities)))
             },
         );
+        // Asset-record edits (undoable; hot reload + persistence flow through
+        // apply — see `std::rendering::asset_actions`). Assets are addressed
+        // by guid string, as `state`/`inspect` print them.
+        #[cfg(feature = "rendering")]
+        {
+            use crate::std::rendering::{SetAssetReferenceAction, SetAssetSettingsAction};
+            use redlilium_assets::AssetDb;
+
+            fn req_guid(params: &ron::Value, key: &str) -> Result<redlilium_assets::Guid, String> {
+                req_str(params, key)?
+                    .parse()
+                    .map_err(|e| format!("'{key}': {e}"))
+            }
+
+            r.register(
+                "set_asset_settings",
+                "(guid: \"uuid\", settings?: \"…\") — replace the record's per-kind settings string (absent = clear)",
+                |world, params| {
+                    let guid = req_guid(params, "guid")?;
+                    let old = world
+                        .resource::<AssetDb>()
+                        .record(&guid)
+                        .ok_or_else(|| format!("unknown asset {guid}"))?
+                        .settings
+                        .clone();
+                    Ok(RegisteredAction::plain(SetAssetSettingsAction {
+                        guid,
+                        old,
+                        new: opt_str(params, "settings"),
+                    }))
+                },
+            );
+            r.register(
+                "set_asset_reference",
+                "(guid: \"uuid\", role: \"layout\", target?: \"uuid\") — set the record's named reference (absent = remove)",
+                |world, params| {
+                    let guid = req_guid(params, "guid")?;
+                    let role = req_str(params, "role")?;
+                    let old = world
+                        .resource::<AssetDb>()
+                        .record(&guid)
+                        .ok_or_else(|| format!("unknown asset {guid}"))?
+                        .reference(&role);
+                    let target = match opt_str(params, "target") {
+                        Some(s) => Some(s.parse().map_err(|e| format!("'target': {e}"))?),
+                        None => None,
+                    };
+                    Ok(RegisteredAction::plain(SetAssetReferenceAction {
+                        guid,
+                        role,
+                        old,
+                        new: target,
+                    }))
+                },
+            );
+        }
         r
     }
 

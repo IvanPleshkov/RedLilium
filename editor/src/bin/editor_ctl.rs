@@ -119,6 +119,39 @@ fn build_envelope(args: &[String]) -> Result<String, String> {
                 q(&rest[0])
             )
         }
+        "new-asset" => {
+            need(2, "new-asset <source> <kind> [dir] [name]")?;
+            let mut envelope = format!(
+                "(id: 1, cmd: \"new_asset\", source: {}, kind: {}",
+                q(&rest[0]),
+                q(&rest[1])
+            );
+            if let Some(dir) = rest.get(2) {
+                envelope.push_str(&format!(", dir: {}", q(dir)));
+            }
+            if let Some(name) = rest.get(3) {
+                envelope.push_str(&format!(", name: {}", q(name)));
+            }
+            envelope.push(')');
+            envelope
+        }
+        "save-prefab" => {
+            need(2, "save-prefab <entity> <mount/path.prefab>")?;
+            format!(
+                "(id: 1, cmd: \"save_prefab\", entity: {}, path: {})",
+                q(&rest[0]),
+                q(&rest[1])
+            )
+        }
+        "spawn-prefab" => {
+            need(1, "spawn-prefab <mount/path.prefab> [parent]")?;
+            let mut envelope = format!("(id: 1, cmd: \"spawn_prefab\", path: {}", q(&rest[0]));
+            if let Some(parent) = rest.get(1) {
+                envelope.push_str(&format!(", parent: {}", q(parent)));
+            }
+            envelope.push(')');
+            envelope
+        }
         "step" => {
             let n = rest.first().map(String::as_str).unwrap_or("1");
             format!("(id: 1, cmd: \"step\", n: {n})")

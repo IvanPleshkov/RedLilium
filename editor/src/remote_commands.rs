@@ -50,6 +50,9 @@ const COMMANDS: &[&str] = &[
     "shutdown",
     "action",
     "actions",
+    "new_asset",
+    "save_prefab",
+    "spawn_prefab",
 ];
 
 /// Per-editor remote protocol state (parked writes/waits, screenshot job).
@@ -698,6 +701,154 @@ fn dispatch(
                 }
                 Err(e) => send_err(world, conn, id, &format!("{name}: {e}")),
             }
+        }
+        // Create an asset file + DB record — the same (non-undoable) flow as
+        // the browser's "New asset": file ops sit outside the history, only
+        // record edits are actions. The VFS write is a local-mount file;
+        // blocking on it keeps this a one-response command.
+        "new_asset" => {
+            let (Some(source), Some(kind)) = (str_param("source"), str_param("kind")) else {
+                return send_err(world, conn, id, "missing 'source' or 'kind'");
+            };
+            let dir = str_param("dir").unwrap_or_default();
+            // A material instance parents to the std opaque material by
+            // default (mirrors the browser flow).
+            let parent = if kind == "material_instance" {
+                world.resource::<redlilium_assets::AssetDb>().guid_of(
+                    &redlilium_assets::AssetPath::new("std", "materials/opaque.material"),
+                )
+            } else {
+                None
+            };
+            let Some(spec) = redlilium_ecs::new_asset_spec(&kind, parent) else {
+                return send_err(world, conn, id, &format!("unknown asset kind '{kind}'"));
+            };
+            let path = match str_param("name") {
+                Some(name) => {
+                    let path = if dir.is_empty() {
+                        format!("{name}.{}", spec.extension)
+                    } else {
+                        format!("{dir}/{name}.{}", spec.extension)
+                    };
+                    let taken = world
+                        .resource::<redlilium_assets::AssetDb>()
+                        .guid_of(&redlilium_assets::AssetPath::new(&source, &path))
+                        .is_some();
+                    if taken {
+                        return send_err(world, conn, id, &format!("'{path}' already exists"));
+                    }
+                    path
+                }
+                None => crate::core::unique_asset_path(world, &source, &dir, spec.extension),
+            };
+            let guid = {
+                let mut db = world.resource_mut::<redlilium_assets::AssetDb>();
+                let guid =
+                    db.register_path(redlilium_assets::AssetPath::new(&source, &path), &kind, 0);
+                db.set_settings(&guid, spec.settings);
+                guid
+            };
+            let vfs_path = format!("{source}/{path}");
+            let write = pollster::block_on(
+                world
+                    .resource::<AssetProcessor>()
+                    .vfs()
+                    .write(&vfs_path, Vec::new()),
+            );
+            if let Err(e) = write {
+                world
+                    .resource_mut::<redlilium_assets::AssetDb>()
+                    .remove(&guid);
+                return send_err(world, conn, id, &format!("write {vfs_path}: {e}"));
+            }
+            world
+                .resource_mut::<redlilium_ecs::DirtyMounts>()
+                .push(&source);
+            log::info!("remote: created asset {vfs_path} ({guid})");
+
+            #[derive(Serialize)]
+            struct NewAssetResp {
+                id: i64,
+                ok: bool,
+                guid: String,
+                path: String,
+            }
+            send(
+                world,
+                conn,
+                &NewAssetResp {
+                    id,
+                    ok: true,
+                    guid: guid.to_string(),
+                    path: vfs_path,
+                },
+            );
+        }
+        // Serialize an entity subtree to a `.prefab` file (RON) — the wire
+        // twin of the browser's prefab export.
+        "save_prefab" => {
+            let Some(entity) = str_param("entity").and_then(|s| find_entity(world, &s)) else {
+                return send_err(world, conn, id, "unknown entity");
+            };
+            let Some(path) = str_param("path") else {
+                return send_err(world, conn, id, "missing 'path'");
+            };
+            let data = match world
+                .serialize_prefab(entity)
+                .map_err(|e| e.to_string())
+                .and_then(|prefab| {
+                    redlilium_ecs::serialize::encode(&prefab, redlilium_ecs::serialize::Format::Ron)
+                        .map_err(|e| e.to_string())
+                }) {
+                Ok(data) => data,
+                Err(e) => return send_err(world, conn, id, &format!("serialize: {e}")),
+            };
+            let write =
+                pollster::block_on(world.resource::<AssetProcessor>().vfs().write(&path, data));
+            match write {
+                Ok(()) => {
+                    log::info!("remote: saved prefab {path}");
+                    send(world, conn, &OkResp { id, ok: true });
+                }
+                Err(e) => send_err(world, conn, id, &format!("write {path}: {e}")),
+            }
+        }
+        // Spawn a `.prefab` file (undoable; response carries the new ids).
+        "spawn_prefab" => {
+            let Some(path) = str_param("path") else {
+                return send_err(world, conn, id, "missing 'path'");
+            };
+            let parent = match str_param("parent") {
+                Some(spec) => match find_entity(world, &spec) {
+                    Some(e) => Some(e),
+                    None => return send_err(world, conn, id, &format!("unknown parent '{spec}'")),
+                },
+                None => None,
+            };
+            let data =
+                match pollster::block_on(world.resource::<AssetProcessor>().vfs().read(&path)) {
+                    Ok(data) => data,
+                    Err(e) => return send_err(world, conn, id, &format!("read {path}: {e}")),
+                };
+            let prefab = match redlilium_ecs::serialize::decode::<
+                redlilium_ecs::serialize::SerializedPrefab,
+            >(&data, redlilium_ecs::serialize::Format::Ron)
+            {
+                Ok(p) => p,
+                Err(e) => return send_err(world, conn, id, &format!("decode {path}: {e}")),
+            };
+            let report = SpawnReport::default();
+            let action = redlilium_ecs::ui::SpawnPrefabAction::new(prefab, parent)
+                .with_report(report.clone());
+            let result = push_action(world, Box::new(action));
+            rc.parked.push(Parked::Write {
+                conn,
+                id,
+                entity: None,
+                component: None,
+                spawned: Some(report),
+                result,
+            });
         }
         "actions" => {
             #[derive(Serialize)]

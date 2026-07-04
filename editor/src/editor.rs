@@ -23,7 +23,7 @@ use winit::keyboard::PhysicalKey;
 
 use crate::asset_browser::AssetBrowser;
 use crate::console::ConsolePanel;
-use crate::core::{EditorWorld, EditorWorldParams, create_editor_world};
+use crate::core::{EditorWorld, EditorWorldParams, create_editor_world, unique_asset_path};
 use crate::dock::{self, EditorTabViewer, Tab};
 #[cfg(not(target_os = "macos"))]
 use crate::menu;
@@ -1424,26 +1424,4 @@ fn show_drag_overlay(ctx: &egui::Context, world: &World) {
                 });
             });
     }
-}
-
-/// A free asset path `dir/new[.N].<ext>` under `source` not already in the DB.
-fn unique_asset_path(world: &World, source: &str, dir: &str, ext: &str) -> String {
-    let db = world.resource::<AssetDb>();
-    (0u32..)
-        .find_map(|i| {
-            let name = if i == 0 {
-                format!("new.{ext}")
-            } else {
-                format!("new_{i}.{ext}")
-            };
-            let path = if dir.is_empty() {
-                name
-            } else {
-                format!("{dir}/{name}")
-            };
-            db.guid_of(&AssetPath::new(source, &path))
-                .is_none()
-                .then_some(path)
-        })
-        .expect("infinite range yields a free name")
 }

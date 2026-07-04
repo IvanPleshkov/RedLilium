@@ -31,6 +31,16 @@ impl Default for Guid {
     }
 }
 
+/// Parse from the canonical hyphenated form (what [`Display`](std::fmt::Display)
+/// prints) — wire formats (the remote channel) address assets by guid string.
+impl std::str::FromStr for Guid {
+    type Err = uuid::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(uuid::Uuid::parse_str(s)?))
+    }
+}
+
 impl std::fmt::Display for Guid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
