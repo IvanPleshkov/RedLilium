@@ -413,9 +413,44 @@ impl WgpuBackend {
                         data.len()
                     ))
                 })?;
-                // queue.write_buffer stages internally and is ordered before this
-                // command buffer's submission.
-                self.queue.write_buffer(dst_buffer, *dst_offset, bytes);
+                if bytes.is_empty() {
+                    return Ok(());
+                }
+                if !dst_offset.is_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT)
+                    || !(bytes.len() as u64).is_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT)
+                {
+                    return Err(GraphicsError::InvalidParameter(format!(
+                        "WriteBuffer requires 4-byte aligned dst_offset and size \
+                         (got offset {}, size {})",
+                        dst_offset,
+                        bytes.len()
+                    )));
+                }
+                // Copy via a transient staging buffer at THIS point in the
+                // encoder, so the write lands at the transfer pass's position
+                // in the graph. queue.write_buffer would instead execute at the
+                // start of the submission — before ALL passes, regardless of
+                // where the transfer pass sits. The staging buffer is dropped
+                // after encoding; wgpu keeps it alive until the submission
+                // completes.
+                let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("write_buffer_staging"),
+                    size: bytes.len() as u64,
+                    usage: wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: true,
+                });
+                staging
+                    .slice(..)
+                    .get_mapped_range_mut()
+                    .copy_from_slice(bytes);
+                staging.unmap();
+                encoder.copy_buffer_to_buffer(
+                    &staging,
+                    0,
+                    dst_buffer,
+                    *dst_offset,
+                    bytes.len() as u64,
+                );
             }
             // Drained by the frame pipeline after the fence (CPU read); nothing
             // to encode here.

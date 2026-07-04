@@ -68,7 +68,7 @@ per-frame uniform streams.
 - **Failure:** window resize / alt-tab / monitor sleep → frame errors out and rendering
   stops or error-spams instead of transparently recreating the surface.
 
-### [ ] WG-H4. Mid-graph `WriteBuffer` transfer op executes before *all* passes in the submission
+### [x] WG-H4. Mid-graph `WriteBuffer` transfer op executes before *all* passes in the submission
 - **Where:** `pass_encoding.rs:400-419` (`queue.write_buffer` during encoding)
 - **Category:** bug / divergence (see XB-H3)
 - wgpu schedules queue writes at the start of the next submission, not at the transfer

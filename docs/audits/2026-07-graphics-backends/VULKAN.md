@@ -136,7 +136,7 @@ Line numbers refer to the tree at commit `1d6ee28`.
 
 ## Medium
 
-### [ ] VK-M1. Host writes to mapped buffers have no frame synchronization
+### [x] VK-M1. Host writes to mapped buffers have no frame synchronization
 - **Where:** `mod.rs:1361-1391` (`write_buffer`), `mod.rs:2377-2411` (`WriteBuffer` transfer op)
 - **Category:** bug
 - Both paths memcpy into the single persistently-mapped allocation with no per-frame

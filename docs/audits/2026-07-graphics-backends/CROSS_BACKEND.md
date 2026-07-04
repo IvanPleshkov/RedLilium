@@ -37,7 +37,7 @@ enums, present modes, stencil/depth clears) **except** where noted below.
 - **Category:** divergence — details in WG-H1. Writable-storage compute works on Vulkan,
   fails pipeline creation on wgpu.
 
-### [ ] XB-H3. `write_buffer` timing semantics differ; trait contract silent
+### [x] XB-H3. `write_buffer` timing semantics differ; trait contract silent
 - **Where:** `vulkan/mod.rs:1361-1391` (immediate memcpy into mapped memory) vs
   `wgpu_impl/resources.rs:518-532` (`queue.write_buffer`, staged & queue-ordered); mid-graph
   op: `wgpu_impl/pass_encoding.rs:400-419` executes before all passes of the submission,

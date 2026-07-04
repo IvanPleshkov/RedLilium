@@ -179,6 +179,12 @@ pub struct VulkanBackend {
     pipeline_manager: pipeline::PipelineManager,
     /// Scratch buffers for allocation reuse during pass encoding.
     encoder_scratch: Mutex<VulkanEncoderScratch>,
+    /// Transient staging buffers created while encoding a frame (e.g. for
+    /// `WriteBuffer` transfer ops), retired per frame slot. A slot's buffers
+    /// are destroyed in [`advance_frame`](Self::advance_frame) once its fence
+    /// has signalled, so the GPU is guaranteed to be done with them.
+    retired_staging:
+        Mutex<[Vec<(vk::Buffer, gpu_allocator::vulkan::Allocation)>; MAX_FRAMES_IN_FLIGHT]>,
 }
 
 impl std::fmt::Debug for VulkanBackend {
@@ -280,6 +286,7 @@ impl VulkanBackend {
             layout_tracker,
             pipeline_manager,
             encoder_scratch: Mutex::new(VulkanEncoderScratch::default()),
+            retired_staging: Mutex::new(Default::default()),
         })
     }
 
@@ -408,6 +415,17 @@ impl VulkanBackend {
         // Reset the oldest slot's descriptor pool — safe because the fence wait
         // guarantees the GPU is done with all descriptor sets from this slot.
         let _ = self.pipeline_manager.reset_descriptor_pool(oldest);
+
+        // Destroy the oldest slot's transient staging buffers — same safety
+        // argument: the fence wait guarantees their copies have completed.
+        let retired: Vec<_> = self.retired_staging.lock()[oldest].drain(..).collect();
+        if !retired.is_empty() {
+            let mut allocator = self.allocator.lock();
+            for (buffer, allocation) in retired {
+                unsafe { self.device.destroy_buffer(buffer, None) };
+                let _ = allocator.free(allocation);
+            }
+        }
     }
 
     /// Get the layout tracker for direct access (for testing).
@@ -546,6 +564,19 @@ impl Drop for VulkanBackend {
                 self.device.destroy_command_pool(pool, None);
             }
             self.device.destroy_command_pool(self.command_pool, None);
+
+            // Destroy any staging buffers still retired in frame slots (the
+            // device_wait_idle above guarantees the GPU is done with them).
+            {
+                let mut slots = self.retired_staging.lock();
+                let mut allocator = self.allocator.lock();
+                for slot in slots.iter_mut() {
+                    for (buffer, allocation) in slot.drain(..) {
+                        self.device.destroy_buffer(buffer, None);
+                        let _ = allocator.free(allocation);
+                    }
+                }
+            }
 
             // Drop the allocator BEFORE destroying the device. gpu-allocator's
             // `Allocator::drop` frees its pooled memory blocks using the device,
@@ -2323,6 +2354,71 @@ impl VulkanBackend {
         Ok(())
     }
 
+    /// Create a transient host-visible staging buffer pre-filled with `bytes`.
+    ///
+    /// The returned pair must be pushed into [`Self::retired_staging`] for the
+    /// current frame slot so the buffer outlives the GPU copy that reads it.
+    /// Host writes made here are visible to the GPU via the implicit
+    /// host→device memory dependency performed by `vkQueueSubmit`.
+    fn create_transient_staging(
+        &self,
+        bytes: &[u8],
+        label: &str,
+    ) -> Result<(vk::Buffer, gpu_allocator::vulkan::Allocation), GraphicsError> {
+        let buffer_info = vk::BufferCreateInfo::default()
+            .size(bytes.len() as u64)
+            .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let buffer = unsafe { self.device.create_buffer(&buffer_info, None) }.map_err(|e| {
+            GraphicsError::ResourceCreationFailed(format!("Failed to create staging buffer: {e:?}"))
+        })?;
+
+        let requirements = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+        let allocation =
+            match self
+                .allocator
+                .lock()
+                .allocate(&gpu_allocator::vulkan::AllocationCreateDesc {
+                    name: label,
+                    requirements,
+                    location: gpu_allocator::MemoryLocation::CpuToGpu,
+                    linear: true,
+                    allocation_scheme: gpu_allocator::vulkan::AllocationScheme::GpuAllocatorManaged,
+                }) {
+                Ok(allocation) => allocation,
+                Err(e) => {
+                    unsafe { self.device.destroy_buffer(buffer, None) };
+                    return Err(GraphicsError::ResourceCreationFailed(format!(
+                        "Failed to allocate staging memory: {e}"
+                    )));
+                }
+            };
+
+        if let Err(e) = unsafe {
+            self.device
+                .bind_buffer_memory(buffer, allocation.memory(), allocation.offset())
+        } {
+            unsafe { self.device.destroy_buffer(buffer, None) };
+            let _ = self.allocator.lock().free(allocation);
+            return Err(GraphicsError::ResourceCreationFailed(format!(
+                "Failed to bind staging memory: {e:?}"
+            )));
+        }
+
+        let Some(mapped) = allocation.mapped_ptr() else {
+            unsafe { self.device.destroy_buffer(buffer, None) };
+            let _ = self.allocator.lock().free(allocation);
+            return Err(GraphicsError::Internal(
+                "staging buffer is not host-mapped".to_string(),
+            ));
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr() as *mut u8, bytes.len());
+        }
+
+        Ok((buffer, allocation))
+    }
+
     fn encode_transfer_pass(
         &self,
         cmd: vk::CommandBuffer,
@@ -2388,27 +2484,43 @@ impl VulkanBackend {
                         data.len()
                     ))
                 })?;
-                let GpuBuffer::Vulkan { allocation, .. } = dst.gpu_handle() else {
+                let GpuBuffer::Vulkan {
+                    buffer: dst_buffer, ..
+                } = dst.gpu_handle()
+                else {
                     return Ok(());
                 };
-                let guard = allocation.lock();
-                let Some(allocation) = guard.as_ref() else {
-                    return Err(GraphicsError::Internal(
-                        "WriteBuffer dst allocation is None".to_string(),
-                    ));
-                };
-                let Some(mapped_ptr) = allocation.mapped_ptr() else {
-                    return Err(GraphicsError::Internal(
-                        "WriteBuffer dst is not host-visible (mapped)".to_string(),
-                    ));
-                };
-                // CPU memcpy into mapped memory during command recording; the
-                // write completes before submission, so the GPU sees it when it
-                // runs this frame's commands.
-                unsafe {
-                    let p = mapped_ptr.as_ptr().add(*dst_offset as usize);
-                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), p as *mut u8, bytes.len());
+                if bytes.is_empty() {
+                    return Ok(());
                 }
+                // Same restriction as wgpu's copy path (COPY_BUFFER_ALIGNMENT);
+                // enforced on both backends so a graph behaves identically.
+                if !dst_offset.is_multiple_of(4) || !bytes.len().is_multiple_of(4) {
+                    return Err(GraphicsError::InvalidParameter(format!(
+                        "WriteBuffer requires 4-byte aligned dst_offset and size \
+                         (got offset {}, size {})",
+                        dst_offset,
+                        bytes.len()
+                    )));
+                }
+                // Copy via a transient staging buffer at THIS point in the
+                // command buffer, so the write lands at the transfer pass's
+                // position in the graph: passes ordered before it see the old
+                // contents, passes after it see the new. A host memcpy here
+                // would instead be visible to the whole frame — and race any
+                // still-executing previous frame reading the same memory.
+                let (staging, staging_alloc) =
+                    self.create_transient_staging(bytes, "write_buffer_staging")?;
+                let region = vk::BufferCopy::default()
+                    .src_offset(0)
+                    .dst_offset(*dst_offset)
+                    .size(bytes.len() as u64);
+                unsafe {
+                    self.device
+                        .cmd_copy_buffer(cmd, staging, *dst_buffer, &[region]);
+                }
+                let slot = self.current_slot.load(Ordering::Relaxed);
+                self.retired_staging.lock()[slot].push((staging, staging_alloc));
             }
             // Drained by the frame pipeline after the fence (CPU read); nothing
             // to encode here.
