@@ -258,7 +258,9 @@ impl PipelineManager {
                 let descriptor_type = match entry.binding_type {
                     BindingType::UniformBuffer => vk::DescriptorType::UNIFORM_BUFFER,
                     BindingType::DynamicUniformBuffer => vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
-                    BindingType::StorageBuffer => vk::DescriptorType::STORAGE_BUFFER,
+                    BindingType::StorageBuffer | BindingType::StorageBufferReadOnly => {
+                        vk::DescriptorType::STORAGE_BUFFER
+                    }
                     BindingType::Sampler => vk::DescriptorType::SAMPLER,
                     BindingType::Texture => vk::DescriptorType::SAMPLED_IMAGE,
                     BindingType::TextureCube => vk::DescriptorType::SAMPLED_IMAGE,
@@ -406,7 +408,10 @@ impl PipelineManager {
                 vk::VertexInputBindingDescription::default()
                     .binding(i as u32)
                     .stride(buffer.stride)
-                    .input_rate(vk::VertexInputRate::VERTEX)
+                    .input_rate(match buffer.step_mode {
+                        crate::mesh::VertexStepMode::Vertex => vk::VertexInputRate::VERTEX,
+                        crate::mesh::VertexStepMode::Instance => vk::VertexInputRate::INSTANCE,
+                    })
             })
             .collect();
 
@@ -472,8 +477,12 @@ impl PipelineManager {
 
         let color_blend_attachments: Vec<vk::PipelineColorBlendAttachmentState> = color_formats
             .iter()
-            .map(|_| {
-                if let Some(state) = blend_state {
+            .map(|format| {
+                // Blending is invalid on integer formats (matches the wgpu backend,
+                // which also disables it for e.g. R32Uint picking/ID buffers).
+                if let Some(state) = blend_state
+                    && !format.is_integer()
+                {
                     convert_blend_state(state)
                 } else {
                     // Default: no blending (replace)

@@ -34,6 +34,17 @@ impl WgpuBackend {
     ) -> Result<GpuTexture, GraphicsError> {
         use crate::types::TextureDimension;
 
+        // wgpu has no BGRA-ordered 10-bit format; silently mapping to
+        // Rgb10a2Unorm would swap the red/blue channels relative to the
+        // Vulkan backend (A2R10G10B10). Fail loudly instead.
+        if descriptor.format == crate::types::TextureFormat::Bgra10a2Unorm {
+            return Err(GraphicsError::InvalidParameter(
+                "Bgra10a2Unorm is not supported by the wgpu backend (no BGRA-ordered \
+                 10-bit format in WebGPU); use Rgba10a2Unorm instead"
+                    .into(),
+            ));
+        }
+
         let format = convert_texture_format(descriptor.format);
         let usage = convert_texture_usage(descriptor.usage);
 
@@ -495,12 +506,15 @@ impl WgpuBackend {
             && let Ok(guard) = submission_index.lock()
             && let Some(idx) = guard.clone()
         {
-            // Wait for the specific submission with user-specified timeout
+            // Wait for the specific submission with user-specified timeout.
+            // `wait_finished()` is true for both QueueEmpty and WaitSucceeded;
+            // `is_queue_empty()` would report a spurious timeout whenever other
+            // submissions are still in flight.
             match device.poll(wgpu::PollType::Wait {
                 submission_index: Some(idx),
                 timeout: Some(timeout),
             }) {
-                Ok(status) => status.is_queue_empty(),
+                Ok(status) => status.wait_finished(),
                 Err(_) => false,
             }
         } else {

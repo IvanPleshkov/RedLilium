@@ -2151,9 +2151,10 @@ impl VulkanBackend {
                         buffer_idx += 1;
                         // Use the binding type from layout, defaulting to UNIFORM_BUFFER
                         let descriptor_type = match binding_type {
-                            Some(crate::materials::BindingType::StorageBuffer) => {
-                                vk::DescriptorType::STORAGE_BUFFER
-                            }
+                            Some(
+                                crate::materials::BindingType::StorageBuffer
+                                | crate::materials::BindingType::StorageBufferReadOnly,
+                            ) => vk::DescriptorType::STORAGE_BUFFER,
                             Some(crate::materials::BindingType::DynamicUniformBuffer) => {
                                 vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC
                             }
@@ -2817,9 +2818,10 @@ impl VulkanBackend {
                             let info = &scratch_buffer_infos[buffer_idx..buffer_idx + 1];
                             buffer_idx += 1;
                             let descriptor_type = match binding_type {
-                                Some(crate::materials::BindingType::StorageBuffer) => {
-                                    vk::DescriptorType::STORAGE_BUFFER
-                                }
+                                Some(
+                                    crate::materials::BindingType::StorageBuffer
+                                    | crate::materials::BindingType::StorageBufferReadOnly,
+                                ) => vk::DescriptorType::STORAGE_BUFFER,
                                 Some(crate::materials::BindingType::DynamicUniformBuffer) => {
                                     vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC
                                 }
