@@ -94,9 +94,9 @@ impl EditAction<World> for SetStaticAction {
 
 /// Reversible action that adds a default component to an entity.
 #[derive(Debug)]
-struct AddComponentAction {
-    entity: Entity,
-    name: &'static str,
+pub struct AddComponentAction {
+    pub entity: Entity,
+    pub name: String,
 }
 
 impl EditAction<World> for AddComponentAction {
@@ -104,7 +104,7 @@ impl EditAction<World> for AddComponentAction {
         if !world.is_alive(self.entity) {
             return Err(EditActionError::TargetNotFound("entity despawned".into()));
         }
-        world.insert_default_by_name(self.entity, self.name);
+        world.insert_default_by_name(self.entity, &self.name);
         Ok(())
     }
 
@@ -112,12 +112,12 @@ impl EditAction<World> for AddComponentAction {
         if !world.is_alive(self.entity) {
             return Err(EditActionError::TargetNotFound("entity despawned".into()));
         }
-        world.remove_by_name(self.entity, self.name);
+        world.remove_by_name(self.entity, &self.name);
         Ok(())
     }
 
     fn description(&self) -> &str {
-        self.name
+        &self.name
     }
 }
 
@@ -125,10 +125,20 @@ impl EditAction<World> for AddComponentAction {
 ///
 /// On apply, extracts (clones) the component value into `saved` before removing.
 /// On undo, restores the saved value back onto the entity.
-struct RemoveComponentAction {
-    entity: Entity,
-    name: &'static str,
-    saved: Option<Box<dyn crate::prefab::ComponentBag>>,
+pub struct RemoveComponentAction {
+    pub entity: Entity,
+    pub name: String,
+    pub(crate) saved: Option<Box<dyn crate::prefab::ComponentBag>>,
+}
+
+impl RemoveComponentAction {
+    pub fn new(entity: Entity, name: String) -> Self {
+        Self {
+            entity,
+            name,
+            saved: None,
+        }
+    }
 }
 
 impl std::fmt::Debug for RemoveComponentAction {
@@ -144,8 +154,8 @@ impl EditAction<World> for RemoveComponentAction {
         if !world.is_alive(self.entity) {
             return Err(EditActionError::TargetNotFound("entity despawned".into()));
         }
-        self.saved = world.extract_by_name(self.entity, self.name);
-        world.remove_by_name(self.entity, self.name);
+        self.saved = world.extract_by_name(self.entity, &self.name);
+        world.remove_by_name(self.entity, &self.name);
         Ok(())
     }
 
@@ -162,7 +172,7 @@ impl EditAction<World> for RemoveComponentAction {
     }
 
     fn description(&self) -> &str {
-        self.name
+        &self.name
     }
 }
 
@@ -355,11 +365,10 @@ pub fn show_component_inspector(ui: &mut egui::Ui, world: &mut World, state: &mu
 
                 header_resp.header_response.context_menu(|ui| {
                     if ui.button("Remove Component").clicked() {
-                        actions.push(Box::new(RemoveComponentAction {
-                            entity: selected,
-                            name: comp_name,
-                            saved: None,
-                        }));
+                        actions.push(Box::new(RemoveComponentAction::new(
+                            selected,
+                            (*comp_name).to_owned(),
+                        )));
                         ui.close();
                     }
                 });
@@ -403,7 +412,7 @@ pub fn show_component_inspector(ui: &mut egui::Ui, world: &mut World, state: &mu
                                 if ui.button(*name).clicked() {
                                     actions.push(Box::new(AddComponentAction {
                                         entity: selected,
-                                        name,
+                                        name: (*name).to_owned(),
                                     }));
                                     state.add_component_open = false;
                                 }

@@ -16,6 +16,8 @@ pub mod hierarchy;
 ))]
 pub mod physics;
 #[cfg(feature = "rendering")]
+pub mod remote;
+#[cfg(feature = "rendering")]
 pub mod rendering;
 pub mod spawn;
 pub mod systems;

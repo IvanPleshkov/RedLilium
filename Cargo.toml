@@ -77,7 +77,7 @@ rapier2d = "0.32"
 rapier2d-f64 = { package = "rapier2d-f64", version = "0.32" }
 
 # Async IO runtime
-tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "net", "io-util", "sync"] }
 
 # Serialization
 serde = { version = "1", features = ["derive", "rc"] }

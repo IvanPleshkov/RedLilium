@@ -33,3 +33,4 @@ demos/web/pkg/
 /book/redlilium-book.html
 /redlilium-book.zip
 project-assets/
+.redlilium/

@@ -27,6 +27,7 @@ mod context;
 mod error;
 pub mod field;
 mod format;
+pub mod natural;
 mod prefab_io;
 pub mod value;
 
@@ -36,6 +37,7 @@ pub use field::{
     DeserializeField, DeserializeFieldFallback, SerializeField, SerializeFieldFallback,
 };
 pub use format::Format;
+pub use natural::{natural_to_value, parse_entity_spec, value_to_natural};
 pub use prefab_io::{SerializedComponent, SerializedEntity, SerializedPrefab};
 pub use value::Value;
 

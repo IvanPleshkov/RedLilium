@@ -4,6 +4,9 @@ use std::time::Instant;
 
 /// A single captured log entry.
 pub struct LogEntry {
+    /// Monotonic sequence number (survives ring eviction — remote clients
+    /// page through logs with `logs since=<seq>`).
+    pub seq: u64,
     pub level: log::Level,
     pub target: String,
     pub message: String,
@@ -14,6 +17,7 @@ pub struct LogEntry {
 pub struct LogBuffer {
     entries: VecDeque<LogEntry>,
     max_capacity: usize,
+    next_seq: u64,
 }
 
 impl LogBuffer {
@@ -21,6 +25,7 @@ impl LogBuffer {
         Self {
             entries: VecDeque::with_capacity(max_capacity.min(1024)),
             max_capacity,
+            next_seq: 1,
         }
     }
 
@@ -28,7 +33,9 @@ impl LogBuffer {
         &self.entries
     }
 
-    fn push(&mut self, entry: LogEntry) {
+    fn push(&mut self, mut entry: LogEntry) {
+        entry.seq = self.next_seq;
+        self.next_seq += 1;
         if self.entries.len() >= self.max_capacity {
             self.entries.pop_front();
         }
@@ -69,6 +76,7 @@ impl log::Log for LogCapture {
 
             // Capture to ring buffer
             let entry = LogEntry {
+                seq: 0, // assigned by push
                 level: record.level(),
                 target: record.target().to_owned(),
                 message: format!("{}", record.args()),

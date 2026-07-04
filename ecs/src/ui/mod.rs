@@ -29,7 +29,9 @@
 mod component_inspector;
 mod world_inspector;
 
-pub use component_inspector::{ImportComponentAction, show_component_inspector};
+pub use component_inspector::{
+    AddComponentAction, ImportComponentAction, RemoveComponentAction, show_component_inspector,
+};
 pub use world_inspector::{DeleteEntityAction, SpawnPrefabAction, show_world_inspector};
 
 use redlilium_core::abstract_editor::{ActionQueue, EditAction, EditActionResult};

@@ -158,6 +158,9 @@ pub use self::std::systems::{UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGl
 // AssetProcessor resource. Consumers dep `redlilium-assets` directly.
 #[cfg(feature = "rendering")]
 pub use self::std::assets::{AssetGpuFlush, AssetPump};
+// Remote-control transport (line-based TCP on the IO runtime; docs/REMOTE.md).
+#[cfg(feature = "rendering")]
+pub use self::std::remote::{RemoteLine, RemoteServe, RemoteTransport};
 // Rendering asset loaders + their sharing managers (feature-gated).
 #[cfg(feature = "rendering")]
 pub use rendering::{

@@ -27,6 +27,7 @@ bytemuck = { workspace = true }
 egui = { workspace = true }
 egui_dock = { workspace = true }
 winit = { workspace = true }
+image = { workspace = true }
 pollster = { workspace = true }
 tokio = { workspace = true }
 notify = { workspace = true }

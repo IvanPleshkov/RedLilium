@@ -563,7 +563,11 @@ impl SceneViewState {
                     width,
                     height,
                     format,
-                    TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
+                    // COPY_SRC: the remote channel reads the scene back for
+                    // screenshots (docs/REMOTE.md).
+                    TextureUsage::RENDER_ATTACHMENT
+                        | TextureUsage::TEXTURE_BINDING
+                        | TextureUsage::COPY_SRC,
                 )
                 .with_label("scene_view_color"),
             )

@@ -83,6 +83,8 @@ pub struct Editor {
     /// `<dir>/assets.db`, loaded + scanned at world creation and persisted
     /// when edited.
     local_mounts: Vec<(&'static str, &'static str)>,
+    /// Remote-control protocol state (`REDLILIUM_REMOTE=1`, docs/REMOTE.md).
+    remote: Option<crate::remote_commands::RemoteCommands>,
     console: ConsolePanel,
 
     // UI (the egui controller is an ECS resource — see on_init)
@@ -172,6 +174,9 @@ impl Editor {
             vfs,
             asset_browser,
             local_mounts: local_mounts.to_vec(),
+            remote: std::env::var("REDLILIUM_REMOTE")
+                .is_ok_and(|v| v == "1")
+                .then(crate::remote_commands::RemoteCommands::default),
             console,
             dock_state: dock::create_default_layout(),
             inspector_state: InspectorState::new(),
@@ -219,6 +224,13 @@ impl Editor {
         // Mounts with un-persisted asset-DB edits (written by the undoable
         // asset-edit actions); drained + persisted once per frame.
         world.insert_resource(redlilium_ecs::DirtyMounts::new());
+        // Remote-control channel (docs/REMOTE.md): served by RemoteServe on
+        // the IO runtime; the editor pumps commands each frame. Opt-in.
+        if self.remote.is_some() {
+            world.insert_resource(redlilium_ecs::RemoteTransport::new(
+                ".redlilium/editor.port",
+            ));
+        }
 
         // Asset system: one processor (with the rendering loaders) + one DB. The
         // AssetPump / MeshLoad / AssetGpuFlush systems drive these each frame.
@@ -483,6 +495,9 @@ impl Editor {
         // AssetPump drains the async stages onto the compute/IO pools + collects.
         schedules.get_mut::<PostUpdate>().add(HotReload);
         schedules.get_mut::<PostUpdate>().add(MeshLoad::default());
+        schedules
+            .get_mut::<PostUpdate>()
+            .add(redlilium_ecs::RemoteServe);
         schedules.get_mut::<PostUpdate>().add(MaterialInstanceLoad);
         schedules.get_mut::<PostUpdate>().add(AssetPump);
         schedules
@@ -910,6 +925,14 @@ impl AppHandler for Editor {
                     log::warn!("Action failed: {e}");
                 }
             }
+        }
+
+        // Remote protocol pump: completes last frame's parked responses (their
+        // actions just drained), then executes newly arrived commands.
+        if let Some(rc) = &mut self.remote
+            && let Some(ew) = self.world.as_mut()
+        {
+            crate::remote_commands::pump(rc, &mut ew.world, &mut ew.history);
         }
 
         // Run ECS schedules (always run in editing mode for camera/transforms)
@@ -1507,6 +1530,15 @@ impl AppHandler for Editor {
                 .resource_mut::<RenderSchedule>()
                 .take()
                 .expect("RenderSchedule must hold the graph after the Render schedule");
+        }
+
+        // Remote screenshot: copy this frame's scene target through the graph.
+        if let (Some(rc), Some(sv), Some(ew)) = (
+            &mut self.remote,
+            self.scene_view.as_ref(),
+            self.world.as_ref(),
+        ) {
+            crate::remote_commands::inject_screenshot_pass(rc, &ew.world, sv.device(), &mut graph);
         }
 
         if render_active && let Some(ew) = self.world.as_ref() {

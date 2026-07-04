@@ -14,6 +14,7 @@ mod history_panel;
 mod log_capture;
 mod menu;
 mod project;
+mod remote_commands;
 mod scene_view;
 mod status_bar;
 mod theme;

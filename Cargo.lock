@@ -4406,6 +4406,7 @@ dependencies = [
  "egui",
  "egui_dock",
  "env_logger",
+ "image",
  "log",
  "muda",
  "notify",
