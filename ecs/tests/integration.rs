@@ -416,3 +416,48 @@ fn register_prevents_empty_world_panic() {
     let runner = EcsRunner::single_thread();
     runner.run(&mut world, &container);
 }
+
+// ---------------------------------------------------------------------------
+// Prefab serialization of a child entity
+// ---------------------------------------------------------------------------
+
+/// A prefab cut from the middle of a hierarchy must not carry the root's
+/// `Parent` (it references an entity outside the subtree — attachment
+/// context, not content). Regression: delete-undo of a child entity failed
+/// with "entity reference points outside the deserialized set".
+#[test]
+fn child_prefab_roundtrip_drops_external_parent() {
+    let mut world = World::new();
+    register_std_components(&mut world);
+
+    let parent = world.spawn();
+    let child = world.spawn();
+    let grandchild = world.spawn();
+    for e in [parent, child, grandchild] {
+        world.insert(e, Transform::default()).unwrap();
+    }
+    redlilium_ecs::set_parent(&mut world, child, parent);
+    redlilium_ecs::set_parent(&mut world, grandchild, child);
+
+    let prefab = world.serialize_prefab(child).unwrap();
+    // The root of the cut must not serialize its Parent; internal hierarchy
+    // (child -> grandchild) is content and stays.
+    assert!(
+        !prefab.entities[0]
+            .components
+            .iter()
+            .any(|c| c.type_name == "Parent"),
+        "root's external Parent must be dropped"
+    );
+
+    let spawned = world
+        .deserialize_prefab(&prefab)
+        .expect("child prefab must deserialize");
+    assert_eq!(spawned.len(), 2);
+    // The clone is a root (no parent); its own subtree is intact.
+    assert!(world.get::<Parent>(spawned[0]).is_none());
+    assert_eq!(
+        world.get::<Parent>(spawned[1]).map(|p| p.0),
+        Some(spawned[0])
+    );
+}

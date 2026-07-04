@@ -27,6 +27,8 @@ mod context;
 mod error;
 pub mod field;
 mod format;
+// Natural-RON conversion needs the `ron` crate (also pulled in by `rendering`).
+#[cfg(feature = "serialize-ron")]
 pub mod natural;
 mod prefab_io;
 pub mod value;
@@ -37,7 +39,8 @@ pub use field::{
     DeserializeField, DeserializeFieldFallback, SerializeField, SerializeFieldFallback,
 };
 pub use format::Format;
-pub use natural::{natural_to_value, parse_entity_spec, value_to_natural};
+#[cfg(feature = "serialize-ron")]
+pub use natural::{find_entity, natural_to_value, parse_entity_spec, value_to_natural};
 pub use prefab_io::{SerializedComponent, SerializedEntity, SerializedPrefab};
 pub use value::Value;
 

@@ -40,6 +40,10 @@ Stop with `editor_ctl shutdown` (graceful; discards unsaved changes), or
 - `step [n]` — advance n frames (drives the frames in headless mode)
 - `screenshot <path.png>` — the scene render target, then Read the PNG
 - `shutdown` — close the editor
+- `actions` — list the action registry (name + usage)
+- `action <name> '(params…)'` — invoke any registered action: `spawn_entity`
+  (response carries the new entity id), `delete_entity`, `reparent`,
+  `add_component`, `remove_component`, `set_component`, `select`
 - `raw '(id: 1, cmd: "…")'` — arbitrary envelope
 
 ## Recipes
@@ -53,6 +57,15 @@ editor_ctl screenshot /tmp/check.png   # then Read the image
 
 Verify hot reload: edit the asset file / `asset_settings`, `wait-assets`,
 screenshot, compare.
+
+Author a new object from scratch (copy MeshRenderer data from an existing
+entity via `inspect` if you need a template):
+```bash
+editor_ctl action spawn_entity '(name: "Ball")'      # → entities: ["7@42"]
+editor_ctl action add_component '(entity: "7@42", component: "MeshRenderer")'
+editor_ctl edit 7@42 MeshRenderer '<natural RON>'    # mesh + material sources
+editor_ctl wait-assets && editor_ctl screenshot /tmp/check.png
+```
 
 Notes: entity ids are stable per session only — always start from `state`.
 Component data uses natural RON; tuple-struct components address fields as

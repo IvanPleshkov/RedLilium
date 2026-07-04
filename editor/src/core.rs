@@ -322,6 +322,10 @@ pub fn create_editor_world(
     // Insert ActionQueue for editor action dispatch
     world.insert_resource(ActionQueue::<World>::new());
 
+    // The name -> constructor registry over EditActions: the remote channel's
+    // generic `action` command builds from it (docs/REMOTE.md).
+    world.insert_resource(redlilium_ecs::ui::ActionRegistry::with_builtins());
+
     // Insert Selection resource for tracking selected entities
     world.insert_resource(redlilium_ecs::ui::Selection::new());
 

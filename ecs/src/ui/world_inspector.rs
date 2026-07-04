@@ -478,6 +478,18 @@ pub struct DeleteEntityAction {
     serialized: Option<crate::serialize::SerializedPrefab>,
 }
 
+impl DeleteEntityAction {
+    /// `parent` is where the subtree is re-attached on undo — pass the
+    /// entity's current parent.
+    pub fn new(entity: Entity, parent: Option<Entity>) -> Self {
+        Self {
+            entity,
+            parent,
+            serialized: None,
+        }
+    }
+}
+
 impl std::fmt::Debug for DeleteEntityAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DeleteEntityAction")
@@ -539,10 +551,21 @@ impl EditAction<World> for DeleteEntityAction {
 /// - `new_parent: Some(e)` → `set_parent(entity, e)`
 /// - `new_parent: None`    → `remove_parent(entity)` (make root)
 #[derive(Debug)]
-struct ReparentAction {
+pub struct ReparentAction {
     entity: Entity,
     old_parent: Option<Entity>,
     new_parent: Option<Entity>,
+}
+
+impl ReparentAction {
+    /// `old_parent` is what undo restores — pass the entity's current parent.
+    pub fn new(entity: Entity, old_parent: Option<Entity>, new_parent: Option<Entity>) -> Self {
+        Self {
+            entity,
+            old_parent,
+            new_parent,
+        }
+    }
 }
 
 impl EditAction<World> for ReparentAction {
@@ -594,6 +617,8 @@ pub struct SpawnPrefabAction {
     serialized: crate::serialize::SerializedPrefab,
     parent: Option<Entity>,
     spawned_entities: Vec<Entity>,
+    /// Reported to the caller on apply, if requested (see [`SpawnReport`]).
+    report: Option<SpawnReport>,
 }
 
 impl SpawnPrefabAction {
@@ -602,7 +627,14 @@ impl SpawnPrefabAction {
             serialized,
             parent,
             spawned_entities: Vec::new(),
+            report: None,
         }
+    }
+
+    /// Report the spawned entities into `report` at apply time.
+    pub fn with_report(mut self, report: SpawnReport) -> Self {
+        self.report = Some(report);
+        self
     }
 }
 
@@ -626,6 +658,9 @@ impl EditAction<World> for SpawnPrefabAction {
         {
             crate::std::hierarchy::set_parent(world, entities[0], parent);
         }
+        if let Some(report) = &self.report {
+            *report.lock().unwrap() = entities.clone();
+        }
         self.spawned_entities = entities;
         Ok(())
     }
@@ -642,5 +677,80 @@ impl EditAction<World> for SpawnPrefabAction {
 
     fn description(&self) -> &str {
         "Spawn prefab"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Undoable spawn-entity action
+// ---------------------------------------------------------------------------
+
+/// Where a spawn-style action reports the entities it created on apply.
+/// The caller (e.g. the remote protocol) keeps a clone and reads it after the
+/// action executed — the ids don't exist before then.
+pub type SpawnReport = std::sync::Arc<std::sync::Mutex<Vec<Entity>>>;
+
+/// Reversible action that spawns one fresh entity with the editor's default
+/// scene components (Transform, GlobalTransform, Visibility) plus an optional
+/// name and parent.
+#[derive(Debug)]
+pub struct SpawnEntityAction {
+    name: Option<String>,
+    parent: Option<Entity>,
+    /// The spawned entity (for undo; refreshed on every apply/redo).
+    entity: Option<Entity>,
+    /// Reported to the caller on apply, if requested.
+    report: Option<SpawnReport>,
+}
+
+impl SpawnEntityAction {
+    pub fn new(name: Option<String>, parent: Option<Entity>) -> Self {
+        Self {
+            name,
+            parent,
+            entity: None,
+            report: None,
+        }
+    }
+
+    /// Report the spawned entity into `report` at apply time.
+    pub fn with_report(mut self, report: SpawnReport) -> Self {
+        self.report = Some(report);
+        self
+    }
+}
+
+impl EditAction<World> for SpawnEntityAction {
+    fn apply(&mut self, world: &mut World) -> EditActionResult {
+        let entity = world.spawn();
+        let transform = crate::Transform::default();
+        let _ = world.insert(entity, crate::GlobalTransform(transform.to_matrix()));
+        let _ = world.insert(entity, transform);
+        let _ = world.insert(entity, crate::Visibility::VISIBLE);
+        if let Some(name) = &self.name {
+            let _ = world.insert(entity, crate::Name::new(name.clone()));
+        }
+        if let Some(parent) = self.parent
+            && world.is_alive(parent)
+        {
+            crate::std::hierarchy::set_parent(world, entity, parent);
+        }
+        if let Some(report) = &self.report {
+            *report.lock().unwrap() = vec![entity];
+        }
+        self.entity = Some(entity);
+        Ok(())
+    }
+
+    fn undo(&mut self, world: &mut World) -> EditActionResult {
+        if let Some(entity) = self.entity.take()
+            && world.is_alive(entity)
+        {
+            crate::std::hierarchy::despawn_recursive(world, entity);
+        }
+        Ok(())
+    }
+
+    fn description(&self) -> &str {
+        "Spawn entity"
     }
 }

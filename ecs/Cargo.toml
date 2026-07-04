@@ -22,8 +22,8 @@ rendering = [
     "dep:image",
     "dep:redlilium-assets",
     "dep:redlilium-vfs",
-    "dep:ron",
-    "dep:bincode",
+    "serialize-ron",
+    "serialize-bincode",
 ]
 serialize-ron = ["dep:ron"]
 serialize-bincode = ["dep:bincode"]

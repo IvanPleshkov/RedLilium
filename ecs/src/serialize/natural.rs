@@ -99,6 +99,14 @@ pub fn natural_to_value(value: &ron::Value) -> Result<Value, String> {
     })
 }
 
+/// Resolve an `"index@spawn_tick"` entity spec against a live world.
+pub fn find_entity(world: &crate::World, spec: &str) -> Option<crate::Entity> {
+    let (index, tick) = parse_entity_spec(spec).ok()?;
+    world
+        .iter_entities()
+        .find(|e| e.index() == index && e.spawn_tick() == tick)
+}
+
 /// Parse the `"index@spawn_tick"` entity spec.
 pub fn parse_entity_spec(spec: &str) -> Result<(u32, u64), String> {
     let (index, tick) = spec

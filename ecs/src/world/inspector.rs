@@ -456,13 +456,20 @@ impl World {
         // 3. Create context (Arc dedup tracked across all entities)
         let mut ctx = crate::serialize::SerializeContext::new(self);
 
-        // 4. For each entity, serialize all components
+        // 4. For each entity, serialize all components. The root's `Parent` is
+        // deliberately dropped: it references an entity *outside* the subtree
+        // (attachment context, not prefab content) and would fail the entity
+        // remap on deserialization. Callers that care (delete-undo, spawn
+        // under a node) re-attach the root themselves.
         let serialized_entities = old_entities
             .iter()
             .map(|&entity| {
                 let components: Vec<_> = serialize_fns
                     .iter()
                     .filter_map(|f| f(self, entity, &mut ctx).transpose())
+                    .filter(|c| {
+                        !(entity == root && c.as_ref().is_ok_and(|c| c.type_name == "Parent"))
+                    })
                     .collect::<Result<_, _>>()?;
                 Ok(crate::serialize::SerializedEntity {
                     entity_index: entity.index(),

@@ -16,8 +16,12 @@ use std::time::{Duration, Instant};
 
 use redlilium_assets::AssetProcessor;
 use redlilium_core::abstract_editor::{ActionQueue, EditAction, EditActionHistory};
-use redlilium_ecs::serialize::{SerializedComponent, natural_to_value, value_to_natural};
-use redlilium_ecs::ui::{AddComponentAction, ImportComponentAction, RemoveComponentAction};
+use redlilium_ecs::serialize::{
+    SerializedComponent, find_entity, natural_to_value, value_to_natural,
+};
+use redlilium_ecs::ui::{
+    ActionRegistry, AddComponentAction, ImportComponentAction, RemoveComponentAction, SpawnReport,
+};
 use redlilium_ecs::{
     CameraTarget, ChangedAssets, Entity, Name, Parent, RemoteTransport, ScenePass, World,
 };
@@ -44,6 +48,8 @@ const COMMANDS: &[&str] = &[
     "step",
     "screenshot",
     "shutdown",
+    "action",
+    "actions",
 ];
 
 /// Per-editor remote protocol state (parked writes/waits, screenshot job).
@@ -70,12 +76,14 @@ impl RemoteCommands {
 
 enum Parked {
     /// A queued write — respond after the next queue drain applies it.
-    /// `component` set → the response carries that component's snapshot.
+    /// `component` set → the response carries that component's snapshot;
+    /// `spawned` set → it carries the entities the action created.
     Write {
         conn: u64,
         id: i64,
         entity: Option<Entity>,
         component: Option<String>,
+        spawned: Option<SpawnReport>,
     },
     /// `wait(for: "assets_idle")` — resolved after the asset pipeline has been
     /// idle for [`CALM_FRAMES`] consecutive frames.
@@ -170,11 +178,33 @@ fn complete_parked(rc: &mut RemoteCommands, world: &World) {
                 id,
                 entity,
                 component,
+                spawned,
             } => {
                 // The action drained this frame; report the resulting state.
-                match (entity, component) {
-                    (Some(entity), Some(name)) => {
+                match (entity, component, spawned) {
+                    (Some(entity), Some(name), _) => {
                         send_component_snapshot(world, conn, id, entity, &name)
+                    }
+                    (_, _, Some(report)) => {
+                        #[derive(Serialize)]
+                        struct SpawnedResp {
+                            id: i64,
+                            ok: bool,
+                            entities: Vec<String>,
+                        }
+                        let entities = report
+                            .lock()
+                            .map(|e| e.iter().map(|e| entity_spec(*e)).collect())
+                            .unwrap_or_default();
+                        send(
+                            world,
+                            conn,
+                            &SpawnedResp {
+                                id,
+                                ok: true,
+                                entities,
+                            },
+                        );
                     }
                     _ => send(world, conn, &OkResp { id, ok: true }),
                 }
@@ -461,6 +491,7 @@ fn dispatch(
                 id,
                 entity: Some(entity),
                 component: Some(component),
+                spawned: None,
             });
         }
         "add_component" | "remove_component" => {
@@ -481,6 +512,7 @@ fn dispatch(
                 id,
                 entity: Some(entity),
                 component: None,
+                spawned: None,
             });
         }
         "select" => {
@@ -505,6 +537,7 @@ fn dispatch(
                 id,
                 entity: None,
                 component: None,
+                spawned: None,
             });
         }
         "undo" | "redo" => {
@@ -563,6 +596,57 @@ fn dispatch(
             rc.shutdown = true;
             send(world, conn, &OkResp { id, ok: true });
         }
+        // The generic path: any action in the ActionRegistry, invoked by name
+        // with a natural-RON parameter map. Same queue -> history route as
+        // the specialized commands; spawn-style actions report the created
+        // entities in the response.
+        "action" => {
+            let Some(name) = str_param("name") else {
+                return send_err(world, conn, id, "missing 'name'");
+            };
+            let empty = ron::Value::Map(ron::Map::new());
+            let params = get("params").map(|(_, v)| v).unwrap_or(&empty);
+            let constructed = {
+                let registry = world.resource::<ActionRegistry>();
+                registry.construct(&name, world, params)
+            };
+            match constructed {
+                Ok(registered) => {
+                    push_action(world, registered.action);
+                    rc.parked.push(Parked::Write {
+                        conn,
+                        id,
+                        entity: None,
+                        component: None,
+                        spawned: registered.spawned,
+                    });
+                }
+                Err(e) => send_err(world, conn, id, &format!("{name}: {e}")),
+            }
+        }
+        "actions" => {
+            #[derive(Serialize)]
+            struct ActionsResp {
+                id: i64,
+                ok: bool,
+                actions: Vec<(String, String)>,
+            }
+            let actions = world
+                .resource::<ActionRegistry>()
+                .list()
+                .into_iter()
+                .map(|(n, u)| (n.to_owned(), u.to_owned()))
+                .collect();
+            send(
+                world,
+                conn,
+                &ActionsResp {
+                    id,
+                    ok: true,
+                    actions,
+                },
+            );
+        }
         "screenshot" => {
             let Some(path) = str_param("path") else {
                 return send_err(world, conn, id, "missing 'path'");
@@ -591,13 +675,6 @@ fn dispatch(
 
 fn push_action(world: &World, action: Box<dyn EditAction<World>>) {
     world.resource::<ActionQueue<World>>().push(action);
-}
-
-fn find_entity(world: &World, spec: &str) -> Option<Entity> {
-    let (index, tick) = redlilium_ecs::serialize::parse_entity_spec(spec).ok()?;
-    world
-        .iter_entities()
-        .find(|e| e.index() == index && e.spawn_tick() == tick)
 }
 
 fn entity_spec(e: Entity) -> String {
