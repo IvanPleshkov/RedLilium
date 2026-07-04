@@ -82,6 +82,26 @@ If wasm-pack is not installed, skip web build:
 - Reference issues in commits (`#N`); `Closes #N` auto-closes on push
 - `docs/` holds durable design only (architecture, decisions, contracts)
 
+### Agent Delegation
+
+Specialized subagents live in `.claude/agents/`. Delegate instead of doing
+these in the main context:
+
+| Agent | Model | Use for |
+|---|---|---|
+| `editor-driver` | sonnet | Multi-step interactive editor sessions over the remote channel (`docs/REMOTE.md`, skill `editor-remote`) |
+| `editor-logs` | haiku | Digesting editor logs — never pull raw logs into the main context |
+| `gh-tasks` | haiku | Issue digests and batch operations (single create/close inline via `gh` is cheaper — the agent exists to keep bulk JSON out of context) |
+| `Explore` (built-in) | — | Broad code searches across many files/conventions |
+
+Validation sequences against the editor that need judgment (reading
+screenshots, "does it look right") belong to the orchestrator or
+`editor-driver`; mechanical regression checking is a test-infrastructure
+concern, not an agent's job.
+
+Note: new/edited agent definitions become invocable as named agent types
+only from the next session.
+
 ### Adding New Features
 
 1. Read relevant crate README and `docs/ARCHITECTURE.md`
