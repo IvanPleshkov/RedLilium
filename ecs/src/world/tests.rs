@@ -74,7 +74,7 @@ fn read_unregistered_returns_err() {
 
 #[test]
 fn write_unregistered_returns_err() {
-    let world = World::new();
+    let mut world = World::new();
     assert!(world.write::<Position>().is_err());
 }
 
@@ -185,7 +185,44 @@ fn read_write_conflict_panics() {
     world.insert(e, Position { x: 0.0, y: 0.0 }).unwrap();
 
     let _r = world.read::<Position>().unwrap();
-    let _w = world.write::<Position>().unwrap();
+    let _w = world.write_storage::<Position>().unwrap();
+}
+
+#[test]
+fn world_query_multi_write() {
+    // World::query is the owner-side path for holding several storages at
+    // once, now that single-storage write accessors take &mut self (issue #10).
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.register_component::<Health>();
+    let e = world.spawn();
+    world.insert(e, Position { x: 1.0, y: 2.0 }).unwrap();
+    world.insert(e, Health(50)).unwrap();
+
+    {
+        let mut q = world.query::<(crate::Write<Position>, crate::Write<Health>)>();
+        let (positions, healths) = q.items_mut();
+        for (_, mut pos) in positions.iter_mut() {
+            pos.x += 10.0;
+        }
+        for (_, mut hp) in healths.iter_mut() {
+            hp.0 += 1;
+        }
+    }
+
+    assert_eq!(
+        world.get::<Position>(e),
+        Some(&Position { x: 11.0, y: 2.0 })
+    );
+    assert_eq!(world.get::<Health>(e), Some(&Health(51)));
+}
+
+#[test]
+#[should_panic(expected = "more than once")]
+fn world_query_aliasing_set_panics() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    let _ = world.query::<(crate::Write<Position>, crate::Read<Position>)>();
 }
 
 #[test]

@@ -150,7 +150,10 @@ impl World {
             return;
         }
         let world_ptr: *mut World = self;
-        self.observers.flush(world_ptr);
+        // SAFETY: `world_ptr` is derived from the exclusive `&mut self`; no
+        // other borrow of the world exists, and `self` is not touched again
+        // until flush returns.
+        unsafe { crate::observer::flush(world_ptr) };
     }
 
     // ---- Reactive trigger buffers ----

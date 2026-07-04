@@ -1,5 +1,4 @@
 use std::any::{Any, TypeId, type_name};
-use std::cell::Cell;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
@@ -211,7 +210,7 @@ impl Resources {
             ptr,
             _guard: Some(guard),
             _marker: PhantomData,
-            borrowed: Cell::new(false),
+            borrowed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -240,7 +239,7 @@ impl Resources {
             ptr,
             _guard: None,
             _marker: PhantomData,
-            borrowed: Cell::new(false),
+            borrowed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -360,8 +359,10 @@ impl<T: 'static> Deref for ResourceRef<'_, T> {
 ///
 /// Contains a runtime borrow flag used by [`QueryItem`](crate::QueryItem)
 /// iteration to detect aliasing `&mut T` references (similar to `RefCell`).
-/// The `Cell` also makes this type `!Sync`, which intentionally excludes
-/// `ResMut` from `par_for_each`.
+/// The flag lives behind an `Arc` so a [`ResMutRef`](crate::query::ResMutRef)
+/// holding it stays valid even if this struct is moved (e.g. via
+/// `QueryIter::into_guard`) or dropped first. The raw `ptr` keeps this type
+/// `!Sync`, which intentionally excludes `ResMut` from `par_for_each`.
 pub struct ResourceRefMut<'a, T: 'static> {
     ptr: *mut T,
     _guard: Option<RwLockWriteGuard<'a, dyn Resource>>,
@@ -369,11 +370,11 @@ pub struct ResourceRefMut<'a, T: 'static> {
     /// Runtime borrow tracking for iterator safety.
     /// `true` while a [`ResMutRef`](crate::query::ResMutRef) derived
     /// from this resource is alive.
-    pub(crate) borrowed: Cell<bool>,
+    pub(crate) borrowed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 // SAFETY: equivalent to `&mut T`, which is `Send` when `T: Send`. (`Sync` is
-// intentionally NOT implemented — the `Cell<bool>` keeps it `!Sync`.)
+// intentionally NOT implemented — the raw `ptr` keeps it `!Sync`.)
 unsafe impl<T: Send> Send for ResourceRefMut<'_, T> {}
 
 impl<T: 'static> ResourceRefMut<'_, T> {

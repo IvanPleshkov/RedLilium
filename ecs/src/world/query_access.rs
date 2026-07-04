@@ -48,14 +48,40 @@ impl World {
     /// Returns a guard that dereferences to [`SparseSetInner<T>`](crate::SparseSetInner),
     /// allowing iteration, lookup, and mutation.
     ///
+    /// Takes `&mut self`: unlocked readers ([`get`](World::get) and the bare
+    /// filter constructors) hand out references with no lock guard, so every
+    /// public mutation path must be exclusive for the borrow checker to keep
+    /// them apart. To hold write access to several storages at once, use
+    /// [`query`](World::query).
+    ///
     /// # Errors
     ///
     /// Returns [`ComponentNotRegistered`] if `T` has never been registered or inserted.
+    pub fn write<T: 'static>(&mut self) -> Result<RefMut<'_, T>, WorldError> {
+        self.write_storage()
+    }
+
+    /// Gets exclusive write access to all components of type T, returning `None`
+    /// if the type has never been registered.
+    ///
+    /// Non-panicking variant of [`write`](World::write).
+    pub fn try_write<T: 'static>(&mut self) -> Option<RefMut<'_, T>> {
+        self.try_write_storage()
+    }
+
+    /// `&self` counterpart of [`write`](World::write) for crate internals.
+    ///
+    /// The returned guard holds the storage's write lock, which makes it safe
+    /// against other *locking* accessors from any thread — but not against
+    /// the unlocked readers ([`get`](World::get), bare filters), which is why
+    /// the public API requires `&mut self`. Callers here are the locking
+    /// `fetch` paths and in-crate systems, which never use unlocked reads
+    /// concurrently.
     ///
     /// # Panics
     ///
-    /// Panics if T is borrowed by any [`read`](World::read) or [`write`](World::write) call.
-    pub fn write<T: 'static>(&self) -> Result<RefMut<'_, T>, WorldError> {
+    /// Panics if T is borrowed by any read or write guard.
+    pub(crate) fn write_storage<T: 'static>(&self) -> Result<RefMut<'_, T>, WorldError> {
         let storage =
             self.components
                 .get(&TypeId::of::<T>())
@@ -65,11 +91,10 @@ impl World {
         Ok(RefMut::new(storage, self.entities(), self.tick))
     }
 
-    /// Gets exclusive write access to all components of type T, returning `None`
-    /// if the type has never been registered.
-    ///
-    /// Non-panicking variant of [`write`](World::write). Used by `OptionalWrite<T>`.
-    pub fn try_write<T: 'static>(&self) -> Option<RefMut<'_, T>> {
+    /// `&self` counterpart of [`try_write`](World::try_write) for crate
+    /// internals (see [`write_storage`](World::write_storage)). Used by
+    /// `OptionalWrite<T>`.
+    pub(crate) fn try_write_storage<T: 'static>(&self) -> Option<RefMut<'_, T>> {
         let storage = self.components.get(&TypeId::of::<T>())?;
         Some(RefMut::new(storage, self.entities(), self.tick))
     }
@@ -111,8 +136,21 @@ impl World {
     /// Gets exclusive write access including static and editor entities.
     ///
     /// Like [`write`](World::write), but only excludes disabled entities —
-    /// both static and editor entities are included.
-    pub fn write_all<T: 'static>(&self) -> Result<RefMut<'_, T>, WorldError> {
+    /// both static and editor entities are included. Takes `&mut self` for
+    /// the same reason as [`write`](World::write).
+    pub fn write_all<T: 'static>(&mut self) -> Result<RefMut<'_, T>, WorldError> {
+        self.write_all_storage()
+    }
+
+    /// Gets exclusive write access including static and editor entities,
+    /// returning `None` if the type has never been registered.
+    pub fn try_write_all<T: 'static>(&mut self) -> Option<RefMut<'_, T>> {
+        self.try_write_all_storage()
+    }
+
+    /// `&self` counterpart of [`write_all`](World::write_all) for crate
+    /// internals (see [`write_storage`](World::write_storage)).
+    pub(crate) fn write_all_storage<T: 'static>(&self) -> Result<RefMut<'_, T>, WorldError> {
         let storage =
             self.components
                 .get(&TypeId::of::<T>())
@@ -127,9 +165,9 @@ impl World {
         ))
     }
 
-    /// Gets exclusive write access including static and editor entities,
-    /// returning `None` if the type has never been registered.
-    pub fn try_write_all<T: 'static>(&self) -> Option<RefMut<'_, T>> {
+    /// `&self` counterpart of [`try_write_all`](World::try_write_all) for
+    /// crate internals (see [`write_storage`](World::write_storage)).
+    pub(crate) fn try_write_all_storage<T: 'static>(&self) -> Option<RefMut<'_, T>> {
         let storage = self.components.get(&TypeId::of::<T>())?;
         Some(RefMut::new_with_mask(
             storage,
@@ -137,6 +175,38 @@ impl World {
             Entity::DISABLED,
             self.tick,
         ))
+    }
+
+    // ---- Multi-storage access ----
+
+    /// Acquires locks for the given access set and returns a guard holding
+    /// the locked data — the world-owner counterpart of
+    /// [`SystemContext::query`](crate::SystemContext::query).
+    ///
+    /// Use this to work with several storages at once (including multiple
+    /// writes), which the single-storage `&mut self` accessors like
+    /// [`write`](World::write) cannot express:
+    ///
+    /// ```ignore
+    /// let mut q = world.query::<(Write<Position>, Read<Velocity>)>();
+    /// let (positions, velocities) = q.items_mut();
+    /// ```
+    ///
+    /// Takes `&mut self` so the guard cannot coexist with the unlocked
+    /// readers ([`get`](World::get) and the bare filter constructors).
+    ///
+    /// # Panics
+    ///
+    /// Panics on an aliasing-unsafe access set (e.g. `(Write<T>, Read<T>)`)
+    /// and if the set contains `MainThreadRes`/`MainThreadResMut`.
+    pub fn query<A: crate::query::AccessSet>(&mut self) -> crate::query::QueryGuard<'_, A> {
+        if A::needs_main_thread() {
+            panic!("World::query does not support main-thread resources");
+        }
+        let infos = A::access_infos();
+        let guards = self.acquire_sorted(&infos);
+        let items = A::fetch_unlocked(self);
+        crate::query::QueryGuard::new(guards, items)
     }
 
     // ---- Unlocked access (for use when locks are held externally) ----

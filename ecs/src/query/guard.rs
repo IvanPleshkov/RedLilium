@@ -1,5 +1,6 @@
-use std::cell::Cell;
 use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use fixedbitset::FixedBitSet;
 use smallvec::SmallVec;
@@ -21,16 +22,16 @@ use crate::system::context::LockTracking;
 /// a closure — enabling normal control flow, `?` operators, and multiple
 /// statements with the locks held.
 ///
-/// Access fetched data via the public `items` field:
+/// Access fetched data via [`items`](Self::items) / [`items_mut`](Self::items_mut):
 ///
 /// ```ignore
 /// // Read-only:
 /// let q = ctx.query::<(Read<Position>, Read<Velocity>)>();
-/// let (positions, velocities) = &q.items;
+/// let (positions, velocities) = q.items();
 ///
 /// // With writes:
 /// let mut q = ctx.query::<(Write<Position>, Read<Velocity>)>();
-/// let (positions, velocities) = &mut q.items;
+/// let (positions, velocities) = q.items_mut();
 /// for (idx, pos) in positions.iter_mut() {
 ///     if let Some(vel) = velocities.get(idx) {
 ///         pos.x += vel.x;
@@ -46,16 +47,22 @@ use crate::system::context::LockTracking;
 /// Use `lock().execute()` for those.
 pub struct QueryGuard<'a, A: AccessSet> {
     _guards: SmallVec<[LockGuard<'a>; 8]>,
-    /// The fetched component/resource data. Destructure this to access
-    /// individual storages.
-    pub items: A::Item<'a>,
+    /// The fetched component/resource data. Private: the unlocked `Ref`s /
+    /// `RefMut`s in here are only kept alive by `_guards`, so moving them out
+    /// of the guard (possible through a public field) would dangle once the
+    /// guard drops. Access goes through [`items`](Self::items) /
+    /// [`items_mut`](Self::items_mut), which tie the borrow to the guard.
+    items: A::Item<'a>,
     /// Deadlock tracking — unregisters held locks when this guard is dropped.
     /// `None` when created outside of a SystemContext (e.g. in tests).
     _tracking: Option<LockTracking<'a>>,
 }
 
 impl<'a, A: AccessSet> QueryGuard<'a, A> {
-    #[cfg(test)]
+    /// Creates a guard without deadlock tracking.
+    ///
+    /// Used by [`World::query`](crate::World::query) (the world owner is
+    /// exclusive, so same-system lock tracking does not apply) and by tests.
     pub(crate) fn new(guards: SmallVec<[LockGuard<'a>; 8]>, items: A::Item<'a>) -> Self {
         Self {
             _guards: guards,
@@ -74,6 +81,18 @@ impl<'a, A: AccessSet> QueryGuard<'a, A> {
             items,
             _tracking: Some(tracking),
         }
+    }
+
+    /// Returns the fetched data, borrowed for the guard's lifetime.
+    ///
+    /// Destructure the tuple to access individual storages.
+    pub fn items(&self) -> &A::Item<'a> {
+        &self.items
+    }
+
+    /// Mutable variant of [`items`](Self::items).
+    pub fn items_mut(&mut self) -> &mut A::Item<'a> {
+        &mut self.items
     }
 }
 
@@ -314,22 +333,21 @@ impl<'w, T: 'static> QueryItem for ResourceRefMut<'w, T> {
 
     unsafe fn query_get(&self, _entity_index: u32) -> Option<ResMutRef<'w, T>> {
         assert!(
-            !self.borrowed.get(),
+            !self.borrowed.load(Ordering::Relaxed),
             "ResMut<{}> already borrowed mutably by a previous iterator item. \
              Drop the previous item before calling next().",
             std::any::type_name::<T>()
         );
-        self.borrowed.set(true);
+        self.borrowed.store(true, Ordering::Relaxed);
         // SAFETY: the RwLockWriteGuard inside ResourceRefMut keeps exclusive
         // access for 'w. The borrow flag ensures only one ResMutRef exists
-        // at a time, preventing aliasing &mut T.
-        // The flag pointer is valid because ResourceRefMut (owning the Cell)
-        // lives inside QueryGuard which outlives every ResMutRef.
-        let flag = &self.borrowed as *const Cell<bool>;
+        // at a time, preventing aliasing &mut T. The flag is shared via Arc,
+        // so it stays valid even if the guard (and this ResourceRefMut) is
+        // moved or dropped while the ResMutRef is still alive.
         unsafe {
             Some(ResMutRef {
                 ptr: &mut *self.as_ptr_mut(),
-                flag,
+                flag: Arc::clone(&self.borrowed),
             })
         }
     }
@@ -347,7 +365,9 @@ impl<'w, T: 'static> QueryItem for ResourceRefMut<'w, T> {
 /// panic at runtime, similar to [`RefCell`](std::cell::RefCell).
 pub struct ResMutRef<'w, T: 'static> {
     ptr: &'w mut T,
-    flag: *const Cell<bool>,
+    /// Shared with the originating [`ResourceRefMut`]; the `Arc` keeps the
+    /// flag alive independently of guard moves and drop order.
+    flag: Arc<AtomicBool>,
 }
 
 impl<T: 'static> Deref for ResMutRef<'_, T> {
@@ -366,10 +386,7 @@ impl<T: 'static> DerefMut for ResMutRef<'_, T> {
 
 impl<T: 'static> Drop for ResMutRef<'_, T> {
     fn drop(&mut self) {
-        // SAFETY: the flag pointer is valid — it points to a Cell<bool>
-        // owned by ResourceRefMut inside the QueryGuard, which outlives
-        // every ResMutRef yielded by the iterator.
-        unsafe { &*self.flag }.set(false);
+        self.flag.store(false, Ordering::Relaxed);
     }
 }
 
@@ -460,6 +477,14 @@ impl_query_item!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F, 6 G, 7 H);
 /// Owns the underlying [`QueryGuard`], keeping locks held for the
 /// iterator's lifetime. Use [`into_guard`](QueryIter::into_guard) to
 /// recover the guard after (partial) iteration.
+///
+/// # Known limitation (issue #12)
+///
+/// Yielded items carry the world borrow's lifetime, not the iterator's, so
+/// `collect()`-ing references and dropping the iterator (releasing its
+/// locks) is not prevented by the compiler. Do not store yielded references
+/// beyond the iterator's life; a proper fix requires lending-iterator
+/// (GAT) item types.
 ///
 /// ```ignore
 /// let q = ctx.query::<(Write<Position>, Read<Velocity>)>();

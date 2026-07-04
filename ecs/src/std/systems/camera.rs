@@ -67,7 +67,7 @@ mod tests {
             .unwrap();
 
         let globals = world.read::<GlobalTransform>().unwrap();
-        let mut cameras = world.write::<Camera>().unwrap();
+        let mut cameras = world.write_storage::<Camera>().unwrap();
         update_camera_matrices(&globals, &mut cameras);
         drop(cameras);
         drop(globals);
@@ -92,7 +92,7 @@ mod tests {
             .unwrap();
 
         let globals = world.read::<GlobalTransform>().unwrap();
-        let mut cameras = world.write::<Camera>().unwrap();
+        let mut cameras = world.write_storage::<Camera>().unwrap();
         update_camera_matrices(&globals, &mut cameras);
         drop(cameras);
         drop(globals);
@@ -120,7 +120,7 @@ mod tests {
         world.insert(e, cam_original).unwrap();
 
         let globals = world.read::<GlobalTransform>().unwrap();
-        let mut cameras = world.write::<Camera>().unwrap();
+        let mut cameras = world.write_storage::<Camera>().unwrap();
         update_camera_matrices(&globals, &mut cameras);
         drop(cameras);
         drop(globals);

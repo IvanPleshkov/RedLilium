@@ -278,7 +278,7 @@ impl AppHandler for PhysicsDemoApp {
         }
 
         // Update camera projection for new aspect ratio
-        if let (Some(world), Some(cam_entity)) = (&self.world, self.camera_entity) {
+        if let (Some(world), Some(cam_entity)) = (&mut self.world, self.camera_entity) {
             let mut cameras = world.write::<Camera>().unwrap();
             if let Some(mut cam) = cameras.get_mut(cam_entity.index()) {
                 cam.projection_matrix =

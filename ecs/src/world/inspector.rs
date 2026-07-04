@@ -53,7 +53,8 @@ impl World {
     /// callback can apply re-resolutions (marks the component changed). The
     /// `(component, entity_index)` pair comes from
     /// [`scan_asset_refs`](Self::scan_asset_refs).
-    pub fn patch_asset_refs(
+    #[cfg_attr(not(feature = "rendering"), allow(dead_code))]
+    pub(crate) fn patch_asset_refs(
         &self,
         component: &str,
         entity_index: u32,

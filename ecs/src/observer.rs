@@ -159,59 +159,74 @@ impl Observers {
     pub fn has_pending(&self) -> bool {
         !self.pending.is_empty()
     }
+}
 
-    /// Drains and fires all pending triggers, supporting cascading.
-    ///
-    /// Observers that perform mutations (insert/remove/despawn) will queue
-    /// new triggers. This method loops until no more triggers remain.
-    ///
-    /// # Panics
-    ///
-    /// Panics if cascading exceeds 100 iterations (likely infinite loop).
-    pub fn flush(&mut self, world_ptr: *mut World) {
-        const MAX_ITERATIONS: u32 = 100;
+/// Drains and fires all pending triggers, supporting cascading.
+///
+/// Observers that perform mutations (insert/remove/despawn) will queue
+/// new triggers. This function loops until no more triggers remain.
+///
+/// A free function rather than a method on [`Observers`]: a `&mut self`
+/// receiver would stay alive across handler calls while the handler mutates
+/// the same `Observers` through the `&mut World` it receives (pushing new
+/// triggers) — an aliasing violation. Here every registry access re-borrows
+/// through `world_ptr`, so the handler's `&mut World` is the only live
+/// reference during the call.
+///
+/// # Safety
+///
+/// `world_ptr` must point to a valid `World` with no live borrows of it or
+/// anything it owns; the caller must not use any reference the pointer was
+/// derived from until this function returns.
+///
+/// # Panics
+///
+/// Panics if cascading exceeds 100 iterations (likely infinite loop).
+pub(crate) unsafe fn flush(world_ptr: *mut World) {
+    const MAX_ITERATIONS: u32 = 100;
 
-        for iteration in 0..MAX_ITERATIONS {
-            let triggers = std::mem::take(&mut self.pending);
-            if triggers.is_empty() {
-                return;
-            }
+    for iteration in 0..MAX_ITERATIONS {
+        let triggers = unsafe { std::mem::take(&mut (*world_ptr).observers.pending) };
+        if triggers.is_empty() {
+            return;
+        }
 
-            // Take handlers out to release borrow on self, allowing
-            // the handler closure to receive `&mut World` (which contains self).
-            let handlers = std::mem::take(&mut self.handlers);
+        // Take handlers out of the world so calling them with `&mut World`
+        // cannot alias the map they live in.
+        let handlers = unsafe { std::mem::take(&mut (*world_ptr).observers.handlers) };
 
-            for trigger in &triggers {
-                if let Some(fns) = handlers.get(&trigger.observer_key) {
-                    for f in fns {
-                        // SAFETY: world_ptr points to the World that owns this Observers.
-                        // We took `handlers` out of self, so the World can be mutably borrowed.
-                        // The handler may push new triggers to self.pending (via World mutations),
-                        // which is fine since we already took the current triggers.
-                        unsafe {
-                            f(&mut *world_ptr, trigger.entity);
-                        }
+        for trigger in &triggers {
+            if let Some(fns) = handlers.get(&trigger.observer_key) {
+                for f in fns {
+                    // SAFETY: `handlers` was moved out of the world, and no
+                    // other borrow through `world_ptr` is live here, so this
+                    // `&mut World` is unique. Handlers may push new triggers
+                    // into `observers.pending`; the current batch was already
+                    // taken.
+                    unsafe {
+                        f(&mut *world_ptr, trigger.entity);
                     }
                 }
             }
+        }
 
-            // Put handlers back, merging any newly registered observers
-            // that were added during handler execution.
-            let newly_added = std::mem::replace(&mut self.handlers, handlers);
-            for (key, new_fns) in newly_added {
-                self.handlers.entry(key).or_default().extend(new_fns);
-            }
+        // Put handlers back, merging any newly registered observers
+        // that were added during handler execution.
+        let observers = unsafe { &mut (*world_ptr).observers };
+        let newly_added = std::mem::replace(&mut observers.handlers, handlers);
+        for (key, new_fns) in newly_added {
+            observers.handlers.entry(key).or_default().extend(new_fns);
+        }
 
-            // Only treat the limit as exceeded if work genuinely remains after
-            // the final pass — a cascade exactly MAX_ITERATIONS deep that
-            // resolves cleanly must not panic.
-            if iteration == MAX_ITERATIONS - 1 && !self.pending.is_empty() {
-                panic!(
-                    "Observer cascade exceeded {MAX_ITERATIONS} iterations. \
-                     This likely indicates an infinite loop where observers \
-                     continuously trigger each other."
-                );
-            }
+        // Only treat the limit as exceeded if work genuinely remains after
+        // the final pass — a cascade exactly MAX_ITERATIONS deep that
+        // resolves cleanly must not panic.
+        if iteration == MAX_ITERATIONS - 1 && !observers.pending.is_empty() {
+            panic!(
+                "Observer cascade exceeded {MAX_ITERATIONS} iterations. \
+                 This likely indicates an infinite loop where observers \
+                 continuously trigger each other."
+            );
         }
     }
 }

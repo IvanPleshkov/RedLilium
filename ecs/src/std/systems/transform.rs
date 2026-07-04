@@ -174,7 +174,7 @@ mod tests {
     /// Helper: get component borrows and run update.
     fn run_update(world: &World) {
         let transforms = world.read::<Transform>().unwrap();
-        let mut globals = world.write::<GlobalTransform>().unwrap();
+        let mut globals = world.write_storage::<GlobalTransform>().unwrap();
         let children_storage = world.read::<Children>().unwrap();
         let parents = world.read::<Parent>().unwrap();
         let since_tick = world.current_tick().saturating_sub(1);
@@ -275,7 +275,7 @@ mod tests {
         // change visible and propagates it to GlobalTransform.
         world.advance_tick();
         {
-            let mut transforms = world.write::<Transform>().unwrap();
+            let mut transforms = world.write_storage::<Transform>().unwrap();
             *transforms.get_mut(e.index()).unwrap() =
                 Transform::from_translation(Vec3::new(7.0, 0.0, 0.0));
         }

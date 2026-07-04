@@ -30,8 +30,8 @@ pub struct Without<T: 'static>(PhantomData<T>);
 /// # Example
 ///
 /// ```ignore
-/// let positions = world.write::<Position>();
-/// let frozen = world.without::<Frozen>();
+/// let mut q = world.query::<(Write<Position>, Without<Frozen>)>();
+/// let (positions, frozen) = q.items_mut();
 ///
 /// for (entity_idx, pos) in positions.iter_mut() {
 ///     if frozen.matches(entity_idx) {

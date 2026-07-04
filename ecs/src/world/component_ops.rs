@@ -116,7 +116,7 @@ impl World {
                 }
             },
             patch_asset_refs_fn: |world, idx, f| {
-                if let Ok(mut storage) = world.write_all::<T>()
+                if let Ok(mut storage) = world.write_all_storage::<T>()
                     && let Some(mut comp) = storage.get_mut(idx)
                 {
                     comp.visit_asset_refs_mut(f);
@@ -193,7 +193,7 @@ impl World {
                 }
             },
             patch_asset_refs_fn: |world, idx, f| {
-                if let Ok(mut storage) = world.write_all::<T>()
+                if let Ok(mut storage) = world.write_all_storage::<T>()
                     && let Some(mut comp) = storage.get_mut(idx)
                 {
                     comp.visit_asset_refs_mut(f);
@@ -498,10 +498,22 @@ impl World {
     /// # Safety of the `unsafe` block
     ///
     /// `data_ptr()` returns a raw pointer to the storage without locking.
-    /// This is safe here because `&self` on `World` guarantees no `&mut self`
-    /// method (insert, remove, despawn) is running concurrently. Parallel
-    /// system execution uses the separate `read_unlocked` / `write_unlocked`
-    /// API which acquires locks externally via `acquire_sorted`.
+    /// This is sound because every path that can mutate component storage is
+    /// exclusive with the `&self` borrow this reference derives from:
+    ///
+    /// - all public mutating APIs (`insert`, `remove`, `despawn`, `write`,
+    ///   `try_write`, `write_all`, `try_write_all`, `query`) take `&mut self`;
+    /// - systems mutate storage only inside a runner, and every runner entry
+    ///   point (`EcsRunner::run`, `Schedules::run_frame`) takes `&mut World`,
+    ///   so no external `&self` can coexist with a running schedule;
+    /// - the crate-internal `&self` accessors (`write_storage`,
+    ///   `write_unlocked`, …) are used only by fetch paths and systems under
+    ///   the discipline above.
+    ///
+    /// Crate-internal rule: code running *inside* a schedule (systems holding
+    /// `ctx.world()`) must not call the unlocked readers (`get`, the bare
+    /// filter constructors) for storages a sibling system may write — use the
+    /// locking accessors instead.
     pub fn get<T: 'static>(&self, entity: Entity) -> Option<&T> {
         // Reject stale/dead handles so a recycled slot does not return the new
         // occupant's component (component storage is indexed by slot only).
@@ -509,9 +521,9 @@ impl World {
             return None;
         }
         let lock = self.components.get(&TypeId::of::<T>())?;
-        // SAFETY: &self guarantees no concurrent mutation of World.
-        // We don't acquire the RwLock to avoid deadlocks in hook callbacks
-        // and to return a lightweight &T instead of a lock guard.
+        // SAFETY: see above — no mutation path can overlap the `&self` this
+        // reference is tied to. Not taking the RwLock also keeps hook
+        // callbacks (inside insert/remove) deadlock-free.
         let storage = unsafe { &*lock.data_ptr() };
         storage.typed::<T>().get(entity.index())
     }

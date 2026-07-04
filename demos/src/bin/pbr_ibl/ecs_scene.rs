@@ -196,18 +196,12 @@ impl EcsScene {
     /// Updates sphere material properties (base_color, spacing) from UI state.
     pub fn update_spheres(&mut self, base_color: [f32; 4], spacing: f32) {
         let offset = (GRID_SIZE as f32 - 1.0) * spacing / 2.0;
-        let mut spheres = self
-            .world
-            .write::<PbrSphere>()
-            .expect("PbrSphere not registered");
-        let mut transforms = self
-            .world
-            .write::<Transform>()
-            .expect("Transform not registered");
-        let mut globals = self
-            .world
-            .write::<GlobalTransform>()
-            .expect("GlobalTransform not registered");
+        let mut q = self.world.query::<(
+            redlilium_ecs::Write<PbrSphere>,
+            redlilium_ecs::Write<Transform>,
+            redlilium_ecs::Write<GlobalTransform>,
+        )>();
+        let (spheres, transforms, globals) = q.items_mut();
 
         for (i, (idx, mut sphere)) in spheres.iter_mut().enumerate() {
             sphere.base_color = base_color;

@@ -139,8 +139,10 @@ pub struct World {
     tick: u64,
     /// Reverse index from component name to TypeId for name-based lookups.
     name_index: BTreeMap<&'static str, TypeId>,
-    /// Deferred observer registry and pending triggers.
-    observers: Observers,
+    /// Deferred observer registry and pending triggers. `pub(crate)` so
+    /// [`crate::observer::flush`] can re-borrow it through a raw world
+    /// pointer instead of holding `&mut Observers` across handler calls.
+    pub(crate) observers: Observers,
     /// Monomorphized swap functions for each registered `Triggers<M>` resource.
     trigger_swap_fns: Vec<fn(&mut World)>,
 }

@@ -238,8 +238,8 @@ impl Editor {
     }
 
     /// Update the editor camera's projection on resize.
-    fn update_camera_projection(&self, aspect: f32) {
-        let ew = self.active_world();
+    fn update_camera_projection(&mut self, aspect: f32) {
+        let ew = self.world.as_mut().unwrap();
         if let Ok(mut cameras) = ew.world.write_all::<Camera>()
             && let Some(mut cam) = cameras.get_mut(ew.editor_camera.index())
         {

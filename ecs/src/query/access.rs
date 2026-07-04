@@ -127,28 +127,27 @@ impl AccessInfo {
     }
 }
 
-/// Validates that no aliasing-sensitive storage (a component or a main-thread
-/// resource) appears more than once in a single access set when any of those
-/// accesses is mutable.
+/// Validates that no aliasing-sensitive storage (a component, resource, or
+/// main-thread resource) appears more than once in a single access set when
+/// any of those accesses is mutable.
 ///
-/// Such a set — e.g. `(Write<T>, Write<T>)`, `(Read<T>, Write<T>)`, or
-/// `(MainThreadRes<T>, MainThreadResMut<T>)` — would otherwise hand out two
-/// references to the same storage (`&mut`/`&mut` or `&`/`&mut`) because locks
-/// are deduplicated by storage while data is fetched per element, producing
-/// undefined behavior. Panics with a clear message instead.
+/// Such a set — e.g. `(Write<T>, Write<T>)`, `(Read<T>, Write<T>)`,
+/// `(ResMut<T>, ResMut<T>)`, or `(MainThreadRes<T>, MainThreadResMut<T>)` —
+/// would otherwise hand out two references to the same storage (`&mut`/`&mut`
+/// or `&`/`&mut`) because locks are deduplicated by storage while data is
+/// fetched per element, producing undefined behavior. Panics with a clear
+/// message instead.
 ///
-/// Resources self-lock via their `Arc<RwLock<T>>` and panic on a conflicting
-/// borrow, so they are not aliasing-unsafe and are not checked here. Filters
-/// carry unique marker `TypeId`s and borrow no storage exclusively.
+/// Resources do self-lock via their `Arc<RwLock<T>>`, but only on the locking
+/// `fetch` path; the production `fetch_unlocked` path relies on the
+/// deduplicated lock plan and hands out guard-less references, so duplicate
+/// resources must be rejected here just like components. Filters carry unique
+/// marker `TypeId`s and borrow no storage exclusively.
 pub(crate) fn validate_no_aliasing_conflict(infos: &[AccessInfo]) {
     for (i, a) in infos.iter().enumerate() {
         let class = a.kind.storage_class();
-        // Resources self-lock and panic on conflict; pure markers borrow no
-        // storage. Only component storages and main-thread resources can alias.
-        if !matches!(
-            class,
-            StorageClass::Component | StorageClass::MainThreadResource
-        ) {
+        // Pure markers borrow no storage; everything else can alias.
+        if class == StorageClass::Marker {
             continue;
         }
         for b in &infos[i + 1..] {
@@ -158,6 +157,7 @@ pub(crate) fn validate_no_aliasing_conflict(infos: &[AccessInfo]) {
             if a.same_storage(b) && (a.is_write || b.is_write) {
                 let what = match class {
                     StorageClass::MainThreadResource => "main-thread resource",
+                    StorageClass::Resource => "resource",
                     _ => "component",
                 };
                 panic!(
@@ -199,6 +199,20 @@ pub trait AccessElement {
 
     /// Returns the access metadata for this element.
     fn access_info() -> AccessInfo;
+
+    /// Appends this element's access metadata to `out`.
+    ///
+    /// Most elements contribute exactly one entry
+    /// ([`access_info`](Self::access_info)); combinator filters ([`Or`],
+    /// [`Any`]) recurse into their nested elements instead, so the storages
+    /// those filters read are visible to the aliasing validator and included
+    /// in the lock plan. A combinator that hid them would let
+    /// `(Write<T>, Or<With<T>, …>)` fetch the same storage mutably and
+    /// shared at once, and would let the filter read storage metadata
+    /// without any lock against a parallel writer.
+    fn collect_access_infos(out: &mut SmallVec<[AccessInfo; 8]>) {
+        out.push(Self::access_info());
+    }
 
     /// Fetches this element's data from the world, acquiring per-storage locks.
     fn fetch(world: &World) -> Self::Item<'_>;
@@ -473,7 +487,7 @@ impl<T: 'static> AccessElement for Write<T> {
 
     fn fetch(world: &World) -> Self::Item<'_> {
         world
-            .write::<T>()
+            .write_storage::<T>()
             .expect("Component not registered for Write<T> access")
     }
 
@@ -513,7 +527,7 @@ impl<T: 'static> AccessElement for WriteAll<T> {
 
     fn fetch(world: &World) -> Self::Item<'_> {
         world
-            .write_all::<T>()
+            .write_all_storage::<T>()
             .expect("Component not registered for WriteAll<T> access")
     }
 
@@ -548,7 +562,7 @@ impl<T: 'static> AccessElement for OptionalWrite<T> {
     }
 
     fn fetch(world: &World) -> Self::Item<'_> {
-        world.try_write::<T>()
+        world.try_write_storage::<T>()
     }
 
     fn fetch_unlocked(world: &World) -> Self::Item<'_> {
@@ -803,8 +817,14 @@ where
     type Item<'w> = OrFilter<A::Item<'w>, B::Item<'w>>;
 
     fn access_info() -> AccessInfo {
-        // Filters don't hold locks; use our own marker TypeId.
+        // Inert marker; the real metadata comes from `collect_access_infos`,
+        // which surfaces the nested filters' storage reads.
         AccessInfo::filter(TypeId::of::<Or<A, B>>())
+    }
+
+    fn collect_access_infos(out: &mut SmallVec<[AccessInfo; 8]>) {
+        A::collect_access_infos(out);
+        B::collect_access_infos(out);
     }
 
     fn fetch(world: &World) -> Self::Item<'_> {
@@ -828,7 +848,12 @@ macro_rules! impl_any_access_element {
             type Item<'w> = AnyFilter<($($T::Item<'w>,)+)>;
 
             fn access_info() -> AccessInfo {
+                // Inert marker; see `Or::access_info`.
                 AccessInfo::filter(TypeId::of::<Any<($($T,)+)>>())
+            }
+
+            fn collect_access_infos(out: &mut SmallVec<[AccessInfo; 8]>) {
+                $($T::collect_access_infos(out);)+
             }
 
             fn fetch(world: &World) -> Self::Item<'_> {
@@ -875,7 +900,9 @@ macro_rules! impl_access_set {
             type Item<'w> = ($($T::Item<'w>,)+);
 
             fn access_infos() -> SmallVec<[AccessInfo; 8]> {
-                smallvec::smallvec![$($T::access_info()),+]
+                let mut infos = SmallVec::new();
+                $($T::collect_access_infos(&mut infos);)+
+                infos
             }
 
             fn fetch(world: &World) -> Self::Item<'_> {
@@ -961,6 +988,53 @@ mod tests {
     #[should_panic(expected = "main-thread resource")]
     fn duplicate_main_thread_res_resmut_rejected() {
         let infos = <(MainThreadRes<Position>, MainThreadResMut<Position>)>::access_infos();
+        validate_no_aliasing_conflict(&infos);
+    }
+
+    #[test]
+    fn or_surfaces_nested_storages() {
+        // Or/Any must report the storages their nested filters read; a bare
+        // marker would hide them from the validator and the lock plan
+        // (issue #10).
+        let infos = <(Or<With<Position>, Changed<Velocity>>,)>::access_infos();
+        assert_eq!(infos.len(), 2);
+        assert_eq!(infos[0].type_id, TypeId::of::<Position>());
+        assert_eq!(infos[1].type_id, TypeId::of::<Velocity>());
+        assert!(infos.iter().all(|i| !i.is_write));
+
+        let infos = <(Any<(With<Position>, With<Velocity>, Changed<Position>)>,)>::access_infos();
+        assert_eq!(infos.len(), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "more than once")]
+    fn write_and_or_nested_same_component_rejected() {
+        // A filter on T nested in Or reads T's storage; combined with
+        // Write<T> that aliases mutably (issue #10).
+        let infos = <(Write<Position>, Or<With<Position>, With<Velocity>>)>::access_infos();
+        validate_no_aliasing_conflict(&infos);
+    }
+
+    #[test]
+    #[should_panic(expected = "resource")]
+    fn duplicate_resmut_resmut_rejected() {
+        // Resources self-lock only on the locking `fetch` path; the unlocked
+        // path dedups the pair into one write lock and would hand out two
+        // `&mut` to the same resource (issue #11).
+        let infos = <(ResMut<Position>, ResMut<Position>)>::access_infos();
+        validate_no_aliasing_conflict(&infos);
+    }
+
+    #[test]
+    #[should_panic(expected = "resource")]
+    fn duplicate_res_resmut_rejected() {
+        let infos = <(Res<Position>, ResMut<Position>)>::access_infos();
+        validate_no_aliasing_conflict(&infos);
+    }
+
+    #[test]
+    fn duplicate_res_res_allowed() {
+        let infos = <(Res<Position>, Res<Position>)>::access_infos();
         validate_no_aliasing_conflict(&infos);
     }
 

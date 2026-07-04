@@ -154,7 +154,9 @@ pub(crate) struct ComponentMeta {
     /// instance. No-op for components without asset refs.
     pub scan_asset_refs_fn: ScanAssetRefsFn,
     /// Re-visit one instance's asset references mutably (marks the component
-    /// changed) so the callback can apply re-resolutions.
+    /// changed) so the callback can apply re-resolutions. Only read by the
+    /// `rendering` asset-sync systems.
+    #[cfg_attr(not(feature = "rendering"), allow(dead_code))]
     pub patch_asset_refs_fn: PatchAssetRefsFn,
     /// Display order in the inspector panel. Lower values appear first.
     pub display_order: u32,
@@ -272,6 +274,10 @@ impl<T: 'static> SparseSetInner<T> {
     /// If the entity already has this component, the value is replaced
     /// and `ticks_changed` is updated. If it's a new insertion,
     /// both `ticks_added` and `ticks_changed` are set to `tick`.
+    /// Raw storage insertion: skips hooks, observers, required components
+    /// and removal tracking. Reaching this on a live world requires `&mut
+    /// SparseSetInner`, which guards deliberately do not hand out
+    /// (`RefMut` has no `DerefMut`) — go through `World::insert` instead.
     pub fn insert(&mut self, entity_index: u32, value: T, tick: u64) {
         let idx = entity_index as usize;
 
@@ -303,6 +309,8 @@ impl<T: 'static> SparseSetInner<T> {
 
     /// Removes a component for the given entity index.
     /// Returns the removed value, or `None` if the entity did not have this component.
+    /// Raw storage removal: see [`insert`](Self::insert) — on a live world
+    /// go through `World::remove`.
     pub fn remove(&mut self, entity_index: u32) -> Option<T> {
         let idx = entity_index as usize;
         if idx >= self.sparse.len() {
@@ -1117,12 +1125,10 @@ impl<T: 'static> Deref for RefMut<'_, T> {
     }
 }
 
-impl<T: 'static> DerefMut for RefMut<'_, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        // SAFETY: We have exclusive access guaranteed by the write lock.
-        unsafe { &mut *self.inner }
-    }
-}
+// No `DerefMut`: `&mut SparseSetInner` would expose raw `insert`/`remove`,
+// which bypass hooks, observers, required components and removal tracking
+// (issue #12). Mutation goes through the tracked inherent methods
+// (`get_mut`, `iter_mut`, …), which also stamp change ticks.
 
 // RefMut holds either an RwLockWriteGuard (auto-released on drop) or nothing.
 // No manual Drop needed — the Option<RwLockWriteGuard> handles it.
@@ -1255,8 +1261,10 @@ mod tests {
         lock.write().typed_mut::<u32>().insert(0, 42, 0);
         let entities = Entities::new();
         {
+            // Mutation goes through the tracked inherent accessor — RefMut
+            // deliberately has no DerefMut to raw insert/remove (issue #12).
             let mut guard = RefMut::<u32>::new(&lock, &entities, 0);
-            guard.insert(0, 99, 0);
+            *guard.get_mut(0).unwrap() = 99;
         }
         assert_eq!(lock.read().typed::<u32>().get(0), Some(&99));
     }

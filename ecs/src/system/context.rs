@@ -325,7 +325,7 @@ impl<'a> SystemContext<'a> {
     ///
     /// ```ignore
     /// let mut q = ctx.query::<(Write<Position>, Read<Velocity>)>();
-    /// let (positions, velocities) = &mut q.items;
+    /// let (positions, velocities) = q.items_mut();
     /// for (idx, pos) in positions.iter_mut() {
     ///     if let Some(vel) = velocities.get(idx) {
     ///         pos.x += vel.x;
@@ -737,8 +737,8 @@ mod tests {
 
         let q1 = ctx.query::<(Read<Position>,)>();
         let q2 = ctx.query::<(Read<Position>,)>(); // should NOT panic
-        let (pos1,) = &q1.items;
-        let (pos2,) = &q2.items;
+        let (pos1,) = q1.items();
+        let (pos2,) = q2.items();
         assert_eq!(pos1.len(), pos2.len());
     }
 
@@ -758,7 +758,7 @@ mod tests {
         }
         // Now a new write lock should succeed
         let q2 = ctx.query::<(Write<Position>,)>();
-        let (positions,) = &q2.items;
+        let (positions,) = q2.items();
         assert_eq!(positions.len(), 1);
     }
 
