@@ -67,6 +67,15 @@ editor_ctl edit 7@42 MeshRenderer '<natural RON>'    # mesh + material sources
 editor_ctl wait-assets && editor_ctl screenshot /tmp/check.png
 ```
 
+## Logs
+
+Do NOT dump `logs` output or the stderr file into the main context — log
+volume is high. Delegate to the `editor-logs` agent (model: haiku): give it
+the since-seq (or 0), the stderr file path as fallback, and any specific
+question ("did hot reload fire?"). It returns a ~20-line digest and the last
+seq for the next page. Only fetch `logs` directly when you need a single
+known entry.
+
 Notes: entity ids are stable per session only — always start from `state`.
 Component data uses natural RON; tuple-struct components address fields as
 `{"0": …}`. Writes respond AFTER applying (one frame) — no need to re-inspect.

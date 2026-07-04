@@ -18,6 +18,9 @@ result (snapshot in the response, `inspect`, or a screenshot you Read). Use
 `wait-assets` after anything that loads or hot-reloads assets, `wait-frames 3`
 after pure component edits, BEFORE taking verification screenshots.
 
+Check `logs` with since-seq paging and filter for ERROR/WARN — never dump
+raw log output into your report.
+
 Your final message is a report for the orchestrator: state clearly what you
 did, what you verified (and how), the paths of screenshots you left behind,
 and any anomalies (errors, warnings in `logs`, visual artifacts). Be factual —
