@@ -291,10 +291,15 @@ pub fn convert_compare_function(func: CompareFunction) -> wgpu::CompareFunction 
 }
 
 /// Convert LoadOp to wgpu load op for color attachments.
+///
+/// wgpu has no `DontCare`: it maps to `Clear` with the default value, which is
+/// as cheap as a true don't-care on tile-based GPUs (no tile load) and never
+/// accidentally preserves contents the contract says are undefined — matching
+/// the Vulkan backend's `DONT_CARE` semantics.
 pub fn convert_load_op(op: &crate::graph::LoadOp) -> wgpu::LoadOp<wgpu::Color> {
     match op {
         crate::graph::LoadOp::Load => wgpu::LoadOp::Load,
-        crate::graph::LoadOp::DontCare => wgpu::LoadOp::Load, // wgpu doesn't have DontCare for color
+        crate::graph::LoadOp::DontCare => wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
         crate::graph::LoadOp::Clear(clear_value) => {
             if let crate::types::ClearValue::Color { r, g, b, a } = clear_value {
                 wgpu::LoadOp::Clear(wgpu::Color {
@@ -304,39 +309,62 @@ pub fn convert_load_op(op: &crate::graph::LoadOp) -> wgpu::LoadOp<wgpu::Color> {
                     a: *a as f64,
                 })
             } else {
-                wgpu::LoadOp::Load
+                // Mismatched ClearValue kind: still honor the Clear intent with
+                // the default value (identical on both backends) instead of
+                // silently loading undefined contents.
+                log::warn!(
+                    "LoadOp::Clear on a color attachment with non-color ClearValue \
+                     {clear_value:?}; clearing with transparent black"
+                );
+                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
             }
         }
     }
 }
 
 /// Convert LoadOp to wgpu load op for depth attachments.
+///
+/// See [`convert_load_op`] for the `DontCare` and mismatched-`ClearValue`
+/// policy (defaults: depth `1.0`).
 pub fn convert_depth_load_op(op: &crate::graph::LoadOp) -> wgpu::LoadOp<f32> {
     match op {
         crate::graph::LoadOp::Load => wgpu::LoadOp::Load,
-        crate::graph::LoadOp::DontCare => wgpu::LoadOp::Load, // wgpu doesn't have DontCare for depth
+        crate::graph::LoadOp::DontCare => wgpu::LoadOp::Clear(1.0),
         crate::graph::LoadOp::Clear(clear_value) => {
             if let crate::types::ClearValue::Depth(depth) = clear_value {
                 wgpu::LoadOp::Clear(*depth)
             } else if let crate::types::ClearValue::DepthStencil { depth, .. } = clear_value {
                 wgpu::LoadOp::Clear(*depth)
             } else {
-                wgpu::LoadOp::Load
+                log::warn!(
+                    "LoadOp::Clear on a depth attachment with non-depth ClearValue \
+                     {clear_value:?}; clearing with depth 1.0"
+                );
+                wgpu::LoadOp::Clear(1.0)
             }
         }
     }
 }
 
 /// Convert LoadOp to wgpu load op for stencil attachments.
+///
+/// See [`convert_load_op`] for the `DontCare` and mismatched-`ClearValue`
+/// policy (defaults: stencil `0`).
 pub fn convert_stencil_load_op(op: &crate::graph::LoadOp) -> wgpu::LoadOp<u32> {
     match op {
         crate::graph::LoadOp::Load => wgpu::LoadOp::Load,
-        crate::graph::LoadOp::DontCare => wgpu::LoadOp::Load, // wgpu doesn't have DontCare for stencil
+        crate::graph::LoadOp::DontCare => wgpu::LoadOp::Clear(0),
         crate::graph::LoadOp::Clear(clear_value) => {
             let stencil = match clear_value {
                 crate::types::ClearValue::Stencil(s) => *s,
                 crate::types::ClearValue::DepthStencil { stencil, .. } => *stencil,
-                _ => 0,
+                _ => {
+                    log::warn!(
+                        "LoadOp::Clear on a stencil attachment with non-stencil ClearValue \
+                         {clear_value:?}; clearing with stencil 0"
+                    );
+                    0
+                }
             };
             wgpu::LoadOp::Clear(stencil)
         }
@@ -537,5 +565,64 @@ pub fn convert_binding_type(binding_type: crate::materials::BindingType) -> wgpu
                 multisampled: false,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::LoadOp;
+    use crate::types::ClearValue;
+
+    #[test]
+    fn dont_care_clears_instead_of_loading() {
+        // XB-H4: DontCare must not preserve contents (Vulkan uses DONT_CARE;
+        // wgpu has no equivalent, so it clears with the default value).
+        assert!(matches!(
+            convert_load_op(&LoadOp::DontCare),
+            wgpu::LoadOp::Clear(c) if c == wgpu::Color::TRANSPARENT
+        ));
+        assert!(matches!(
+            convert_depth_load_op(&LoadOp::DontCare),
+            wgpu::LoadOp::Clear(d) if d == 1.0
+        ));
+        assert!(matches!(
+            convert_stencil_load_op(&LoadOp::DontCare),
+            wgpu::LoadOp::Clear(0)
+        ));
+    }
+
+    #[test]
+    fn mismatched_clear_value_still_clears() {
+        // A Clear with the wrong ClearValue kind must clear with defaults,
+        // not silently degrade to Load of undefined contents.
+        assert!(matches!(
+            convert_load_op(&LoadOp::Clear(ClearValue::Depth(0.5))),
+            wgpu::LoadOp::Clear(c) if c == wgpu::Color::TRANSPARENT
+        ));
+        assert!(matches!(
+            convert_depth_load_op(&LoadOp::Clear(ClearValue::color(1.0, 0.0, 0.0, 1.0))),
+            wgpu::LoadOp::Clear(d) if d == 1.0
+        ));
+        assert!(matches!(
+            convert_stencil_load_op(&LoadOp::Clear(ClearValue::color(1.0, 0.0, 0.0, 1.0))),
+            wgpu::LoadOp::Clear(0)
+        ));
+    }
+
+    #[test]
+    fn matching_clear_value_uses_it() {
+        assert!(matches!(
+            convert_load_op(&LoadOp::Clear(ClearValue::color(0.25, 0.5, 0.75, 1.0))),
+            wgpu::LoadOp::Clear(c) if (c.r - 0.25).abs() < 1e-6 && (c.a - 1.0).abs() < 1e-6
+        ));
+        assert!(matches!(
+            convert_depth_load_op(&LoadOp::Clear(ClearValue::Depth(0.5))),
+            wgpu::LoadOp::Clear(d) if d == 0.5
+        ));
+        assert!(matches!(
+            convert_stencil_load_op(&LoadOp::Clear(ClearValue::Stencil(7))),
+            wgpu::LoadOp::Clear(7)
+        ));
     }
 }

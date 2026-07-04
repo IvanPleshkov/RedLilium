@@ -228,6 +228,10 @@ pub fn convert_compare_function(func: CompareFunction) -> vk::CompareOp {
 }
 
 /// Convert LoadOp to Vulkan attachment load op and clear value for color attachments.
+///
+/// A `Clear` with a mismatched `ClearValue` kind still clears — with the
+/// default value (transparent black), matching the wgpu backend — instead of
+/// silently degrading to `LOAD` of undefined contents.
 pub fn convert_load_op_color(op: &crate::graph::LoadOp) -> (vk::AttachmentLoadOp, vk::ClearValue) {
     match op {
         crate::graph::LoadOp::Load => (vk::AttachmentLoadOp::LOAD, vk::ClearValue::default()),
@@ -245,7 +249,11 @@ pub fn convert_load_op_color(op: &crate::graph::LoadOp) -> (vk::AttachmentLoadOp
                     },
                 )
             } else {
-                (vk::AttachmentLoadOp::LOAD, vk::ClearValue::default())
+                log::warn!(
+                    "LoadOp::Clear on a color attachment with non-color ClearValue \
+                     {clear_value:?}; clearing with transparent black"
+                );
+                (vk::AttachmentLoadOp::CLEAR, vk::ClearValue::default())
             }
         }
     }
@@ -259,6 +267,12 @@ pub fn convert_load_op_depth(op: &crate::graph::LoadOp) -> (vk::AttachmentLoadOp
             (vk::AttachmentLoadOp::DONT_CARE, vk::ClearValue::default())
         }
         crate::graph::LoadOp::Clear(clear_value) => {
+            if matches!(clear_value, crate::types::ClearValue::Color { .. }) {
+                log::warn!(
+                    "LoadOp::Clear on a depth attachment with non-depth ClearValue \
+                     {clear_value:?}; clearing with depth 1.0 / stencil 0"
+                );
+            }
             let depth = match clear_value {
                 crate::types::ClearValue::Depth(d) => *d,
                 crate::types::ClearValue::DepthStencil { depth, .. } => *depth,
@@ -292,7 +306,13 @@ pub fn convert_load_op_stencil(
             let stencil = match clear_value {
                 crate::types::ClearValue::Stencil(s) => *s,
                 crate::types::ClearValue::DepthStencil { stencil, .. } => *stencil,
-                _ => 0,
+                _ => {
+                    log::warn!(
+                        "LoadOp::Clear on a stencil attachment with non-stencil ClearValue \
+                         {clear_value:?}; clearing with stencil 0"
+                    );
+                    0
+                }
             };
             (
                 vk::AttachmentLoadOp::CLEAR,
@@ -384,4 +404,57 @@ pub fn convert_blend_state(
         .dst_alpha_blend_factor(alpha_dst)
         .alpha_blend_op(alpha_op)
         .color_write_mask(vk::ColorComponentFlags::RGBA)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::LoadOp;
+    use crate::types::ClearValue;
+
+    #[test]
+    fn dont_care_maps_to_vk_dont_care() {
+        let (op, _) = convert_load_op_color(&LoadOp::DontCare);
+        assert_eq!(op, vk::AttachmentLoadOp::DONT_CARE);
+        let (op, _) = convert_load_op_depth(&LoadOp::DontCare);
+        assert_eq!(op, vk::AttachmentLoadOp::DONT_CARE);
+        let (op, _) = convert_load_op_stencil(&LoadOp::DontCare);
+        assert_eq!(op, vk::AttachmentLoadOp::DONT_CARE);
+    }
+
+    #[test]
+    fn mismatched_clear_value_still_clears() {
+        // XB-H4: a Clear with the wrong ClearValue kind must clear with
+        // defaults, not silently degrade to LOAD of undefined contents.
+        let (op, value) = convert_load_op_color(&LoadOp::Clear(ClearValue::Depth(0.5)));
+        assert_eq!(op, vk::AttachmentLoadOp::CLEAR);
+        assert_eq!(unsafe { value.color.float32 }, [0.0; 4]);
+
+        let (op, value) =
+            convert_load_op_depth(&LoadOp::Clear(ClearValue::color(1.0, 0.0, 0.0, 1.0)));
+        assert_eq!(op, vk::AttachmentLoadOp::CLEAR);
+        assert_eq!(unsafe { value.depth_stencil.depth }, 1.0);
+        assert_eq!(unsafe { value.depth_stencil.stencil }, 0);
+
+        let (op, value) =
+            convert_load_op_stencil(&LoadOp::Clear(ClearValue::color(1.0, 0.0, 0.0, 1.0)));
+        assert_eq!(op, vk::AttachmentLoadOp::CLEAR);
+        assert_eq!(unsafe { value.depth_stencil.stencil }, 0);
+    }
+
+    #[test]
+    fn matching_clear_value_uses_it() {
+        let (op, value) =
+            convert_load_op_color(&LoadOp::Clear(ClearValue::color(0.25, 0.5, 0.75, 1.0)));
+        assert_eq!(op, vk::AttachmentLoadOp::CLEAR);
+        assert_eq!(unsafe { value.color.float32 }, [0.25, 0.5, 0.75, 1.0]);
+
+        let (op, value) = convert_load_op_depth(&LoadOp::Clear(ClearValue::DepthStencil {
+            depth: 0.5,
+            stencil: 3,
+        }));
+        assert_eq!(op, vk::AttachmentLoadOp::CLEAR);
+        assert_eq!(unsafe { value.depth_stencil.depth }, 0.5);
+        assert_eq!(unsafe { value.depth_stencil.stencil }, 3);
+    }
 }

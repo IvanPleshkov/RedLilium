@@ -19,11 +19,21 @@ use crate::backend::vulkan::VulkanSurfaceTextureView;
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum LoadOp {
     /// Clear the attachment with a specified value.
+    ///
+    /// The [`ClearValue`] kind must match the attachment (color value for a
+    /// color attachment, depth/stencil for depth attachments). A mismatched
+    /// value still clears — with the default (transparent black / depth 1.0 /
+    /// stencil 0) — and logs a warning; identical on both backends.
     Clear(ClearValue),
     /// Load the existing contents of the attachment.
     #[default]
     Load,
-    /// Don't care about the existing contents (may be undefined).
+    /// The existing contents are undefined; the pass must not rely on them.
+    ///
+    /// Implemented as a true `DONT_CARE` on Vulkan and as a default-value
+    /// clear on wgpu (which has no don't-care load) — both avoid the
+    /// tile-load cost on tile-based GPUs, and neither preserves the previous
+    /// contents. Use [`Load`](Self::Load) if you need them preserved.
     DontCare,
 }
 
