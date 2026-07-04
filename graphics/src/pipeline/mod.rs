@@ -37,7 +37,7 @@
 //! let mut pipeline = device.create_pipeline(2);  // 2 frames in flight
 //!
 //! while !window.should_close() {
-//!     let mut schedule = pipeline.begin_frame();  // Wait + get schedule
+//!     let mut schedule = pipeline.begin_frame()?;  // Wait + get schedule
 //!
 //!     let shadows = schedule.submit("shadows", shadow_graph, &[]);
 //!     let main = schedule.submit("main", main_graph, &[shadows]);
@@ -46,7 +46,7 @@
 //!     pipeline.end_frame(schedule);  // Store fence, advance slot
 //! }
 //!
-//! pipeline.wait_idle();  // Graceful shutdown
+//! pipeline.wait_idle()?;  // Graceful shutdown
 //! ```
 //!
 //! # Choosing Frames in Flight
@@ -186,7 +186,7 @@ impl FramePipeline {
     ///
     /// ```ignore
     /// loop {
-    ///     let mut schedule = pipeline.begin_frame();  // Wait + get schedule
+    ///     let mut schedule = pipeline.begin_frame()?;  // Wait + get schedule
     ///
     ///     let main = schedule.submit("main", &main_graph, &[]);
     ///     schedule.present("present", &post_graph, &[main]);
@@ -230,13 +230,17 @@ impl FramePipeline {
         }
     }
 
-    pub fn begin_frame(&mut self) -> FrameSchedule {
+    pub fn begin_frame(&mut self) -> Result<FrameSchedule, GraphicsError> {
         profile_scope!("begin_frame");
 
-        // Wait for previous work in this slot to complete
+        // Wait for previous work in this slot to complete. On timeout or
+        // device loss the GPU may still be using this slot's resources —
+        // propagate the error WITHOUT advancing frame state or recycling
+        // anything (command pools, descriptor pools, graphs). The fence stays
+        // in the slot, so a later call retries the wait.
         if let Some(fence) = &self.frame_fences[self.current_slot] {
             profile_scope!("wait_fence");
-            fence.wait();
+            fence.wait()?;
         }
 
         // Fence passed: the GPU finished this slot's work, so readback source
@@ -275,17 +279,17 @@ impl FramePipeline {
         // Take graph pool for this frame
         let graph_pool = std::mem::take(&mut self.graph_pool);
 
-        FrameSchedule::new(
+        Ok(FrameSchedule::new(
             self.device.clone(),
             self.current_slot,
             ring_buffer,
             graph_pool,
-        )
+        ))
     }
 
     /// Begin a new frame with a timeout.
     ///
-    /// Like [`begin_frame`](Self::begin_frame), but returns `None` if the
+    /// Like [`begin_frame`](Self::begin_frame), but returns `Ok(None)` if the
     /// timeout elapses before the frame slot becomes available.
     ///
     /// # Arguments
@@ -294,14 +298,15 @@ impl FramePipeline {
     ///
     /// # Returns
     ///
-    /// `Some(schedule)` if the frame slot is ready, `None` if timeout elapsed.
+    /// `Ok(Some(schedule))` if the frame slot is ready, `Ok(None)` if the
+    /// timeout elapsed, `Err` on device loss or fence-wait failure.
     ///
     /// # Example
     ///
     /// ```ignore
     /// use std::time::Duration;
     ///
-    /// match pipeline.begin_frame_timeout(Duration::from_millis(100)) {
+    /// match pipeline.begin_frame_timeout(Duration::from_millis(100))? {
     ///     Some(schedule) => {
     ///         // Normal frame processing
     ///         schedule.present("present", &graph, &[]);
@@ -313,13 +318,16 @@ impl FramePipeline {
     ///     }
     /// }
     /// ```
-    pub fn begin_frame_timeout(&mut self, timeout: Duration) -> Option<FrameSchedule> {
+    pub fn begin_frame_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<FrameSchedule>, GraphicsError> {
         profile_scope!("begin_frame_timeout");
 
         if let Some(fence) = &self.frame_fences[self.current_slot]
-            && !fence.wait_timeout(timeout)
+            && !fence.wait_timeout(timeout)?
         {
-            return None;
+            return Ok(None);
         }
 
         // Fence passed: drain readbacks before recycling this slot's graphs.
@@ -356,12 +364,12 @@ impl FramePipeline {
         // Take graph pool for this frame
         let graph_pool = std::mem::take(&mut self.graph_pool);
 
-        Some(FrameSchedule::new(
+        Ok(Some(FrameSchedule::new(
             self.device.clone(),
             self.current_slot,
             ring_buffer,
             graph_pool,
-        ))
+        )))
     }
 
     /// End the current frame.
@@ -381,7 +389,7 @@ impl FramePipeline {
     /// # Example
     ///
     /// ```ignore
-    /// let mut schedule = pipeline.begin_frame();
+    /// let mut schedule = pipeline.begin_frame()?;
     /// let main = schedule.submit("main", main_graph, &[]);
     /// schedule.present("present", post_graph, &[main]);
     /// pipeline.end_frame(schedule);  // Takes ownership
@@ -433,13 +441,14 @@ impl FramePipeline {
     ///
     /// ```ignore
     /// // Wait for current slot before modifying slot-local resources
-    /// pipeline.wait_current_slot();
+    /// pipeline.wait_current_slot()?;
     /// update_slot_local_buffer(pipeline.current_slot());
     /// ```
-    pub fn wait_current_slot(&self) {
+    pub fn wait_current_slot(&self) -> Result<(), GraphicsError> {
         if let Some(fence) = &self.frame_fences[self.current_slot] {
-            fence.wait();
+            fence.wait()?;
         }
+        Ok(())
     }
 
     /// Wait for the current frame slot with a timeout.
@@ -453,12 +462,16 @@ impl FramePipeline {
     ///
     /// # Returns
     ///
-    /// `true` if the slot is ready, `false` if timeout elapsed.
-    pub fn wait_current_slot_timeout(&self, timeout: std::time::Duration) -> bool {
+    /// `Ok(true)` if the slot is ready, `Ok(false)` if the timeout elapsed,
+    /// `Err` on device loss or fence-wait failure.
+    pub fn wait_current_slot_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<bool, GraphicsError> {
         if let Some(fence) = &self.frame_fences[self.current_slot] {
             fence.wait_timeout(timeout)
         } else {
-            true // No fence means slot is ready
+            Ok(true) // No fence means slot is ready
         }
     }
 
@@ -481,21 +494,27 @@ impl FramePipeline {
     /// ```ignore
     /// // Main loop
     /// while !window.should_close() {
-    ///     let mut schedule = pipeline.begin_frame();
+    ///     let mut schedule = pipeline.begin_frame()?;
     ///     // ... render ...
     ///     pipeline.end_frame(schedule);
     /// }
     ///
     /// // Shutdown
-    /// pipeline.wait_idle();  // Wait for ALL GPU work
+    /// pipeline.wait_idle()?;  // Wait for ALL GPU work
     /// drop(device);          // Safe to destroy
     /// ```
-    pub fn wait_idle(&self) {
+    /// # Errors
+    ///
+    /// Returns an error on fence-wait timeout or device loss. In that case the
+    /// GPU may still be executing — do NOT destroy resources or call
+    /// [`recycle_all_graphs`](Self::recycle_all_graphs).
+    pub fn wait_idle(&self) -> Result<(), GraphicsError> {
         profile_scope!("wait_idle");
 
         for fence in self.frame_fences.iter().flatten() {
-            fence.wait();
+            fence.wait()?;
         }
+        Ok(())
     }
 
     /// Recycle all submitted graphs across every frame slot.
@@ -521,7 +540,7 @@ impl FramePipeline {
 
     /// Wait for all in-flight GPU work with a timeout.
     ///
-    /// Like [`wait_idle`](Self::wait_idle), but returns `false` if the
+    /// Like [`wait_idle`](Self::wait_idle), but returns `Ok(false)` if the
     /// timeout elapses before all work completes.
     ///
     /// # Arguments
@@ -530,23 +549,24 @@ impl FramePipeline {
     ///
     /// # Returns
     ///
-    /// `true` if GPU is idle, `false` if timeout elapsed.
-    pub fn wait_idle_timeout(&self, timeout: Duration) -> bool {
+    /// `Ok(true)` if GPU is idle, `Ok(false)` if the timeout elapsed, `Err`
+    /// on device loss or fence-wait failure.
+    pub fn wait_idle_timeout(&self, timeout: Duration) -> Result<bool, GraphicsError> {
         let start = std::time::Instant::now();
 
         for fence in self.frame_fences.iter().flatten() {
             let elapsed = start.elapsed();
             if elapsed >= timeout {
-                return false;
+                return Ok(false);
             }
 
             let remaining = timeout - elapsed;
-            if !fence.wait_timeout(remaining) {
-                return false;
+            if !fence.wait_timeout(remaining)? {
+                return Ok(false);
             }
         }
 
-        true
+        Ok(true)
     }
 
     /// Get the number of frames in flight.
@@ -715,7 +735,7 @@ mod tests {
     #[test]
     fn test_begin_frame_returns_schedule() {
         let mut pipeline = make_test_pipeline(2);
-        let _schedule = pipeline.begin_frame();
+        let _schedule = pipeline.begin_frame().unwrap();
 
         assert_eq!(pipeline.frame_count(), 1);
     }
@@ -725,7 +745,7 @@ mod tests {
         let mut pipeline = make_test_pipeline(3);
         assert_eq!(pipeline.current_slot(), 0);
 
-        let mut schedule = pipeline.begin_frame();
+        let mut schedule = pipeline.begin_frame().unwrap();
         schedule.render(make_test_graph("present"));
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 1);
@@ -733,14 +753,14 @@ mod tests {
         // Signal fences so next begin_frame doesn't block
         pipeline.signal_all_fences();
 
-        let mut schedule = pipeline.begin_frame();
+        let mut schedule = pipeline.begin_frame().unwrap();
         schedule.render(make_test_graph("present"));
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 2);
 
         pipeline.signal_all_fences();
 
-        let mut schedule = pipeline.begin_frame();
+        let mut schedule = pipeline.begin_frame().unwrap();
         schedule.render(make_test_graph("present"));
         pipeline.end_frame(schedule);
         assert_eq!(pipeline.current_slot(), 0); // Wraps around
@@ -763,7 +783,7 @@ mod tests {
     fn test_wait_idle_no_fences() {
         let pipeline = make_test_pipeline(2);
         // Should return immediately when no fences
-        pipeline.wait_idle();
+        pipeline.wait_idle().unwrap();
     }
 
     #[test]
@@ -771,7 +791,7 @@ mod tests {
         let mut pipeline = make_test_pipeline(2);
 
         // Frame 0
-        let mut schedule = pipeline.begin_frame();
+        let mut schedule = pipeline.begin_frame().unwrap();
         assert_eq!(pipeline.frame_count(), 1);
         schedule.render(make_test_graph("present"));
         pipeline.end_frame(schedule);
@@ -781,7 +801,7 @@ mod tests {
         pipeline.signal_all_fences();
 
         // Frame 1
-        let mut schedule = pipeline.begin_frame();
+        let mut schedule = pipeline.begin_frame().unwrap();
         assert_eq!(pipeline.frame_count(), 2);
         schedule.render(make_test_graph("present"));
         pipeline.end_frame(schedule);
@@ -791,7 +811,7 @@ mod tests {
         pipeline.signal_all_fences();
 
         // Frame 2 (reuses slot 0)
-        let _schedule = pipeline.begin_frame();
+        let _schedule = pipeline.begin_frame().unwrap();
         assert_eq!(pipeline.frame_count(), 3);
         assert_eq!(pipeline.current_slot(), 0);
     }
@@ -801,7 +821,9 @@ mod tests {
         let mut pipeline = make_test_pipeline(2);
 
         // Should succeed immediately (no fence to wait on)
-        let schedule = pipeline.begin_frame_timeout(Duration::from_millis(1));
+        let schedule = pipeline
+            .begin_frame_timeout(Duration::from_millis(1))
+            .unwrap();
         assert!(schedule.is_some());
         assert_eq!(pipeline.frame_count(), 1);
     }
@@ -811,7 +833,11 @@ mod tests {
         let pipeline = make_test_pipeline(2);
 
         // Should succeed immediately (no fences)
-        assert!(pipeline.wait_idle_timeout(Duration::from_millis(1)));
+        assert!(
+            pipeline
+                .wait_idle_timeout(Duration::from_millis(1))
+                .unwrap()
+        );
     }
 
     #[test]
@@ -825,7 +851,7 @@ mod tests {
     #[should_panic(expected = "render() must be called before end_frame()")]
     fn test_end_frame_without_render_panics() {
         let mut pipeline = make_test_pipeline(2);
-        let schedule = pipeline.begin_frame();
+        let schedule = pipeline.begin_frame().unwrap();
         pipeline.end_frame(schedule); // Panics - render() not called
     }
 
@@ -833,7 +859,7 @@ mod tests {
     fn test_full_frame_with_render() {
         let mut pipeline = make_test_pipeline(2);
 
-        let mut schedule = pipeline.begin_frame();
+        let mut schedule = pipeline.begin_frame().unwrap();
         // One graph per frame (may carry multiple passes).
         schedule.render(make_test_graph("main"));
 

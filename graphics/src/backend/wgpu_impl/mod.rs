@@ -241,7 +241,9 @@ impl WgpuBackend {
     /// - If `signal_fence` is provided: returns immediately after submission;
     ///   the submission index is stored in the fence for async polling.
     /// - If `signal_fence` is `None`: currently blocks until the submission
-    ///   completes (`poll(Wait)`).
+    ///   completes (`poll(Wait)`) and returns an error on timeout/poll
+    ///   failure. Per the trait-level contract this blocking is an
+    ///   implementation detail — callers must not rely on it.
     ///
     /// NOTE: the `None`-fence block is conservative. CPU/GPU overlap is bounded
     /// per frame by the frame-in-flight fence waited in
@@ -285,23 +287,28 @@ impl WgpuBackend {
         };
 
         // Store submission index in fence for async polling
-        if let Some(GpuFence::Wgpu {
-            submission_index: fence_idx,
-            ..
-        }) = signal_fence
-            && let Ok(mut guard) = fence_idx.lock()
+        if let Some(GpuFence::Wgpu { state, .. }) = signal_fence
+            && let Ok(mut guard) = state.lock()
         {
-            *guard = Some(submission_index);
+            *guard = crate::backend::WgpuFenceState::Submitted(submission_index);
             // Async path: return immediately, caller will wait on fence
             return Ok(());
         }
 
-        // Sync path: no fence provided, wait for GPU to complete before returning
-        let _ = self.device.poll(wgpu::PollType::Wait {
+        // Sync path: no fence provided, wait for GPU to complete before
+        // returning. A timeout or poll failure must be surfaced — pretending
+        // the work finished lets callers recycle in-flight resources.
+        match self.device.poll(wgpu::PollType::Wait {
             submission_index: Some(submission_index),
             timeout: Some(std::time::Duration::from_secs(10)),
-        });
-
-        Ok(())
+        }) {
+            Ok(status) if status.wait_finished() => Ok(()),
+            Ok(_) => Err(GraphicsError::Timeout(
+                "render graph submission did not complete within 10 s; GPU may be hung".into(),
+            )),
+            Err(e) => Err(GraphicsError::Internal(format!(
+                "device poll failed after graph submission: {e}"
+            ))),
+        }
     }
 }

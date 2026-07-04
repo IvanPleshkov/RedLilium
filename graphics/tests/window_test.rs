@@ -210,7 +210,7 @@ impl WindowTestApp {
         let (r, g, b) = hue_to_rgb(hue);
 
         // Execute using FramePipeline and FrameSchedule (as documented in ARCHITECTURE.md)
-        let mut schedule = pipeline.begin_frame();
+        let mut schedule = pipeline.begin_frame().expect("begin_frame failed");
 
         let mut graph = schedule.acquire_graph();
         let mut pass = GraphicsPass::new(format!("frame_{}", self.frame_count));
@@ -324,7 +324,7 @@ impl ApplicationHandler for WindowTestApp {
 
                         // Wait for GPU to finish before exiting
                         if let Some(pipeline) = &self.pipeline {
-                            pipeline.wait_idle();
+                            pipeline.wait_idle().expect("wait_idle failed");
                         }
 
                         event_loop.exit();
@@ -467,7 +467,7 @@ fn run_window_test(params: InstanceParameters) -> bool {
 
     // Cleanup
     if let Some(pipeline) = &app.pipeline {
-        pipeline.wait_idle();
+        let _ = pipeline.wait_idle();
     }
 
     match app.result {

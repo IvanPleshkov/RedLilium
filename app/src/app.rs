@@ -327,7 +327,13 @@ where
         // Wait for ALL in-flight frames before reconfiguring the surface.
         // The surface is shared across all frame slots, so any slot with
         // pending GPU work could still reference the old swapchain textures.
-        ctx.pipeline.wait_idle();
+        // On failure the GPU may still be using them — skip the reconfigure
+        // entirely (the next resize event retries) rather than recycling
+        // graphs the GPU still reads.
+        if let Err(e) = ctx.pipeline.wait_idle() {
+            log::error!("wait_idle failed during resize, skipping surface reconfigure: {e}");
+            return;
+        }
 
         // Recycle all submitted graphs to release Arc<TextureView> references
         // to the old swapchain back buffers.
@@ -385,8 +391,16 @@ where
             }
         };
 
-        // Begin frame
-        let schedule = ctx.pipeline.begin_frame();
+        // Begin frame. On fence-wait failure (GPU hang, device lost) the
+        // slot's resources must not be recycled — skip this frame; the fence
+        // stays in its slot and the next frame retries the wait.
+        let schedule = match ctx.pipeline.begin_frame() {
+            Ok(schedule) => schedule,
+            Err(e) => {
+                log::error!("begin_frame failed, skipping frame: {e}");
+                return;
+            }
+        };
 
         // Create draw context
         let draw_ctx = DrawContext {
@@ -508,9 +522,12 @@ where
                         self.handler.on_shutdown(ctx);
                     }
 
-                    // Wait for GPU before exiting
-                    if let Some(ctx) = &self.context {
-                        ctx.pipeline.wait_idle();
+                    // Wait for GPU before exiting; on failure we exit anyway —
+                    // the process is going down.
+                    if let Some(ctx) = &self.context
+                        && let Err(e) = ctx.pipeline.wait_idle()
+                    {
+                        log::error!("wait_idle failed during shutdown: {e}");
                     }
 
                     event_loop.exit();

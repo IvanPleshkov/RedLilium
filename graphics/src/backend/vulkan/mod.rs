@@ -32,6 +32,12 @@ use super::{GpuBuffer, GpuFence, GpuSampler, GpuTexture};
 /// Maximum number of frames in flight for per-slot resource tracking.
 pub const MAX_FRAMES_IN_FLIGHT: usize = 3;
 
+/// Upper bound for every CPU-side GPU wait (fences, swapchain acquire).
+///
+/// A hung GPU must surface as a [`GraphicsError::Timeout`] instead of
+/// freezing the process forever; 10 s is far beyond any legitimate frame.
+pub(crate) const FENCE_WAIT_TIMEOUT_NS: u64 = 10_000_000_000;
+
 /// Process-wide source of stable texture ids for the layout tracker. Monotonic
 /// so a destroyed texture's id is never reused (no layout aliasing).
 static NEXT_TEXTURE_ID: AtomicU64 = AtomicU64::new(1);
@@ -1067,7 +1073,7 @@ impl VulkanBackend {
     }
 
     /// Create a fence for CPU-GPU synchronization.
-    pub fn create_fence(&self, signaled: bool) -> GpuFence {
+    pub fn create_fence(&self, signaled: bool) -> Result<GpuFence, GraphicsError> {
         let flags = if signaled {
             vk::FenceCreateFlags::SIGNALED
         } else {
@@ -1076,44 +1082,48 @@ impl VulkanBackend {
 
         let fence_info = vk::FenceCreateInfo::default().flags(flags);
 
-        let fence =
-            unsafe { self.device.create_fence(&fence_info, None) }.expect("Failed to create fence");
+        let fence = unsafe { self.device.create_fence(&fence_info, None) }.map_err(|e| {
+            GraphicsError::ResourceCreationFailed(format!("Failed to create fence: {:?}", e))
+        })?;
 
-        GpuFence::Vulkan {
+        Ok(GpuFence::Vulkan {
             device: self.device.clone(),
             fence,
-        }
+        })
     }
 
     /// Wait for a fence to be signaled.
     ///
     /// Uses a 10-second timeout to prevent indefinite hangs on corrupted fences
-    /// or GPU lockups. If timeout occurs, logs a warning but continues.
-    pub fn wait_fence(&self, fence: &GpuFence) {
+    /// or GPU lockups. Timeout and device loss are returned as errors — the
+    /// caller must not recycle resources guarded by this fence in that case.
+    pub fn wait_fence(&self, fence: &GpuFence) -> Result<(), GraphicsError> {
         if let GpuFence::Vulkan { device, fence, .. } = fence {
-            // 10 second timeout in nanoseconds
-            const FENCE_TIMEOUT_NS: u64 = 10_000_000_000;
             unsafe {
-                match device.wait_for_fences(&[*fence], true, FENCE_TIMEOUT_NS) {
-                    Ok(()) => {}
-                    Err(vk::Result::TIMEOUT) => {
-                        log::warn!(
-                            "Fence wait timed out after 10 seconds. \
-                             GPU may be hung or fence was never signaled."
-                        );
-                    }
-                    Err(e) => {
-                        log::error!("Fence wait failed: {:?}", e);
-                    }
+                match device.wait_for_fences(&[*fence], true, FENCE_WAIT_TIMEOUT_NS) {
+                    Ok(()) => Ok(()),
+                    Err(vk::Result::TIMEOUT) => Err(GraphicsError::Timeout(
+                        "fence wait timed out after 10 s; GPU may be hung".into(),
+                    )),
+                    Err(vk::Result::ERROR_DEVICE_LOST) => Err(GraphicsError::DeviceLost),
+                    Err(e) => Err(GraphicsError::Internal(format!(
+                        "Fence wait failed: {:?}",
+                        e
+                    ))),
                 }
             }
+        } else {
+            Ok(())
         }
     }
 
     /// Check if a fence is signaled (non-blocking).
+    ///
+    /// `get_fence_status` returns `Ok(false)` for `VK_NOT_READY`, so the
+    /// success of the call alone does NOT mean the fence is signaled.
     pub fn is_fence_signaled(&self, fence: &GpuFence) -> bool {
         if let GpuFence::Vulkan { device, fence, .. } = fence {
-            unsafe { device.get_fence_status(*fence).is_ok() }
+            matches!(unsafe { device.get_fence_status(*fence) }, Ok(true))
         } else {
             false
         }
@@ -1121,23 +1131,29 @@ impl VulkanBackend {
 
     /// Wait for a fence to be signaled with a timeout.
     ///
-    /// Returns `true` if the fence was signaled, `false` if the timeout elapsed.
-    pub fn wait_fence_timeout(&self, fence: &GpuFence, timeout: std::time::Duration) -> bool {
+    /// Returns `Ok(true)` if the fence was signaled, `Ok(false)` on timeout,
+    /// and an error on device loss or wait failure.
+    pub fn wait_fence_timeout(
+        &self,
+        fence: &GpuFence,
+        timeout: std::time::Duration,
+    ) -> Result<bool, GraphicsError> {
         if let GpuFence::Vulkan { device, fence, .. } = fence {
             // Convert Duration to nanoseconds for Vulkan
             let timeout_ns = timeout.as_nanos() as u64;
             unsafe {
                 match device.wait_for_fences(&[*fence], true, timeout_ns) {
-                    Ok(()) => true,
-                    Err(vk::Result::TIMEOUT) => false,
-                    Err(e) => {
-                        log::error!("Fence wait failed: {:?}", e);
-                        false
-                    }
+                    Ok(()) => Ok(true),
+                    Err(vk::Result::TIMEOUT) => Ok(false),
+                    Err(vk::Result::ERROR_DEVICE_LOST) => Err(GraphicsError::DeviceLost),
+                    Err(e) => Err(GraphicsError::Internal(format!(
+                        "Fence wait failed: {:?}",
+                        e
+                    ))),
                 }
             }
         } else {
-            false
+            Ok(false)
         }
     }
 
@@ -1729,11 +1745,23 @@ impl VulkanBackend {
             )));
         }
 
-        // Wait for staging copy to complete, then free staging resources immediately
-        let _ = unsafe {
+        // Wait for staging copy to complete, then free staging resources
+        // immediately. On timeout/device-loss the GPU may still be reading the
+        // staging buffer — leak it (and the fence) instead of freeing in-use
+        // memory, and surface the error.
+        if let Err(e) = unsafe {
             self.device
-                .wait_for_fences(&[staging_fence], true, u64::MAX)
-        };
+                .wait_for_fences(&[staging_fence], true, FENCE_WAIT_TIMEOUT_NS)
+        } {
+            log::error!("Staging copy fence wait failed ({e:?}); leaking staging buffer and fence");
+            return Err(match e {
+                vk::Result::TIMEOUT => {
+                    GraphicsError::Timeout("staging copy did not complete within 10 s".into())
+                }
+                vk::Result::ERROR_DEVICE_LOST => GraphicsError::DeviceLost,
+                other => GraphicsError::Internal(format!("staging fence wait failed: {other:?}")),
+            });
+        }
         unsafe {
             self.device.destroy_fence(staging_fence, None);
             self.device

@@ -131,7 +131,9 @@ pub fn run() {
     // The shutdown ack is queued on the IO runtime's writer task; give it a
     // beat to reach the socket before tearing the process down.
     std::thread::sleep(Duration::from_millis(150));
-    pipeline.wait_idle();
+    if let Err(e) = pipeline.wait_idle() {
+        log::error!("wait_idle failed during shutdown: {e}");
+    }
     let _ = std::fs::remove_file(".redlilium/editor.port");
     log::info!("headless editor: shutdown");
 }
@@ -190,7 +192,16 @@ fn tick(
     ew.schedules.run_frame(&mut ew.world, runner, FIXED_DT);
 
     // Render into the camera's off-screen target (created on first tick).
-    let mut schedule = pipeline.begin_frame();
+    // On fence-wait failure skip rendering this tick — the fence stays in its
+    // slot and the next tick retries the wait.
+    let mut schedule = match pipeline.begin_frame() {
+        Ok(schedule) => schedule,
+        Err(e) => {
+            log::error!("begin_frame failed, skipping frame: {e}");
+            ew.window_input.write().begin_frame();
+            return shutdown;
+        }
+    };
     let mut graph = schedule.acquire_graph();
     scene_view.ensure_camera_target(&mut ew.world, ew.editor_camera, width, height);
     ew.world.resource_mut::<RenderSchedule>().set(graph);

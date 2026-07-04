@@ -228,8 +228,20 @@ impl FrameSchedule {
             "render() has already been called on this schedule"
         );
 
-        // Fence signalled by this frame's single submit.
-        let fence = Fence::new_gpu(Arc::clone(self.device.instance()));
+        // Fence signalled by this frame's single submit. Any failure below
+        // (fence creation, compile, submit) means NO GPU work is in flight for
+        // this frame, so the slot fence must read as signaled — a GPU fence
+        // that was reset but never submitted would stall every subsequent
+        // `begin_frame` until its wait times out.
+        let mut fence = match Fence::new_gpu(Arc::clone(self.device.instance())) {
+            Ok(fence) => fence,
+            Err(e) => {
+                log::error!("Failed to create frame fence, skipping submit: {e}");
+                self.submitted_graphs.push(graph);
+                self.fence = Some(Fence::new_signaled());
+                return;
+            }
+        };
 
         match graph.compile(RenderGraphCompilationMode::Strict) {
             Ok(_) => {
@@ -238,10 +250,12 @@ impl FrameSchedule {
                 let backend = self.device.instance().backend();
                 if let Err(e) = backend.execute_graph(&graph, compiled, fence.gpu_fence()) {
                     log::error!("Failed to execute frame graph: {e}");
+                    fence = Fence::new_signaled();
                 }
             }
             Err(e) => {
                 log::error!("Failed to compile frame graph: {e}");
+                fence = Fence::new_signaled();
             }
         }
 
@@ -288,7 +302,7 @@ mod tests {
         schedule.render(make_test_graph("main"));
 
         let fence = schedule.take_fence();
-        fence.wait();
+        fence.wait().unwrap();
         assert_eq!(fence.status(), FenceStatus::Signaled);
     }
 
@@ -303,7 +317,7 @@ mod tests {
         schedule.render(graph);
 
         let fence = schedule.take_fence();
-        fence.wait();
+        fence.wait().unwrap();
         assert_eq!(fence.status(), FenceStatus::Signaled);
     }
 

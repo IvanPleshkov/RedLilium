@@ -424,103 +424,124 @@ impl WgpuBackend {
 
     /// Create a fence for CPU-GPU synchronization.
     ///
-    /// Note: wgpu fences work differently from Vulkan fences. Instead of a binary
-    /// signaled/unsignaled state, wgpu tracks submission indices. A fence with no
-    /// submission (None) is considered "signaled" (no work to wait for).
-    ///
-    /// The `signaled` parameter is acknowledged but has limited effect:
-    /// - `signaled=true`: Fence starts with no submission (effectively signaled)
-    /// - `signaled=false`: Same as above - wgpu cannot represent an unsignaled fence
-    ///   without pending work. The fence becomes meaningful only after `execute_graph`
-    ///   stores a submission index.
-    pub fn create_fence(&self, _signaled: bool) -> GpuFence {
-        // Note: wgpu fences track submissions, not binary state.
-        // Fence will appear signaled until work is submitted.
-        GpuFence::Wgpu {
+    /// wgpu has no native binary fence, so the state is emulated (see
+    /// [`WgpuFenceState`](crate::backend::WgpuFenceState)): the fence starts
+    /// `Signaled` or `Unsignaled` exactly as requested — matching Vulkan — and
+    /// becomes submission-tracked once `execute_graph` ties a submission to it.
+    pub fn create_fence(&self, signaled: bool) -> Result<GpuFence, GraphicsError> {
+        Ok(GpuFence::Wgpu {
             device: self.device.clone(),
-            submission_index: Mutex::new(None),
-        }
+            state: Mutex::new(if signaled {
+                crate::backend::WgpuFenceState::Signaled
+            } else {
+                crate::backend::WgpuFenceState::Unsignaled
+            }),
+        })
     }
 
     /// Wait for a fence to be signaled.
-    pub fn wait_fence(&self, fence: &GpuFence) {
-        if let GpuFence::Wgpu {
-            device,
-            submission_index,
-        } = fence
-            && let Ok(guard) = submission_index.lock()
-            && let Some(idx) = guard.clone()
-        {
-            // Wait for the specific submission
-            let _ = device.poll(wgpu::PollType::Wait {
-                submission_index: Some(idx),
-                timeout: Some(std::time::Duration::from_secs(10)),
-            });
+    ///
+    /// Bounded by a 10 s timeout; timeout and poll failures are returned as
+    /// errors so callers never mistake a hung GPU for completed work.
+    /// Waiting on an `Unsignaled` fence with no tied submission is an error:
+    /// nothing will ever signal it (Vulkan would stall the full timeout).
+    pub fn wait_fence(&self, fence: &GpuFence) -> Result<(), GraphicsError> {
+        use crate::backend::WgpuFenceState;
+        let GpuFence::Wgpu { device, state } = fence else {
+            return Ok(());
+        };
+        let current = state
+            .lock()
+            .map_err(|_| GraphicsError::Internal("wgpu fence mutex poisoned".into()))?
+            .clone();
+        match current {
+            WgpuFenceState::Signaled => Ok(()),
+            WgpuFenceState::Unsignaled => Err(GraphicsError::Timeout(
+                "waiting on an unsignaled wgpu fence with no pending submission — \
+                 it can never be signaled"
+                    .into(),
+            )),
+            WgpuFenceState::Submitted(idx) => {
+                match device.poll(wgpu::PollType::Wait {
+                    submission_index: Some(idx),
+                    timeout: Some(std::time::Duration::from_secs(10)),
+                }) {
+                    Ok(status) if status.wait_finished() => Ok(()),
+                    Ok(_) => Err(GraphicsError::Timeout(
+                        "fence wait timed out after 10 s; GPU may be hung".into(),
+                    )),
+                    Err(e) => Err(GraphicsError::Internal(format!(
+                        "device poll failed during fence wait: {e}"
+                    ))),
+                }
+            }
         }
     }
 
     /// Check if a fence is signaled (non-blocking).
     ///
-    /// Returns `true` if:
-    /// - No work has been submitted yet (fence is in initial state)
-    /// - All submitted work has completed
-    ///
-    /// Returns `false` if:
-    /// - Work is still pending on the GPU
-    /// - Lock acquisition failed (conservative assumption)
-    /// - Not a wgpu fence
+    /// `Unsignaled` fences poll as unsignaled (matching Vulkan) until
+    /// `execute_graph` ties a submission to them.
     pub fn is_fence_signaled(&self, fence: &GpuFence) -> bool {
-        let GpuFence::Wgpu {
-            device,
-            submission_index,
-        } = fence
-        else {
+        use crate::backend::WgpuFenceState;
+        let GpuFence::Wgpu { device, state } = fence else {
             return false; // Not a wgpu fence
         };
 
-        let Ok(guard) = submission_index.lock() else {
+        let Ok(guard) = state.lock() else {
             return false; // Lock failed, assume not signaled (conservative)
         };
 
-        // No submission yet means fence is in initial "signaled" state
-        if guard.is_none() {
-            return true;
-        }
-
-        // Poll without blocking to check completion status.
-        // Note: wgpu's non-blocking poll checks if ALL queue work is done,
-        // not a specific submission. This is conservative but correct.
-        match device.poll(wgpu::PollType::Poll) {
-            Ok(status) => status.is_queue_empty(),
-            Err(_) => false, // Poll failed, assume not signaled
+        match &*guard {
+            WgpuFenceState::Signaled => true,
+            WgpuFenceState::Unsignaled => false,
+            // Poll without blocking to check completion status.
+            // Note: wgpu's non-blocking poll checks if ALL queue work is done,
+            // not a specific submission. This is conservative but correct.
+            WgpuFenceState::Submitted(_) => match device.poll(wgpu::PollType::Poll) {
+                Ok(status) => status.is_queue_empty(),
+                Err(_) => false, // Poll failed, assume not signaled
+            },
         }
     }
 
     /// Wait for a fence to be signaled with a timeout.
     ///
-    /// Returns `true` if the fence was signaled, `false` if the timeout elapsed.
-    pub fn wait_fence_timeout(&self, fence: &GpuFence, timeout: std::time::Duration) -> bool {
-        if let GpuFence::Wgpu {
-            device,
-            submission_index,
-        } = fence
-            && let Ok(guard) = submission_index.lock()
-            && let Some(idx) = guard.clone()
-        {
-            // Wait for the specific submission with user-specified timeout.
-            // `wait_finished()` is true for both QueueEmpty and WaitSucceeded;
-            // `is_queue_empty()` would report a spurious timeout whenever other
-            // submissions are still in flight.
-            match device.poll(wgpu::PollType::Wait {
-                submission_index: Some(idx),
-                timeout: Some(timeout),
-            }) {
-                Ok(status) => status.wait_finished(),
-                Err(_) => false,
+    /// Returns `Ok(true)` if the fence was signaled, `Ok(false)` on timeout
+    /// (including an untied `Unsignaled` fence, which can never signal), and
+    /// an error on poll failure.
+    pub fn wait_fence_timeout(
+        &self,
+        fence: &GpuFence,
+        timeout: std::time::Duration,
+    ) -> Result<bool, GraphicsError> {
+        use crate::backend::WgpuFenceState;
+        let GpuFence::Wgpu { device, state } = fence else {
+            return Ok(false);
+        };
+        let current = state
+            .lock()
+            .map_err(|_| GraphicsError::Internal("wgpu fence mutex poisoned".into()))?
+            .clone();
+        match current {
+            WgpuFenceState::Signaled => Ok(true),
+            // Nothing will ever signal it — report "not yet" immediately
+            // instead of sleeping out the timeout.
+            WgpuFenceState::Unsignaled => Ok(false),
+            WgpuFenceState::Submitted(idx) => {
+                // `wait_finished()` is true for both QueueEmpty and WaitSucceeded;
+                // `is_queue_empty()` would report a spurious timeout whenever other
+                // submissions are still in flight.
+                match device.poll(wgpu::PollType::Wait {
+                    submission_index: Some(idx),
+                    timeout: Some(timeout),
+                }) {
+                    Ok(status) => Ok(status.wait_finished()),
+                    Err(e) => Err(GraphicsError::Internal(format!(
+                        "device poll failed during fence wait: {e}"
+                    ))),
+                }
             }
-        } else {
-            // No submission or not a wgpu fence - treat as signaled
-            true
         }
     }
 

@@ -171,7 +171,7 @@ impl WindowTestApp {
         let hue = (self.frame_count as f32 / FRAMES_TO_RENDER as f32) * 360.0;
         let (r, g, b) = hue_to_rgb(hue);
 
-        let mut schedule = pipeline.begin_frame();
+        let mut schedule = pipeline.begin_frame().expect("begin_frame failed");
 
         let mut graph = schedule.acquire_graph();
         let mut pass = GraphicsPass::new(format!("frame_{}", self.frame_count));
@@ -273,7 +273,7 @@ impl ApplicationHandler for WindowTestApp {
                         self.result = TestResult::Passed;
 
                         if let Some(pipeline) = &self.pipeline {
-                            pipeline.wait_idle();
+                            pipeline.wait_idle().expect("wait_idle failed");
                         }
 
                         event_loop.exit();
@@ -366,7 +366,7 @@ fn run_window_test(params: InstanceParameters) -> bool {
     }
 
     if let Some(pipeline) = &app.pipeline {
-        pipeline.wait_idle();
+        let _ = pipeline.wait_idle();
     }
 
     match app.result {

@@ -229,14 +229,13 @@ impl std::fmt::Debug for GpuPipeline {
 /// when command buffer execution completes. CPU can wait or poll the fence status.
 /// This provides precise synchronization and supports multiple frames in flight.
 ///
-/// ## wgpu (`SubmissionIndex`)
+/// ## wgpu ([`WgpuFenceState`])
 /// wgpu abstracts over multiple backends (Vulkan, Metal, DX12, WebGPU) and doesn't
-/// expose native fence handles to maintain portability. Instead, it uses submission
-/// indices that can be polled via `device.poll()`. Key differences:
-/// - No true "unsignaled" state - fence tracks submissions, not binary state
-/// - Polling checks if work is complete, not a specific fence state
-/// - `execute_graph` with fence provided returns immediately (async)
-/// - `execute_graph` without fence blocks until completion (sync, backwards compatible)
+/// expose native fence handles to maintain portability. The fence emulates
+/// Vulkan's binary semantics with a small state machine:
+/// - `Unsignaled` / `Signaled` — the initial state chosen by `create_fence`
+/// - `Submitted(index)` — set by `execute_graph`; polling/waiting resolves the
+///   state by asking the device about that submission
 ///
 /// **Why not expose GPU fences in wgpu?** Each backend (Metal, DX12, WebGPU) has
 /// different synchronization primitives. wgpu's submission index abstraction works
@@ -250,13 +249,11 @@ pub enum GpuFence {
     Dummy {
         signaled: std::sync::atomic::AtomicBool,
     },
-    /// wgpu backend - tracks submission index for polling.
-    /// Note: wgpu fences track submissions rather than binary state.
-    /// A fence with `submission_index: None` is considered "signaled" (no pending work).
+    /// wgpu backend - binary fence emulated over submission indices.
     #[cfg(feature = "wgpu-backend")]
     Wgpu {
         device: Arc<wgpu::Device>,
-        submission_index: std::sync::Mutex<Option<wgpu::SubmissionIndex>>,
+        state: std::sync::Mutex<WgpuFenceState>,
     },
     /// Vulkan backend - true GPU fence via `vkFence`.
     #[cfg(feature = "vulkan-backend")]
@@ -274,11 +271,9 @@ impl std::fmt::Debug for GpuFence {
                 .field("signaled", signaled)
                 .finish(),
             #[cfg(feature = "wgpu-backend")]
-            Self::Wgpu {
-                submission_index, ..
-            } => f
+            Self::Wgpu { state, .. } => f
                 .debug_struct("GpuFence::Wgpu")
-                .field("submission_index", submission_index)
+                .field("state", state)
                 .finish_non_exhaustive(),
             #[cfg(feature = "vulkan-backend")]
             Self::Vulkan { fence, .. } => f
@@ -287,6 +282,24 @@ impl std::fmt::Debug for GpuFence {
                 .finish_non_exhaustive(),
         }
     }
+}
+
+/// State of a wgpu fence (see [`GpuFence::Wgpu`]).
+///
+/// Emulates Vulkan's binary fence semantics on top of wgpu submission
+/// indices: `create_fence` picks `Unsignaled` or `Signaled`, and
+/// `execute_graph` moves the fence to `Submitted` so waits/polls resolve
+/// against the actual GPU submission.
+#[cfg(feature = "wgpu-backend")]
+#[derive(Debug, Clone)]
+pub enum WgpuFenceState {
+    /// Created unsignaled; no submission will ever signal it until
+    /// `execute_graph` ties one. Polls as unsignaled; waiting is an error.
+    Unsignaled,
+    /// Created signaled (or trivially complete); polls as signaled.
+    Signaled,
+    /// Tied to a queue submission; polls/waits resolve via `device.poll`.
+    Submitted(wgpu::SubmissionIndex),
 }
 
 /// Handle to an acquired surface texture for presentation.
@@ -811,7 +824,7 @@ impl GpuBackend {
     }
 
     /// Create a fence for CPU-GPU synchronization.
-    pub fn create_fence(&self, signaled: bool) -> GpuFence {
+    pub fn create_fence(&self, signaled: bool) -> Result<GpuFence, GraphicsError> {
         match self {
             Self::Dummy(backend) => backend.create_fence(signaled),
             #[cfg(feature = "wgpu-backend")]
@@ -822,7 +835,12 @@ impl GpuBackend {
     }
 
     /// Wait for a fence to be signaled.
-    pub fn wait_fence(&self, fence: &GpuFence) {
+    ///
+    /// Uses a backend-internal timeout (10 s) to avoid hanging forever on a
+    /// hung GPU. Returns an error on timeout or device loss — the caller must
+    /// NOT recycle resources guarded by this fence in that case, because the
+    /// GPU may still be using them.
+    pub fn wait_fence(&self, fence: &GpuFence) -> Result<(), GraphicsError> {
         match self {
             Self::Dummy(backend) => backend.wait_fence(fence),
             #[cfg(feature = "wgpu-backend")]
@@ -834,8 +852,13 @@ impl GpuBackend {
 
     /// Wait for a fence to be signaled with a timeout.
     ///
-    /// Returns `true` if the fence was signaled, `false` if the timeout elapsed.
-    pub fn wait_fence_timeout(&self, fence: &GpuFence, timeout: std::time::Duration) -> bool {
+    /// Returns `Ok(true)` if the fence was signaled, `Ok(false)` if the
+    /// timeout elapsed, and an error on device loss or wait failure.
+    pub fn wait_fence_timeout(
+        &self,
+        fence: &GpuFence,
+        timeout: std::time::Duration,
+    ) -> Result<bool, GraphicsError> {
         match self {
             Self::Dummy(backend) => backend.wait_fence_timeout(fence, timeout),
             #[cfg(feature = "wgpu-backend")]
@@ -871,9 +894,16 @@ impl GpuBackend {
     ///
     /// This records commands from the graph into a command buffer and submits it.
     ///
-    /// # Arguments
+    /// # Synchronization contract
     ///
-    /// * `signal_fence` - Optional fence to signal when execution completes (for CPU waiting)
+    /// * `signal_fence: Some(_)` — returns immediately after submission on
+    ///   every backend; the fence is signaled when the GPU finishes, and the
+    ///   caller waits/polls it before recycling frame resources.
+    /// * `signal_fence: None` — **fire-and-forget with no CPU-side completion
+    ///   guarantee.** Backends may return immediately after submission
+    ///   (Vulkan) or block conservatively (wgpu today) — callers must not
+    ///   rely on either behavior. If you need to know when the work is done,
+    ///   pass a fence.
     ///
     /// One render graph is submitted per frame, so there is no cross-graph
     /// semaphore ordering. Swapchain acquire/present synchronization is handled

@@ -315,15 +315,24 @@ impl VulkanSwapchain {
     ) -> Result<VulkanSwapchainAcquireResult, GraphicsError> {
         let current_frame = self.current_frame;
 
-        // Wait for the previous frame using this slot to complete
+        // Wait for the previous frame using this slot to complete. Bounded:
+        // a hung GPU must become an error, not a permanent freeze.
         let in_flight_fence = self.in_flight_fences[current_frame];
         unsafe {
-            vulkan_backend
-                .device()
-                .wait_for_fences(&[in_flight_fence], true, u64::MAX)
+            vulkan_backend.device().wait_for_fences(
+                &[in_flight_fence],
+                true,
+                super::FENCE_WAIT_TIMEOUT_NS,
+            )
         }
-        .map_err(|e| {
-            GraphicsError::Internal(format!("Failed to wait for in-flight fence: {:?}", e))
+        .map_err(|e| match e {
+            vk::Result::TIMEOUT => GraphicsError::Timeout(
+                "in-flight fence wait timed out after 10 s; GPU may be hung".into(),
+            ),
+            vk::Result::ERROR_DEVICE_LOST => GraphicsError::DeviceLost,
+            other => {
+                GraphicsError::Internal(format!("Failed to wait for in-flight fence: {other:?}"))
+            }
         })?;
 
         // Reset the fence for this frame
@@ -345,16 +354,19 @@ impl VulkanSwapchain {
         let (image_index, _suboptimal) = unsafe {
             vulkan_backend.swapchain_loader().acquire_next_image(
                 self.swapchain,
-                u64::MAX,
+                super::FENCE_WAIT_TIMEOUT_NS,
                 image_available_semaphore,
                 vk::Fence::null(),
             )
         }
-        .map_err(|e| {
-            GraphicsError::ResourceCreationFailed(format!(
-                "Failed to acquire swapchain image: {:?}",
-                e
-            ))
+        .map_err(|e| match e {
+            vk::Result::TIMEOUT | vk::Result::NOT_READY => GraphicsError::Timeout(
+                "swapchain image acquire timed out after 10 s; GPU may be hung".into(),
+            ),
+            vk::Result::ERROR_DEVICE_LOST => GraphicsError::DeviceLost,
+            other => GraphicsError::ResourceCreationFailed(format!(
+                "Failed to acquire swapchain image: {other:?}"
+            )),
         })?;
 
         self.current_image_index = image_index;

@@ -190,7 +190,7 @@ impl TestContext {
     /// graph execution through the frame scheduling system.
     pub fn execute_graph(&self, graph: RenderGraph) {
         let mut pipeline = self.pipeline.borrow_mut();
-        let mut schedule = pipeline.begin_frame();
+        let mut schedule = pipeline.begin_frame().expect("begin_frame failed");
 
         // Render the single graph - this actually executes on the GPU
         schedule.render(graph);
@@ -199,7 +199,7 @@ impl TestContext {
         pipeline.end_frame(schedule);
 
         // Wait for all GPU work to complete before returning
-        pipeline.wait_idle();
+        pipeline.wait_idle().expect("wait_idle failed");
     }
 
     /// Read back a buffer's contents through the frame graph.
@@ -221,17 +221,17 @@ impl TestContext {
 
         let mut pipeline = self.pipeline.borrow_mut();
         // Frame 1: record + submit the readback op.
-        let mut schedule = pipeline.begin_frame();
+        let mut schedule = pipeline.begin_frame().expect("begin_frame failed");
         schedule.render(graph);
         pipeline.end_frame(schedule);
-        pipeline.wait_idle();
+        pipeline.wait_idle().expect("wait_idle failed");
         // Frame 2: recycling the slot runs its post-fence readback processing in
         // begin_frame (filling `dst`); render an empty graph to complete the
         // frame (the scheduler requires render() before end_frame).
-        let mut schedule = pipeline.begin_frame();
+        let mut schedule = pipeline.begin_frame().expect("begin_frame failed");
         schedule.render(RenderGraph::new());
         pipeline.end_frame(schedule);
-        pipeline.wait_idle();
+        pipeline.wait_idle().expect("wait_idle failed");
 
         dst.lock().unwrap().clone()
     }
@@ -253,7 +253,7 @@ impl TestContext {
 impl Drop for TestContext {
     fn drop(&mut self) {
         // Ensure GPU is idle before cleanup
-        self.pipeline.borrow().wait_idle();
+        let _ = self.pipeline.borrow().wait_idle();
     }
 }
 
