@@ -213,15 +213,14 @@ impl ComponentField for u8 {
 
 impl ComponentField for u32 {
     fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
-        let mut v = *self as i64;
+        let mut v = *self;
         let changed = ui
             .horizontal(|ui| {
                 ui.label(name);
-                ui.add(egui::DragValue::new(&mut v).range(0..=u32::MAX as i64))
-                    .changed()
+                ui.add(egui::DragValue::new(&mut v)).changed()
             })
             .inner;
-        changed.then_some(v as u32)
+        changed.then_some(v)
     }
 
     fn serialize_field(
@@ -270,15 +269,17 @@ impl ComponentField for i32 {
 
 impl ComponentField for u64 {
     fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
-        let mut v = *self as i64;
+        // Native u64 backing: the old cast through i64 silently rewrote
+        // values above i64::MAX on edit. DragValue still goes through f64
+        // internally, so drags on values above 2^53 remain imprecise.
+        let mut v = *self;
         let changed = ui
             .horizontal(|ui| {
                 ui.label(name);
-                ui.add(egui::DragValue::new(&mut v).range(0..=i64::MAX))
-                    .changed()
+                ui.add(egui::DragValue::new(&mut v)).changed()
             })
             .inner;
-        changed.then_some(v as u64)
+        changed.then_some(v)
     }
 
     fn serialize_field(
@@ -299,15 +300,14 @@ impl ComponentField for u64 {
 
 impl ComponentField for usize {
     fn inspect_field(&self, name: &str, ui: &mut egui::Ui) -> Option<Self> {
-        let mut v = *self as i64;
+        let mut v = *self;
         let changed = ui
             .horizontal(|ui| {
                 ui.label(name);
-                ui.add(egui::DragValue::new(&mut v).range(0..=i64::MAX))
-                    .changed()
+                ui.add(egui::DragValue::new(&mut v)).changed()
             })
             .inner;
-        changed.then_some(v as usize)
+        changed.then_some(v)
     }
 
     fn serialize_field(

@@ -233,10 +233,19 @@ impl Entities {
     /// More efficient than calling [`allocate`](Self::allocate) in a loop
     /// because internal vectors are grown in bulk.
     pub(crate) fn allocate_many(&mut self, count: u32) -> Vec<Entity> {
+        let reuse = count.min(self.free_list.len() as u32);
+        let fresh = count - reuse;
+        // Checked in u64 before any allocation: `start + fresh` computed in
+        // u32 can wrap past MAX_INDEX and slip through in release builds.
+        assert!(
+            self.generations.len() as u64 + fresh as u64 <= Entity::MAX_INDEX as u64 + 1,
+            "Entity limit exceeded (max {})",
+            Entity::MAX_INDEX + 1
+        );
+
         let mut entities = Vec::with_capacity(count as usize);
 
         // Reuse from free list first
-        let reuse = count.min(self.free_list.len() as u32);
         for _ in 0..reuse {
             let index = self.free_list.pop().unwrap();
             let idx = index as usize;
@@ -247,14 +256,8 @@ impl Entities {
         }
 
         // Allocate fresh slots for remainder
-        let fresh = count - reuse;
         if fresh > 0 {
             let start = self.generations.len() as u32;
-            assert!(
-                start + fresh - 1 <= Entity::MAX_INDEX,
-                "Entity limit exceeded (max {})",
-                Entity::MAX_INDEX + 1
-            );
             for i in 0..fresh {
                 self.generations.push(0);
                 self.next_generation.push(Self::next_after(0));
@@ -488,6 +491,19 @@ mod tests {
         for e in &batch {
             assert!(alloc.is_alive(*e));
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "Entity limit exceeded")]
+    fn allocate_many_past_index_limit_panics() {
+        // Regression: the limit check ran in u32 and could wrap in release,
+        // letting indices past MAX_INDEX alias existing entities (issue #15).
+        // Two live slots + u32::MAX fresh: `start + fresh - 1` in u32 is
+        // exactly the wrapping case (2 + u32::MAX - 1 == 0 mod 2^32).
+        let mut alloc = Entities::new();
+        alloc.allocate();
+        alloc.allocate();
+        alloc.allocate_many(u32::MAX);
     }
 
     #[test]

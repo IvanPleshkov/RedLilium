@@ -258,10 +258,15 @@ pub struct Schedules {
     state_checkers: Vec<StateChecker>,
     fixed_timestep: f64,
     fixed_accumulator: f64,
+    max_fixed_steps: u32,
     startup_done: bool,
 }
 
 impl Schedules {
+    /// Default cap on [`FixedUpdate`] iterations per frame (~133 ms of
+    /// simulation debt at the default 60 Hz timestep).
+    pub const DEFAULT_MAX_FIXED_STEPS: u32 = 8;
+
     /// Creates a new empty schedule orchestrator.
     ///
     /// Fixed timestep defaults to 1/60 seconds. Change with
@@ -272,6 +277,7 @@ impl Schedules {
             state_checkers: Vec::new(),
             fixed_timestep: 1.0 / 60.0,
             fixed_accumulator: 0.0,
+            max_fixed_steps: Self::DEFAULT_MAX_FIXED_STEPS,
             startup_done: false,
         }
     }
@@ -341,6 +347,20 @@ impl Schedules {
         self.fixed_accumulator = 0.0;
     }
 
+    /// Sets the maximum number of [`FixedUpdate`] iterations per frame.
+    ///
+    /// After a long stall (debugger pause, asset load, window drag) the
+    /// accumulator holds many timesteps of debt; without a cap the catch-up
+    /// loop itself makes the next frame slow, accumulating more debt (the
+    /// "spiral of death"). Excess debt beyond the cap is dropped — the
+    /// simulation loses that wall-clock time instead of freezing.
+    ///
+    /// Default is [`DEFAULT_MAX_FIXED_STEPS`](Self::DEFAULT_MAX_FIXED_STEPS).
+    pub fn set_max_fixed_steps(&mut self, steps: u32) {
+        assert!(steps > 0, "Max fixed steps must be positive");
+        self.max_fixed_steps = steps;
+    }
+
     /// Runs the [`Startup`] schedule once.
     ///
     /// Subsequent calls are no-ops. Call this before your main loop.
@@ -390,8 +410,14 @@ impl Schedules {
         // 3. Check state transitions and run OnExit / OnEnter
         self.run_state_transitions(world, runner);
 
-        // 4. FixedUpdate accumulator
+        // 4. FixedUpdate accumulator. Debt is clamped so a long stall runs at
+        //    most `max_fixed_steps` catch-up iterations instead of spiraling
+        //    (each over-budget frame adding more debt than it retires).
         self.fixed_accumulator += delta_time;
+        let max_debt = self.fixed_timestep * self.max_fixed_steps as f64;
+        if self.fixed_accumulator > max_debt {
+            self.fixed_accumulator = max_debt;
+        }
         if let Some(schedule) = self.schedules.get(&ScheduleId::of::<FixedUpdate>()) {
             while self.fixed_accumulator >= self.fixed_timestep {
                 // Set effective delta to fixed timestep
@@ -402,9 +428,7 @@ impl Schedules {
         } else {
             // No FixedUpdate schedule registered — just drain accumulator
             // to prevent unbounded growth.
-            while self.fixed_accumulator >= self.fixed_timestep {
-                self.fixed_accumulator -= self.fixed_timestep;
-            }
+            self.fixed_accumulator %= self.fixed_timestep;
         }
 
         // Restore effective delta to frame delta
@@ -608,6 +632,31 @@ mod tests {
         let dt = 1.0 / 60.0;
         schedules.run_frame(&mut world, &runner, dt);
         assert_eq!(counter.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn fixed_update_catch_up_clamped() {
+        let counter = Arc::new(AtomicU32::new(0));
+        let mut world = World::new();
+        let mut schedules = Schedules::new();
+        let runner = EcsRunner::single_thread();
+
+        // Power-of-two timestep so the accumulator arithmetic is exact.
+        schedules.set_fixed_timestep(0.25);
+        schedules.set_max_fixed_steps(4);
+        schedules
+            .get_mut::<FixedUpdate>()
+            .add(IncrementSystem(counter.clone()));
+
+        // A 10-second stall would owe 40 steps; the clamp drops the excess
+        // debt and runs only `max_fixed_steps` (issue #19).
+        schedules.run_frame(&mut world, &runner, 10.0);
+        assert_eq!(counter.load(Ordering::SeqCst), 4);
+
+        // The dropped debt must not leak into the next frame: a normal frame
+        // runs exactly one step.
+        schedules.run_frame(&mut world, &runner, 0.25);
+        assert_eq!(counter.load(Ordering::SeqCst), 5);
     }
 
     #[test]
