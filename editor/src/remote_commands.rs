@@ -74,8 +74,62 @@ impl RemoteCommands {
     }
 }
 
+/// The apply outcome of a queued action, filled by [`ReportedAction`] when
+/// the drain executes it. `None` until then.
+type ExecResult = Arc<Mutex<Option<Result<(), String>>>>;
+
+/// Decorator that captures the apply result of the wrapped action so the
+/// parked response can report failure instead of a false ack. Everything
+/// else delegates — history semantics (recording, merging, undo) are the
+/// inner action's.
+struct ReportedAction {
+    inner: Box<dyn EditAction<World>>,
+    result: ExecResult,
+}
+
+impl std::fmt::Debug for ReportedAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.inner.fmt(f)
+    }
+}
+
+impl EditAction<World> for ReportedAction {
+    fn apply(&mut self, target: &mut World) -> redlilium_core::abstract_editor::EditActionResult {
+        let result = self.inner.apply(target);
+        if let Ok(mut slot) = self.result.lock() {
+            *slot = Some(result.clone().map_err(|e| e.to_string()));
+        }
+        result
+    }
+
+    fn undo(&mut self, target: &mut World) -> redlilium_core::abstract_editor::EditActionResult {
+        self.inner.undo(target)
+    }
+
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+
+    fn merge(&mut self, other: Box<dyn EditAction<World>>) -> Option<Box<dyn EditAction<World>>> {
+        self.inner.merge(other)
+    }
+
+    fn is_recorded(&self) -> bool {
+        self.inner.is_recorded()
+    }
+
+    fn breaks_merge(&self) -> bool {
+        self.inner.breaks_merge()
+    }
+
+    fn modifies_content(&self) -> bool {
+        self.inner.modifies_content()
+    }
+}
+
 enum Parked {
     /// A queued write — respond after the next queue drain applies it.
+    /// `result` carries the apply outcome (error → error response);
     /// `component` set → the response carries that component's snapshot;
     /// `spawned` set → it carries the entities the action created.
     Write {
@@ -84,6 +138,7 @@ enum Parked {
         entity: Option<Entity>,
         component: Option<String>,
         spawned: Option<SpawnReport>,
+        result: ExecResult,
     },
     /// `wait(for: "assets_idle")` — resolved after the asset pipeline has been
     /// idle for [`CALM_FRAMES`] consecutive frames.
@@ -179,8 +234,24 @@ fn complete_parked(rc: &mut RemoteCommands, world: &World) {
                 entity,
                 component,
                 spawned,
+                result,
             } => {
-                // The action drained this frame; report the resulting state.
+                // The action drained this frame; a captured apply failure is
+                // the response (a false ack hides a no-op edit). `None` means
+                // the queue rejected/merged it away without running apply —
+                // report that too rather than pretend it applied.
+                match result.lock().ok().and_then(|slot| slot.clone()) {
+                    Some(Err(e)) => {
+                        send_err(world, conn, id, &format!("apply failed: {e}"));
+                        continue;
+                    }
+                    Some(Ok(())) => {}
+                    None => {
+                        send_err(world, conn, id, "action was not executed");
+                        continue;
+                    }
+                }
+                // Success: report the resulting state.
                 match (entity, component, spawned) {
                     (Some(entity), Some(name), _) => {
                         send_component_snapshot(world, conn, id, entity, &name)
@@ -482,7 +553,7 @@ fn dispatch(
                 type_name: component.clone(),
                 data: value,
             };
-            push_action(
+            let result = push_action(
                 world,
                 Box::new(ImportComponentAction::new(entity, serialized)),
             );
@@ -492,6 +563,7 @@ fn dispatch(
                 entity: Some(entity),
                 component: Some(component),
                 spawned: None,
+                result,
             });
         }
         "add_component" | "remove_component" => {
@@ -506,13 +578,14 @@ fn dispatch(
             } else {
                 Box::new(RemoveComponentAction::new(entity, name))
             };
-            push_action(world, action);
+            let result = push_action(world, action);
             rc.parked.push(Parked::Write {
                 conn,
                 id,
                 entity: Some(entity),
                 component: None,
                 spawned: None,
+                result,
             });
         }
         "select" => {
@@ -526,7 +599,7 @@ fn dispatch(
                     .collect(),
                 _ => return send_err(world, conn, id, "missing 'entities' list"),
             };
-            push_action(
+            let result = push_action(
                 world,
                 Box::new(redlilium_ecs::ui::SelectAction::set(entities)),
             );
@@ -538,6 +611,7 @@ fn dispatch(
                 entity: None,
                 component: None,
                 spawned: None,
+                result,
             });
         }
         "undo" | "redo" => {
@@ -612,13 +686,14 @@ fn dispatch(
             };
             match constructed {
                 Ok(registered) => {
-                    push_action(world, registered.action);
+                    let result = push_action(world, registered.action);
                     rc.parked.push(Parked::Write {
                         conn,
                         id,
                         entity: None,
                         component: None,
                         spawned: registered.spawned,
+                        result,
                     });
                 }
                 Err(e) => send_err(world, conn, id, &format!("{name}: {e}")),
@@ -673,8 +748,17 @@ fn dispatch(
     }
 }
 
-fn push_action(world: &World, action: Box<dyn EditAction<World>>) {
-    world.resource::<ActionQueue<World>>().push(action);
+/// Queue `action` wrapped in a [`ReportedAction`]; the returned slot holds
+/// the apply outcome once the next frame's drain executes it.
+fn push_action(world: &World, action: Box<dyn EditAction<World>>) -> ExecResult {
+    let result = ExecResult::default();
+    world
+        .resource::<ActionQueue<World>>()
+        .push(Box::new(ReportedAction {
+            inner: action,
+            result: result.clone(),
+        }));
+    result
 }
 
 fn entity_spec(e: Entity) -> String {
