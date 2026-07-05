@@ -223,9 +223,14 @@ impl FrameSchedule {
     pub fn render(&mut self, mut graph: RenderGraph) {
         profile_scope!("render_graph");
 
+        // INVARIANT: exactly one graph per frame → one submit → one fence.
+        // The whole cross-frame synchronization model depends on this (the
+        // backend's persistent barrier trackers assume single-queue
+        // submission order; there are no cross-graph semaphores). Supporting
+        // multiple in-flight graphs per frame is tracked in #47.
         assert!(
             self.fence.is_none(),
-            "render() has already been called on this schedule"
+            "render() has already been called on this schedule (one graph per frame; see #47)"
         );
 
         // Fence signalled by this frame's single submit. Any failure below

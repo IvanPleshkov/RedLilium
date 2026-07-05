@@ -845,6 +845,20 @@ impl VulkanBackend {
             gpu_allocator::MemoryLocation::GpuOnly
         };
 
+        // Guard the ADR-020 contract: a buffer meant for direct mapped writes
+        // (RING every frame, or MAP_WRITE) must be host-visible. If a future
+        // policy change let one land GpuOnly, `write_buffer`'s mapped path
+        // would silently fall through to the blocking one-shot staging copy —
+        // every frame — a catastrophic, invisible perf regression (the exact
+        // class the editor smoke caught during #41).
+        debug_assert!(
+            !descriptor
+                .usage
+                .intersects(crate::types::BufferUsage::MAP_WRITE | crate::types::BufferUsage::RING)
+                || location != gpu_allocator::MemoryLocation::GpuOnly,
+            "RING/MAP_WRITE buffer must be host-visible (see ADR-020); got GpuOnly"
+        );
+
         // Create buffer
         let buffer_info = vk::BufferCreateInfo::default()
             .size(descriptor.size)
@@ -1386,9 +1400,15 @@ impl VulkanBackend {
     ///   holds `Arc`s to them until the slot's frame fence is waited in
     ///   [`FramePipeline::begin_frame`](crate::pipeline::FramePipeline::begin_frame).
     ///
-    /// Cross-graph ordering is enforced via the GPU semaphores in
-    /// `wait_semaphores` / `signal_semaphores` (built by the scheduler from the
-    /// dependency graph).
+    /// INVARIANT: exactly one graph is executed per frame, as one submit on the
+    /// single graphics queue. There are NO cross-graph GPU semaphores — the
+    /// only semaphores are the swapchain acquire/present handshake below.
+    /// Ordering between consecutive frames' graphs is provided entirely by the
+    /// persistent barrier trackers (`layout_tracker`, `buffer_tracker`), whose
+    /// `vkCmdPipelineBarrier`s synchronize across submissions *because they are
+    /// on one queue in submission order*. Adding a second queue or a second
+    /// per-frame submit would break this silently (pipeline barriers do not
+    /// cross queues) — see #47 before doing either.
     pub fn execute_graph(
         &self,
         graph: &RenderGraph,

@@ -442,9 +442,14 @@ impl TextureId {
 /// frames**, so this is a single global map (not reset each frame). Offscreen
 /// textures only ever change layout through the barriers this tracker emits
 /// (the swapchain image is handled separately by the present path and is not
-/// tracked here), and submits are serialized on one queue with per-frame
-/// fences — so this CPU-side map, updated in pass-record order, matches GPU
-/// execution order.
+/// tracked here).
+///
+/// INVARIANT (single queue): this CPU-side map, updated in pass-record order,
+/// matches GPU execution order only because submits are serialized on the one
+/// graphics queue with per-frame fences. The emitted layout-transition
+/// barriers synchronize across submissions within that queue; they do not
+/// cross queues. A second queue would need semaphores + queue-family ownership
+/// transfers — see #47 (this tracker has no queue-ownership concept).
 ///
 /// Keeping layouts across frames is what lets **persistent / history textures**
 /// (temporal AA, accumulation, motion blur) retain their contents: their first

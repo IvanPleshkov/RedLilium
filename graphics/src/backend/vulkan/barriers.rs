@@ -58,9 +58,16 @@ struct BufferAccessState {
 /// Tracks the last access to every buffer used by render graphs, mirroring
 /// [`super::layout::TextureLayoutTracker`] for buffers.
 ///
-/// The tracker is global and persists across frames — Vulkan barriers on a
-/// single queue synchronize across submissions, so a write recorded in frame
-/// N is still the relevant source scope for a read in frame N+1.
+/// The tracker is global and persists across frames.
+///
+/// INVARIANT (single queue): correctness relies on every tracked access being
+/// on the one graphics queue. A `vkCmdPipelineBarrier` synchronizes across
+/// submissions only *within a queue*, so a write recorded in frame N is a
+/// valid source scope for a read in frame N+1 only because both submits are on
+/// that queue in submission order. This tracker has no concept of queue
+/// ownership: a second queue (async compute) would need semaphores +
+/// ownership transfers instead, and adding one without that would silently
+/// drop synchronization. See #47 before introducing a second queue.
 ///
 /// Keyed by the raw `vk::Buffer` handle. Unlike texture layouts, stale state
 /// after handle reuse is benign: it can only produce an unnecessary or
