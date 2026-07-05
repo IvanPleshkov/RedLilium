@@ -394,11 +394,15 @@ fn main() {
 
     let args: Vec<String> = std::env::args().collect();
     let backend = args.get(1).map(|s| s.as_str()).unwrap_or("wgpu");
+    // `--validation` as any later arg enables GPU validation layers.
+    let validation = args.iter().skip(2).any(|a| a == "--validation");
 
     let params = match backend {
         "vulkan" => {
-            log::info!("Using Vulkan backend");
-            InstanceParameters::new().with_backend(BackendType::Vulkan)
+            log::info!("Using Vulkan backend (validation: {validation})");
+            InstanceParameters::new()
+                .with_backend(BackendType::Vulkan)
+                .with_validation(validation)
         }
         "wgpu" => {
             log::info!("Using wgpu backend with Auto mode");

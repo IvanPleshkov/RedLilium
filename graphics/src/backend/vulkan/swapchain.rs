@@ -476,9 +476,24 @@ pub fn present_vulkan_frame(
         ))
     })?;
 
-    // Transition image from COLOR_ATTACHMENT_OPTIMAL to PRESENT_SRC_KHR
+    // Transition the image to PRESENT_SRC_KHR. The actual current layout
+    // depends on whether anything rendered to the swapchain this frame: the
+    // normal path left it in COLOR_ATTACHMENT_OPTIMAL, but a frame that
+    // acquired without touching it (loading screen, headless tick) left it in
+    // UNDEFINED/PRESENT_SRC — claiming color-attachment there is a layout
+    // mismatch (validation error, UB on tilers). `UNDEFINED` is valid from
+    // any layout; contents are discardable since nothing was drawn.
+    let rendered = vulkan_backend.swapchain_render_consumed();
+    let (old_layout, src_access) = if rendered {
+        (
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+        )
+    } else {
+        (vk::ImageLayout::UNDEFINED, vk::AccessFlags::empty())
+    };
     let barrier = vk::ImageMemoryBarrier::default()
-        .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+        .old_layout(old_layout)
         .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
         .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
@@ -490,7 +505,7 @@ pub fn present_vulkan_frame(
             base_array_layer: 0,
             layer_count: 1,
         })
-        .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+        .src_access_mask(src_access)
         .dst_access_mask(vk::AccessFlags::empty());
 
     unsafe {
@@ -518,7 +533,7 @@ pub fn present_vulkan_frame(
     // COLOR_ATTACHMENT_OPTIMAL→PRESENT_SRC transition happens after the writes.
     // If nothing rendered to the swapchain this frame, fall back to waiting on
     // `image_available` directly (the image was acquired but never written).
-    let wait_semaphore = if vulkan_backend.swapchain_render_consumed() {
+    let wait_semaphore = if rendered {
         image_render_finished_semaphore
     } else {
         image_available_semaphore

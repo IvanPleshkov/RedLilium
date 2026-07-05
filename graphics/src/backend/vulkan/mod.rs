@@ -384,6 +384,7 @@ impl VulkanBackend {
         sync.image_available = Some(image_available);
         sync.image_render_finished = Some(image_render_finished);
         sync.consumed = false;
+        sync.surface_transitioned = false;
     }
 
     /// If a swapchain acquire is pending and not yet consumed, returns the
@@ -594,6 +595,12 @@ struct SwapchainSync {
     /// Whether a render submit this frame consumed `image_available` (i.e. wrote
     /// the swapchain image). Present uses this to pick its wait semaphore.
     consumed: bool,
+    /// Whether the acquired image has been transitioned to
+    /// `COLOR_ATTACHMENT_OPTIMAL` this frame. Only the FIRST surface-writing
+    /// pass transitions from `UNDEFINED` (discarding stale presented
+    /// contents); later passes emit a same-layout WAW barrier so their
+    /// `LoadOp::Load` sees the earlier passes' output.
+    surface_transitioned: bool,
 }
 
 impl Drop for VulkanBackend {
@@ -1984,17 +1991,45 @@ impl VulkanBackend {
         // generation system in execute_graph() before each pass is encoded.
         // Surface images (swapchain) are handled specially below.
 
-        // Transition surface images from UNDEFINED/PRESENT_SRC to COLOR_ATTACHMENT_OPTIMAL.
-        // Using UNDEFINED as old_layout is valid from any actual layout (contents are discarded
-        // but that's OK since we're clearing the render target).
+        // Surface (swapchain) image barrier.
+        //
+        // Only the FIRST surface-writing pass of the frame transitions the
+        // image, from `UNDEFINED` (valid from any actual layout; discards the
+        // stale contents of the previously presented image — the engine always
+        // renders full frames, so cross-frame `LoadOp::Load` on the surface is
+        // not supported; use an offscreen target for accumulation). Later
+        // passes emit a same-layout WAW barrier instead, so a UI overlay pass
+        // with `LoadOp::Load` sees the scene pass's output rather than
+        // re-discarding it.
+        //
+        // src stage is COLOR_ATTACHMENT_OUTPUT in both cases — the submit
+        // waits the `image_available` semaphore at that stage, and a
+        // `TOP_OF_PIPE` source would NOT be ordered after the semaphore wait
+        // (the canonical WSI hazard: the transition could execute while the
+        // presentation engine still reads the image).
         for attachment in &render_targets.color_attachments {
             if let RenderTarget::Surface {
                 vulkan_view: Some(surface_view),
                 ..
             } = &attachment.target
             {
+                let first_write = {
+                    let mut sync = self.swapchain_sync.lock();
+                    let first = !sync.surface_transitioned;
+                    sync.surface_transitioned = true;
+                    first
+                };
+                let (old_layout, src_access) = if first_write {
+                    (vk::ImageLayout::UNDEFINED, vk::AccessFlags::empty())
+                } else {
+                    (
+                        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                        vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                    )
+                };
+
                 let barrier = vk::ImageMemoryBarrier::default()
-                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .old_layout(old_layout)
                     .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
@@ -2006,13 +2041,16 @@ impl VulkanBackend {
                         base_array_layer: 0,
                         layer_count: 1,
                     })
-                    .src_access_mask(vk::AccessFlags::empty())
-                    .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
+                    .src_access_mask(src_access)
+                    .dst_access_mask(
+                        vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                            | vk::AccessFlags::COLOR_ATTACHMENT_READ,
+                    );
 
                 unsafe {
                     self.device.cmd_pipeline_barrier(
                         cmd,
-                        vk::PipelineStageFlags::TOP_OF_PIPE,
+                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                         vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                         vk::DependencyFlags::empty(),
                         &[],

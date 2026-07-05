@@ -310,6 +310,15 @@ impl BufferUsageDecl {
 }
 
 /// How the swapchain surface is accessed by a pass.
+///
+/// # `Load` scope
+///
+/// `LoadOp::Load` on the surface preserves contents **within a frame only**
+/// (e.g. a UI overlay pass loading the scene pass's output). The first
+/// surface-writing pass of each frame starts from discarded contents — the
+/// previously *presented* image is stale (swapchain images rotate) and the
+/// Vulkan backend transitions it from `UNDEFINED`. For cross-frame
+/// accumulation, render to an offscreen texture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SurfaceAccess {
     /// Write only (Clear or DontCare load op).
