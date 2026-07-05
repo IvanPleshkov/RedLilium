@@ -19,6 +19,10 @@ const SETS_PER_POOL: u32 = 1000;
 /// Manages Vulkan pipeline creation and descriptor pool resources.
 pub struct PipelineManager {
     device: ash::Device,
+    /// Device-resolved Vulkan format for `TextureFormat::Depth24PlusStencil8`
+    /// (see `VulkanBackend::vk_texture_format`); pipeline attachment formats
+    /// must match what `create_texture` actually created.
+    depth24_stencil8_format: vk::Format,
     /// Pool-size template used to create each additional pool when a slot's
     /// current pools run out of descriptor sets.
     pool_sizes: Vec<vk::DescriptorPoolSize>,
@@ -52,7 +56,10 @@ impl PipelineManager {
     }
 
     /// Create a new pipeline manager.
-    pub fn new(device: ash::Device) -> Result<Self, GraphicsError> {
+    pub fn new(
+        device: ash::Device,
+        depth24_stencil8_format: vk::Format,
+    ) -> Result<Self, GraphicsError> {
         let pool_sizes = vec![
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
@@ -102,10 +109,20 @@ impl PipelineManager {
 
         Ok(Self {
             device,
+            depth24_stencil8_format,
             pool_sizes,
             descriptor_pools,
             destroyed: false,
         })
+    }
+
+    /// Device-resolved attachment format (see field docs).
+    fn vk_texture_format(&self, format: TextureFormat) -> vk::Format {
+        if format == TextureFormat::Depth24PlusStencil8 {
+            self.depth24_stencil8_format
+        } else {
+            convert_texture_format(format)
+        }
     }
 
     /// Compile shader source to SPIR-V and create a Vulkan shader module.
@@ -534,11 +551,11 @@ impl PipelineManager {
         // Set up dynamic rendering formats
         let color_attachment_formats: Vec<vk::Format> = color_formats
             .iter()
-            .map(|f| convert_texture_format(*f))
+            .map(|f| self.vk_texture_format(*f))
             .collect();
 
         let depth_attachment_format = depth_format
-            .map(convert_texture_format)
+            .map(|f| self.vk_texture_format(f))
             .unwrap_or(vk::Format::UNDEFINED);
 
         // Dynamic-rendering format matching: the encoder records a stencil
@@ -549,7 +566,7 @@ impl PipelineManager {
         // rendering VUIDs even with stencil testing disabled.
         let stencil_attachment_format = depth_format
             .filter(|f| f.has_stencil())
-            .map(convert_texture_format)
+            .map(|f| self.vk_texture_format(f))
             .unwrap_or(vk::Format::UNDEFINED);
 
         let mut rendering_info = vk::PipelineRenderingCreateInfo::default()

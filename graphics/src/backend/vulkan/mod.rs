@@ -149,6 +149,10 @@ pub struct VulkanBackend {
     debug_utils: Option<ash::ext::debug_utils::Instance>,
     /// Selected physical device.
     physical_device: vk::PhysicalDevice,
+    /// Resolved Vulkan format for `TextureFormat::Depth24PlusStencil8`:
+    /// `D24_UNORM_S8_UINT` where the device supports it as a depth-stencil
+    /// attachment, `D32_SFLOAT_S8_UINT` otherwise (optional on e.g. AMD).
+    depth24_stencil8_format: vk::Format,
     /// Logical device.
     device: ash::Device,
     /// Graphics queue.
@@ -285,8 +289,33 @@ impl VulkanBackend {
         // Create layout tracker for automatic barrier placement
         let layout_tracker = Mutex::new(TextureLayoutTracker::new());
 
+        // D24_UNORM_S8_UINT is optional (commonly absent on AMD); the spec
+        // only guarantees that one of D24S8/D32S8 supports depth-stencil
+        // attachment. Resolve the actual format for Depth24PlusStencil8 once.
+        let depth24_stencil8_format = {
+            let props = unsafe {
+                instance.get_physical_device_format_properties(
+                    physical_device,
+                    vk::Format::D24_UNORM_S8_UINT,
+                )
+            };
+            if props
+                .optimal_tiling_features
+                .contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
+            {
+                vk::Format::D24_UNORM_S8_UINT
+            } else {
+                log::info!(
+                    "D24_UNORM_S8_UINT not supported by this device; \
+                     Depth24PlusStencil8 maps to D32_SFLOAT_S8_UINT"
+                );
+                vk::Format::D32_SFLOAT_S8_UINT
+            }
+        };
+
         // Create pipeline manager for shader compilation and graphics pipelines
-        let pipeline_manager = pipeline::PipelineManager::new(device.clone())?;
+        let pipeline_manager =
+            pipeline::PipelineManager::new(device.clone(), depth24_stencil8_format)?;
 
         log::info!(
             "Vulkan backend initialized (validation: {})",
@@ -315,9 +344,25 @@ impl VulkanBackend {
             buffer_tracker: Mutex::new(BufferAccessTracker::new()),
             retired_tracker_handles: Arc::new(Mutex::new(RetiredTrackerHandles::default())),
             pipeline_manager,
+            depth24_stencil8_format,
             encoder_scratch: Mutex::new(VulkanEncoderScratch::default()),
             retired_staging: Mutex::new(Default::default()),
         })
+    }
+
+    /// Convert an engine texture format to the Vulkan format this device
+    /// actually uses for it.
+    ///
+    /// Identical to [`conversion::convert_texture_format`] except for
+    /// `Depth24PlusStencil8`, whose Vulkan format is device-dependent
+    /// (D24S8 where supported, D32S8 otherwise). Texture creation and
+    /// pipeline attachment formats must both go through this so they agree.
+    pub(crate) fn vk_texture_format(&self, format: crate::types::TextureFormat) -> vk::Format {
+        if format == crate::types::TextureFormat::Depth24PlusStencil8 {
+            self.depth24_stencil8_format
+        } else {
+            convert_texture_format(format)
+        }
     }
 
     /// Get the Vulkan device.
@@ -867,7 +912,7 @@ impl VulkanBackend {
     ) -> Result<GpuTexture, GraphicsError> {
         use crate::types::TextureDimension;
 
-        let format = convert_texture_format(descriptor.format);
+        let format = self.vk_texture_format(descriptor.format);
         let usage = convert_texture_usage(descriptor.usage, descriptor.format);
 
         // Determine image type, array layers, and flags based on dimension

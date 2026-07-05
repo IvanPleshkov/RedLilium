@@ -223,7 +223,8 @@ pub fn convert_texture_format(format: TextureFormat) -> wgpu::TextureFormat {
             block: wgpu::AstcBlock::B12x12,
             channel: wgpu::AstcChannel::UnormSrgb,
         },
-        _ => wgpu::TextureFormat::Rgba8Unorm,
+        // No wildcard arm on purpose: a new TextureFormat variant must fail
+        // to compile here rather than silently alias to RGBA8.
     }
 }
 

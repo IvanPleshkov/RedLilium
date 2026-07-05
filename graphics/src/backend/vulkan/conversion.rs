@@ -73,6 +73,9 @@ pub fn convert_texture_format(format: TextureFormat) -> vk::Format {
         // Depth/stencil formats
         TextureFormat::Depth16Unorm => vk::Format::D16_UNORM,
         TextureFormat::Depth24Plus => vk::Format::D32_SFLOAT, // Vulkan doesn't have D24, use D32
+        // D24_UNORM_S8_UINT is optional hardware support; texture creation and
+        // pipeline formats go through `VulkanBackend::vk_texture_format`, which
+        // substitutes D32_SFLOAT_S8_UINT on devices without it.
         TextureFormat::Depth24PlusStencil8 => vk::Format::D24_UNORM_S8_UINT,
         TextureFormat::Depth32Float => vk::Format::D32_SFLOAT,
         TextureFormat::Depth32FloatStencil8 => vk::Format::D32_SFLOAT_S8_UINT,
@@ -134,7 +137,8 @@ pub fn convert_texture_format(format: TextureFormat) -> vk::Format {
         TextureFormat::Astc12x10UnormSrgb => vk::Format::ASTC_12X10_SRGB_BLOCK,
         TextureFormat::Astc12x12Unorm => vk::Format::ASTC_12X12_UNORM_BLOCK,
         TextureFormat::Astc12x12UnormSrgb => vk::Format::ASTC_12X12_SRGB_BLOCK,
-        _ => vk::Format::R8G8B8A8_UNORM,
+        // No wildcard arm on purpose: a new TextureFormat variant must fail
+        // to compile here rather than silently alias to RGBA8.
     }
 }
 
