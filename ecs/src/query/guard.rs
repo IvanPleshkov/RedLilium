@@ -584,8 +584,9 @@ mod tests {
     /// Helper: constructs a QueryGuard directly from a World (same logic as
     /// `SystemContext::query()` but callable from sync tests).
     fn query<'w, A: AccessSet>(world: &'w World) -> QueryGuard<'w, A> {
+        let ticks = crate::query::FetchTicks::frame(world);
         let guards = world.acquire_sorted(&A::access_infos());
-        let items = A::fetch_unlocked(world);
+        let items = A::fetch_unlocked(world, ticks);
         QueryGuard::new(guards, items)
     }
 

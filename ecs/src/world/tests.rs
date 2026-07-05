@@ -422,15 +422,15 @@ fn removed_filter_not_matching_before_tick() {
     let entity = world.spawn();
     world.insert(entity, Health(100)).unwrap();
 
-    world.advance_tick(); // tick = 1
-    let _ = world.remove::<Health>(entity); // removed at tick 1
+    world.advance_tick(); // tick = 2 (the world starts at tick 1)
+    let _ = world.remove::<Health>(entity); // removed at tick 2
 
-    // Query with since_tick = 1, removal at tick 1 is NOT strictly after 1
-    let removed = world.removed::<Health>(1);
+    // Query with since_tick = 2: removal at tick 2 is NOT strictly after 2
+    let removed = world.removed::<Health>(2);
     assert!(!removed.matches(entity.index()));
 
-    // Query with since_tick = 0, removal at tick 1 IS strictly after 0
-    let removed = world.removed::<Health>(0);
+    // Query with since_tick = 1: removal at tick 2 IS strictly after 1
+    let removed = world.removed::<Health>(1);
     assert!(removed.matches(entity.index()));
 }
 

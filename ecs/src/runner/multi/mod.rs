@@ -223,6 +223,10 @@ impl EcsRunnerMultiThread {
                 // Apply pending deferred commands so the exclusive system
                 // sees structural changes from predecessors.
                 {
+                    // Advance the tick so command writes (and the exclusive
+                    // system's own writes) are stamped after every already-run
+                    // system's `last_run`.
+                    world.advance_tick();
                     redlilium_core::profile_scope!("ecs: apply commands (pre-exclusive)");
                     for cmd in commands.drain() {
                         cmd(world);
@@ -321,6 +325,7 @@ impl EcsRunnerMultiThread {
 
         // Apply remaining deferred commands
         {
+            world.advance_tick();
             redlilium_core::profile_scope!("ecs: apply commands");
             for cmd in commands.drain() {
                 cmd(world);
@@ -423,6 +428,12 @@ impl EcsRunnerMultiThread {
                     let timing_ref = timing_out;
                     let do_timings = collect_timings;
                     let ro = systems.is_read_only();
+                    // Fresh tick for this run; becomes the system's last_run
+                    // after completion (see single-thread runner).
+                    let ticks = crate::query::FetchTicks {
+                        last_run: systems.last_run(idx),
+                        this_run: world_ref.next_tick(),
+                    };
                     scope.spawn(move || {
                         redlilium_core::set_thread_name!("ecs: worker");
                         redlilium_core::profile_scope_dynamic!(system_name);
@@ -435,6 +446,7 @@ impl EcsRunnerMultiThread {
                             dispatcher_ref,
                         )
                         .with_read_only(ro)
+                        .with_ticks(ticks)
                         .with_system_results(results_ref, accessible);
                         if let Some(rec) = recorder_ref {
                             ctx = ctx.with_access_recorder(rec, idx);
@@ -471,6 +483,7 @@ impl EcsRunnerMultiThread {
                                 ));
                             }
                         }
+                        systems.set_last_run(idx, ticks.this_run);
 
                         if let Some(start) = sys_start {
                             timing_ref.lock().push(SystemTiming {

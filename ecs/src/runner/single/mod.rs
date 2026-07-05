@@ -129,7 +129,12 @@ impl EcsRunnerSingleThread {
 
                 if systems.is_exclusive(idx) {
                     // Apply pending deferred commands so the exclusive system
-                    // sees structural changes from predecessors.
+                    // sees structural changes from predecessors. Advance the
+                    // tick first so command writes are stamped after every
+                    // already-run system's `last_run` (visible to all next
+                    // run); the exclusive system's own writes share that
+                    // fresh tick.
+                    world.advance_tick();
                     {
                         redlilium_core::profile_scope!("ecs: apply commands (pre-exclusive)");
                         for cmd in commands.drain() {
@@ -188,8 +193,17 @@ impl EcsRunnerSingleThread {
                         });
                     }
                 } else {
+                    // Assign this run a fresh tick: writes are stamped with
+                    // it, and afterwards it becomes the system's `last_run`,
+                    // so its change filters see exactly what happened since
+                    // its previous run.
+                    let ticks = crate::query::FetchTicks {
+                        last_run: systems.last_run(idx),
+                        this_run: world.next_tick(),
+                    };
                     let mut ctx = SystemContext::new(world, &self.compute, &self.io, &commands)
                         .with_read_only(systems.is_read_only())
+                        .with_ticks(ticks)
                         .with_system_results(&results_store, systems.accessible_results(idx));
                     if let Some(ref rec) = recorder {
                         ctx = ctx.with_access_recorder(rec, idx);
@@ -216,6 +230,7 @@ impl EcsRunnerSingleThread {
                             errors.push(SystemError::Panicked(panic_payload_to_string(&*payload)));
                         }
                     }
+                    systems.set_last_run(idx, ticks.this_run);
 
                     #[cfg(not(target_arch = "wasm32"))]
                     if let Some(start) = sys_start {
@@ -228,7 +243,9 @@ impl EcsRunnerSingleThread {
             }
         }
 
-        // Apply deferred commands (ctx dropped, world is free)
+        // Apply deferred commands (ctx dropped, world is free). Advance the
+        // tick so command writes land after every system's `last_run`.
+        world.advance_tick();
         {
             redlilium_core::profile_scope!("ecs: apply commands");
             for cmd in commands.drain() {

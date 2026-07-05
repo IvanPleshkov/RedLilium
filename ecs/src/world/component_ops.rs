@@ -343,7 +343,7 @@ impl World {
         }
 
         // Perform the actual insert (always tracked at current tick)
-        let tick = self.tick;
+        let tick = self.current_tick();
         self.storage_mut(&type_id).unwrap().typed_mut::<T>().insert(
             entity.index(),
             component,
@@ -458,7 +458,7 @@ impl World {
             return Err(WorldError::EntityNotAlive { entity });
         }
 
-        let tick = self.tick;
+        let tick = self.current_tick();
         let type_id = TypeId::of::<T>();
 
         // Check presence and extract hooks
@@ -536,7 +536,7 @@ impl World {
         if !self.entities.is_alive(entity) {
             return None;
         }
-        let tick = self.tick;
+        let tick = self.current_tick();
         let storage = self
             .components
             .get_mut(&TypeId::of::<T>())

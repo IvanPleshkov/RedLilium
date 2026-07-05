@@ -461,3 +461,224 @@ fn child_prefab_roundtrip_drops_external_parent() {
         Some(spawned[0])
     );
 }
+
+// ---------------------------------------------------------------------------
+// Per-system change detection (issue #21)
+// ---------------------------------------------------------------------------
+
+mod change_detection {
+    use redlilium_ecs::{
+        EcsRunner, MaybeAdded, MaybeChanged, Read, System, SystemContext, SystemError,
+        SystemsContainer, World, Write,
+    };
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    struct Marker(u32);
+
+    /// Bumps every `Marker` once, on its first run only.
+    struct MutateOnce {
+        runs: Arc<AtomicU32>,
+    }
+    impl System for MutateOnce {
+        type Result = ();
+        fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+            if self.runs.fetch_add(1, Ordering::SeqCst) == 0 {
+                ctx.lock::<(Write<Marker>,)>().execute(|(mut markers,)| {
+                    for (_, mut m) in markers.iter_mut() {
+                        m.0 += 1;
+                    }
+                });
+            }
+            Ok(())
+        }
+    }
+
+    /// Counts entities whose `Marker` changed since this system's last run.
+    struct CountChanged {
+        seen: Arc<AtomicU32>,
+    }
+    impl System for CountChanged {
+        type Result = ();
+        fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+            ctx.lock::<(Read<Marker>, MaybeChanged<Marker>)>()
+                .execute(|(markers, changed)| {
+                    for (idx, _) in markers.iter() {
+                        if changed.matches(idx) {
+                            self.seen.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                });
+            Ok(())
+        }
+    }
+
+    /// Counts entities whose `Marker` was added since this system's last run.
+    struct CountAdded {
+        seen: Arc<AtomicU32>,
+    }
+    impl System for CountAdded {
+        type Result = ();
+        fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+            ctx.lock::<(Read<Marker>, MaybeAdded<Marker>)>()
+                .execute(|(markers, added)| {
+                    for (idx, _) in markers.iter() {
+                        if added.matches(idx) {
+                            self.seen.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                });
+            Ok(())
+        }
+    }
+
+    /// Spawns one `Marker` entity via deferred commands, on its first run only.
+    struct SpawnViaCommandsOnce {
+        runs: Arc<AtomicU32>,
+    }
+    impl System for SpawnViaCommandsOnce {
+        type Result = ();
+        fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+            if self.runs.fetch_add(1, Ordering::SeqCst) == 0 {
+                ctx.spawn_with((Marker(7),));
+            }
+            Ok(())
+        }
+    }
+
+    fn setup() -> (World, Arc<AtomicU32>, Arc<AtomicU32>) {
+        let mut world = World::new();
+        world.register_component::<Marker>();
+        let e = world.spawn();
+        world.insert(e, Marker(0)).unwrap();
+        (
+            world,
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(AtomicU32::new(0)),
+        )
+    }
+
+    /// Audit C2, scenario 1: a system ordered BEFORE the mutator must see the
+    /// mutation on its next run. With the old frame-global `since = tick - 1`
+    /// window it never did.
+    #[test]
+    fn changed_visible_to_system_ordered_before_mutator() {
+        let (mut world, seen, runs) = setup();
+
+        let mut systems = SystemsContainer::new();
+        systems.add(CountChanged { seen: seen.clone() });
+        systems.add(MutateOnce { runs });
+        // Observer runs strictly before the mutator every frame.
+        systems.add_edge::<CountChanged, MutateOnce>().unwrap();
+
+        let runner = EcsRunner::single_thread();
+
+        // Frame 1: the setup-time insert (stamped at world tick 1) is visible
+        // to the never-run observer (last_run 0); the mutator then writes.
+        runner.run(&mut world, &systems);
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            1,
+            "setup insert visible on first run"
+        );
+
+        // Frame 2: the observer must see the mutation made AFTER it ran in
+        // frame 1.
+        runner.run(&mut world, &systems);
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            2,
+            "frame-1 mutation visible in frame 2"
+        );
+
+        // Frame 3: nothing mutated since — no re-trigger.
+        runner.run(&mut world, &systems);
+        assert_eq!(seen.load(Ordering::SeqCst), 2, "no spurious re-detection");
+    }
+
+    /// Audit C2, scenario 2: components inserted by deferred commands (applied
+    /// at end of frame) must be visible to Added filters next frame.
+    #[test]
+    fn command_applied_insert_visible_via_added() {
+        let mut world = World::new();
+        world.register_component::<Marker>();
+        let seen = Arc::new(AtomicU32::new(0));
+        let runs = Arc::new(AtomicU32::new(0));
+
+        let mut systems = SystemsContainer::new();
+        systems.add(CountAdded { seen: seen.clone() });
+        systems.add(SpawnViaCommandsOnce { runs });
+
+        let runner = EcsRunner::single_thread();
+
+        // Frame 1: spawn queued, applied after both systems ran.
+        runner.run(&mut world, &systems);
+        assert_eq!(seen.load(Ordering::SeqCst), 0);
+
+        // Frame 2: the command-applied insert must be visible.
+        runner.run(&mut world, &systems);
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            1,
+            "command insert visible next frame"
+        );
+
+        // Frame 3: no re-trigger.
+        runner.run(&mut world, &systems);
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+    }
+
+    /// Audit C2, scenario 3 (editor Render pattern): a separate schedule run
+    /// after the mutating schedule must see the current frame's changes.
+    #[test]
+    fn later_schedule_sees_current_frame_changes() {
+        let (mut world, seen, runs) = setup();
+
+        let mut update = SystemsContainer::new();
+        update.add(MutateOnce { runs });
+        let mut render = SystemsContainer::new();
+        render.add(CountChanged { seen: seen.clone() });
+
+        let runner = EcsRunner::single_thread();
+
+        // One host frame: Update mutates, Render (a separate container run
+        // right after) must see both the setup insert and the mutation.
+        runner.run(&mut world, &update);
+        runner.run(&mut world, &render);
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            1,
+            "render sees same-frame mutation"
+        );
+
+        // Next host frame: nothing new.
+        runner.run(&mut world, &update);
+        runner.run(&mut world, &render);
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            1,
+            "no re-detection in later frames"
+        );
+    }
+
+    /// Same as scenario 1, driven by the multi-threaded runner (atomic tick
+    /// assignment and last_run updates through &SystemsContainer).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn changed_visible_before_mutator_multi_thread() {
+        let (mut world, seen, runs) = setup();
+
+        let mut systems = SystemsContainer::new();
+        systems.add(CountChanged { seen: seen.clone() });
+        systems.add(MutateOnce { runs });
+        systems.add_edge::<CountChanged, MutateOnce>().unwrap();
+
+        let runner = EcsRunner::multi_thread(2);
+        runner.run(&mut world, &systems);
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+        runner.run(&mut world, &systems);
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
+        runner.run(&mut world, &systems);
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
+    }
+}

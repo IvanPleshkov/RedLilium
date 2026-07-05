@@ -82,21 +82,36 @@ impl World {
     ///
     /// Panics if T is borrowed by any read or write guard.
     pub(crate) fn write_storage<T: 'static>(&self) -> Result<RefMut<'_, T>, WorldError> {
+        self.write_storage_at(self.current_tick())
+    }
+
+    /// Like [`write_storage`](World::write_storage) but stamps writes with an
+    /// explicit tick (a system run's `this_run`).
+    pub(crate) fn write_storage_at<T: 'static>(
+        &self,
+        tick: u64,
+    ) -> Result<RefMut<'_, T>, WorldError> {
         let storage =
             self.components
                 .get(&TypeId::of::<T>())
                 .ok_or(WorldError::ComponentNotRegistered {
                     type_name: std::any::type_name::<T>(),
                 })?;
-        Ok(RefMut::new(storage, self.entities(), self.tick))
+        Ok(RefMut::new(storage, self.entities(), tick))
     }
 
     /// `&self` counterpart of [`try_write`](World::try_write) for crate
     /// internals (see [`write_storage`](World::write_storage)). Used by
     /// `OptionalWrite<T>`.
     pub(crate) fn try_write_storage<T: 'static>(&self) -> Option<RefMut<'_, T>> {
+        self.try_write_storage_at(self.current_tick())
+    }
+
+    /// Like [`try_write_storage`](World::try_write_storage) with an explicit
+    /// write-stamp tick.
+    pub(crate) fn try_write_storage_at<T: 'static>(&self, tick: u64) -> Option<RefMut<'_, T>> {
         let storage = self.components.get(&TypeId::of::<T>())?;
-        Some(RefMut::new(storage, self.entities(), self.tick))
+        Some(RefMut::new(storage, self.entities(), tick))
     }
 
     // ---- ReadAll access (includes static entities) ----
@@ -151,6 +166,15 @@ impl World {
     /// `&self` counterpart of [`write_all`](World::write_all) for crate
     /// internals (see [`write_storage`](World::write_storage)).
     pub(crate) fn write_all_storage<T: 'static>(&self) -> Result<RefMut<'_, T>, WorldError> {
+        self.write_all_storage_at(self.current_tick())
+    }
+
+    /// Like [`write_all_storage`](World::write_all_storage) with an explicit
+    /// write-stamp tick.
+    pub(crate) fn write_all_storage_at<T: 'static>(
+        &self,
+        tick: u64,
+    ) -> Result<RefMut<'_, T>, WorldError> {
         let storage =
             self.components
                 .get(&TypeId::of::<T>())
@@ -161,7 +185,7 @@ impl World {
             storage,
             self.entities(),
             Entity::DISABLED,
-            self.tick,
+            tick,
         ))
     }
 
@@ -173,7 +197,7 @@ impl World {
             storage,
             self.entities(),
             Entity::DISABLED,
-            self.tick,
+            self.current_tick(),
         ))
     }
 
@@ -204,8 +228,9 @@ impl World {
             panic!("World::query does not support main-thread resources");
         }
         let infos = A::access_infos();
+        let ticks = crate::query::FetchTicks::frame(self);
         let guards = self.acquire_sorted(&infos);
-        let items = A::fetch_unlocked(self);
+        let items = A::fetch_unlocked(self, ticks);
         crate::query::QueryGuard::new(guards, items)
     }
 
@@ -228,18 +253,17 @@ impl World {
     /// Gets exclusive write access without acquiring a lock.
     ///
     /// The caller must ensure the write lock is already held externally.
-    pub(crate) fn write_unlocked<T: 'static>(&self) -> Result<RefMut<'_, T>, WorldError> {
+    pub(crate) fn write_unlocked<T: 'static>(
+        &self,
+        tick: u64,
+    ) -> Result<RefMut<'_, T>, WorldError> {
         let lock =
             self.components
                 .get(&TypeId::of::<T>())
                 .ok_or(WorldError::ComponentNotRegistered {
                     type_name: std::any::type_name::<T>(),
                 })?;
-        Ok(RefMut::new_unlocked(
-            lock.data_ptr(),
-            self.entities(),
-            self.tick,
-        ))
+        Ok(RefMut::new_unlocked(lock.data_ptr(), self.entities(), tick))
     }
 
     /// Gets optional shared read access without acquiring a lock.
@@ -250,13 +274,9 @@ impl World {
     }
 
     /// Gets optional exclusive write access without acquiring a lock.
-    pub(crate) fn try_write_unlocked<T: 'static>(&self) -> Option<RefMut<'_, T>> {
+    pub(crate) fn try_write_unlocked<T: 'static>(&self, tick: u64) -> Option<RefMut<'_, T>> {
         let lock = self.components.get(&TypeId::of::<T>())?;
-        Some(RefMut::new_unlocked(
-            lock.data_ptr(),
-            self.entities(),
-            self.tick,
-        ))
+        Some(RefMut::new_unlocked(lock.data_ptr(), self.entities(), tick))
     }
 
     /// Gets shared read access including static entities, without acquiring a lock.
@@ -277,7 +297,10 @@ impl World {
 
     /// Gets exclusive write access including static and editor entities,
     /// without acquiring a lock.
-    pub(crate) fn write_all_unlocked<T: 'static>(&self) -> Result<RefMut<'_, T>, WorldError> {
+    pub(crate) fn write_all_unlocked<T: 'static>(
+        &self,
+        tick: u64,
+    ) -> Result<RefMut<'_, T>, WorldError> {
         let lock =
             self.components
                 .get(&TypeId::of::<T>())
@@ -288,7 +311,7 @@ impl World {
             lock.data_ptr(),
             self.entities(),
             Entity::DISABLED,
-            self.tick,
+            tick,
         ))
     }
 

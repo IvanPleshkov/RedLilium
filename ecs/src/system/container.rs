@@ -151,6 +151,11 @@ pub struct SystemsContainer {
     /// Exclusive systems, write component access, and deferred commands
     /// are forbidden at runtime.
     read_only: bool,
+    /// Per-system tick of the previous run (0 = never ran). Atomic because
+    /// runners update it through `&SystemsContainer` while other systems
+    /// execute. Change filters in a system's queries match events recorded
+    /// strictly after its entry here.
+    last_runs: Vec<std::sync::atomic::AtomicU64>,
 }
 
 impl SystemsContainer {
@@ -171,6 +176,7 @@ impl SystemsContainer {
             set_barriers: HashMap::new(),
             is_virtual: Vec::new(),
             read_only: false,
+            last_runs: Vec::new(),
         }
     }
 
@@ -211,6 +217,7 @@ impl SystemsContainer {
         let idx = self.systems.len();
         self.id_to_idx.insert(type_id, idx);
         self.idx_to_id.push(type_id);
+        self.last_runs.push(std::sync::atomic::AtomicU64::new(0));
         self.systems.push(SystemEntry::Regular(arc.clone()));
         self.names.push(std::any::type_name::<S>());
         self.edges.push(Vec::new());
@@ -450,6 +457,7 @@ impl SystemsContainer {
         let idx = self.systems.len();
         self.id_to_idx.insert(type_id, idx);
         self.idx_to_id.push(type_id);
+        self.last_runs.push(std::sync::atomic::AtomicU64::new(0));
         self.systems.push(SystemEntry::Exclusive(arc.clone()));
         self.names.push(std::any::type_name::<S>());
         self.edges.push(Vec::new());
@@ -504,6 +512,7 @@ impl SystemsContainer {
         let idx = self.systems.len();
         self.id_to_idx.insert(type_id, idx);
         self.idx_to_id.push(type_id);
+        self.last_runs.push(std::sync::atomic::AtomicU64::new(0));
         self.systems
             .push(SystemEntry::ReadOnlyExclusive(arc.clone()));
         self.names.push(std::any::type_name::<S>());
@@ -692,6 +701,16 @@ impl SystemsContainer {
     ///
     /// Returns `true` if the system should run, `false` if it should be
     /// skipped. Systems with no condition edges always return `true`.
+    /// Returns the tick of the system's previous run (0 = never ran).
+    pub(crate) fn last_run(&self, idx: usize) -> u64 {
+        self.last_runs[idx].load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Records the tick assigned to the system's just-finished run.
+    pub(crate) fn set_last_run(&self, idx: usize, tick: u64) {
+        self.last_runs[idx].store(tick, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub(crate) fn check_conditions(
         &self,
         idx: usize,
@@ -854,6 +873,7 @@ impl SystemsContainer {
 
         // Create enter barrier node.
         let enter_idx = self.systems.len();
+        self.last_runs.push(std::sync::atomic::AtomicU64::new(0));
         self.systems.push(SystemEntry::Virtual);
         self.names.push(std::any::type_name::<SetEnter<S>>());
         self.edges.push(Vec::new());
@@ -868,6 +888,7 @@ impl SystemsContainer {
 
         // Create exit barrier node.
         let exit_idx = self.systems.len();
+        self.last_runs.push(std::sync::atomic::AtomicU64::new(0));
         self.systems.push(SystemEntry::Virtual);
         self.names.push(std::any::type_name::<SetExit<S>>());
         self.edges.push(Vec::new());

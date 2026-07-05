@@ -108,9 +108,9 @@ pub use bundle::Bundle;
 pub use commands::{CommandCollector, SpawnBuilder};
 pub use query::LockRequest;
 pub use query::{
-    AccessSet, Added, Any, Changed, MainThreadRes, MainThreadResMut, MaybeAdded, MaybeChanged,
-    MaybeRemoved, OptionalRead, OptionalWrite, Or, Read, ReadAll, Removed, Res, ResMut, Write,
-    WriteAll,
+    AccessSet, Added, Any, Changed, FetchTicks, MainThreadRes, MainThreadResMut, MaybeAdded,
+    MaybeChanged, MaybeRemoved, OptionalRead, OptionalWrite, Or, Read, ReadAll, Removed, Res,
+    ResMut, Write, WriteAll,
 };
 pub use runner::{EcsRunner, EcsRunnerSingleThread, ShutdownError};
 pub use system::ParConfig;

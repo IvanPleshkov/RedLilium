@@ -135,8 +135,9 @@ pub struct World {
     entities: Entities,
     components: HashMap<TypeId, parking_lot::RwLock<ComponentStorage>>,
     resources: Resources,
-    /// Global tick counter for change detection.
-    tick: u64,
+    /// Global tick counter for change detection. Atomic so runners can
+    /// assign per-system ticks while worker threads hold `&World`.
+    tick: std::sync::atomic::AtomicU64,
     /// Reverse index from component name to TypeId for name-based lookups.
     name_index: BTreeMap<&'static str, TypeId>,
     /// Deferred observer registry and pending triggers. `pub(crate)` so
@@ -158,7 +159,9 @@ impl World {
             entities: Entities::new(),
             components: HashMap::new(),
             resources,
-            tick: 0,
+            // Starts at 1 so setup-time writes (stamped with tick 1) are
+            // visible to never-run systems, whose `last_run` is 0.
+            tick: std::sync::atomic::AtomicU64::new(1),
             name_index: BTreeMap::new(),
             observers: Observers::new(),
             trigger_swap_fns: Vec::new(),
@@ -198,7 +201,7 @@ impl World {
         }
 
         let index = entity.index();
-        let tick = self.tick;
+        let tick = self.current_tick();
 
         // Pass 1: collect on_remove hooks for components this entity has
         let hooks: smallvec::SmallVec<[crate::sparse_set::ComponentHookFn; 2]> = self

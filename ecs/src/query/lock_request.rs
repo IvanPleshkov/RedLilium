@@ -89,7 +89,7 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
             redlilium_core::profile_scope!("ecs: lock acquire");
             self.ctx.world().acquire_sorted(&A::access_infos())
         };
-        let items = A::fetch_unlocked(self.ctx.world());
+        let items = A::fetch_unlocked(self.ctx.world(), self.ctx.ticks());
         f(items)
     }
 
@@ -102,6 +102,7 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
         match self.ctx.dispatcher() {
             Some(dispatcher) => {
                 let world = self.ctx.world();
+                let ticks = self.ctx.ticks();
                 let (result_tx, result_rx) = mpsc::sync_channel::<R>(1);
 
                 let work: Box<dyn FnOnce() + Send + '_> = Box::new(move || {
@@ -109,7 +110,7 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
                         redlilium_core::profile_scope!("ecs: lock acquire (main-thread)");
                         world.acquire_sorted(&A::access_infos())
                     };
-                    let items = A::fetch_unlocked(world);
+                    let items = A::fetch_unlocked(world, ticks);
                     let result = f(items);
                     let _ = result_tx.send(result);
                 });

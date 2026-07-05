@@ -13,7 +13,7 @@ use crate::main_thread_dispatcher::MainThreadDispatcher;
 use crate::query::AccessSet;
 use crate::query::LockRequest;
 use crate::query::QueryGuard;
-use crate::query::access::{AccessInfo, normalize_access_infos};
+use crate::query::access::{AccessInfo, FetchTicks, normalize_access_infos};
 use crate::system::diagnostics::AccessRecorder;
 use crate::system::results_store::SystemResultsStore;
 use crate::system::{ExclusiveSystem, System};
@@ -107,6 +107,11 @@ pub struct SystemContext<'a> {
     /// When true, write access to components/resources and deferred
     /// commands are forbidden. Set by a read-only [`SystemsContainer`].
     read_only: bool,
+    /// The tick window of this system run: change filters match strictly
+    /// after `ticks.last_run`, writes stamp `ticks.this_run`. Set by the
+    /// runner per system; contexts created outside a runner default to the
+    /// legacy frame window.
+    ticks: FetchTicks,
 }
 
 impl<'a> SystemContext<'a> {
@@ -131,6 +136,7 @@ impl<'a> SystemContext<'a> {
             accessible_results: None,
             access_recorder: None,
             read_only: false,
+            ticks: FetchTicks::frame(world),
         }
     }
 
@@ -156,6 +162,7 @@ impl<'a> SystemContext<'a> {
             accessible_results: None,
             access_recorder: None,
             read_only: false,
+            ticks: FetchTicks::frame(world),
         }
     }
 
@@ -184,6 +191,26 @@ impl<'a> SystemContext<'a> {
     ) -> Self {
         self.access_recorder = Some((recorder, system_idx));
         self
+    }
+
+    /// Sets the tick window for this system run. Called by runners.
+    pub(crate) fn with_ticks(mut self, ticks: FetchTicks) -> Self {
+        self.ticks = ticks;
+        self
+    }
+
+    /// Returns the tick window of this system run.
+    pub(crate) fn ticks(&self) -> FetchTicks {
+        self.ticks
+    }
+
+    /// Returns the tick of this system's previous run.
+    ///
+    /// Change/add/remove filters in this system's queries match events
+    /// recorded strictly after this tick. Useful as the `since` argument for
+    /// explicit change scans (e.g. [`World::scan_asset_refs`]).
+    pub fn last_run_tick(&self) -> u64 {
+        self.ticks.last_run
     }
 
     /// Marks this context as read-only.
@@ -357,7 +384,7 @@ impl<'a> SystemContext<'a> {
 
         self.register_held_locks(&sorted);
         let tracking = self.make_tracking(&sorted);
-        let items = A::fetch_unlocked(self.world);
+        let items = A::fetch_unlocked(self.world, self.ticks);
         QueryGuard::new_tracked(guards, items, tracking)
     }
 

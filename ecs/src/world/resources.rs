@@ -156,17 +156,34 @@ impl World {
 
     /// Returns the current world tick.
     ///
-    /// The tick advances each frame via [`advance_tick`](World::advance_tick)
-    /// and is used for change detection.
+    /// The tick advances once per executed system inside a runner (see
+    /// [`next_tick`](World::next_tick)) plus at explicit barriers
+    /// ([`advance_tick`](World::advance_tick)), and is used for change
+    /// detection.
     pub fn current_tick(&self) -> u64 {
-        self.tick
+        self.tick.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Advances the world tick by one.
     ///
-    /// Call this at the start of each frame, before running systems.
+    /// Called by runners before applying deferred commands (so command
+    /// writes are stamped after every system's `last_run`) and by
+    /// `Schedules::run_frame` after the frame (so out-of-band edits by the
+    /// world owner are visible to every system next frame).
     pub fn advance_tick(&mut self) {
-        self.tick += 1;
+        self.tick.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Advances the tick and returns the new value.
+    ///
+    /// Runners call this to assign each system run a unique `this_run`
+    /// stamp: the system's writes are stamped with it, and after the run it
+    /// becomes the system's `last_run`, so change filters see exactly what
+    /// happened since — including mutations later in the same frame.
+    /// Atomic (`&self`) because the multi-threaded runner assigns ticks
+    /// while worker systems hold `&World`.
+    pub(crate) fn next_tick(&self) -> u64 {
+        self.tick.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
     }
 
     /// Clears all removal tracking records for all component types.

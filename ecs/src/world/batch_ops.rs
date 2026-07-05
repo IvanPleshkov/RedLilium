@@ -123,7 +123,7 @@ impl World {
         }
 
         // Phase 3: deallocate all entities and remove components
-        let tick = self.tick;
+        let tick = self.current_tick();
         for &entity in entities {
             if !self.entities.is_alive(entity) {
                 continue;
@@ -194,7 +194,7 @@ impl World {
     /// Fires `on_remove` hook for each entity before removal.
     /// Records removals for [`removed`](World::removed) filter queries.
     pub fn remove_batch<T: 'static>(&mut self, entities: &[Entity]) {
-        let tick = self.tick;
+        let tick = self.current_tick();
         let type_id = TypeId::of::<T>();
 
         // Extract on_remove hooks

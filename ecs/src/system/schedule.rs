@@ -444,9 +444,11 @@ impl Schedules {
             runner.run(world, schedule);
         }
 
-        // 7. Advance change-detection tick (after all systems, so that
-        //    mutations applied before the next run_frame use the new tick
-        //    and are visible to Changed<T> filters in the next frame).
+        // 7. Advance the change-detection tick. Systems already get their own
+        //    per-run ticks inside the runner; this bump is for out-of-band
+        //    mutations by the world owner between frames (editor edits, app
+        //    code) — it stamps them after every system's `last_run`, so they
+        //    are visible to Changed<T>/Added<T> filters in the next frame.
         world.advance_tick();
     }
 

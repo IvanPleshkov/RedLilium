@@ -375,8 +375,6 @@ pub struct MeshLoad {
 struct SyncGate {
     /// Manager generations at the previous scan.
     last_gens: Option<[u64; 3]>,
-    /// World tick of the previous scan.
-    scanned_at: u64,
 }
 
 impl System for MeshLoad {
@@ -413,19 +411,18 @@ impl System for MeshLoad {
             .then(|| world.resource_mut::<TextureManager>());
 
         // Gen-gating: unchanged generations → visit only components changed
-        // since the previous scan. The `- 1` guard: the whole frame shares one
-        // tick, so writes later in the scan's own frame carry the same tick and
-        // `changed_since` is strict — back off by one and re-visit that frame's
-        // components once more (cheap no-ops when already current).
+        // since this system's previous run. `ctx.last_run_tick()` is exact:
+        // every system run gets its own tick, so writes later in the previous
+        // frame are stamped after it and `changed_since`'s strict comparison
+        // catches them (no back-off guard needed).
         let gens = [
             mesh_mgr.generation(),
             instance_mgr.as_ref().map_or(0, |m| m.generation()),
             texture_mgr.as_ref().map_or(0, |m| m.generation()),
         ];
         let mut gate = self.gate.lock().expect("sync gate poisoned");
-        let since = (gate.last_gens == Some(gens)).then(|| gate.scanned_at.saturating_sub(1));
+        let since = (gate.last_gens == Some(gens)).then(|| ctx.last_run_tick());
         gate.last_gens = Some(gens);
-        gate.scanned_at = world.current_tick();
         drop(gate);
 
         let mut stale: Vec<(&'static str, u32)> = Vec::new();
