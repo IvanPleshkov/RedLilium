@@ -387,6 +387,7 @@ impl WgpuBackend {
                     return Ok(());
                 };
 
+                crate::graph::validate_buffer_copy_alignment(regions)?;
                 for region in regions {
                     encoder.copy_buffer_to_buffer(
                         src_buffer,
@@ -468,29 +469,16 @@ impl WgpuBackend {
                 };
 
                 let format = src.format();
-                let block_size = format.block_size();
 
                 for region in regions {
-                    let bytes_per_row =
-                        region
-                            .buffer_layout
-                            .bytes_per_row
-                            .or(if region.extent.height > 1 {
-                                let unpadded = region.extent.width * block_size;
-                                Some((unpadded + 255) & !255)
-                            } else {
-                                None
-                            });
-
-                    let rows_per_image =
-                        region
-                            .buffer_layout
-                            .rows_per_image
-                            .or(if region.extent.depth > 1 {
-                                Some(region.extent.height)
-                            } else {
-                                None
-                            });
+                    // Shared resolver: same tight-packing/block math and
+                    // alignment validation as the Vulkan backend.
+                    let layout = region
+                        .buffer_layout
+                        .resolve(format, region.extent)
+                        .map_err(|e| {
+                            GraphicsError::InvalidParameter(format!("TextureToBuffer: {e}"))
+                        })?;
 
                     encoder.copy_texture_to_buffer(
                         wgpu::TexelCopyTextureInfo {
@@ -506,9 +494,10 @@ impl WgpuBackend {
                         wgpu::TexelCopyBufferInfo {
                             buffer: dst_buffer,
                             layout: wgpu::TexelCopyBufferLayout {
-                                offset: region.buffer_layout.offset,
-                                bytes_per_row,
-                                rows_per_image,
+                                offset: layout.offset,
+                                bytes_per_row: layout.multi_row.then_some(layout.bytes_per_row),
+                                rows_per_image: (region.extent.depth > 1)
+                                    .then_some(layout.rows_per_image_blocks),
                             },
                         },
                         wgpu::Extent3d {
@@ -532,37 +521,25 @@ impl WgpuBackend {
                 };
 
                 let format = dst.format();
-                let block_size = format.block_size();
 
                 for region in regions {
-                    let bytes_per_row =
-                        region
-                            .buffer_layout
-                            .bytes_per_row
-                            .or(if region.extent.height > 1 {
-                                let unpadded = region.extent.width * block_size;
-                                Some((unpadded + 255) & !255)
-                            } else {
-                                None
-                            });
-
-                    let rows_per_image =
-                        region
-                            .buffer_layout
-                            .rows_per_image
-                            .or(if region.extent.depth > 1 {
-                                Some(region.extent.height)
-                            } else {
-                                None
-                            });
+                    // Shared resolver: same tight-packing/block math and
+                    // alignment validation as the Vulkan backend.
+                    let layout = region
+                        .buffer_layout
+                        .resolve(format, region.extent)
+                        .map_err(|e| {
+                            GraphicsError::InvalidParameter(format!("BufferToTexture: {e}"))
+                        })?;
 
                     encoder.copy_buffer_to_texture(
                         wgpu::TexelCopyBufferInfo {
                             buffer: src_buffer,
                             layout: wgpu::TexelCopyBufferLayout {
-                                offset: region.buffer_layout.offset,
-                                bytes_per_row,
-                                rows_per_image,
+                                offset: layout.offset,
+                                bytes_per_row: layout.multi_row.then_some(layout.bytes_per_row),
+                                rows_per_image: (region.extent.depth > 1)
+                                    .then_some(layout.rows_per_image_blocks),
                             },
                         },
                         wgpu::TexelCopyTextureInfo {

@@ -583,6 +583,113 @@ fn graph_writes_swapchain(graph: &RenderGraph) -> bool {
     })
 }
 
+/// Aspect mask for whole-image operations, derived from the format.
+///
+/// Depth formats must not be addressed with `COLOR` (invalid usage);
+/// image↔image copies may cover depth and stencil together.
+fn image_aspect_mask(format: crate::types::TextureFormat) -> vk::ImageAspectFlags {
+    if format.is_depth_stencil() {
+        if format.has_stencil() {
+            vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+        } else {
+            vk::ImageAspectFlags::DEPTH
+        }
+    } else {
+        vk::ImageAspectFlags::COLOR
+    }
+}
+
+/// Resolved layer/z addressing of a texture copy location.
+struct ResolvedLayerZ {
+    base_layer: u32,
+    layer_count: u32,
+    z_offset: i32,
+    /// Real z-depth of the copied region (1 for array-like textures — their
+    /// "depth" moved into `layer_count`).
+    extent_depth: u32,
+}
+
+/// Split a copy location's `origin.z` / `extent.depth` into array-layer and
+/// z-offset terms.
+///
+/// For array-like dimensions (arrays, cubes) `origin.z` addresses the base
+/// layer and `extent.depth` the number of layers — matching wgpu's
+/// `Origin3d::z` / `depth_or_array_layers` semantics. For 1D/2D/3D they are a
+/// real z offset and depth (Vulkan requires layer terms in the subresource,
+/// not the offset).
+fn resolve_layer_z(
+    dimension: crate::types::TextureDimension,
+    origin_z: u32,
+    extent: crate::types::Extent3d,
+) -> ResolvedLayerZ {
+    use crate::types::TextureDimension;
+    let array_like = matches!(
+        dimension,
+        TextureDimension::D1Array
+            | TextureDimension::D2Array
+            | TextureDimension::Cube
+            | TextureDimension::CubeArray
+    );
+    if array_like {
+        ResolvedLayerZ {
+            base_layer: origin_z,
+            layer_count: extent.depth.max(1),
+            z_offset: 0,
+            extent_depth: 1,
+        }
+    } else {
+        ResolvedLayerZ {
+            base_layer: 0,
+            layer_count: 1,
+            z_offset: origin_z as i32,
+            extent_depth: extent.depth.max(1),
+        }
+    }
+}
+
+/// Build validated `vk::BufferImageCopy` regions for buffer↔image transfer
+/// ops. Layout math (tight pitch, block conversion, alignment rules) comes
+/// from the shared [`BufferTextureLayout::resolve`], so wgpu and Vulkan
+/// accept and reject exactly the same graphs.
+fn build_buffer_image_copies(
+    format: crate::types::TextureFormat,
+    dimension: crate::types::TextureDimension,
+    regions: &[crate::graph::BufferTextureCopyRegion],
+    op_name: &str,
+) -> Result<Vec<vk::BufferImageCopy>, GraphicsError> {
+    let aspect_mask = image_aspect_mask(format);
+    regions
+        .iter()
+        .map(|r| {
+            let layout = r
+                .buffer_layout
+                .resolve(format, r.extent)
+                .map_err(|e| GraphicsError::InvalidParameter(format!("{op_name}: {e}")))?;
+            let loc = resolve_layer_z(dimension, r.texture_location.origin.z, r.extent);
+            Ok(vk::BufferImageCopy::default()
+                .buffer_offset(layout.offset)
+                .buffer_row_length(layout.row_length_texels)
+                .buffer_image_height(layout.rows_per_image_texels)
+                .image_subresource(vk::ImageSubresourceLayers {
+                    aspect_mask,
+                    mip_level: r.texture_location.mip_level,
+                    base_array_layer: loc.base_layer,
+                    layer_count: loc.layer_count,
+                })
+                .image_offset(vk::Offset3D {
+                    x: r.texture_location.origin.x as i32,
+                    y: r.texture_location.origin.y as i32,
+                    z: loc.z_offset,
+                })
+                .image_extent(vk::Extent3D {
+                    width: r.extent.width,
+                    height: r.extent.height,
+                    depth: loc.extent_depth,
+                }))
+        })
+        .collect()
+}
+
 /// Per-frame swapchain synchronization handoff between `acquire_next_image`,
 /// the render submit (in `execute_graph`), and present.
 #[derive(Default)]
@@ -1511,20 +1618,32 @@ impl VulkanBackend {
         vec![0u8; size as usize]
     }
 
-    /// Write data to a texture.
+    /// Write tightly-packed data covering mip 0 of every layer of a texture.
     ///
-    /// Uses a staging buffer to upload texture data. The staging buffer and
-    /// command buffer are submitted asynchronously and cleaned up via deferred
-    /// destruction after the GPU finishes.
+    /// **Blocking convenience path**: uploads through a one-shot staging
+    /// buffer and waits for the copy synchronously — fine for tools and
+    /// one-time setup, wrong for streaming (each call is a full GPU
+    /// round-trip). Load-time/streaming uploads belong in the frame graph
+    /// via [`TransferOperation::upload_texture_data`]; batching/staging-belt
+    /// perf work is tracked in issue #41.
     ///
-    /// Returns an error if the texture write fails.
+    /// `data` must be tightly packed for the whole image: all array layers
+    /// (cube faces) back to back, block-compressed formats in block rows.
+    /// Textures with `mip_level_count > 1` are rejected — upload each mip
+    /// with an explicit region through the transfer ops instead. Combined
+    /// depth-stencil formats are rejected (single-aspect copies only).
+    ///
+    /// After the upload the image is in `SHADER_READ_ONLY_OPTIMAL` and the
+    /// layout tracker is updated accordingly, so the first render-graph use
+    /// does not re-transition from `UNDEFINED` (which could legally discard
+    /// the uploaded texels).
     pub fn write_texture(
         &self,
         texture: &GpuTexture,
         data: &[u8],
         descriptor: &crate::types::TextureDescriptor,
     ) -> Result<(), GraphicsError> {
-        let GpuTexture::Vulkan { image, .. } = texture else {
+        let GpuTexture::Vulkan { image, id, .. } = texture else {
             return Err(GraphicsError::Internal(
                 "write_texture called with non-Vulkan texture".to_string(),
             ));
@@ -1533,6 +1652,41 @@ impl VulkanBackend {
         if data.is_empty() {
             return Ok(());
         }
+
+        let format = descriptor.format;
+        if format.is_depth_stencil() && format.has_stencil() {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "write_texture does not support combined depth-stencil formats ({format:?})"
+            )));
+        }
+        if descriptor.mip_level_count > 1 {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "write_texture uploads mip 0 only, but the texture has {} mip levels — upload \
+                 each mip with an explicit region via TransferOperation::upload_texture",
+                descriptor.mip_level_count
+            )));
+        }
+
+        // Tightly-packed size for mip 0 of every layer/depth slice.
+        let (block_w, block_h) = format.block_dimensions();
+        let block_size = format.block_size();
+        let row_blocks = descriptor.size.width.div_ceil(block_w);
+        let col_blocks = descriptor.size.height.div_ceil(block_h);
+        let (layer_count, depth) = descriptor.layers_and_depth();
+        let expected = row_blocks as usize
+            * col_blocks as usize
+            * block_size as usize
+            * depth as usize
+            * layer_count as usize;
+        if data.len() != expected {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "write_texture data size {} does not match the texture's tightly-packed size \
+                 {expected} ({row_blocks}x{col_blocks} blocks x {block_size} bytes x \
+                 {layer_count} layers x {depth} depth)",
+                data.len(),
+            )));
+        }
+        let aspect_mask = image_aspect_mask(format);
 
         // Create staging buffer
         let staging_buffer_info = vk::BufferCreateInfo::default()
@@ -1662,7 +1816,8 @@ impl VulkanBackend {
             )));
         }
 
-        // Transition image layout to TRANSFER_DST_OPTIMAL
+        // Transition the WHOLE image (all layers/aspects) to
+        // TRANSFER_DST_OPTIMAL so no subresource is left in UNDEFINED.
         let barrier = vk::ImageMemoryBarrier::default()
             .old_layout(vk::ImageLayout::UNDEFINED)
             .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
@@ -1670,11 +1825,11 @@ impl VulkanBackend {
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .image(*image)
             .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
+                aspect_mask,
                 base_mip_level: 0,
-                level_count: 1,
+                level_count: vk::REMAINING_MIP_LEVELS,
                 base_array_layer: 0,
-                layer_count: 1,
+                layer_count: vk::REMAINING_ARRAY_LAYERS,
             })
             .src_access_mask(vk::AccessFlags::empty())
             .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
@@ -1691,22 +1846,22 @@ impl VulkanBackend {
             );
         }
 
-        // Copy buffer to image
+        // Copy mip 0 of every layer (tightly packed, layers back to back).
         let region = vk::BufferImageCopy::default()
             .buffer_offset(0)
             .buffer_row_length(0) // 0 means tightly packed
             .buffer_image_height(0)
             .image_subresource(vk::ImageSubresourceLayers {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
+                aspect_mask,
                 mip_level: 0,
                 base_array_layer: 0,
-                layer_count: 1,
+                layer_count,
             })
             .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
             .image_extent(vk::Extent3D {
                 width: descriptor.size.width,
                 height: descriptor.size.height,
-                depth: 1,
+                depth,
             });
 
         unsafe {
@@ -1719,7 +1874,9 @@ impl VulkanBackend {
             );
         }
 
-        // Transition image layout to SHADER_READ_ONLY_OPTIMAL
+        // Transition the whole image to SHADER_READ_ONLY_OPTIMAL. The dst
+        // scope covers every shader stage that may sample it — fragment-only
+        // would leave vertex/compute sampling unsynchronized.
         let barrier = vk::ImageMemoryBarrier::default()
             .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
             .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
@@ -1727,11 +1884,11 @@ impl VulkanBackend {
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .image(*image)
             .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
+                aspect_mask,
                 base_mip_level: 0,
-                level_count: 1,
+                level_count: vk::REMAINING_MIP_LEVELS,
                 base_array_layer: 0,
-                layer_count: 1,
+                layer_count: vk::REMAINING_ARRAY_LAYERS,
             })
             .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
             .dst_access_mask(vk::AccessFlags::SHADER_READ);
@@ -1740,7 +1897,9 @@ impl VulkanBackend {
             self.device.cmd_pipeline_barrier(
                 cmd,
                 vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::PipelineStageFlags::VERTEX_SHADER
+                    | vk::PipelineStageFlags::FRAGMENT_SHADER
+                    | vk::PipelineStageFlags::COMPUTE_SHADER,
                 vk::DependencyFlags::empty(),
                 &[],
                 &[],
@@ -1829,6 +1988,14 @@ impl VulkanBackend {
         if let Err(e) = self.allocator.lock().free(staging_allocation) {
             log::error!("Failed to free staging allocation: {}", e);
         }
+
+        // The whole image is now in SHADER_READ_ONLY_OPTIMAL. Registering it
+        // keeps the render graph's first use from re-transitioning out of
+        // UNDEFINED — a transition that may legally discard the texels we
+        // just uploaded.
+        self.layout_tracker
+            .lock()
+            .set_layout(TextureId::from_raw(*id), TextureLayout::ShaderReadOnly);
 
         Ok(())
     }
@@ -2556,7 +2723,7 @@ impl VulkanBackend {
         cmd: vk::CommandBuffer,
         operation: &crate::graph::TransferOperation,
     ) -> Result<(), GraphicsError> {
-        use crate::graph::TransferOperation;
+        use crate::graph::{TransferOperation, validate_buffer_copy_alignment};
 
         match operation {
             TransferOperation::BufferToBuffer { src, dst, regions } => {
@@ -2573,6 +2740,7 @@ impl VulkanBackend {
                     return Ok(());
                 };
 
+                validate_buffer_copy_alignment(regions)?;
                 let copy_regions: Vec<vk::BufferCopy> = regions
                     .iter()
                     .map(|r| {
@@ -2643,8 +2811,6 @@ impl VulkanBackend {
             // to encode here.
             TransferOperation::ReadbackBuffer { .. } => {}
             TransferOperation::TextureToBuffer { src, dst, regions } => {
-                use crate::types::TextureDimension;
-
                 let GpuTexture::Vulkan {
                     image: src_image, ..
                 } = src.gpu_handle()
@@ -2661,71 +2827,12 @@ impl VulkanBackend {
                 // NOTE: Layout transitions are now handled automatically by the barrier
                 // generation system in execute_graph() before each pass is encoded.
 
-                let block_size = src.format().block_size();
-                let dimension = src.dimension();
-
-                // For cubemaps and 2D arrays, origin.z specifies the array layer, not the z offset.
-                // Vulkan requires z offset to be 0 for 2D images, with layer specified in subresource.
-                let uses_array_layers = matches!(
-                    dimension,
-                    TextureDimension::D1Array
-                        | TextureDimension::D2Array
-                        | TextureDimension::Cube
-                        | TextureDimension::CubeArray
-                );
-
-                let copy_regions: Vec<vk::BufferImageCopy> = regions
-                    .iter()
-                    .map(|r| {
-                        // Compute bytes_per_row with 256-byte alignment for consistency with wgpu
-                        // If bytes_per_row is not specified and we have multiple rows, align to 256 bytes
-                        let bytes_per_row = r.buffer_layout.bytes_per_row.unwrap_or_else(|| {
-                            if r.extent.height > 1 {
-                                let unpadded = r.extent.width * block_size;
-                                // Align to 256 bytes for wgpu compatibility
-                                (unpadded + 255) & !255
-                            } else {
-                                0 // Single row - tight packing
-                            }
-                        });
-
-                        // Vulkan's buffer_row_length is in texels (pixels), not bytes
-                        // Convert from bytes to texels by dividing by block_size
-                        let row_length_texels = if bytes_per_row > 0 {
-                            bytes_per_row / block_size
-                        } else {
-                            0 // 0 means tightly packed
-                        };
-
-                        // Determine array layer and z offset based on texture type
-                        let (base_array_layer, z_offset) = if uses_array_layers {
-                            (r.texture_location.origin.z, 0)
-                        } else {
-                            (0, r.texture_location.origin.z as i32)
-                        };
-
-                        vk::BufferImageCopy::default()
-                            .buffer_offset(r.buffer_layout.offset)
-                            .buffer_row_length(row_length_texels)
-                            .buffer_image_height(r.buffer_layout.rows_per_image.unwrap_or(0))
-                            .image_subresource(vk::ImageSubresourceLayers {
-                                aspect_mask: vk::ImageAspectFlags::COLOR,
-                                mip_level: r.texture_location.mip_level,
-                                base_array_layer,
-                                layer_count: 1,
-                            })
-                            .image_offset(vk::Offset3D {
-                                x: r.texture_location.origin.x as i32,
-                                y: r.texture_location.origin.y as i32,
-                                z: z_offset,
-                            })
-                            .image_extent(vk::Extent3D {
-                                width: r.extent.width,
-                                height: r.extent.height,
-                                depth: r.extent.depth.max(1),
-                            })
-                    })
-                    .collect();
+                let copy_regions = build_buffer_image_copies(
+                    src.format(),
+                    src.dimension(),
+                    regions,
+                    "TextureToBuffer",
+                )?;
 
                 unsafe {
                     self.device.cmd_copy_image_to_buffer(
@@ -2738,8 +2845,6 @@ impl VulkanBackend {
                 }
             }
             TransferOperation::BufferToTexture { src, dst, regions } => {
-                use crate::types::TextureDimension;
-
                 let GpuBuffer::Vulkan {
                     buffer: src_buffer, ..
                 } = src.gpu_handle()
@@ -2756,68 +2861,12 @@ impl VulkanBackend {
                 // NOTE: Layout transitions are now handled automatically by the barrier
                 // generation system in execute_graph() before each pass is encoded.
 
-                let block_size = dst.format().block_size();
-                let dimension = dst.dimension();
-
-                // For cubemaps and 2D arrays, origin.z specifies the array layer, not the z offset.
-                // Vulkan requires z offset to be 0 for 2D images, with layer specified in subresource.
-                let uses_array_layers = matches!(
-                    dimension,
-                    TextureDimension::D1Array
-                        | TextureDimension::D2Array
-                        | TextureDimension::Cube
-                        | TextureDimension::CubeArray
-                );
-
-                let copy_regions: Vec<vk::BufferImageCopy> = regions
-                    .iter()
-                    .map(|r| {
-                        // Compute bytes_per_row with 256-byte alignment for consistency with wgpu
-                        let bytes_per_row = r.buffer_layout.bytes_per_row.unwrap_or_else(|| {
-                            if r.extent.height > 1 {
-                                let unpadded = r.extent.width * block_size;
-                                (unpadded + 255) & !255
-                            } else {
-                                0
-                            }
-                        });
-
-                        // Convert from bytes to texels for Vulkan
-                        let row_length_texels = if bytes_per_row > 0 {
-                            bytes_per_row / block_size
-                        } else {
-                            0
-                        };
-
-                        // Determine array layer and z offset based on texture type
-                        let (base_array_layer, z_offset) = if uses_array_layers {
-                            (r.texture_location.origin.z, 0)
-                        } else {
-                            (0, r.texture_location.origin.z as i32)
-                        };
-
-                        vk::BufferImageCopy::default()
-                            .buffer_offset(r.buffer_layout.offset)
-                            .buffer_row_length(row_length_texels)
-                            .buffer_image_height(r.buffer_layout.rows_per_image.unwrap_or(0))
-                            .image_subresource(vk::ImageSubresourceLayers {
-                                aspect_mask: vk::ImageAspectFlags::COLOR,
-                                mip_level: r.texture_location.mip_level,
-                                base_array_layer,
-                                layer_count: 1,
-                            })
-                            .image_offset(vk::Offset3D {
-                                x: r.texture_location.origin.x as i32,
-                                y: r.texture_location.origin.y as i32,
-                                z: z_offset,
-                            })
-                            .image_extent(vk::Extent3D {
-                                width: r.extent.width,
-                                height: r.extent.height,
-                                depth: r.extent.depth.max(1),
-                            })
-                    })
-                    .collect();
+                let copy_regions = build_buffer_image_copies(
+                    dst.format(),
+                    dst.dimension(),
+                    regions,
+                    "BufferToTexture",
+                )?;
 
                 unsafe {
                     self.device.cmd_copy_buffer_to_image(
@@ -2846,36 +2895,50 @@ impl VulkanBackend {
                 // NOTE: Layout transitions are now handled automatically by the barrier
                 // generation system in execute_graph() before each pass is encoded.
 
+                // Aspect follows the format (a depth copy with COLOR aspect is
+                // invalid); image-to-image copies may cover both depth and
+                // stencil at once, unlike buffer<->image copies.
+                let src_aspect = image_aspect_mask(src.format());
+                let dst_aspect = image_aspect_mask(dst.format());
+
                 let copy_regions: Vec<vk::ImageCopy> = regions
                     .iter()
                     .map(|r| {
+                        // For array-like textures origin.z addresses the layer
+                        // and extent.depth the layer count (matching wgpu);
+                        // for 1D/2D/3D they are a real z offset and depth.
+                        let src_loc = resolve_layer_z(src.dimension(), r.src.origin.z, r.extent);
+                        let dst_loc = resolve_layer_z(dst.dimension(), r.dst.origin.z, r.extent);
+                        // vk::ImageCopy has one extent; a 3D side keeps real
+                        // depth, array<->array copies move layers instead.
+                        let depth = src_loc.extent_depth.max(dst_loc.extent_depth);
                         vk::ImageCopy::default()
                             .src_subresource(vk::ImageSubresourceLayers {
-                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                aspect_mask: src_aspect,
                                 mip_level: r.src.mip_level,
-                                base_array_layer: 0,
-                                layer_count: 1,
+                                base_array_layer: src_loc.base_layer,
+                                layer_count: src_loc.layer_count,
                             })
                             .src_offset(vk::Offset3D {
                                 x: r.src.origin.x as i32,
                                 y: r.src.origin.y as i32,
-                                z: r.src.origin.z as i32,
+                                z: src_loc.z_offset,
                             })
                             .dst_subresource(vk::ImageSubresourceLayers {
-                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                aspect_mask: dst_aspect,
                                 mip_level: r.dst.mip_level,
-                                base_array_layer: 0,
-                                layer_count: 1,
+                                base_array_layer: dst_loc.base_layer,
+                                layer_count: dst_loc.layer_count,
                             })
                             .dst_offset(vk::Offset3D {
                                 x: r.dst.origin.x as i32,
                                 y: r.dst.origin.y as i32,
-                                z: r.dst.origin.z as i32,
+                                z: dst_loc.z_offset,
                             })
                             .extent(vk::Extent3D {
                                 width: r.extent.width,
                                 height: r.extent.height,
-                                depth: r.extent.depth.max(1),
+                                depth,
                             })
                     })
                     .collect();

@@ -14,7 +14,18 @@ use std::sync::{Arc, Mutex};
 use crate::device::GraphicsDevice;
 use crate::error::GraphicsError;
 use crate::resources::{Buffer, Texture};
-use crate::types::{BufferDescriptor, BufferUsage, Extent3d};
+use crate::types::{BufferDescriptor, BufferUsage, Extent3d, TextureFormat};
+
+/// Required row-pitch alignment for buffer↔texture copies spanning more than
+/// one row (wgpu's `COPY_BYTES_PER_ROW_ALIGNMENT`).
+///
+/// WebGPU requires it, Vulkan does not — it is enforced on **both** backends
+/// so a graph that works on one backend works on the other.
+pub const COPY_BYTES_PER_ROW_ALIGNMENT: u32 = 256;
+
+/// Required offset/size alignment for buffer↔buffer copies (wgpu's
+/// `COPY_BUFFER_ALIGNMENT`), enforced on both backends.
+pub const COPY_BUFFER_ALIGNMENT: u64 = 4;
 
 /// A region within a buffer for copy operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -45,6 +56,27 @@ impl BufferCopyRegion {
             size,
         }
     }
+}
+
+/// Validate buffer↔buffer copy regions against [`COPY_BUFFER_ALIGNMENT`].
+///
+/// wgpu rejects unaligned offsets/sizes at submit time; checking up front on
+/// both backends turns that into a graph-encoding error with the offending
+/// values in the message.
+pub fn validate_buffer_copy_alignment(regions: &[BufferCopyRegion]) -> Result<(), GraphicsError> {
+    for r in regions {
+        if !r.src_offset.is_multiple_of(COPY_BUFFER_ALIGNMENT)
+            || !r.dst_offset.is_multiple_of(COPY_BUFFER_ALIGNMENT)
+            || !r.size.is_multiple_of(COPY_BUFFER_ALIGNMENT)
+        {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "buffer copy offsets and size must be {COPY_BUFFER_ALIGNMENT}-byte aligned \
+                 (src_offset {}, dst_offset {}, size {})",
+                r.src_offset, r.dst_offset, r.size
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Specifies a location within a texture for copy operations.
@@ -131,11 +163,18 @@ impl TextureCopyRegion {
 pub struct BufferTextureLayout {
     /// Offset in bytes from the start of the buffer.
     pub offset: u64,
-    /// Bytes per row of texture data (must be aligned, typically to 256).
-    /// If None, assumes tightly packed based on format and width.
+    /// Byte pitch between consecutive rows (rows of *blocks* for compressed
+    /// formats). `None` means tightly packed for the format and copy width.
+    ///
+    /// Copies spanning more than one row must have a pitch aligned to
+    /// [`COPY_BYTES_PER_ROW_ALIGNMENT`] (256) — a WebGPU rule enforced on
+    /// both backends for portability. Tightly-packed data whose natural
+    /// pitch isn't 256-aligned must either pad rows or supply an explicit
+    /// aligned `bytes_per_row`.
     pub bytes_per_row: Option<u32>,
-    /// Number of rows per image (for 3D textures or texture arrays).
-    /// If None, assumes tightly packed based on height.
+    /// Number of texel rows per image slice (for 3D textures or array
+    /// layers). `None` means tightly packed (`extent.height`). Must be a
+    /// multiple of the format's block height.
     pub rows_per_image: Option<u32>,
 }
 
@@ -162,6 +201,103 @@ impl BufferTextureLayout {
             rows_per_image: None,
         }
     }
+
+    /// Resolve and validate this layout against a format and copy extent.
+    ///
+    /// This is the single source of truth for buffer↔texture copy layout on
+    /// both backends: tight pitch is computed in *blocks* for compressed
+    /// formats (not texels), and the cross-backend alignment rules are
+    /// checked here so a graph behaves identically on Vulkan and wgpu.
+    pub fn resolve(
+        &self,
+        format: TextureFormat,
+        extent: Extent3d,
+    ) -> Result<ResolvedBufferTextureLayout, GraphicsError> {
+        // Buffer↔image copies address a single aspect; combined depth-stencil
+        // has two and this API has no aspect selector.
+        if format.is_depth_stencil() && format.has_stencil() {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "buffer<->texture copies of combined depth-stencil formats ({format:?}) are not \
+                 supported: the copy addresses a single aspect"
+            )));
+        }
+
+        let (block_w, block_h) = format.block_dimensions();
+        let block_size = format.block_size();
+        let row_blocks = extent.width.div_ceil(block_w);
+        let height_blocks = extent.height.div_ceil(block_h);
+        let images = extent.depth.max(1);
+
+        let tight_bytes_per_row = row_blocks * block_size;
+        let bytes_per_row = self.bytes_per_row.unwrap_or(tight_bytes_per_row);
+        if bytes_per_row < tight_bytes_per_row {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "bytes_per_row {bytes_per_row} smaller than the copy's tight pitch \
+                 {tight_bytes_per_row} ({row_blocks} blocks x {block_size} bytes)"
+            )));
+        }
+        if !bytes_per_row.is_multiple_of(block_size) {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "bytes_per_row {bytes_per_row} is not a multiple of the format block size \
+                 {block_size}"
+            )));
+        }
+
+        let multi_row = height_blocks * images > 1;
+        if multi_row && !bytes_per_row.is_multiple_of(COPY_BYTES_PER_ROW_ALIGNMENT) {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "bytes_per_row {bytes_per_row} must be {COPY_BYTES_PER_ROW_ALIGNMENT}-byte \
+                 aligned for copies spanning more than one row (wgpu rule, enforced on both \
+                 backends); pad the rows or pass an explicit aligned bytes_per_row"
+            )));
+        }
+
+        let rows_per_image_texels = self.rows_per_image.unwrap_or(extent.height);
+        if !rows_per_image_texels.is_multiple_of(block_h) {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "rows_per_image {rows_per_image_texels} is not a multiple of the format block \
+                 height {block_h}"
+            )));
+        }
+        if rows_per_image_texels < extent.height {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "rows_per_image {rows_per_image_texels} smaller than the copy height {}",
+                extent.height
+            )));
+        }
+
+        Ok(ResolvedBufferTextureLayout {
+            offset: self.offset,
+            bytes_per_row,
+            row_length_texels: (bytes_per_row / block_size) * block_w,
+            rows_per_image_texels,
+            rows_per_image_blocks: rows_per_image_texels / block_h,
+            multi_row,
+        })
+    }
+}
+
+/// A [`BufferTextureLayout`] resolved against a format and extent — tight
+/// values filled in, block math applied, alignment rules validated.
+///
+/// Produced by [`BufferTextureLayout::resolve`] and consumed by both
+/// backends' copy encoders.
+#[derive(Debug, Clone, Copy)]
+pub struct ResolvedBufferTextureLayout {
+    /// Byte offset into the buffer.
+    pub offset: u64,
+    /// Byte pitch between consecutive block rows.
+    pub bytes_per_row: u32,
+    /// Row pitch expressed in texels (Vulkan `bufferRowLength`; a multiple of
+    /// the block width).
+    pub row_length_texels: u32,
+    /// Texel rows per image slice (Vulkan `bufferImageHeight`).
+    pub rows_per_image_texels: u32,
+    /// Block rows per image slice (wgpu `rows_per_image`).
+    pub rows_per_image_blocks: u32,
+    /// Whether the copy spans more than one block row (wgpu then requires an
+    /// explicit `bytes_per_row`).
+    pub multi_row: bool,
 }
 
 /// Buffer to texture copy region.
@@ -351,12 +487,27 @@ impl TransferOperation {
     }
 
     /// Create a texture-to-buffer readback for the entire texture.
+    ///
+    /// The row pitch in `dst` is the tight pitch rounded up to
+    /// [`COPY_BYTES_PER_ROW_ALIGNMENT`] (256) — the alignment multi-row
+    /// copies require on both backends. Size `dst` accordingly
+    /// (`aligned_pitch * rows * slices`) and read rows at that stride.
     pub fn readback_texture_whole(src: Arc<Texture>, dst: Arc<Buffer>) -> Self {
         let extent = src.size();
+        let format = src.format();
+        let (block_w, block_h) = format.block_dimensions();
+        let tight_bpr = extent.width.div_ceil(block_w) * format.block_size();
+        let multi_row = extent.height.div_ceil(block_h) * extent.depth.max(1) > 1;
+        let bytes_per_row =
+            multi_row.then(|| tight_bpr.next_multiple_of(COPY_BYTES_PER_ROW_ALIGNMENT));
         Self::TextureToBuffer {
             src,
             dst,
-            regions: vec![BufferTextureCopyRegion::whole(extent)],
+            regions: vec![BufferTextureCopyRegion::new(
+                BufferTextureLayout::new(0, bytes_per_row, None),
+                TextureCopyLocation::base(),
+                extent,
+            )],
         }
     }
 
@@ -367,23 +518,72 @@ impl TransferOperation {
     /// `BufferToTexture` copy. The staging buffer is owned by the returned
     /// operation, so it stays alive until the frame's GPU work completes (the
     /// frame pipeline retains submitted graphs until their fence). `data` must
-    /// be tightly packed (no row padding) for the texture's extent.
+    /// be tightly packed (no row padding) for the texture's extent, layers
+    /// back to back.
+    ///
+    /// If the tight row pitch isn't [`COPY_BYTES_PER_ROW_ALIGNMENT`]-aligned
+    /// (required for multi-row copies on both backends), the rows are padded
+    /// into the staging buffer here, while the data is still on the CPU — so
+    /// any texture width uploads correctly.
     pub fn upload_texture_data(
         device: &Arc<GraphicsDevice>,
         dst: Arc<Texture>,
         data: &[u8],
     ) -> Result<Self, GraphicsError> {
+        let format = dst.format();
+        let extent = dst.size();
+        let (block_w, block_h) = format.block_dimensions();
+        let block_size = format.block_size();
+        let row_blocks = extent.width.div_ceil(block_w);
+        let col_blocks = extent.height.div_ceil(block_h);
+        let images = extent.depth.max(1);
+        let tight_bpr = row_blocks * block_size;
+        let total_rows = col_blocks as usize * images as usize;
+
+        let expected = tight_bpr as usize * total_rows;
+        if data.len() != expected {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "upload_texture_data: data size {} does not match the texture's tightly-packed \
+                 size {expected}",
+                data.len()
+            )));
+        }
+
+        let multi_row = total_rows > 1;
+        let needs_padding = multi_row && !tight_bpr.is_multiple_of(COPY_BYTES_PER_ROW_ALIGNMENT);
+        let (staging_bytes, bytes_per_row) = if needs_padding {
+            let padded_bpr = tight_bpr.next_multiple_of(COPY_BYTES_PER_ROW_ALIGNMENT);
+            let mut padded = vec![0u8; padded_bpr as usize * total_rows];
+            for row in 0..total_rows {
+                let src = row * tight_bpr as usize;
+                let dst_off = row * padded_bpr as usize;
+                padded[dst_off..dst_off + tight_bpr as usize]
+                    .copy_from_slice(&data[src..src + tight_bpr as usize]);
+            }
+            (std::borrow::Cow::Owned(padded), Some(padded_bpr))
+        } else {
+            (std::borrow::Cow::Borrowed(data), None)
+        };
+
         let staging = device.create_buffer(
             &BufferDescriptor::new(
-                data.len() as u64,
+                staging_bytes.len() as u64,
                 BufferUsage::COPY_SRC | BufferUsage::COPY_DST,
             )
             .with_label("texture_upload_staging"),
         )?;
         // Fresh staging buffer — never touched by the GPU, so the mapped write
         // cannot race.
-        staging.write_mapped(0, data)?;
-        Ok(Self::upload_texture_whole(staging, dst))
+        staging.write_mapped(0, &staging_bytes)?;
+        Ok(Self::BufferToTexture {
+            src: staging,
+            dst,
+            regions: vec![BufferTextureCopyRegion::new(
+                BufferTextureLayout::new(0, bytes_per_row, None),
+                TextureCopyLocation::base(),
+                extent,
+            )],
+        })
     }
 
     /// Upload all of `data` into `dst` at `dst_offset` through the frame graph.
@@ -501,6 +701,75 @@ mod tests {
             .unwrap();
 
         (buffer1, buffer2, texture1, texture2)
+    }
+
+    #[test]
+    fn resolve_tight_uncompressed() {
+        // 256x256 RGBA8: tight pitch 1024 is 256-aligned, no explicit layout needed.
+        let layout = BufferTextureLayout::packed()
+            .resolve(TextureFormat::Rgba8Unorm, Extent3d::new_2d(256, 256))
+            .unwrap();
+        assert_eq!(layout.bytes_per_row, 1024);
+        assert_eq!(layout.row_length_texels, 256);
+        assert_eq!(layout.rows_per_image_texels, 256);
+        assert_eq!(layout.rows_per_image_blocks, 256);
+        assert!(layout.multi_row);
+    }
+
+    #[test]
+    fn resolve_rejects_unaligned_tight_pitch() {
+        // 100x100 RGBA8: tight pitch 400 isn't 256-aligned — must error with
+        // guidance instead of silently striding at 256 (the old behavior
+        // sheared the image and read out of bounds).
+        let err = BufferTextureLayout::packed()
+            .resolve(TextureFormat::Rgba8Unorm, Extent3d::new_2d(100, 100))
+            .unwrap_err();
+        assert!(err.to_string().contains("256"));
+
+        // Single-row copies have no alignment requirement.
+        let layout = BufferTextureLayout::packed()
+            .resolve(TextureFormat::Rgba8Unorm, Extent3d::new_2d(100, 1))
+            .unwrap();
+        assert_eq!(layout.bytes_per_row, 400);
+        assert!(!layout.multi_row);
+    }
+
+    #[test]
+    fn resolve_block_compressed_pitch_is_in_blocks() {
+        // 64x64 BC7: 16 block columns x 16 bytes = 256 bytes per block row —
+        // NOT 64 texels x 16 bytes (the old texel-based math was 4x too big).
+        let layout = BufferTextureLayout::packed()
+            .resolve(TextureFormat::Bc7RgbaUnorm, Extent3d::new_2d(64, 64))
+            .unwrap();
+        assert_eq!(layout.bytes_per_row, 256);
+        // Vulkan bufferRowLength is texels: 16 blocks x 4 texels.
+        assert_eq!(layout.row_length_texels, 64);
+        // wgpu rows_per_image is block rows: 64 texel rows / 4.
+        assert_eq!(layout.rows_per_image_blocks, 16);
+        assert_eq!(layout.rows_per_image_texels, 64);
+    }
+
+    #[test]
+    fn resolve_rejects_combined_depth_stencil() {
+        let err = BufferTextureLayout::packed()
+            .resolve(TextureFormat::Depth24PlusStencil8, Extent3d::new_2d(64, 64))
+            .unwrap_err();
+        assert!(err.to_string().contains("depth-stencil"));
+    }
+
+    #[test]
+    fn resolve_rejects_short_explicit_pitch() {
+        let err = BufferTextureLayout::new(0, Some(512), None)
+            .resolve(TextureFormat::Rgba8Unorm, Extent3d::new_2d(256, 2))
+            .unwrap_err();
+        assert!(err.to_string().contains("tight pitch"));
+    }
+
+    #[test]
+    fn validate_buffer_copy_alignment_enforces_4_bytes() {
+        assert!(validate_buffer_copy_alignment(&[BufferCopyRegion::new(0, 4, 16)]).is_ok());
+        assert!(validate_buffer_copy_alignment(&[BufferCopyRegion::new(0, 2, 16)]).is_err());
+        assert!(validate_buffer_copy_alignment(&[BufferCopyRegion::new(0, 0, 3)]).is_err());
     }
 
     #[test]

@@ -74,8 +74,10 @@ pub use target::{
     ColorAttachment, DepthStencilAttachment, LoadOp, RenderTarget, RenderTargetConfig, StoreOp,
 };
 pub use transfer::{
-    BufferCopyRegion, BufferTextureCopyRegion, BufferTextureLayout, TextureCopyLocation,
+    BufferCopyRegion, BufferTextureCopyRegion, BufferTextureLayout, COPY_BUFFER_ALIGNMENT,
+    COPY_BYTES_PER_ROW_ALIGNMENT, ResolvedBufferTextureLayout, TextureCopyLocation,
     TextureCopyRegion, TextureOrigin, TransferConfig, TransferOperation,
+    validate_buffer_copy_alignment,
 };
 
 /// The render graph describes a frame's rendering operations.

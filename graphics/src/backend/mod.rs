@@ -977,7 +977,20 @@ impl GpuBackend {
         }
     }
 
-    /// Write data to a texture.
+    /// Write tightly-packed data covering mip 0 of every layer of a texture.
+    ///
+    /// **Blocking convenience path** for tools and one-time setup: the
+    /// Vulkan backend performs a synchronous staging upload (a full GPU
+    /// round-trip per call). Load-time and streaming uploads belong in the
+    /// frame graph via
+    /// [`TransferOperation::upload_texture_data`](crate::TransferOperation::upload_texture_data)
+    /// — batched staging-belt infrastructure is tracked in issue #41.
+    ///
+    /// Contract (identical on both backends): `data` is tightly packed for
+    /// the whole image (all layers back to back, compressed formats in block
+    /// rows) and its size is validated; textures with `mip_level_count > 1`
+    /// and combined depth-stencil formats are rejected — upload those with
+    /// explicit regions through the transfer ops.
     pub fn write_texture(
         &self,
         texture: &GpuTexture,
