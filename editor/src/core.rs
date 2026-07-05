@@ -11,22 +11,19 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use redlilium_assets::{AssetDb, AssetPath, AssetProcessor, Guid};
+use redlilium_assets::{AssetDb, AssetPath, Guid};
 use redlilium_core::abstract_editor::{ActionQueue, DEFAULT_MAX_UNDO, EditActionHistory};
 use redlilium_core::math::Vec3;
 use redlilium_debug_drawer::DebugDrawer;
 use redlilium_ecs::{
-    AssetGpuFlush, AssetPump, Camera, ChangedAssets, DebugRender, DrawGrid, DrawSelectionAabb,
-    EguiRender, Entity, FlushUploads, ForwardRender, FrameRing, FreeFlyCamera, GlobalTransform,
-    GridConfig, HotReload, MaterialAssetManager, MaterialInstanceLoad, MaterialInstanceLoader,
-    MaterialInstanceManager, MaterialInstanceSource, MaterialLoader, MeshGenerator, MeshLoad,
-    MeshLoader, MeshManager, MeshRenderer, MeshSource, Name, PipelineCache, PostUpdate, Primitive,
-    Render, RenderSchedule, ScenePass, Schedules, ShaderLoader, ShaderManager, ShadingRegistry,
-    TextureLoader, TextureManager, Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera,
-    UpdateGlobalTransforms, VertexLayoutLoader, VertexLayoutManager, Visibility, WindowInput,
-    World, register_std_components,
+    AssetGpuFlush, AssetPump, Camera, DebugRender, DrawGrid, DrawSelectionAabb, EguiRender, Entity,
+    FlushUploads, ForwardRender, FrameRing, FreeFlyCamera, GlobalTransform, GridConfig, HotReload,
+    MaterialInstanceLoad, MaterialInstanceSource, MeshGenerator, MeshLoad, MeshRenderer,
+    MeshSource, Name, PostUpdate, Primitive, Render, RenderSchedule, ScenePass, Schedules,
+    Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms,
+    Visibility, WindowInput, World, register_std_components,
 };
-use redlilium_vfs::Vfs;
+use redlilium_runtime::EngineContext;
 
 use crate::scene_view::SceneViewState;
 
@@ -79,77 +76,29 @@ impl EditorWorld {
 
 /// What to build into a new editor world — the windowed shell wants the egui
 /// overlay system, the headless shell wants the remote channel unconditionally.
-pub struct EditorWorldParams<'a> {
-    pub vfs: &'a Vfs,
-    /// Local asset-pack mounts `(name, dir)`, each with its own `assets.db`.
-    pub local_mounts: &'a [(&'static str, &'static str)],
+pub struct EditorWorldParams {
     /// Insert the `RemoteTransport` resource and `RemoteServe` system.
     pub remote: bool,
     /// Register the `EguiRender` overlay system (windowed shell only).
     pub egui: bool,
 }
 
-/// Create a new editor world with a simple demo scene.
-pub fn create_editor_world(
-    params: &EditorWorldParams<'_>,
-    scene_view: &mut SceneViewState,
-    aspect: f32,
-) -> EditorWorld {
-    let mut world = World::new();
-    register_std_components(&mut world);
-    redlilium_ecs::register_rendering_components(&mut world);
-
-    // Insert rendering manager resources
-    world.insert_resource(TextureManager::new(scene_view.device().clone()));
-    world.insert_resource(MeshManager::new());
-    world.insert_resource(VertexLayoutManager::new());
-    world.insert_resource(ShaderManager::new());
-    // Asset-based material system: the shading registry (engine code), the
-    // template + instance resolvers, and the draw-time pipeline cache.
-    world.insert_resource(ShadingRegistry::with_builtins());
-    world.insert_resource(MaterialAssetManager::new());
-    world.insert_resource(MaterialInstanceManager::new(scene_view.device().clone()));
-    world.insert_resource(PipelineCache::new(scene_view.device().clone()));
-    // Hot-reload inbox: inspector edits + fs-watcher changes land here; the
-    // HotReload system drains it and invalidates the owning managers.
-    world.insert_resource(ChangedAssets::new());
-    // Mounts with un-persisted asset-DB edits (written by the undoable
-    // asset-edit actions); drained + persisted once per frame.
-    world.insert_resource(redlilium_ecs::DirtyMounts::new());
-    // Remote-control channel (docs/REMOTE.md): served by RemoteServe on
-    // the IO runtime; the editor pumps commands each frame. Opt-in.
-    if params.remote {
-        world.insert_resource(redlilium_ecs::RemoteTransport::new(
-            ".redlilium/editor.port",
-        ));
+/// Load each local mount's asset DB into the shared in-memory DB, then scan
+/// the mount: files added/changed/removed while the editor was closed get
+/// registered (routed by the loaders' extensions), rehashed, or dropped. A
+/// non-empty delta is persisted right back.
+///
+/// Call once per editor session, before the first world is created — the
+/// database lives in the persistent [`EngineContext`], not in a world.
+pub fn scan_local_mounts(engine: &EngineContext, local_mounts: &[(&'static str, &'static str)]) {
+    // Load every mount's DB first: load_mount_db locks the shared asset DB
+    // internally, so it must not run under the write guard taken below.
+    for &(mount, dir) in local_mounts {
+        engine.load_mount_db(mount, dir);
     }
-
-    // Asset system: one processor (with the rendering loaders) + one DB. The
-    // AssetPump / MeshLoad / AssetGpuFlush systems drive these each frame.
-    let processor = AssetProcessor::builder(params.vfs.clone(), scene_view.device().clone())
-        .with_loader::<MeshLoader>()
-        .with_loader::<VertexLayoutLoader>()
-        .with_loader::<ShaderLoader>()
-        .with_loader::<MaterialLoader>()
-        .with_loader::<MaterialInstanceLoader>()
-        .with_loader::<TextureLoader>()
-        .build();
-
-    // Load each local mount's asset DB into the one merged in-memory DB,
-    // then scan the mount: files added/changed/removed while the editor was
-    // closed get registered (routed by the loaders' extensions), rehashed,
-    // or dropped. A non-empty delta is persisted right back.
-    let mut asset_db = AssetDb::new();
-    for (mount, dir) in params.local_mounts {
-        match std::fs::read_to_string(format!("{dir}/assets.db")) {
-            Ok(text) => {
-                if let Err(e) = asset_db.merge_ron(mount, &text) {
-                    log::error!("failed to parse {mount} assets.db: {e}");
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => log::warn!("{mount} assets.db not readable: {e}"),
-        }
+    let processor = engine.processor().read();
+    let mut asset_db = engine.asset_db().write();
+    for &(mount, dir) in local_mounts {
         match pollster::block_on(processor.scan(&mut asset_db, mount, None)) {
             Ok(report) => {
                 let changed = report.added.len() + report.modified.len() + report.removed.len();
@@ -168,16 +117,52 @@ pub fn create_editor_world(
             Err(e) => log::error!("scan of mount '{mount}' failed: {e}"),
         }
     }
-    world.insert_resource(processor);
+}
+
+/// Create a new editor world with a simple demo scene.
+///
+/// Persistent state (GPU managers, asset DB/processor) comes from the
+/// [`EngineContext`] as shared resources; everything created here is
+/// per-world and dies with it (ADR-020).
+pub fn create_editor_world(
+    params: &EditorWorldParams,
+    engine: &EngineContext,
+    scene_view: &mut SceneViewState,
+    aspect: f32,
+) -> EditorWorld {
+    let mut world = World::new();
+    register_std_components(&mut world);
+    redlilium_ecs::register_rendering_components(&mut world);
+
+    // Shared engine state: GPU resource managers, shading registry, pipeline
+    // cache, ChangedAssets inbox, asset processor + database.
+    engine.inject_into(&mut world);
+
+    // Mounts with un-persisted asset-DB edits (written by the undoable
+    // asset-edit actions); drained + persisted once per frame.
+    world.insert_resource(redlilium_ecs::DirtyMounts::new());
+    // Remote-control channel (docs/REMOTE.md): served by RemoteServe on
+    // the IO runtime; the editor pumps commands each frame. Opt-in.
+    if params.remote {
+        world.insert_resource(redlilium_ecs::RemoteTransport::new(
+            ".redlilium/editor.port",
+        ));
+    }
+
     // Resolve the demo meshes by path (fall back to generated if absent).
-    let cube_source = asset_db
-        .guid_of(&AssetPath::new("std", "meshes/cube.rmesh"))
-        .map(MeshSource::File)
-        .unwrap_or_else(|| MeshSource::Generated(MeshGenerator::cube(0.5)));
-    let sphere_source = asset_db
-        .guid_of(&AssetPath::new("std", "meshes/sphere.rmesh"))
-        .map(MeshSource::File)
-        .unwrap_or_else(|| MeshSource::Generated(MeshGenerator::sphere(0.5, 32, 16)));
+    let (cube_source, sphere_source) = {
+        let asset_db = engine.asset_db().read();
+        (
+            asset_db
+                .guid_of(&AssetPath::new("std", "meshes/cube.rmesh"))
+                .map(MeshSource::File)
+                .unwrap_or_else(|| MeshSource::Generated(MeshGenerator::cube(0.5))),
+            asset_db
+                .guid_of(&AssetPath::new("std", "meshes/sphere.rmesh"))
+                .map(MeshSource::File)
+                .unwrap_or_else(|| MeshSource::Generated(MeshGenerator::sphere(0.5, 32, 16))),
+        )
+    };
     // The std `default` material instance every demo primitive binds. Bound by
     // its stable guid (not a path lookup) so it survives a rename/move of the
     // asset and merely fails to resolve — rather than crashing the editor — if
@@ -185,7 +170,6 @@ pub fn create_editor_world(
     let material_source = MaterialInstanceSource {
         guid: Guid::stable("materials/default.matinst"),
     };
-    world.insert_resource(asset_db);
 
     // Holds the per-frame render graph while the `Render` schedule runs.
     world.insert_resource(RenderSchedule::empty());

@@ -75,13 +75,15 @@ pub fn run() {
     );
 
     let runner = EcsRunner::single_thread();
+    // Persistent engine state + the startup mount scan (ADR-020).
+    let engine = redlilium_runtime::EngineContext::with_vfs(device.clone(), vfs.clone());
+    crate::core::scan_local_mounts(&engine, &local_mounts);
     let mut ew = create_editor_world(
         &EditorWorldParams {
-            vfs: &vfs,
-            local_mounts: &local_mounts,
             remote: true,
             egui: false,
         },
+        &engine,
         &mut scene_view,
         width as f32 / height as f32,
     );

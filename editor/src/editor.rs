@@ -53,6 +53,9 @@ pub struct Editor {
     // design — one scene is resident at a time.
     world: Option<EditorWorld>,
     runner: EcsRunner,
+    /// Persistent engine state (GPU managers, asset DB/processor) — outlives
+    /// any world (ADR-020). Created with the graphics device in `on_init`.
+    engine: Option<redlilium_runtime::EngineContext>,
 
     // VFS and asset browser
     vfs: Vfs,
@@ -149,6 +152,7 @@ impl Editor {
         Self {
             world: None,
             runner: EcsRunner::single_thread(),
+            engine: None,
             vfs,
             asset_browser,
             local_mounts: local_mounts.to_vec(),
@@ -330,18 +334,24 @@ impl AppHandler for Editor {
         let mut scene_view = SceneViewState::new(ctx.device().clone(), ctx.surface_format());
         scene_view.resize_if_needed(ctx.width(), ctx.height());
 
+        // Persistent engine state (shared managers + asset DB), then the
+        // startup mount scan — both outlive the editor world.
+        let engine =
+            redlilium_runtime::EngineContext::with_vfs(ctx.device().clone(), self.vfs.clone());
+        crate::core::scan_local_mounts(&engine, &self.local_mounts);
+
         // Create the editor world with a demo scene
         let aspect = ctx.aspect_ratio();
         let editor_world = create_editor_world(
             &EditorWorldParams {
-                vfs: &self.vfs,
-                local_mounts: &self.local_mounts,
                 remote: self.remote.is_some(),
                 egui: true,
             },
+            &engine,
             &mut scene_view,
             aspect,
         );
+        self.engine = Some(engine);
         self.world = Some(editor_world);
 
         self.scene_view = Some(scene_view);

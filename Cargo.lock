@@ -4420,6 +4420,7 @@ dependencies = [
  "redlilium-debug-drawer",
  "redlilium-ecs",
  "redlilium-graphics",
+ "redlilium-runtime",
  "redlilium-vfs",
  "ron",
  "serde",

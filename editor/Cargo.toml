@@ -12,6 +12,7 @@ redlilium-ecs = { path = "../ecs", features = ["rendering", "serialize-ron"] }
 redlilium-assets = { path = "../assets" }
 redlilium-graphics = { path = "../graphics" }
 redlilium-app = { path = "../app" }
+redlilium-runtime = { path = "../runtime" }
 redlilium-debug-drawer = { path = "../debug_drawer" }
 redlilium-vfs = { path = "../vfs", features = ["sftp"] }
 

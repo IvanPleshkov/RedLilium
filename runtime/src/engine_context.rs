@@ -45,22 +45,22 @@ impl EngineContext {
     /// database — a shipped game consumes the committed `assets.db` as-is.
     pub fn new(device: Arc<GraphicsDevice>, mounts: &[(&'static str, &'static str)]) -> Self {
         let mut vfs = Vfs::new();
-        let mut asset_db = AssetDb::new();
         for &(name, dir) in mounts {
             vfs.mount(name, FileSystemProvider::new(dir));
-            match std::fs::read_to_string(format!("{dir}/assets.db")) {
-                Ok(text) => {
-                    if let Err(e) = asset_db.merge_ron(name, &text) {
-                        log::error!("failed to parse {name} assets.db: {e}");
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    log::warn!("mount '{name}' has no assets.db ({dir})");
-                }
-                Err(e) => log::warn!("{name} assets.db not readable: {e}"),
-            }
         }
+        let ctx = Self::with_vfs(device, vfs);
+        for &(name, dir) in mounts {
+            ctx.load_mount_db(name, dir);
+        }
+        ctx
+    }
 
+    /// Like [`new`](Self::new), but over a caller-built [`Vfs`] and with an
+    /// empty asset database — the editor uses this to keep ownership of its
+    /// VFS (file watcher, browser) and to drive scanning itself. Populate the
+    /// database via [`load_mount_db`](Self::load_mount_db) or directly through
+    /// [`asset_db`](Self::asset_db).
+    pub fn with_vfs(device: Arc<GraphicsDevice>, vfs: Vfs) -> Self {
         let processor = AssetProcessor::builder(vfs, device.clone())
             .with_loader::<MeshLoader>()
             .with_loader::<VertexLayoutLoader>()
@@ -81,14 +81,40 @@ impl EngineContext {
             pipelines: Arc::new(RwLock::new(PipelineCache::new(device.clone()))),
             changed_assets: Arc::new(RwLock::new(ChangedAssets::new())),
             processor: Arc::new(RwLock::new(processor)),
-            asset_db: Arc::new(RwLock::new(asset_db)),
+            asset_db: Arc::new(RwLock::new(AssetDb::new())),
             device,
+        }
+    }
+
+    /// Merge the mount's `<dir>/assets.db` (if present) into the shared
+    /// asset database.
+    pub fn load_mount_db(&self, mount: &str, dir: &str) {
+        match std::fs::read_to_string(format!("{dir}/assets.db")) {
+            Ok(text) => {
+                if let Err(e) = self.asset_db.write().merge_ron(mount, &text) {
+                    log::error!("failed to parse {mount} assets.db: {e}");
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                log::warn!("mount '{mount}' has no assets.db ({dir})");
+            }
+            Err(e) => log::warn!("{mount} assets.db not readable: {e}"),
         }
     }
 
     /// The GPU device.
     pub fn device(&self) -> &Arc<GraphicsDevice> {
         &self.device
+    }
+
+    /// The shared asset processor (loaders + async stages).
+    pub fn processor(&self) -> &Arc<RwLock<AssetProcessor>> {
+        &self.processor
+    }
+
+    /// The shared asset database.
+    pub fn asset_db(&self) -> &Arc<RwLock<AssetDb>> {
+        &self.asset_db
     }
 
     /// Insert every persistent manager into the world as a shared resource.
