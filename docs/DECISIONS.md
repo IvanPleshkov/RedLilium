@@ -960,3 +960,126 @@ Contract for shader authors:
 - ✅ Fixes UV input for sequentially-annotated shaders on Vulkan
 - ⚠️ Shaders consuming a non-prefix attribute subset are not expressible;
   use a dedicated `VertexLayout` for such passes
+
+---
+
+## ADR-020: Game Code Authoring — Rust Plugins over a Shared Engine Dylib
+
+**Date**: 2026-07-05
+**Status**: Accepted
+
+### Context
+
+Today a "game" is a hand-written `AppHandler` binary that owns its `World`,
+`SystemsContainer` and render graph; the editor hosts only engine systems and
+cannot run user gameplay code. Issue #4 asks: how does a user (or an AI agent
+driving the editor remotely) write game logic **without recompiling the
+editor**? Candidates: a C API, scripting/WASM, or hot-reloadable Rust dylibs.
+
+Additional inputs:
+
+- Rust has no stable ABI, so any native dylib boundary requires either a
+  C-shaped stable layer or a same-toolchain contract.
+- A domain scripting language already exists: **tyroxine**
+  (`github/procedural`) — a pure, deterministic DSL for procedural mesh
+  generation, designed to be embedded in this engine for procedural assets.
+  It is explicitly not a general-purpose gameplay language, and its embedding
+  `Context` is expensive to build (~1s analyze) and not `Send`.
+- True live hot reload (swapping code under a running world) is notoriously
+  fragile: stale function pointers in hooks/systems/resources, `TypeId`
+  churn, closures capturing old code.
+
+### Decision
+
+Game logic is written in **Rust as plugins**, hosted either by the editor
+(dev) or by a thin runtime binary (shipping):
+
+1. **Plugin contract.** Game code implements
+   `trait Plugin { fn build(&self, app: &mut App); }` where `App` is a
+   builder wrapping `World` + `Schedules` (+ runner/window config). Plugins
+   register components/resources/events and add systems to named schedules —
+   including `Render`. The host owns the frame loop and the Render bracket;
+   game code never owns `main()`'s event loop internals.
+
+2. **New thin crate `redlilium-runtime`** glues app+ecs+graphics+assets:
+   `App` builder, `redlilium_runtime::run(MyGamePlugin)` for shipped
+   binaries (native and wasm). The `app` crate stays a pure window/GPU layer
+   with no ecs dependency.
+
+3. **Hosting model.** The editor is an engine **binary** that loads the game
+   as a **cdylib** exporting exactly two symbols: an entry
+   `redlilium_game_module() -> Box<dyn Plugin>` and an ABI fingerprint
+   (rustc version + engine build id). Fingerprint mismatch → refuse to load
+   with a clear error. The shipped game is a separate fully static binary
+   reusing the same `Plugin`.
+
+4. **Dev linking: one shared engine dylib.** In dev profiles the engine is
+   built as a single dynamic library (`redlilium-dylib` re-export crate,
+   `crate-type = ["dylib"]`, à la Bevy `dynamic_linking`), linked by **both**
+   the editor binary and the game cdylib. One copy of engine code, statics
+   and `TypeId`s per process makes passing `&mut World` across the boundary
+   sound under the same-toolchain contract. Release builds are fully static.
+
+5. **Reload = warm restart, not live hot reload.** The editor process keeps a
+   persistent host-owned `EngineContext` — window, `GraphicsInstance` /
+   `Device` / `Surface`, egui, asset DB + processor + VFS mounts + watcher,
+   GPU caches (`TextureManager`, `MeshManager`, `PipelineCache`,
+   `ShadingRegistry`), tyroxine `Context` — injected into each new world via
+   `insert_resource_shared`. On reload: serialize scene (name-based) → drop
+   worlds/schedules → unload dylib → load new dylib → fingerprint check →
+   register std + plugin → deserialize scene. Undo history and selection are
+   deliberately reset. This is the **same snapshot machinery as Play mode
+   (#1) and scene save/load (#2)** — one mechanism, three features. A remote
+   channel `reload` command makes this drivable by an AI agent.
+
+6. **Scripting stays domain-specific.** tyroxine is the embedded DSL for
+   procedural assets / contextual generation, living host-side in the
+   persistent `EngineContext` (surviving game reloads). Gameplay logic is
+   Rust; no general-purpose scripting layer.
+
+### Alternatives Considered
+
+**1. C API boundary**
+
+- ✅ Editor and game could use different compiler versions
+- ❌ The boundary would have to cover the *entire* World/graphics/assets API
+  as a stable, type-erased surface — enormous cost, and it discards the
+  typed ECS API (GAT queries, derives, typed events) just built
+- Rejected in favor of a same-rustc fingerprint check.
+
+**2. Scripting/WASM for gameplay**
+
+- ✅ Sandbox, stable boundary, compiler-independence
+- ❌ Per-call boundary overhead on queries, a component-access ABI to design,
+  wasm-inside-wasm on the web target; no external users to justify it
+- Deferred indefinitely; tyroxine covers the scripting niche that matters.
+
+**3. Editor as a library in the game project (game owns both binaries)**
+
+- ✅ No ABI boundary at all
+- ❌ Every game change relinks the editor binary and restarts the process,
+  losing warm GPU/asset state — incompatible with a long-lived editor driven
+  over the remote channel
+- Rejected.
+
+**4. True live hot reload (state migration under a running world)**
+
+- ❌ Stale function pointers in hooks/systems/resources, `TypeId` churn,
+  closures capturing unloaded code
+- Rejected: warm restart gives most of the value with none of the UB surface.
+
+### Consequences
+
+- ✅ Game code uses the full typed engine API directly — the narrow boundary
+  is one entry symbol, not a wrapper layer
+- ✅ Sub-second reload of a running editor: GPU resources and asset DB stay
+  resident, only worlds are rebuilt
+- ✅ One snapshot mechanism serves Play mode, scene save/load and reload
+- ✅ The same `Plugin` runs statically in shipped binaries, including wasm
+- ✅ Demos and editor converge on one bootstrap model (`Plugin` + `Schedules`)
+- ⚠️ Dylib mode requires same rustc + same engine build (fingerprint-enforced)
+- ⚠️ Dev builds move to a dylib profile; release stays static (two link modes
+  to keep healthy in CI)
+- ⚠️ GPU caches / asset managers must migrate from world resources to the
+  host-owned `EngineContext` (`Arc` + `insert_resource_shared`)
+- ⚠️ Undo history and selection reset on reload (accepted as expected behavior)
