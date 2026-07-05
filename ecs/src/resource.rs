@@ -360,9 +360,9 @@ impl<T: 'static> Deref for ResourceRef<'_, T> {
 /// Contains a runtime borrow flag used by [`QueryItem`](crate::QueryItem)
 /// iteration to detect aliasing `&mut T` references (similar to `RefCell`).
 /// The flag lives behind an `Arc` so a [`ResMutRef`](crate::query::ResMutRef)
-/// holding it stays valid even if this struct is moved (e.g. via
-/// `QueryIter::into_guard`) or dropped first. The raw `ptr` keeps this type
-/// `!Sync`, which intentionally excludes `ResMut` from `par_for_each`.
+/// holding it stays valid even if this struct is moved or dropped first.
+/// The raw `ptr` keeps this type `!Sync`, which intentionally excludes
+/// `ResMut` from `par_for_each`.
 pub struct ResourceRefMut<'a, T: 'static> {
     ptr: *mut T,
     _guard: Option<RwLockWriteGuard<'a, dyn Resource>>,

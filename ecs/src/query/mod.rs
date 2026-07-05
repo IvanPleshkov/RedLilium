@@ -13,5 +13,5 @@ pub use filter::{
     AddedFilter, AnyFilter, ChangedFilter, ContainsChecker, Filter, OrFilter, RemovedFilter, With,
     Without,
 };
-pub use guard::{QueryGuard, QueryItem, QueryIter, ResMutRef};
+pub use guard::{QueryGuard, QueryItem, QueryIter, ReadOnlyQueryItem, ResMutRef};
 pub use lock_request::LockRequest;

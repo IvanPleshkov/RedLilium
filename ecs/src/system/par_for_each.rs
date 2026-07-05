@@ -64,11 +64,18 @@ const PARALLEL_THRESHOLD: usize = 128;
 ///   entity indices (guaranteed by sparse set layout: different entity
 ///   indices map to different dense slots).
 /// - `I: Sync` ensures `&items` can be shared across threads.
+/// - The item lifetime `'x` is chosen by the caller and must not outlive
+///   the locks backing `items` (callers tie it to a borrow of the
+///   owning guard, or protect it with an HRTB closure bound).
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn par_for_each_entities<I, F>(items: &I, entities: &[u32], config: &ParConfig, f: &F)
-where
+pub(crate) fn par_for_each_entities<'x, I, F>(
+    items: &I,
+    entities: &[u32],
+    config: &ParConfig,
+    f: &F,
+) where
     I: QueryItem + Sync,
-    F: Fn(u32, I::Item) + Sync,
+    F: Fn(u32, I::Item<'x>) + Sync,
 {
     let count = entities.len();
 
@@ -106,10 +113,14 @@ where
 
 /// WASM fallback: sequential iteration (no threads available).
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn par_for_each_entities<I, F>(items: &I, entities: &[u32], _config: &ParConfig, f: &F)
-where
+pub(crate) fn par_for_each_entities<'x, I, F>(
+    items: &I,
+    entities: &[u32],
+    _config: &ParConfig,
+    f: &F,
+) where
     I: QueryItem + Sync,
-    F: Fn(u32, I::Item) + Sync,
+    F: Fn(u32, I::Item<'x>) + Sync,
 {
     for &entity in entities {
         if let Some(item) = unsafe { items.query_get(entity) } {

@@ -164,7 +164,10 @@ macro_rules! impl_for_each_access {
         where
             $(for<'w> $T::Item<'w>: QueryItem,)+
         {
-            type EachItem<'w> = ($(<$T::Item<'w> as QueryItem>::Item,)+);
+            // Storage and item lifetimes are both 'w here: the items are
+            // consumed inside HRTB-bound closures (`for<'a> Fn(EachItem<'a>)`),
+            // which cannot smuggle them past the storage locks.
+            type EachItem<'w> = ($(<$T::Item<'w> as QueryItem>::Item<'w>,)+);
 
             fn run_for_each<'w>(items: &Self::Item<'w>, mut f: impl FnMut(Self::EachItem<'w>)) {
                 // Try bitset-accelerated path first.

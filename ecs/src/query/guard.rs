@@ -100,6 +100,56 @@ impl<'a, A: AccessSet> QueryGuard<'a, A>
 where
     A::Item<'a>: QueryItem,
 {
+    /// Iterates over matching entities (inner join across all queried
+    /// storages), read-only variant.
+    ///
+    /// Only available when every element of the access set is read-only
+    /// ([`ReadOnlyQueryItem`]); multiple concurrent `iter()` calls on the
+    /// same guard are then harmless. Yielded items borrow the guard, so
+    /// they cannot outlive it.
+    pub fn iter(&self) -> QueryIter<'_, 'a, A>
+    where
+        A::Item<'a>: ReadOnlyQueryItem,
+    {
+        QueryIter::new(&self.items)
+    }
+
+    /// Iterates over matching entities (inner join across all queried
+    /// storages), yielding mutable items for `Write`/`ResMut` elements.
+    ///
+    /// Takes `&mut self` so only one iterator (and its items) can exist at
+    /// a time — yielded items borrow the guard and cannot outlive it:
+    ///
+    /// ```ignore
+    /// let mut q = ctx.query::<(Write<Position>, Read<Velocity>)>();
+    /// for (entity_idx, (pos, vel)) in q.iter_mut() {
+    ///     pos.x += vel.x;
+    /// }
+    /// ```
+    ///
+    /// Dropping the guard while collected items are alive is rejected at
+    /// compile time (the items borrow the guard, which keeps its locks
+    /// held):
+    ///
+    /// ```compile_fail
+    /// use redlilium_ecs::{World, Write};
+    ///
+    /// struct Position { x: f32 }
+    ///
+    /// let mut world = World::new();
+    /// world.register_component::<Position>();
+    /// let e = world.spawn();
+    /// world.insert(e, Position { x: 1.0 }).unwrap();
+    ///
+    /// let mut q = world.query::<(Write<Position>,)>();
+    /// let items: Vec<_> = q.iter_mut().collect();
+    /// drop(q); // ERROR: `q` is still borrowed by `items`
+    /// let _ = &items;
+    /// ```
+    pub fn iter_mut(&mut self) -> QueryIter<'_, 'a, A> {
+        QueryIter::new(&self.items)
+    }
+
     /// Iterates over matching entities in parallel, calling `f` for each.
     ///
     /// Splits the entity list into batches and processes them on separate
@@ -111,28 +161,35 @@ where
     /// (not `FnMut`). Use atomics, `Mutex`, or thread-local accumulators
     /// for shared mutable state.
     ///
+    /// Takes `&mut self` for the same reason as [`iter_mut`]
+    /// (Self::iter_mut): items handed to `f` are tied to this borrow and
+    /// cannot alias a later iteration.
+    ///
     /// # Example
     ///
     /// ```ignore
-    /// let q = ctx.query::<(Write<Position>, Read<Velocity>)>();
+    /// let mut q = ctx.query::<(Write<Position>, Read<Velocity>)>();
     /// q.par_for_each(|entity_idx, (pos, vel)| {
     ///     pos.x += vel.x;
     /// });
     /// ```
-    pub fn par_for_each<F>(&self, f: F)
+    pub fn par_for_each<'g, F>(&'g mut self, f: F)
     where
         A::Item<'a>: Sync,
-        F: Fn(u32, <A::Item<'a> as QueryItem>::Item) + Sync,
+        F: Fn(u32, <A::Item<'a> as QueryItem>::Item<'g>) + Sync,
     {
         self.par_for_each_with(crate::system::par_for_each::ParConfig::default(), f);
     }
 
     /// Like [`par_for_each`](Self::par_for_each), but with explicit
     /// parallelism configuration.
-    pub fn par_for_each_with<F>(&self, config: crate::system::par_for_each::ParConfig, f: F)
-    where
+    pub fn par_for_each_with<'g, F>(
+        &'g mut self,
+        config: crate::system::par_for_each::ParConfig,
+        f: F,
+    ) where
         A::Item<'a>: Sync,
-        F: Fn(u32, <A::Item<'a> as QueryItem>::Item) + Sync,
+        F: Fn(u32, <A::Item<'a> as QueryItem>::Item<'g>) + Sync,
     {
         if let Some(intersected) = self.items.query_intersected_entities() {
             crate::system::par_for_each::par_for_each_entities(
@@ -152,15 +209,27 @@ where
     }
 }
 
-impl<'a, A: AccessSet> IntoIterator for QueryGuard<'a, A>
+impl<'g, 'a, A: AccessSet> IntoIterator for &'g QueryGuard<'a, A>
+where
+    A::Item<'a>: ReadOnlyQueryItem,
+{
+    type Item = (u32, <A::Item<'a> as QueryItem>::Item<'g>);
+    type IntoIter = QueryIter<'g, 'a, A>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'g, 'a, A: AccessSet> IntoIterator for &'g mut QueryGuard<'a, A>
 where
     A::Item<'a>: QueryItem,
 {
-    type Item = (u32, <A::Item<'a> as QueryItem>::Item);
-    type IntoIter = QueryIter<'a, A>;
+    type Item = (u32, <A::Item<'a> as QueryItem>::Item<'g>);
+    type IntoIter = QueryIter<'g, 'a, A>;
 
     fn into_iter(self) -> Self::IntoIter {
-        QueryIter::from(self)
+        self.iter_mut()
     }
 }
 
@@ -174,8 +243,10 @@ where
 /// This trait enables [`QueryIter`] to perform inner joins across
 /// multiple component storages.
 pub trait QueryItem {
-    /// The per-entity reference type (e.g., `&T` or `&mut T`).
-    type Item;
+    /// The per-entity reference type at lifetime `'q` (e.g., `&'q T` or
+    /// [`Mut<'q, T>`]). The lifetime is chosen by the `query_get` caller;
+    /// safe wrappers tie it to a borrow of the owning [`QueryGuard`].
+    type Item<'q>;
 
     /// Number of entities in this storage.
     fn query_count(&self) -> usize;
@@ -187,9 +258,13 @@ pub trait QueryItem {
     ///
     /// # Safety
     ///
-    /// For mutable items, the caller must ensure each `entity_index` is
-    /// accessed at most once (no aliasing mutable references).
-    unsafe fn query_get(&self, entity_index: u32) -> Option<Self::Item>;
+    /// The caller chooses `'q` and must guarantee:
+    /// - the lock/borrow backing `self` stays held for all of `'q` (safe
+    ///   wrappers achieve this by tying `'q` to a borrow of the
+    ///   [`QueryGuard`] that owns the locks);
+    /// - for mutable items, each `entity_index` is fetched at most once
+    ///   while previous items are alive (no aliasing mutable references).
+    unsafe fn query_get<'q>(&self, entity_index: u32) -> Option<Self::Item<'q>>;
 
     /// Returns the component membership bitset, if available.
     ///
@@ -228,7 +303,7 @@ pub trait QueryItem {
 }
 
 impl<'w, T: 'static> QueryItem for Ref<'w, T> {
-    type Item = &'w T;
+    type Item<'q> = &'q T;
 
     fn query_count(&self) -> usize {
         self.len()
@@ -238,11 +313,15 @@ impl<'w, T: 'static> QueryItem for Ref<'w, T> {
         self.entities()
     }
 
-    unsafe fn query_get(&self, entity_index: u32) -> Option<&'w T> {
+    unsafe fn query_get<'q>(&self, entity_index: u32) -> Option<&'q T> {
         if self.is_entity_excluded(entity_index) {
             return None;
         }
-        self.storage().get(entity_index)
+        // SAFETY: the caller guarantees the read lock stays held for 'q,
+        // so extending the storage borrow to 'q cannot dangle.
+        self.storage()
+            .get(entity_index)
+            .map(|v| unsafe { &*(v as *const T) })
     }
 
     fn query_membership(&self) -> Option<&FixedBitSet> {
@@ -259,7 +338,7 @@ impl<'w, T: 'static> QueryItem for Ref<'w, T> {
 }
 
 impl<'w, T: 'static> QueryItem for RefMut<'w, T> {
-    type Item = Mut<'w, T>;
+    type Item<'q> = Mut<'q, T>;
 
     fn query_count(&self) -> usize {
         self.len()
@@ -269,12 +348,12 @@ impl<'w, T: 'static> QueryItem for RefMut<'w, T> {
         self.entities()
     }
 
-    unsafe fn query_get(&self, entity_index: u32) -> Option<Mut<'w, T>> {
+    unsafe fn query_get<'q>(&self, entity_index: u32) -> Option<Mut<'q, T>> {
         if self.is_entity_excluded(entity_index) {
             return None;
         }
-        // SAFETY: write lock is held (via QueryGuard._guards), and the caller
-        // (QueryIter) visits each entity_index at most once, so no aliasing
+        // SAFETY: the caller guarantees the write lock stays held for 'q and
+        // that each entity_index is fetched at most once, so no aliasing
         // mutable references are created.
         unsafe {
             SparseSetInner::get_ptr_mut_with_tick(self.storage_ptr(), entity_index)
@@ -297,7 +376,7 @@ impl<'w, T: 'static> QueryItem for RefMut<'w, T> {
 }
 
 impl<'w, T: 'static> QueryItem for ResourceRef<'w, T> {
-    type Item = &'w T;
+    type Item<'q> = &'q T;
 
     fn query_count(&self) -> usize {
         // Resources are singletons — never the smallest set, so they
@@ -310,9 +389,10 @@ impl<'w, T: 'static> QueryItem for ResourceRef<'w, T> {
         &[]
     }
 
-    unsafe fn query_get(&self, _entity_index: u32) -> Option<&'w T> {
-        // SAFETY: the RwLockReadGuard inside ResourceRef keeps the data
-        // valid for 'w. Multiple shared references are safe (read-only).
+    unsafe fn query_get<'q>(&self, _entity_index: u32) -> Option<&'q T> {
+        // SAFETY: the caller guarantees the RwLockReadGuard inside
+        // ResourceRef stays held for 'q. Multiple shared references are
+        // safe (read-only).
         unsafe {
             let ptr: *const T = &**self;
             Some(&*ptr)
@@ -321,7 +401,7 @@ impl<'w, T: 'static> QueryItem for ResourceRef<'w, T> {
 }
 
 impl<'w, T: 'static> QueryItem for ResourceRefMut<'w, T> {
-    type Item = ResMutRef<'w, T>;
+    type Item<'q> = ResMutRef<'q, T>;
 
     fn query_count(&self) -> usize {
         usize::MAX
@@ -331,7 +411,7 @@ impl<'w, T: 'static> QueryItem for ResourceRefMut<'w, T> {
         &[]
     }
 
-    unsafe fn query_get(&self, _entity_index: u32) -> Option<ResMutRef<'w, T>> {
+    unsafe fn query_get<'q>(&self, _entity_index: u32) -> Option<ResMutRef<'q, T>> {
         assert!(
             !self.borrowed.load(Ordering::Relaxed),
             "ResMut<{}> already borrowed mutably by a previous iterator item. \
@@ -390,10 +470,31 @@ impl<T: 'static> Drop for ResMutRef<'_, T> {
     }
 }
 
+/// Marker for query items that only ever hand out shared references.
+///
+/// Implemented for [`Ref`], [`ResourceRef`], and tuples composed entirely
+/// of read-only items.
+///
+/// # Safety
+///
+/// Implementors must guarantee that `query_get` never produces mutable
+/// access. [`QueryGuard::iter`] relies on this: it allows multiple
+/// concurrent iterators from a shared guard borrow, which would alias
+/// mutable references for a non-read-only item.
+pub unsafe trait ReadOnlyQueryItem: QueryItem {}
+
+// SAFETY: Ref/ResourceRef items are `&T` — read-only.
+unsafe impl<T: 'static> ReadOnlyQueryItem for Ref<'_, T> {}
+// SAFETY: see above.
+unsafe impl<T: 'static> ReadOnlyQueryItem for ResourceRef<'_, T> {}
+
 macro_rules! impl_query_item {
     ($($idx:tt $T:ident),+) => {
+        // SAFETY: a tuple is read-only iff every element is.
+        unsafe impl<$($T: ReadOnlyQueryItem),+> ReadOnlyQueryItem for ($($T,)+) {}
+
         impl<$($T: QueryItem),+> QueryItem for ($($T,)+) {
-            type Item = ($($T::Item,)+);
+            type Item<'q> = ($($T::Item<'q>,)+);
 
             fn query_count(&self) -> usize {
                 let mut min = usize::MAX;
@@ -416,9 +517,9 @@ macro_rules! impl_query_item {
                 min_entities
             }
 
-            unsafe fn query_get(&self, entity_index: u32) -> Option<Self::Item> {
+            unsafe fn query_get<'q>(&self, entity_index: u32) -> Option<Self::Item<'q>> {
                 // SAFETY: delegates to each element's query_get with the same
-                // entity_index. The caller guarantees unique access per index.
+                // entity_index and 'q. The caller upholds the contract.
                 unsafe {
                     Some(($( self.$idx.query_get(entity_index)?, )+))
                 }
@@ -470,63 +571,51 @@ impl_query_item!(0 A, 1 B, 2 C, 3 D, 4 E, 5 F, 6 G, 7 H);
 
 /// Iterator over entities and their components from a [`QueryGuard`].
 ///
-/// Created via [`From<QueryGuard>`] or [`QueryGuard::into_iter()`].
-/// Performs an inner join: iterates over the smallest component storage
-/// and yields only entities present in all queried storages.
+/// Created via [`QueryGuard::iter`] / [`QueryGuard::iter_mut`] (or
+/// `IntoIterator` on `&guard` / `&mut guard`). Performs an inner join:
+/// iterates over the smallest component storage and yields only entities
+/// present in all queried storages.
 ///
-/// Owns the underlying [`QueryGuard`], keeping locks held for the
-/// iterator's lifetime. Use [`into_guard`](QueryIter::into_guard) to
-/// recover the guard after (partial) iteration.
-///
-/// # Known limitation (issue #12)
-///
-/// Yielded items carry the world borrow's lifetime, not the iterator's, so
-/// `collect()`-ing references and dropping the iterator (releasing its
-/// locks) is not prevented by the compiler. Do not store yielded references
-/// beyond the iterator's life; a proper fix requires lending-iterator
-/// (GAT) item types.
+/// Borrows the [`QueryGuard`], and yielded items carry that borrow's
+/// lifetime — the guard (and thus its locks) cannot be dropped while the
+/// iterator or any yielded item is alive. `collect()`-ing items is safe:
+/// the collection keeps the guard borrowed.
 ///
 /// ```ignore
-/// let q = ctx.query::<(Write<Position>, Read<Velocity>)>();
-/// for (entity_idx, (pos, vel)) in q {
+/// let mut q = ctx.query::<(Write<Position>, Read<Velocity>)>();
+/// for (entity_idx, (pos, vel)) in q.iter_mut() {
 ///     pos.x += vel.x;
 /// }
 /// ```
-pub struct QueryIter<'a, A: AccessSet> {
-    guard: QueryGuard<'a, A>,
+pub struct QueryIter<'g, 'a, A: AccessSet> {
+    /// Borrow of the guard's fetched data. The guard outlives 'g, keeping
+    /// the locks held for as long as this iterator or its items exist.
+    items: &'g A::Item<'a>,
     /// Pre-computed matching entity indices (from bitset intersection),
     /// or `None` to fall back to the smallest-set iteration path.
     intersected: Option<Vec<u32>>,
     idx: usize,
 }
 
-impl<'a, A: AccessSet> QueryIter<'a, A> {
-    /// Converts this iterator back into the underlying [`QueryGuard`],
-    /// releasing the iterator state while keeping the locks held.
-    pub fn into_guard(self) -> QueryGuard<'a, A> {
-        self.guard
-    }
-}
-
-impl<'a, A: AccessSet> From<QueryGuard<'a, A>> for QueryIter<'a, A>
+impl<'g, 'a, A: AccessSet> QueryIter<'g, 'a, A>
 where
     A::Item<'a>: QueryItem,
 {
-    fn from(guard: QueryGuard<'a, A>) -> Self {
-        let intersected = guard.items.query_intersected_entities();
+    fn new(items: &'g A::Item<'a>) -> Self {
+        let intersected = items.query_intersected_entities();
         Self {
-            guard,
+            items,
             intersected,
             idx: 0,
         }
     }
 }
 
-impl<'a, A: AccessSet> Iterator for QueryIter<'a, A>
+impl<'g, 'a, A: AccessSet> Iterator for QueryIter<'g, 'a, A>
 where
     A::Item<'a>: QueryItem,
 {
-    type Item = (u32, <A::Item<'a> as QueryItem>::Item);
+    type Item = (u32, <A::Item<'a> as QueryItem>::Item<'g>);
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(ref entities) = self.intersected {
@@ -534,22 +623,25 @@ where
             while self.idx < entities.len() {
                 let entity_idx = entities[self.idx];
                 self.idx += 1;
-                // SAFETY: bitset intersection guarantees the entity has all
-                // components and is not disabled. Each entity is visited once.
-                if let Some(item) = unsafe { self.guard.items.query_get(entity_idx) } {
+                // SAFETY: the guard is borrowed for 'g, so its locks stay
+                // held for 'g. Bitset intersection guarantees the entity has
+                // all components and is not disabled. Each entity is visited
+                // once (monotonically increasing idx).
+                if let Some(item) = unsafe { self.items.query_get(entity_idx) } {
                     return Some((entity_idx, item));
                 }
             }
         } else {
             // Fallback: walk the smallest set and probe other storages.
-            let entities = self.guard.items.query_entities();
+            let entities = self.items.query_entities();
             while self.idx < entities.len() {
                 let entity_idx = entities[self.idx];
                 self.idx += 1;
-                // SAFETY: the iterator visits each entity exactly once
+                // SAFETY: the guard is borrowed for 'g, so its locks stay
+                // held for 'g. The iterator visits each entity exactly once
                 // (monotonically increasing idx), so no aliasing mutable
                 // references are created across calls to next().
-                if let Some(item) = unsafe { self.guard.items.query_get(entity_idx) } {
+                if let Some(item) = unsafe { self.items.query_get(entity_idx) } {
                     return Some((entity_idx, item));
                 }
             }
@@ -561,7 +653,7 @@ where
         let entities = if let Some(ref intersected) = self.intersected {
             intersected.as_slice()
         } else {
-            self.guard.items.query_entities()
+            self.items.query_entities()
         };
         let remaining = entities.len().saturating_sub(self.idx);
         (0, Some(remaining))
@@ -714,7 +806,7 @@ mod tests {
 
         let q = query::<(Read<Position>,)>(&world);
         let mut sum = 0.0;
-        for (_, (pos,)) in q {
+        for (_, (pos,)) in q.iter() {
             sum += pos.x;
         }
         assert_eq!(sum, 3.0);
@@ -728,8 +820,8 @@ mod tests {
         world.insert(e, Position { x: 10.0 }).unwrap();
 
         {
-            let q = query::<(Write<Position>,)>(&world);
-            for (_, (mut pos,)) in q {
+            let mut q = query::<(Write<Position>,)>(&world);
+            for (_, (mut pos,)) in q.iter_mut() {
                 pos.x = 99.0;
             }
         }
@@ -753,9 +845,9 @@ mod tests {
         world.insert(e2, Position { x: 20.0 }).unwrap();
 
         {
-            let q = query::<(Write<Position>, Read<Velocity>)>(&world);
+            let mut q = query::<(Write<Position>, Read<Velocity>)>(&world);
             let mut count = 0;
-            for (_, (mut pos, vel)) in q {
+            for (_, (mut pos, vel)) in q.iter_mut() {
                 pos.x += vel.x;
                 count += 1;
             }
@@ -784,7 +876,7 @@ mod tests {
         world.insert(e_vel, Velocity { x: 1.0 }).unwrap();
 
         let q = query::<(Read<Position>, Read<Velocity>)>(&world);
-        let results: Vec<_> = QueryIter::from(q).map(|(idx, (p, _))| (idx, p.x)).collect();
+        let results: Vec<_> = q.iter().map(|(idx, (p, _))| (idx, p.x)).collect();
         // Should only find the entity that has both
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1, 100.0);
@@ -801,7 +893,7 @@ mod tests {
         // No Velocity on any entity
 
         let q = query::<(Read<Position>, Read<Velocity>)>(&world);
-        assert_eq!(QueryIter::from(q).count(), 0);
+        assert_eq!(q.iter().count(), 0);
     }
 
     #[test]
@@ -811,13 +903,21 @@ mod tests {
         let e = world.spawn();
         world.insert(e, Position { x: 42.0 }).unwrap();
 
-        let q = query::<(Read<Position>,)>(&world);
+        let mut q = query::<(Read<Position>,)>(&world);
         let mut found = false;
-        for (_, (pos,)) in q {
+        // IntoIterator on &guard (read-only)...
+        for (_, (pos,)) in &q {
             assert_eq!(pos.x, 42.0);
             found = true;
         }
         assert!(found);
+        // ...and on &mut guard.
+        let mut found_mut = false;
+        for (_, (pos,)) in &mut q {
+            assert_eq!(pos.x, 42.0);
+            found_mut = true;
+        }
+        assert!(found_mut);
     }
 
     #[test]
@@ -834,8 +934,8 @@ mod tests {
         world.insert(e2, Velocity { x: 20.0 }).unwrap();
 
         {
-            let q = query::<(Write<Position>, Write<Velocity>)>(&world);
-            for (_, (mut pos, mut vel)) in q {
+            let mut q = query::<(Write<Position>, Write<Velocity>)>(&world);
+            for (_, (mut pos, mut vel)) in q.iter_mut() {
                 pos.x += 100.0;
                 vel.x += 100.0;
             }
@@ -862,8 +962,8 @@ mod tests {
         world.insert(e2, Velocity { x: 5.0 }).unwrap();
 
         {
-            let q = query::<(Write<Position>, Read<Velocity>, Res<f32>)>(&world);
-            for (_, (mut pos, vel, factor)) in q {
+            let mut q = query::<(Write<Position>, Read<Velocity>, Res<f32>)>(&world);
+            for (_, (mut pos, vel, factor)) in q.iter_mut() {
                 pos.x += vel.x * *factor;
             }
         }
@@ -873,22 +973,23 @@ mod tests {
     }
 
     #[test]
-    fn iter_into_guard_recovers_locks() {
+    fn iter_partial_then_guard_still_usable() {
         let mut world = World::new();
         world.register_component::<Position>();
         let e = world.spawn();
         world.insert(e, Position { x: 1.0 }).unwrap();
 
-        let q = query::<(Write<Position>,)>(&world);
-        let mut iter = QueryIter::from(q);
+        let mut q = query::<(Write<Position>,)>(&world);
 
-        // Partially consume the iterator
+        // Partially consume an iterator, then drop it (locks stay held by
+        // the guard).
+        let mut iter = q.iter_mut();
         let (_, (mut pos,)) = iter.next().unwrap();
         pos.x = 42.0;
+        drop(iter);
 
-        // Recover the guard — locks still held
-        let guard = iter.into_guard();
-        let (positions,) = &guard.items;
+        // The guard is usable again after the iterator borrow ends.
+        let (positions,) = q.items();
         assert_eq!(positions.get(e.index()).unwrap().x, 42.0);
     }
 
@@ -904,8 +1005,8 @@ mod tests {
         world.insert(e2, Position { x: 7.0 }).unwrap();
 
         {
-            let q = query::<(Read<Position>, ResMut<f32>)>(&world);
-            for (_, (pos, mut acc)) in q {
+            let mut q = query::<(Read<Position>, ResMut<f32>)>(&world);
+            for (_, (pos, mut acc)) in q.iter_mut() {
                 *acc += pos.x;
             }
         }
@@ -926,10 +1027,32 @@ mod tests {
         let e2 = world.spawn();
         world.insert(e2, Position { x: 2.0 }).unwrap();
 
-        let q = query::<(Read<Position>, ResMut<f32>)>(&world);
-        let mut iter = QueryIter::from(q);
+        let mut q = query::<(Read<Position>, ResMut<f32>)>(&world);
+        let mut iter = q.iter_mut();
         let _a = iter.next().unwrap(); // holds ResMutRef
         let _b = iter.next().unwrap(); // panics: _a still alive
+    }
+
+    #[test]
+    fn iter_collected_items_stay_valid() {
+        let mut world = World::new();
+        world.register_component::<Position>();
+        for i in 0..4 {
+            let e = world.spawn();
+            world.insert(e, Position { x: i as f32 }).unwrap();
+        }
+
+        let mut q = query::<(Write<Position>,)>(&world);
+        // Collecting mutable items is safe: they borrow `q`, so the guard
+        // (and its locks) cannot be dropped while they are alive.
+        let mut items: Vec<_> = q.iter_mut().collect();
+        for (_, (pos,)) in &mut items {
+            pos.x += 10.0;
+        }
+        drop(items);
+
+        let sum: f32 = q.items().0.iter().map(|(_, p)| p.x).sum();
+        assert_eq!(sum, 0.0 + 1.0 + 2.0 + 3.0 + 40.0);
     }
 
     // ---- Bitset intersection tests ----
@@ -952,7 +1075,7 @@ mod tests {
         }
 
         let q = query::<(Read<Position>, Read<Velocity>)>(&world);
-        let results: Vec<_> = QueryIter::from(q).collect();
+        let results: Vec<_> = q.iter().collect();
         assert_eq!(results.len(), 5);
         for (_, (pos, _)) in &results {
             assert_eq!(pos.x, 999.0);
@@ -968,7 +1091,7 @@ mod tests {
         world.insert(e, Position { x: 42.0 }).unwrap();
 
         let q = query::<(Read<Position>,)>(&world);
-        let iter = QueryIter::from(q);
+        let iter = q.iter();
         // Single component should NOT use intersection (no benefit)
         assert!(iter.intersected.is_none());
         let results: Vec<_> = iter.collect();
@@ -989,8 +1112,8 @@ mod tests {
         world.insert(e2, Position { x: 20.0 }).unwrap();
 
         {
-            let q = query::<(Write<Position>, Read<Velocity>)>(&world);
-            for (_, (mut pos, vel)) in q {
+            let mut q = query::<(Write<Position>, Read<Velocity>)>(&world);
+            for (_, (mut pos, vel)) in q.iter_mut() {
                 pos.x += vel.x;
             }
         }
@@ -1015,8 +1138,8 @@ mod tests {
         world.insert(e2, Position { x: 100.0 }).unwrap();
 
         {
-            let q = query::<(Write<Position>, Read<Velocity>, Res<f32>)>(&world);
-            let iter = QueryIter::from(q);
+            let mut q = query::<(Write<Position>, Read<Velocity>, Res<f32>)>(&world);
+            let iter = q.iter_mut();
             // 2 component bitsets (Position + Velocity), so intersection is used
             assert!(iter.intersected.is_some());
             for (_, (mut pos, vel, factor)) in iter {
@@ -1040,7 +1163,7 @@ mod tests {
         }
 
         {
-            let q = query::<(Write<Position>,)>(&world);
+            let mut q = query::<(Write<Position>,)>(&world);
             q.par_for_each(|_entity, (mut pos,)| {
                 pos.x += 1.0;
             });
@@ -1048,7 +1171,7 @@ mod tests {
 
         let q2 = query::<(Read<Position>,)>(&world);
         let mut count = 0;
-        for (_, (pos,)) in q2 {
+        for (_, (pos,)) in q2.iter() {
             assert!(pos.x >= 1.0);
             count += 1;
         }
@@ -1080,14 +1203,14 @@ mod tests {
         }
 
         {
-            let q = query::<(Write<Position>, Read<Velocity>)>(&world);
+            let mut q = query::<(Write<Position>, Read<Velocity>)>(&world);
             q.par_for_each(|_entity, (mut pos, vel)| {
                 pos.x += vel.x;
             });
         }
 
         let q2 = query::<(Read<Position>,)>(&world);
-        for (_, (pos,)) in q2 {
+        for (_, (pos,)) in q2.iter() {
             assert!(pos.x >= -1.0);
         }
     }
@@ -1104,14 +1227,14 @@ mod tests {
         }
 
         {
-            let q = query::<(Write<Position>, Res<f32>)>(&world);
+            let mut q = query::<(Write<Position>, Res<f32>)>(&world);
             q.par_for_each(|_entity, (mut pos, factor)| {
                 pos.x *= *factor;
             });
         }
 
         let q2 = query::<(Read<Position>,)>(&world);
-        for (_, (pos,)) in q2 {
+        for (_, (pos,)) in q2.iter() {
             assert_eq!(pos.x, 2.0);
         }
     }
@@ -1128,7 +1251,7 @@ mod tests {
         }
 
         let counter = AtomicU32::new(0);
-        let q = query::<(Read<Position>,)>(&world);
+        let mut q = query::<(Read<Position>,)>(&world);
         q.par_for_each(|_entity, (_pos,)| {
             counter.fetch_add(1, Ordering::Relaxed);
         });
@@ -1141,7 +1264,7 @@ mod tests {
         let mut world = World::new();
         world.register_component::<Position>();
 
-        let q = query::<(Read<Position>,)>(&world);
+        let mut q = query::<(Read<Position>,)>(&world);
         q.par_for_each(|_entity, (_pos,)| {
             panic!("should not be called");
         });
@@ -1159,7 +1282,7 @@ mod tests {
         }
 
         let counter = AtomicU32::new(0);
-        let q = query::<(Read<Position>,)>(&world);
+        let mut q = query::<(Read<Position>,)>(&world);
         q.par_for_each(|_entity, (_pos,)| {
             counter.fetch_add(1, Ordering::Relaxed);
         });

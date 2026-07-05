@@ -89,7 +89,7 @@ pub use query::{
     AddedFilter, AnyFilter, ChangedFilter, ContainsChecker, Filter, OrFilter, RemovedFilter, With,
     Without,
 };
-pub use query::{QueryGuard, QueryItem, QueryIter, ResMutRef};
+pub use query::{QueryGuard, QueryItem, QueryIter, ReadOnlyQueryItem, ResMutRef};
 pub use reactive::{HasTriggers, Triggers};
 pub use redlilium_core::compute::{
     CancellationToken, Cancelled, Checkpoint, ComputeContext, ComputeMutex, ComputeMutexGuard,
