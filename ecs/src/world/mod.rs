@@ -201,8 +201,12 @@ impl World {
     ///
     /// Returns `true` if the entity was alive and is now despawned.
     /// Returns `false` if the entity was already dead.
-    /// Fires `on_remove` hooks before removal (entity still alive, components still readable).
     /// Records removals for [`removed`](World::removed) filter queries.
+    ///
+    /// `on_remove` hooks fire before removal (entity still alive, own
+    /// component still readable) and exactly once per component; hook-less
+    /// components stay readable for the whole hook phase (see #43 for
+    /// ordering caveats between hooked components).
     pub fn despawn(&mut self, entity: Entity) -> bool {
         if !self.entities.is_alive(entity) {
             return false;
@@ -211,23 +215,40 @@ impl World {
         let index = entity.index();
         let tick = self.current_tick();
 
-        // Pass 1: collect on_remove hooks for components this entity has
-        let hooks: smallvec::SmallVec<[crate::sparse_set::ComponentHookFn; 2]> = self
+        // Pass 1: collect the components with on_remove hooks. Only the
+        // TypeIds are snapshotted — presence is re-checked per hook, so a
+        // hook that cascades a removal (e.g. removes another component of
+        // this entity) does not cause that component's hooks to fire twice.
+        let hooked: smallvec::SmallVec<[TypeId; 4]> = self
             .components
-            .values_mut()
-            .map(|lock| lock.get_mut())
-            .filter(|s| !s.on_remove.is_empty() && s.contains_untyped(index))
-            .flat_map(|s| s.on_remove.iter())
+            .iter_mut()
+            .filter_map(|(type_id, lock)| {
+                let s = lock.get_mut();
+                (!s.on_remove.is_empty() && s.contains_untyped(index)).then_some(*type_id)
+            })
             .collect();
 
-        // Pass 2: fire hooks (entity still alive, components still readable).
-        // A hook may despawn this entity (directly or via nested hooks),
-        // so check liveness after each call to avoid running hooks on a
-        // dead entity and double-cleaning.
-        for hook in hooks {
-            hook(self, entity);
-            if !self.entities.is_alive(entity) {
+        // Pass 2: per hooked component — fire its hooks (re-validating
+        // liveness and presence between calls), then remove it immediately
+        // so a cascading remove() from a later hook cannot re-fire it (#43).
+        for type_id in hooked {
+            let hooks = match self.storage_mut(&type_id) {
+                Some(s) => s.on_remove.clone(),
+                None => continue,
+            };
+            if !self.fire_hooks_checked(entity, type_id, &hooks) {
                 return true; // already fully despawned by a hook
+            }
+            let removed = self.storage_mut(&type_id).is_some_and(|s| {
+                if s.remove_untyped(index) {
+                    s.record_removal(index, tick);
+                    true
+                } else {
+                    false
+                }
+            });
+            if removed && let Some(trigger_key) = self.observers.remove_trigger_key(&type_id) {
+                self.observers.push_trigger(trigger_key, entity);
             }
         }
 

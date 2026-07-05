@@ -62,14 +62,24 @@ impl CommandBuffer {
 
     /// Queues a component insertion on an entity.
     ///
+    /// If the entity has been despawned by the time commands are applied
+    /// (an ordinary cross-system race: another system queued a despawn the
+    /// same frame), the insert is skipped — same tolerance as queued
+    /// removes.
+    ///
     /// # Panics
     ///
     /// Panics when applied if the component type has not been registered.
     pub fn insert<T: Send + Sync + 'static>(&self, entity: crate::entity::Entity, component: T) {
-        self.push(move |world| {
-            world
-                .insert(entity, component)
-                .expect("Component not registered");
+        self.push(move |world| match world.insert(entity, component) {
+            Ok(()) => {}
+            Err(crate::world::WorldError::EntityNotAlive { .. }) => {
+                log::debug!(
+                    "deferred insert of {} on {entity:?} skipped: entity despawned",
+                    std::any::type_name::<T>()
+                );
+            }
+            Err(e) => panic!("deferred insert of {}: {e}", std::any::type_name::<T>()),
         });
     }
 
@@ -102,13 +112,38 @@ impl CommandBuffer {
 
     /// Queues inserting a component on each entity.
     ///
+    /// Entities despawned by the time commands are applied are skipped
+    /// (same cross-system race tolerance as [`insert`](Self::insert)).
+    ///
     /// # Panics
     ///
-    /// Panics when applied if the component type has not been registered
-    /// or if any entity is dead.
+    /// Panics when applied if the component type has not been registered.
     pub fn insert_batch<T: Send + Sync + 'static>(&self, items: Vec<(Entity, T)>) {
         self.push(move |world| {
-            world.insert_batch(items).expect("insert_batch failed");
+            let mut items = items;
+            let before = items.len();
+            items.retain(|(entity, _)| world.is_alive(*entity));
+            if items.len() < before {
+                log::debug!(
+                    "deferred insert_batch of {}: skipped {} despawned entities",
+                    std::any::type_name::<T>(),
+                    before - items.len()
+                );
+            }
+            match world.insert_batch(items) {
+                Ok(()) => {}
+                Err(crate::world::WorldError::EntityNotAlive { entity }) => {
+                    // A hook despawned a later batch entity mid-application.
+                    log::debug!(
+                        "deferred insert_batch of {}: aborted at {entity:?} (despawned by a hook)",
+                        std::any::type_name::<T>()
+                    );
+                }
+                Err(e) => panic!(
+                    "deferred insert_batch of {}: {e}",
+                    std::any::type_name::<T>()
+                ),
+            }
         });
     }
 

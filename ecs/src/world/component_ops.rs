@@ -305,6 +305,35 @@ impl World {
         Ok(())
     }
 
+    /// Fires a component's hooks one at a time, re-validating between calls.
+    ///
+    /// A hook may despawn the entity or remove the component (directly or
+    /// via a cascade) — the remaining hooks are then skipped instead of
+    /// firing on dead or absent data, and a component removed by a hook is
+    /// not double-processed by the caller.
+    ///
+    /// Returns `false` if the entity is no longer alive afterwards.
+    pub(crate) fn fire_hooks_checked(
+        &mut self,
+        entity: Entity,
+        type_id: TypeId,
+        hooks: &ComponentHooks,
+    ) -> bool {
+        for hook in hooks.iter() {
+            if !self.entities.is_alive(entity) {
+                return false;
+            }
+            let present = self
+                .storage_mut(&type_id)
+                .is_some_and(|s| s.contains_untyped(entity.index()));
+            if !present {
+                return true;
+            }
+            hook(self, entity);
+        }
+        self.entities.is_alive(entity)
+    }
+
     /// Low-level insert: writes component to storage and fires on_replace.
     ///
     /// Does NOT fire on_add/on_insert hooks, apply required components, or
@@ -312,6 +341,9 @@ impl World {
     /// to process via [`apply_pending`].
     ///
     /// The caller must have already verified the entity is alive.
+    /// Re-checks liveness after `on_replace` hooks: a hook that despawns
+    /// the entity aborts the insert with [`WorldError::EntityNotAlive`]
+    /// instead of writing phantom data into the freed slot.
     pub(crate) fn insert_raw<T: Send + Sync + 'static>(
         &mut self,
         entity: Entity,
@@ -337,10 +369,21 @@ impl World {
             )
         };
 
-        // Fire on_replace BEFORE overwriting (old value still readable)
-        if had_component {
-            on_replace.fire(self, entity);
+        // Fire on_replace BEFORE overwriting (old value still readable),
+        // re-validating between hooks.
+        if had_component && !self.fire_hooks_checked(entity, type_id, &on_replace) {
+            // A hook despawned the entity — do NOT write into the freed
+            // slot (the next spawn would inherit phantom data).
+            return Err(WorldError::EntityNotAlive { entity });
         }
+
+        // A replace hook may have removed the component; recompute so the
+        // write below counts as a fresh add (on_add, required components
+        // and add triggers fire) rather than a replacement.
+        let had_component = had_component
+            && self
+                .storage_mut(&type_id)
+                .is_some_and(|s| s.contains_untyped(entity.index()));
 
         // Perform the actual insert (always tracked at current tick)
         let tick = self.current_tick();
@@ -453,6 +496,11 @@ impl World {
     ///
     /// Fires `on_remove` hook before removal. Records the removal for
     /// [`removed`](World::removed) filter queries.
+    ///
+    /// If an `on_remove` hook despawns the entity or removes the component
+    /// itself, the cleanup performed by that hook wins and this call
+    /// returns `Ok(None)` — it never touches the slot by raw index after
+    /// the entity died (a respawn may already own it).
     pub fn remove<T: 'static>(&mut self, entity: Entity) -> Result<Option<T>, WorldError> {
         if !self.entities.is_alive(entity) {
             return Err(WorldError::EntityNotAlive { entity });
@@ -472,10 +520,17 @@ impl World {
             storage.on_remove.clone()
         };
 
-        // Fire on_remove BEFORE removal (value still readable)
-        on_remove.fire(self, entity);
+        // Fire on_remove BEFORE removal (value still readable),
+        // re-validating between hooks.
+        if !self.fire_hooks_checked(entity, type_id, &on_remove) {
+            // A hook despawned the entity; despawn already removed the
+            // component. The freed slot may belong to a new entity — do
+            // not touch it by raw index.
+            return Ok(None);
+        }
 
-        // Perform removal
+        // Perform removal. If a hook removed the component itself, the
+        // sparse set returns None and nothing is double-recorded.
         let Some(storage) = self.storage_mut(&type_id) else {
             return Ok(None);
         };

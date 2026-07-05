@@ -89,41 +89,64 @@ impl World {
 
     /// Despawns multiple entities at once.
     ///
-    /// All `on_remove` hooks fire first while every entity in the batch
-    /// is still alive and has its components, then all entities are
-    /// deallocated and their components removed. This means hooks can
-    /// observe the full batch in a consistent state.
+    /// `on_remove` hooks fire first (every batch entity still alive) and
+    /// exactly once per component; hook-less components stay readable for
+    /// the whole hook phase (see #43 for ordering caveats between hooked
+    /// components). Then all entities are deallocated and their remaining
+    /// components removed.
     ///
-    /// Skips entities that are already dead.
+    /// Skips entities that are already dead (a stale handle never touches
+    /// the slot's current owner).
     /// Records removals for [`removed`](World::removed) filter queries.
     pub fn despawn_batch(&mut self, entities: &[Entity]) {
-        // Phase 1: collect on_remove hooks for all entities
-        let mut hooks: SmallVec<[(Entity, crate::sparse_set::ComponentHookFn); 8]> =
-            Default::default();
+        // Phase 1: collect (entity, hooked component) pairs. Only TypeIds
+        // are snapshotted — presence is re-checked per hook, so a hook that
+        // cascades a removal or despawn does not double-fire.
+        let mut hooked: SmallVec<[(Entity, TypeId); 8]> = Default::default();
         for &entity in entities {
             if !self.entities.is_alive(entity) {
                 continue;
             }
             let index = entity.index();
-            for lock in self.components.values_mut() {
+            for (type_id, lock) in self.components.iter_mut() {
                 let storage = lock.get_mut();
                 if !storage.on_remove.is_empty() && storage.contains_untyped(index) {
-                    for hook in storage.on_remove.iter() {
-                        hooks.push((entity, hook));
-                    }
+                    hooked.push((entity, *type_id));
                 }
             }
         }
 
-        // Phase 2: fire all hooks (all entities still alive, all components readable)
-        for &(entity, hook) in &hooks {
-            if self.entities.is_alive(entity) {
-                hook(self, entity);
+        // Phase 2: per (entity, hooked component) — fire its hooks
+        // (re-validating liveness and presence between calls), then remove
+        // the component immediately so a cascading remove() from a later
+        // hook cannot re-fire it (#43).
+        let tick = self.current_tick();
+        for (entity, type_id) in hooked {
+            if !self.entities.is_alive(entity) {
+                continue;
+            }
+            let hooks = match self.storage_mut(&type_id) {
+                Some(s) => s.on_remove.clone(),
+                None => continue,
+            };
+            if !self.fire_hooks_checked(entity, type_id, &hooks) {
+                continue; // despawned by a hook; nothing left to remove
+            }
+            let index = entity.index();
+            let removed = self.storage_mut(&type_id).is_some_and(|s| {
+                if s.remove_untyped(index) {
+                    s.record_removal(index, tick);
+                    true
+                } else {
+                    false
+                }
+            });
+            if removed && let Some(trigger_key) = self.observers.remove_trigger_key(&type_id) {
+                self.observers.push_trigger(trigger_key, entity);
             }
         }
 
         // Phase 3: deallocate all entities and remove components
-        let tick = self.current_tick();
         for &entity in entities {
             if !self.entities.is_alive(entity) {
                 continue;
@@ -190,8 +213,10 @@ impl World {
 
     /// Removes a component from multiple entities at once.
     ///
-    /// Skips entities that don't have the component.
-    /// Fires `on_remove` hook for each entity before removal.
+    /// Skips dead entities (a stale handle must never touch the slot's
+    /// current owner) and entities that don't have the component.
+    /// Fires `on_remove` hook for each entity before removal,
+    /// re-validating liveness and presence between hook calls.
     /// Records removals for [`removed`](World::removed) filter queries.
     pub fn remove_batch<T: 'static>(&mut self, entities: &[Entity]) {
         let tick = self.current_tick();
@@ -207,27 +232,34 @@ impl World {
 
         // Fire on_remove hooks before removal
         if !on_remove.is_empty() {
-            let with_component: Vec<Entity> = entities
-                .iter()
-                .copied()
-                .filter(|e| {
-                    self.storage_mut(&type_id)
-                        .is_some_and(|s| s.contains_untyped(e.index()))
-                })
-                .collect();
-            for entity in with_component {
-                on_remove.fire(self, entity);
+            for &entity in entities {
+                if !self.entities.is_alive(entity) {
+                    continue;
+                }
+                let present = self
+                    .storage_mut(&type_id)
+                    .is_some_and(|s| s.contains_untyped(entity.index()));
+                if present {
+                    self.fire_hooks_checked(entity, type_id, &on_remove);
+                }
             }
         }
 
-        // Perform removals
+        // Perform removals — only for entities still alive after the hooks
+        // (hooks may have despawned some; their slots may already be owned
+        // by a respawn).
+        let alive: Vec<Entity> = entities
+            .iter()
+            .copied()
+            .filter(|e| self.entities.is_alive(*e))
+            .collect();
         let Some(storage) = self.storage_mut(&type_id) else {
             return;
         };
         let mut removed_entities = Vec::new();
         {
             let set = storage.typed_mut::<T>();
-            for &entity in entities {
+            for &entity in &alive {
                 if set.remove(entity.index()).is_some() {
                     removed_entities.push(entity);
                 }

@@ -1100,6 +1100,162 @@ fn despawn_multiple_components_hooks() {
     assert_eq!(*world.resource::<u32>(), 11);
 }
 
+// --- Hook cascade / liveness tests (issue #22) ---
+
+#[test]
+fn on_replace_despawn_leaves_no_phantom_data() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+
+    world.on_replace::<Position>(|world, entity| {
+        world.despawn(entity);
+    });
+
+    let entity = world.spawn();
+    world.insert(entity, Position { x: 1.0, y: 1.0 }).unwrap();
+
+    // The replace fires the hook, which despawns the entity — the write
+    // must be aborted instead of landing in the freed slot.
+    let result = world.insert(entity, Position { x: 2.0, y: 2.0 });
+    assert!(matches!(result, Err(WorldError::EntityNotAlive { .. })));
+    assert!(!world.is_alive(entity));
+
+    // A respawn reusing the slot must not inherit phantom data.
+    let reused = world.spawn();
+    assert_eq!(reused.index(), entity.index());
+    assert_eq!(world.get::<Position>(reused), None);
+}
+
+#[test]
+fn on_remove_despawn_spares_the_slots_new_owner() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.insert_resource::<Option<Entity>>(None);
+    world.insert_resource(false); // hook already ran (guards reentrancy)
+
+    // The hook despawns the entity and immediately respawns the slot with
+    // its own Position.
+    world.on_remove::<Position>(|world, entity| {
+        if *world.resource::<bool>() {
+            return; // reentrant call from the despawn below
+        }
+        *world.resource_mut::<bool>() = true;
+        world.despawn(entity);
+        let new = world.spawn();
+        assert_eq!(new.index(), entity.index());
+        world.insert(new, Position { x: 9.0, y: 9.0 }).unwrap();
+        *world.resource_mut::<Option<Entity>>() = Some(new);
+    });
+
+    let entity = world.spawn();
+    world.insert(entity, Position { x: 1.0, y: 1.0 }).unwrap();
+
+    // The hook's cleanup wins; the stale handle must not remove the new
+    // owner's component by raw index.
+    let removed = world.remove::<Position>(entity).unwrap();
+    assert!(removed.is_none());
+
+    let new_owner = world.resource::<Option<Entity>>().unwrap();
+    assert_eq!(
+        world.get::<Position>(new_owner),
+        Some(&Position { x: 9.0, y: 9.0 })
+    );
+}
+
+#[test]
+fn despawn_cascading_removal_fires_hooks_once() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.register_component::<Health>();
+    world.insert_resource(0u32); // Health on_remove fire count
+
+    // Position's hook cascades: removes Health explicitly.
+    world.on_remove::<Position>(|world, entity| {
+        let _ = world.remove::<Health>(entity);
+    });
+    world.on_remove::<Health>(|world, _entity| {
+        *world.resource_mut::<u32>() += 1;
+    });
+
+    let entity = world.spawn();
+    world.insert(entity, Position { x: 0.0, y: 0.0 }).unwrap();
+    world.insert(entity, Health(100)).unwrap();
+    world.despawn(entity);
+
+    // Health's on_remove fired exactly once (inside the cascade), not a
+    // second time from despawn's own snapshot.
+    assert_eq!(*world.resource::<u32>(), 1);
+}
+
+#[test]
+fn remove_batch_skips_stale_handles() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+
+    let old = world.spawn();
+    world.insert(old, Position { x: 1.0, y: 1.0 }).unwrap();
+    world.despawn(old);
+
+    // The slot now belongs to someone else.
+    let new = world.spawn();
+    assert_eq!(new.index(), old.index());
+    world.insert(new, Position { x: 5.0, y: 5.0 }).unwrap();
+
+    // A stale handle in the batch must not strip the new owner.
+    world.remove_batch::<Position>(&[old]);
+    assert_eq!(
+        world.get::<Position>(new),
+        Some(&Position { x: 5.0, y: 5.0 })
+    );
+}
+
+#[test]
+fn on_replace_removing_component_makes_insert_a_fresh_add() {
+    let mut world = World::new();
+    world.register_component::<Position>();
+    world.insert_resource(0u32); // on_add fire count
+
+    world.on_add::<Position>(|world, _entity| {
+        *world.resource_mut::<u32>() += 1;
+    });
+    world.on_replace::<Position>(|world, entity| {
+        let _ = world.remove::<Position>(entity);
+    });
+
+    let entity = world.spawn();
+    world.insert(entity, Position { x: 1.0, y: 1.0 }).unwrap();
+    assert_eq!(*world.resource::<u32>(), 1);
+
+    // The replace hook removed the old value, so this counts as a fresh
+    // add again (on_add fires), not a replacement.
+    world.insert(entity, Position { x: 2.0, y: 2.0 }).unwrap();
+    assert_eq!(*world.resource::<u32>(), 2);
+    assert_eq!(
+        world.get::<Position>(entity),
+        Some(&Position { x: 2.0, y: 2.0 })
+    );
+}
+
+#[test]
+fn deferred_insert_after_despawn_is_skipped_not_a_panic() {
+    let mut world = World::new();
+    world.register_component::<Health>();
+
+    let entity = world.spawn();
+
+    // Two systems race within one frame: one queues a despawn, another
+    // queues an insert on the same entity.
+    {
+        let commands = world.resource::<crate::commands::CommandBuffer>();
+        commands.despawn(entity);
+        commands.insert(entity, Health(1));
+        commands.insert_batch(vec![(entity, Health(2))]);
+    }
+    world.apply_commands(); // must not panic
+
+    assert!(!world.is_alive(entity));
+}
+
 // --- Required components tests ---
 
 #[derive(Debug, Clone, PartialEq, Default)]
