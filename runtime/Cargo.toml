@@ -1,0 +1,20 @@
+[package]
+name = "redlilium-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Game runtime for RedLilium Engine: the Plugin API and the host loop gluing app, ECS, graphics, and assets (ADR-020)"
+
+[dependencies]
+redlilium-core = { path = "../core" }
+redlilium-app = { path = "../app" }
+redlilium-graphics = { path = "../graphics" }
+redlilium-ecs = { path = "../ecs", features = ["rendering"] }
+redlilium-assets = { path = "../assets" }
+redlilium-vfs = { path = "../vfs" }
+
+winit = { workspace = true }
+parking_lot = { workspace = true }
+log = { workspace = true }
+bytemuck = { workspace = true }

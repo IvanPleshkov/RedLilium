@@ -17,6 +17,8 @@ redlilium-core = { path = "../core" }
 redlilium-graphics = { path = "../graphics" }
 redlilium-app = { path = "../app" }
 redlilium-ecs = { path = "../ecs", features = ["physics", "rendering"] }
+redlilium-runtime = { path = "../runtime" }
+redlilium-assets = { path = "../assets" }
 winit.workspace = true
 parking_lot = { workspace = true }
 log.workspace = true
@@ -51,6 +53,10 @@ path = "src/bin/textured_quad_demo.rs"
 [[bin]]
 name = "physics_demo"
 path = "src/bin/physics_demo/main.rs"
+
+[[bin]]
+name = "plugin_demo"
+path = "src/bin/plugin_demo.rs"
 
 [[example]]
 name = "window_test"

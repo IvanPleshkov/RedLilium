@@ -6,6 +6,7 @@ members = [
     "ecs-macro",
     "graphics",
     "app",
+    "runtime",
     "demos",
     "editor",
     "debug_drawer",

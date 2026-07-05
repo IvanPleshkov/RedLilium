@@ -4358,9 +4358,11 @@ dependencies = [
  "log",
  "parking_lot",
  "redlilium-app",
+ "redlilium-assets",
  "redlilium-core",
  "redlilium-ecs",
  "redlilium-graphics",
+ "redlilium-runtime",
  "ureq",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -4450,6 +4452,22 @@ dependencies = [
  "static_assertions",
  "tracy-client",
  "wgpu",
+ "winit",
+]
+
+[[package]]
+name = "redlilium-runtime"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "log",
+ "parking_lot",
+ "redlilium-app",
+ "redlilium-assets",
+ "redlilium-core",
+ "redlilium-ecs",
+ "redlilium-graphics",
+ "redlilium-vfs",
  "winit",
 ]
 
