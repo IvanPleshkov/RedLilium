@@ -106,6 +106,11 @@ fn deserialize_component_fn<T: Component>(
 /// Each World is fully self-contained. Multiple worlds can coexist
 /// in the same process, sharing no data between them.
 ///
+/// A `World` is `Send`, but if main-thread resources are in use
+/// ([`insert_main_thread_resource`](World::insert_main_thread_resource))
+/// it must be dropped on the thread that owns them (debug-checked); see
+/// that method's docs for the confinement contract.
+///
 /// # Example
 ///
 /// ```

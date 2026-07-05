@@ -867,10 +867,14 @@ impl<T: 'static> Deref for Ref<'_, T> {
 // Ref holds either an RwLockReadGuard (auto-released on drop) or nothing.
 // No manual Drop needed — the Option<RwLockReadGuard> handles it.
 
-// SAFETY: Ref only provides shared (&) access to the inner data.
+// SAFETY (Sync): Ref only provides shared (&) access to the inner data.
 // The RwLock guarantees no exclusive access exists when the guard is held.
 // When unlocked, the caller guarantees external lock management.
-unsafe impl<T: Send + Sync + 'static> Send for Ref<'_, T> {}
+//
+// Deliberately NOT Send: Ref may hold a parking_lot read guard, and
+// parking_lot guards must be released on the thread that acquired them
+// (lock_api contract; also incompatible with deadlock detection). Guards
+// are created, used and dropped on the same thread (audit A7).
 unsafe impl<T: Send + Sync + 'static> Sync for Ref<'_, T> {}
 
 /// Exclusive write access to a component storage.
@@ -1133,9 +1137,14 @@ impl<T: 'static> Deref for RefMut<'_, T> {
 // RefMut holds either an RwLockWriteGuard (auto-released on drop) or nothing.
 // No manual Drop needed — the Option<RwLockWriteGuard> handles it.
 
-// SAFETY: RefMut has exclusive access to the inner data.
+// SAFETY (Sync): RefMut has exclusive access to the inner data, and its
+// shared (&self) surface only hands out & reads or runtime-checked items.
 // The RwLock ensures no other access exists when the guard is held.
-unsafe impl<T: Send + Sync + 'static> Send for RefMut<'_, T> {}
+//
+// Deliberately NOT Send: RefMut may hold a parking_lot write guard, and
+// parking_lot guards must be released on the thread that acquired them
+// (lock_api contract; also incompatible with deadlock detection). Guards
+// are created, used and dropped on the same thread (audit A7).
 unsafe impl<T: Send + Sync + 'static> Sync for RefMut<'_, T> {}
 
 #[cfg(test)]

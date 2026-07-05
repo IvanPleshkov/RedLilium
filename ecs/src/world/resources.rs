@@ -113,6 +113,15 @@ impl World {
     /// The resource does **not** need to implement `Send` or `Sync`.
     /// Takes `&mut self`, so it can only be called before systems run
     /// (during setup on the main thread).
+    ///
+    /// # Thread confinement
+    ///
+    /// The first insert pins main-thread resources to the current thread:
+    /// all later access happens there (systems reach them via the runner's
+    /// main-thread dispatcher), and the `World` itself must be **dropped on
+    /// that thread** while main-thread resources are present — otherwise
+    /// their destructors would run on a foreign thread. Both are checked
+    /// in debug builds.
     pub fn insert_main_thread_resource<T: 'static>(&mut self, value: T) {
         // SAFETY: &mut self guarantees exclusive access; setup is on main thread.
         unsafe { self.resources.insert_main_thread(value) }

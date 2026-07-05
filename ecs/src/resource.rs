@@ -334,11 +334,13 @@ pub struct ResourceRef<'a, T: 'static> {
     _marker: PhantomData<&'a T>,
 }
 
-// SAFETY: `ResourceRef` is a read-only view, equivalent to `&T`. `&T` is
-// `Send`/`Sync` exactly when `T: Sync`; the held read guard (when present) is
-// itself `Send + Sync`. This preserves the pre-existing auto-traits after
-// switching the internal representation to a raw pointer.
-unsafe impl<T: Sync> Send for ResourceRef<'_, T> {}
+// SAFETY (Sync): `ResourceRef` is a read-only view, equivalent to `&T`,
+// which is `Sync` exactly when `T: Sync`.
+//
+// Deliberately NOT Send: the held parking_lot read guard (when present)
+// must be released on the thread that acquired it (lock_api contract;
+// also incompatible with deadlock detection). Guards are created, used
+// and dropped on the same thread (audit A7).
 unsafe impl<T: Sync> Sync for ResourceRef<'_, T> {}
 
 impl<T: 'static> Deref for ResourceRef<'_, T> {
@@ -373,9 +375,10 @@ pub struct ResourceRefMut<'a, T: 'static> {
     pub(crate) borrowed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-// SAFETY: equivalent to `&mut T`, which is `Send` when `T: Send`. (`Sync` is
-// intentionally NOT implemented — the raw `ptr` keeps it `!Sync`.)
-unsafe impl<T: Send> Send for ResourceRefMut<'_, T> {}
+// Deliberately neither Send nor Sync: the raw `ptr` keeps it `!Sync`
+// (aliasing `&mut T` across threads), and the held parking_lot write guard
+// must be released on the thread that acquired it, so no `Send` either
+// (audit A7). Fully thread-confined.
 
 impl<T: 'static> ResourceRefMut<'_, T> {
     /// Returns a raw mutable pointer to the underlying resource data.
