@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use redlilium_graphics::{
-    FramePipeline, FrameSchedule, GraphicsDevice, GraphicsInstance, RenderGraph, ResizeManager,
-    RingAllocation, RingBuffer, Surface, SurfaceTexture, TextureFormat,
+    FramePipeline, FrameSchedule, GraphicsDevice, GraphicsError, GraphicsInstance, RenderGraph,
+    ResizeManager, RingAllocation, RingBuffer, Surface, SurfaceTexture, TextureFormat,
 };
 use winit::window::Window;
 
@@ -43,6 +43,9 @@ pub struct AppContext {
     pub(crate) hdr_active: bool,
     /// Resize manager for debounced window resize handling.
     pub(crate) resize_manager: ResizeManager,
+    /// Set when acquire/present reported the surface as outdated; the app
+    /// reconfigures the surface before the next frame and clears it.
+    pub(crate) surface_outdated: bool,
 }
 
 impl AppContext {
@@ -302,7 +305,15 @@ impl<'a> DrawContext<'a> {
     /// be returned from `on_draw` for the pipeline to complete the frame.
     pub fn render(mut self, graph: RenderGraph) -> FrameSchedule {
         self.schedule.render(graph);
-        self.swapchain_texture.present();
+        match self.swapchain_texture.present() {
+            Ok(()) => {}
+            Err(GraphicsError::SurfaceOutdated | GraphicsError::SurfaceLost) => {
+                // The frame may still have been shown; reconfigure before the
+                // next acquire (picked up at the top of the next frame).
+                self.app.surface_outdated = true;
+            }
+            Err(e) => log::error!("Failed to present frame: {e}"),
+        }
         self.schedule
     }
 }

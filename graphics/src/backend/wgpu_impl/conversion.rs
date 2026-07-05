@@ -450,6 +450,20 @@ pub fn convert_present_mode(mode: crate::swapchain::PresentMode) -> wgpu::Presen
     }
 }
 
+/// Convert a wgpu present mode back to the engine's PresentMode.
+///
+/// Returns `None` for modes the engine does not expose (`AutoVsync`,
+/// `AutoNoVsync` are request-only aliases and never appear in capabilities).
+pub fn from_wgpu_present_mode(mode: wgpu::PresentMode) -> Option<crate::swapchain::PresentMode> {
+    match mode {
+        wgpu::PresentMode::Immediate => Some(crate::swapchain::PresentMode::Immediate),
+        wgpu::PresentMode::Mailbox => Some(crate::swapchain::PresentMode::Mailbox),
+        wgpu::PresentMode::Fifo => Some(crate::swapchain::PresentMode::Fifo),
+        wgpu::PresentMode::FifoRelaxed => Some(crate::swapchain::PresentMode::FifoRelaxed),
+        _ => None,
+    }
+}
+
 /// Convert ShaderStageFlags to wgpu shader stages.
 pub fn convert_shader_stages(flags: crate::materials::ShaderStageFlags) -> wgpu::ShaderStages {
     let mut result = wgpu::ShaderStages::empty();

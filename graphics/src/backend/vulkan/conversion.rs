@@ -345,6 +345,20 @@ pub fn convert_present_mode(mode: crate::swapchain::PresentMode) -> vk::PresentM
     }
 }
 
+/// Convert a Vulkan present mode back to the engine's PresentMode.
+///
+/// Returns `None` for modes the engine does not expose (e.g. shared
+/// demand/continuous refresh).
+pub fn from_vulkan_present_mode(mode: vk::PresentModeKHR) -> Option<crate::swapchain::PresentMode> {
+    match mode {
+        vk::PresentModeKHR::IMMEDIATE => Some(crate::swapchain::PresentMode::Immediate),
+        vk::PresentModeKHR::MAILBOX => Some(crate::swapchain::PresentMode::Mailbox),
+        vk::PresentModeKHR::FIFO => Some(crate::swapchain::PresentMode::Fifo),
+        vk::PresentModeKHR::FIFO_RELAXED => Some(crate::swapchain::PresentMode::FifoRelaxed),
+        _ => None,
+    }
+}
+
 /// Convert BlendFactor to Vulkan blend factor.
 pub fn convert_blend_factor(factor: crate::materials::BlendFactor) -> vk::BlendFactor {
     match factor {

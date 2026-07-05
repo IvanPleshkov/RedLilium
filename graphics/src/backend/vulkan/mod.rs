@@ -410,6 +410,20 @@ impl VulkanBackend {
         self.swapchain_sync.lock().consumed
     }
 
+    /// Undo `take_swapchain_render_sync` after a failed queue submit.
+    ///
+    /// The failed submit enqueued nothing, so `image_available` still has its
+    /// pending signal from the acquire and `image_render_finished` will never
+    /// be signaled. Restoring the un-consumed state makes present fall back to
+    /// waiting on `image_available` directly (the "nothing rendered" path),
+    /// which drains the pending signal and keeps both semaphores reusable —
+    /// instead of present blocking forever on `image_render_finished`.
+    pub(crate) fn restore_swapchain_render_sync(&self, image_available: vk::Semaphore) {
+        let mut sync = self.swapchain_sync.lock();
+        sync.image_available = Some(image_available);
+        sync.consumed = false;
+    }
+
     /// Advance to the next frame.
     ///
     /// Frees command buffers from the oldest frame slot, advances the layout
@@ -1405,10 +1419,12 @@ impl VulkanBackend {
         // wait on `image_available` (so it does not write the image before the
         // presentation engine releases it) and signal `image_render_finished`
         // (so present transitions/presents only after rendering completes).
-        if graph_writes_swapchain(graph)
-            && let Some((image_available, image_render_finished)) =
-                self.take_swapchain_render_sync()
-        {
+        let swapchain_pair = if graph_writes_swapchain(graph) {
+            self.take_swapchain_render_sync()
+        } else {
+            None
+        };
+        if let Some((image_available, image_render_finished)) = swapchain_pair {
             vk_wait_semaphores.push(image_available);
             wait_stage_masks.push(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT);
             vk_signal_semaphores.push(image_render_finished);
@@ -1442,16 +1458,27 @@ impl VulkanBackend {
                 submit_info = submit_info.signal_semaphores(&vk_signal_semaphores);
             }
 
-            unsafe {
+            let submit_result = unsafe {
                 self.device.queue_submit(
                     self.graphics_queue,
                     &[submit_info],
                     fence.unwrap_or(vk::Fence::null()),
                 )
+            };
+            if let Err(e) = submit_result {
+                // Nothing was enqueued: hand the swapchain semaphore pair back
+                // so present can still consume `image_available` cleanly
+                // instead of waiting forever on `image_render_finished`.
+                if let Some((image_available, _)) = swapchain_pair {
+                    self.restore_swapchain_render_sync(image_available);
+                }
+                return Err(match e {
+                    vk::Result::ERROR_DEVICE_LOST => GraphicsError::DeviceLost,
+                    other => GraphicsError::Internal(format!(
+                        "Failed to submit command buffer: {other:?}"
+                    )),
+                });
             }
-            .map_err(|e| {
-                GraphicsError::Internal(format!("Failed to submit command buffer: {:?}", e))
-            })?;
         }
 
         // No per-buffer freeing: the slot's pool is reset wholesale in

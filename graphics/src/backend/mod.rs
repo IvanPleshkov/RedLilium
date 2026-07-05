@@ -349,6 +349,10 @@ pub enum GpuSurfaceTexture {
         in_flight_fence: vk::Fence,
         /// The command buffer for presentation.
         present_command_buffer: vk::CommandBuffer,
+        /// Whether the acquire reported the swapchain as suboptimal — the
+        /// frame is rendered and presented normally, but present reports
+        /// `SurfaceOutdated` so the caller reconfigures.
+        suboptimal: bool,
     },
 }
 
@@ -401,13 +405,17 @@ impl GpuSurfaceTexture {
     /// Present the surface texture.
     ///
     /// Takes the backend for Vulkan presentation.
-    pub fn present(self, backend: &GpuBackend, frame_index: u64) {
+    ///
+    /// # Errors
+    ///
+    /// `SurfaceOutdated` / `SurfaceLost` mean the surface must be
+    /// reconfigured before the next acquire (the frame may still have been
+    /// shown). Other errors indicate the frame was not presented.
+    pub fn present(self, backend: &GpuBackend, frame_index: u64) -> Result<(), GraphicsError> {
         match self {
-            Self::Dummy => {}
+            Self::Dummy => Ok(()),
             #[cfg(feature = "wgpu-backend")]
-            Self::Wgpu { texture, .. } => {
-                wgpu_impl::swapchain::present_surface_texture(texture);
-            }
+            Self::Wgpu { texture, .. } => wgpu_impl::swapchain::present_surface_texture(texture),
             #[cfg(feature = "vulkan-backend")]
             Self::Vulkan {
                 view,
@@ -418,10 +426,11 @@ impl GpuSurfaceTexture {
                 render_finished_semaphore,
                 in_flight_fence,
                 present_command_buffer,
+                suboptimal,
                 ..
             } => {
                 if let GpuBackend::Vulkan(vulkan_backend) = backend {
-                    if let Err(e) = vulkan::swapchain::present_vulkan_frame(
+                    vulkan::swapchain::present_vulkan_frame(
                         vulkan_backend,
                         &view,
                         swapchain,
@@ -432,11 +441,38 @@ impl GpuSurfaceTexture {
                         in_flight_fence,
                         present_command_buffer,
                         frame_index,
-                    ) {
-                        log::error!("Failed to present Vulkan frame: {}", e);
+                    )?;
+                    if suboptimal {
+                        Err(GraphicsError::SurfaceOutdated)
+                    } else {
+                        Ok(())
                     }
                 } else {
-                    log::error!("Vulkan surface texture requires Vulkan backend for presentation");
+                    Err(GraphicsError::Internal(
+                        "Vulkan surface texture requires Vulkan backend for presentation"
+                            .to_string(),
+                    ))
+                }
+            }
+        }
+    }
+
+    /// Release an acquired surface texture that will not be rendered.
+    ///
+    /// On Vulkan an acquired image carries pending binary-semaphore signals
+    /// that can only be drained by presenting, so this presents the
+    /// (undrawn) image — one undefined frame on an error path beats
+    /// permanently poisoned sync objects. On wgpu, dropping the texture is
+    /// the supported cancellation path.
+    pub fn abandon(self, backend: &GpuBackend, frame_index: u64) {
+        match self {
+            Self::Dummy => {}
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu { .. } => {}
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan { .. } => {
+                if let Err(e) = self.present(backend, frame_index) {
+                    log::warn!("Failed to release abandoned surface texture: {e}");
                 }
             }
         }
@@ -517,16 +553,59 @@ impl GpuSurface {
                         .filter_map(|sf| vulkan::conversion::from_vulkan_format(sf.format))
                         .collect(),
                     Err(e) => {
+                        // Report honestly: pretending Bgra8Unorm is supported
+                        // lets configuration proceed with a format the
+                        // backend will reject (or worse, silently mismatch).
                         log::warn!("Failed to query Vulkan surface formats: {}", e);
-                        vec![crate::types::TextureFormat::Bgra8Unorm]
+                        Vec::new()
                     }
                 }
             }
 
             #[allow(unreachable_patterns)]
-            _ => {
-                vec![crate::types::TextureFormat::Bgra8Unorm]
+            _ => Vec::new(),
+        }
+    }
+
+    /// Query the present modes actually supported by this surface.
+    pub fn get_supported_present_modes(
+        &self,
+        backend: &GpuBackend,
+    ) -> Vec<crate::swapchain::PresentMode> {
+        match (self, backend) {
+            (Self::Dummy, _) => vec![
+                crate::swapchain::PresentMode::Fifo,
+                crate::swapchain::PresentMode::Immediate,
+                crate::swapchain::PresentMode::Mailbox,
+                crate::swapchain::PresentMode::FifoRelaxed,
+            ],
+
+            #[cfg(feature = "wgpu-backend")]
+            (Self::Wgpu { surface }, GpuBackend::Wgpu(wgpu_backend)) => {
+                let caps = surface.get_capabilities(wgpu_backend.adapter());
+                caps.present_modes
+                    .iter()
+                    .filter_map(|m| wgpu_impl::conversion::from_wgpu_present_mode(*m))
+                    .collect()
             }
+
+            #[cfg(feature = "vulkan-backend")]
+            (Self::Vulkan { surface, .. }, GpuBackend::Vulkan(vulkan_backend)) => {
+                match vulkan_backend.get_surface_present_modes(*surface) {
+                    Ok(modes) => modes
+                        .iter()
+                        .filter_map(|m| vulkan::conversion::from_vulkan_present_mode(*m))
+                        .collect(),
+                    Err(e) => {
+                        log::warn!("Failed to query Vulkan surface present modes: {}", e);
+                        // FIFO is guaranteed by the Vulkan spec.
+                        vec![crate::swapchain::PresentMode::Fifo]
+                    }
+                }
+            }
+
+            #[allow(unreachable_patterns)]
+            _ => vec![crate::swapchain::PresentMode::Fifo],
         }
     }
 
@@ -547,24 +626,40 @@ impl GpuSurface {
 
             #[cfg(feature = "wgpu-backend")]
             (Self::Wgpu { surface }, GpuBackend::Wgpu(wgpu_backend)) => {
-                wgpu_impl::swapchain::configure_surface(surface, wgpu_backend, config);
-                Ok(())
+                wgpu_impl::swapchain::configure_surface(surface, wgpu_backend, config)
             }
 
             #[cfg(feature = "vulkan-backend")]
             (Self::Vulkan { surface, swapchain }, GpuBackend::Vulkan(vulkan_backend)) => {
                 use vulkan::swapchain::VulkanSwapchain;
 
-                // Destroy old swapchain if it exists
-                if let Some(ref mut old_swapchain) = *swapchain.write() {
-                    old_swapchain.destroy();
-                }
+                // Create the new swapchain BEFORE destroying the old one,
+                // passing the old handle so the driver can recreate
+                // seamlessly. On failure the old swapchain stays in place —
+                // rendering continues on the previous configuration instead
+                // of losing the surface entirely.
+                let old = swapchain.write().take();
+                let old_handle = old
+                    .as_ref()
+                    .map(|s| s.swapchain)
+                    .unwrap_or(vk::SwapchainKHR::null());
 
-                // Create new swapchain
-                let new_swapchain = VulkanSwapchain::new(vulkan_backend, *surface, config)?;
-                *swapchain.write() = Some(new_swapchain);
-                log::info!("Configured Vulkan swapchain");
-                Ok(())
+                match VulkanSwapchain::new(vulkan_backend, *surface, config, old_handle) {
+                    Ok(new_swapchain) => {
+                        // The old swapchain is retired by the create call;
+                        // destroy its images/sync objects now.
+                        if let Some(mut old) = old {
+                            old.destroy();
+                        }
+                        *swapchain.write() = Some(new_swapchain);
+                        log::info!("Configured Vulkan swapchain");
+                        Ok(())
+                    }
+                    Err(e) => {
+                        *swapchain.write() = old;
+                        Err(e)
+                    }
+                }
             }
 
             #[allow(unreachable_patterns)]
@@ -607,6 +702,7 @@ impl GpuSurface {
                         render_finished_semaphore: result.render_finished_semaphore,
                         in_flight_fence: result.in_flight_fence,
                         present_command_buffer: result.present_command_buffer,
+                        suboptimal: result.suboptimal,
                     })
                 } else {
                     Err(GraphicsError::Internal(

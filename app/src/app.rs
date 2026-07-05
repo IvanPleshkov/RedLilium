@@ -227,6 +227,7 @@ where
             surface_format,
             hdr_active,
             resize_manager,
+            surface_outdated: false,
         });
 
         true
@@ -312,27 +313,54 @@ where
 
     /// Reconfigure the swapchain and notify the handler of a resize.
     fn apply_resize(&mut self, width: u32, height: u32) {
-        let ctx = match &mut self.context {
-            Some(c) => c,
-            None => return,
-        };
+        {
+            let ctx = match &mut self.context {
+                Some(c) => c,
+                None => return,
+            };
 
-        if ctx.width == width && ctx.height == height {
+            if ctx.width == width && ctx.height == height {
+                return;
+            }
+
+            ctx.width = width;
+            ctx.height = height;
+        }
+
+        if !self.reconfigure_surface() {
             return;
         }
 
-        ctx.width = width;
-        ctx.height = height;
+        // Notify handler
+        if let Some(ctx) = &mut self.context {
+            self.handler.on_resize(ctx);
+        }
+    }
+
+    /// Reconfigure the surface with the current context dimensions.
+    ///
+    /// Used both for resize events and for `SurfaceOutdated` reports from
+    /// acquire/present (where the size may be unchanged but the swapchain no
+    /// longer matches the surface). Returns `false` only if the surface was
+    /// not touched at all (no context, or in-flight work could not be
+    /// drained); a failed `configure` still returns `true` so callers behave
+    /// as after any other reconfigure — a failing surface reports outdated on
+    /// the next acquire and is retried there.
+    fn reconfigure_surface(&mut self) -> bool {
+        let ctx = match &mut self.context {
+            Some(c) => c,
+            None => return false,
+        };
 
         // Wait for ALL in-flight frames before reconfiguring the surface.
         // The surface is shared across all frame slots, so any slot with
         // pending GPU work could still reference the old swapchain textures.
         // On failure the GPU may still be using them — skip the reconfigure
-        // entirely (the next resize event retries) rather than recycling
-        // graphs the GPU still reads.
+        // entirely (the next resize event or outdated report retries) rather
+        // than recycling graphs the GPU still reads.
         if let Err(e) = ctx.pipeline.wait_idle() {
             log::error!("wait_idle failed during resize, skipping surface reconfigure: {e}");
-            return;
+            return false;
         }
 
         // Recycle all submitted graphs to release Arc<TextureView> references
@@ -346,22 +374,27 @@ where
             PresentMode::Immediate
         };
 
-        let config = SurfaceConfiguration::new(width, height)
+        let config = SurfaceConfiguration::new(ctx.width, ctx.height)
             .with_format(ctx.surface_format)
             .with_present_mode(present_mode);
 
+        ctx.surface_outdated = false;
         if let Err(e) = ctx.surface.configure(&ctx.device, &config) {
             log::error!("Failed to reconfigure surface: {}", e);
         }
-
-        // Notify handler
-        self.handler.on_resize(ctx);
+        true
     }
 
     /// Render a frame.
     fn render_frame(&mut self) {
         // Apply any pending debounced resize before rendering
         self.apply_pending_resize();
+
+        // If the previous frame reported the surface outdated (resize,
+        // monitor change), recreate the swapchain before acquiring.
+        if self.context.as_ref().is_some_and(|c| c.surface_outdated) {
+            self.reconfigure_surface();
+        }
 
         let now = Instant::now();
         let delta_time = now.duration_since(self.last_frame_time).as_secs_f32();
@@ -385,6 +418,16 @@ where
         // Acquire swapchain texture
         let swapchain_texture = match ctx.surface.acquire_texture() {
             Ok(t) => t,
+            Err(
+                e @ (redlilium_graphics::GraphicsError::SurfaceOutdated
+                | redlilium_graphics::GraphicsError::SurfaceLost),
+            ) => {
+                // Skip this frame; the swapchain is recreated at the top of
+                // the next one.
+                log::debug!("Surface needs reconfiguration: {e}");
+                ctx.surface_outdated = true;
+                return;
+            }
             Err(e) => {
                 log::warn!("Failed to acquire swapchain texture: {}", e);
                 return;

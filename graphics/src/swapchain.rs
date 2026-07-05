@@ -25,7 +25,7 @@
 //! // In render loop:
 //! let frame = surface.acquire_texture()?;
 //! // ... render to frame.texture() ...
-//! frame.present();
+//! frame.present()?; // Err(SurfaceOutdated) => reconfigure before next acquire
 //! ```
 
 use std::sync::{Arc, RwLock};
@@ -182,17 +182,11 @@ impl Surface {
     ///
     /// Queries actual GPU capabilities for supported surface formats.
     /// This includes both standard SDR formats and HDR formats when
-    /// the display supports them.
+    /// the display supports them. An empty result means the query failed —
+    /// no format is guaranteed to work, so no fallback is invented here.
     pub fn supported_formats(&self) -> Vec<TextureFormat> {
-        let formats = self
-            .gpu_surface
-            .get_supported_formats(&self.instance.backend());
-        if formats.is_empty() {
-            // Fallback if query returns nothing
-            vec![TextureFormat::Bgra8Unorm]
-        } else {
-            formats
-        }
+        self.gpu_surface
+            .get_supported_formats(&self.instance.backend())
     }
 
     /// Get the supported HDR texture formats for this surface.
@@ -226,14 +220,13 @@ impl Surface {
         }
     }
 
-    /// Get the supported present modes for this surface.
+    /// Get the present modes actually supported by this surface.
+    ///
+    /// Queries GPU capabilities; [`PresentMode::Fifo`] is always included
+    /// (both Vulkan and wgpu guarantee it).
     pub fn supported_present_modes(&self) -> Vec<PresentMode> {
-        vec![
-            PresentMode::Fifo, // Always supported
-            PresentMode::Immediate,
-            PresentMode::Mailbox,
-            PresentMode::FifoRelaxed,
-        ]
+        self.gpu_surface
+            .get_supported_present_modes(&self.instance.backend())
     }
 
     /// Configure the surface for rendering.
@@ -262,6 +255,23 @@ impl Surface {
                 config.format
             )));
         }
+
+        // Clamp an unsupported present mode to FIFO (guaranteed available)
+        // instead of passing it through: Vulkan would silently fall back
+        // while wgpu would panic — this makes both backends behave the same,
+        // with a warning.
+        let mut config = config.clone();
+        if !self
+            .supported_present_modes()
+            .contains(&config.present_mode)
+        {
+            log::warn!(
+                "present mode {:?} not supported by surface; falling back to Fifo",
+                config.present_mode
+            );
+            config.present_mode = PresentMode::Fifo;
+        }
+        let config = &config;
 
         log::info!(
             "Configuring surface: {}x{} {:?} {:?}",
@@ -425,13 +435,22 @@ impl SurfaceTexture {
     ///
     /// This displays the rendered content in the window. After calling this,
     /// the texture is no longer valid for rendering.
-    pub fn present(mut self) {
+    ///
+    /// # Errors
+    ///
+    /// [`GraphicsError::SurfaceOutdated`] / [`GraphicsError::SurfaceLost`]
+    /// mean the surface no longer matches the window (resize, monitor
+    /// change) and must be reconfigured with [`Surface::configure`] before
+    /// the next acquire; the frame itself may still have been shown. Other
+    /// errors indicate the frame was not presented.
+    pub fn present(mut self) -> Result<(), GraphicsError> {
         if let Ok(mut presented) = self.presented.write() {
             *presented = true;
         }
 
-        if let Some(gpu_texture) = self.gpu_texture.take() {
-            gpu_texture.present(&self.instance.backend(), self.frame_index);
+        match self.gpu_texture.take() {
+            Some(gpu_texture) => gpu_texture.present(&self.instance.backend(), self.frame_index),
+            None => Ok(()),
         }
     }
 }
@@ -449,8 +468,14 @@ impl std::fmt::Debug for SurfaceTexture {
 
 impl Drop for SurfaceTexture {
     fn drop(&mut self) {
-        // Note: If the SurfaceTexture is dropped without presenting,
-        // the frame will be skipped. This is intentional behavior.
+        // Dropped without presenting (error path, panic unwind). The acquired
+        // image must still be released: on Vulkan its pending semaphore
+        // signals can only be drained by presenting, so `abandon` presents
+        // the undrawn image — one undefined frame beats permanently poisoned
+        // sync objects. On wgpu this is a plain drop.
+        if let Some(gpu_texture) = self.gpu_texture.take() {
+            gpu_texture.abandon(&self.instance.backend(), self.frame_index);
+        }
     }
 }
 

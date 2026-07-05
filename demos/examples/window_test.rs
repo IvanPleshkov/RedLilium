@@ -35,8 +35,8 @@ use winit::platform::windows::EventLoopBuilderExtWindows;
 use winit::window::{Window, WindowId};
 
 use redlilium_graphics::{
-    BackendType, ColorAttachment, FramePipeline, GraphicsDevice, GraphicsInstance, GraphicsPass,
-    InstanceParameters, LoadOp, PresentMode, RenderTargetConfig, StoreOp, Surface,
+    BackendType, ColorAttachment, FramePipeline, GraphicsDevice, GraphicsError, GraphicsInstance,
+    GraphicsPass, InstanceParameters, LoadOp, PresentMode, RenderTargetConfig, StoreOp, Surface,
     SurfaceConfiguration, WgpuBackendType,
 };
 
@@ -162,6 +162,17 @@ impl WindowTestApp {
 
         let swapchain_texture = match surface.acquire_texture() {
             Ok(t) => t,
+            Err(GraphicsError::SurfaceOutdated | GraphicsError::SurfaceLost) => {
+                // Reconfigure with the current size and skip this frame.
+                log::info!("Surface outdated, reconfiguring");
+                let config = SurfaceConfiguration::new(self.window_size.0, self.window_size.1)
+                    .with_format(surface.preferred_format())
+                    .with_present_mode(PresentMode::Fifo);
+                if let Some(device) = &self.device {
+                    let _ = surface.configure(device, &config);
+                }
+                return true;
+            }
             Err(e) => {
                 log::warn!("Failed to acquire swapchain texture: {}", e);
                 return false;
@@ -187,7 +198,10 @@ impl WindowTestApp {
         schedule.render(graph);
         pipeline.end_frame(schedule);
 
-        swapchain_texture.present();
+        if let Err(e) = swapchain_texture.present() {
+            // SurfaceOutdated here is non-fatal: the next acquire reconfigures.
+            log::warn!("Present reported: {}", e);
+        }
 
         log::info!(
             "Frame {} rendered (clear color: RGB({:.2}, {:.2}, {:.2}))",
