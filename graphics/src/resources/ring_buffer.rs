@@ -153,6 +153,10 @@ impl RingBuffer {
         // Ensure capacity is aligned
         let aligned_capacity = align_up(capacity, alignment);
 
+        // The RING flag marks this as a CPU-written-per-frame buffer: the
+        // Vulkan backend allocates it host-visible (ADR-020). MAP_WRITE must
+        // NOT be added here — on wgpu that flag only combines with COPY_SRC,
+        // and rings are written via Queue::write_buffer there instead.
         let descriptor = BufferDescriptor::new(aligned_capacity, usage | BufferUsage::RING)
             .with_label(format!("{label}_ring"));
 

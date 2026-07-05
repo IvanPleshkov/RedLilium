@@ -12,6 +12,7 @@ mod device;
 mod instance;
 pub mod layout;
 mod pipeline;
+mod staging;
 pub mod swapchain;
 
 use std::mem::ManuallyDrop;
@@ -211,12 +212,11 @@ pub struct VulkanBackend {
     pipeline_manager: pipeline::PipelineManager,
     /// Scratch buffers for allocation reuse during pass encoding.
     encoder_scratch: Mutex<VulkanEncoderScratch>,
-    /// Transient staging buffers created while encoding a frame (e.g. for
-    /// `WriteBuffer` transfer ops), retired per frame slot. A slot's buffers
-    /// are destroyed in [`advance_frame`](Self::advance_frame) once its fence
-    /// has signalled, so the GPU is guaranteed to be done with them.
-    retired_staging:
-        Mutex<[Vec<(vk::Buffer, gpu_allocator::vulkan::Allocation)>; MAX_FRAMES_IN_FLIGHT]>,
+    /// Pooled staging memory for frame-graph uploads (`WriteBuffer` transfer
+    /// ops). Chunks written during a frame stay owned by its slot and return
+    /// to the pool in [`advance_frame`](Self::advance_frame) once the slot's
+    /// fence has signalled, so the GPU is guaranteed to be done with them.
+    staging_belt: Mutex<staging::StagingBelt>,
 }
 
 impl std::fmt::Debug for VulkanBackend {
@@ -265,14 +265,17 @@ impl VulkanBackend {
             device.clone(),
         )?));
 
-        // Create command pool (staging uploads + swapchain present).
-        let command_pool = command::create_command_pool(&device, graphics_queue_family)?;
+        // Create command pool (staging uploads + swapchain present). Present
+        // command buffers are reset individually each frame, so this pool
+        // needs per-buffer reset.
+        let command_pool = command::create_command_pool(&device, graphics_queue_family, true)?;
 
-        // Per-frame-slot pools for the render-graph submit, reset per slot.
+        // Per-frame-slot pools for the render-graph submit — only ever
+        // bulk-reset once the slot's fence signals, so no per-buffer reset.
         let frame_command_pools = {
             let mut pools = [vk::CommandPool::null(); MAX_FRAMES_IN_FLIGHT];
             for pool in &mut pools {
-                *pool = command::create_command_pool(&device, graphics_queue_family)?;
+                *pool = command::create_command_pool(&device, graphics_queue_family, false)?;
             }
             pools
         };
@@ -346,7 +349,7 @@ impl VulkanBackend {
             pipeline_manager,
             depth24_stencil8_format,
             encoder_scratch: Mutex::new(VulkanEncoderScratch::default()),
-            retired_staging: Mutex::new(Default::default()),
+            staging_belt: Mutex::new(staging::StagingBelt::default()),
         })
     }
 
@@ -506,16 +509,11 @@ impl VulkanBackend {
         // guarantees the GPU is done with all descriptor sets from this slot.
         let _ = self.pipeline_manager.reset_descriptor_pool(oldest);
 
-        // Destroy the oldest slot's transient staging buffers — same safety
-        // argument: the fence wait guarantees their copies have completed.
-        let retired: Vec<_> = self.retired_staging.lock()[oldest].drain(..).collect();
-        if !retired.is_empty() {
-            let mut allocator = self.allocator.lock();
-            for (buffer, allocation) in retired {
-                unsafe { self.device.destroy_buffer(buffer, None) };
-                let _ = allocator.free(allocation);
-            }
-        }
+        // Return the oldest slot's staging-belt chunks to the pool — same
+        // safety argument: the fence wait guarantees their copies completed.
+        self.staging_belt
+            .lock()
+            .retire_slot(&self.device, &mut self.allocator.lock(), oldest);
 
         // Remove destroyed resources from the barrier trackers so the maps
         // stay bounded by live resources. Safe at any point: texture ids are
@@ -786,18 +784,11 @@ impl Drop for VulkanBackend {
             }
             self.device.destroy_command_pool(self.command_pool, None);
 
-            // Destroy any staging buffers still retired in frame slots (the
-            // device_wait_idle above guarantees the GPU is done with them).
-            {
-                let mut slots = self.retired_staging.lock();
-                let mut allocator = self.allocator.lock();
-                for slot in slots.iter_mut() {
-                    for (buffer, allocation) in slot.drain(..) {
-                        self.device.destroy_buffer(buffer, None);
-                        let _ = allocator.free(allocation);
-                    }
-                }
-            }
+            // Destroy the staging belt (the device_wait_idle above
+            // guarantees the GPU is done with every chunk).
+            self.staging_belt
+                .lock()
+                .destroy(&self.device, &mut self.allocator.lock());
 
             // Drop the allocator BEFORE destroying the device. gpu-allocator's
             // `Allocator::drop` frees its pooled memory blocks using the device,
@@ -831,10 +822,15 @@ impl VulkanBackend {
     pub fn create_buffer(&self, descriptor: &BufferDescriptor) -> Result<GpuBuffer, GraphicsError> {
         let usage = convert_buffer_usage(descriptor.usage);
 
-        // Determine memory location based on usage flags.
-        // Buffers that need CPU access (MAP_READ, MAP_WRITE, or COPY_DST for CPU writes)
-        // should use host-visible memory. UNIFORM and VERTEX buffers with COPY_DST are
-        // commonly updated from CPU, so use CpuToGpu for those too.
+        // Memory location follows mappability, not copyability (ADR-020):
+        // COPY_DST destinations are written by GPU-side copies and belong in
+        // device-local memory — the old `COPY_DST => CpuToGpu` heuristic put
+        // every mesh/uniform buffer in host-visible memory, so draws fetched
+        // over PCIe on discrete GPUs. Buffers the CPU writes directly are
+        // marked MAP_WRITE or RING (ring buffers are mapped-written every
+        // frame; RING stays an engine-side flag because wgpu's MAP_WRITE has
+        // different combination rules and rings use Queue::write_buffer
+        // there).
         let location = if descriptor
             .usage
             .contains(crate::types::BufferUsage::MAP_READ)
@@ -842,13 +838,8 @@ impl VulkanBackend {
             gpu_allocator::MemoryLocation::GpuToCpu
         } else if descriptor
             .usage
-            .contains(crate::types::BufferUsage::MAP_WRITE)
-            || descriptor
-                .usage
-                .contains(crate::types::BufferUsage::COPY_DST)
+            .intersects(crate::types::BufferUsage::MAP_WRITE | crate::types::BufferUsage::RING)
         {
-            // COPY_DST buffers are typically updated from CPU via write_buffer,
-            // so they need host-visible memory for direct mapping
             gpu_allocator::MemoryLocation::CpuToGpu
         } else {
             gpu_allocator::MemoryLocation::GpuOnly
@@ -1436,11 +1427,15 @@ impl VulkanBackend {
         {
             profile_scope!("record_passes");
             let pass_usages = compiled.pass_usages();
+            // One batch reused across passes: its merge maps keep their
+            // capacity instead of two fresh HashMaps per pass.
+            let mut barriers = BarrierBatch::new();
             for (i, handle) in compiled.pass_order().iter().enumerate() {
                 let pass = &passes[handle.index()];
 
                 // Generate barriers from pre-computed resource usage
-                let barriers = self.generate_barriers_for_pass(&pass_usages[i]);
+                barriers.clear();
+                self.generate_barriers_for_pass(&mut barriers, &pass_usages[i]);
                 barriers.submit(&self.device, cmd);
 
                 // Encode the pass
@@ -1455,11 +1450,9 @@ impl VulkanBackend {
 
         // One render graph per frame: the only synchronization is the swapchain
         // acquire/render-finished handshake below. There is no cross-graph
-        // semaphore ordering (a single submit per frame).
-        let mut vk_wait_semaphores: Vec<vk::Semaphore> = Vec::new();
-        let mut wait_stage_masks: Vec<vk::PipelineStageFlags> = Vec::new();
-        let mut vk_signal_semaphores: Vec<vk::Semaphore> = Vec::new();
-
+        // semaphore ordering (a single submit per frame) — at most one
+        // wait/signal pair, held in fixed-size arrays (no per-frame Vecs).
+        //
         // If this graph writes the acquired swapchain image, this submit must
         // wait on `image_available` (so it does not write the image before the
         // presentation engine releases it) and signal `image_render_finished`
@@ -1469,11 +1462,14 @@ impl VulkanBackend {
         } else {
             None
         };
-        if let Some((image_available, image_render_finished)) = swapchain_pair {
-            vk_wait_semaphores.push(image_available);
-            wait_stage_masks.push(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT);
-            vk_signal_semaphores.push(image_render_finished);
-        }
+        let (vk_wait_semaphores, vk_signal_semaphores) = match swapchain_pair {
+            Some((image_available, image_render_finished)) => {
+                ([image_available], [image_render_finished])
+            }
+            None => ([vk::Semaphore::null()], [vk::Semaphore::null()]),
+        };
+        let wait_stage_masks = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+        let sem_count = usize::from(swapchain_pair.is_some());
 
         // Get fence to signal
         let fence = signal_fence.and_then(|f| {
@@ -1493,14 +1489,11 @@ impl VulkanBackend {
             profile_scope!("queue_submit");
             let mut submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
 
-            if !vk_wait_semaphores.is_empty() {
+            if sem_count > 0 {
                 submit_info = submit_info
-                    .wait_semaphores(&vk_wait_semaphores)
-                    .wait_dst_stage_mask(&wait_stage_masks);
-            }
-
-            if !vk_signal_semaphores.is_empty() {
-                submit_info = submit_info.signal_semaphores(&vk_signal_semaphores);
+                    .wait_semaphores(&vk_wait_semaphores[..sem_count])
+                    .wait_dst_stage_mask(&wait_stage_masks[..sem_count])
+                    .signal_semaphores(&vk_signal_semaphores[..sem_count]);
             }
 
             let submit_result = unsafe {
@@ -1554,18 +1547,20 @@ impl VulkanBackend {
         }
     }
 
-    /// Generate barriers for a pass's resource usage.
+    /// Generate barriers for a pass's resource usage into `batch`.
     ///
     /// This examines the texture and buffer usages declared by the pass, determines
     /// required layout transitions and memory barriers, and updates tracker state.
+    /// The caller provides (and clears) the batch so its maps' capacity is
+    /// reused across passes.
     fn generate_barriers_for_pass(
         &self,
+        batch: &mut BarrierBatch,
         usage: &crate::graph::resource_usage::PassResourceUsage,
-    ) -> BarrierBatch {
+    ) {
         use crate::graph::resource_usage::TextureAccessMode;
 
         let mut tracker = self.layout_tracker.lock();
-        let mut batch = BarrierBatch::new();
 
         // Generate texture (image) barriers
         for decl in &usage.texture_usages {
@@ -1635,8 +1630,6 @@ impl VulkanBackend {
                 );
             }
         }
-
-        batch
     }
 
     /// Write data to a buffer.
@@ -1648,28 +1641,187 @@ impl VulkanBackend {
         offset: u64,
         data: &[u8],
     ) -> Result<(), GraphicsError> {
-        let GpuBuffer::Vulkan { allocation, .. } = buffer else {
+        let GpuBuffer::Vulkan {
+            buffer: dst_buffer,
+            allocation,
+            size,
+            ..
+        } = buffer
+        else {
             return Err(GraphicsError::Internal(
                 "write_buffer called with non-Vulkan buffer".to_string(),
             ));
         };
 
-        let guard = allocation.lock();
-        let Some(allocation) = guard.as_ref() else {
-            return Err(GraphicsError::Internal(
-                "Buffer allocation is None".to_string(),
-            ));
-        };
+        if data.is_empty() {
+            return Ok(());
+        }
+        let end = offset.checked_add(data.len() as u64);
+        if end.is_none_or(|end| end > *size) {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "write_buffer range at offset {offset} ({} bytes) exceeds buffer size {size}",
+                data.len()
+            )));
+        }
 
-        let Some(mapped_ptr) = allocation.mapped_ptr() else {
-            return Err(GraphicsError::Internal(
-                "Buffer is not mapped for CPU access".to_string(),
-            ));
-        };
+        // Host-visible buffer (MAP_WRITE/MAP_READ): direct mapped write.
+        {
+            let guard = allocation.lock();
+            let Some(alloc) = guard.as_ref() else {
+                return Err(GraphicsError::Internal(
+                    "Buffer allocation is None".to_string(),
+                ));
+            };
+            if let Some(mapped_ptr) = alloc.mapped_ptr() {
+                unsafe {
+                    let dst = mapped_ptr.as_ptr().add(offset as usize);
+                    std::ptr::copy_nonoverlapping(data.as_ptr(), dst as *mut u8, data.len());
+                }
+                return Ok(());
+            }
+        }
 
+        // Device-local destination: **blocking convenience path** (ADR-020),
+        // mirroring `write_texture` — one-shot staging copy + synchronous
+        // wait. Fine for tools/tests/one-time setup; per-frame data belongs
+        // in a RingBuffer (MAP_WRITE) or a `TransferOperation::WriteBuffer`
+        // in the frame graph. Assumes the buffer is not concurrently read by
+        // in-flight frames (same contract as `write_texture`).
+        let (staging, staging_alloc) =
+            self.create_transient_staging(data, "write_buffer_oneshot")?;
+        let dst = *dst_buffer;
+        let byte_len = data.len() as u64;
+        let result = self.submit_one_shot(|device, cmd| {
+            let region = vk::BufferCopy::default()
+                .src_offset(0)
+                .dst_offset(offset)
+                .size(byte_len);
+            // The one-shot submit is outside the frame graph, so the buffer
+            // tracker knows nothing about this write — make it visible to
+            // any later use up front.
+            let barrier = vk::BufferMemoryBarrier::default()
+                .buffer(dst)
+                .offset(0)
+                .size(vk::WHOLE_SIZE)
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
+            unsafe {
+                device.cmd_copy_buffer(cmd, staging, dst, &[region]);
+                device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::ALL_COMMANDS,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[barrier],
+                    &[],
+                );
+            }
+        });
+        match result {
+            Ok(()) => {
+                unsafe {
+                    self.device.destroy_buffer(staging, None);
+                }
+                if let Err(e) = self.allocator.lock().free(staging_alloc) {
+                    log::error!("Failed to free one-shot staging allocation: {e}");
+                }
+                Ok(())
+            }
+            Err(e) => {
+                // On timeout/device loss the GPU may still read the staging
+                // buffer — leak it rather than freeing in-use memory.
+                log::error!("One-shot write_buffer failed ({e}); leaking staging buffer");
+                Err(e)
+            }
+        }
+    }
+
+    /// Record and synchronously execute a one-shot command buffer on the
+    /// graphics queue.
+    ///
+    /// Blocking convenience paths only. On fence-wait failure the command
+    /// buffer is leaked (the GPU may still be executing it) and the error is
+    /// returned.
+    fn submit_one_shot(
+        &self,
+        record: impl FnOnce(&ash::Device, vk::CommandBuffer),
+    ) -> Result<(), GraphicsError> {
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(self.command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        let cmd_buffers =
+            unsafe { self.device.allocate_command_buffers(&alloc_info) }.map_err(|e| {
+                GraphicsError::Internal(format!("Failed to allocate command buffer: {e:?}"))
+            })?;
+        let cmd = cmd_buffers[0];
+
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        let recorded = unsafe { self.device.begin_command_buffer(cmd, &begin_info) }
+            .map_err(|e| GraphicsError::Internal(format!("Failed to begin command buffer: {e:?}")))
+            .map(|_| record(&self.device, cmd))
+            .and_then(|_| {
+                unsafe { self.device.end_command_buffer(cmd) }.map_err(|e| {
+                    GraphicsError::Internal(format!("Failed to end command buffer: {e:?}"))
+                })
+            });
+        if let Err(e) = recorded {
+            unsafe {
+                self.device
+                    .free_command_buffers(self.command_pool, &cmd_buffers);
+            }
+            return Err(e);
+        }
+
+        let fence = unsafe {
+            self.device
+                .create_fence(&vk::FenceCreateInfo::default(), None)
+        }
+        .map_err(|e| {
+            unsafe {
+                self.device
+                    .free_command_buffers(self.command_pool, &cmd_buffers);
+            }
+            GraphicsError::Internal(format!("Failed to create one-shot fence: {e:?}"))
+        })?;
+
+        let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
+        if let Err(e) = unsafe {
+            self.device
+                .queue_submit(self.graphics_queue, &[submit_info], fence)
+        } {
+            unsafe {
+                self.device.destroy_fence(fence, None);
+                self.device
+                    .free_command_buffers(self.command_pool, &cmd_buffers);
+            }
+            return Err(match e {
+                vk::Result::ERROR_DEVICE_LOST => GraphicsError::DeviceLost,
+                other => GraphicsError::Internal(format!("One-shot submit failed: {other:?}")),
+            });
+        }
+
+        if let Err(e) = unsafe {
+            self.device
+                .wait_for_fences(&[fence], true, FENCE_WAIT_TIMEOUT_NS)
+        } {
+            log::error!("One-shot fence wait failed ({e:?}); leaking command buffer and fence");
+            return Err(match e {
+                vk::Result::TIMEOUT => {
+                    GraphicsError::Timeout("one-shot submit did not complete within 10 s".into())
+                }
+                vk::Result::ERROR_DEVICE_LOST => GraphicsError::DeviceLost,
+                other => GraphicsError::Internal(format!("one-shot fence wait failed: {other:?}")),
+            });
+        }
         unsafe {
-            let dst = mapped_ptr.as_ptr().add(offset as usize);
-            std::ptr::copy_nonoverlapping(data.as_ptr(), dst as *mut u8, data.len());
+            self.device.destroy_fence(fence, None);
+            self.device
+                .free_command_buffers(self.command_pool, &cmd_buffers);
         }
         Ok(())
     }
@@ -2881,24 +3033,29 @@ impl VulkanBackend {
                         bytes.len()
                     )));
                 }
-                // Copy via a transient staging buffer at THIS point in the
-                // command buffer, so the write lands at the transfer pass's
-                // position in the graph: passes ordered before it see the old
-                // contents, passes after it see the new. A host memcpy here
-                // would instead be visible to the whole frame — and race any
+                // Copy via belt staging at THIS point in the command buffer,
+                // so the write lands at the transfer pass's position in the
+                // graph: passes ordered before it see the old contents,
+                // passes after it see the new. A host memcpy here would
+                // instead be visible to the whole frame — and race any
                 // still-executing previous frame reading the same memory.
-                let (staging, staging_alloc) =
-                    self.create_transient_staging(bytes, "write_buffer_staging")?;
+                // The belt chunk stays owned by this frame slot until its
+                // fence signals (retired in `advance_frame`).
+                let slot = self.current_slot.load(Ordering::Relaxed);
+                let (staging, src_offset) = self.staging_belt.lock().write(
+                    &self.device,
+                    &mut self.allocator.lock(),
+                    slot,
+                    bytes,
+                )?;
                 let region = vk::BufferCopy::default()
-                    .src_offset(0)
+                    .src_offset(src_offset)
                     .dst_offset(*dst_offset)
                     .size(bytes.len() as u64);
                 unsafe {
                     self.device
                         .cmd_copy_buffer(cmd, staging, *dst_buffer, &[region]);
                 }
-                let slot = self.current_slot.load(Ordering::Relaxed);
-                self.retired_staging.lock()[slot].push((staging, staging_alloc));
             }
             // Drained by the frame pipeline after the fence (CPU read); nothing
             // to encode here.

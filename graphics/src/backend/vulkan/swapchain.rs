@@ -18,6 +18,11 @@ pub struct VulkanSwapchain {
     pub(crate) swapchain: vk::SwapchainKHR,
     pub(crate) images: Vec<vk::Image>,
     pub(crate) image_views: Vec<vk::ImageView>,
+    /// Prebuilt shared wrappers over `image_views`, cloned per acquire —
+    /// avoids an Arc allocation + device clone every frame. Destruction is
+    /// owned by `image_views` (the wrapper's Drop is a no-op for swapchain
+    /// views).
+    image_view_wrappers: Vec<Arc<VulkanImageView>>,
     #[allow(dead_code)] // Reserved for future use
     pub(crate) format: vk::Format,
     #[allow(dead_code)] // Reserved for future use
@@ -219,6 +224,11 @@ impl VulkanSwapchain {
             .map(|&image| vulkan_backend.create_swapchain_image_view(image, surface_format.format))
             .collect::<Result<Vec<_>, _>>()?;
 
+        let image_view_wrappers: Vec<Arc<VulkanImageView>> = image_views
+            .iter()
+            .map(|&view| Arc::new(VulkanImageView::new(vulkan_backend.device().clone(), view)))
+            .collect();
+
         // Create synchronization primitives for frames in flight
         let semaphore_info = vk::SemaphoreCreateInfo::default();
         let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
@@ -310,6 +320,7 @@ impl VulkanSwapchain {
             swapchain,
             images,
             image_views,
+            image_view_wrappers,
             format: surface_format.format,
             extent,
             current_image_index: 0,
@@ -363,7 +374,9 @@ impl VulkanSwapchain {
                 self.device.destroy_fence(fence, None);
             }
 
-            // Destroy image views
+            // Drop the shared wrappers first (their Drop does not destroy the
+            // views), then destroy the views themselves.
+            self.image_view_wrappers.clear();
             for view in self.image_views.drain(..) {
                 self.device.destroy_image_view(view, None);
             }
@@ -462,7 +475,6 @@ impl VulkanSwapchain {
         }
 
         let image = self.images[image_idx];
-        let view = self.image_views[image_idx];
         let swapchain_handle = self.swapchain;
         let present_cmd = self.present_command_buffers[current_frame];
 
@@ -471,7 +483,7 @@ impl VulkanSwapchain {
 
         let vulkan_view = VulkanSurfaceTextureView {
             image,
-            view: Arc::new(VulkanImageView::new(vulkan_backend.device().clone(), view)),
+            view: Arc::clone(&self.image_view_wrappers[image_idx]),
         };
 
         Ok(VulkanSwapchainAcquireResult {
