@@ -384,7 +384,8 @@ impl Schedules {
     ///
     /// Execution order:
     /// 1. Update [`Time`] resource
-    /// 2. Swap reactive trigger buffers (once per frame)
+    /// 2. Swap reactive trigger buffers and advance event queues (once
+    ///    per frame)
     /// 3. Run [`PreUpdate`] (state transitions happen here)
     /// 4. Check state transitions → run `OnExit` / `OnEnter` schedules
     /// 5. Run [`FixedUpdate`] (accumulator loop)
@@ -403,11 +404,12 @@ impl Schedules {
             time.fixed_delta = self.fixed_timestep;
         }
 
-        // 2. Swap reactive trigger buffers exactly once per frame (last
-        //    frame's collecting → readable). Doing this per runner.run would
-        //    make Triggers<M> visibility depend on how many schedules and
-        //    FixedUpdate iterations happen to run.
+        // 2. Swap reactive trigger buffers and advance event queues exactly
+        //    once per frame. Doing this per runner.run would make Triggers<M>
+        //    visibility and Events<T> lifetime depend on how many schedules
+        //    and FixedUpdate iterations happen to run.
         world.update_triggers();
+        world.update_events();
 
         // 3. Run PreUpdate
         if let Some(schedule) = self.schedules.get(&ScheduleId::of::<PreUpdate>()) {

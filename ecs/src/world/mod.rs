@@ -146,6 +146,8 @@ pub struct World {
     pub(crate) observers: Observers,
     /// Monomorphized swap functions for each registered `Triggers<M>` resource.
     trigger_swap_fns: Vec<fn(&mut World)>,
+    /// Monomorphized update functions for each registered `Events<T>` resource.
+    event_update_fns: Vec<fn(&mut World)>,
 }
 
 impl redlilium_core::abstract_editor::Editable for World {}
@@ -165,6 +167,7 @@ impl World {
             name_index: BTreeMap::new(),
             observers: Observers::new(),
             trigger_swap_fns: Vec::new(),
+            event_update_fns: Vec::new(),
         }
     }
 
@@ -268,6 +271,13 @@ impl World {
 /// Used as a monomorphized function pointer stored in `World::trigger_swap_fns`.
 fn swap_trigger_buffer<M: 'static>(world: &mut World) {
     world.resource_mut::<Triggers<M>>().swap();
+}
+
+/// Advances the event double buffer for event type `T`.
+///
+/// Used as a monomorphized function pointer stored in `World::event_update_fns`.
+fn update_event_buffer<T: Send + Sync + 'static>(world: &mut World) {
+    world.resource_mut::<crate::events::Events<T>>().update();
 }
 
 impl Default for World {

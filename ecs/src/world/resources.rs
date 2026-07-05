@@ -221,8 +221,34 @@ impl World {
     /// Registers an event type by inserting an empty [`Events<T>`] resource.
     ///
     /// Call this during setup, before running systems that send or receive
-    /// events of type T.
+    /// events of type T. The queue's double buffer is advanced once per
+    /// frame by `Schedules::run_frame` (via [`update_events`](World::update_events)).
     pub fn add_event<T: Send + Sync + 'static>(&mut self) {
+        // Idempotent: a second registration would add a duplicate update fn,
+        // making the buffer advance twice per frame and drop events after
+        // one frame instead of two.
+        if self.has_resource::<Events<T>>() {
+            return;
+        }
         self.insert_resource(Events::<T>::new());
+        self.event_update_fns.push(super::update_event_buffer::<T>);
+    }
+
+    /// Advances all registered event queues (drops last frame's events,
+    /// current frame's become readable-as-previous).
+    ///
+    /// Called by `Schedules::run_frame` once at the start of each frame —
+    /// NOT per `runner.run`, so event lifetime does not depend on how many
+    /// schedules (or FixedUpdate iterations) ran this frame. Drive it
+    /// manually when running containers without `run_frame`.
+    pub fn update_events(&mut self) {
+        if self.event_update_fns.is_empty() {
+            return;
+        }
+        let fns = std::mem::take(&mut self.event_update_fns);
+        for f in &fns {
+            f(self);
+        }
+        self.event_update_fns = fns;
     }
 }

@@ -828,3 +828,128 @@ mod runner_robustness {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Events: per-reader cursors, exactly-once delivery through run_frame
+// ---------------------------------------------------------------------------
+
+mod events {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use redlilium_ecs::{
+        EcsRunner, EventCursor, Events, PostUpdate, PreUpdate, Res, ResMut, Schedules, System,
+        SystemContext, SystemError, Update, World,
+    };
+
+    struct Damage(u32);
+
+    /// Sends Damage(1) on frame 1 and Damage(2) on frame 2, nothing after.
+    struct Sender {
+        frame: AtomicU32,
+    }
+    impl System for Sender {
+        type Result = ();
+        fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+            let frame = self.frame.fetch_add(1, Ordering::SeqCst) + 1;
+            ctx.lock::<(ResMut<Events<Damage>>,)>()
+                .execute(|(mut events,)| {
+                    if frame <= 2 {
+                        events.send(Damage(frame));
+                    }
+                });
+            Ok(())
+        }
+    }
+
+    /// Accumulates every Damage value it reads (sum and count).
+    struct Reader {
+        cursor: EventCursor<Damage>,
+        sum: Arc<AtomicU32>,
+        count: Arc<AtomicU32>,
+    }
+    impl Reader {
+        fn new(sum: Arc<AtomicU32>, count: Arc<AtomicU32>) -> Self {
+            Self {
+                cursor: EventCursor::new(),
+                sum,
+                count,
+            }
+        }
+    }
+    impl System for Reader {
+        type Result = ();
+        fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+            ctx.lock::<(Res<Events<Damage>>,)>().execute(|(events,)| {
+                for damage in events.read(&self.cursor) {
+                    self.sum.fetch_add(damage.0, Ordering::SeqCst);
+                    self.count.fetch_add(1, Ordering::SeqCst);
+                }
+            });
+            Ok(())
+        }
+    }
+
+    /// A reader ordered BEFORE the sender (PreUpdate) and one ordered AFTER
+    /// it (PostUpdate) must both see every event exactly once.
+    #[test]
+    fn exactly_once_before_and_after_sender() {
+        let mut world = World::new();
+        world.add_event::<Damage>();
+
+        let pre_sum = Arc::new(AtomicU32::new(0));
+        let pre_count = Arc::new(AtomicU32::new(0));
+        let post_sum = Arc::new(AtomicU32::new(0));
+        let post_count = Arc::new(AtomicU32::new(0));
+
+        let mut schedules = Schedules::new();
+        schedules
+            .get_mut::<PreUpdate>()
+            .add(Reader::new(pre_sum.clone(), pre_count.clone()));
+        schedules.get_mut::<Update>().add(Sender {
+            frame: AtomicU32::new(0),
+        });
+        schedules
+            .get_mut::<PostUpdate>()
+            .add(Reader::new(post_sum.clone(), post_count.clone()));
+
+        let runner = EcsRunner::single_thread();
+        for _ in 0..4 {
+            schedules.run_frame(&mut world, &runner, 1.0 / 60.0);
+        }
+
+        // Sender emitted Damage(1) and Damage(2): sum 3, two events.
+        // The PostUpdate reader sees each in its send frame; the PreUpdate
+        // reader sees each one frame later; neither sees anything twice.
+        assert_eq!(post_sum.load(Ordering::SeqCst), 3);
+        assert_eq!(post_count.load(Ordering::SeqCst), 2);
+        assert_eq!(pre_sum.load(Ordering::SeqCst), 3);
+        assert_eq!(pre_count.load(Ordering::SeqCst), 2);
+    }
+
+    /// Same setup on the multi-threaded runner.
+    #[test]
+    fn exactly_once_multi_thread() {
+        let mut world = World::new();
+        world.add_event::<Damage>();
+
+        let sum = Arc::new(AtomicU32::new(0));
+        let count = Arc::new(AtomicU32::new(0));
+
+        let mut schedules = Schedules::new();
+        schedules
+            .get_mut::<PreUpdate>()
+            .add(Reader::new(sum.clone(), count.clone()));
+        schedules.get_mut::<Update>().add(Sender {
+            frame: AtomicU32::new(0),
+        });
+
+        let runner = EcsRunner::multi_thread(2);
+        for _ in 0..4 {
+            schedules.run_frame(&mut world, &runner, 1.0 / 60.0);
+        }
+
+        assert_eq!(sum.load(Ordering::SeqCst), 3);
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+    }
+}
