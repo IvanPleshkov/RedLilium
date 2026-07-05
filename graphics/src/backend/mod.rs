@@ -31,6 +31,8 @@ use std::sync::Arc;
 #[cfg(feature = "vulkan-backend")]
 use ash::vk;
 #[cfg(feature = "vulkan-backend")]
+use ash::vk::Handle;
+#[cfg(feature = "vulkan-backend")]
 use gpu_allocator::vulkan::Allocation;
 #[cfg(feature = "vulkan-backend")]
 use gpu_allocator::vulkan::Allocator;
@@ -60,6 +62,9 @@ pub enum GpuBuffer {
         size: u64,
         /// Allocator for freeing memory on drop.
         allocator: Arc<Mutex<Allocator>>,
+        /// Shared retirement queue: `Drop` pushes the buffer handle here so
+        /// the backend removes its access-tracker entry in `advance_frame`.
+        retired: Arc<Mutex<vulkan::RetiredTrackerHandles>>,
     },
 }
 
@@ -105,6 +110,9 @@ pub enum GpuTexture {
         /// raw `image` handle, this is never reused after the texture is
         /// destroyed, so it can't alias a recreated texture's tracked layout.
         id: u64,
+        /// Shared retirement queue: `Drop` pushes `id` here so the backend
+        /// removes its layout-tracker entry in `advance_frame`.
+        retired: Arc<Mutex<vulkan::RetiredTrackerHandles>>,
     },
 }
 
@@ -645,6 +653,7 @@ impl Drop for GpuBuffer {
             buffer,
             allocation,
             allocator,
+            retired,
             ..
         } = self
         {
@@ -653,6 +662,7 @@ impl Drop for GpuBuffer {
             {
                 log::error!("Failed to free buffer allocation: {}", e);
             }
+            retired.lock().buffers.push(buffer.as_raw());
             unsafe { device.destroy_buffer(*buffer, None) };
         }
     }
@@ -667,6 +677,8 @@ impl Drop for GpuTexture {
             view,
             allocation,
             allocator,
+            id,
+            retired,
             ..
         } = self
         {
@@ -675,6 +687,7 @@ impl Drop for GpuTexture {
             {
                 log::error!("Failed to free texture allocation: {}", e);
             }
+            retired.lock().textures.push(*id);
             unsafe {
                 device.destroy_image_view(*view, None);
                 device.destroy_image(*image, None);

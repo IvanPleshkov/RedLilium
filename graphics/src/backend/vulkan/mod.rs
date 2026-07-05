@@ -43,6 +43,21 @@ pub(crate) const FENCE_WAIT_TIMEOUT_NS: u64 = 10_000_000_000;
 static NEXT_TEXTURE_ID: AtomicU64 = AtomicU64::new(1);
 pub use layout::{TextureLayout, TextureLayoutTracker, TextureUsageGraph};
 
+/// Handles of destroyed resources awaiting removal from the barrier trackers.
+///
+/// `GpuTexture`/`GpuBuffer` drops push their tracker keys here (they can't
+/// touch the trackers directly — drops happen wherever the last `Arc` dies);
+/// [`VulkanBackend::advance_frame`] drains the queue and removes the entries,
+/// so tracker maps stay bounded by the number of live resources instead of
+/// growing with every texture/buffer ever created.
+#[derive(Debug, Default)]
+pub struct RetiredTrackerHandles {
+    /// Stable texture ids (the layout-tracker keys).
+    pub textures: Vec<u64>,
+    /// Raw `vk::Buffer` handles (the access-tracker keys).
+    pub buffers: Vec<u64>,
+}
+
 use self::barriers::{BarrierBatch, BufferAccessTracker, BufferId};
 use self::layout::TextureId;
 
@@ -184,6 +199,10 @@ pub struct VulkanBackend {
     /// Per-buffer last-access tracker for precise buffer barriers
     /// (mirrors `layout_tracker` for buffers).
     buffer_tracker: Mutex<BufferAccessTracker>,
+    /// Tracker keys of destroyed textures/buffers, pushed by resource drops
+    /// and drained in [`advance_frame`](Self::advance_frame) so the tracker
+    /// maps don't grow with every resource ever created.
+    retired_tracker_handles: Arc<Mutex<RetiredTrackerHandles>>,
     /// Pipeline manager for shader compilation and pipeline creation.
     pipeline_manager: pipeline::PipelineManager,
     /// Scratch buffers for allocation reuse during pass encoding.
@@ -294,6 +313,7 @@ impl VulkanBackend {
             current_slot: AtomicUsize::new(0),
             layout_tracker,
             buffer_tracker: Mutex::new(BufferAccessTracker::new()),
+            retired_tracker_handles: Arc::new(Mutex::new(RetiredTrackerHandles::default())),
             pipeline_manager,
             encoder_scratch: Mutex::new(VulkanEncoderScratch::default()),
             retired_staging: Mutex::new(Default::default()),
@@ -434,6 +454,24 @@ impl VulkanBackend {
             for (buffer, allocation) in retired {
                 unsafe { self.device.destroy_buffer(buffer, None) };
                 let _ = allocator.free(allocation);
+            }
+        }
+
+        // Remove destroyed resources from the barrier trackers so the maps
+        // stay bounded by live resources. Safe at any point: texture ids are
+        // never reused, and a buffer handle reused before this drain merely
+        // loses benign access state (next use counts as first).
+        let retired = std::mem::take(&mut *self.retired_tracker_handles.lock());
+        if !retired.textures.is_empty() {
+            let mut tracker = self.layout_tracker.lock();
+            for id in retired.textures {
+                tracker.remove(layout::TextureId::from_raw(id));
+            }
+        }
+        if !retired.buffers.is_empty() {
+            let mut tracker = self.buffer_tracker.lock();
+            for handle in retired.buffers {
+                tracker.remove(BufferId::from_raw(handle));
             }
         }
     }
@@ -690,6 +728,7 @@ impl VulkanBackend {
             allocation: Mutex::new(Some(allocation)),
             size: descriptor.size,
             allocator: Arc::clone(&self.allocator),
+            retired: Arc::clone(&self.retired_tracker_handles),
         })
     }
 
@@ -880,6 +919,7 @@ impl VulkanBackend {
             extent,
             allocator: Arc::clone(&self.allocator),
             id: NEXT_TEXTURE_ID.fetch_add(1, Ordering::Relaxed),
+            retired: Arc::clone(&self.retired_tracker_handles),
         })
     }
 
@@ -1305,6 +1345,27 @@ impl VulkanBackend {
         let _ = command_buffers;
 
         Ok(())
+    }
+
+    /// Layout to declare in a sampled-image descriptor for a texture.
+    ///
+    /// Descriptors must state the layout the image will actually be in at
+    /// draw/dispatch time. The barrier system has already transitioned the
+    /// pass's textures when descriptors are written (barriers are generated
+    /// before pass encoding), so the tracked layout is authoritative: a depth
+    /// texture declared `DepthStencilReadOnly` (sampling + depth test, e.g.
+    /// shadow mapping) is in `DEPTH_STENCIL_READ_ONLY_OPTIMAL`, not the
+    /// previously hardcoded `SHADER_READ_ONLY_OPTIMAL`.
+    fn sampled_image_layout(&self, texture_id: u64) -> vk::ImageLayout {
+        match self
+            .layout_tracker
+            .lock()
+            .get_layout(TextureId::from_raw(texture_id))
+        {
+            TextureLayout::DepthStencilReadOnly => vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+            TextureLayout::General => vk::ImageLayout::GENERAL,
+            _ => vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        }
     }
 
     /// Generate barriers for a pass's resource usage.
@@ -2140,11 +2201,11 @@ impl VulkanBackend {
                         }
                     }
                     BoundResource::Texture(texture) => {
-                        if let GpuTexture::Vulkan { view, .. } = texture.gpu_handle() {
+                        if let GpuTexture::Vulkan { view, id, .. } = texture.gpu_handle() {
                             scratch_image_infos.push(vk::DescriptorImageInfo {
                                 sampler: vk::Sampler::null(),
                                 image_view: *view,
-                                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                                image_layout: self.sampled_image_layout(*id),
                             });
                         }
                     }
@@ -2163,7 +2224,7 @@ impl VulkanBackend {
                     }
                     BoundResource::CombinedTextureSampler { texture, sampler } => {
                         if let (
-                            GpuTexture::Vulkan { view, .. },
+                            GpuTexture::Vulkan { view, id, .. },
                             GpuSampler::Vulkan {
                                 sampler: vk_sampler,
                                 ..
@@ -2173,7 +2234,7 @@ impl VulkanBackend {
                             scratch_image_infos.push(vk::DescriptorImageInfo {
                                 sampler: *vk_sampler,
                                 image_view: *view,
-                                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                                image_layout: self.sampled_image_layout(*id),
                             });
                         }
                     }
@@ -2890,11 +2951,11 @@ impl VulkanBackend {
                             }
                         }
                         BoundResource::Texture(texture) => {
-                            if let GpuTexture::Vulkan { view, .. } = texture.gpu_handle() {
+                            if let GpuTexture::Vulkan { view, id, .. } = texture.gpu_handle() {
                                 scratch_image_infos.push(vk::DescriptorImageInfo {
                                     sampler: vk::Sampler::null(),
                                     image_view: *view,
-                                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                                    image_layout: self.sampled_image_layout(*id),
                                 });
                             }
                         }
@@ -2913,7 +2974,7 @@ impl VulkanBackend {
                         }
                         BoundResource::CombinedTextureSampler { texture, sampler } => {
                             if let (
-                                GpuTexture::Vulkan { view, .. },
+                                GpuTexture::Vulkan { view, id, .. },
                                 GpuSampler::Vulkan {
                                     sampler: vk_sampler,
                                     ..
@@ -2923,7 +2984,7 @@ impl VulkanBackend {
                                 scratch_image_infos.push(vk::DescriptorImageInfo {
                                     sampler: *vk_sampler,
                                     image_view: *view,
-                                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                                    image_layout: self.sampled_image_layout(*id),
                                 });
                             }
                         }

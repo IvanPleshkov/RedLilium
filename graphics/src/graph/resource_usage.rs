@@ -200,6 +200,15 @@ impl BufferAccessMode {
 ///
 /// This describes how a single texture is used within a pass,
 /// including the access mode and subresource range.
+///
+/// # Subresource granularity
+///
+/// The mip/layer range fields describe intent, but the Vulkan barrier system
+/// currently tracks one layout per image and emits **whole-image**
+/// transitions — a pass cannot yet hold different mips/layers of one image
+/// in different layouts (e.g. write mip N while sampling mip N−1 during
+/// mipmap generation). Nothing in the engine declares partial ranges today;
+/// per-subresource tracking is the prerequisite for such workflows.
 #[derive(Debug, Clone)]
 pub struct TextureUsageDecl {
     /// The texture being used.

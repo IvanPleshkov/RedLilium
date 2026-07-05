@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use ash::vk;
 use ash::vk::Handle;
 
-use super::layout::{TextureId, TextureLayout, TextureLayoutTracker};
-use crate::graph::resource_usage::{BufferAccessMode, PassResourceUsage};
+use super::layout::{TextureId, TextureLayout};
+use crate::graph::resource_usage::BufferAccessMode;
 
 /// Unique identifier for a Vulkan buffer within the barrier batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -56,7 +56,7 @@ struct BufferAccessState {
 }
 
 /// Tracks the last access to every buffer used by render graphs, mirroring
-/// [`TextureLayoutTracker`] for buffers.
+/// [`super::layout::TextureLayoutTracker`] for buffers.
 ///
 /// The tracker is global and persists across frames — Vulkan barriers on a
 /// single queue synchronize across submissions, so a write recorded in frame
@@ -66,8 +66,8 @@ struct BufferAccessState {
 /// after handle reuse is benign: it can only produce an unnecessary or
 /// overly-broad barrier, never skip a needed one (a new buffer has no GPU
 /// writes to synchronize until a tracked write records one, which resets the
-/// entry). Entries are never removed — same accepted leak as the texture
-/// tracker (see issue #28).
+/// entry). Destroyed buffers are removed via the retirement queue drained in
+/// `advance_frame`, keeping the map bounded by live resources.
 #[derive(Debug, Default)]
 pub struct BufferAccessTracker {
     states: HashMap<BufferId, BufferAccessState>,
@@ -126,6 +126,12 @@ impl BufferAccessTracker {
             Some((state.last_write_stage, state.last_write_access))
         }
     }
+
+    /// Remove a destroyed buffer's entry (called from the retirement drain
+    /// in `advance_frame`).
+    pub fn remove(&mut self, id: BufferId) {
+        self.states.remove(&id);
+    }
 }
 
 /// A batch of memory barriers (both image and buffer) to submit together.
@@ -176,8 +182,17 @@ impl BarrierBatch {
 
     /// Add an image layout transition barrier.
     ///
-    /// If a barrier for the same image already exists, it will be replaced.
-    /// Barriers where `old_layout == new_layout` are skipped.
+    /// Same-layout uses are skipped only for read-only layouts: two
+    /// consecutive passes writing an image in the same layout (color target
+    /// rendered twice, storage image in `General` across dispatches) have a
+    /// WAW/RAW hazard that dynamic rendering does not implicitly order, so a
+    /// memory barrier without a layout transition is emitted.
+    ///
+    /// If a barrier for the same image already exists in the batch, the
+    /// transitions are collapsed into one chain: the existing `old_layout`
+    /// is kept, the new `new_layout` wins, and access scopes are unioned —
+    /// replacing the entry outright would submit a barrier whose
+    /// `old_layout` no longer matches the image's actual layout.
     pub fn add_image_barrier(
         &mut self,
         id: TextureId,
@@ -186,21 +201,29 @@ impl BarrierBatch {
         new_layout: TextureLayout,
         aspect_mask: vk::ImageAspectFlags,
     ) {
-        // Skip if no transition needed
-        if old_layout == new_layout {
+        // Same read-only layout: no hazard, nothing to do.
+        if old_layout == new_layout && !new_layout.is_write() {
             return;
         }
 
-        let info = ImageBarrierInfo {
-            image,
-            old_layout: old_layout.to_vk(),
-            new_layout: new_layout.to_vk(),
-            src_access_mask: old_layout.src_access_mask(),
-            dst_access_mask: new_layout.dst_access_mask(),
-            aspect_mask,
-        };
-
-        self.image_barriers.insert(id, info);
+        match self.image_barriers.entry(id) {
+            std::collections::hash_map::Entry::Occupied(mut occupied) => {
+                let info = occupied.get_mut();
+                info.new_layout = new_layout.to_vk();
+                info.src_access_mask |= old_layout.src_access_mask();
+                info.dst_access_mask |= new_layout.dst_access_mask();
+            }
+            std::collections::hash_map::Entry::Vacant(vacant) => {
+                vacant.insert(ImageBarrierInfo {
+                    image,
+                    old_layout: old_layout.to_vk(),
+                    new_layout: new_layout.to_vk(),
+                    src_access_mask: old_layout.src_access_mask(),
+                    dst_access_mask: new_layout.dst_access_mask(),
+                    aspect_mask,
+                });
+            }
+        }
         self.src_stage_mask |= old_layout.src_stage();
         self.dst_stage_mask |= new_layout.dst_stage();
     }
@@ -322,82 +345,6 @@ impl BarrierBatch {
     }
 }
 
-impl TextureLayoutTracker {
-    /// Generate barriers for a pass's resource usage.
-    ///
-    /// This examines each texture usage declaration, determines if a layout
-    /// transition is needed, and adds the appropriate barrier to the batch.
-    /// After generating barriers, the tracker's state is updated to reflect
-    /// the new layouts.
-    ///
-    /// # Arguments
-    ///
-    /// * `usage` - The resource usage declarations for the pass
-    /// * `get_image_info` - A closure that returns `(vk::Image, vk::Format)` for a texture,
-    ///   or `None` if the texture should be skipped (e.g., non-Vulkan backend)
-    ///
-    /// # Returns
-    ///
-    /// A `BarrierBatch` containing all necessary image memory barriers.
-    pub fn generate_barriers<F>(
-        &mut self,
-        usage: &PassResourceUsage,
-        get_image_info: F,
-    ) -> BarrierBatch
-    where
-        F: Fn(&crate::resources::Texture) -> Option<(vk::Image, vk::Format, bool)>,
-    {
-        let mut batch = BarrierBatch::new();
-
-        for decl in &usage.texture_usages {
-            // Get image info from the texture
-            let Some((image, format, is_depth)) = get_image_info(&decl.texture) else {
-                continue;
-            };
-
-            let texture_id = TextureId::from(image);
-            let current_layout = self.get_layout(texture_id);
-            let required_layout = decl.access.to_layout();
-
-            // Determine aspect mask based on format
-            let aspect_mask = if is_depth {
-                if format_has_stencil(format) {
-                    vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
-                } else {
-                    vk::ImageAspectFlags::DEPTH
-                }
-            } else {
-                vk::ImageAspectFlags::COLOR
-            };
-
-            // Add barrier if layout change is needed
-            batch.add_image_barrier(
-                texture_id,
-                image,
-                current_layout,
-                required_layout,
-                aspect_mask,
-            );
-
-            // Update tracked state
-            self.set_layout(texture_id, required_layout);
-        }
-
-        batch
-    }
-}
-
-/// Check if a Vulkan format has a stencil component.
-fn format_has_stencil(format: vk::Format) -> bool {
-    matches!(
-        format,
-        vk::Format::D24_UNORM_S8_UINT
-            | vk::Format::D32_SFLOAT_S8_UINT
-            | vk::Format::S8_UINT
-            | vk::Format::D16_UNORM_S8_UINT
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,12 +359,32 @@ mod tests {
     }
 
     #[test]
-    fn test_barrier_batch_skip_same_layout() {
+    fn test_barrier_batch_skip_same_readonly_layout() {
         let mut batch = BarrierBatch::new();
         let id = TextureId::from_raw(12345);
         let image = vk::Image::from_raw(12345);
 
-        // Adding a barrier with same old and new layout should be skipped
+        // Same read-only layout: read-after-read, no hazard, no barrier.
+        batch.add_image_barrier(
+            id,
+            image,
+            TextureLayout::ShaderReadOnly,
+            TextureLayout::ShaderReadOnly,
+            vk::ImageAspectFlags::COLOR,
+        );
+
+        assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn test_barrier_batch_same_write_layout_emits_barrier() {
+        let mut batch = BarrierBatch::new();
+        let id = TextureId::from_raw(12345);
+        let image = vk::Image::from_raw(12345);
+
+        // Rendering to the same color target in two consecutive passes is a
+        // WAW hazard even though the layout doesn't change (VK-H1): a memory
+        // barrier without a transition must be emitted.
         batch.add_image_barrier(
             id,
             image,
@@ -426,7 +393,45 @@ mod tests {
             vk::ImageAspectFlags::COLOR,
         );
 
-        assert!(batch.is_empty());
+        assert_eq!(batch.image_barrier_count(), 1);
+        let info = batch.image_barriers.values().next().unwrap();
+        assert_eq!(info.old_layout, info.new_layout);
+        assert!(
+            info.dst_access_mask
+                .contains(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+        );
+    }
+
+    #[test]
+    fn test_barrier_batch_duplicate_collapses_chain() {
+        let mut batch = BarrierBatch::new();
+        let id = TextureId::from_raw(12345);
+        let image = vk::Image::from_raw(12345);
+
+        // One pass declaring two transitions for the same image: the batch
+        // must collapse them into old(first) -> new(last) — replacing the
+        // entry would submit a barrier whose old_layout doesn't match the
+        // image's actual layout (VK-L1).
+        batch.add_image_barrier(
+            id,
+            image,
+            TextureLayout::Undefined,
+            TextureLayout::TransferDst,
+            vk::ImageAspectFlags::COLOR,
+        );
+        batch.add_image_barrier(
+            id,
+            image,
+            TextureLayout::TransferDst,
+            TextureLayout::ShaderReadOnly,
+            vk::ImageAspectFlags::COLOR,
+        );
+
+        assert_eq!(batch.image_barrier_count(), 1);
+        let info = batch.image_barriers.values().next().unwrap();
+        assert_eq!(info.old_layout, vk::ImageLayout::UNDEFINED);
+        assert_eq!(info.new_layout, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+        assert!(info.dst_access_mask.contains(vk::AccessFlags::SHADER_READ));
     }
 
     #[test]
