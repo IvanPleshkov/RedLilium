@@ -157,22 +157,24 @@ impl crate::Component for MeshRenderer {
     ) -> Result<Value, crate::serialize::SerializeError> {
         let mut prims: Vec<Value> = Vec::with_capacity(self.primitives.len());
         for primitive in &self.primitives {
-            // Only the sources are serialized (as RON); resolution is runtime state.
-            let mesh = ron::to_string(primitive.mesh.source()).map_err(|e| {
+            // Only the sources are serialized (as structured values, #5);
+            // resolution is runtime state.
+            let mesh = crate::serialize::value::to_value(primitive.mesh.source()).map_err(|e| {
                 crate::serialize::SerializeError::FieldError {
                     field: "mesh".to_owned(),
                     message: format!("serialize mesh source: {e}"),
                 }
             })?;
-            let material = ron::to_string(primitive.material.source()).map_err(|e| {
-                crate::serialize::SerializeError::FieldError {
-                    field: "material".to_owned(),
-                    message: format!("serialize material source: {e}"),
-                }
-            })?;
+            let material =
+                crate::serialize::value::to_value(primitive.material.source()).map_err(|e| {
+                    crate::serialize::SerializeError::FieldError {
+                        field: "material".to_owned(),
+                        message: format!("serialize material source: {e}"),
+                    }
+                })?;
             prims.push(Value::Map(vec![
-                ("mesh".to_owned(), Value::String(mesh)),
-                ("material".to_owned(), Value::String(material)),
+                ("mesh".to_owned(), mesh),
+                ("material".to_owned(), material),
             ]));
         }
 
@@ -208,29 +210,8 @@ impl crate::Component for MeshRenderer {
                 }
             };
 
-            let mesh_src = match map_get(&fields, "mesh") {
-                Some(Value::String(s)) => s.clone(),
-                _ => {
-                    return Err(crate::serialize::DeserializeError::FormatError(
-                        "missing 'mesh' source in primitive".into(),
-                    ));
-                }
-            };
-            let material_src = match map_get(&fields, "material") {
-                Some(Value::String(s)) => s.clone(),
-                _ => {
-                    return Err(crate::serialize::DeserializeError::FormatError(
-                        "missing 'material' source in primitive".into(),
-                    ));
-                }
-            };
-
-            let mesh: MeshSource = ron::from_str(&mesh_src).map_err(|e| {
-                crate::serialize::DeserializeError::FormatError(format!("mesh source: {e}"))
-            })?;
-            let material: MaterialInstanceSource = ron::from_str(&material_src).map_err(|e| {
-                crate::serialize::DeserializeError::FormatError(format!("material source: {e}"))
-            })?;
+            let mesh: MeshSource = deserialize_source(&fields, "mesh")?;
+            let material: MaterialInstanceSource = deserialize_source(&fields, "material")?;
 
             // No manager access here: the refs start unresolved and the sync
             // system requests + resolves them once it sees the component.
@@ -244,4 +225,116 @@ impl crate::Component for MeshRenderer {
 
 fn map_get<'a>(map: &'a [(String, Value)], key: &str) -> Option<&'a Value> {
     map.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+}
+
+/// Deserialize a primitive source (`MeshSource` / `MaterialInstanceSource`)
+/// from a field: structured value (current format, #5) or the legacy
+/// RON-encoded-into-a-string form written by older prefabs.
+fn deserialize_source<T: serde::de::DeserializeOwned>(
+    fields: &[(String, Value)],
+    key: &str,
+) -> Result<T, crate::serialize::DeserializeError> {
+    match map_get(fields, key) {
+        Some(Value::String(s)) => ron::from_str(s).map_err(|e| {
+            crate::serialize::DeserializeError::FormatError(format!("{key} source (legacy): {e}"))
+        }),
+        Some(value) => crate::serialize::value::from_value(value.clone()).map_err(|e| {
+            crate::serialize::DeserializeError::FormatError(format!("{key} source: {e}"))
+        }),
+        None => Err(crate::serialize::DeserializeError::FormatError(format!(
+            "missing '{key}' source in primitive"
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::World;
+    use crate::component::Component;
+    use crate::serialize::{DeserializeContext, SerializeContext};
+    use redlilium_assets::Guid;
+
+    fn sample_renderer() -> MeshRenderer {
+        MeshRenderer::single(Primitive::new(
+            MeshSource::File(Guid::stable("meshes/cube.rmesh")),
+            MaterialInstanceSource {
+                guid: Guid::stable("materials/default.matinst"),
+            },
+        ))
+    }
+
+    fn serialize(renderer: &MeshRenderer) -> Value {
+        let world = World::new();
+        let mut ctx = SerializeContext::new(&world);
+        renderer.serialize_component(&mut ctx).unwrap()
+    }
+
+    fn deserialize(value: &Value) -> MeshRenderer {
+        let mut world = World::new();
+        let mut ctx = DeserializeContext::new(&mut world);
+        ctx.load_data(value).unwrap();
+        MeshRenderer::deserialize_component(&mut ctx).unwrap()
+    }
+
+    /// Sources serialize as structured values, not RON-encoded strings (#5).
+    #[test]
+    fn sources_serialize_structured() {
+        let value = serialize(&sample_renderer());
+        let Value::Map(fields) = &value else {
+            panic!("expected Map");
+        };
+        let Some(Value::List(prims)) = map_get(fields, "primitives") else {
+            panic!("expected primitives list");
+        };
+        let Value::Map(prim) = &prims[0] else {
+            panic!("expected primitive map");
+        };
+        for key in ["mesh", "material"] {
+            assert!(
+                !matches!(map_get(prim, key), Some(Value::String(_))),
+                "'{key}' must be a structured value, not a RON string"
+            );
+        }
+    }
+
+    #[test]
+    fn sources_roundtrip() {
+        let renderer = sample_renderer();
+        let restored = deserialize(&serialize(&renderer));
+        assert_eq!(
+            restored.primitives[0].mesh.source(),
+            renderer.primitives[0].mesh.source()
+        );
+        assert_eq!(
+            restored.primitives[0].material.source(),
+            renderer.primitives[0].material.source()
+        );
+    }
+
+    /// Prefabs written before #5 encode sources as RON strings — they must
+    /// still load.
+    #[test]
+    fn legacy_string_sources_still_parse() {
+        let renderer = sample_renderer();
+        let mesh_ron = ron::to_string(renderer.primitives[0].mesh.source()).unwrap();
+        let material_ron = ron::to_string(renderer.primitives[0].material.source()).unwrap();
+        let legacy = Value::Map(vec![(
+            "primitives".to_owned(),
+            Value::List(vec![Value::Map(vec![
+                ("mesh".to_owned(), Value::String(mesh_ron)),
+                ("material".to_owned(), Value::String(material_ron)),
+            ])]),
+        )]);
+
+        let restored = deserialize(&legacy);
+        assert_eq!(
+            restored.primitives[0].mesh.source(),
+            renderer.primitives[0].mesh.source()
+        );
+        assert_eq!(
+            restored.primitives[0].material.source(),
+            renderer.primitives[0].material.source()
+        );
+    }
 }

@@ -10,6 +10,7 @@ use redlilium_core::scene::NodeTransform;
 /// Stores translation, rotation, and scale. Convertible to/from
 /// core's [`NodeTransform`] which uses plain `[f32; N]` arrays.
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable, crate::Component)]
+#[require(crate::GlobalTransform)]
 #[repr(C)]
 pub struct Transform {
     /// Translation in world units.
@@ -90,7 +91,12 @@ impl From<Transform> for NodeTransform {
 /// Computed by the [`update_global_transforms`](crate::systems::update_global_transforms)
 /// system. Without hierarchy, this equals the local [`Transform`]'s matrix.
 /// With hierarchy (future), it will incorporate the parent chain.
+///
+/// Derived state: never serialized (`#[skip_serialization]`) — prefabs carry
+/// only the local [`Transform`], which requires this component, and the
+/// transform-propagation system recomputes the matrix on the next frame.
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable, crate::Component)]
+#[skip_serialization]
 #[repr(C)]
 pub struct GlobalTransform(pub Mat4);
 

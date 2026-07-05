@@ -463,6 +463,51 @@ fn child_prefab_roundtrip_drops_external_parent() {
 }
 
 // ---------------------------------------------------------------------------
+// GlobalTransform is derived, not serialized (issue #5)
+// ---------------------------------------------------------------------------
+
+/// `GlobalTransform` is derived state: never baked into prefabs, re-created
+/// through `Transform`'s require on restore, and recomputed by the
+/// propagation system from the local `Transform`.
+#[test]
+fn global_transform_is_derived_not_serialized() {
+    let mut world = World::new();
+    register_std_components(&mut world);
+
+    let entity = world.spawn();
+    let transform = Transform::from_translation(Vec3::new(1.0, 2.0, 3.0));
+    world.insert(entity, transform).unwrap();
+    // require(GlobalTransform) on Transform auto-inserts the derived component.
+    assert!(world.get::<GlobalTransform>(entity).is_some());
+
+    let prefab = world.serialize_prefab(entity).unwrap();
+    assert!(
+        !prefab.entities[0]
+            .components
+            .iter()
+            .any(|c| c.type_name == "GlobalTransform"),
+        "derived GlobalTransform must not be baked into prefabs"
+    );
+
+    let spawned = world.deserialize_prefab(&prefab).unwrap();
+    let clone = spawned[0];
+    assert!(
+        world.get::<GlobalTransform>(clone).is_some(),
+        "require must re-create the derived component on restore"
+    );
+
+    // The propagation system recomputes the matrix from the local Transform.
+    let mut container = SystemsContainer::new();
+    container.add(UpdateGlobalTransforms);
+    let runner = EcsRunner::single_thread();
+    runner.run(&mut world, &container);
+    assert_eq!(
+        world.get::<GlobalTransform>(clone).unwrap().0,
+        transform.to_matrix()
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Prefab entity-reference policies (issue #23)
 // ---------------------------------------------------------------------------
 
