@@ -121,7 +121,11 @@ impl<T> TaskHandle<T> {
     ///
     /// # Warning
     ///
-    /// This blocks the calling thread. Prefer `try_recv()` in frame loops.
+    /// This blocks the calling thread **without driving the pool**: if
+    /// nothing else ticks the pool (e.g. inside a system on the
+    /// single-threaded runner), the task never progresses and this hangs
+    /// forever. Use [`ComputePool::block_on`] to wait while driving the
+    /// pool, or `try_recv()` in frame loops.
     pub fn recv(self) -> Option<T> {
         self.receiver.recv().ok()
     }
@@ -169,6 +173,20 @@ struct PendingTask {
     id: u64,
     /// Shared state for completion/cancellation tracking.
     state: Arc<TaskState>,
+    /// The fairness round this task was last polled in (see [`TaskQueue`]).
+    last_polled_round: u64,
+}
+
+/// The pool's task list plus the fairness round counter.
+///
+/// [`ComputePool::tick`] picks the highest-priority task *not yet polled in
+/// the current round*; once every task has been polled the round advances.
+/// Without rounds, a high-priority task that waits on a low-priority one
+/// would be re-polled forever and the low-priority task would never run
+/// (priority livelock in the `while pending_count() > 0 {{ tick() }}` loop).
+struct TaskQueue {
+    tasks: Vec<PendingTask>,
+    round: u64,
 }
 
 /// Pool for spawning async compute tasks.
@@ -194,7 +212,7 @@ struct PendingTask {
 /// assert_eq!(handle.try_recv(), Some(42));
 /// ```
 pub struct ComputePool {
-    tasks: Mutex<Vec<PendingTask>>,
+    queue: Mutex<TaskQueue>,
     next_id: Mutex<u64>,
     io: IoRuntime,
 }
@@ -207,7 +225,10 @@ impl ComputePool {
     pub fn new(io: IoRuntime) -> Self {
         reset_yield_timer();
         Self {
-            tasks: Mutex::new(Vec::new()),
+            queue: Mutex::new(TaskQueue {
+                tasks: Vec::new(),
+                round: 1,
+            }),
             next_id: Mutex::new(0),
             io,
         }
@@ -250,9 +271,10 @@ impl ComputePool {
             future: Box::pin(wrapped),
             id,
             state: state.clone(),
+            last_polled_round: 0,
         };
 
-        self.tasks.lock().push(task);
+        self.queue.lock().tasks.push(task);
 
         TaskHandle { receiver, state }
     }
@@ -277,10 +299,55 @@ impl ComputePool {
         }
     }
 
-    /// Polls the highest-priority pending task once.
+    /// Extracts the next task to poll, honoring priority and fairness.
+    ///
+    /// Picks the highest-priority task not yet polled in the current round;
+    /// when every task has been polled, the round advances and all tasks
+    /// become eligible again. The task is removed from the queue so it can
+    /// be polled without holding the lock — the caller must push it back if
+    /// it is still pending.
+    fn extract_next(&self) -> Option<PendingTask> {
+        let mut q = self.queue.lock();
+        if q.tasks.is_empty() {
+            return None;
+        }
+        let round = q.round;
+        let pick = |tasks: &[PendingTask], round: u64| {
+            tasks
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| t.last_polled_round < round)
+                .max_by(|(_, a), (_, b)| a.priority.cmp(&b.priority).then(b.id.cmp(&a.id)))
+                .map(|(i, _)| i)
+        };
+        let idx = match pick(&q.tasks, round) {
+            Some(i) => i,
+            None => {
+                // Every task was polled this round — start the next one.
+                q.round += 1;
+                let round = q.round;
+                pick(&q.tasks, round).expect("non-empty queue must yield a task")
+            }
+        };
+        let round = q.round;
+        let mut task = q.tasks.swap_remove(idx);
+        task.last_polled_round = round;
+        Some(task)
+    }
+
+    /// Puts a still-pending task back into the queue.
+    fn requeue(&self, task: PendingTask) {
+        self.queue.lock().tasks.push(task);
+    }
+
+    /// Polls one pending task, chosen by priority with round-robin fairness.
     ///
     /// Returns the number of tasks that were polled (0 or 1).
     /// Completed and cancelled tasks are automatically removed from the pool.
+    ///
+    /// The future is polled with the queue lock **released**, so tasks may
+    /// re-enter the pool (spawn, `pending_count`, nested `block_on`) and
+    /// futures may lock world storages without deadlocking the pool.
     ///
     /// Cancelled tasks are polled one final time so that
     /// [`checkpoint()`](redlilium_core::compute::ComputeContext::checkpoint)
@@ -289,27 +356,15 @@ impl ComputePool {
     /// poll it is dropped.
     pub fn tick(&self) -> usize {
         redlilium_core::profile_scope!("ecs: compute tick");
-        let mut tasks = self.tasks.lock();
-
-        if tasks.is_empty() {
+        let Some(mut task) = self.extract_next() else {
             return 0;
-        }
-
-        // Find highest priority task (highest priority + lowest id for stability)
-        let best_idx = tasks
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| {
-                a.priority.cmp(&b.priority).then(b.id.cmp(&a.id)) // Lower id = earlier insertion = preferred
-            })
-            .map(|(i, _)| i)
-            .unwrap();
+        };
 
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        if Self::poll_task_guarded(&mut tasks[best_idx], &mut cx) {
-            tasks.swap_remove(best_idx);
+        if !Self::poll_task_guarded(&mut task, &mut cx) {
+            self.requeue(task);
         }
 
         1
@@ -320,11 +375,17 @@ impl ComputePool {
     /// Returns the number of tasks that were polled.
     /// Completed and cancelled tasks are automatically removed.
     /// Cancelled tasks receive one final poll so checkpoints can fire.
+    ///
+    /// The batch is taken out of the queue and polled with the lock
+    /// **released** (tasks extracted here are invisible to
+    /// [`pending_count`](Self::pending_count) until re-queued).
     pub fn tick_all(&self) -> usize {
         redlilium_core::profile_scope!("ecs: compute tick_all");
-        let mut tasks = self.tasks.lock();
-
-        let count = tasks.len();
+        let mut batch = {
+            let mut q = self.queue.lock();
+            std::mem::take(&mut q.tasks)
+        };
+        let count = batch.len();
         if count == 0 {
             return 0;
         }
@@ -332,16 +393,11 @@ impl ComputePool {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        let mut i = 0;
-        while i < tasks.len() {
-            if Self::poll_task_guarded(&mut tasks[i], &mut cx) {
-                tasks.swap_remove(i);
-            } else {
-                i += 1;
-            }
-        }
+        batch.retain_mut(|task| !Self::poll_task_guarded(task, &mut cx));
 
-        redlilium_core::profile_plot!("ecs: compute pending", tasks.len() as f64);
+        let mut q = self.queue.lock();
+        q.tasks.append(&mut batch);
+        redlilium_core::profile_plot!("ecs: compute pending", q.tasks.len() as f64);
 
         count
     }
@@ -352,13 +408,16 @@ impl ComputePool {
     /// so a single non-yielding task may exceed the budget — but no further
     /// tasks will be polled after that.
     ///
-    /// Returns the number of tasks that were polled.
+    /// Returns the number of tasks that were polled. Polling happens with
+    /// the queue lock **released** (see [`tick_all`](Self::tick_all)).
     pub fn tick_with_budget(&self, budget: Duration) -> usize {
         redlilium_core::profile_scope!("ecs: compute tick_budget");
         let start = Instant::now();
-        let mut tasks = self.tasks.lock();
-
-        if tasks.is_empty() {
+        let mut batch = {
+            let mut q = self.queue.lock();
+            std::mem::take(&mut q.tasks)
+        };
+        if batch.is_empty() {
             return 0;
         }
 
@@ -367,62 +426,33 @@ impl ComputePool {
         let mut polled = 0;
         let mut i = 0;
 
-        while i < tasks.len() {
+        while i < batch.len() {
             if polled > 0 && start.elapsed() >= budget {
                 break;
             }
 
-            if Self::poll_task_guarded(&mut tasks[i], &mut cx) {
-                tasks.swap_remove(i);
+            if Self::poll_task_guarded(&mut batch[i], &mut cx) {
+                batch.swap_remove(i);
             } else {
                 i += 1;
             }
             polled += 1;
         }
 
-        redlilium_core::profile_plot!("ecs: compute pending", tasks.len() as f64);
+        let mut q = self.queue.lock();
+        q.tasks.append(&mut batch);
+        redlilium_core::profile_plot!("ecs: compute pending", q.tasks.len() as f64);
 
         polled
     }
 
-    /// Extracts one task, polls it outside the lock, and returns it if pending.
+    /// Polls one task outside the lock — alias of [`tick`](Self::tick).
     ///
-    /// Unlike [`tick`], this method does not hold the mutex while polling,
-    /// making it safe to call from multiple threads concurrently for
-    /// parallel compute draining.
-    ///
-    /// Returns 1 if a task was polled, 0 if the pool was empty.
+    /// Historically `tick` polled under the queue lock and this method was
+    /// the lock-free variant for parallel draining; `tick` now uses the
+    /// same extract-poll-requeue pattern, so both are equivalent.
     pub fn tick_extract(&self) -> usize {
-        redlilium_core::profile_scope!("ecs: compute tick_extract");
-
-        let mut task = {
-            let mut tasks = self.tasks.lock();
-
-            if tasks.is_empty() {
-                return 0;
-            }
-
-            // Find highest priority task
-            let best_idx = tasks
-                .iter()
-                .enumerate()
-                .max_by(|(_, a), (_, b)| a.priority.cmp(&b.priority).then(b.id.cmp(&a.id)))
-                .map(|(i, _)| i)
-                .unwrap();
-
-            tasks.swap_remove(best_idx)
-            // Lock released here
-        };
-
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
-
-        if !Self::poll_task_guarded(&mut task, &mut cx) {
-            // Task still pending — put it back
-            self.tasks.lock().push(task);
-        }
-
-        1
+        self.tick()
     }
 
     /// Blocks the calling thread until the task completes, driving the
@@ -437,16 +467,22 @@ impl ComputePool {
     /// let result = pool.block_on(&mut handle); // Some(42)
     /// ```
     pub fn block_on<T>(&self, handle: &mut TaskHandle<T>) -> Option<T> {
+        use std::sync::mpsc::TryRecvError;
         // Counts consecutive rounds in which no compute task made progress —
         // i.e. we're waiting purely on external IO or another thread. Used to
         // back off so this loop doesn't peg a core at 100%.
         let mut idle_rounds: u32 = 0;
         loop {
-            if let Some(val) = handle.try_recv() {
-                return Some(val);
-            }
-            if handle.is_cancelled() {
-                return None;
+            match handle.receiver.try_recv() {
+                Ok(val) => return Some(val),
+                // The task future is gone (removed after completion, its
+                // final cancellation poll, or a panic) and no value was
+                // sent — there is nothing left to wait for. Checking the
+                // channel rather than `is_cancelled()` avoids the race
+                // where a cancelled task still completes with a result
+                // between the two checks.
+                Err(TryRecvError::Disconnected) => return None,
+                Err(TryRecvError::Empty) => {}
             }
             let progressed = self.tick_all();
             #[cfg(not(target_arch = "wasm32"))]
@@ -466,13 +502,36 @@ impl ComputePool {
                 }
             }
             #[cfg(target_arch = "wasm32")]
-            let _ = progressed;
+            {
+                idle_rounds = if progressed > 0 { 0 } else { idle_rounds + 1 };
+                // On wasm there are no threads and IO futures only resolve
+                // after control returns to the browser event loop — which a
+                // blocking loop never does. If local compute makes no
+                // progress, spinning would hang the tab forever; fail loudly
+                // instead. (A couple of grace rounds let a just-completed
+                // task's result propagate.)
+                if idle_rounds > 2 {
+                    match handle.receiver.try_recv() {
+                        Ok(val) => return Some(val),
+                        Err(TryRecvError::Disconnected) => return None,
+                        Err(TryRecvError::Empty) => panic!(
+                            "ComputePool::block_on would deadlock on wasm: the task is \
+                             waiting on IO (or another task) that can only progress after \
+                             yielding to the browser event loop. Await the TaskHandle from \
+                             an async context instead of blocking."
+                        ),
+                    }
+                }
+            }
         }
     }
 
     /// Returns the number of pending (incomplete) tasks.
+    ///
+    /// Tasks currently extracted for polling by a concurrent `tick*` call
+    /// are not counted until they are re-queued.
     pub fn pending_count(&self) -> usize {
-        self.tasks.lock().len()
+        self.queue.lock().tasks.len()
     }
 }
 
@@ -493,6 +552,77 @@ mod tests {
 
     fn test_pool() -> ComputePool {
         ComputePool::new(IoRuntime::new())
+    }
+
+    #[test]
+    fn high_priority_waiting_on_low_does_not_livelock() {
+        // Issue #18 (B6): tick() used to re-poll the highest-priority task
+        // forever; a High task waiting on a Low task's side effect never let
+        // the Low task run in the documented `while pending { tick() }` loop.
+        use std::sync::atomic::AtomicBool;
+        let pool = test_pool();
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_low = flag.clone();
+        let _low = pool.spawn(Priority::Low, move |_ctx| async move {
+            flag_low.store(true, Ordering::SeqCst);
+        });
+        let flag_high = flag.clone();
+        let high = pool.spawn(Priority::High, move |_ctx| async move {
+            while !flag_high.load(Ordering::SeqCst) {
+                yield_now().await;
+            }
+            7u32
+        });
+
+        let mut ticks = 0;
+        while pool.pending_count() > 0 {
+            pool.tick();
+            ticks += 1;
+            assert!(ticks < 100, "priority livelock: Low task never polled");
+        }
+        assert_eq!(high.try_recv(), Some(7));
+    }
+
+    #[test]
+    fn task_can_reenter_the_pool() {
+        // Issue #18 (B4): polling used to happen while holding the task-queue
+        // mutex, so any reentrant pool call from inside a task (spawn,
+        // pending_count, nested block_on) deadlocked.
+        let pool = Arc::new(ComputePool::new(IoRuntime::new()));
+
+        let pool2 = pool.clone();
+        let handle = pool.spawn(Priority::High, move |_ctx| async move {
+            let inner = pool2.spawn(Priority::High, |_ctx| async { 5u32 });
+            // Reentrant queries must not deadlock either.
+            let n = pool2.pending_count();
+            // The inner task keeps running after its handle is dropped;
+            // the outer task only proves reentrancy doesn't deadlock.
+            drop(inner);
+            n
+        });
+
+        let mut ticks = 0;
+        while pool.pending_count() > 0 {
+            pool.tick();
+            ticks += 1;
+            assert!(ticks < 100, "reentrant spawn deadlocked or never finished");
+        }
+        assert!(handle.try_recv().is_some(), "outer task completed");
+    }
+
+    #[test]
+    fn block_on_returns_result_of_cancelled_but_completed_task() {
+        // Issue #18 (D): block_on used to check is_cancelled() after
+        // try_recv() and could drop a result that a cancelled task still
+        // produced. Now it gives up only when the task future is gone
+        // without having sent a value.
+        let pool = test_pool();
+        let mut handle = pool.spawn(Priority::High, |_ctx| async { 11u32 });
+        handle.cancel();
+        // The task has no checkpoints, so its final poll completes it and
+        // sends the value despite the cancellation request.
+        assert_eq!(pool.block_on(&mut handle), Some(11));
     }
 
     #[test]

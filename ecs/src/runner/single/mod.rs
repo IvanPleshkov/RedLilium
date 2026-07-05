@@ -1,5 +1,6 @@
 use parking_lot::Mutex;
 use std::any::Any;
+use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::commands::CommandCollector;
@@ -17,6 +18,9 @@ use crate::world::World;
 
 use super::ShutdownError;
 
+/// Boxed previous-tick results of one schedule, indexed by system node.
+type PrevResults = Vec<Option<Box<dyn Any + Send + Sync>>>;
+
 /// Single-threaded sequential executor for ECS systems.
 ///
 /// Runs each system to completion in pre-computed topological order.
@@ -26,7 +30,9 @@ use super::ShutdownError;
 pub struct EcsRunnerSingleThread {
     compute: ComputePool,
     io: IoRuntime,
-    prev_results: Mutex<Vec<Option<Box<dyn Any + Send + Sync>>>>,
+    /// Previous-tick system results for `reuse_result`, keyed by the
+    /// container's identity — one runner drives many schedules per frame.
+    prev_results: Mutex<HashMap<u64, PrevResults>>,
 }
 
 impl EcsRunnerSingleThread {
@@ -36,7 +42,7 @@ impl EcsRunnerSingleThread {
         Self {
             compute: ComputePool::new(io.clone()),
             io,
-            prev_results: Mutex::new(Vec::new()),
+            prev_results: Mutex::new(HashMap::new()),
         }
     }
 
@@ -101,11 +107,12 @@ impl EcsRunnerSingleThread {
             None
         };
 
-        // Swap reactive trigger buffers (last tick's collecting → readable).
-        world.update_triggers();
-
         // Take previous-tick results (if the system count matches).
-        let prev = std::mem::take(&mut *self.prev_results.lock());
+        let prev = self
+            .prev_results
+            .lock()
+            .remove(&systems.container_id())
+            .unwrap_or_default();
         let mut prev = if prev.len() == n { prev } else { Vec::new() };
 
         {
@@ -240,6 +247,15 @@ impl EcsRunnerSingleThread {
                         });
                     }
                 }
+
+                // Give compute tasks CPU between systems (the multi-threaded
+                // runner does this in its coordination loop). Without it a
+                // task spawned by an earlier system makes no progress until
+                // the end-of-run drain, and anything waiting on it inside a
+                // later system waits the whole run.
+                if self.compute.pending_count() > 0 {
+                    self.compute.tick_all();
+                }
             }
         }
 
@@ -266,7 +282,9 @@ impl EcsRunnerSingleThread {
         }
 
         // Save this tick's results for next tick's reuse.
-        *self.prev_results.lock() = results_store.into_prev_results();
+        self.prev_results
+            .lock()
+            .insert(systems.container_id(), results_store.into_prev_results());
 
         // Build diagnostic report
         let ambiguities = if diagnostics.detect_ambiguities {

@@ -38,7 +38,27 @@ pub struct IoRuntime {
 
 #[cfg(not(target_arch = "wasm32"))]
 struct IoRuntimeInner {
-    runtime: tokio::runtime::Runtime,
+    /// `Some` until drop. Wrapped so `Drop` can take the runtime and shut it
+    /// down with `shutdown_background()`: a plain drop of a tokio runtime
+    /// panics when it happens inside an async context — e.g. when the last
+    /// `IoRuntime` clone is owned by an IO future running on this runtime.
+    runtime: Option<tokio::runtime::Runtime>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl IoRuntimeInner {
+    fn runtime(&self) -> &tokio::runtime::Runtime {
+        self.runtime.as_ref().expect("runtime taken only in Drop")
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for IoRuntimeInner {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -59,7 +79,9 @@ impl IoRuntime {
             .expect("Failed to create tokio IO runtime");
 
         Self {
-            inner: Arc::new(IoRuntimeInner { runtime }),
+            inner: Arc::new(IoRuntimeInner {
+                runtime: Some(runtime),
+            }),
         }
     }
 
@@ -88,7 +110,7 @@ impl IoRunner for IoRuntime {
     {
         let (sender, receiver) = std::sync::mpsc::channel();
 
-        self.inner.runtime.spawn(async move {
+        self.inner.runtime().spawn(async move {
             let result = future.await;
             let _ = sender.send(result);
         });

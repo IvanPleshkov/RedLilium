@@ -125,9 +125,10 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
                 };
 
                 dispatcher.send_work(work);
-                result_rx
-                    .recv()
-                    .expect("Main thread did not send result back")
+                result_rx.recv().expect(
+                    "main-thread work did not send a result back (it panicked on \
+                     the main thread; see the runner error for the payload)",
+                )
             }
             None => {
                 // Single-threaded: no dispatcher, already on main thread

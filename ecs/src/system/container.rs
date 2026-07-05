@@ -116,6 +116,11 @@ pub(crate) enum SystemEntry {
 /// container.add_edge::<UpdateGlobalTransforms, UpdateCameraMatrices>().unwrap();
 /// ```
 pub struct SystemsContainer {
+    /// Process-unique identity of this container. Runners key per-schedule
+    /// state (previous-tick results for `reuse_result`) by it, so several
+    /// schedules driven through one runner cannot leak results into each
+    /// other even when their node counts happen to match.
+    id: u64,
     /// Registered systems in insertion order.
     systems: Vec<SystemEntry>,
     /// Cached type names to avoid locking just for diagnostics.
@@ -161,7 +166,10 @@ pub struct SystemsContainer {
 impl SystemsContainer {
     /// Creates a new empty systems container.
     pub fn new() -> Self {
+        static NEXT_CONTAINER_ID: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
         Self {
+            id: NEXT_CONTAINER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             systems: Vec::new(),
             names: Vec::new(),
             edges: Vec::new(),
@@ -701,6 +709,11 @@ impl SystemsContainer {
     ///
     /// Returns `true` if the system should run, `false` if it should be
     /// skipped. Systems with no condition edges always return `true`.
+    /// Returns this container's process-unique identity.
+    pub(crate) fn container_id(&self) -> u64 {
+        self.id
+    }
+
     /// Returns the tick of the system's previous run (0 = never ran).
     pub(crate) fn last_run(&self, idx: usize) -> u64 {
         self.last_runs[idx].load(std::sync::atomic::Ordering::Relaxed)

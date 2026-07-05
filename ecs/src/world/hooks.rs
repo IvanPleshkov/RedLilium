@@ -166,6 +166,12 @@ impl World {
     ///
     /// The component type `T` must be registered before calling this.
     pub fn enable_add_triggers<T: Send + Sync + 'static>(&mut self) {
+        // Idempotent: a second registration would add a duplicate swap fn
+        // (double-swapping wipes `readable` right after it was filled) and
+        // a duplicate observer (double-counted triggers).
+        if self.has_resource::<Triggers<OnAdd<T>>>() {
+            return;
+        }
         self.insert_resource(Triggers::<OnAdd<T>>::new());
         self.observe_add::<T>(|world, entity| {
             world.resource_mut::<Triggers<OnAdd<T>>>().push(entity);
@@ -180,6 +186,12 @@ impl World {
     /// observer that collects triggered entities. Fires on both first-time
     /// addition and replacement of an existing value.
     pub fn enable_insert_triggers<T: Send + Sync + 'static>(&mut self) {
+        // Idempotent: a second registration would add a duplicate swap fn
+        // (double-swapping wipes `readable` right after it was filled) and
+        // a duplicate observer (double-counted triggers).
+        if self.has_resource::<Triggers<OnInsert<T>>>() {
+            return;
+        }
         self.insert_resource(Triggers::<OnInsert<T>>::new());
         self.observe_insert::<T>(|world, entity| {
             world.resource_mut::<Triggers<OnInsert<T>>>().push(entity);
@@ -194,6 +206,12 @@ impl World {
     /// observer that collects triggered entities. Fires on explicit removal
     /// and on despawn.
     pub fn enable_remove_triggers<T: Send + Sync + 'static>(&mut self) {
+        // Idempotent: a second registration would add a duplicate swap fn
+        // (double-swapping wipes `readable` right after it was filled) and
+        // a duplicate observer (double-counted triggers).
+        if self.has_resource::<Triggers<OnRemove<T>>>() {
+            return;
+        }
         self.insert_resource(Triggers::<OnRemove<T>>::new());
         self.observe_remove::<T>(|world, entity| {
             world.resource_mut::<Triggers<OnRemove<T>>>().push(entity);
@@ -205,9 +223,12 @@ impl World {
     /// Swaps all reactive trigger buffers.
     ///
     /// Moves `collecting` → `readable` and clears `collecting` for each
-    /// registered trigger buffer. Called by the runner at the start of
-    /// each tick, before any systems execute.
-    pub(crate) fn update_triggers(&mut self) {
+    /// registered trigger buffer. Called by `Schedules::run_frame` once at
+    /// the start of each frame — NOT per `runner.run`, so trigger
+    /// visibility does not depend on how many schedules (or FixedUpdate
+    /// iterations) ran this frame. Drive it manually when running
+    /// containers without `run_frame`.
+    pub fn update_triggers(&mut self) {
         if self.trigger_swap_fns.is_empty() {
             return;
         }

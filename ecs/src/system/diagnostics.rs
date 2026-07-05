@@ -197,9 +197,14 @@ impl AccessRecorder {
 /// Analyzes recorded accesses for ambiguities.
 ///
 /// Two systems are ambiguous if:
-/// 1. They access the same component/resource (at least one writing)
+/// 1. They access the same component/resource (at least one writing) — an
+///    exclusive system counts as accessing *everything* mutably
 /// 2. Neither is a transitive ancestor/descendant of the other
-/// 3. Neither is an exclusive system (which acts as a barrier)
+///
+/// Exclusive systems are NOT treated as barriers: the multi-threaded runner
+/// deliberately runs any ready ordinary systems before a deferred exclusive
+/// one, so an unordered (exclusive, ordinary) pair is real run-to-run
+/// nondeterminism and must be reported.
 pub(crate) fn analyze_ambiguities(
     records: Vec<Vec<AccessInfo>>,
     systems: &SystemsContainer,
@@ -214,12 +219,16 @@ pub(crate) fn analyze_ambiguities(
         .map(|r| normalize_access_infos(&r))
         .collect();
 
+    // A system participates if it recorded any access, or takes &mut World.
+    let participates =
+        |i: usize| !systems.is_virtual(i) && (systems.is_exclusive(i) || !normalized[i].is_empty());
+
     for i in 0..n {
-        if systems.is_exclusive(i) || systems.is_virtual(i) || normalized[i].is_empty() {
+        if !participates(i) {
             continue;
         }
         for j in (i + 1)..n {
-            if systems.is_exclusive(j) || systems.is_virtual(j) || normalized[j].is_empty() {
+            if !participates(j) {
                 continue;
             }
 
@@ -233,8 +242,23 @@ pub(crate) fn analyze_ambiguities(
                 continue; // ordered — not ambiguous
             }
 
-            // Find conflicting accesses
-            let conflicts = find_conflicts(&normalized[i], &normalized[j], world);
+            // Find conflicting accesses. An exclusive system conflicts with
+            // every access of the other system (it owns the whole world).
+            let conflicts = if systems.is_exclusive(i) && systems.is_exclusive(j) {
+                // Both own &mut World; unordered order is still observable.
+                vec![AccessConflict {
+                    type_id: std::any::TypeId::of::<World>(),
+                    type_name: "<&mut World>",
+                    a_writes: true,
+                    b_writes: true,
+                }]
+            } else if systems.is_exclusive(i) {
+                exclusive_conflicts(&normalized[j], true, world)
+            } else if systems.is_exclusive(j) {
+                exclusive_conflicts(&normalized[i], false, world)
+            } else {
+                find_conflicts(&normalized[i], &normalized[j], world)
+            };
             if !conflicts.is_empty() {
                 ambiguities.push(AmbiguityInfo {
                     system_a: systems.get_type_name(i),
@@ -246,6 +270,27 @@ pub(crate) fn analyze_ambiguities(
     }
 
     ambiguities
+}
+
+/// Conflicts of an exclusive system (implicit write to everything) against
+/// the other system's recorded accesses. `exclusive_is_a` tells which side
+/// of the pair the exclusive system is on, for read/write labeling.
+fn exclusive_conflicts(
+    other: &[AccessInfo],
+    exclusive_is_a: bool,
+    world: &World,
+) -> Vec<AccessConflict> {
+    other
+        .iter()
+        .map(|info| AccessConflict {
+            type_id: info.type_id,
+            type_name: world
+                .component_type_name(info.type_id)
+                .unwrap_or("<resource>"),
+            a_writes: if exclusive_is_a { true } else { info.is_write },
+            b_writes: if exclusive_is_a { info.is_write } else { true },
+        })
+        .collect()
 }
 
 fn find_conflicts(a: &[AccessInfo], b: &[AccessInfo], world: &World) -> Vec<AccessConflict> {

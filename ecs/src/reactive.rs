@@ -16,7 +16,8 @@ use crate::system::SystemError;
 ///
 /// - During `flush_observers()`, internal observers push entities to the
 ///   `collecting` buffer.
-/// - At the start of the next tick, the runner calls `update_triggers()`,
+/// - At the start of the next frame, `Schedules::run_frame` calls
+///   `update_triggers()`,
 ///   which swaps `collecting` → `readable`.
 /// - Systems read `readable` via `Res<Triggers<OnAdd<Health>>>`.
 ///
@@ -84,7 +85,8 @@ impl<M: 'static> Triggers<M> {
 
     /// Swaps buffers: `collecting` becomes `readable`, old `readable` is cleared.
     ///
-    /// Called by the runner at the start of each tick via `World::update_triggers()`.
+    /// Called once per frame by `Schedules::run_frame` via
+    /// `World::update_triggers()`.
     pub(crate) fn swap(&mut self) {
         self.readable.clear();
         std::mem::swap(&mut self.readable, &mut self.collecting);
@@ -352,22 +354,28 @@ mod tests {
 
         let runner = crate::runner::EcsRunnerSingleThread::new();
 
-        // Tick 1: no entities, reactive system should NOT run
+        // The buffer swap happens once per frame (Schedules::run_frame);
+        // simulate the frame boundary manually around each runner.run.
+
+        // Frame 1: no entities, reactive system should NOT run
+        world.update_triggers();
         runner.run(&mut world, &container);
         assert_eq!(counter.load(Ordering::SeqCst), 0);
 
-        // Add entities (between ticks)
+        // Add entities (between frames)
         let e1 = world.spawn();
         world.insert(e1, Health(100)).unwrap();
         let e2 = world.spawn();
         world.insert(e2, Health(200)).unwrap();
-        world.flush_observers(); // simulate end-of-tick observer flush
+        world.flush_observers(); // simulate end-of-frame observer flush
 
-        // Tick 2: reactive system should run and see 2 triggers
+        // Frame 2: reactive system should run and see 2 triggers
+        world.update_triggers();
         runner.run(&mut world, &container);
         assert_eq!(counter.load(Ordering::SeqCst), 2);
 
-        // Tick 3: no new entities, reactive system should NOT run
+        // Frame 3: no new entities, reactive system should NOT run
+        world.update_triggers();
         runner.run(&mut world, &container);
         assert_eq!(counter.load(Ordering::SeqCst), 2); // unchanged
     }

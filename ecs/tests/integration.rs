@@ -682,3 +682,149 @@ mod change_detection {
         assert_eq!(seen.load(Ordering::SeqCst), 2);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Runner robustness (issue #16)
+// ---------------------------------------------------------------------------
+
+mod runner_robustness {
+    use redlilium_ecs::{
+        EcsRunner, MainThreadResMut, OnAdd, System, SystemContext, SystemError, SystemsContainer,
+        Triggers, World,
+    };
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::mpsc;
+
+    struct Marker(#[allow(dead_code)] u32);
+
+    /// Issue #16 (B1): a panic inside main-thread-dispatched work used to
+    /// unwind the multi runner's coordination loop while the requesting
+    /// worker blocked forever on its result channel — a permanent hang. Now
+    /// the panic is caught and reported as a system error.
+    #[test]
+    fn main_thread_work_panic_is_reported_not_hung() {
+        struct MainThreadState(#[allow(dead_code)] u32);
+
+        struct PanicsOnMainThread;
+        impl System for PanicsOnMainThread {
+            type Result = ();
+            fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+                ctx.lock::<(MainThreadResMut<MainThreadState>,)>()
+                    .execute(|_state| {
+                        panic!("boom on the main thread");
+                    });
+                Ok(())
+            }
+        }
+
+        let mut world = World::new();
+        world.insert_main_thread_resource(MainThreadState(0));
+
+        let mut systems = SystemsContainer::new();
+        systems.add(PanicsOnMainThread);
+
+        // Run in a thread with a deadline so a regression fails the test
+        // instead of hanging the suite forever.
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let runner = EcsRunner::multi_thread(2);
+            let errors = runner.run(&mut world, &systems);
+            let _ = tx.send(errors.len());
+        });
+        let error_count = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("multi runner hung on a main-thread panic (issue #16 B1)");
+        assert!(error_count > 0, "the panic must surface as a system error");
+    }
+
+    /// Issue #16 (C3): one runner drives several schedules; previous-tick
+    /// results used to be stored in a single slot validated only by node
+    /// count, so a system could receive a foreign schedule's result through
+    /// `reuse_result`.
+    #[test]
+    fn prev_results_do_not_leak_across_schedules() {
+        struct Producer {
+            output: u32,
+            reused: Arc<AtomicU32>,
+        }
+        impl System for Producer {
+            type Result = u32;
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<u32, SystemError> {
+                Ok(self.output)
+            }
+            fn reuse_result(&self, prev: u32) {
+                self.reused.store(prev, Ordering::SeqCst);
+            }
+        }
+
+        let mut world = World::new();
+        let reused_a = Arc::new(AtomicU32::new(0));
+        let reused_b = Arc::new(AtomicU32::new(0));
+
+        // Two schedules with identical shape (1 system, same Result type).
+        let mut schedule_a = SystemsContainer::new();
+        schedule_a.add(Producer {
+            output: 1,
+            reused: reused_a.clone(),
+        });
+        let mut schedule_b = SystemsContainer::new();
+        schedule_b.add(Producer {
+            output: 2,
+            reused: reused_b.clone(),
+        });
+
+        let runner = EcsRunner::single_thread();
+
+        // Frame 1: A then B. B must NOT receive A's result for reuse.
+        runner.run(&mut world, &schedule_a);
+        runner.run(&mut world, &schedule_b);
+        assert_eq!(
+            reused_b.load(Ordering::SeqCst),
+            0,
+            "B reused a foreign schedule's result"
+        );
+
+        // Frame 2: each schedule gets its own previous result back.
+        runner.run(&mut world, &schedule_a);
+        runner.run(&mut world, &schedule_b);
+        assert_eq!(reused_a.load(Ordering::SeqCst), 1);
+        assert_eq!(reused_b.load(Ordering::SeqCst), 2);
+    }
+
+    /// Issue #16 (C4): enabling the same trigger buffer twice used to
+    /// register a duplicate swap fn (a double swap wipes `readable` right
+    /// after it was filled) and a duplicate observer (double counting).
+    #[test]
+    fn enable_triggers_is_idempotent() {
+        let mut world = World::new();
+        world.register_component::<Marker>();
+        world.enable_add_triggers::<Marker>();
+        world.enable_add_triggers::<Marker>(); // second call must be a no-op
+
+        struct Noop;
+        impl System for Noop {
+            type Result = ();
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+                Ok(())
+            }
+        }
+
+        let e = world.spawn();
+        world.insert(e, Marker(1)).unwrap();
+        // A runner pass (empty containers early-return) flushes the queued
+        // observer triggers at end of run.
+        let mut noop = SystemsContainer::new();
+        noop.add(Noop);
+        let runner = EcsRunner::single_thread();
+        runner.run(&mut world, &noop);
+        world.update_triggers();
+
+        let triggers = world.resource::<Triggers<OnAdd<Marker>>>();
+        assert_eq!(
+            triggers.len(),
+            1,
+            "duplicate observer or double swap detected"
+        );
+    }
+}

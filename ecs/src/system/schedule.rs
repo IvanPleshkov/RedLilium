@@ -384,11 +384,12 @@ impl Schedules {
     ///
     /// Execution order:
     /// 1. Update [`Time`] resource
-    /// 2. Run [`PreUpdate`] (state transitions happen here)
-    /// 3. Check state transitions → run `OnExit` / `OnEnter` schedules
-    /// 4. Run [`FixedUpdate`] (accumulator loop)
-    /// 5. Run [`Update`]
-    /// 6. Run [`PostUpdate`]
+    /// 2. Swap reactive trigger buffers (once per frame)
+    /// 3. Run [`PreUpdate`] (state transitions happen here)
+    /// 4. Check state transitions → run `OnExit` / `OnEnter` schedules
+    /// 5. Run [`FixedUpdate`] (accumulator loop)
+    /// 6. Run [`Update`]
+    /// 7. Run [`PostUpdate`]
     pub fn run_frame(&mut self, world: &mut World, runner: &EcsRunner, delta_time: f64) {
         // 1. Update Time resource
         if !world.has_resource::<Time>() {
@@ -402,15 +403,21 @@ impl Schedules {
             time.fixed_delta = self.fixed_timestep;
         }
 
-        // 2. Run PreUpdate
+        // 2. Swap reactive trigger buffers exactly once per frame (last
+        //    frame's collecting → readable). Doing this per runner.run would
+        //    make Triggers<M> visibility depend on how many schedules and
+        //    FixedUpdate iterations happen to run.
+        world.update_triggers();
+
+        // 3. Run PreUpdate
         if let Some(schedule) = self.schedules.get(&ScheduleId::of::<PreUpdate>()) {
             runner.run(world, schedule);
         }
 
-        // 3. Check state transitions and run OnExit / OnEnter
+        // 4. Check state transitions and run OnExit / OnEnter
         self.run_state_transitions(world, runner);
 
-        // 4. FixedUpdate accumulator. Debt is clamped so a long stall runs at
+        // 5. FixedUpdate accumulator. Debt is clamped so a long stall runs at
         //    most `max_fixed_steps` catch-up iterations instead of spiraling
         //    (each over-budget frame adding more debt than it retires).
         self.fixed_accumulator += delta_time;
@@ -434,17 +441,17 @@ impl Schedules {
         // Restore effective delta to frame delta
         world.resource_mut::<Time>().delta = delta_time;
 
-        // 5. Run Update
+        // 6. Run Update
         if let Some(schedule) = self.schedules.get(&ScheduleId::of::<Update>()) {
             runner.run(world, schedule);
         }
 
-        // 6. Run PostUpdate
+        // 7. Run PostUpdate
         if let Some(schedule) = self.schedules.get(&ScheduleId::of::<PostUpdate>()) {
             runner.run(world, schedule);
         }
 
-        // 7. Advance the change-detection tick. Systems already get their own
+        // 8. Advance the change-detection tick. Systems already get their own
         //    per-run ticks inside the runner; this bump is for out-of-band
         //    mutations by the world owner between frames (editor edits, app
         //    code) — it stamps them after every system's `last_run`, so they

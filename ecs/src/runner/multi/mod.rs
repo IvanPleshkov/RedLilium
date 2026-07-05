@@ -1,5 +1,6 @@
 use parking_lot::Mutex;
 use std::any::Any;
+use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,9 @@ use crate::world::World;
 
 use super::ShutdownError;
 
+/// Boxed previous-tick results of one schedule, indexed by system node.
+type PrevResults = Vec<Option<Box<dyn Any + Send + Sync>>>;
+
 /// Multi-threaded executor that runs independent systems in parallel.
 ///
 /// Systems are dispatched to OS threads via `std::thread::scope`.
@@ -32,7 +36,9 @@ pub struct EcsRunnerMultiThread {
     compute: ComputePool,
     io: IoRuntime,
     num_threads: usize,
-    prev_results: Mutex<Vec<Option<Box<dyn Any + Send + Sync>>>>,
+    /// Previous-tick system results for `reuse_result`, keyed by the
+    /// container's identity — one runner drives many schedules per frame.
+    prev_results: Mutex<HashMap<u64, PrevResults>>,
 }
 
 impl EcsRunnerMultiThread {
@@ -43,7 +49,7 @@ impl EcsRunnerMultiThread {
             compute: ComputePool::new(io.clone()),
             io,
             num_threads: num_threads.max(1),
-            prev_results: Mutex::new(Vec::new()),
+            prev_results: Mutex::new(HashMap::new()),
         }
     }
 
@@ -123,15 +129,16 @@ impl EcsRunnerMultiThread {
             None
         };
 
-        // Swap reactive trigger buffers (last tick's collecting → readable).
-        world.update_triggers();
-
         let mut remaining_deps: Vec<usize> = systems.in_degrees().to_vec();
         let mut started = vec![false; n];
         let mut completed_count = 0usize;
 
         // Take previous-tick results (if the system count matches).
-        let prev = std::mem::take(&mut *self.prev_results.lock());
+        let prev = self
+            .prev_results
+            .lock()
+            .remove(&systems.container_id())
+            .unwrap_or_default();
         let prev = Mutex::new(if prev.len() == n { prev } else { Vec::new() });
 
         while completed_count < n {
@@ -339,7 +346,9 @@ impl EcsRunnerMultiThread {
         }
 
         // Save this tick's results for next tick's reuse.
-        *self.prev_results.lock() = results_store.into_prev_results();
+        self.prev_results
+            .lock()
+            .insert(systems.container_id(), results_store.into_prev_results());
 
         // Opportunistically tick remaining compute tasks (time-budgeted).
         if self.compute.pending_count() > 0 {
@@ -542,7 +551,20 @@ impl EcsRunnerMultiThread {
                     }
                     Ok(RunnerEvent::MainThreadRequest(work)) => {
                         redlilium_core::profile_scope!("ecs: main-thread dispatch");
-                        work();
+                        // A panic here must not unwind the coordination loop:
+                        // workers would block forever on their result
+                        // channels while `thread::scope` waits for them. On
+                        // panic the work's result sender is dropped, the
+                        // requesting worker's `recv()` fails, and the error
+                        // surfaces through that system's catch_unwind.
+                        if let Err(payload) =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+                        {
+                            thread_errors.lock().push(SystemError::Panicked(format!(
+                                "main-thread work panicked: {}",
+                                panic_payload_to_string(&*payload)
+                            )));
+                        }
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
