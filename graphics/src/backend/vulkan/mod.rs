@@ -2382,6 +2382,17 @@ impl VulkanBackend {
         let material_instance = &draw_cmd.material;
         let binding_groups = material_instance.binding_groups();
 
+        // A zip would silently drop trailing groups on either side, drawing
+        // with unbound descriptor sets (UB) — make the mismatch an error.
+        if binding_groups.len() != scratch_ds_layouts.len() {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "material instance provides {} binding group(s) but the material's pipeline \
+                 layout declares {} descriptor set(s)",
+                binding_groups.len(),
+                scratch_ds_layouts.len()
+            )));
+        }
+
         scratch_ds_sets.clear();
         for (group_idx, (group, ds_layout)) in binding_groups
             .iter()
@@ -2491,13 +2502,23 @@ impl VulkanBackend {
                     BoundResource::Buffer(_) | BoundResource::BufferRange { .. } => {
                         let info = &scratch_buffer_infos[buffer_idx..buffer_idx + 1];
                         buffer_idx += 1;
-                        // Use the binding type from layout, defaulting to UNIFORM_BUFFER
+                        // The layout entry is authoritative for the descriptor
+                        // type; a binding the layout doesn't declare would be
+                        // written as a guessed type into a set the pipeline
+                        // reads differently — error instead.
+                        let Some(binding_type) = binding_type else {
+                            return Err(GraphicsError::InvalidParameter(format!(
+                                "binding {} in group {} is not declared by the material's \
+                                 binding layout",
+                                entry.binding, group_idx
+                            )));
+                        };
                         let descriptor_type = match binding_type {
-                            Some(
-                                crate::materials::BindingType::StorageBuffer
-                                | crate::materials::BindingType::StorageBufferReadOnly,
-                            ) => vk::DescriptorType::STORAGE_BUFFER,
-                            Some(crate::materials::BindingType::DynamicUniformBuffer) => {
+                            crate::materials::BindingType::StorageBuffer
+                            | crate::materials::BindingType::StorageBufferReadOnly => {
+                                vk::DescriptorType::STORAGE_BUFFER
+                            }
+                            crate::materials::BindingType::DynamicUniformBuffer => {
                                 vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC
                             }
                             _ => vk::DescriptorType::UNIFORM_BUFFER,
@@ -3030,6 +3051,17 @@ impl VulkanBackend {
             let material_instance = &dispatch_cmd.material;
             let binding_groups = material_instance.binding_groups();
 
+            // A zip would silently drop trailing groups on either side,
+            // dispatching with unbound descriptor sets (UB) — error instead.
+            if binding_groups.len() != scratch_ds_layouts.len() {
+                return Err(GraphicsError::InvalidParameter(format!(
+                    "material instance provides {} binding group(s) but the material's \
+                     pipeline layout declares {} descriptor set(s)",
+                    binding_groups.len(),
+                    scratch_ds_layouts.len()
+                )));
+            }
+
             scratch_ds_sets.clear();
             for (group_idx, (group, ds_layout)) in binding_groups
                 .iter()
@@ -3136,12 +3168,21 @@ impl VulkanBackend {
                         BoundResource::Buffer(_) | BoundResource::BufferRange { .. } => {
                             let info = &scratch_buffer_infos[buffer_idx..buffer_idx + 1];
                             buffer_idx += 1;
+                            // The layout entry is authoritative — see the
+                            // graphics twin in `encode_draw_command`.
+                            let Some(binding_type) = binding_type else {
+                                return Err(GraphicsError::InvalidParameter(format!(
+                                    "binding {} in group {} is not declared by the material's \
+                                     binding layout",
+                                    entry.binding, group_idx
+                                )));
+                            };
                             let descriptor_type = match binding_type {
-                                Some(
-                                    crate::materials::BindingType::StorageBuffer
-                                    | crate::materials::BindingType::StorageBufferReadOnly,
-                                ) => vk::DescriptorType::STORAGE_BUFFER,
-                                Some(crate::materials::BindingType::DynamicUniformBuffer) => {
+                                crate::materials::BindingType::StorageBuffer
+                                | crate::materials::BindingType::StorageBufferReadOnly => {
+                                    vk::DescriptorType::STORAGE_BUFFER
+                                }
+                                crate::materials::BindingType::DynamicUniformBuffer => {
                                     vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC
                                 }
                                 _ => vk::DescriptorType::UNIFORM_BUFFER,

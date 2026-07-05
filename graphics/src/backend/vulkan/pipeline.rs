@@ -38,8 +38,10 @@ impl PipelineManager {
         device: &ash::Device,
         pool_sizes: &[vk::DescriptorPoolSize],
     ) -> Result<vk::DescriptorPool, GraphicsError> {
+        // No FREE_DESCRIPTOR_SET: sets are never freed individually, the whole
+        // pool is bulk-reset once the slot's fence signals. This lets drivers
+        // use a linear allocator and removes the fragmentation failure mode.
         let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
             .max_sets(SETS_PER_POOL)
             .pool_sizes(pool_sizes);
         unsafe { device.create_descriptor_pool(&pool_info, None) }.map_err(|e| {
@@ -54,6 +56,13 @@ impl PipelineManager {
         let pool_sizes = vec![
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
+                descriptor_count: 1000,
+            },
+            // DynamicUniformBuffer bindings allocate this type; conformant
+            // drivers (mobile, MoltenVK) enforce per-type pool capacity, so
+            // omitting it fails every dynamic-UBO allocation.
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
                 descriptor_count: 1000,
             },
             vk::DescriptorPoolSize {
@@ -124,7 +133,7 @@ impl PipelineManager {
             ShaderSourceLanguage::Slang => {
                 let spv = self.compile_slang_to_spirv(source, entry_point, defines)?;
                 let actual =
-                    spirv_entry_point_name(&spv).unwrap_or_else(|| entry_point.to_string());
+                    spirv_entry_point_name(&spv, stage).unwrap_or_else(|| entry_point.to_string());
                 (spv, actual)
             }
             #[cfg(not(feature = "slang-shaders"))]
@@ -134,6 +143,16 @@ impl PipelineManager {
                 ));
             }
         };
+
+        // Push constants have no engine-side binding path (pipeline layouts
+        // declare no ranges); fail here with a clear message instead of a
+        // confusing pipeline-validation error at draw time.
+        if spirv_uses_push_constants(&spv) {
+            return Err(GraphicsError::FeatureNotSupported(format!(
+                "shader entry point '{entry_point}' declares push constants, which the \
+                 engine's binding model does not support; use a uniform buffer binding instead"
+            )));
+        }
 
         // Create Vulkan shader module from SPIR-V
         let create_info = vk::ShaderModuleCreateInfo::default().code(&spv);
@@ -321,9 +340,11 @@ impl PipelineManager {
         let layouts = [layout];
         let mut chain = self.descriptor_pools[slot].lock();
 
-        // Try the most-recently-added pool; if it's exhausted or fragmented,
-        // append a fresh pool and retry once. `grew` bounds this so a layout
-        // that can't fit in any single pool errors instead of looping forever.
+        // Try the most-recently-added pool; if it's exhausted, append a fresh
+        // pool and retry once. `grew` bounds this so a layout that can't fit
+        // in any single pool errors instead of looping forever.
+        // (FRAGMENTED_POOL is kept defensively: without FREE_DESCRIPTOR_SET
+        // pools can't actually fragment.)
         let mut grew = false;
         loop {
             let pool = *chain
@@ -517,9 +538,21 @@ impl PipelineManager {
             .map(convert_texture_format)
             .unwrap_or(vk::Format::UNDEFINED);
 
+        // Dynamic-rendering format matching: the encoder records a stencil
+        // attachment whenever the depth format has a stencil aspect, and the
+        // pipeline's declared stencil format must match it (for combined
+        // formats it is the same vk::Format as the depth attachment).
+        // Declaring UNDEFINED while an attachment is bound violates the
+        // rendering VUIDs even with stencil testing disabled.
+        let stencil_attachment_format = depth_format
+            .filter(|f| f.has_stencil())
+            .map(convert_texture_format)
+            .unwrap_or(vk::Format::UNDEFINED);
+
         let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
             .color_attachment_formats(&color_attachment_formats)
-            .depth_attachment_format(depth_attachment_format);
+            .depth_attachment_format(depth_attachment_format)
+            .stencil_attachment_format(stencil_attachment_format);
 
         let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&shader_stages)
@@ -670,31 +703,53 @@ fn convert_shader_stage_flags(flags: crate::materials::ShaderStageFlags) -> vk::
     result
 }
 
-/// Extract the first `OpEntryPoint` name from a SPIR-V word slice.
+const SPIRV_MAGIC: u32 = 0x0723_0203;
+
+/// Iterate SPIR-V instructions as `(opcode, operand words)` pairs.
+fn spirv_instructions(spirv: &[u32]) -> impl Iterator<Item = (u32, &[u32])> {
+    let body = if spirv.len() >= 5 && spirv[0] == SPIRV_MAGIC {
+        &spirv[5..]
+    } else {
+        &[]
+    };
+    let mut i = 0;
+    std::iter::from_fn(move || {
+        if i >= body.len() {
+            return None;
+        }
+        let word = body[i];
+        let opcode = word & 0xFFFF;
+        let word_count = (word >> 16) as usize;
+        if word_count == 0 || i + word_count > body.len() {
+            return None;
+        }
+        let operands = &body[(i + 1)..(i + word_count)];
+        i += word_count;
+        Some((opcode, operands))
+    })
+}
+
+/// Extract the `OpEntryPoint` name matching `stage` from a SPIR-V word slice.
 ///
 /// Slang's SPIR-V output names entry points `"main"` (GLSL convention) rather than
 /// preserving the original function name. This function reads the actual name so the
-/// Vulkan pipeline can use the correct `pName`.
-fn spirv_entry_point_name(spirv: &[u32]) -> Option<String> {
-    const SPIRV_MAGIC: u32 = 0x0723_0203;
+/// Vulkan pipeline can use the correct `pName`. Matching by execution model matters
+/// for modules holding several entry points (e.g. vertex+fragment compiled together):
+/// taking the first `OpEntryPoint` would return the wrong name for the second stage.
+fn spirv_entry_point_name(spirv: &[u32], stage: ShaderStage) -> Option<String> {
     const OP_ENTRY_POINT: u32 = 15;
+    // SPIR-V ExecutionModel values.
+    let execution_model: u32 = match stage {
+        ShaderStage::Vertex => 0,
+        ShaderStage::Fragment => 4,
+        ShaderStage::Compute => 5,
+    };
 
-    if spirv.len() < 5 || spirv[0] != SPIRV_MAGIC {
-        return None;
-    }
-
-    let mut i = 5; // skip the 5-word SPIR-V header
-    while i < spirv.len() {
-        let word = spirv[i];
-        let opcode = word & 0xFFFF;
-        let word_count = (word >> 16) as usize;
-        if word_count == 0 {
-            break;
-        }
+    for (opcode, operands) in spirv_instructions(spirv) {
         // OpEntryPoint: | ExecutionModel | Id | Name (packed u32s) | interface vars |
-        if opcode == OP_ENTRY_POINT && word_count >= 4 && i + word_count <= spirv.len() {
+        if opcode == OP_ENTRY_POINT && operands.len() >= 3 && operands[0] == execution_model {
             let mut bytes = Vec::new();
-            'name: for &word in &spirv[(i + 3)..(i + word_count)] {
+            'name: for &word in &operands[2..] {
                 for byte in word.to_le_bytes() {
                     if byte == 0 {
                         break 'name;
@@ -704,9 +759,24 @@ fn spirv_entry_point_name(spirv: &[u32]) -> Option<String> {
             }
             return String::from_utf8(bytes).ok();
         }
-        i += word_count;
     }
     None
+}
+
+/// Whether the SPIR-V module declares a push-constant block.
+///
+/// The engine's binding model has no push-constant path (pipeline layouts
+/// declare no ranges), so such a module would fail pipeline validation with a
+/// confusing driver error. Detecting it up front turns that into a clear
+/// compile-time diagnostic.
+fn spirv_uses_push_constants(spirv: &[u32]) -> bool {
+    const OP_VARIABLE: u32 = 59;
+    const STORAGE_CLASS_PUSH_CONSTANT: u32 = 9;
+
+    // OpVariable: | Result Type | Result Id | Storage Class | [Initializer] |
+    spirv_instructions(spirv).any(|(opcode, operands)| {
+        opcode == OP_VARIABLE && operands.len() >= 3 && operands[2] == STORAGE_CLASS_PUSH_CONSTANT
+    })
 }
 
 /// Convert vertex attribute format to Vulkan format.
@@ -726,5 +796,81 @@ fn convert_vertex_format(format: VertexAttributeFormat) -> vk::Format {
         VertexAttributeFormat::Uint4 => vk::Format::R32G32B32A32_UINT,
         VertexAttributeFormat::Unorm8x4 => vk::Format::R8G8B8A8_UNORM,
         VertexAttributeFormat::Snorm8x4 => vk::Format::R8G8B8A8_SNORM,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pack_name(name: &str) -> Vec<u32> {
+        // Pack a null-terminated string into little-endian words (SPIR-V
+        // literal string encoding). Always emits the terminator, padding to a
+        // word boundary.
+        let mut bytes: Vec<u8> = name.as_bytes().to_vec();
+        bytes.push(0);
+        while !bytes.len().is_multiple_of(4) {
+            bytes.push(0);
+        }
+        bytes
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    }
+
+    fn instruction(opcode: u32, operands: &[u32]) -> Vec<u32> {
+        let mut words = vec![(((operands.len() + 1) as u32) << 16) | opcode];
+        words.extend_from_slice(operands);
+        words
+    }
+
+    fn module(instructions: &[Vec<u32>]) -> Vec<u32> {
+        let mut spv = vec![SPIRV_MAGIC, 0x0001_0300, 0, 100, 0];
+        for inst in instructions {
+            spv.extend_from_slice(inst);
+        }
+        spv
+    }
+
+    fn entry_point(execution_model: u32, name: &str) -> Vec<u32> {
+        let mut operands = vec![execution_model, 1];
+        operands.extend(pack_name(name));
+        instruction(15, &operands) // OpEntryPoint
+    }
+
+    #[test]
+    fn entry_point_name_selected_by_stage() {
+        // Vertex + fragment compiled into one module: each stage must get its
+        // own name, not the first OpEntryPoint's.
+        let spv = module(&[entry_point(0, "vsMain"), entry_point(4, "psMain")]);
+        assert_eq!(
+            spirv_entry_point_name(&spv, ShaderStage::Vertex).as_deref(),
+            Some("vsMain")
+        );
+        assert_eq!(
+            spirv_entry_point_name(&spv, ShaderStage::Fragment).as_deref(),
+            Some("psMain")
+        );
+        assert_eq!(spirv_entry_point_name(&spv, ShaderStage::Compute), None);
+    }
+
+    #[test]
+    fn entry_point_name_rejects_bad_magic() {
+        let mut spv = module(&[entry_point(0, "main")]);
+        spv[0] = 0xDEAD_BEEF;
+        assert_eq!(spirv_entry_point_name(&spv, ShaderStage::Vertex), None);
+    }
+
+    #[test]
+    fn push_constant_detection() {
+        // OpVariable: | Result Type | Result Id | Storage Class |
+        let uniform_var = instruction(59, &[2, 3, 2]); // StorageClass Uniform
+        let push_var = instruction(59, &[2, 4, 9]); // StorageClass PushConstant
+
+        let without = module(&[entry_point(0, "main"), uniform_var.clone()]);
+        assert!(!spirv_uses_push_constants(&without));
+
+        let with = module(&[entry_point(0, "main"), uniform_var, push_var]);
+        assert!(spirv_uses_push_constants(&with));
     }
 }
