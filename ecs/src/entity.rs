@@ -56,6 +56,16 @@ impl Entity {
     /// Maximum entity index (2^24 - 1).
     pub const MAX_INDEX: u32 = (1u32 << Self::ID_BITS) - 1;
 
+    /// A guaranteed-never-alive entity handle.
+    ///
+    /// Its spawn tick equals the dead-slot marker (`Entities::DEAD_TICK`),
+    /// which is never stamped on a live entity, so `world.is_alive(DANGLING)`
+    /// is `false` in every world forever. Prefab-asset instantiation resolves
+    /// references whose target no longer exists to this handle — a dangling
+    /// reference at export stays a dangling reference after instantiation
+    /// (see [`World::deserialize_prefab_asset`](crate::World)).
+    pub const DANGLING: Entity = Entity { bits: u64::MAX };
+
     /// Creates a new entity handle from a slot index and a spawn tick.
     ///
     /// Only the lower 40 bits of `spawn_tick` are stored in the handle.

@@ -33,7 +33,7 @@ pub mod natural;
 mod prefab_io;
 pub mod value;
 
-pub use context::{DeserializeContext, SerializeContext};
+pub use context::{DeserializeContext, SerializeContext, UnmappedEntityPolicy};
 pub use error::{DeserializeError, SerializeError};
 pub use field::{
     DeserializeField, DeserializeFieldFallback, SerializeField, SerializeFieldFallback,

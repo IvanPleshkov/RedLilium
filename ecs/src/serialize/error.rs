@@ -11,6 +11,17 @@ pub enum SerializeError {
     NotSerializable { component: &'static str },
     /// Format encoding error (RON/bincode).
     FormatError(String),
+    /// A component references a live entity outside the prefab's scope.
+    /// Prefab assets must be self-contained (see `World::serialize_prefab_asset`):
+    /// include the target in the prefab or clear the link.
+    ExternalEntityRef {
+        /// The in-scope entity carrying the reference.
+        entity: crate::Entity,
+        /// Name of the component holding the reference.
+        component: String,
+        /// The live out-of-scope entity being referenced.
+        target: crate::Entity,
+    },
 }
 
 impl fmt::Display for SerializeError {
@@ -23,6 +34,18 @@ impl fmt::Display for SerializeError {
                 write!(f, "component '{component}' does not support serialization")
             }
             Self::FormatError(msg) => write!(f, "format error: {msg}"),
+            Self::ExternalEntityRef {
+                entity,
+                component,
+                target,
+            } => {
+                write!(
+                    f,
+                    "component '{component}' on {entity} references {target}, which is alive \
+                     but outside the prefab; prefab assets must be self-contained — include \
+                     the target in the prefab or clear the link"
+                )
+            }
         }
     }
 }

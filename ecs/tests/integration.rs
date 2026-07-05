@@ -463,6 +463,205 @@ fn child_prefab_roundtrip_drops_external_parent() {
 }
 
 // ---------------------------------------------------------------------------
+// Prefab entity-reference policies (issue #23)
+// ---------------------------------------------------------------------------
+
+mod prefab_refs {
+    use redlilium_ecs::serialize::{
+        SerializeError, SerializedComponent, SerializedEntity, SerializedPrefab, Value,
+    };
+    use redlilium_ecs::{Component, Entity, World, register_std_components};
+
+    /// A component holding a bare entity reference.
+    #[derive(Clone, Component)]
+    struct Link {
+        target: Entity,
+    }
+
+    /// A component holding an optional entity reference.
+    #[derive(Clone, Component)]
+    struct OptLink {
+        target: Option<Entity>,
+    }
+
+    fn world_with_links() -> World {
+        let mut world = World::new();
+        register_std_components(&mut world);
+        world.register_inspector::<Link>();
+        world.register_inspector::<OptLink>();
+        world
+    }
+
+    #[test]
+    fn dangling_constant_is_never_alive() {
+        let mut world = world_with_links();
+        for _ in 0..64 {
+            world.spawn();
+        }
+        assert!(!world.is_alive(Entity::DANGLING));
+    }
+
+    /// Prefab assets must be self-contained: a reference to a live entity
+    /// outside the subtree fails the export with a precise error, while the
+    /// same-world snapshot (undo path) accepts it.
+    #[test]
+    fn asset_export_rejects_live_external_ref() {
+        let mut world = world_with_links();
+        let external = world.spawn();
+        let root = world.spawn();
+        world.insert(root, Link { target: external }).unwrap();
+
+        match world.serialize_prefab_asset(root) {
+            Err(SerializeError::ExternalEntityRef {
+                entity,
+                component,
+                target,
+            }) => {
+                assert_eq!(entity, root);
+                assert_eq!(component, "Link");
+                assert_eq!(target, external);
+            }
+            other => panic!("expected ExternalEntityRef, got {other:?}"),
+        }
+
+        // The same-world snapshot has no such restriction.
+        world.serialize_prefab(root).unwrap();
+    }
+
+    /// A reference that was dangling at export stays dangling after
+    /// instantiation — resolved to `Entity::DANGLING`, never to a handle
+    /// that could alias a live entity in the destination world.
+    #[test]
+    fn asset_dangling_ref_stays_dangling() {
+        let mut world = world_with_links();
+        let victim = world.spawn();
+        let root = world.spawn();
+        world.insert(root, Link { target: victim }).unwrap();
+        world
+            .insert(
+                root,
+                OptLink {
+                    target: Some(victim),
+                },
+            )
+            .unwrap();
+        world.despawn(victim);
+
+        let prefab = world.serialize_prefab_asset(root).unwrap();
+
+        let mut other = world_with_links();
+        // Occupy low slots so a naive raw-id carry-over would alias them.
+        for _ in 0..8 {
+            other.spawn();
+        }
+        let spawned = other.deserialize_prefab_asset(&prefab).unwrap();
+        let link_target = other.get::<Link>(spawned[0]).unwrap().target;
+        assert_eq!(link_target, Entity::DANGLING);
+        assert!(!other.is_alive(link_target));
+        let opt_target = other.get::<OptLink>(spawned[0]).unwrap().target;
+        assert_eq!(opt_target, Some(Entity::DANGLING));
+    }
+
+    /// Same-world restore (delete-undo) keeps references to still-alive
+    /// external entities. Regression: this used to fail with
+    /// UnmappedEntityReference for bare `Entity` fields and silently dropped
+    /// `Option<Entity>` links.
+    #[test]
+    fn same_world_restore_keeps_live_external_ref() {
+        let mut world = world_with_links();
+        let external = world.spawn();
+        let root = world.spawn();
+        world.insert(root, Link { target: external }).unwrap();
+        world
+            .insert(
+                root,
+                OptLink {
+                    target: Some(external),
+                },
+            )
+            .unwrap();
+
+        let prefab = world.serialize_prefab(root).unwrap();
+        world.despawn(root);
+
+        let spawned = world.deserialize_prefab(&prefab).unwrap();
+        assert_eq!(world.get::<Link>(spawned[0]).unwrap().target, external);
+        assert_eq!(
+            world.get::<OptLink>(spawned[0]).unwrap().target,
+            Some(external)
+        );
+        assert!(world.is_alive(external));
+    }
+
+    /// References between entities inside the prefab remap to the freshly
+    /// spawned copies in both modes.
+    #[test]
+    fn internal_refs_remap_to_spawned_entities() {
+        let mut world = world_with_links();
+        let root = world.spawn();
+        let child = world.spawn();
+        redlilium_ecs::set_parent(&mut world, child, root);
+        world.insert(root, Link { target: child }).unwrap();
+
+        let prefab = world.serialize_prefab_asset(root).unwrap();
+
+        let mut other = world_with_links();
+        let spawned = other.deserialize_prefab_asset(&prefab).unwrap();
+        assert_eq!(spawned.len(), 2);
+        assert_eq!(other.get::<Link>(spawned[0]).unwrap().target, spawned[1]);
+    }
+
+    /// A failed instantiation must not leave partially spawned entities in
+    /// the world (audit C7: no rollback).
+    #[test]
+    fn failed_restore_rolls_back_spawned_entities() {
+        let mut world = world_with_links();
+        let existing = world.spawn();
+        world
+            .insert(
+                existing,
+                Link {
+                    target: Entity::DANGLING,
+                },
+            )
+            .unwrap();
+        let before = world.entity_count();
+
+        // Two entities; the second carries a Link with garbage field data so
+        // its deserialization fails after the first entity fully restored.
+        let prefab = SerializedPrefab {
+            entities: vec![
+                SerializedEntity {
+                    entity_index: 100,
+                    entity_spawn_tick: 1,
+                    entity_flags: 0,
+                    components: vec![],
+                },
+                SerializedEntity {
+                    entity_index: 101,
+                    entity_spawn_tick: 1,
+                    entity_flags: 0,
+                    components: vec![SerializedComponent {
+                        type_name: "Link".to_string(),
+                        data: Value::Map(vec![(
+                            "target".to_string(),
+                            Value::String("garbage".to_string()),
+                        )]),
+                    }],
+                },
+            ],
+        };
+
+        assert!(world.deserialize_prefab(&prefab).is_err());
+        assert_eq!(
+            world.entity_count(),
+            before,
+            "failed restore must despawn everything it spawned"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Per-system change detection (issue #21)
 // ---------------------------------------------------------------------------
 

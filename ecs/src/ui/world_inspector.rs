@@ -649,8 +649,10 @@ impl std::fmt::Debug for SpawnPrefabAction {
 
 impl EditAction<World> for SpawnPrefabAction {
     fn apply(&mut self, world: &mut World) -> EditActionResult {
+        // Asset semantics: the prefab comes from a file, not from this world —
+        // out-of-prefab references resolve to `Entity::DANGLING`.
         let entities = world
-            .deserialize_prefab(&self.serialized)
+            .deserialize_prefab_asset(&self.serialized)
             .map_err(|e| EditActionError::Custom(e.to_string()))?;
         if let Some(parent) = self.parent
             && world.is_alive(parent)

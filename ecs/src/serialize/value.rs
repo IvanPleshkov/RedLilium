@@ -59,6 +59,19 @@ pub fn from_value<T: de::DeserializeOwned>(value: Value) -> Result<T, Deserializ
     T::deserialize(ValueDeserializer(value)).map_err(|e| DeserializeError::FormatError(e.0))
 }
 
+/// Reserved map key marking an explicit `Some` whose inner would otherwise be
+/// ambiguous with `None` (see `serialize_some`). User struct fields and enum
+/// variants must not use this name.
+const SOME_WRAPPER_KEY: &str = "__some__";
+
+fn some_wrapper(inner: Value) -> Value {
+    Value::Map(vec![(SOME_WRAPPER_KEY.to_owned(), inner)])
+}
+
+fn is_some_wrapper(entries: &[(String, Value)]) -> bool {
+    entries.len() == 1 && entries[0].0 == SOME_WRAPPER_KEY
+}
+
 // ---------------------------------------------------------------------------
 // ValueSerializer
 // ---------------------------------------------------------------------------
@@ -144,7 +157,18 @@ impl serde::Serializer for ValueSerializer {
         Ok(Value::Null)
     }
     fn serialize_some<T: ?Sized + Serialize>(self, value: &T) -> Result<Value, ValueError> {
-        value.serialize(self)
+        let inner = value.serialize(self)?;
+        // `Some(None)` and `Some(())` both serialize their inner to `Null`,
+        // which would collapse to the outer `None` on round-trip. Wrap the
+        // ambiguous cases in a reserved single-entry map so nesting survives;
+        // unambiguous values pass through unchanged (common case, same format).
+        // The wrap is recursive: an inner that is itself a wrapper gets wrapped
+        // again, so every `Some` level is preserved.
+        Ok(match &inner {
+            Value::Null => some_wrapper(inner),
+            Value::Map(entries) if is_some_wrapper(entries) => some_wrapper(inner),
+            _ => inner,
+        })
     }
 
     fn serialize_unit(self) -> Result<Value, ValueError> {
@@ -427,6 +451,12 @@ impl<'de> serde::Deserializer<'de> for ValueDeserializer {
     fn deserialize_bool<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, ValueError> {
         match self.0 {
             Value::Bool(v) => visitor.visit_bool(v),
+            // Map keys are stored stringified (see `SerializeMap::serialize_key`);
+            // parse them back when a typed key is requested.
+            Value::String(s) => visitor.visit_bool(
+                s.parse()
+                    .map_err(|_| de::Error::custom(format!("cannot parse '{s}' as bool")))?,
+            ),
             _ => self.deserialize_any(visitor),
         }
     }
@@ -450,6 +480,11 @@ impl<'de> serde::Deserializer<'de> for ValueDeserializer {
                     .map_err(|_| de::Error::custom(format!("integer {v} out of range for i64")))?;
                 visitor.visit_i64(n)
             }
+            // Stringified map key (see `SerializeMap::serialize_key`).
+            Value::String(s) => visitor.visit_i64(
+                s.parse()
+                    .map_err(|_| de::Error::custom(format!("cannot parse '{s}' as i64")))?,
+            ),
             _ => self.deserialize_any(visitor),
         }
     }
@@ -473,6 +508,11 @@ impl<'de> serde::Deserializer<'de> for ValueDeserializer {
                     .map_err(|_| de::Error::custom(format!("integer {v} out of range for u64")))?;
                 visitor.visit_u64(n)
             }
+            // Stringified map key (see `SerializeMap::serialize_key`).
+            Value::String(s) => visitor.visit_u64(
+                s.parse()
+                    .map_err(|_| de::Error::custom(format!("cannot parse '{s}' as u64")))?,
+            ),
             _ => self.deserialize_any(visitor),
         }
     }
@@ -481,6 +521,11 @@ impl<'de> serde::Deserializer<'de> for ValueDeserializer {
         match self.0 {
             Value::F32(v) => visitor.visit_f32(v),
             Value::F64(v) => visitor.visit_f32(v as f32),
+            // Stringified map key (see `SerializeMap::serialize_key`).
+            Value::String(s) => visitor.visit_f32(
+                s.parse()
+                    .map_err(|_| de::Error::custom(format!("cannot parse '{s}' as f32")))?,
+            ),
             _ => self.deserialize_any(visitor),
         }
     }
@@ -488,6 +533,11 @@ impl<'de> serde::Deserializer<'de> for ValueDeserializer {
         match self.0 {
             Value::F64(v) => visitor.visit_f64(v),
             Value::F32(v) => visitor.visit_f64(v as f64),
+            // Stringified map key (see `SerializeMap::serialize_key`).
+            Value::String(s) => visitor.visit_f64(
+                s.parse()
+                    .map_err(|_| de::Error::custom(format!("cannot parse '{s}' as f64")))?,
+            ),
             _ => self.deserialize_any(visitor),
         }
     }
@@ -518,6 +568,12 @@ impl<'de> serde::Deserializer<'de> for ValueDeserializer {
     fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, ValueError> {
         match self.0 {
             Value::Null => visitor.visit_none(),
+            // Unwrap the explicit-`Some` marker emitted by `serialize_some`
+            // for inners that would otherwise be ambiguous with `None`.
+            Value::Map(mut entries) if is_some_wrapper(&entries) => {
+                let (_, inner) = entries.pop().expect("wrapper has exactly one entry");
+                visitor.visit_some(ValueDeserializer(inner))
+            }
             other => visitor.visit_some(ValueDeserializer(other)),
         }
     }
@@ -789,6 +845,49 @@ mod tests {
             from_value::<Option<i32>>(to_value(&none).unwrap()).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn roundtrip_nested_option() {
+        // `Some(None)` must not collapse to `None` (audit C7).
+        for v in [None, Some(None), Some(Some(3i32))] {
+            let restored: Option<Option<i32>> = from_value(to_value(&v).unwrap()).unwrap();
+            assert_eq!(restored, v);
+        }
+        // Every `Some` level is preserved, arbitrarily deep.
+        for v in [Some(Some(None)), Some(None), Some(Some(Some(7i32)))] {
+            let restored: Option<Option<Option<i32>>> = from_value(to_value(&v).unwrap()).unwrap();
+            assert_eq!(restored, v);
+        }
+    }
+
+    #[test]
+    fn roundtrip_option_unit() {
+        // `Some(())` serializes its inner to Null — same ambiguity as Some(None).
+        for v in [Some(()), None] {
+            let restored: Option<()> = from_value(to_value(&v).unwrap()).unwrap();
+            assert_eq!(restored, v);
+        }
+    }
+
+    #[test]
+    fn roundtrip_integer_key_maps() {
+        // Map keys are stored stringified; typed keys must parse back (audit C7).
+        let unsigned: std::collections::HashMap<u32, String> =
+            [(5, "five".to_string()), (7, "seven".to_string())].into();
+        let restored: std::collections::HashMap<u32, String> =
+            from_value(to_value(&unsigned).unwrap()).unwrap();
+        assert_eq!(restored, unsigned);
+
+        let signed: std::collections::HashMap<i64, i32> = [(-3, 30), (4, 40)].into();
+        let restored: std::collections::HashMap<i64, i32> =
+            from_value(to_value(&signed).unwrap()).unwrap();
+        assert_eq!(restored, signed);
+
+        let boolean: std::collections::HashMap<bool, u8> = [(true, 1), (false, 0)].into();
+        let restored: std::collections::HashMap<bool, u8> =
+            from_value(to_value(&boolean).unwrap()).unwrap();
+        assert_eq!(restored, boolean);
     }
 
     #[test]

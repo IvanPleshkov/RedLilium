@@ -778,7 +778,9 @@ impl AppHandler for Editor {
         if let Some((root_entity, vfs_dir)) = self.asset_browser.pending_prefab_export.take() {
             let ew = self.world.as_ref().unwrap();
             if ew.world.is_alive(root_entity) {
-                match ew.world.serialize_prefab(root_entity) {
+                // Asset export: the prefab must be self-contained (external
+                // entity references are rejected with a clear error).
+                match ew.world.serialize_prefab_asset(root_entity) {
                     Ok(serialized) => {
                         match redlilium_ecs::serialize::encode(
                             &serialized,

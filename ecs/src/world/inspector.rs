@@ -425,7 +425,13 @@ impl World {
         crate::prefab::Prefab::new(entities)
     }
 
-    /// Serializes an entity subtree into a [`SerializedPrefab`](crate::serialize::SerializedPrefab).
+    /// Serializes an entity subtree into a [`SerializedPrefab`](crate::serialize::SerializedPrefab)
+    /// as a **same-world snapshot** (undo/redo backups).
+    ///
+    /// Entity references pointing outside the subtree are serialized as-is:
+    /// restoring in the same world keeps still-alive targets linked, and
+    /// targets that died in the meantime stay dangling. For self-contained
+    /// prefab **assets** use [`serialize_prefab_asset`](World::serialize_prefab_asset).
     ///
     /// Performs a breadth-first walk from `root` through [`Children`](crate::Children)
     /// components and serializes all serializable components. Components that
@@ -441,6 +447,35 @@ impl World {
         &self,
         root: Entity,
     ) -> Result<crate::serialize::SerializedPrefab, crate::serialize::SerializeError> {
+        self.serialize_prefab_impl(root, false)
+    }
+
+    /// Serializes an entity subtree into a self-contained **prefab asset**.
+    ///
+    /// Unlike [`serialize_prefab`](World::serialize_prefab) (a same-world
+    /// snapshot), a prefab asset must not depend on the source world:
+    ///
+    /// - a reference to a **live entity outside the subtree** fails with
+    ///   [`ExternalEntityRef`](crate::serialize::SerializeError::ExternalEntityRef) —
+    ///   include the target in the prefab or clear the link;
+    /// - a **dangling** reference (dead target) is allowed and stays dangling
+    ///   after instantiation (resolved to [`Entity::DANGLING`] by
+    ///   [`deserialize_prefab_asset`](World::deserialize_prefab_asset)).
+    ///
+    /// The root's `Parent` is exempt: it is dropped from the output, as with
+    /// [`serialize_prefab`](World::serialize_prefab).
+    pub fn serialize_prefab_asset(
+        &self,
+        root: Entity,
+    ) -> Result<crate::serialize::SerializedPrefab, crate::serialize::SerializeError> {
+        self.serialize_prefab_impl(root, true)
+    }
+
+    fn serialize_prefab_impl(
+        &self,
+        root: Entity,
+        forbid_external_refs: bool,
+    ) -> Result<crate::serialize::SerializedPrefab, crate::serialize::SerializeError> {
         if !self.is_alive(root) {
             return Ok(crate::serialize::SerializedPrefab {
                 entities: Vec::new(),
@@ -449,6 +484,32 @@ impl World {
 
         // 1. BFS walk via Children to collect all entities in subtree
         let old_entities = self.collect_subtree_bfs(root);
+
+        // 1b. Asset mode: every entity reference must resolve inside the
+        // subtree or be dangling. The root's Parent is skipped — it is
+        // dropped from the output below (external by construction).
+        if forbid_external_refs {
+            let scope: std::collections::HashSet<Entity> = old_entities.iter().copied().collect();
+            let mut refs = Vec::new();
+            for &entity in &old_entities {
+                for meta in self.iter_meta() {
+                    if entity == root && meta.name == "Parent" {
+                        continue;
+                    }
+                    refs.clear();
+                    (meta.collect_entities_fn)(self, entity, &mut refs);
+                    for &target in &refs {
+                        if !scope.contains(&target) && self.is_alive(target) {
+                            return Err(crate::serialize::SerializeError::ExternalEntityRef {
+                                entity,
+                                component: meta.name.to_owned(),
+                                target,
+                            });
+                        }
+                    }
+                }
+            }
+        }
 
         // 2. Collect serialize_fns
         let serialize_fns: Vec<SerializeComponentFn> =
@@ -486,23 +547,73 @@ impl World {
         })
     }
 
-    /// Deserializes a [`SerializedPrefab`](crate::serialize::SerializedPrefab) into new entities.
+    /// Deserializes a [`SerializedPrefab`](crate::serialize::SerializedPrefab) into new entities
+    /// as a **same-world snapshot** restore (undo/redo).
     ///
     /// Spawns new entities, deserializes components, and remaps entity references
     /// (e.g., [`Parent`](crate::Parent) / [`Children`](crate::Children)) to the
-    /// newly spawned entities. Arc values that were shared during serialization
-    /// are shared again via the deduplication cache.
+    /// newly spawned entities. References whose target is not part of the
+    /// prefab keep their original handle: a still-alive target stays linked, a
+    /// dead one stays dangling. For prefab **assets** use
+    /// [`deserialize_prefab_asset`](World::deserialize_prefab_asset). Arc
+    /// values that were shared during serialization are shared again via the
+    /// deduplication cache.
     ///
-    /// Returns the list of new entities in BFS order (index 0 = root).
+    /// Returns the list of new entities in BFS order (index 0 = root). On
+    /// error, every entity spawned by this call is despawned — a failed
+    /// restore leaves the world unchanged.
     ///
     /// Unknown component types are silently skipped.
     pub fn deserialize_prefab(
         &mut self,
         prefab: &crate::serialize::SerializedPrefab,
     ) -> Result<Vec<Entity>, crate::serialize::DeserializeError> {
+        self.deserialize_prefab_impl(prefab, crate::serialize::UnmappedEntityPolicy::Keep)
+    }
+
+    /// Deserializes a **prefab asset** (see
+    /// [`serialize_prefab_asset`](World::serialize_prefab_asset)) into new entities.
+    ///
+    /// Same as [`deserialize_prefab`](World::deserialize_prefab), except that a
+    /// reference whose target is not part of the prefab resolves to
+    /// [`Entity::DANGLING`] instead of keeping the original handle — in a
+    /// foreign world the source handle could alias an unrelated live entity.
+    /// A reference that was dangling when the asset was exported is thus
+    /// dangling after instantiation, in any world.
+    pub fn deserialize_prefab_asset(
+        &mut self,
+        prefab: &crate::serialize::SerializedPrefab,
+    ) -> Result<Vec<Entity>, crate::serialize::DeserializeError> {
+        self.deserialize_prefab_impl(prefab, crate::serialize::UnmappedEntityPolicy::Dangling)
+    }
+
+    fn deserialize_prefab_impl(
+        &mut self,
+        prefab: &crate::serialize::SerializedPrefab,
+        unmapped_policy: crate::serialize::UnmappedEntityPolicy,
+    ) -> Result<Vec<Entity>, crate::serialize::DeserializeError> {
         // 1. Spawn entities
         let new_entities: Vec<Entity> = prefab.entities.iter().map(|_| self.spawn()).collect();
 
+        match self.deserialize_prefab_body(prefab, &new_entities, unmapped_policy) {
+            Ok(()) => Ok(new_entities),
+            Err(e) => {
+                // Roll back: a failed restore must not leave a partially
+                // spawned entity tree in the world.
+                for &entity in &new_entities {
+                    self.despawn(entity);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    fn deserialize_prefab_body(
+        &mut self,
+        prefab: &crate::serialize::SerializedPrefab,
+        new_entities: &[Entity],
+        unmapped_policy: crate::serialize::UnmappedEntityPolicy,
+    ) -> Result<(), crate::serialize::DeserializeError> {
         // 2. Build entity remap: (old_index, old_spawn_tick) -> new Entity
         let entity_map: HashMap<(u32, u64), Entity> = prefab
             .entities
@@ -527,6 +638,7 @@ impl World {
         // 5. Create context with entity remap and Arc dedup cache
         let mut ctx = crate::serialize::DeserializeContext::new(self);
         ctx.set_entity_map(entity_map);
+        ctx.set_unmapped_policy(unmapped_policy);
 
         // 5b. Pre-scan EVERY component's data (including those whose type is
         // unknown/skipped) to record each shared Arc's raw inner. This lets an
@@ -556,6 +668,6 @@ impl World {
             }
         }
 
-        Ok(new_entities)
+        Ok(())
     }
 }

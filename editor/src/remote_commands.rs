@@ -904,7 +904,7 @@ fn dispatch(
                 return send_err(world, conn, id, "missing 'path'");
             };
             let data = match world
-                .serialize_prefab(entity)
+                .serialize_prefab_asset(entity)
                 .map_err(|e| e.to_string())
                 .and_then(|prefab| {
                     redlilium_ecs::serialize::encode(&prefab, redlilium_ecs::serialize::Format::Ron)

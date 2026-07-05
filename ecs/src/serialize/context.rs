@@ -153,6 +153,24 @@ impl<'w> SerializeContext<'w> {
 // DeserializeContext
 // ---------------------------------------------------------------------------
 
+/// What to do with a serialized entity reference that is not in the remap
+/// table (its target was not part of the serialized set).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum UnmappedEntityPolicy {
+    /// Fail deserialization (safe default for contexts without a remap
+    /// table, e.g. single-component import).
+    #[default]
+    Error,
+    /// Keep the original handle. Correct for same-world snapshots (undo):
+    /// a still-alive target stays linked, a dead one stays dangling.
+    Keep,
+    /// Resolve to [`Entity::DANGLING`]. Correct for prefab assets loaded
+    /// into a foreign world, where the original handle could collide with
+    /// an unrelated live entity — a reference that was dangling at export
+    /// stays dangling after instantiation.
+    Dangling,
+}
+
 /// Context for deserializing component fields.
 ///
 /// Provides field-by-field access, Arc deduplication cache, entity
@@ -167,6 +185,8 @@ pub struct DeserializeContext<'w> {
     /// by deserializing the inner at the (known-typed) `ArcRef` site instead.
     arc_raw: HashMap<u32, Value>,
     entity_map: HashMap<(u32, u64), Entity>,
+    /// How to resolve references missing from `entity_map`.
+    unmapped_policy: UnmappedEntityPolicy,
     /// Name of the component currently being deserialized, used to enrich
     /// [`DeserializeError::MissingField`] / `TypeMismatch` diagnostics.
     current_component: String,
@@ -181,8 +201,14 @@ impl<'w> DeserializeContext<'w> {
             arc_cache: HashMap::new(),
             arc_raw: HashMap::new(),
             entity_map: HashMap::new(),
+            unmapped_policy: UnmappedEntityPolicy::default(),
             current_component: String::new(),
         }
+    }
+
+    /// Sets how references missing from the remap table are resolved.
+    pub fn set_unmapped_policy(&mut self, policy: UnmappedEntityPolicy) {
+        self.unmapped_policy = policy;
     }
 
     /// Sets the name of the component about to be deserialized, used to enrich
@@ -276,24 +302,28 @@ impl<'w> DeserializeContext<'w> {
         value::from_value(val).map_err(|e| DeserializeError::FormatError(e.to_string()))
     }
 
-    /// Resolves a serialized entity reference through the remap table.
-    ///
-    /// Returns an error on a miss rather than fabricating a handle from the
-    /// source indices — such a handle would silently alias an unrelated or dead
-    /// entity in the destination world.
+    /// Resolves a serialized entity reference through the remap table,
+    /// falling back to the configured [`UnmappedEntityPolicy`] on a miss.
     fn resolve_entity(
         &self,
         field: &str,
         index: u32,
         spawn_tick: u64,
     ) -> Result<Entity, DeserializeError> {
-        self.entity_map.get(&(index, spawn_tick)).copied().ok_or(
-            DeserializeError::UnmappedEntityReference {
+        if let Some(&mapped) = self.entity_map.get(&(index, spawn_tick)) {
+            return Ok(mapped);
+        }
+        match self.unmapped_policy {
+            // Never fabricate a handle by default — it could silently alias an
+            // unrelated or dead entity in the destination world.
+            UnmappedEntityPolicy::Error => Err(DeserializeError::UnmappedEntityReference {
                 field: field.to_owned(),
                 index,
                 spawn_tick,
-            },
-        )
+            }),
+            UnmappedEntityPolicy::Keep => Ok(Entity::new(index, spawn_tick)),
+            UnmappedEntityPolicy::Dangling => Ok(Entity::DANGLING),
+        }
     }
 
     /// Read an entity reference, applying the remap table.
@@ -336,14 +366,20 @@ impl<'w> DeserializeContext<'w> {
 
     /// Read an optional entity reference, applying the remap table.
     ///
-    /// An unmapped (out-of-set) reference resolves to `None` rather than a
-    /// fabricated, dangling handle.
+    /// Under [`UnmappedEntityPolicy::Error`] an unmapped reference resolves to
+    /// `None` (the field is optional — dropping the link is the lenient
+    /// counterpart of the bare-`Entity` error); the other policies resolve it
+    /// like [`read_entity`](Self::read_entity) does.
     pub fn read_optional_entity(&mut self, name: &str) -> Result<Option<Entity>, DeserializeError> {
         let val = self.read_field(name)?;
         match val {
             Value::Null => Ok(None),
             Value::Entity { index, spawn_tick } => {
-                Ok(self.entity_map.get(&(index, spawn_tick)).copied())
+                if self.unmapped_policy == UnmappedEntityPolicy::Error {
+                    Ok(self.entity_map.get(&(index, spawn_tick)).copied())
+                } else {
+                    self.resolve_entity(name, index, spawn_tick).map(Some)
+                }
             }
             _ => Err(DeserializeError::TypeMismatch {
                 field: name.to_owned(),
