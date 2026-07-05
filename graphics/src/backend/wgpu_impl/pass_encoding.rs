@@ -45,14 +45,19 @@ impl WgpuBackend {
             return Ok(());
         };
 
-        // Build color attachments on stack (8 = wgpu max_color_attachments default).
-        let color_count = render_targets.color_attachments.len().min(8);
-        debug_assert!(
-            render_targets.color_attachments.len() <= 8,
-            "More than 8 color attachments exceeds wgpu default limits"
-        );
+        // Build color attachments on stack (8 = wgpu max_color_attachments
+        // default). Exceeding it must be an error: silently dropping trailing
+        // attachments would render without them and corrupt MRT output.
+        let color_count = render_targets.color_attachments.len();
+        if color_count > 8 {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "pass '{}' declares {} color attachments; wgpu supports at most 8",
+                pass.name(),
+                color_count
+            )));
+        }
         let mut color_attachments = [const { None }; 8];
-        for (i, attachment) in render_targets.color_attachments.iter().enumerate().take(8) {
+        for (i, attachment) in render_targets.color_attachments.iter().enumerate() {
             color_attachments[i] = match &attachment.target {
                 RenderTarget::Texture { texture, .. } => {
                     let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() else {
@@ -91,32 +96,49 @@ impl WgpuBackend {
         }
         let color_attachments = &color_attachments[..color_count];
 
-        // Build depth stencil attachment if present
-        let depth_stencil_attachment =
-            render_targets
-                .depth_stencil_attachment
-                .as_ref()
-                .map(|attachment| {
-                    let GpuTexture::Wgpu { view, .. } = attachment.texture().gpu_handle() else {
-                        panic!("Invalid depth texture GPU handle");
-                    };
-                    let stencil_ops = if attachment.target.format().has_stencil() {
-                        Some(wgpu::Operations {
-                            load: convert_stencil_load_op(&attachment.stencil_load_op()),
-                            store: convert_store_op(&attachment.stencil_store_op()),
-                        })
-                    } else {
-                        None
-                    };
-                    wgpu::RenderPassDepthStencilAttachment {
-                        view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: convert_depth_load_op(&attachment.depth_load_op()),
-                            store: convert_store_op(&attachment.depth_store_op()),
-                        }),
-                        stencil_ops,
+        // Build depth stencil attachment if present. Mismatched handles are
+        // errors, not panics — matching the color/buffer handling in this
+        // file (a panic here also poisons the encoder scratch mutex).
+        let depth_stencil_attachment = match &render_targets.depth_stencil_attachment {
+            Some(attachment) => {
+                let view = match &attachment.target {
+                    RenderTarget::Texture { texture, .. } => {
+                        let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() else {
+                            return Err(GraphicsError::InvalidParameter(format!(
+                                "wgpu: depth attachment of pass '{}' has a non-wgpu GPU \
+                                 handle (resource from a different backend)",
+                                pass.name()
+                            )));
+                        };
+                        view
                     }
-                });
+                    RenderTarget::Surface { .. } => {
+                        return Err(GraphicsError::InvalidParameter(format!(
+                            "wgpu: pass '{}' uses the surface as a depth attachment; \
+                             surfaces are color-only",
+                            pass.name()
+                        )));
+                    }
+                };
+                let stencil_ops = if attachment.target.format().has_stencil() {
+                    Some(wgpu::Operations {
+                        load: convert_stencil_load_op(&attachment.stencil_load_op()),
+                        store: convert_store_op(&attachment.stencil_store_op()),
+                    })
+                } else {
+                    None
+                };
+                Some(wgpu::RenderPassDepthStencilAttachment {
+                    view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: convert_depth_load_op(&attachment.depth_load_op()),
+                        store: convert_store_op(&attachment.depth_store_op()),
+                    }),
+                    stencil_ops,
+                })
+            }
+            None => None,
+        };
 
         // Check if we have any valid attachments - wgpu requires at least one
         let has_valid_color = color_attachments.iter().any(|a| a.is_some());
@@ -153,7 +175,7 @@ impl WgpuBackend {
 
         // Lock scratch ONCE for all draw commands in this pass.
         // Destructure to allow independent field borrows.
-        let scratch = &mut *self.encoder_scratch.lock().unwrap();
+        let scratch = &mut *self.encoder_scratch.lock();
         let super::WgpuEncoderScratch {
             bind_group_layouts: scratch_bind_group_layouts,
             bind_groups: scratch_bind_groups,
@@ -624,7 +646,7 @@ impl WgpuBackend {
             timestamp_writes: None,
         });
 
-        let scratch = &mut *self.encoder_scratch.lock().unwrap();
+        let scratch = &mut *self.encoder_scratch.lock();
         let super::WgpuEncoderScratch {
             bind_group_layouts: scratch_bind_group_layouts,
             bind_groups: scratch_bind_groups,

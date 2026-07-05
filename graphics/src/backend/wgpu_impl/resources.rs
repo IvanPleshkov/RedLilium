@@ -46,6 +46,21 @@ impl WgpuBackend {
         }
 
         let format = convert_texture_format(descriptor.format);
+
+        // Feature-gated formats (BC/ETC2/ASTC compression, etc.) are requested
+        // opportunistically at device creation; if this adapter lacks the
+        // feature, creating the texture would raise an uncaptured validation
+        // error. Fail with a clear error at the actual cause instead.
+        let required = format.required_features();
+        if !self.device.features().contains(required) {
+            return Err(GraphicsError::FeatureNotSupported(format!(
+                "texture format {:?} requires wgpu feature(s) {:?}, which this adapter \
+                 does not support",
+                descriptor.format,
+                required.difference(self.device.features())
+            )));
+        }
+
         let usage = convert_texture_usage(descriptor.usage);
 
         // Convert our texture dimension to wgpu's

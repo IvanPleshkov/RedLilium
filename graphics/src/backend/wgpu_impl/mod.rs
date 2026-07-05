@@ -58,7 +58,11 @@ pub struct WgpuBackend {
     adapter: wgpu::Adapter,
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
-    encoder_scratch: std::sync::Mutex<WgpuEncoderScratch>,
+    // parking_lot: no poisoning. With std::sync::Mutex a single panicking
+    // encode poisoned the scratch forever, failing every subsequent frame
+    // even when the original cause was transient. The scratch buffers are
+    // cleared before each use, so recovery is always safe.
+    encoder_scratch: parking_lot::Mutex<WgpuEncoderScratch>,
 }
 
 impl std::fmt::Debug for WgpuBackend {
@@ -113,9 +117,46 @@ impl WgpuBackend {
         log::info!("wgpu adapter: {:?}", adapter.get_info());
 
         // Request device
+        let (device, queue) = Self::request_device(&adapter)?;
+
+        Ok(Self {
+            instance,
+            adapter,
+            device: Arc::new(device),
+            queue: Arc::new(queue),
+            encoder_scratch: parking_lot::Mutex::new(WgpuEncoderScratch::default()),
+        })
+    }
+
+    /// Features requested opportunistically when the adapter supports them:
+    /// compressed texture formats (BC/ETC2/ASTC) so `create_texture` with
+    /// those formats works wherever the hardware can, and filterable 32-bit
+    /// float textures.
+    fn optional_features(adapter: &wgpu::Adapter) -> wgpu::Features {
+        let supported = adapter.features();
+        [
+            wgpu::Features::TEXTURE_COMPRESSION_BC,
+            wgpu::Features::TEXTURE_COMPRESSION_ETC2,
+            wgpu::Features::TEXTURE_COMPRESSION_ASTC,
+            wgpu::Features::FLOAT32_FILTERABLE,
+        ]
+        .into_iter()
+        .filter(|f| supported.contains(*f))
+        .fold(wgpu::Features::empty(), |acc, f| acc | f)
+    }
+
+    /// Request a device from `adapter` with the engine's feature set and an
+    /// uncaptured-error handler installed.
+    ///
+    /// Without a handler every uncaptured wgpu validation error aborts the
+    /// process; routing them to the log makes a bad draw degrade (missing
+    /// output + error message) instead of killing the app.
+    fn request_device(
+        adapter: &wgpu::Adapter,
+    ) -> Result<(wgpu::Device, wgpu::Queue), GraphicsError> {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("RedLilium Device"),
-            required_features: wgpu::Features::POLYGON_MODE_LINE,
+            required_features: wgpu::Features::POLYGON_MODE_LINE | Self::optional_features(adapter),
             required_limits: wgpu::Limits::default(),
             memory_hints: wgpu::MemoryHints::default(),
             experimental_features: wgpu::ExperimentalFeatures::default(),
@@ -125,13 +166,11 @@ impl WgpuBackend {
             GraphicsError::ResourceCreationFailed(format!("Device creation failed: {e}"))
         })?;
 
-        Ok(Self {
-            instance,
-            adapter,
-            device: Arc::new(device),
-            queue: Arc::new(queue),
-            encoder_scratch: std::sync::Mutex::new(WgpuEncoderScratch::default()),
-        })
+        device.on_uncaptured_error(std::sync::Arc::new(|error| {
+            log::error!("wgpu uncaptured error: {error}");
+        }));
+
+        Ok((device, queue))
     }
 
     /// Get the wgpu instance.
@@ -196,18 +235,7 @@ impl WgpuBackend {
         );
 
         // Request device from the new adapter
-        let (new_device, new_queue) =
-            pollster::block_on(new_adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("RedLilium Device"),
-                required_features: wgpu::Features::POLYGON_MODE_LINE,
-                required_limits: wgpu::Limits::default(),
-                memory_hints: wgpu::MemoryHints::default(),
-                experimental_features: wgpu::ExperimentalFeatures::default(),
-                trace: wgpu::Trace::Off,
-            }))
-            .map_err(|e| {
-                GraphicsError::ResourceCreationFailed(format!("Device creation failed: {e}"))
-            })?;
+        let (new_device, new_queue) = Self::request_device(&new_adapter)?;
 
         // Update the backend with new adapter and device.
         // Note: Pipelines are now owned by Materials (GpuPipeline),
