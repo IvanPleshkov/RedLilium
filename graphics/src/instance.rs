@@ -422,6 +422,21 @@ impl GraphicsInstance {
         // Ensure the backend is compatible with the surface
         {
             let mut backend = self.backend_mut();
+
+            // On wgpu an incompatible adapter is fixed by swapping the
+            // backend's device — safe only while nothing has been created
+            // yet. Resources made through an existing GraphicsDevice belong
+            // to the old wgpu device; after a swap the first draw touching
+            // them is a cross-device validation error. Refuse instead.
+            if self.device_count() > 0 && !backend.surface_compatible(surface.gpu_surface()) {
+                return Err(GraphicsError::InvalidParameter(
+                    "surface requires a different GPU adapter, but graphics devices (and \
+                     potentially their resources) already exist on the current one; create \
+                     the surface and its device before any other device"
+                        .to_string(),
+                ));
+            }
+
             backend.ensure_compatible_with_surface(surface.gpu_surface())?;
         }
 

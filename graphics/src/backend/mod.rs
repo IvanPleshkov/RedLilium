@@ -1181,6 +1181,27 @@ impl GpuBackend {
     /// device supports the surface.
     ///
     /// Returns `Ok(true)` if compatible, `Err` if no compatible adapter could be found.
+    /// Whether the backend's current adapter can present to `surface`,
+    /// without changing any state.
+    pub fn surface_compatible(&self, surface: &GpuSurface) -> bool {
+        match (self, surface) {
+            (Self::Dummy(_), _) => true,
+
+            #[cfg(feature = "wgpu-backend")]
+            (Self::Wgpu(wgpu_backend), GpuSurface::Wgpu { surface }) => {
+                wgpu_backend.is_adapter_compatible_with_surface(surface)
+            }
+
+            #[cfg(feature = "vulkan-backend")]
+            (Self::Vulkan(vulkan_backend), GpuSurface::Vulkan { surface, .. }) => {
+                vulkan_backend.is_surface_supported(*surface)
+            }
+
+            #[allow(unreachable_patterns)]
+            _ => false,
+        }
+    }
+
     pub fn ensure_compatible_with_surface(
         &mut self,
         surface: &GpuSurface,

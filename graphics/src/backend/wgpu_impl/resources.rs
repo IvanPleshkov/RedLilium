@@ -63,6 +63,17 @@ impl WgpuBackend {
 
         let usage = convert_texture_usage(descriptor.usage);
 
+        // WebGPU has no arrayed 1D textures at all; the old mapping created a
+        // multi-layer D1 texture with a D1 (non-array) view, which fails
+        // bind-group validation on first use. Reject it up front.
+        if descriptor.dimension == TextureDimension::D1Array {
+            return Err(GraphicsError::FeatureNotSupported(
+                "D1Array textures are not supported by the wgpu backend (WebGPU has no \
+                 arrayed 1D textures); use a D2Array with height 1 instead"
+                    .into(),
+            ));
+        }
+
         // Convert our texture dimension to wgpu's
         let (wgpu_dimension, depth_or_array_layers) = match descriptor.dimension {
             TextureDimension::D1 => (wgpu::TextureDimension::D1, descriptor.size.depth),
@@ -137,8 +148,7 @@ impl WgpuBackend {
         descriptor: &crate::materials::MaterialDescriptor,
     ) -> Result<super::super::GpuPipeline, GraphicsError> {
         use super::conversion::{
-            convert_binding_type, convert_blend_state, convert_shader_stages, convert_step_mode,
-            convert_topology, convert_vertex_format,
+            convert_blend_state, convert_step_mode, convert_topology, convert_vertex_format,
         };
         use crate::materials::ShaderStage;
 
@@ -204,19 +214,11 @@ impl WgpuBackend {
             }
         }
 
-        // Bind group layouts
+        // Bind group layouts (binding_layout_entries owns the
+        // CombinedTextureSampler texture+sampler split)
         let mut bind_group_layouts = Vec::new();
         for bg_layout in &descriptor.binding_layouts {
-            let entries: Vec<wgpu::BindGroupLayoutEntry> = bg_layout
-                .entries
-                .iter()
-                .map(|entry| wgpu::BindGroupLayoutEntry {
-                    binding: entry.binding,
-                    visibility: convert_shader_stages(entry.visibility),
-                    ty: convert_binding_type(entry.binding_type),
-                    count: None,
-                })
-                .collect();
+            let entries = super::conversion::binding_layout_entries(bg_layout);
             bind_group_layouts.push(self.device.create_bind_group_layout(
                 &wgpu::BindGroupLayoutDescriptor {
                     label: bg_layout.label.as_deref(),
@@ -327,7 +329,6 @@ impl WgpuBackend {
         &self,
         descriptor: &crate::materials::MaterialDescriptor,
     ) -> Result<super::super::GpuPipeline, GraphicsError> {
-        use super::conversion::{convert_binding_type, convert_shader_stages};
         use crate::materials::ShaderStage;
 
         let mut compute_module = None;
@@ -353,19 +354,11 @@ impl WgpuBackend {
             ));
         };
 
-        // Bind group layouts
+        // Bind group layouts (binding_layout_entries owns the
+        // CombinedTextureSampler texture+sampler split)
         let mut bind_group_layouts = Vec::new();
         for bg_layout in &descriptor.binding_layouts {
-            let entries: Vec<wgpu::BindGroupLayoutEntry> = bg_layout
-                .entries
-                .iter()
-                .map(|entry| wgpu::BindGroupLayoutEntry {
-                    binding: entry.binding,
-                    visibility: convert_shader_stages(entry.visibility),
-                    ty: convert_binding_type(entry.binding_type),
-                    count: None,
-                })
-                .collect();
+            let entries = super::conversion::binding_layout_entries(bg_layout);
             bind_group_layouts.push(self.device.create_bind_group_layout(
                 &wgpu::BindGroupLayoutDescriptor {
                     label: bg_layout.label.as_deref(),

@@ -568,11 +568,21 @@ pub fn convert_binding_type(binding_type: crate::materials::BindingType) -> wgpu
             view_dimension: wgpu::TextureViewDimension::D2Array,
             multisampled: false,
         },
+        crate::materials::BindingType::DepthTexture => wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Depth,
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
         crate::materials::BindingType::Sampler => {
             wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)
         }
+        crate::materials::BindingType::ComparisonSampler => {
+            wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison)
+        }
         crate::materials::BindingType::CombinedTextureSampler => {
-            // wgpu doesn't have combined texture/sampler, use texture binding
+            // wgpu has no combined texture/sampler binding. The layout side
+            // expands this entry to texture at N + sampler at N+1 (see
+            // `binding_layout_entries`); this arm provides the texture half.
             wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Float { filterable: true },
                 view_dimension: wgpu::TextureViewDimension::D2,
@@ -580,6 +590,37 @@ pub fn convert_binding_type(binding_type: crate::materials::BindingType) -> wgpu
             }
         }
     }
+}
+
+/// Expand a [`BindingLayout`](crate::materials::BindingLayout) into wgpu bind
+/// group layout entries.
+///
+/// This owns the `CombinedTextureSampler` split contract: the bind-group side
+/// (`pass_encoding`) emits a texture view at binding N and a sampler at
+/// binding N + 1 for a combined entry — matching Slang's WGSL emission — so
+/// the layout must declare both. Every other entry maps 1:1.
+pub fn binding_layout_entries(
+    layout: &crate::materials::BindingLayout,
+) -> Vec<wgpu::BindGroupLayoutEntry> {
+    let mut entries = Vec::with_capacity(layout.entries.len());
+    for entry in &layout.entries {
+        let visibility = convert_shader_stages(entry.visibility);
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: entry.binding,
+            visibility,
+            ty: convert_binding_type(entry.binding_type),
+            count: None,
+        });
+        if entry.binding_type == crate::materials::BindingType::CombinedTextureSampler {
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: entry.binding + 1,
+                visibility,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            });
+        }
+    }
+    entries
 }
 
 #[cfg(test)]

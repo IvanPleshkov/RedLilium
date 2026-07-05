@@ -280,10 +280,13 @@ impl PipelineManager {
                     BindingType::StorageBuffer | BindingType::StorageBufferReadOnly => {
                         vk::DescriptorType::STORAGE_BUFFER
                     }
-                    BindingType::Sampler => vk::DescriptorType::SAMPLER,
-                    BindingType::Texture => vk::DescriptorType::SAMPLED_IMAGE,
-                    BindingType::TextureCube => vk::DescriptorType::SAMPLED_IMAGE,
-                    BindingType::Texture2DArray => vk::DescriptorType::SAMPLED_IMAGE,
+                    BindingType::Sampler | BindingType::ComparisonSampler => {
+                        vk::DescriptorType::SAMPLER
+                    }
+                    BindingType::Texture
+                    | BindingType::TextureCube
+                    | BindingType::Texture2DArray
+                    | BindingType::DepthTexture => vk::DescriptorType::SAMPLED_IMAGE,
                     BindingType::CombinedTextureSampler => {
                         vk::DescriptorType::COMBINED_IMAGE_SAMPLER
                     }
