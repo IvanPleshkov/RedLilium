@@ -154,16 +154,18 @@ impl BufferAccessMode {
     }
 
     /// Get the Vulkan pipeline stage for this buffer access mode (as source).
+    ///
+    /// `BufferAccessMode` does not record which shader stage performs the
+    /// access, so shader modes return the union of all stages that could —
+    /// including `COMPUTE_SHADER` for uniform reads (a UBO can feed a
+    /// dispatch just as well as a draw).
     #[cfg(feature = "vulkan-backend")]
     pub fn src_stage(self) -> ash::vk::PipelineStageFlags {
         use ash::vk::PipelineStageFlags;
         match self {
             Self::VertexBuffer => PipelineStageFlags::VERTEX_INPUT,
             Self::IndexBuffer => PipelineStageFlags::VERTEX_INPUT,
-            Self::UniformRead => {
-                PipelineStageFlags::VERTEX_SHADER | PipelineStageFlags::FRAGMENT_SHADER
-            }
-            Self::StorageRead | Self::StorageWrite | Self::StorageReadWrite => {
+            Self::UniformRead | Self::StorageRead | Self::StorageWrite | Self::StorageReadWrite => {
                 PipelineStageFlags::VERTEX_SHADER
                     | PipelineStageFlags::FRAGMENT_SHADER
                     | PipelineStageFlags::COMPUTE_SHADER
@@ -174,16 +176,16 @@ impl BufferAccessMode {
     }
 
     /// Get the Vulkan pipeline stage for this buffer access mode (as destination).
+    ///
+    /// See [`src_stage`](Self::src_stage) for why shader modes return the
+    /// union of vertex/fragment/compute stages.
     #[cfg(feature = "vulkan-backend")]
     pub fn dst_stage(self) -> ash::vk::PipelineStageFlags {
         use ash::vk::PipelineStageFlags;
         match self {
             Self::VertexBuffer => PipelineStageFlags::VERTEX_INPUT,
             Self::IndexBuffer => PipelineStageFlags::VERTEX_INPUT,
-            Self::UniformRead => {
-                PipelineStageFlags::VERTEX_SHADER | PipelineStageFlags::FRAGMENT_SHADER
-            }
-            Self::StorageRead | Self::StorageWrite | Self::StorageReadWrite => {
+            Self::UniformRead | Self::StorageRead | Self::StorageWrite | Self::StorageReadWrite => {
                 PipelineStageFlags::VERTEX_SHADER
                     | PipelineStageFlags::FRAGMENT_SHADER
                     | PipelineStageFlags::COMPUTE_SHADER

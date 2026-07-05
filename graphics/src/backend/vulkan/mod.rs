@@ -43,7 +43,7 @@ pub(crate) const FENCE_WAIT_TIMEOUT_NS: u64 = 10_000_000_000;
 static NEXT_TEXTURE_ID: AtomicU64 = AtomicU64::new(1);
 pub use layout::{TextureLayout, TextureLayoutTracker, TextureUsageGraph};
 
-use self::barriers::{BarrierBatch, BufferId};
+use self::barriers::{BarrierBatch, BufferAccessTracker, BufferId};
 use self::layout::TextureId;
 
 /// Scratch buffers reused across draw commands to avoid per-draw heap allocations.
@@ -181,6 +181,9 @@ pub struct VulkanBackend {
     /// Layout tracker for automatic barrier placement.
     /// Uses interior mutability since execute_graph takes &self.
     layout_tracker: Mutex<TextureLayoutTracker>,
+    /// Per-buffer last-access tracker for precise buffer barriers
+    /// (mirrors `layout_tracker` for buffers).
+    buffer_tracker: Mutex<BufferAccessTracker>,
     /// Pipeline manager for shader compilation and pipeline creation.
     pipeline_manager: pipeline::PipelineManager,
     /// Scratch buffers for allocation reuse during pass encoding.
@@ -290,6 +293,7 @@ impl VulkanBackend {
             frame_command_pools,
             current_slot: AtomicUsize::new(0),
             layout_tracker,
+            buffer_tracker: Mutex::new(BufferAccessTracker::new()),
             pipeline_manager,
             encoder_scratch: Mutex::new(VulkanEncoderScratch::default()),
             retired_staging: Mutex::new(Default::default()),
@@ -1358,9 +1362,11 @@ impl VulkanBackend {
             tracker.set_layout(texture_id, required_layout);
         }
 
-        // Generate buffer barriers
-        // Note: Buffer barriers are needed for synchronization between passes that
-        // write and read the same buffer. We track the previous access mode per buffer.
+        // Generate buffer barriers from per-buffer last-access tracking: the
+        // tracker knows what wrote each buffer last (compute, transfer, …)
+        // and which read scopes that write is already visible to, so reads
+        // get a precise source scope and repeat reads emit nothing.
+        let mut buffer_tracker = self.buffer_tracker.lock();
         for decl in &usage.buffer_usages {
             // Get Vulkan buffer info
             let GpuBuffer::Vulkan { buffer, .. } = decl.buffer.gpu_handle() else {
@@ -1369,32 +1375,16 @@ impl VulkanBackend {
 
             let buffer_id = BufferId::from(*buffer);
 
-            // For buffer barriers, we need to track previous access mode.
-            // Since we don't have per-buffer tracking yet, we generate barriers
-            // for all write operations and write-to-read transitions.
-            // This is conservative but safe - a future optimization could add
-            // buffer state tracking similar to texture layout tracking.
-            if decl.access.is_write() {
-                // Always barrier before writes to ensure previous reads complete
+            if let Some((src_stage, src_access)) =
+                buffer_tracker.request_access(buffer_id, decl.access)
+            {
                 batch.add_buffer_barrier(
                     buffer_id,
                     *buffer,
-                    decl.access, // Use same access as src (will be optimized away if same read)
-                    decl.access,
-                    decl.offset,
-                    decl.size,
-                );
-            } else {
-                // For reads after potential writes, we need barriers.
-                // Since we don't track previous state, use TransferWrite as conservative src.
-                // This ensures any previous transfer/storage writes are visible.
-                batch.add_buffer_barrier(
-                    buffer_id,
-                    *buffer,
-                    crate::graph::resource_usage::BufferAccessMode::TransferWrite,
-                    decl.access,
-                    decl.offset,
-                    decl.size,
+                    src_stage,
+                    src_access,
+                    decl.access.dst_stage(),
+                    decl.access.dst_access_mask(),
                 );
             }
         }

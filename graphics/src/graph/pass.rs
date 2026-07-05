@@ -2,8 +2,9 @@
 
 use std::sync::Arc;
 
-use crate::materials::BoundResource;
-use crate::materials::MaterialInstance;
+use std::collections::HashSet;
+
+use crate::materials::{BindingType, BoundResource, MaterialInstance};
 use crate::mesh::Mesh;
 use crate::resources::Buffer;
 use crate::types::{ScissorRect, Viewport};
@@ -775,39 +776,117 @@ impl GraphicsPass {
             }
         }
 
-        // Infer from draw commands (textures in material bindings are sampled)
+        // Infer from draw commands: sampled textures and buffers in material
+        // bindings, plus the mesh's vertex/index buffers (so GPU writes to
+        // them — e.g. a WriteBuffer upload or a compute skinning pass — get a
+        // barrier before vertex input reads them).
+        let mut seen = BufferDeclSet::new();
         for cmd in &self.draw_commands {
-            Self::extract_material_textures(&cmd.material, &mut usage);
+            extract_material_resources(&cmd.material, &mut usage, &mut seen);
+            declare_mesh_buffers(&cmd.mesh, &mut usage, &mut seen);
         }
 
         // Infer from indirect draw commands
         for cmd in &self.indirect_draw_commands {
-            Self::extract_material_textures(&cmd.material, &mut usage);
+            extract_material_resources(&cmd.material, &mut usage, &mut seen);
+            declare_mesh_buffers(&cmd.mesh, &mut usage, &mut seen);
             // Indirect buffers are read by the GPU for draw arguments
-            usage.add_buffer(
-                Arc::clone(&cmd.indirect_buffer),
+            seen.add_buffer(
+                &mut usage,
+                &cmd.indirect_buffer,
                 BufferAccessMode::IndirectRead,
             );
         }
 
         usage
     }
+}
 
-    /// Extract textures from a material instance's bindings.
-    fn extract_material_textures(material: &MaterialInstance, usage: &mut PassResourceUsage) {
-        for group in material.binding_groups() {
-            for entry in &group.entries {
-                match &entry.resource {
-                    BoundResource::Texture(tex) => {
-                        usage.add_texture(Arc::clone(tex), TextureAccessMode::ShaderRead);
-                    }
-                    BoundResource::CombinedTextureSampler { texture, .. } => {
-                        usage.add_texture(Arc::clone(texture), TextureAccessMode::ShaderRead);
-                    }
-                    _ => {}
-                }
-            }
+/// Per-pass dedup of buffer usage declarations.
+///
+/// Draw commands routinely share meshes and materials, so without dedup a
+/// pass with N draws would declare the same buffers N times (N tracker
+/// lookups per frame in the Vulkan backend).
+struct BufferDeclSet {
+    seen: HashSet<(*const Buffer, BufferAccessMode)>,
+}
+
+impl BufferDeclSet {
+    fn new() -> Self {
+        Self {
+            seen: HashSet::new(),
         }
+    }
+
+    /// Add a buffer usage declaration unless an identical one exists.
+    fn add_buffer(
+        &mut self,
+        usage: &mut PassResourceUsage,
+        buffer: &Arc<Buffer>,
+        access: BufferAccessMode,
+    ) {
+        if self.seen.insert((Arc::as_ptr(buffer), access)) {
+            usage.add_buffer(Arc::clone(buffer), access);
+        }
+    }
+}
+
+/// Extract resource usages from a material instance's bindings.
+///
+/// Textures are declared as `ShaderRead`. Buffers are classified by the
+/// material's binding layout: uniform bindings read, `StorageBufferReadOnly`
+/// reads, `StorageBuffer` may be written by the shader and is declared
+/// read-write — this is what lets the Vulkan backend place a barrier between
+/// a compute pass writing a storage buffer and the pass that consumes it.
+/// A buffer whose binding type cannot be determined (legacy material without
+/// binding layouts) is conservatively treated as read-write.
+fn extract_material_resources(
+    material: &MaterialInstance,
+    usage: &mut PassResourceUsage,
+    seen: &mut BufferDeclSet,
+) {
+    let binding_layouts = material.material().binding_layouts();
+    for (group_index, group) in material.binding_groups().iter().enumerate() {
+        let layout = binding_layouts.get(group_index);
+        for entry in &group.entries {
+            let buffer = match &entry.resource {
+                BoundResource::Texture(tex) => {
+                    usage.add_texture(Arc::clone(tex), TextureAccessMode::ShaderRead);
+                    continue;
+                }
+                BoundResource::CombinedTextureSampler { texture, .. } => {
+                    usage.add_texture(Arc::clone(texture), TextureAccessMode::ShaderRead);
+                    continue;
+                }
+                BoundResource::Buffer(buffer) => buffer,
+                BoundResource::BufferRange { buffer, .. } => buffer,
+                _ => continue,
+            };
+
+            let binding_type = layout
+                .and_then(|l| l.entries.iter().find(|e| e.binding == entry.binding))
+                .map(|e| e.binding_type);
+            let access = match binding_type {
+                Some(BindingType::UniformBuffer | BindingType::DynamicUniformBuffer) => {
+                    BufferAccessMode::UniformRead
+                }
+                Some(BindingType::StorageBufferReadOnly) => BufferAccessMode::StorageRead,
+                // StorageBuffer shaders may write; unknown/missing layouts are
+                // treated the same so they can never hide a hazard.
+                _ => BufferAccessMode::StorageReadWrite,
+            };
+            seen.add_buffer(usage, buffer, access);
+        }
+    }
+}
+
+/// Declare a mesh's vertex and index buffers as pass inputs.
+fn declare_mesh_buffers(mesh: &Mesh, usage: &mut PassResourceUsage, seen: &mut BufferDeclSet) {
+    for buffer in mesh.vertex_buffers() {
+        seen.add_buffer(usage, buffer, BufferAccessMode::VertexBuffer);
+    }
+    if let Some(index_buffer) = mesh.index_buffer() {
+        seen.add_buffer(usage, index_buffer, BufferAccessMode::IndexBuffer);
     }
 }
 
@@ -1012,32 +1091,18 @@ impl ComputePass {
 
     /// Infer resource usage from the compute pass.
     ///
-    /// Examines material bindings in dispatch commands to determine
-    /// which textures and buffers are used.
+    /// Examines material bindings in dispatch commands to determine which
+    /// textures and buffers are used. Storage buffers are declared read-write
+    /// so writes performed by the dispatch are synchronized against
+    /// subsequent passes that read them.
     pub fn infer_resource_usage(&self) -> PassResourceUsage {
         let mut usage = PassResourceUsage::new();
 
+        let mut seen = BufferDeclSet::new();
         for cmd in &self.dispatch_commands {
-            Self::extract_material_textures(&cmd.material, &mut usage);
+            extract_material_resources(&cmd.material, &mut usage, &mut seen);
         }
 
         usage
-    }
-
-    /// Extract textures from a material instance's bindings.
-    fn extract_material_textures(material: &MaterialInstance, usage: &mut PassResourceUsage) {
-        for group in material.binding_groups() {
-            for entry in &group.entries {
-                match &entry.resource {
-                    BoundResource::Texture(tex) => {
-                        usage.add_texture(Arc::clone(tex), TextureAccessMode::ShaderRead);
-                    }
-                    BoundResource::CombinedTextureSampler { texture, .. } => {
-                        usage.add_texture(Arc::clone(texture), TextureAccessMode::ShaderRead);
-                    }
-                    _ => {}
-                }
-            }
-        }
     }
 }

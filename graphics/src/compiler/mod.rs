@@ -296,35 +296,42 @@ fn analyze_resource_conflict(a: &PassResourceUsage, b: &PassResourceUsage) -> (b
     let mut b_before_a = false;
     let mut has_waw = false;
 
-    // Check texture conflicts
+    // Check texture conflicts.
+    //
+    // A symmetric ReadWrite-vs-ReadWrite pair on the same resource yields no
+    // derivable direction — deriving one from each access's read half would
+    // make the passes each "come before" the other and misreport a cyclic
+    // dependency. Such pairs are WAW-only and go through WAW resolution
+    // (explicit edges, or addition order in Automatic mode). Asymmetric
+    // pairs (e.g. pure write vs read-write) still order by the read half.
     for ta in &a.texture_usages {
         for tb in &b.texture_usages {
             if Arc::ptr_eq(&ta.texture, &tb.texture) {
-                if ta.access.is_write() && tb.access.is_read() {
-                    a_before_b = true;
-                }
-                if tb.access.is_write() && ta.access.is_read() {
-                    b_before_a = true;
-                }
                 if ta.access.is_write() && tb.access.is_write() {
                     has_waw = true;
+                }
+                let a_writes_b_reads = ta.access.is_write() && tb.access.is_read();
+                let b_writes_a_reads = tb.access.is_write() && ta.access.is_read();
+                if !(a_writes_b_reads && b_writes_a_reads) {
+                    a_before_b |= a_writes_b_reads;
+                    b_before_a |= b_writes_a_reads;
                 }
             }
         }
     }
 
-    // Check buffer conflicts
+    // Check buffer conflicts (same rules as textures above)
     for ba in &a.buffer_usages {
         for bb in &b.buffer_usages {
             if Arc::ptr_eq(&ba.buffer, &bb.buffer) {
-                if ba.access.is_write() && bb.access.is_read() {
-                    a_before_b = true;
-                }
-                if bb.access.is_write() && ba.access.is_read() {
-                    b_before_a = true;
-                }
                 if ba.access.is_write() && bb.access.is_write() {
                     has_waw = true;
+                }
+                let a_writes_b_reads = ba.access.is_write() && bb.access.is_read();
+                let b_writes_a_reads = bb.access.is_write() && ba.access.is_read();
+                if !(a_writes_b_reads && b_writes_a_reads) {
+                    a_before_b |= a_writes_b_reads;
+                    b_before_a |= b_writes_a_reads;
                 }
             }
         }
