@@ -58,6 +58,13 @@ path = "src/bin/physics_demo/main.rs"
 name = "plugin_demo"
 path = "src/bin/plugin_demo.rs"
 
+# Manual end-to-end harness for warm-restart reload (#45): loads the demos
+# cdylib as a game module and reloads it. Needs a GPU adapter, so it is run by
+# hand, not in CI.
+[[bin]]
+name = "reload_harness"
+path = "src/bin/reload_harness.rs"
+
 [[example]]
 name = "window_test"
 path = "examples/window_test.rs"

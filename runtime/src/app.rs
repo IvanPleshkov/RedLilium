@@ -150,6 +150,21 @@ impl App {
         self.aspect
     }
 
+    /// First-boot construction: build a fresh [`App`], run the plugin's
+    /// registration ([`build`](crate::Plugin::build)) and then populate the
+    /// initial scene ([`spawn_scene`](crate::Plugin::spawn_scene)).
+    ///
+    /// This is the host-facing entry the runtime and the editor use to stand up
+    /// a game from a loaded module; a warm reload uses [`reload`](Self::reload)
+    /// instead, which restores the scene from a snapshot rather than spawning
+    /// it. The caller drives startup/frames afterward (see the host loop).
+    pub fn boot(engine: &EngineContext, plugin: &dyn crate::Plugin, aspect: f32) -> Self {
+        let mut app = Self::new(engine, aspect);
+        plugin.build(&mut app);
+        plugin.spawn_scene(&mut app);
+        app
+    }
+
     /// Capture a name-keyed snapshot of the world for a warm-restart reload.
     ///
     /// Records every alive entity and every opted-in

@@ -11,38 +11,52 @@
 //!   hands a Rust trait object across the boundary and is therefore only sound
 //!   once the fingerprint matched; the host calls it **only after** the gate.
 //!
-//! ## What the fingerprint does and does not guarantee
+//! ## Linking model
 //!
 //! Rust has no stable ABI: two separate compilations of the "same" engine can
-//! differ in layout, vtable order, and `TypeId` hashes. ADR-020's soundness
-//! rests on host and game linking the **same** engine dylib built by the
-//! **same** toolchain. The fingerprint encodes the engine version, the `rustc`
-//! version, and the engine **source revision** (git rev + dirty flag), so a
-//! toolchain change, a version bump, or an engine rebuild past a source edit is
-//! caught. The game bakes its fingerprint in as a `const` inlined from the
-//! engine metadata it compiled against (not a call into engine code — that
-//! would resolve into the host's dylib and tautologically match), so a host on
-//! a newer engine rejects a stale game.
+//! differ in layout, vtable order, and `TypeId` hashes. #45 does **not** use a
+//! shared engine dylib (that was evaluated and deferred). Instead the game
+//! cdylib is built in the **same `cargo build`** as the host, so both statically
+//! embed the *same* engine rlibs: identical `StableCrateId` → identical
+//! `TypeId`s → identical layouts → the `Box<dyn Plugin>` handoff and the
+//! name-keyed snapshot round-trip are sound. There are two *copies* of the
+//! engine code (host image + cdylib image); see [`GameModule::load`]'s Safety
+//! notes for what that duplication does and does not permit.
+//!
+//! ## What the fingerprint does and does not guarantee
+//!
+//! The fingerprint encodes the engine version, the `rustc` version, and a
+//! content id for the engine source (`build.rs`: `HEAD` rev + a hash of the
+//! uncommitted diff), so a toolchain change, a version bump, or *any* engine
+//! source edit — committed or not — shifts it. The game bakes its fingerprint
+//! in as a `const` inlined from the engine metadata it compiled against (not a
+//! call into engine code — that would resolve into the host image and
+//! tautologically match), so a host built from different engine sources rejects
+//! a stale game.
+//!
+//! Within a *single* `cargo build` the id is computed once and shared, so the
+//! host and the game cdylib always agree and are mutually consistent — this is
+//! what makes same-build loading (the reload harness) sound. The id only
+//! discriminates across *separate* builds, which is the editor reload flow.
 //!
 //! It is still **necessary, not sufficient**. What it does NOT catch:
 //!
-//! - **Uncommitted edits.** Two distinct dirty working trees share the same
-//!   `-dirty` id. Don't reload across dirty builds.
 //! - **Feature unification / profile differences.** These change layout and
-//!   `-C metadata` without moving the git rev.
-//! - **Two-engine-copies configurations** (a game statically embedding its own
-//!   engine): duplicated statics/allocator even when ids line up.
+//!   `-C metadata` without changing the source content the id hashes.
+//! - **Duplicated statics.** Two engine copies means two of every `static`,
+//!   thread-local, and global registry (allocator, `parking_lot` parking table,
+//!   `log` logger, panic bookkeeping). Fingerprint parity says nothing about
+//!   this; see [`GameModule::load`].
 //!
 //! Do NOT treat [`QualifiedTypeId`](redlilium_ecs::QualifiedTypeId) as the
-//! backstop for this residual. `TypeId` derives from the crate's
-//! `StableCrateId` (name + version + `-C metadata` + rustc) — **not** source
-//! contents — so an edit that changes a struct's layout without changing any of
-//! those keeps the same `TypeId`. The load-time fail-fast catches `TypeId`
-//! *drift* (a game type colliding with an engine type from another source); it
-//! does **not** catch *layout drift under a stable `TypeId`*. The real
-//! guarantee is procedural: the shared-dylib build tooling (slice C) must
-//! ensure host and game link one engine build under one toolchain and feature
-//! set; the fingerprint is the check that they did, not a proof of it.
+//! backstop for the residual. `TypeId` derives from the crate's `StableCrateId`
+//! (name + version + `-C metadata` + rustc) — **not** source contents — so a
+//! layout-changing edit keeps the same `TypeId`. The load-time fail-fast catches
+//! `TypeId` *drift* (a game type colliding with an engine type from another
+//! source); it does **not** catch *layout drift under a stable `TypeId`*. That
+//! residual is closed procedurally by the content-hash build id above: the
+//! fingerprint is the check that the two sides were built from the same engine
+//! sources, not a proof of it.
 
 use std::ffi::c_char;
 
@@ -187,18 +201,21 @@ impl GameModule {
     ///
     /// # Safety
     ///
-    /// The caller must guarantee all of:
+    /// #45 links statically: the cdylib must be built in the **same `cargo
+    /// build`** as this host (see the module "Linking model" docs), so both
+    /// embed the same engine rlibs. The caller must guarantee all of:
     ///
-    /// - **Same engine, same toolchain.** The cdylib links the **same** shared
-    ///   engine dylib as this host under the **same** `rustc`, engine version,
-    ///   and **feature set** (ADR-020's dev-linking contract). The fingerprint
-    ///   gate catches version/rustc/revision drift, but a matching fingerprint
-    ///   is necessary, not sufficient — see the module docs; it does not prove
-    ///   identical layout, and `QualifiedTypeId` does not backstop the residual.
-    /// - **Shared libstd, one allocator.** The plugin's `Box` is freed by this
-    ///   host's global allocator but was allocated by the game's; they must be
-    ///   the same. Under the shared-dylib contract std is shared and this holds;
-    ///   a divergent `#[global_allocator]` on either side breaks it.
+    /// - **Same build.** The cdylib and this host came from one `cargo build`
+    ///   under the same `rustc`, engine version, and **feature set**, so their
+    ///   `TypeId`s and type layouts agree. The fingerprint gate catches
+    ///   version/rustc/source-content drift, but a match is necessary, not
+    ///   sufficient (module docs): it does not prove identical feature
+    ///   unification, and `QualifiedTypeId` does not backstop layout drift.
+    /// - **Default allocator on both sides.** The plugin's `Box` is allocated in
+    ///   the cdylib image and freed in the host image. With Rust's default
+    ///   allocator both forward to the system allocator and this is sound; a
+    ///   divergent `#[global_allocator]` on **either** side makes the cross-image
+    ///   free UB.
     /// - **A genuine RedLilium module.** The file exports
     ///   `redlilium_abi_fingerprint` / `redlilium_game_module` with exactly the
     ///   [`AbiFingerprintFn`] / [`GameModuleFn`] signatures — i.e. it was
@@ -206,6 +223,21 @@ impl GameModule {
     ///   different type, or reading a non-NUL-terminated fingerprint, is UB.
     /// - **Lifetime.** The returned [`GameModule`] outlives every `App`/`World`/
     ///   `Schedules` its plugin touches (see the type docs).
+    ///
+    /// **Duplicated statics (not yet a shared engine).** Because there are two
+    /// engine images, each has its own `static`s and thread-locals. This is
+    /// benign for single-threaded, uncontended use (booting a game, the reload
+    /// harness), but two hazards become live once game code runs under the
+    /// multi-threaded runner alongside host code and must be resolved before
+    /// then (by a shared engine dylib, or by confining game execution):
+    ///
+    /// - **`parking_lot` parking table.** A blocking lock/unlock on the *same*
+    ///   lock instance from the two images uses two different global parking
+    ///   tables → lost wakeups / deadlock under contention.
+    /// - **Split panic bookkeeping.** A panic raised in the cdylib image and
+    ///   caught here (the `catch_unwind` below, or any unwind through host
+    ///   frames) touches two libstd panic counters → `thread::panicking()` can
+    ///   misreport afterward.
     pub unsafe fn load(path: impl AsRef<std::ffi::OsStr>) -> Result<Self, GameModuleError> {
         unsafe {
             let library = libloading::Library::new(path).map_err(GameModuleError::Load)?;
