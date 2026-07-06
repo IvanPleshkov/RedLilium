@@ -75,9 +75,9 @@ impl Backend {
     pub fn to_instance_parameters(self) -> InstanceParameters {
         match self {
             Backend::Dummy => InstanceParameters::new().with_backend(BackendType::Dummy),
-            Backend::Vulkan => InstanceParameters::new()
-                .with_backend(BackendType::Wgpu)
-                .with_wgpu_backend(WgpuBackendType::Auto),
+            // The native ash backend, NOT wgpu-on-vulkan: these cases exist to
+            // cover graphics/src/backend/vulkan/.
+            Backend::Vulkan => InstanceParameters::new().with_backend(BackendType::Vulkan),
             Backend::WebGpu => InstanceParameters::new()
                 .with_backend(BackendType::Wgpu)
                 .with_wgpu_backend(WgpuBackendType::Auto),
