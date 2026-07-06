@@ -74,6 +74,7 @@ pub fn run() {
         1.0,
     );
 
+    // Single-threaded (see the windowed editor): MT needs schedule hardening.
     let runner = EcsRunner::single_thread();
     // Persistent engine state + the startup mount scan (ADR-020).
     let engine = redlilium_runtime::EngineContext::with_vfs(device.clone(), vfs.clone());

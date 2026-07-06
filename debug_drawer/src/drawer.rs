@@ -1,6 +1,5 @@
 use std::sync::atomic::{AtomicU64, Ordering};
-
-use parking_lot::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use crate::vertex::DebugVertex;
 
@@ -48,6 +47,18 @@ impl DebugDrawer {
         self.current_tick.load(Ordering::Acquire)
     }
 
+    /// Locks the frame buffers, ignoring poison.
+    ///
+    /// `std::sync::Mutex` is used (not `parking_lot`) because a `DebugDrawer`
+    /// is shared into ECS worlds as a resource and can be locked from the game
+    /// cdylib's image; `parking_lot`'s per-image parking table would lose
+    /// wakeups across that boundary (see `redlilium_ecs::sync`). Poison is
+    /// irrelevant here — a panicked writer only leaves a half-filled vertex
+    /// buffer, which the next `advance_tick` clears.
+    fn frames(&self) -> MutexGuard<'_, [FrameData; 2]> {
+        self.frames.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Advance to the next tick.
     ///
     /// Increments the tick counter and clears the new write buffer.
@@ -56,7 +67,7 @@ impl DebugDrawer {
         let new_tick = self.current_tick.load(Ordering::Acquire) + 1;
         let write_index = (new_tick % 2) as usize;
         {
-            let mut frames = self.frames.lock();
+            let mut frames = self.frames();
             frames[write_index].clear();
         }
         self.current_tick.store(new_tick, Ordering::Release);
@@ -83,7 +94,7 @@ impl DebugDrawer {
     pub fn take_render_data(&self) -> Vec<DebugVertex> {
         let tick = self.current_tick.load(Ordering::Acquire);
         let render_index = ((tick + 1) % 2) as usize;
-        let mut frames = self.frames.lock();
+        let mut frames = self.frames();
         std::mem::take(&mut frames[render_index].vertices)
     }
 
@@ -102,7 +113,7 @@ impl DebugDrawer {
             return;
         }
         let write_index = (tick % 2) as usize;
-        let mut frames = self.frames.lock();
+        let mut frames = self.frames();
         frames[write_index].vertices.extend_from_slice(&vertices);
     }
 }

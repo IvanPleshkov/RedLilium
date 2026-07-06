@@ -43,8 +43,9 @@ pub struct PhysicsDemoApp {
     // Rendering
     renderer: Option<PhysicsRenderer>,
 
-    // Input
-    window_input: Option<Arc<RwLock<WindowInput>>>,
+    // Input. The handle returned by `insert_resource`, so its lock type is the
+    // ECS's cross-image-safe `sync::RwLock` (not `parking_lot`, used for `ui`).
+    window_input: Option<Arc<redlilium_ecs::sync::RwLock<WindowInput>>>,
 
     // UI
     egui_controller: Option<EguiController>,

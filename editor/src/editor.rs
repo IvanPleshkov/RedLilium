@@ -151,6 +151,11 @@ impl Editor {
 
         Self {
             world: None,
+            // Single-threaded for now. Switching to the multi-threaded runner
+            // needs engine schedule MT-hardening first (#45): the std asset/
+            // render systems use panic-on-contention raw `World` accessors and
+            // rely on schedule ORDER, not edges — an audit hit 3 panics/8 frames
+            // under MT. See the MT-hardening plan.
             runner: EcsRunner::single_thread(),
             engine: None,
             vfs,

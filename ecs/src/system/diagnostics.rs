@@ -4,7 +4,7 @@
 //! without compile-time feature flags. Pass [`RunDiagnostics`] to
 //! [`run_with()`](crate::EcsRunner::run_with) to control what is collected.
 
-use parking_lot::Mutex;
+use crate::sync::Mutex;
 use std::any::TypeId;
 use std::fmt;
 use std::time::Duration;

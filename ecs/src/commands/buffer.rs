@@ -1,4 +1,4 @@
-use parking_lot::Mutex;
+use crate::sync::Mutex;
 
 use crate::bundle::Bundle;
 use crate::entity::Entity;

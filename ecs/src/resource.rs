@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
-use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use crate::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::main_thread_resource::MainThreadResources;
 
@@ -375,7 +375,7 @@ pub struct ResourceRef<'a, T: 'static> {
 // SAFETY (Sync): `ResourceRef` is a read-only view, equivalent to `&T`,
 // which is `Sync` exactly when `T: Sync`.
 //
-// Deliberately NOT Send: the held parking_lot read guard (when present)
+// Deliberately NOT Send: the held read guard (when present)
 // must be released on the thread that acquired it (lock_api contract;
 // also incompatible with deadlock detection). Guards are created, used
 // and dropped on the same thread (audit A7).
@@ -414,7 +414,7 @@ pub struct ResourceRefMut<'a, T: 'static> {
 }
 
 // Deliberately neither Send nor Sync: the raw `ptr` keeps it `!Sync`
-// (aliasing `&mut T` across threads), and the held parking_lot write guard
+// (aliasing `&mut T` across threads), and the held write guard
 // must be released on the thread that acquired it, so no `Send` either
 // (audit A7). Fully thread-confined.
 

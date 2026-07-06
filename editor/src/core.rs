@@ -9,7 +9,7 @@
 use std::f32::consts::FRAC_PI_4;
 use std::sync::Arc;
 
-use parking_lot::RwLock;
+use redlilium_ecs::sync::RwLock;
 
 use redlilium_assets::{AssetDb, AssetPath, Guid};
 use redlilium_core::abstract_editor::{ActionQueue, DEFAULT_MAX_UNDO, EditActionHistory};

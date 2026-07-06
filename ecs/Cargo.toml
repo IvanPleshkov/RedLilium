@@ -36,7 +36,6 @@ fixedbitset = { workspace = true }
 smallvec = { workspace = true }
 serde = { workspace = true }
 log.workspace = true
-parking_lot = { workspace = true }
 egui.workspace = true
 ron = { workspace = true, optional = true }
 bincode = { workspace = true, optional = true }

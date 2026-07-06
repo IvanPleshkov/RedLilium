@@ -14,7 +14,7 @@ impl World {
     /// Returns the typed `Arc` handle for external access (e.g. inspector,
     /// editor). The world stores a coerced `Arc<RwLock<dyn Resource>>` that
     /// shares the same underlying data and lock.
-    pub fn insert_resource<T: Resource>(&mut self, value: T) -> Arc<parking_lot::RwLock<T>> {
+    pub fn insert_resource<T: Resource>(&mut self, value: T) -> Arc<crate::sync::RwLock<T>> {
         // A value insert resolves to the type's declared origin (respecting it),
         // declaring the current source only for a never-before-seen type — so a
         // warm-reload snapshot restore never conflicts. See `resolve_type_source`.
@@ -26,7 +26,7 @@ impl World {
     ///
     /// The Arc is coerced to `Arc<RwLock<dyn Resource>>` for storage;
     /// both the caller's clone and the stored clone share the same lock.
-    pub fn insert_resource_shared<T: Resource>(&mut self, resource: Arc<parking_lot::RwLock<T>>) {
+    pub fn insert_resource_shared<T: Resource>(&mut self, resource: Arc<crate::sync::RwLock<T>>) {
         // See `insert_resource`: value inserts resolve to the declared origin.
         let source = self.resolve_type_source(std::any::TypeId::of::<T>());
         self.resources.insert_shared(resource, source);
@@ -35,7 +35,7 @@ impl World {
     /// Removes a resource, returning the `Arc<RwLock<dyn Resource>>` if present.
     pub fn remove_resource<T: 'static>(
         &mut self,
-    ) -> Option<Arc<parking_lot::RwLock<dyn Resource>>> {
+    ) -> Option<Arc<crate::sync::RwLock<dyn Resource>>> {
         self.resources.remove::<T>()
     }
 
@@ -52,7 +52,7 @@ impl World {
     /// # Panics
     ///
     /// Panics if the resource does not exist.
-    pub fn resource_shared<T: 'static>(&self) -> Arc<parking_lot::RwLock<dyn Resource>> {
+    pub fn resource_shared<T: 'static>(&self) -> Arc<crate::sync::RwLock<dyn Resource>> {
         self.guard_resource_source::<T>();
         self.resources.get_handle::<T>()
     }
@@ -133,7 +133,7 @@ impl World {
     pub(crate) fn resource_read_guard_dyn(
         &self,
         type_id: std::any::TypeId,
-    ) -> Option<parking_lot::RwLockReadGuard<'_, dyn crate::resource::Resource>> {
+    ) -> Option<crate::sync::RwLockReadGuard<'_, dyn crate::resource::Resource>> {
         self.resources.read_guard_dyn(type_id)
     }
 
@@ -142,7 +142,7 @@ impl World {
     pub(crate) fn resource_write_guard_dyn(
         &self,
         type_id: std::any::TypeId,
-    ) -> Option<parking_lot::RwLockWriteGuard<'_, dyn crate::resource::Resource>> {
+    ) -> Option<crate::sync::RwLockWriteGuard<'_, dyn crate::resource::Resource>> {
         self.resources.write_guard_dyn(type_id)
     }
 

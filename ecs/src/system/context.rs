@@ -1,4 +1,4 @@
-use parking_lot::Mutex;
+use crate::sync::Mutex;
 use smallvec::SmallVec;
 use std::any::TypeId;
 use std::collections::{HashMap, HashSet};

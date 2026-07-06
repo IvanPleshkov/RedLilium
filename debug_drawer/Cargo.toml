@@ -9,4 +9,3 @@ description = "Debug drawing utilities for RedLilium Engine"
 redlilium-graphics = { path = "../graphics" }
 bytemuck = { workspace = true }
 log = { workspace = true }
-parking_lot = { workspace = true }

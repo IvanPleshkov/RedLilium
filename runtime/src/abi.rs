@@ -44,9 +44,11 @@
 //! - **Feature unification / profile differences.** These change layout and
 //!   `-C metadata` without changing the source content the id hashes.
 //! - **Duplicated statics.** Two engine copies means two of every `static`,
-//!   thread-local, and global registry (allocator, `parking_lot` parking table,
-//!   `log` logger, panic bookkeeping). Fingerprint parity says nothing about
-//!   this; see [`GameModule::load`].
+//!   thread-local, and global registry (allocator, `log` logger, panic
+//!   bookkeeping). Fingerprint parity says nothing about this; see
+//!   [`GameModule::load`]. The ECS's own component/resource locks sidestep it
+//!   by using [`redlilium_ecs::sync`], which is cross-image safe by
+//!   construction.
 //!
 //! Do NOT treat [`QualifiedTypeId`](redlilium_ecs::QualifiedTypeId) as the
 //! backstop for the residual. `TypeId` derives from the crate's `StableCrateId`

@@ -69,6 +69,7 @@ pub mod serialize;
 mod sparse_set;
 #[allow(clippy::module_inception)]
 pub mod std;
+pub mod sync;
 mod system;
 pub mod type_identity;
 pub mod ui;

@@ -15,7 +15,6 @@ redlilium-assets = { path = "../assets" }
 redlilium-vfs = { path = "../vfs" }
 
 winit = { workspace = true }
-parking_lot = { workspace = true }
 log = { workspace = true }
 bytemuck = { workspace = true }
 libloading = { workspace = true }

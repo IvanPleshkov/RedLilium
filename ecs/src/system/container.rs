@@ -4,7 +4,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use parking_lot::RwLock;
+use crate::sync::RwLock;
 
 use crate::system::condition::{ConditionMode, ConditionResult, condition_checker};
 

@@ -168,7 +168,7 @@ fn deserialize_component_fn<T: Component>(
 /// ```
 pub struct World {
     entities: Entities,
-    components: HashMap<TypeId, parking_lot::RwLock<ComponentStorage>>,
+    components: HashMap<TypeId, crate::sync::RwLock<ComponentStorage>>,
     resources: Resources,
     /// Global tick counter for change detection. Atomic so runners can
     /// assign per-system ticks while worker threads hold `&World`.

@@ -50,7 +50,7 @@ impl World {
         self.record_type_source(TypeId::of::<T>(), std::any::type_name::<T>());
         self.components
             .entry(TypeId::of::<T>())
-            .or_insert_with(|| parking_lot::RwLock::new(ComponentStorage::new::<T>()));
+            .or_insert_with(|| crate::sync::RwLock::new(ComponentStorage::new::<T>()));
     }
 
     /// Registers a component type with inspector support.

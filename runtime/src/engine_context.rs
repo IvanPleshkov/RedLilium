@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use parking_lot::RwLock;
+use redlilium_ecs::sync::RwLock;
 
 use redlilium_assets::{AssetDb, AssetProcessor};
 use redlilium_ecs::{

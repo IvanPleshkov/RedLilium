@@ -541,10 +541,10 @@ impl<T: Send + Sync + 'static> ErasedSparseSet for SparseSetInner<T> {
 /// locks for an access set are taken up-front in one globally-consistent order.
 #[allow(dead_code)]
 pub(crate) enum LockGuard<'a> {
-    Read(parking_lot::RwLockReadGuard<'a, ComponentStorage>),
-    Write(parking_lot::RwLockWriteGuard<'a, ComponentStorage>),
-    ResourceRead(parking_lot::RwLockReadGuard<'a, dyn crate::resource::Resource>),
-    ResourceWrite(parking_lot::RwLockWriteGuard<'a, dyn crate::resource::Resource>),
+    Read(crate::sync::RwLockReadGuard<'a, ComponentStorage>),
+    Write(crate::sync::RwLockWriteGuard<'a, ComponentStorage>),
+    ResourceRead(crate::sync::RwLockReadGuard<'a, dyn crate::resource::Resource>),
+    ResourceWrite(crate::sync::RwLockWriteGuard<'a, dyn crate::resource::Resource>),
 }
 
 /// A type-erased sparse set that stores components of a single type.
@@ -681,7 +681,7 @@ pub struct Ref<'a, T: 'static> {
     /// Bitmask of entity flag bits that cause an entity to be excluded
     /// from filtered methods. Default: `DISABLED | STATIC`.
     exclude_mask: u32,
-    _guard: Option<parking_lot::RwLockReadGuard<'a, ComponentStorage>>,
+    _guard: Option<crate::sync::RwLockReadGuard<'a, ComponentStorage>>,
 }
 
 impl<'a, T: 'static> Ref<'a, T> {
@@ -692,7 +692,7 @@ impl<'a, T: 'static> Ref<'a, T> {
     ///
     /// Uses the default exclude mask (`DISABLED | STATIC | EDITOR`).
     pub(crate) fn new(
-        lock: &'a parking_lot::RwLock<ComponentStorage>,
+        lock: &'a crate::sync::RwLock<ComponentStorage>,
         entities: &'a Entities,
     ) -> Self {
         let guard = lock.try_read().unwrap_or_else(|| {
@@ -712,7 +712,7 @@ impl<'a, T: 'static> Ref<'a, T> {
     /// Used by `ReadAll<T>` to create a `Ref` that only excludes disabled
     /// entities (mask = `DISABLED`), including static entities in iteration.
     pub(crate) fn new_with_mask(
-        lock: &'a parking_lot::RwLock<ComponentStorage>,
+        lock: &'a crate::sync::RwLock<ComponentStorage>,
         entities: &'a Entities,
         exclude_mask: u32,
     ) -> Self {
@@ -871,8 +871,8 @@ impl<T: 'static> Deref for Ref<'_, T> {
 // The RwLock guarantees no exclusive access exists when the guard is held.
 // When unlocked, the caller guarantees external lock management.
 //
-// Deliberately NOT Send: Ref may hold a parking_lot read guard, and
-// parking_lot guards must be released on the thread that acquired them
+// Deliberately NOT Send: Ref may hold a read guard, and
+// the guards must be released on the thread that acquired them
 // (lock_api contract; also incompatible with deadlock detection). Guards
 // are created, used and dropped on the same thread (audit A7).
 unsafe impl<T: Send + Sync + 'static> Sync for Ref<'_, T> {}
@@ -893,7 +893,7 @@ pub struct RefMut<'a, T: 'static> {
     exclude_mask: u32,
     /// Current world tick, stamped into `ticks_changed` via [`Mut`].
     tick: u64,
-    _guard: Option<parking_lot::RwLockWriteGuard<'a, ComponentStorage>>,
+    _guard: Option<crate::sync::RwLockWriteGuard<'a, ComponentStorage>>,
     _marker: PhantomData<&'a mut SparseSetInner<T>>,
 }
 
@@ -905,7 +905,7 @@ impl<'a, T: 'static> RefMut<'a, T> {
     ///
     /// Uses the default exclude mask (`DISABLED | STATIC | EDITOR`).
     pub(crate) fn new(
-        lock: &'a parking_lot::RwLock<ComponentStorage>,
+        lock: &'a crate::sync::RwLock<ComponentStorage>,
         entities: &'a Entities,
         tick: u64,
     ) -> Self {
@@ -930,7 +930,7 @@ impl<'a, T: 'static> RefMut<'a, T> {
     /// Used by `WriteAll<T>` to create a `RefMut` that only excludes disabled
     /// entities (mask = `DISABLED`), including static and editor entities.
     pub(crate) fn new_with_mask(
-        lock: &'a parking_lot::RwLock<ComponentStorage>,
+        lock: &'a crate::sync::RwLock<ComponentStorage>,
         entities: &'a Entities,
         exclude_mask: u32,
         tick: u64,
@@ -1141,8 +1141,8 @@ impl<T: 'static> Deref for RefMut<'_, T> {
 // shared (&self) surface only hands out & reads or runtime-checked items.
 // The RwLock ensures no other access exists when the guard is held.
 //
-// Deliberately NOT Send: RefMut may hold a parking_lot write guard, and
-// parking_lot guards must be released on the thread that acquired them
+// Deliberately NOT Send: RefMut may hold a write guard, and
+// the guards must be released on the thread that acquired them
 // (lock_api contract; also incompatible with deadlock detection). Guards
 // are created, used and dropped on the same thread (audit A7).
 unsafe impl<T: Send + Sync + 'static> Sync for RefMut<'_, T> {}
@@ -1221,7 +1221,7 @@ mod tests {
 
     #[test]
     fn lock_shared_multiple() {
-        let lock = parking_lot::RwLock::new(ComponentStorage::new::<u32>());
+        let lock = crate::sync::RwLock::new(ComponentStorage::new::<u32>());
         let _a = lock.read();
         let _b = lock.read();
         // Both locks succeed
@@ -1229,15 +1229,15 @@ mod tests {
 
     #[test]
     fn lock_exclusive_alone() {
-        let lock = parking_lot::RwLock::new(ComponentStorage::new::<u32>());
+        let lock = crate::sync::RwLock::new(ComponentStorage::new::<u32>());
         let _guard = lock.write();
     }
 
     #[test]
     fn lock_exclusive_conflicts_shared() {
-        let lock = parking_lot::RwLock::new(ComponentStorage::new::<u32>());
+        let lock = crate::sync::RwLock::new(ComponentStorage::new::<u32>());
         let _r = lock.read();
-        // parking_lot RwLock would deadlock here, not panic.
+        // A same-thread re-lock would deadlock, not panic.
         // With the new design, conflicts are handled by the scheduler,
         // not by the lock itself. This test is no longer applicable.
         // Just verify that a try_write returns None when read-locked.
@@ -1246,16 +1246,16 @@ mod tests {
 
     #[test]
     fn lock_shared_conflicts_exclusive() {
-        let lock = parking_lot::RwLock::new(ComponentStorage::new::<u32>());
+        let lock = crate::sync::RwLock::new(ComponentStorage::new::<u32>());
         let _w = lock.write();
-        // parking_lot RwLock would deadlock here, not panic.
+        // A same-thread re-lock would deadlock, not panic.
         // Just verify that a try_read returns None when write-locked.
         assert!(lock.try_read().is_none());
     }
 
     #[test]
     fn lock_released_on_drop() {
-        let lock = parking_lot::RwLock::new(ComponentStorage::new::<u32>());
+        let lock = crate::sync::RwLock::new(ComponentStorage::new::<u32>());
         let entities = Entities::new();
         {
             let _guard = Ref::<u32>::new(&lock, &entities);
@@ -1266,7 +1266,7 @@ mod tests {
 
     #[test]
     fn ref_mut_allows_mutation() {
-        let lock = parking_lot::RwLock::new(ComponentStorage::new::<u32>());
+        let lock = crate::sync::RwLock::new(ComponentStorage::new::<u32>());
         lock.write().typed_mut::<u32>().insert(0, 42, 0);
         let entities = Entities::new();
         {
