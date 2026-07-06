@@ -242,6 +242,26 @@ mod tests {
         assert_eq!(world.current_source(), SourceId::HOST);
     }
 
+    // A value insert of an already-declared resource resolves to the declared
+    // origin and never conflicts — the warm-reload restore path (a snapshot
+    // re-inserts a resource under a different scope than its declaration).
+    #[test]
+    fn value_insert_resolves_to_declared_origin_without_conflict() {
+        let mut world = World::new();
+        // Declare the resource's origin under a synthetic generation.
+        world.with_registration_source(SourceId(3), |w| {
+            w.insert_resource(Score(1));
+        });
+        // A later insert under HOST (as a snapshot restore would do) must not
+        // panic and must respect the original origin, not re-stamp it HOST.
+        world.insert_resource(Score(2));
+        assert_eq!(
+            world.qualified_type_id_of::<Score>(),
+            Some(QualifiedTypeId::new(TypeId::of::<Score>(), SourceId(3)))
+        );
+        assert_eq!(world.resource::<Score>().0, 2);
+    }
+
     // §3 (live path): the resource downcast guard passes under matching HOST...
     #[test]
     fn resource_guard_passes_under_host() {

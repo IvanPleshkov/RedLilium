@@ -4461,6 +4461,7 @@ name = "redlilium-runtime"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "libloading",
  "log",
  "parking_lot",
  "redlilium-app",

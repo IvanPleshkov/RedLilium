@@ -15,8 +15,10 @@ impl World {
     /// editor). The world stores a coerced `Arc<RwLock<dyn Resource>>` that
     /// shares the same underlying data and lock.
     pub fn insert_resource<T: Resource>(&mut self, value: T) -> Arc<parking_lot::RwLock<T>> {
-        self.record_type_source(std::any::TypeId::of::<T>(), std::any::type_name::<T>());
-        let source = self.current_source();
+        // A value insert resolves to the type's declared origin (respecting it),
+        // declaring the current source only for a never-before-seen type — so a
+        // warm-reload snapshot restore never conflicts. See `resolve_type_source`.
+        let source = self.resolve_type_source(std::any::TypeId::of::<T>());
         self.resources.insert(value, source)
     }
 
@@ -25,8 +27,8 @@ impl World {
     /// The Arc is coerced to `Arc<RwLock<dyn Resource>>` for storage;
     /// both the caller's clone and the stored clone share the same lock.
     pub fn insert_resource_shared<T: Resource>(&mut self, resource: Arc<parking_lot::RwLock<T>>) {
-        self.record_type_source(std::any::TypeId::of::<T>(), std::any::type_name::<T>());
-        let source = self.current_source();
+        // See `insert_resource`: value inserts resolve to the declared origin.
+        let source = self.resolve_type_source(std::any::TypeId::of::<T>());
         self.resources.insert_shared(resource, source);
     }
 

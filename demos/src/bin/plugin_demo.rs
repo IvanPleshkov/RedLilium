@@ -1,9 +1,10 @@
 //! # Plugin Demo
 //!
-//! Game code authored as a `redlilium-runtime` [`Plugin`] (ADR-020, #44):
-//! the demo only registers a component, adds systems to schedules, and spawns
-//! the initial scene — the runtime owns the window, the world, the frame loop,
-//! and the render bracket.
+//! Game code authored as a `redlilium-runtime` [`Plugin`] (ADR-020, #44/#45):
+//! `build` registers a component and adds systems; `spawn_scene` populates the
+//! initial scene. The split lets warm-restart reload re-run registration while
+//! restoring the scene from a snapshot. The runtime owns the window, the world,
+//! the frame loop, and the render bracket.
 //!
 //! Controls: right-drag to look, WASD to fly (std `FreeFlyCamera`).
 #![recursion_limit = "256"]
@@ -60,7 +61,9 @@ impl Plugin for SpinDemo {
         app.schedule_mut::<PostUpdate>()
             .add_edge::<UpdateFreeFlyCamera, UpdateGlobalTransforms>()
             .expect("no cycle");
+    }
 
+    fn spawn_scene(&self, app: &mut App) {
         let aspect = app.initial_aspect();
         let world = app.world_mut();
 

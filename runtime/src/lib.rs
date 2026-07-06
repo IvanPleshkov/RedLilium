@@ -19,9 +19,12 @@
 //!
 //! impl Plugin for MyGame {
 //!     fn build(&self, app: &mut App) {
+//!         // Registration only: components, resources, events, systems.
 //!         app.register_component::<MyComponent>();
 //!         app.add_system::<redlilium_ecs::Update, _>(MySystem);
-//!         // spawn the initial scene through app.world_mut()
+//!     }
+//!     fn spawn_scene(&self, app: &mut App) {
+//!         // Populate the initial scene through app.world_mut().
 //!     }
 //! }
 //!
@@ -35,11 +38,16 @@
 //! the world as shared resources — the prerequisite for warm-restart reload
 //! and Play-mode world swaps (#44, #45).
 
+mod abi;
 mod app;
 mod blit;
 mod engine_context;
 mod handler;
 
+pub use abi::{
+    ABI_FINGERPRINT, ABI_FINGERPRINT_SYMBOL, AbiFingerprintFn, GAME_MODULE_SYMBOL, GameModule,
+    GameModuleError, GameModuleFn, abi_fingerprint,
+};
 pub use app::App;
 pub use engine_context::EngineContext;
 
@@ -47,14 +55,32 @@ use redlilium_app::AppArgs;
 
 /// User game code, structured as a plugin.
 ///
-/// The runtime (or the editor, once #45 lands) calls [`build`](Plugin::build)
-/// exactly once, after the graphics device exists and before the first frame.
-/// Register components, insert resources, add systems to schedules, and spawn
-/// the initial scene here. Plugins can compose other plugins via
-/// [`App::add_plugin`].
+/// The contract deliberately splits *registration* from *initial-scene spawn*,
+/// because warm-restart reload (ADR-020, #45) re-runs registration against a
+/// fresh world but takes the scene from a snapshot, not from a fresh spawn:
+///
+/// - [`build`](Plugin::build) — register components, resources, events, and add
+///   systems to schedules. It runs **once per world generation**: on first boot
+///   and again after every reload. Keep it idempotent and free of scene
+///   population — anything spawned here would be duplicated by the restored
+///   snapshot on reload.
+/// - [`spawn_scene`](Plugin::spawn_scene) — populate the initial scene through
+///   [`App::world_mut`]. It runs **only when there is no snapshot to restore**
+///   (first boot); a reload restores entities from the captured snapshot
+///   instead. Default: no-op.
+///
+/// The host calls `build` after the graphics device exists and before the first
+/// frame. Plugins can compose other plugins via [`App::add_plugin`].
 pub trait Plugin {
-    /// Configure the world and schedules for this game.
+    /// Register components, resources, events, and systems. Runs once per world
+    /// generation (first boot and every reload); must not spawn scene entities.
     fn build(&self, app: &mut App);
+
+    /// Populate the initial scene. Called only on first boot — a reload
+    /// restores entities from a snapshot instead. Default: no-op.
+    fn spawn_scene(&self, app: &mut App) {
+        let _ = app;
+    }
 }
 
 /// Host configuration for [`run`].

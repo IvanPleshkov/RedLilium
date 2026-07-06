@@ -994,12 +994,16 @@ Additional inputs:
 Game logic is written in **Rust as plugins**, hosted either by the editor
 (dev) or by a thin runtime binary (shipping):
 
-1. **Plugin contract.** Game code implements
-   `trait Plugin { fn build(&self, app: &mut App); }` where `App` is a
-   builder wrapping `World` + `Schedules` (+ runner/window config). Plugins
-   register components/resources/events and add systems to named schedules —
-   including `Render`. The host owns the frame loop and the Render bracket;
-   game code never owns `main()`'s event loop internals.
+1. **Plugin contract.** Game code implements `trait Plugin` over an `App`
+   builder wrapping `World` + `Schedules` (+ runner/window config), with two
+   methods: `build(&self, &mut App)` registers components/resources/events and
+   adds systems to named schedules (including `Render`); `spawn_scene(&self,
+   &mut App)` (default no-op) populates the initial scene. The split is
+   load-bearing for reload (point 5): `build` re-runs against every fresh world
+   generation, while `spawn_scene` runs only on first boot — a reload restores
+   the scene from a snapshot instead, so scene population must never live in
+   `build`. The host owns the frame loop and the Render bracket; game code
+   never owns `main()`'s event loop internals.
 
 2. **New thin crate `redlilium-runtime`** glues app+ecs+graphics+assets:
    `App` builder, `redlilium_runtime::run(MyGamePlugin)` for shipped
@@ -1027,10 +1031,20 @@ Game logic is written in **Rust as plugins**, hosted either by the editor
    `ShadingRegistry`), tyroxine `Context` — injected into each new world via
    `insert_resource_shared`. On reload: serialize scene (name-based) → drop
    worlds/schedules → unload dylib → load new dylib → fingerprint check →
-   register std + plugin → deserialize scene. Undo history and selection are
-   deliberately reset. This is the **same snapshot machinery as Play mode
-   (#1) and scene save/load (#2)** — one mechanism, three features. A remote
-   channel `reload` command makes this drivable by an AI agent.
+   register std + plugin (`build`, **not** `spawn_scene`) → deserialize scene.
+   Undo history and selection are deliberately reset. This is the **same
+   snapshot machinery as Play mode (#1) and scene save/load (#2)** — one
+   mechanism, three features. A remote channel `reload` command makes this
+   drivable by an AI agent.
+
+   *Status (#45, slice A):* the world-lifecycle half landed first, decoupled
+   from dylib linking. `App::capture` + `App::reload` (`runtime/src/app.rs`)
+   do build-new-world → re-run `build` → `deserialize_world_into`, skipping
+   `spawn_scene`/`run_startup`, and preserve the `EngineContext` managers as
+   the same shared `Arc`s across the swap (headless-tested). This runs against
+   a **statically linked** plugin under `SourceId::HOST`; the dylib
+   load/unload and real per-reload `SourceId` generations (slices B/C) build on
+   this seam.
 
 6. **Scripting stays domain-specific.** tyroxine is the embedded DSL for
    procedural assets / contextual generation, living host-side in the

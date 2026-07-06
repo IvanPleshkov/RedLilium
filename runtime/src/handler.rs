@@ -50,7 +50,11 @@ impl<P: Plugin> AppHandler for RuntimeHandler<P> {
         let engine = EngineContext::new(ctx.device().clone(), &self.config.mounts);
         let mut app = App::new(&engine, ctx.aspect_ratio());
         if let Some(plugin) = self.plugin.take() {
+            // First boot: register the game's types, then populate the initial
+            // scene. A reload (ADR-020, #45) re-runs `build` but restores the
+            // scene from a snapshot instead of calling `spawn_scene`.
             plugin.build(&mut app);
+            plugin.spawn_scene(&mut app);
         }
 
         let runner = EcsRunner::single_thread();

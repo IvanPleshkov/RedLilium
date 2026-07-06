@@ -237,8 +237,18 @@ impl World {
 
     // ---- Type identity (ADR-020 amendment) ----
 
-    /// Records the origin ([`SourceId`](crate::SourceId)) of a type at its
-    /// registration boundary, and fails fast on a source conflict.
+    /// **Declares** the origin ([`SourceId`](crate::SourceId)) of a type at an
+    /// explicit *registration* boundary (e.g. `register_component`), and fails
+    /// fast on a source conflict.
+    ///
+    /// Registering a type is a claim that *this* source defines it. A *value
+    /// insert* of an already-declared type is a different act — see
+    /// [`resolve_type_source`](World::resolve_type_source), which respects the
+    /// existing origin instead of conflicting. Keeping the two distinct is what
+    /// lets a warm reload restore a snapshot (value inserts, possibly under a
+    /// different scope than the original registration) without a spurious
+    /// panic, while a genuine `TypeId` collision between two *registering*
+    /// sources is still rejected loudly.
     ///
     /// The source used is the current registration source — normally
     /// [`SourceId::HOST`](crate::SourceId::HOST), or whatever a
@@ -272,6 +282,31 @@ impl World {
                 v.insert(incoming);
             }
         }
+    }
+
+    /// Resolves the [`SourceId`](crate::SourceId) to stamp on a *value insert*
+    /// of `type_id`, declaring the current source only if the type has no
+    /// recorded origin yet.
+    ///
+    /// Unlike [`record_type_source`](World::record_type_source), an insert is
+    /// not a declaration: if the type already has an origin, that origin wins
+    /// and the insert respects it (never conflicts). This is the path a
+    /// snapshot restore takes — re-inserting a resource under whatever scope is
+    /// active must not fight the origin declared when the type was first seen.
+    /// A never-before-seen type is declared under the current source.
+    ///
+    /// The trade-off versus `record_type_source`: value inserts cannot detect a
+    /// cross-source `TypeId` collision (the first inserter wins silently). That
+    /// is acceptable — resources have no separate registration step, collisions
+    /// are caught on the component path, and in the warm-reload model game data
+    /// only ever crosses a generation boundary as plain serialized `Value`s,
+    /// never as a live in-place downcast.
+    pub(crate) fn resolve_type_source(
+        &mut self,
+        type_id: TypeId,
+    ) -> crate::type_identity::SourceId {
+        let current = self.current_source;
+        *self.type_sources.entry(type_id).or_insert(current)
     }
 
     /// Runs `f` with the registration source temporarily set to `source`, so

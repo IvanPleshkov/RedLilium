@@ -95,5 +95,8 @@ russh-sftp = "2.1"
 # File watching
 notify = "8"
 
+# Dynamic library loading (game cdylib warm-restart reload, ADR-020)
+libloading = "0.8"
+
 # Profiling (optional)
 tracy-client = "0.18"

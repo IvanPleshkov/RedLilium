@@ -361,6 +361,18 @@ impl Schedules {
         self.max_fixed_steps = steps;
     }
 
+    /// Marks the [`Startup`] schedule as already consumed, so a later
+    /// [`run_startup`](Self::run_startup) is a no-op.
+    ///
+    /// Used by warm-restart reload (ADR-020, #45): the reloaded world takes its
+    /// scene from a snapshot, not from a fresh Startup run, so the host must not
+    /// re-run Startup against it. Because a reload builds a *fresh* `Schedules`
+    /// (where `startup_done` is `false`), this makes the "don't run startup on
+    /// reload" invariant enforceable rather than merely conventional.
+    pub fn mark_startup_done(&mut self) {
+        self.startup_done = true;
+    }
+
     /// Runs the [`Startup`] schedule once.
     ///
     /// Subsequent calls are no-ops. Call this before your main loop.
