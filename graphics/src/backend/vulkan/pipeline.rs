@@ -58,11 +58,9 @@ pub struct PipelineManager {
     /// persistence (in-process caching still works).
     pipeline_cache_path: Option<PathBuf>,
     /// Set when a pipeline was compiled since the last disk write; cleared by
-    /// [`Self::persist_cache_if_dirty`]. Persistence piggybacks on
-    /// `advance_frame` because in practice nothing ever tears the backend
-    /// down: `GraphicsInstance` and `GraphicsDevice` hold strong `Arc`s to
-    /// each other, so `destroy()` is unreachable outside that cycle being
-    /// fixed (tracked in a separate issue).
+    /// [`Self::persist_cache_if_dirty`]. Flushed from `advance_frame` (not
+    /// only from `destroy()`) so the cache survives abnormal exits — a
+    /// process that aborts or calls `exit()` never unwinds into teardown.
     pipeline_cache_dirty: std::sync::atomic::AtomicBool,
     /// Content-keyed dedup of descriptor set layouts: materials with identical
     /// binding layouts share one `VkDescriptorSetLayout`.

@@ -17,9 +17,12 @@ use crate::types::SamplerDescriptor;
 /// let sampler = device.create_sampler(&SamplerDescriptor::linear())?;
 /// ```
 pub struct Sampler {
-    device: Arc<GraphicsDevice>,
     descriptor: SamplerDescriptor,
     gpu_handle: GpuSampler,
+    /// Declared after `gpu_handle` deliberately: fields drop in declaration
+    /// order, and this keep-alive must outlive the handle's `Drop`, which
+    /// needs the backend (owned by the device→instance chain) alive. See #50.
+    device: Arc<GraphicsDevice>,
 }
 
 impl Sampler {

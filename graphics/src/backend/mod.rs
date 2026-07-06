@@ -504,6 +504,10 @@ pub enum GpuSurface {
         surface: vk::SurfaceKHR,
         /// The Vulkan swapchain (created on configure).
         swapchain: RwLock<Option<vulkan::swapchain::VulkanSwapchain>>,
+        /// Surface-extension fn table, kept so `Drop` can destroy the
+        /// `VkSurfaceKHR` (the frontend `Surface` keeps the `VkInstance`
+        /// alive until after this drops).
+        surface_loader: ash::khr::surface::Instance,
         /// Keeps the window alive for as long as the `VkSurfaceKHR` references
         /// it. The `wgpu` variant needs no equivalent — its `Surface<'static>`
         /// owns an `Arc<Window>` clone internally.
@@ -735,11 +739,22 @@ impl GpuSurface {
 #[cfg(feature = "vulkan-backend")]
 impl Drop for GpuSurface {
     fn drop(&mut self) {
-        if let GpuSurface::Vulkan { swapchain, .. } = self {
-            // Destroy the swapchain before the surface is dropped.
+        if let GpuSurface::Vulkan {
+            surface,
+            swapchain,
+            surface_loader,
+            ..
+        } = self
+        {
+            // Destroy the swapchain before the surface it was created from.
             // The VulkanSwapchain stores its own device handles for cleanup.
             if let Some(ref mut sc) = *swapchain.write() {
                 sc.destroy();
+            }
+            // SAFETY: the frontend Surface keeps the instance (and thus the
+            // VkInstance behind `surface_loader`) alive until after this Drop.
+            if *surface != vk::SurfaceKHR::null() {
+                unsafe { surface_loader.destroy_surface(*surface, None) };
             }
         }
     }
@@ -1199,6 +1214,7 @@ impl GpuBackend {
                 Ok(GpuSurface::Vulkan {
                     surface,
                     swapchain: RwLock::new(None),
+                    surface_loader: vulkan_backend.surface_loader().clone(),
                     _window: window,
                 })
             }

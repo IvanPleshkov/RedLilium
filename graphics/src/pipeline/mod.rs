@@ -104,9 +104,6 @@ use redlilium_core::profiling::{frame_mark, profile_scope};
 /// `FramePipeline` is **not thread-safe**. It should be owned by a single
 /// thread (typically the main/render thread).
 pub struct FramePipeline {
-    /// Device for executing graphs.
-    device: Arc<GraphicsDevice>,
-
     /// Fences for each frame slot. `None` if slot hasn't been used yet.
     frame_fences: Vec<Option<Fence>>,
 
@@ -130,6 +127,14 @@ pub struct FramePipeline {
     /// Per-slot submitted graphs kept alive until fence wait guarantees GPU is done.
     /// Resetting these after fence wait drops Arc references to GPU resources safely.
     slot_graphs: Vec<Vec<RenderGraph>>,
+
+    /// Device for executing graphs.
+    ///
+    /// Declared last deliberately: fields drop in declaration order, and this
+    /// keep-alive must outlive the fences/ring buffers/graphs above — their
+    /// `Drop`s destroy GPU objects and need the backend (owned by the
+    /// device→instance chain) to still be alive. See #50.
+    device: Arc<GraphicsDevice>,
 }
 
 impl std::fmt::Debug for FramePipeline {

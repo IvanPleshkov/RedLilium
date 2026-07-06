@@ -118,13 +118,16 @@ impl SurfaceConfiguration {
 /// The surface is created from a window using [`GraphicsInstance::create_surface`].
 /// It must be configured with [`Surface::configure`] before use.
 pub struct Surface {
-    instance: Arc<GraphicsInstance>,
     config: RwLock<Option<SurfaceConfiguration>>,
-    device: RwLock<Option<Arc<GraphicsDevice>>>,
     /// Current frame index (cycles through swapchain images).
     frame_index: RwLock<u64>,
     /// The backend-specific GPU surface.
     gpu_surface: GpuSurface,
+    /// Keep-alives, declared after `gpu_surface` deliberately: fields drop in
+    /// declaration order, and surface/swapchain teardown needs the backend
+    /// (owned by the device→instance chain) to still be alive. See #50.
+    device: RwLock<Option<Arc<GraphicsDevice>>>,
+    instance: Arc<GraphicsInstance>,
 }
 
 impl Surface {
@@ -387,8 +390,6 @@ impl std::fmt::Debug for Surface {
 ///
 /// If dropped without presenting, the frame is discarded.
 pub struct SurfaceTexture {
-    device: Arc<GraphicsDevice>,
-    instance: Arc<GraphicsInstance>,
     format: TextureFormat,
     width: u32,
     height: u32,
@@ -396,6 +397,11 @@ pub struct SurfaceTexture {
     presented: RwLock<bool>,
     /// The backend-specific surface texture.
     gpu_texture: Option<GpuSurfaceTexture>,
+    /// Keep-alives, declared after `gpu_texture` deliberately: fields drop in
+    /// declaration order, and the texture's teardown needs the backend
+    /// (owned by the device→instance chain) to still be alive. See #50.
+    device: Arc<GraphicsDevice>,
+    instance: Arc<GraphicsInstance>,
 }
 
 impl SurfaceTexture {

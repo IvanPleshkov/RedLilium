@@ -388,9 +388,12 @@ impl MaterialDescriptor {
 ///     .with_label("pbr_material"))?;
 /// ```
 pub struct Material {
-    device: Arc<GraphicsDevice>,
     descriptor: MaterialDescriptor,
     gpu_handle: GpuPipeline,
+    /// Declared after `gpu_handle` deliberately: fields drop in declaration
+    /// order, and this keep-alive must outlive the handle's `Drop`, which
+    /// needs the backend (owned by the device→instance chain) alive. See #50.
+    device: Arc<GraphicsDevice>,
 }
 
 impl Material {

@@ -19,9 +19,13 @@ use crate::types::BufferDescriptor;
 /// println!("Buffer size: {}", buffer.size());
 /// ```
 pub struct Buffer {
-    device: Arc<GraphicsDevice>,
     descriptor: BufferDescriptor,
     gpu_handle: GpuBuffer,
+    /// Declared after `gpu_handle` deliberately: fields drop in declaration
+    /// order, and this keep-alive must outlive the handle's `Drop` (which
+    /// calls `vkDestroyBuffer` and needs the backend, transitively owned by
+    /// the device→instance chain, to still be alive). See #50.
+    device: Arc<GraphicsDevice>,
 }
 
 impl Buffer {

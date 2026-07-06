@@ -656,6 +656,14 @@ impl GraphicsDevice {
     }
 }
 
+impl Drop for GraphicsDevice {
+    fn drop(&mut self) {
+        // Keeps the instance's live-device guard counter accurate; `instance`
+        // (a field) drops after this, so the call is always safe.
+        self.instance.device_dropped();
+    }
+}
+
 impl std::fmt::Debug for GraphicsDevice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GraphicsDevice")

@@ -540,9 +540,8 @@ impl VulkanBackend {
         }
 
         // Flush freshly compiled pipelines to the on-disk pipeline cache.
-        // Done here rather than at teardown because the backend is never
-        // actually dropped (GraphicsInstance <-> GraphicsDevice Arc cycle);
-        // a no-op on frames without pipeline compilation.
+        // Done here (not only at teardown) so the cache survives abnormal
+        // exits; a no-op on frames without pipeline compilation.
         self.pipeline_manager.persist_cache_if_dirty();
     }
 
