@@ -34,6 +34,19 @@ pub enum WorldError {
         /// The dead entity.
         entity: Entity,
     },
+    /// A registration would map a `TypeId` that is already recorded under a
+    /// **different** [`SourceId`](crate::SourceId) — the aliasing/collision
+    /// case the ADR-020 type-identity amendment rejects loudly (e.g. a game
+    /// cdylib registering a type whose `TypeId` clashes with an engine type
+    /// from another source).
+    TypeSourceConflict {
+        /// The conflicting type's name.
+        type_name: &'static str,
+        /// The source already recorded for the `TypeId`.
+        existing: crate::type_identity::SourceId,
+        /// The source the current registration tried to stamp.
+        incoming: crate::type_identity::SourceId,
+    },
 }
 
 impl std::fmt::Display for WorldError {
@@ -46,6 +59,15 @@ impl std::fmt::Display for WorldError {
             Self::EntityNotAlive { entity } => {
                 write!(f, "Entity {entity} is not alive")
             }
+            Self::TypeSourceConflict {
+                type_name,
+                existing,
+                incoming,
+            } => write!(
+                f,
+                "Type `{type_name}` is already registered under source {existing:?}; \
+                 refusing to re-register it under {incoming:?} (type-identity conflict)"
+            ),
         }
     }
 }
@@ -96,6 +118,13 @@ fn deserialize_component_fn<T: Component>(
         WorldError::EntityNotAlive { entity } => {
             crate::serialize::DeserializeError::UnknownComponent {
                 type_name: format!("entity {entity} not alive"),
+            }
+        }
+        // `insert` never surfaces a source conflict (registration, not insert,
+        // is where the fail-fast lives); mapped for exhaustiveness only.
+        WorldError::TypeSourceConflict { type_name, .. } => {
+            crate::serialize::DeserializeError::UnknownComponent {
+                type_name: type_name.to_string(),
             }
         }
     })?;
@@ -158,6 +187,16 @@ pub struct World {
     /// whole-world snapshots, keyed by `SnapshotResource::NAME` (sorted for
     /// deterministic capture order).
     snapshot_resources: BTreeMap<&'static str, snapshot::SnapshotResourceEntry>,
+    /// Origin (`SourceId`) recorded for each registered component/resource
+    /// `TypeId`, per the ADR-020 type-identity amendment. Storage stays keyed
+    /// by bare `TypeId`; this map carries the qualifying `source` as metadata,
+    /// resolved at the boundaries (downcast guard, load-time fail-fast). In a
+    /// single-process build every entry is [`SourceId::HOST`].
+    type_sources: HashMap<TypeId, crate::type_identity::SourceId>,
+    /// The source stamped onto registrations happening right now. Defaults to
+    /// [`SourceId::HOST`]; a future loader scopes game-cdylib registrations by
+    /// flipping it via [`with_registration_source`](World::with_registration_source).
+    current_source: crate::type_identity::SourceId,
 }
 
 impl redlilium_core::abstract_editor::Editable for World {}
@@ -166,7 +205,19 @@ impl World {
     /// Creates a new empty world.
     pub fn new() -> Self {
         let mut resources = Resources::new();
-        resources.insert(crate::commands::CommandBuffer::new());
+        resources.insert(
+            crate::commands::CommandBuffer::new(),
+            crate::type_identity::SourceId::HOST,
+        );
+        let mut type_sources = HashMap::new();
+        // The bootstrap `CommandBuffer` is inserted directly above (before
+        // `Self` exists, so it bypasses `insert_resource`/`record_type_source`).
+        // Record its `HOST` origin here so the downcast guard covers it too
+        // rather than silently skipping it as an unknown-source entry.
+        type_sources.insert(
+            TypeId::of::<crate::commands::CommandBuffer>(),
+            crate::type_identity::SourceId::HOST,
+        );
         Self {
             entities: Entities::new(),
             components: HashMap::new(),
@@ -179,7 +230,133 @@ impl World {
             trigger_swap_fns: Vec::new(),
             event_update_fns: Vec::new(),
             snapshot_resources: BTreeMap::new(),
+            type_sources,
+            current_source: crate::type_identity::SourceId::HOST,
         }
+    }
+
+    // ---- Type identity (ADR-020 amendment) ----
+
+    /// Records the origin ([`SourceId`](crate::SourceId)) of a type at its
+    /// registration boundary, and fails fast on a source conflict.
+    ///
+    /// The source used is the current registration source — normally
+    /// [`SourceId::HOST`](crate::SourceId::HOST), or whatever a
+    /// [`with_registration_source`](World::with_registration_source) scope set.
+    /// Re-recording the *same* `(TypeId, source)` is idempotent (matching the
+    /// idempotence of the `register_*` paths).
+    ///
+    /// # Panics
+    ///
+    /// Panics with [`WorldError::TypeSourceConflict`] if `type_id` was already
+    /// recorded under a **different** source — the aliasing/collision case the
+    /// ADR mandates be rejected loudly rather than silently overwritten.
+    pub(crate) fn record_type_source(&mut self, type_id: TypeId, type_name: &'static str) {
+        use std::collections::hash_map::Entry;
+        let incoming = self.current_source;
+        match self.type_sources.entry(type_id) {
+            Entry::Occupied(e) => {
+                let existing = *e.get();
+                if existing != incoming {
+                    panic!(
+                        "{}",
+                        WorldError::TypeSourceConflict {
+                            type_name,
+                            existing,
+                            incoming,
+                        }
+                    );
+                }
+            }
+            Entry::Vacant(v) => {
+                v.insert(incoming);
+            }
+        }
+    }
+
+    /// Runs `f` with the registration source temporarily set to `source`, so
+    /// every component/resource registered inside is stamped with it.
+    ///
+    /// The previous source is restored afterward — **including if `f` panics**.
+    /// This matters for the #45 loader: a failing plugin registration panics
+    /// (e.g. [`record_type_source`](World::record_type_source)'s fail-fast
+    /// fires *inside* this scope), and an editor that catches that panic to stay
+    /// alive must not be left with `current_source` stuck on a dead generation —
+    /// which would mis-stamp every subsequent host registration. The restore is
+    /// therefore RAII, not a tail assignment.
+    ///
+    /// Today only tests call this with a non-`HOST` value; the engine's
+    /// `register_std_components` and the like run under the default
+    /// [`SourceId::HOST`](crate::SourceId::HOST).
+    pub fn with_registration_source<R>(
+        &mut self,
+        source: crate::type_identity::SourceId,
+        f: impl FnOnce(&mut World) -> R,
+    ) -> R {
+        /// Restores `current_source` on drop, so an unwinding `f` cannot leave
+        /// the world stamping registrations with a stale generation.
+        struct RestoreSource<'a> {
+            world: &'a mut World,
+            prev: crate::type_identity::SourceId,
+        }
+        impl Drop for RestoreSource<'_> {
+            fn drop(&mut self) {
+                self.world.current_source = self.prev;
+            }
+        }
+
+        let prev = self.current_source;
+        self.current_source = source;
+        let scope = RestoreSource { world: self, prev };
+        // Reborrow (not move) so `scope` stays intact to restore on drop.
+        f(&mut *scope.world)
+    }
+
+    /// The [`QualifiedTypeId`](crate::QualifiedTypeId) for `T` if it has been
+    /// registered (as a component or resource), resolving `source` via the
+    /// registration metadata. Returns `None` for never-registered types.
+    pub fn qualified_type_id_of<T: 'static>(&self) -> Option<crate::QualifiedTypeId> {
+        self.type_sources
+            .get(&TypeId::of::<T>())
+            .map(|&source| crate::QualifiedTypeId::new(TypeId::of::<T>(), source))
+    }
+
+    /// The current registration source ([`SourceId::HOST`](crate::SourceId::HOST)
+    /// outside a [`with_registration_source`](World::with_registration_source)
+    /// scope).
+    pub fn current_source(&self) -> crate::type_identity::SourceId {
+        self.current_source
+    }
+
+    /// Resolves the recorded source for `T`, if registered. Used by the
+    /// resource downcast guard to compare against an entry's stored source.
+    pub(crate) fn resolved_source<T: 'static>(&self) -> Option<crate::type_identity::SourceId> {
+        self.type_sources.get(&TypeId::of::<T>()).copied()
+    }
+
+    /// [`resolved_source`](World::resolved_source) by bare `TypeId`.
+    pub(crate) fn resolved_source_by_id(
+        &self,
+        type_id: TypeId,
+    ) -> Option<crate::type_identity::SourceId> {
+        self.type_sources.get(&type_id).copied()
+    }
+
+    /// Test-only seam: overwrites the recorded source for `T` without the
+    /// fail-fast, simulating a type surviving into a fresh generation (which in
+    /// production only happens across a world-dropping reload). Lets a unit test
+    /// force the live downcast-guard mismatch that the fail-fast otherwise makes
+    /// unreachable.
+    ///
+    /// Gated on `debug_assertions` to match its only caller (the guard test,
+    /// which the `debug_assert`-based guard makes a no-op in release) — so a
+    /// release test build has neither the helper nor a dead-code warning for it.
+    #[cfg(all(test, debug_assertions))]
+    pub(crate) fn force_type_source_for_test<T: 'static>(
+        &mut self,
+        source: crate::type_identity::SourceId,
+    ) {
+        self.type_sources.insert(TypeId::of::<T>(), source);
     }
 
     // ---- Component lock helpers ----

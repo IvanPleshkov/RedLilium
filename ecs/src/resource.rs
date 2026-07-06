@@ -54,6 +54,12 @@ struct ResourceEntry {
     /// The resource value, stored as `Arc<RwLock<dyn Resource>>`.
     handle: Arc<RwLock<dyn Resource>>,
     type_name: &'static str,
+    /// The origin ([`SourceId`](crate::SourceId)) recorded when this entry was
+    /// inserted, per the ADR-020 type-identity amendment. Compared against the
+    /// source `T` currently resolves to by the downcast guard (see
+    /// [`World::resource`](crate::World::resource)). `HOST` in single-process
+    /// builds.
+    source: crate::type_identity::SourceId,
 }
 
 /// Container for typed singleton resources backed by `Arc<RwLock<dyn Resource>>`.
@@ -88,13 +94,18 @@ impl Resources {
     /// Returns the typed `Arc` handle so the caller can keep a clone
     /// for external access (e.g. inspector). The world stores a coerced
     /// `Arc<RwLock<dyn Resource>>` that shares the same underlying data.
-    pub fn insert<T: Resource>(&mut self, value: T) -> Arc<RwLock<T>> {
+    pub fn insert<T: Resource>(
+        &mut self,
+        value: T,
+        source: crate::type_identity::SourceId,
+    ) -> Arc<RwLock<T>> {
         let arc = Arc::new(RwLock::new(value));
         self.entries.insert(
             TypeId::of::<T>(),
             ResourceEntry {
                 handle: arc.clone(),
                 type_name: type_name::<T>(),
+                source,
             },
         );
         arc
@@ -105,14 +116,25 @@ impl Resources {
     /// The Arc is coerced to `Arc<RwLock<dyn Resource>>` for storage;
     /// both the caller's clone and the stored clone share the same
     /// underlying lock and data.
-    pub fn insert_shared<T: Resource>(&mut self, resource: Arc<RwLock<T>>) {
+    pub fn insert_shared<T: Resource>(
+        &mut self,
+        resource: Arc<RwLock<T>>,
+        source: crate::type_identity::SourceId,
+    ) {
         self.entries.insert(
             TypeId::of::<T>(),
             ResourceEntry {
                 handle: resource,
                 type_name: type_name::<T>(),
+                source,
             },
         );
+    }
+
+    /// The source recorded for a resource entry, if present. Consulted by the
+    /// downcast guard at the [`World`](crate::World) boundary.
+    pub(crate) fn entry_source<T: 'static>(&self) -> Option<crate::type_identity::SourceId> {
+        self.entries.get(&TypeId::of::<T>()).map(|e| e.source)
     }
 
     /// Removes a resource, returning the `Arc<RwLock<dyn Resource>>` if present.
@@ -422,11 +444,14 @@ impl<T: 'static> DerefMut for ResourceRefMut<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::type_identity::SourceId;
+
+    const HOST: SourceId = SourceId::HOST;
 
     #[test]
     fn insert_and_borrow() {
         let mut resources = Resources::new();
-        resources.insert(42u32);
+        resources.insert(42u32, HOST);
         let val = resources.borrow::<u32>();
         assert_eq!(*val, 42);
     }
@@ -434,7 +459,7 @@ mod tests {
     #[test]
     fn borrow_mut_and_modify() {
         let mut resources = Resources::new();
-        resources.insert(42u32);
+        resources.insert(42u32, HOST);
         {
             let mut val = resources.borrow_mut::<u32>();
             *val = 99;
@@ -446,8 +471,8 @@ mod tests {
     #[test]
     fn replace_resource() {
         let mut resources = Resources::new();
-        resources.insert(42u32);
-        resources.insert(99u32);
+        resources.insert(42u32, HOST);
+        resources.insert(99u32, HOST);
         let val = resources.borrow::<u32>();
         assert_eq!(*val, 99);
     }
@@ -455,7 +480,7 @@ mod tests {
     #[test]
     fn remove_resource() {
         let mut resources = Resources::new();
-        resources.insert(42u32);
+        resources.insert(42u32, HOST);
         let removed = resources.remove::<u32>();
         assert!(removed.is_some());
         assert!(!resources.contains::<u32>());
@@ -464,7 +489,7 @@ mod tests {
     #[test]
     fn shared_borrows_coexist() {
         let mut resources = Resources::new();
-        resources.insert(42u32);
+        resources.insert(42u32, HOST);
         let _a = resources.borrow::<u32>();
         let _b = resources.borrow::<u32>();
         // Both borrows succeed simultaneously
@@ -474,7 +499,7 @@ mod tests {
     #[should_panic(expected = "Cannot borrow resource `u32` mutably: already borrowed")]
     fn exclusive_conflicts_shared() {
         let mut resources = Resources::new();
-        resources.insert(42u32);
+        resources.insert(42u32, HOST);
         let _a = resources.borrow::<u32>();
         let _b = resources.borrow_mut::<u32>(); // Should panic
     }
@@ -483,7 +508,7 @@ mod tests {
     #[should_panic(expected = "Cannot borrow resource `u32` immutably: already borrowed mutably")]
     fn shared_conflicts_exclusive() {
         let mut resources = Resources::new();
-        resources.insert(42u32);
+        resources.insert(42u32, HOST);
         let _a = resources.borrow_mut::<u32>();
         let _b = resources.borrow::<u32>(); // Should panic
     }
@@ -498,7 +523,7 @@ mod tests {
     #[test]
     fn insert_returns_arc_handle() {
         let mut resources = Resources::new();
-        let handle = resources.insert(42u32);
+        let handle = resources.insert(42u32, HOST);
 
         // External access via typed handle
         assert_eq!(*handle.read(), 42);
@@ -515,7 +540,7 @@ mod tests {
     fn insert_shared_same_arc() {
         let mut resources = Resources::new();
         let handle = Arc::new(RwLock::new(42u32));
-        resources.insert_shared(handle.clone());
+        resources.insert_shared(handle.clone(), HOST);
 
         // Modify through external handle
         *handle.write() = 99;
@@ -528,7 +553,7 @@ mod tests {
     #[test]
     fn get_handle_returns_dyn_resource() {
         let mut resources = Resources::new();
-        resources.insert(42u32);
+        resources.insert(42u32, HOST);
 
         let dyn_handle = resources.get_handle::<u32>();
         let guard = dyn_handle.read();

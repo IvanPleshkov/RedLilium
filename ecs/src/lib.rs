@@ -70,6 +70,7 @@ mod sparse_set;
 #[allow(clippy::module_inception)]
 pub mod std;
 mod system;
+pub mod type_identity;
 pub mod ui;
 mod world;
 
@@ -99,6 +100,7 @@ pub use redlilium_core::compute::{
 };
 pub use resource::{Resource, ResourceRef, ResourceRefMut, SnapshotResource};
 pub use sparse_set::{Mut, Ref, RefMut, SparseSetInner};
+pub use type_identity::{QualifiedTypeId, SourceId};
 pub use world::{ComponentNotRegistered, InspectResult, World, WorldError, set_component_actions};
 
 pub use compute::EcsComputeContext;

@@ -1083,3 +1083,93 @@ Game logic is written in **Rust as plugins**, hosted either by the editor
 - ⚠️ GPU caches / asset managers must migrate from world resources to the
   host-owned `EngineContext` (`Arc` + `insert_resource_shared`)
 - ⚠️ Undo history and selection reset on reload (accepted as expected behavior)
+
+### Amendment (2026-07-06): Type identity is `QualifiedTypeId`, not bare `TypeId`
+
+**Status**: Accepted (design). The `QualifiedTypeId` / `SourceId` primitive is
+introduced as a `HOST`-only, behavior-preserving plinth in #49; #45 wires it to
+real per-reload generations.
+
+The original decision (points 3–4) relied on "one copy of `TypeId`s per
+process" as the thing that makes `&mut World` sound across the boundary. That
+is the *goal*, but bare `TypeId` is the wrong primitive to build on, for two
+reasons the original text glossed over:
+
+- **`TypeId` is not guaranteed stable across separately-compiled artifacts.**
+  It is derived from the defining crate's `StableCrateId` = hash(crate name +
+  `-C metadata` + rustc version). Engine types (`Transform`, defined in the
+  shared engine dylib, one compiled copy) *do* unify. But a game compiled as a
+  separate `cargo` invocation against `redlilium-*` as external deps gets a
+  different `-C metadata` → different `StableCrateId` → **different `TypeId`**,
+  and the failure is *silent*: `insert::<Transform>` from the game lands under a
+  key the editor's `query::<Transform>` never looks up. Components vanish with
+  no link error.
+- **Game-defined types get a fresh `TypeId` on every reload** (the game crate's
+  metadata changes per build), so a component's identity is not even stable
+  across the reload it must survive conceptually.
+
+**Decision.** Type identity in the engine is
+`QualifiedTypeId { type_id: TypeId, source: SourceId }`, where
+`SourceId(u32)` names the *origin of the type's definition* — **not** the
+calling library — with `SourceId::HOST = 0` for the host/shared-dylib and a
+monotonic generation index (incremented per dylib reload) for game-defined
+types. The source is assigned **at registration time** (engine
+`register_std_components` stamps `HOST`; the plugin-load path stamps the
+current generation), never inferred from `TypeId::of` in generic code — a
+generic call site cannot know where `T` was defined. A `TypeId → SourceId`
+map maintained at registration resolves a live `TypeId::of::<T>()` back to its
+qualified key.
+
+The source binding **must** be by defining origin (variant B). Binding it to
+the *calling* library (variant A, a lib-local static) would tag the shared
+`Transform` as `(V, HOST)` when the editor inserts it but `(V, gen_N)` when the
+game inserts it — splitting one engine type into two keys. That is exactly the
+breakage this amendment prevents.
+
+**Where the tag earns its keep.** Because worlds are dropped on reload and
+exactly one game generation is live at a time, a bare `TypeId` is already
+unique *within* a live `World` — so `source` is **not** added to the hot query
+key. It pays off at the **boundaries**:
+
+1. **`Any::downcast` UB-guard.** Downcasting data produced by generation *N*
+   with generation *N+1*'s vtable is UB even if the `TypeId` coincidentally
+   matches. `source` lets retained/serialized data from an unloaded generation
+   be *refused* rather than reinterpreted. This is the real prize and it
+   protects snapshot blobs, host-retained resources, and anything surviving a
+   reload.
+2. **Load-time fail-fast.** A plugin registering a type whose `TypeId`
+   collides with an engine type from a different `source` is an explicit error
+   instead of silent aliasing. This subsumes the earlier "ABI probe" idea —
+   the qualified id *is* the probe, generalized to a multi-origin world.
+
+**What this does not change.** The shared-engine-dylib discipline (point 4)
+stands: engine types must still unify to `SourceId::HOST` on both sides, which
+requires the game to link the *same prebuilt* `libredlilium.dylib`
+(`-C prefer-dynamic`, not a recompiled copy), same rustc, same engine version,
+**same feature set** of the shared crates (feature unification changes
+metadata → changes `TypeId`). `QualifiedTypeId` does not remove that
+requirement — it makes violations of it *loud* instead of silently dropping
+components.
+
+**Not affected.** The world-snapshot core (#48) is single-process and carries
+no dylib boundary. Notably the serialization layer is already **name-keyed**
+(`SerializedComponent.type_name`, `name_index`, `SnapshotResource::NAME`), so
+the save/reload path is naturally resilient to a `TypeId` shift — which is part
+of why "reload = snapshot" holds. Only the *live in-process* path (dylib
+systems mutating the host's `World`) depends on `TypeId` identity, and that is
+what `QualifiedTypeId` guards.
+
+**Known boundaries (to close in #45).** The #49 plinth records a source for
+components and resources registered through `register_component` /
+`insert_resource*`, and guards the resource downcast on both the convenience
+(`resource()`) and production (`Res<T>::fetch_unlocked`) paths. Deliberately
+still outside its scope, because they need real generations to matter:
+
+- **Main-thread resources** (`insert_main_thread_resource`) carry no recorded
+  source and are not guarded on downcast — the same future risk class as
+  regular resources.
+- **No unload API yet.** `remove_resource` does not clear `type_sources`, so a
+  `TypeId` stays bound to its first source for the world's life. Fine while a
+  world is dropped whole on reload; #45 introduces per-generation registration
+  and teardown, at which point the guard becomes reachable in production (today
+  it fires only via the test-only `force_type_source_for_test` seam).

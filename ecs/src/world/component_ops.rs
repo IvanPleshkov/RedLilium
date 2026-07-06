@@ -44,6 +44,10 @@ impl World {
     /// Does not register inspector metadata — use [`register_inspector`](World::register_inspector)
     /// or [`register_inspector_default`](World::register_inspector_default) for that.
     pub fn register_component<T: Send + Sync + 'static>(&mut self) {
+        // Record the type's origin (ADR-020 type-identity amendment) and
+        // fail-fast on a source conflict. This is the single choke point every
+        // component registration path funnels through.
+        self.record_type_source(TypeId::of::<T>(), std::any::type_name::<T>());
         self.components
             .entry(TypeId::of::<T>())
             .or_insert_with(|| parking_lot::RwLock::new(ComponentStorage::new::<T>()));

@@ -379,6 +379,22 @@ impl World {
         self.components.keys().copied()
     }
 
+    /// Returns the [`QualifiedTypeId`](crate::QualifiedTypeId) of every
+    /// registered component type — the source-qualified parallel to
+    /// [`component_type_ids`](World::component_type_ids), consulted by #45 and
+    /// the downcast guard. The source is resolved from the registration map
+    /// (`type_sources`, `HOST` in single-process builds), which every
+    /// `register_component` path populates — so no storage lock (and no
+    /// unlocked read of component data) is needed.
+    pub fn component_qualified_type_ids(
+        &self,
+    ) -> impl Iterator<Item = crate::QualifiedTypeId> + '_ {
+        self.components.keys().filter_map(|type_id| {
+            self.resolved_source_by_id(*type_id)
+                .map(|source| crate::QualifiedTypeId::new(*type_id, source))
+        })
+    }
+
     // ---- Filters ----
 
     /// Creates a `With<T>` filter that checks for component presence.

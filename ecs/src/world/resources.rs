@@ -15,7 +15,9 @@ impl World {
     /// editor). The world stores a coerced `Arc<RwLock<dyn Resource>>` that
     /// shares the same underlying data and lock.
     pub fn insert_resource<T: Resource>(&mut self, value: T) -> Arc<parking_lot::RwLock<T>> {
-        self.resources.insert(value)
+        self.record_type_source(std::any::TypeId::of::<T>(), std::any::type_name::<T>());
+        let source = self.current_source();
+        self.resources.insert(value, source)
     }
 
     /// Inserts a pre-existing `Arc<RwLock<T>>` as a resource.
@@ -23,7 +25,9 @@ impl World {
     /// The Arc is coerced to `Arc<RwLock<dyn Resource>>` for storage;
     /// both the caller's clone and the stored clone share the same lock.
     pub fn insert_resource_shared<T: Resource>(&mut self, resource: Arc<parking_lot::RwLock<T>>) {
-        self.resources.insert_shared(resource);
+        self.record_type_source(std::any::TypeId::of::<T>(), std::any::type_name::<T>());
+        let source = self.current_source();
+        self.resources.insert_shared(resource, source);
     }
 
     /// Removes a resource, returning the `Arc<RwLock<dyn Resource>>` if present.
@@ -47,6 +51,7 @@ impl World {
     ///
     /// Panics if the resource does not exist.
     pub fn resource_shared<T: 'static>(&self) -> Arc<parking_lot::RwLock<dyn Resource>> {
+        self.guard_resource_source::<T>();
         self.resources.get_handle::<T>()
     }
 
@@ -56,6 +61,7 @@ impl World {
     ///
     /// Panics if the resource does not exist or is exclusively borrowed.
     pub fn resource<T: 'static>(&self) -> ResourceRef<'_, T> {
+        self.guard_resource_source::<T>();
         self.resources.borrow::<T>()
     }
 
@@ -65,7 +71,32 @@ impl World {
     ///
     /// Panics if the resource does not exist or any borrow is active.
     pub fn resource_mut<T: 'static>(&self) -> ResourceRefMut<'_, T> {
+        self.guard_resource_source::<T>();
         self.resources.borrow_mut::<T>()
+    }
+
+    /// Downcast source-guard (ADR-020 type-identity amendment): asserts the
+    /// stored entry's recorded source matches the source `T` currently resolves
+    /// to via the registration map, refusing to reinterpret data left by a
+    /// stale generation. It only bites once #45 introduces real per-reload
+    /// generations; today every registration is `HOST` so it is always a no-op.
+    ///
+    /// The whole body is behind `cfg!(debug_assertions)`, so in release the two
+    /// map lookups are compiled out entirely (`if false`) rather than relying on
+    /// the optimizer to prove them dead — the guard costs exactly nothing on the
+    /// hot resource-access path in release. Skipped when either side is unknown;
+    /// the one such case, the bootstrap `CommandBuffer`, is now recorded in
+    /// [`World::new`], so a skip in practice means an unregistered type.
+    #[inline]
+    fn guard_resource_source<T: 'static>(&self) {
+        if cfg!(debug_assertions)
+            && let (Some(entry), Some(expected)) = (
+                self.resources.entry_source::<T>(),
+                self.resolved_source::<T>(),
+            )
+        {
+            crate::type_identity::assert_source_match(entry, expected, std::any::type_name::<T>());
+        }
     }
 
     /// Borrows a resource immutably **without** locking it.
@@ -75,6 +106,11 @@ impl World {
     /// The caller must already hold this resource's read lock for the returned
     /// lifetime (e.g. via [`acquire_sorted`](Self::acquire_sorted)).
     pub(crate) unsafe fn resource_unlocked<T: 'static>(&self) -> ResourceRef<'_, T> {
+        // The production system-access path (`Res<T>::fetch_unlocked`) flows
+        // through here, so the source-guard must sit on it too — not only on the
+        // convenience `resource()` path. Reads only the registration maps; the
+        // caller's lock is unaffected.
+        self.guard_resource_source::<T>();
         unsafe { self.resources.borrow_unlocked::<T>() }
     }
 
@@ -85,6 +121,8 @@ impl World {
     /// The caller must already hold this resource's write lock for the returned
     /// lifetime (e.g. via [`acquire_sorted`](Self::acquire_sorted)).
     pub(crate) unsafe fn resource_mut_unlocked<T: 'static>(&self) -> ResourceRefMut<'_, T> {
+        // See `resource_unlocked`: guard the production `ResMut<T>` path too.
+        self.guard_resource_source::<T>();
         unsafe { self.resources.borrow_mut_unlocked::<T>() }
     }
 
