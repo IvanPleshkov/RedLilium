@@ -1846,20 +1846,55 @@ impl VulkanBackend {
         Ok(())
     }
 
-    /// Read data from a buffer.
-    pub fn read_buffer(&self, buffer: &GpuBuffer, offset: u64, size: u64) -> Vec<u8> {
-        if let GpuBuffer::Vulkan { allocation, .. } = buffer
-            && let Some(allocation) = allocation.lock().as_ref()
-            && let Some(mapped_ptr) = allocation.mapped_ptr()
-        {
-            let mut result = vec![0u8; size as usize];
-            unsafe {
-                let src = mapped_ptr.as_ptr().add(offset as usize);
-                std::ptr::copy_nonoverlapping(src as *const u8, result.as_mut_ptr(), size as usize);
-            }
-            return result;
+    /// Read a host-visible buffer's mapped memory. See the trait contract on
+    /// [`GpuBackend::read_buffer`](crate::backend::GpuBackend::read_buffer).
+    pub fn read_buffer(
+        &self,
+        buffer: &GpuBuffer,
+        offset: u64,
+        size: u64,
+    ) -> Result<Vec<u8>, GraphicsError> {
+        let GpuBuffer::Vulkan {
+            allocation,
+            size: buf_size,
+            ..
+        } = buffer
+        else {
+            return Err(GraphicsError::Internal(
+                "read_buffer called with non-Vulkan buffer".to_string(),
+            ));
+        };
+        if size == 0 {
+            return Ok(Vec::new());
         }
-        vec![0u8; size as usize]
+        if offset.checked_add(size).is_none_or(|end| end > *buf_size) {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "read_buffer range at offset {offset} ({size} bytes) exceeds buffer size {buf_size}"
+            )));
+        }
+
+        let guard = allocation.lock();
+        let Some(allocation) = guard.as_ref() else {
+            return Err(GraphicsError::Internal(
+                "Buffer allocation is None".to_string(),
+            ));
+        };
+        // No mapped pointer ⇒ device-local buffer. Reading it here would
+        // silently return zeros; require a host-visible readback buffer.
+        let Some(mapped_ptr) = allocation.mapped_ptr() else {
+            return Err(GraphicsError::InvalidParameter(
+                "read_buffer on a device-local buffer; copy it to a MAP_READ readback \
+                 buffer via TransferOperation::ReadbackBuffer first"
+                    .to_string(),
+            ));
+        };
+
+        let mut result = vec![0u8; size as usize];
+        unsafe {
+            let src = mapped_ptr.as_ptr().add(offset as usize);
+            std::ptr::copy_nonoverlapping(src as *const u8, result.as_mut_ptr(), size as usize);
+        }
+        Ok(result)
     }
 
     /// Write tightly-packed data covering mip 0 of every layer of a texture.

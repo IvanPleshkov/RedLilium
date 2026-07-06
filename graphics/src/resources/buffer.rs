@@ -83,7 +83,7 @@ impl Buffer {
     /// public so external code cannot read GPU memory that may still be in use.
     ///
     /// [`ReadbackBuffer`]: crate::TransferOperation::ReadbackBuffer
-    pub(crate) fn read_mapped(&self, offset: u64, size: u64) -> Vec<u8> {
+    pub(crate) fn read_mapped(&self, offset: u64, size: u64) -> Result<Vec<u8>, GraphicsError> {
         self.device
             .instance()
             .backend()

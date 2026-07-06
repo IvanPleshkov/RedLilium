@@ -217,12 +217,18 @@ impl FramePipeline {
                         dst,
                     } = op
                     {
-                        let bytes = src.read_mapped(
+                        match src.read_mapped(
                             src_range.start as u64,
                             (src_range.end - src_range.start) as u64,
-                        );
-                        if let Ok(mut guard) = dst.lock() {
-                            *guard = bytes;
+                        ) {
+                            Ok(bytes) => {
+                                if let Ok(mut guard) = dst.lock() {
+                                    *guard = bytes;
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("readback drain failed: {e}");
+                            }
                         }
                     }
                 }

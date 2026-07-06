@@ -383,9 +383,9 @@ impl GraphicsInstance {
     /// surface.configure(&device, &SurfaceConfiguration::new(800, 600));
     /// ```
     #[allow(clippy::arc_with_non_send_sync)] // Surface is intentionally !Send+!Sync for window safety
-    pub fn create_surface<W>(&self, window: &W) -> Result<Arc<Surface>, GraphicsError>
+    pub fn create_surface<W>(&self, window: Arc<W>) -> Result<Arc<Surface>, GraphicsError>
     where
-        W: HasWindowHandle + HasDisplayHandle + Sync,
+        W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
     {
         let instance = self.arc_self().ok_or_else(|| {
             GraphicsError::ResourceCreationFailed("instance has been dropped".to_string())

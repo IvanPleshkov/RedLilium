@@ -56,7 +56,7 @@ enum TestResult {
 struct WindowTestApp {
     result: TestResult,
     params: InstanceParameters,
-    window: Option<Window>,
+    window: Option<std::sync::Arc<Window>>,
     instance: Option<Arc<GraphicsInstance>>,
     device: Option<Arc<GraphicsDevice>>,
     surface: Option<Arc<Surface>>,
@@ -100,7 +100,7 @@ impl WindowTestApp {
         };
 
         // Create surface first (needed to select compatible adapter)
-        let surface = match instance.create_surface(window) {
+        let surface = match instance.create_surface(window.clone()) {
             Ok(s) => s,
             Err(e) => {
                 log::warn!("Failed to create surface: {}", e);
@@ -236,7 +236,7 @@ impl ApplicationHandler for WindowTestApp {
             match event_loop.create_window(window_attributes) {
                 Ok(window) => {
                     log::info!("Test window created successfully");
-                    self.window = Some(window);
+                    self.window = Some(std::sync::Arc::new(window));
 
                     if !self.init_graphics() {
                         log::info!("Graphics initialization failed, skipping test");

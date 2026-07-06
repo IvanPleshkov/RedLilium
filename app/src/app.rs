@@ -151,8 +151,8 @@ where
             }
         };
 
-        // Create surface
-        let surface = match instance.create_surface(window) {
+        // Create surface (owned Arc<Window> so the surface keeps the window alive)
+        let surface = match instance.create_surface(window.clone()) {
             Ok(s) => s,
             Err(e) => {
                 log::error!("Failed to create surface: {}", e);

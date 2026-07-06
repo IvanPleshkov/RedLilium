@@ -77,7 +77,7 @@ struct WindowTestApp {
     /// Instance parameters for backend selection.
     params: InstanceParameters,
     /// Window handle (created on resume).
-    window: Option<Window>,
+    window: Option<std::sync::Arc<Window>>,
     /// Graphics instance.
     instance: Option<Arc<GraphicsInstance>>,
     /// Graphics device.
@@ -130,7 +130,7 @@ impl WindowTestApp {
         };
 
         // Create surface first (needed to select compatible adapter)
-        let surface = match instance.create_surface(window) {
+        let surface = match instance.create_surface(window.clone()) {
             Ok(s) => s,
             Err(e) => {
                 log::warn!("Failed to create surface: {}", e);
@@ -281,7 +281,7 @@ impl ApplicationHandler for WindowTestApp {
             match event_loop.create_window(window_attributes) {
                 Ok(window) => {
                     log::info!("Test window created successfully");
-                    self.window = Some(window);
+                    self.window = Some(std::sync::Arc::new(window));
 
                     // Initialize graphics
                     if !self.init_graphics() {

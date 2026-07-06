@@ -128,14 +128,16 @@ pub struct Surface {
 }
 
 impl Surface {
-    /// Create a new surface from a window.
+    /// Create a new surface from an owned window.
     ///
-    /// # Safety
-    ///
-    /// The window handle must remain valid for the lifetime of the surface.
-    pub(crate) fn new<W>(instance: Arc<GraphicsInstance>, window: &W) -> Result<Self, GraphicsError>
+    /// The `Arc<W>` is retained by the backend surface, so the window is
+    /// guaranteed to outlive it (no lifetime erasure).
+    pub(crate) fn new<W>(
+        instance: Arc<GraphicsInstance>,
+        window: Arc<W>,
+    ) -> Result<Self, GraphicsError>
     where
-        W: HasWindowHandle + HasDisplayHandle + Sync,
+        W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
     {
         log::info!("Creating surface from window");
 

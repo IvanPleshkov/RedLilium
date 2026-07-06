@@ -500,6 +500,10 @@ pub enum GpuSurface {
         surface: vk::SurfaceKHR,
         /// The Vulkan swapchain (created on configure).
         swapchain: RwLock<Option<vulkan::swapchain::VulkanSwapchain>>,
+        /// Keeps the window alive for as long as the `VkSurfaceKHR` references
+        /// it. The `wgpu` variant needs no equivalent — its `Surface<'static>`
+        /// owns an `Arc<Window>` clone internally.
+        _window: Arc<dyn std::any::Any + Send + Sync>,
     },
 }
 
@@ -630,7 +634,12 @@ impl GpuSurface {
             }
 
             #[cfg(feature = "vulkan-backend")]
-            (Self::Vulkan { surface, swapchain }, GpuBackend::Vulkan(vulkan_backend)) => {
+            (
+                Self::Vulkan {
+                    surface, swapchain, ..
+                },
+                GpuBackend::Vulkan(vulkan_backend),
+            ) => {
                 use vulkan::swapchain::VulkanSwapchain;
 
                 // Create the new swapchain BEFORE destroying the old one,
@@ -1060,10 +1069,22 @@ impl GpuBackend {
         }
     }
 
-    /// Read data from a buffer.
+    /// Read a host-visible buffer's mapped memory into a `Vec`.
     ///
-    /// This is a blocking operation that waits for the GPU to finish.
-    pub fn read_buffer(&self, buffer: &GpuBuffer, offset: u64, size: u64) -> Vec<u8> {
+    /// Contract (identical on both backends): the buffer must be host-readable
+    /// (`BufferUsage::MAP_READ`) and the caller must ensure the GPU has
+    /// finished writing it — read *after* the frame fence (this is what the
+    /// pipeline's post-fence readback drain does). This method performs **no**
+    /// GPU wait and **no** staging copy of its own: reading a device-local
+    /// buffer is an error, not a silent zero-fill — copy it to a readback
+    /// buffer with [`TransferOperation::ReadbackBuffer`](crate::TransferOperation)
+    /// first.
+    pub fn read_buffer(
+        &self,
+        buffer: &GpuBuffer,
+        offset: u64,
+        size: u64,
+    ) -> Result<Vec<u8>, GraphicsError> {
         match self {
             Self::Dummy(backend) => backend.read_buffer(buffer, offset, size),
             #[cfg(feature = "wgpu-backend")]
@@ -1102,14 +1123,20 @@ impl GpuBackend {
         }
     }
 
-    /// Create a surface from a window.
+    /// Create a surface from an owned window.
     ///
-    /// # Safety
-    ///
-    /// The window handle must remain valid for the lifetime of the surface.
-    pub fn create_surface<W>(&self, window: &W) -> Result<GpuSurface, GraphicsError>
+    /// Takes an `Arc<W>` so the window's lifetime is genuinely tied to the
+    /// surface: `wgpu`'s `Surface<'static>` is created from the owned `Arc`
+    /// (no lifetime-erasing `transmute`), and the Vulkan variant keeps a clone
+    /// alive for as long as the `VkSurfaceKHR`. Dropping the window while the
+    /// surface lives is therefore impossible.
+    pub fn create_surface<W>(&self, window: Arc<W>) -> Result<GpuSurface, GraphicsError>
     where
-        W: raw_window_handle::HasWindowHandle + raw_window_handle::HasDisplayHandle + Sync,
+        W: raw_window_handle::HasWindowHandle
+            + raw_window_handle::HasDisplayHandle
+            + Send
+            + Sync
+            + 'static,
     {
         match self {
             Self::Dummy(_) => {
@@ -1119,20 +1146,18 @@ impl GpuBackend {
 
             #[cfg(feature = "wgpu-backend")]
             Self::Wgpu(wgpu_backend) => {
-                // Create wgpu surface from window
-                // SAFETY: The caller guarantees the window handle remains valid for the
-                // lifetime of the surface. We transmute to 'static to satisfy wgpu's
-                // Surface<'static> requirement, but the Surface is dropped before the
-                // window in practice.
-                let surface: wgpu::Surface<'static> = unsafe {
-                    std::mem::transmute(wgpu_backend.instance().create_surface(window).map_err(
-                        |e| {
-                            GraphicsError::ResourceCreationFailed(format!(
-                                "Failed to create wgpu surface: {e}"
-                            ))
-                        },
-                    )?)
-                };
+                // The owned Arc converts into wgpu's `SurfaceTarget<'static>`
+                // (it is `HasWindowHandle + HasDisplayHandle + Send + Sync +
+                // 'static`), so wgpu returns a genuine `Surface<'static>` that
+                // holds the window itself — no `transmute`.
+                let surface = wgpu_backend
+                    .instance()
+                    .create_surface(window)
+                    .map_err(|e| {
+                        GraphicsError::ResourceCreationFailed(format!(
+                            "Failed to create wgpu surface: {e}"
+                        ))
+                    })?;
                 log::info!("Created wgpu surface");
                 Ok(GpuSurface::Wgpu { surface })
             }
@@ -1169,6 +1194,7 @@ impl GpuBackend {
                 Ok(GpuSurface::Vulkan {
                     surface,
                     swapchain: RwLock::new(None),
+                    _window: window,
                 })
             }
         }

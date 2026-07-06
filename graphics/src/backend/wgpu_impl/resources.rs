@@ -478,11 +478,29 @@ impl WgpuBackend {
                     Ok(_) => Err(GraphicsError::Timeout(
                         "fence wait timed out after 10 s; GPU may be hung".into(),
                     )),
-                    Err(e) => Err(GraphicsError::Internal(format!(
-                        "device poll failed during fence wait: {e}"
-                    ))),
+                    Err(e) => {
+                        // The submission index was never validly submitted (a
+                        // rejected submit still returns an index that never
+                        // signals) or the device is lost — either way, waiting
+                        // on it again would fail forever. Abandon it: mark the
+                        // fence signaled so the next frame recovers the slot,
+                        // and report this frame's failure. See #46.
+                        Self::abandon_wgpu_fence(state);
+                        Err(GraphicsError::Internal(format!(
+                            "device poll failed during fence wait: {e}"
+                        )))
+                    }
                 }
             }
+        }
+    }
+
+    /// Mark a wgpu fence signaled after an unrecoverable poll failure, so a
+    /// later wait on the same slot returns immediately instead of re-polling a
+    /// submission index that will never signal (the #46 wedge).
+    fn abandon_wgpu_fence(state: &std::sync::Mutex<crate::backend::WgpuFenceState>) {
+        if let Ok(mut guard) = state.lock() {
+            *guard = crate::backend::WgpuFenceState::Signaled;
         }
     }
 
@@ -545,9 +563,13 @@ impl WgpuBackend {
                     timeout: Some(timeout),
                 }) {
                     Ok(status) => Ok(status.wait_finished()),
-                    Err(e) => Err(GraphicsError::Internal(format!(
-                        "device poll failed during fence wait: {e}"
-                    ))),
+                    Err(e) => {
+                        // Unrecoverable — abandon so the slot recovers (#46).
+                        Self::abandon_wgpu_fence(state);
+                        Err(GraphicsError::Internal(format!(
+                            "device poll failed during fence wait: {e}"
+                        )))
+                    }
                 }
             }
         }
@@ -667,67 +689,70 @@ impl WgpuBackend {
     }
 
     /// Read data from a buffer.
-    pub fn read_buffer(&self, buffer: &GpuBuffer, offset: u64, size: u64) -> Vec<u8> {
-        if let GpuBuffer::Wgpu(wgpu_buffer) = buffer {
-            // Try to map the buffer directly first (works if buffer has MAP_READ)
-            let slice = wgpu_buffer.slice(offset..offset + size);
-            let (tx, rx) = std::sync::mpsc::channel();
-            slice.map_async(wgpu::MapMode::Read, move |result| {
-                let _ = tx.send(result);
-            });
+    /// Read a host-visible buffer's mapped memory. See the trait contract on
+    /// [`GpuBackend::read_buffer`](crate::backend::GpuBackend::read_buffer).
+    pub fn read_buffer(
+        &self,
+        buffer: &GpuBuffer,
+        offset: u64,
+        size: u64,
+    ) -> Result<Vec<u8>, GraphicsError> {
+        let GpuBuffer::Wgpu(wgpu_buffer) = buffer else {
+            return Err(GraphicsError::Internal(
+                "read_buffer called with non-wgpu buffer".to_string(),
+            ));
+        };
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        if offset
+            .checked_add(size)
+            .is_none_or(|end| end > wgpu_buffer.size())
+        {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "read_buffer range at offset {offset} ({size} bytes) exceeds buffer size {}",
+                wgpu_buffer.size()
+            )));
+        }
+        // Check MAP_READ up front rather than letting `map_async` fail: a
+        // failed map is a device validation error (logged by the uncaptured
+        // handler) on every call, and the old staging-copy fallback then
+        // panicked in `get_mapped_range`. Require a readback buffer instead —
+        // matching the Vulkan backend, which also does not stage here.
+        if !wgpu_buffer.usage().contains(wgpu::BufferUsages::MAP_READ) {
+            return Err(GraphicsError::InvalidParameter(
+                "read_buffer on a buffer without MAP_READ; copy device-local data to a \
+                 readback buffer via TransferOperation::ReadbackBuffer first"
+                    .to_string(),
+            ));
+        }
 
-            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
-
-            if let Ok(Ok(())) = rx.recv() {
-                // Direct mapping succeeded
+        let slice = wgpu_buffer.slice(offset..offset + size);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        // Drive the map callback. The caller guarantees GPU completion
+        // (post-fence), so this returns promptly.
+        if let Err(e) = self.device.poll(wgpu::PollType::wait_indefinitely()) {
+            return Err(GraphicsError::Internal(format!(
+                "device poll failed during read_buffer map: {e}"
+            )));
+        }
+        match rx.recv() {
+            Ok(Ok(())) => {
+                // `get_mapped_range()` borrows the mapping; `.to_vec()` copies
+                // it out and drops the view before `unmap()`.
                 let data = slice.get_mapped_range().to_vec();
-                let _ = slice;
                 wgpu_buffer.unmap();
-                return data;
+                Ok(data)
             }
-
-            // Direct mapping failed - use staging buffer approach
-            // This requires the source buffer to have COPY_SRC
-            let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Read Staging Buffer"),
-                size,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            });
-
-            // Copy from source to staging
-            let mut encoder = self
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Read Buffer Encoder"),
-                });
-            encoder.copy_buffer_to_buffer(wgpu_buffer, offset, &staging, 0, size);
-
-            let idx = self.queue.submit(std::iter::once(encoder.finish()));
-
-            // Wait for copy to complete
-            let _ = self.device.poll(wgpu::PollType::Wait {
-                submission_index: Some(idx),
-                timeout: Some(std::time::Duration::from_secs(10)),
-            });
-
-            // Map and read
-            let slice = staging.slice(..);
-            let (tx, rx) = std::sync::mpsc::channel();
-            slice.map_async(wgpu::MapMode::Read, move |result| {
-                let _ = tx.send(result);
-            });
-
-            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
-            let _ = rx.recv();
-
-            let data = slice.get_mapped_range().to_vec();
-            let _ = slice;
-            staging.unmap();
-
-            data
-        } else {
-            vec![0u8; size as usize]
+            Ok(Err(e)) => Err(GraphicsError::Internal(format!(
+                "read_buffer map_async failed: {e}"
+            ))),
+            Err(_) => Err(GraphicsError::Internal(
+                "read_buffer map callback was dropped".to_string(),
+            )),
         }
     }
 }

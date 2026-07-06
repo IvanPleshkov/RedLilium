@@ -150,10 +150,14 @@ impl DummyBackend {
         Ok(())
     }
 
-    /// Read data from a buffer.
-    pub fn read_buffer(&self, _buffer: &GpuBuffer, _offset: u64, size: u64) -> Vec<u8> {
-        // Return zeroed data
-        vec![0u8; size as usize]
+    /// Read data from a buffer (dummy: zeroed data of the requested size).
+    pub fn read_buffer(
+        &self,
+        _buffer: &GpuBuffer,
+        _offset: u64,
+        size: u64,
+    ) -> Result<Vec<u8>, GraphicsError> {
+        Ok(vec![0u8; size as usize])
     }
 
     /// Write data to a texture.
