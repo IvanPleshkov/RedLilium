@@ -2520,13 +2520,19 @@ impl VulkanBackend {
             self.device.cmd_set_viewport(cmd, 0, &[viewport]);
         }
 
-        // Set scissor rect (use pass override or fall back to render area)
+        // Set scissor rect (use pass override or fall back to render area).
+        // An explicit scissor is clamped to the render area — Vulkan rejects
+        // negative offsets and out-of-bounds extents (VUID-vkCmdSetScissor).
         let default_scissor = if let Some(sr) = pass.scissor_rect() {
+            let c = sr.clamped(render_area.extent.width, render_area.extent.height);
             vk::Rect2D {
-                offset: vk::Offset2D { x: sr.x, y: sr.y },
+                offset: vk::Offset2D {
+                    x: c.x as i32,
+                    y: c.y as i32,
+                },
                 extent: vk::Extent2D {
-                    width: sr.width,
-                    height: sr.height,
+                    width: c.width,
+                    height: c.height,
                 },
             }
         } else {
@@ -2541,7 +2547,7 @@ impl VulkanBackend {
 
         // Encode draw commands
         for draw_cmd in pass.draw_commands() {
-            self.encode_draw_command(cmd, draw_cmd, default_scissor)?;
+            self.encode_draw_command(cmd, draw_cmd, default_scissor, render_area.extent)?;
         }
 
         // End dynamic rendering
@@ -2560,6 +2566,7 @@ impl VulkanBackend {
         cmd: vk::CommandBuffer,
         draw_cmd: &crate::graph::DrawCommand,
         pass_scissor: vk::Rect2D,
+        target_extent: vk::Extent2D,
     ) -> Result<(), GraphicsError> {
         use crate::materials::BoundResource;
 
@@ -2826,19 +2833,20 @@ impl VulkanBackend {
             }
         }
 
-        // Set per-draw scissor rect if specified
+        // Set per-draw scissor rect if specified. Clamped to the target — a
+        // negative/out-of-bounds rect (egui clip during resize) is a
+        // validation error / UB on Vulkan otherwise.
         let custom_scissor = draw_cmd.scissor_rect.is_some();
         if let Some(scissor) = &draw_cmd.scissor_rect {
-            // Convert ScissorRect to Vulkan Rect2D
-            // Note: x and y can be negative in ScissorRect but Vulkan offset uses i32
+            let c = scissor.clamped(target_extent.width, target_extent.height);
             let vk_scissor = vk::Rect2D {
                 offset: vk::Offset2D {
-                    x: scissor.x,
-                    y: scissor.y,
+                    x: c.x as i32,
+                    y: c.y as i32,
                 },
                 extent: vk::Extent2D {
-                    width: scissor.width,
-                    height: scissor.height,
+                    width: c.width,
+                    height: c.height,
                 },
             };
             unsafe {

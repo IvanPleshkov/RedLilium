@@ -165,10 +165,14 @@ impl WgpuBackend {
             render_pass.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
         }
 
-        // Set scissor rect (use pass override or fall back to full target dimensions)
+        // Set scissor rect (use pass override or fall back to full target
+        // dimensions). An explicit scissor is clamped to the target — wgpu
+        // requires the rect ⊆ target, and a negative origin cast to u32
+        // becomes ~4 billion and panics.
         let pass_scissor = pass.scissor_rect();
-        if let Some(sr) = pass_scissor {
-            render_pass.set_scissor_rect(sr.x as u32, sr.y as u32, sr.width, sr.height);
+        if let (Some(sr), Some((width, height))) = (pass_scissor, default_dims) {
+            let c = sr.clamped(width, height);
+            render_pass.set_scissor_rect(c.x, c.y, c.width, c.height);
         } else if let Some((width, height)) = default_dims {
             render_pass.set_scissor_rect(0, 0, width, height);
         }
@@ -331,15 +335,12 @@ impl WgpuBackend {
                 }
             }
 
-            // Set per-draw scissor rect if specified
+            // Set per-draw scissor rect if specified (clamped to the target,
+            // as above).
             let custom_scissor = draw_cmd.scissor_rect.is_some();
-            if let Some(scissor) = &draw_cmd.scissor_rect {
-                render_pass.set_scissor_rect(
-                    scissor.x as u32,
-                    scissor.y as u32,
-                    scissor.width,
-                    scissor.height,
-                );
+            if let (Some(scissor), Some((width, height))) = (&draw_cmd.scissor_rect, default_dims) {
+                let c = scissor.clamped(width, height);
+                render_pass.set_scissor_rect(c.x, c.y, c.width, c.height);
             }
 
             if mesh.is_indexed() {
@@ -365,10 +366,12 @@ impl WgpuBackend {
                 );
             }
 
-            // Restore pass-level scissor after per-draw override
+            // Restore pass-level scissor after per-draw override (clamped, as
+            // when it was first set).
             if custom_scissor {
-                if let Some(sr) = pass_scissor {
-                    render_pass.set_scissor_rect(sr.x as u32, sr.y as u32, sr.width, sr.height);
+                if let (Some(sr), Some((width, height))) = (pass_scissor, default_dims) {
+                    let c = sr.clamped(width, height);
+                    render_pass.set_scissor_rect(c.x, c.y, c.width, c.height);
                 } else if let Some((width, height)) = default_dims {
                     render_pass.set_scissor_rect(0, 0, width, height);
                 }
