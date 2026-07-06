@@ -18,6 +18,29 @@ RedLilium is a game and graphics engine written in Rust. It supports both native
 
 **IMPORTANT:** After making code changes, always run the test script to verify the project builds and passes all checks.
 
+### Canonical pre-commit gate
+
+Run the **`preflight`** skill after any code change (it packages the exact
+sequence and flags below and reports a pass/fail verdict). If running by hand
+on Linux/macOS, the canonical invocation is:
+
+```bash
+cargo fmt --all
+CARGO_INCREMENTAL=0 bash scripts/test-all.sh --skip-web
+git diff --stat -- std-assets/assets.db project-assets/assets.db   # must be empty
+```
+
+Load-bearing gotchas (getting any wrong wastes a run):
+
+- **`bash` prefix**, not `./scripts/test-all.sh` — the script must be invoked
+  through `bash`.
+- **`--skip-web`** — `wasm-pack` is not installed here; without it the web
+  build step fails spuriously.
+- **`CARGO_INCREMENTAL=0`** — avoids incremental artifacts skewing the run.
+- **Asset DBs must stay clean** — `std-assets/assets.db` and
+  `project-assets/assets.db` must not change as a side effect of unrelated
+  work; check the diff before every commit.
+
 ### Running Tests
 
 **On Windows (PowerShell):**
@@ -65,6 +88,22 @@ If wasm-pack is not installed, skip web build:
 - **IMPORTANT:** After making any changes to Rust code, always run `cargo fmt --all` to format the code before running tests or committing
 - Run `cargo clippy` before committing
 - All warnings should be fixed (clippy runs with `-D warnings`)
+- A crate that instantiates wgpu-typed resources (e.g. links `redlilium-graphics`
+  and constructs materials/pipelines) needs `#![recursion_limit = "256"]` at the
+  crate root, or the `Send`/`Sync` auto-trait resolution overflows. Precedent:
+  `ecs`, `graphics`, `editor`, `runtime`.
+
+### Committing
+
+- **Never commit without an explicit instruction** from the user. Running the
+  `preflight` gate is not authorization to commit.
+- Before committing, run `preflight` (or its manual equivalent) — green build,
+  tests, clippy, and clean asset DBs.
+- End every commit message with the co-author trailer for the model that did
+  the work, e.g. `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`
+  (or the Opus/Sonnet trailer when that tier owns the session).
+- Reference issues in the message (`#N`); `Closes #N` auto-closes on push.
+- If on the default branch (`main`), branch first unless told otherwise.
 
 ### Documentation
 
