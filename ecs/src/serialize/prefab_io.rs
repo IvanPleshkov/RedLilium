@@ -36,3 +36,33 @@ pub struct SerializedComponent {
     /// The serialized field data.
     pub data: Value,
 }
+
+/// A whole-world snapshot: every alive entity plus the opted-in snapshot
+/// resources.
+///
+/// Produced by [`World::serialize_world`](crate::World::serialize_world) and
+/// restored by [`World::deserialize_world_into`](crate::World::deserialize_world_into).
+/// This is the single snapshot mechanism shared by Play mode, scene save/load,
+/// and warm-restart reload. Unlike [`SerializedPrefab`] (a subtree), it carries
+/// no BFS root — entity references remap across the whole set, and a reference
+/// to an entity that is not in the snapshot resolves to
+/// [`Entity::DANGLING`](crate::Entity::DANGLING).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SerializedWorld {
+    /// All alive entities' serialized components, in
+    /// [`World::iter_entities`](crate::World::iter_entities) order.
+    pub entities: Vec<SerializedEntity>,
+    /// Opted-in snapshot resources (see
+    /// [`SnapshotResource`](crate::SnapshotResource)).
+    pub resources: Vec<SerializedResource>,
+}
+
+/// A single resource's serialized data (mirrors [`SerializedComponent`]).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SerializedResource {
+    /// The resource type name (matches
+    /// [`SnapshotResource::NAME`](crate::SnapshotResource::NAME)).
+    pub type_name: String,
+    /// The serialized resource data.
+    pub data: Value,
+}

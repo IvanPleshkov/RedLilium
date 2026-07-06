@@ -5,6 +5,7 @@ mod hooks;
 mod inspector;
 mod query_access;
 mod resources;
+mod snapshot;
 #[cfg(test)]
 mod tests;
 
@@ -153,6 +154,10 @@ pub struct World {
     trigger_swap_fns: Vec<fn(&mut World)>,
     /// Monomorphized update functions for each registered `Events<T>` resource.
     event_update_fns: Vec<fn(&mut World)>,
+    /// Type-erased capture/restore hooks for resources that opt into
+    /// whole-world snapshots, keyed by `SnapshotResource::NAME` (sorted for
+    /// deterministic capture order).
+    snapshot_resources: BTreeMap<&'static str, snapshot::SnapshotResourceEntry>,
 }
 
 impl redlilium_core::abstract_editor::Editable for World {}
@@ -173,6 +178,7 @@ impl World {
             observers: Observers::new(),
             trigger_swap_fns: Vec::new(),
             event_update_fns: Vec::new(),
+            snapshot_resources: BTreeMap::new(),
         }
     }
 

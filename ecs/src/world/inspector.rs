@@ -547,6 +547,111 @@ impl World {
         })
     }
 
+    /// Serializes the **entire world** — every alive entity and every opted-in
+    /// snapshot resource — into a [`SerializedWorld`](crate::serialize::SerializedWorld).
+    ///
+    /// This is the single snapshot mechanism shared by Play mode, scene
+    /// save/load, and warm-restart reload (see issue #48). Unlike
+    /// [`serialize_prefab`](World::serialize_prefab), it enumerates all alive
+    /// entities via [`iter_entities`](World::iter_entities) rather than walking
+    /// a subtree, and keeps `Parent` links intact (every referenced entity is
+    /// part of the snapshot). Entity references are captured as-is and remapped
+    /// on restore; a reference to an entity that dies before the snapshot is
+    /// taken stays dangling and resolves to
+    /// [`Entity::DANGLING`](crate::Entity::DANGLING) on restore.
+    ///
+    /// Only resources registered via
+    /// [`register_snapshot_resource`](World::register_snapshot_resource) are
+    /// captured; host/GPU managers and ephemeral resources are excluded by not
+    /// opting in.
+    pub fn serialize_world(
+        &self,
+    ) -> Result<crate::serialize::SerializedWorld, crate::serialize::SerializeError> {
+        // 1. Every alive entity (no BFS root, no scope restriction).
+        let entities: Vec<Entity> = self.iter_entities().collect();
+
+        // 2. Collect serialize fns and a shared context (Arc dedup spans all
+        // entities, exactly as in the prefab path).
+        let serialize_fns: Vec<SerializeComponentFn> =
+            self.iter_meta().map(|m| m.serialize_fn).collect();
+        let mut ctx = crate::serialize::SerializeContext::new(self);
+
+        // 3. Serialize every component of every entity. Nothing is dropped:
+        // a whole-world snapshot keeps `Parent` because the target is captured
+        // too and remaps on restore.
+        let serialized_entities = entities
+            .iter()
+            .map(|&entity| {
+                let components: Vec<_> = serialize_fns
+                    .iter()
+                    .filter_map(|f| f(self, entity, &mut ctx).transpose())
+                    .collect::<Result<_, _>>()?;
+                Ok(crate::serialize::SerializedEntity {
+                    entity_index: entity.index(),
+                    entity_spawn_tick: entity.spawn_tick(),
+                    entity_flags: self.get_entity_flags(entity),
+                    components,
+                })
+            })
+            .collect::<Result<_, crate::serialize::SerializeError>>()?;
+
+        // 4. Capture opted-in snapshot resources.
+        let resources = self.capture_snapshot_resources()?;
+
+        Ok(crate::serialize::SerializedWorld {
+            entities: serialized_entities,
+            resources,
+        })
+    }
+
+    /// Restores a [`SerializedWorld`](crate::serialize::SerializedWorld) into
+    /// this world, spawning fresh entities and restoring opted-in resources.
+    ///
+    /// The target world must already have the relevant component types
+    /// registered (via `register_std_components`, `register_rendering_components`
+    /// and any plugin) and the relevant resources registered via
+    /// [`register_snapshot_resource`](World::register_snapshot_resource) — the
+    /// snapshot carries data, not registration.
+    ///
+    /// Entity references remap to the freshly spawned entities; a reference
+    /// whose target is not in the snapshot (it died before capture) resolves to
+    /// [`Entity::DANGLING`](crate::Entity::DANGLING). Unknown component and
+    /// resource types are skipped silently, so a snapshot can be restored into
+    /// a world missing a plugin that was present at capture.
+    ///
+    /// Returns the newly spawned entities in snapshot order. On error, every
+    /// entity spawned by this call is despawned — a failed restore leaves the
+    /// pre-existing world contents untouched (resources already restored before
+    /// the failure are not rolled back).
+    pub fn deserialize_world_into(
+        &mut self,
+        snapshot: &crate::serialize::SerializedWorld,
+    ) -> Result<Vec<Entity>, crate::serialize::DeserializeError> {
+        // 1. Spawn one fresh entity per serialized entity.
+        let new_entities: Vec<Entity> = snapshot.entities.iter().map(|_| self.spawn()).collect();
+
+        // 2. Restore components (Dangling policy: refs to entities absent from
+        // the snapshot are dead targets → Entity::DANGLING), then resources.
+        let result = self
+            .deserialize_prefab_body(
+                &snapshot.entities,
+                &new_entities,
+                crate::serialize::UnmappedEntityPolicy::Dangling,
+            )
+            .and_then(|()| self.restore_snapshot_resources(&snapshot.resources));
+
+        match result {
+            Ok(()) => Ok(new_entities),
+            Err(e) => {
+                // Roll back the entities this call spawned.
+                for &entity in &new_entities {
+                    self.despawn(entity);
+                }
+                Err(e)
+            }
+        }
+    }
+
     /// Deserializes a [`SerializedPrefab`](crate::serialize::SerializedPrefab) into new entities
     /// as a **same-world snapshot** restore (undo/redo).
     ///
@@ -595,7 +700,7 @@ impl World {
         // 1. Spawn entities
         let new_entities: Vec<Entity> = prefab.entities.iter().map(|_| self.spawn()).collect();
 
-        match self.deserialize_prefab_body(prefab, &new_entities, unmapped_policy) {
+        match self.deserialize_prefab_body(&prefab.entities, &new_entities, unmapped_policy) {
             Ok(()) => Ok(new_entities),
             Err(e) => {
                 // Roll back: a failed restore must not leave a partially
@@ -610,13 +715,12 @@ impl World {
 
     fn deserialize_prefab_body(
         &mut self,
-        prefab: &crate::serialize::SerializedPrefab,
+        entities: &[crate::serialize::SerializedEntity],
         new_entities: &[Entity],
         unmapped_policy: crate::serialize::UnmappedEntityPolicy,
     ) -> Result<(), crate::serialize::DeserializeError> {
         // 2. Build entity remap: (old_index, old_spawn_tick) -> new Entity
-        let entity_map: HashMap<(u32, u64), Entity> = prefab
-            .entities
+        let entity_map: HashMap<(u32, u64), Entity> = entities
             .iter()
             .zip(new_entities.iter())
             .map(|(se, &new_e)| ((se.entity_index, se.entity_spawn_tick), new_e))
@@ -629,7 +733,7 @@ impl World {
             .collect();
 
         // 4. Restore entity flags
-        for (i, se) in prefab.entities.iter().enumerate() {
+        for (i, se) in entities.iter().enumerate() {
             if se.entity_flags != 0 {
                 self.set_entity_flags(new_entities[i], se.entity_flags);
             }
@@ -644,14 +748,14 @@ impl World {
         // unknown/skipped) to record each shared Arc's raw inner. This lets an
         // `ArcRef` on a registered component resolve even when the original
         // `ArcValue` lived on a component that gets skipped below.
-        for se in &prefab.entities {
+        for se in entities {
             for comp in &se.components {
                 ctx.prescan_arc_values(&comp.data);
             }
         }
 
         // 6. For each entity, deserialize components
-        for (i, se) in prefab.entities.iter().enumerate() {
+        for (i, se) in entities.iter().enumerate() {
             let entity = new_entities[i];
             for comp in &se.components {
                 if let Some(&deser_fn) = deserialize_fns.get(comp.type_name.as_str()) {

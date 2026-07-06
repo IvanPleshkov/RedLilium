@@ -58,6 +58,7 @@ wasm-bindgen-futures = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+serde = { workspace = true }
 
 [[bench]]
 name = "ecs_benchmarks"

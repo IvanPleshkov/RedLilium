@@ -707,6 +707,159 @@ mod prefab_refs {
 }
 
 // ---------------------------------------------------------------------------
+// Whole-world snapshot: serialize_world / deserialize_world_into (issue #48)
+// ---------------------------------------------------------------------------
+
+mod world_snapshot {
+    use redlilium_ecs::{
+        Component, Entity, Name, SnapshotResource, World, register_std_components, set_parent,
+    };
+    use serde::{Deserialize, Serialize};
+
+    /// A component holding a bare entity reference.
+    #[derive(Clone, Component)]
+    struct Link {
+        target: Entity,
+    }
+
+    /// A game resource that opts into snapshots.
+    #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+    struct GameScore {
+        value: u32,
+    }
+    impl SnapshotResource for GameScore {
+        const NAME: &'static str = "GameScore";
+    }
+
+    /// A game resource that *could* opt in but is never registered for it.
+    #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+    struct Unregistered {
+        value: u32,
+    }
+    impl SnapshotResource for Unregistered {
+        const NAME: &'static str = "Unregistered";
+    }
+
+    /// A host-style resource that never implements `SnapshotResource`.
+    struct HostManager {
+        _handle: u64,
+    }
+
+    fn registered_world() -> World {
+        let mut world = World::new();
+        register_std_components(&mut world);
+        world.register_inspector::<Link>();
+        world.register_snapshot_resource::<GameScore>();
+        world
+    }
+
+    /// A multi-entity world with hierarchy and an intra-world entity ref
+    /// round-trips: all entities present, refs remapped, a ref to a despawned
+    /// target becomes `Entity::DANGLING`.
+    #[test]
+    fn round_trips_entities_hierarchy_and_refs() {
+        let mut world = registered_world();
+
+        let root = world.spawn();
+        world.insert(root, Name::new("root")).unwrap();
+        let child = world.spawn();
+        world.insert(child, Name::new("child")).unwrap();
+        set_parent(&mut world, child, root);
+
+        // An intra-world reference that will remap, and a reference to an
+        // entity we despawn before the snapshot (must go dangling).
+        let victim = world.spawn();
+        world.insert(root, Link { target: child }).unwrap();
+        let dangling_holder = world.spawn();
+        world
+            .insert(dangling_holder, Link { target: victim })
+            .unwrap();
+        world.despawn(victim);
+
+        let alive_before = world.entity_count();
+        let snapshot = world.serialize_world().unwrap();
+        assert_eq!(snapshot.entities.len() as u32, alive_before);
+
+        // Restore into a fresh, registered world.
+        let mut target = registered_world();
+        let spawned = target.deserialize_world_into(&snapshot).unwrap();
+        assert_eq!(spawned.len() as u32, alive_before);
+        assert_eq!(target.entity_count(), alive_before);
+
+        // Locate the restored entities by Name / by having a Link.
+        let find_named = |w: &World, name: &str| -> Option<Entity> {
+            spawned
+                .iter()
+                .copied()
+                .find(|&e| w.get::<Name>(e).map(|n| n.0.clone()).as_deref() == Some(name))
+        };
+        let new_root = find_named(&target, "root").expect("root restored");
+        let new_child = find_named(&target, "child").expect("child restored");
+
+        // The hierarchy link remapped to the freshly spawned child.
+        assert_eq!(target.get::<Link>(new_root).unwrap().target, new_child);
+        // Parent/Children remapped too.
+        assert_eq!(
+            target.get::<redlilium_ecs::Parent>(new_child).unwrap().0,
+            new_root
+        );
+
+        // The reference to the despawned target is dangling.
+        let restored_holder = spawned
+            .iter()
+            .copied()
+            .find(|&e| target.get::<Link>(e).map(|l| l.target) == Some(Entity::DANGLING))
+            .expect("dangling holder restored");
+        assert!(!target.is_alive(target.get::<Link>(restored_holder).unwrap().target));
+    }
+
+    /// A registered snapshot resource round-trips; a non-registered resource is
+    /// absent after restore; a host-style resource is excluded entirely.
+    #[test]
+    fn resources_only_cross_when_registered() {
+        let mut world = registered_world();
+        world.insert_resource(GameScore { value: 42 });
+        world.insert_resource(Unregistered { value: 7 });
+        world.insert_resource(HostManager { _handle: 0xDEAD });
+
+        let snapshot = world.serialize_world().unwrap();
+        // Only the registered snapshot resource is captured.
+        assert_eq!(snapshot.resources.len(), 1);
+        assert_eq!(snapshot.resources[0].type_name, "GameScore");
+
+        let mut target = registered_world();
+        target.deserialize_world_into(&snapshot).unwrap();
+
+        // Registered resource crossed with its value.
+        assert_eq!(*target.resource::<GameScore>(), GameScore { value: 42 });
+        // The other two were never captured, so they are absent in the fresh
+        // world (which never inserted them).
+        assert!(!target.has_resource::<Unregistered>());
+        assert!(!target.has_resource::<HostManager>());
+    }
+
+    /// Registering the same snapshot resource twice is a no-op (still one
+    /// captured entry, not two).
+    #[test]
+    fn register_snapshot_resource_is_idempotent() {
+        let mut world = registered_world();
+        world.register_snapshot_resource::<GameScore>();
+        world.insert_resource(GameScore { value: 1 });
+
+        let snapshot = world.serialize_world().unwrap();
+        assert_eq!(snapshot.resources.len(), 1);
+    }
+
+    /// A registered-but-absent snapshot resource is simply skipped at capture.
+    #[test]
+    fn absent_registered_resource_is_skipped() {
+        let world = registered_world(); // GameScore registered but never inserted
+        let snapshot = world.serialize_world().unwrap();
+        assert!(snapshot.resources.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Per-system change detection (issue #21)
 // ---------------------------------------------------------------------------
 

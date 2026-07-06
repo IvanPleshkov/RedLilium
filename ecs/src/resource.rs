@@ -33,6 +33,22 @@ impl<T: Send + Sync + 'static> Resource for T {
     }
 }
 
+/// Marker for a resource that participates in whole-world snapshots.
+///
+/// Snapshots (Play mode, scene save/load, warm-restart reload) move data
+/// across the [`serialize_world`](crate::World::serialize_world) /
+/// [`deserialize_world_into`](crate::World::deserialize_world_into) boundary.
+/// Only resources that opt in — by implementing this trait and calling
+/// [`register_snapshot_resource`](crate::World::register_snapshot_resource) —
+/// are captured and restored. Host/GPU managers (the editor's `EngineContext`)
+/// and ephemeral resources (`RenderSchedule`, `Time`, `CommandBuffer`,
+/// `Events`, editor UI) deliberately do **not** implement it: they are
+/// re-injected or rebuilt by world setup rather than carried in the snapshot.
+pub trait SnapshotResource: Resource + serde::Serialize + serde::de::DeserializeOwned {
+    /// Stable type name used to match a captured resource to its restore hook.
+    const NAME: &'static str;
+}
+
 /// A single type-erased resource entry.
 struct ResourceEntry {
     /// The resource value, stored as `Arc<RwLock<dyn Resource>>`.
