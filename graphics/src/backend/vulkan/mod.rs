@@ -316,9 +316,15 @@ impl VulkanBackend {
             }
         };
 
-        // Create pipeline manager for shader compilation and graphics pipelines
-        let pipeline_manager =
-            pipeline::PipelineManager::new(device.clone(), depth24_stencil8_format)?;
+        // Create pipeline manager for shader compilation and graphics pipelines.
+        // Device properties identify the on-disk pipeline cache's owner
+        // (vendor/device/cacheUUID header validation).
+        let device_properties = unsafe { instance.get_physical_device_properties(physical_device) };
+        let pipeline_manager = pipeline::PipelineManager::new(
+            device.clone(),
+            depth24_stencil8_format,
+            &device_properties,
+        )?;
 
         log::info!(
             "Vulkan backend initialized (validation: {})",
@@ -532,6 +538,12 @@ impl VulkanBackend {
                 tracker.remove(BufferId::from_raw(handle));
             }
         }
+
+        // Flush freshly compiled pipelines to the on-disk pipeline cache.
+        // Done here rather than at teardown because the backend is never
+        // actually dropped (GraphicsInstance <-> GraphicsDevice Arc cycle);
+        // a no-op on frames without pipeline compilation.
+        self.pipeline_manager.persist_cache_if_dirty();
     }
 
     /// Get the layout tracker for direct access (for testing).

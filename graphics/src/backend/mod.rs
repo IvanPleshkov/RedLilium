@@ -201,6 +201,10 @@ pub enum GpuPipeline {
         device: ash::Device,
         pipeline: vk::Pipeline,
         pipeline_layout: vk::PipelineLayout,
+        /// Layouts for per-draw descriptor-set allocation. Borrowed copies of
+        /// handles owned by the backend's `PipelineManager` dedup cache —
+        /// shared between materials with identical binding layouts and valid
+        /// for the backend's lifetime. `Drop` must not destroy them.
         descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
     },
 }
@@ -826,15 +830,16 @@ impl Drop for GpuPipeline {
             device,
             pipeline,
             pipeline_layout,
-            descriptor_set_layouts,
+            descriptor_set_layouts: _,
         } = self
         {
+            // descriptor_set_layouts are NOT destroyed here: they are shared
+            // handles owned by the PipelineManager's dedup cache (other
+            // materials may still reference them). The manager destroys them
+            // in its destroy().
             unsafe {
                 device.destroy_pipeline(*pipeline, None);
                 device.destroy_pipeline_layout(*pipeline_layout, None);
-                for layout in descriptor_set_layouts {
-                    device.destroy_descriptor_set_layout(*layout, None);
-                }
             }
         }
     }

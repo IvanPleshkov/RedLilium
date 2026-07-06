@@ -1,11 +1,15 @@
 //! Vulkan pipeline management for shader compilation and graphics pipeline creation.
 
+use std::collections::HashMap;
 use std::ffi::CString;
+use std::path::{Path, PathBuf};
 
 use ash::vk;
 
 use crate::error::GraphicsError;
-use crate::materials::{BindingLayout, BindingType, ShaderSourceLanguage, ShaderStage};
+use crate::materials::{
+    BindingLayout, BindingType, ShaderSourceLanguage, ShaderStage, ShaderStageFlags,
+};
 use crate::mesh::VertexAttributeFormat;
 use crate::types::TextureFormat;
 use redlilium_core::mesh::{PrimitiveTopology, VertexLayout};
@@ -15,6 +19,19 @@ use super::conversion::{convert_blend_state, convert_texture_format};
 /// Number of descriptor sets each individual descriptor pool can hand out
 /// before a new pool is appended to the slot's chain.
 const SETS_PER_POOL: u32 = 1000;
+
+/// Content key for descriptor-set-layout dedup: one entry per binding, in
+/// declaration order. Labels are deliberately excluded — layouts that differ
+/// only by label are Vulkan-identical.
+type DsLayoutKey = Vec<(u32, BindingType, ShaderStageFlags)>;
+
+fn ds_layout_key(layout: &BindingLayout) -> DsLayoutKey {
+    layout
+        .entries
+        .iter()
+        .map(|e| (e.binding, e.binding_type, e.visibility))
+        .collect()
+}
 
 /// Manages Vulkan pipeline creation and descriptor pool resources.
 pub struct PipelineManager {
@@ -32,6 +49,28 @@ pub struct PipelineManager {
     /// [`SETS_PER_POOL`] sets per frame. The whole chain is reset together once
     /// the slot's fence signals, so resets never race in-flight descriptors.
     descriptor_pools: [parking_lot::Mutex<Vec<vk::DescriptorPool>>; super::MAX_FRAMES_IN_FLIGHT],
+    /// Driver pipeline cache shared by every graphics/compute pipeline this
+    /// manager creates. Seeded from [`Self::pipeline_cache_path`] on startup
+    /// and written back in [`Self::destroy`], so shader recompilation is paid
+    /// once per (driver, shader set), not once per run.
+    pipeline_cache: vk::PipelineCache,
+    /// On-disk location of the serialized pipeline cache; `None` disables
+    /// persistence (in-process caching still works).
+    pipeline_cache_path: Option<PathBuf>,
+    /// Set when a pipeline was compiled since the last disk write; cleared by
+    /// [`Self::persist_cache_if_dirty`]. Persistence piggybacks on
+    /// `advance_frame` because in practice nothing ever tears the backend
+    /// down: `GraphicsInstance` and `GraphicsDevice` hold strong `Arc`s to
+    /// each other, so `destroy()` is unreachable outside that cycle being
+    /// fixed (tracked in a separate issue).
+    pipeline_cache_dirty: std::sync::atomic::AtomicBool,
+    /// Content-keyed dedup of descriptor set layouts: materials with identical
+    /// binding layouts share one `VkDescriptorSetLayout`.
+    ///
+    /// OWNERSHIP: the handles in this map are owned by the manager and
+    /// destroyed in [`Self::destroy`]. `GpuPipeline::Vulkan` holds copies for
+    /// encoding but must NOT destroy them (see its `Drop` impl).
+    ds_layout_cache: parking_lot::Mutex<HashMap<DsLayoutKey, vk::DescriptorSetLayout>>,
     /// Whether resources have been explicitly destroyed.
     destroyed: bool,
 }
@@ -56,9 +95,15 @@ impl PipelineManager {
     }
 
     /// Create a new pipeline manager.
+    ///
+    /// `device_properties` identifies the (device, driver) pair the on-disk
+    /// pipeline cache was produced by; stale or foreign cache files are
+    /// silently ignored (the spec requires `pInitialData` to come from a
+    /// compatible cache).
     pub fn new(
         device: ash::Device,
         depth24_stencil8_format: vk::Format,
+        device_properties: &vk::PhysicalDeviceProperties,
     ) -> Result<Self, GraphicsError> {
         let pool_sizes = vec![
             vk::DescriptorPoolSize {
@@ -107,13 +152,100 @@ impl PipelineManager {
             .try_into()
             .unwrap_or_else(|_| unreachable!("created exactly MAX_FRAMES_IN_FLIGHT pools"));
 
+        let pipeline_cache_path = pipeline_cache_disk_path();
+        let pipeline_cache =
+            Self::create_pipeline_cache(&device, pipeline_cache_path.as_deref(), device_properties);
+
         Ok(Self {
             device,
             depth24_stencil8_format,
             pool_sizes,
             descriptor_pools,
+            pipeline_cache,
+            pipeline_cache_path,
+            pipeline_cache_dirty: std::sync::atomic::AtomicBool::new(false),
+            ds_layout_cache: parking_lot::Mutex::new(HashMap::new()),
             destroyed: false,
         })
+    }
+
+    /// Write the pipeline cache to disk if any pipeline was compiled since
+    /// the last write. Called once per frame (from `advance_frame`) and from
+    /// [`Self::destroy`]; a no-op when nothing changed, so steady-state
+    /// frames pay one relaxed atomic load.
+    pub fn persist_cache_if_dirty(&self) {
+        use std::sync::atomic::Ordering;
+        if !self.pipeline_cache_dirty.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        let Some(path) = &self.pipeline_cache_path else {
+            return;
+        };
+        if self.pipeline_cache == vk::PipelineCache::null() {
+            return;
+        }
+        match unsafe { self.device.get_pipeline_cache_data(self.pipeline_cache) } {
+            Ok(data) if !data.is_empty() => save_pipeline_cache(path, &data),
+            Ok(_) => {}
+            Err(e) => log::warn!("Failed to read Vulkan pipeline cache data: {e:?}"),
+        }
+    }
+
+    /// Mark the cache as needing a disk write (a pipeline was just compiled).
+    fn mark_cache_dirty(&self) {
+        if self.pipeline_cache != vk::PipelineCache::null() && self.pipeline_cache_path.is_some() {
+            self.pipeline_cache_dirty
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Create the driver pipeline cache, seeded from disk when a compatible
+    /// serialized cache exists. Never fails the backend: on any problem the
+    /// cache is created empty (or left null, which Vulkan treats as "no
+    /// cache") and pipelines are simply compiled from scratch.
+    fn create_pipeline_cache(
+        device: &ash::Device,
+        path: Option<&Path>,
+        device_properties: &vk::PhysicalDeviceProperties,
+    ) -> vk::PipelineCache {
+        let initial_data = path.and_then(|p| match std::fs::read(p) {
+            Ok(data) if pipeline_cache_data_compatible(&data, device_properties) => {
+                log::info!(
+                    "Loaded Vulkan pipeline cache from {} ({} bytes)",
+                    p.display(),
+                    data.len()
+                );
+                Some(data)
+            }
+            Ok(_) => {
+                log::info!(
+                    "Ignoring incompatible Vulkan pipeline cache at {} \
+                     (different device/driver or corrupt header)",
+                    p.display()
+                );
+                None
+            }
+            Err(_) => None, // no cache yet — normal on first run
+        });
+
+        let create = |data: &[u8]| {
+            let info = vk::PipelineCacheCreateInfo::default().initial_data(data);
+            unsafe { device.create_pipeline_cache(&info, None) }
+        };
+
+        match create(initial_data.as_deref().unwrap_or(&[])) {
+            Ok(cache) => cache,
+            Err(e) if initial_data.is_some() => {
+                // Defensive: a header-compatible but internally corrupt blob.
+                // Retry empty rather than losing the cache for the whole run.
+                log::warn!("Vulkan pipeline cache rejected initial data ({e:?}); starting empty");
+                create(&[]).unwrap_or(vk::PipelineCache::null())
+            }
+            Err(e) => {
+                log::warn!("Failed to create Vulkan pipeline cache ({e:?}); caching disabled");
+                vk::PipelineCache::null()
+            }
+        }
     }
 
     /// Device-resolved attachment format (see field docs).
@@ -282,11 +414,22 @@ impl PipelineManager {
         Ok(spv)
     }
 
-    /// Create a descriptor set layout from a binding layout.
+    /// Get or create a descriptor set layout for a binding layout.
+    ///
+    /// Layouts are deduplicated by content: materials with identical binding
+    /// layouts (a very common case — e.g. every material sharing the standard
+    /// per-frame set) receive the same `VkDescriptorSetLayout` handle. The
+    /// returned handle is owned by this manager and stays valid until
+    /// [`Self::destroy`]; callers must not destroy it.
     pub fn create_descriptor_set_layout(
         &self,
         layout: &BindingLayout,
     ) -> Result<vk::DescriptorSetLayout, GraphicsError> {
+        let key = ds_layout_key(layout);
+        if let Some(&cached) = self.ds_layout_cache.lock().get(&key) {
+            return Ok(cached);
+        }
+
         let bindings: Vec<vk::DescriptorSetLayoutBinding> = layout
             .entries
             .iter()
@@ -321,7 +464,7 @@ impl PipelineManager {
 
         let create_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
 
-        let layout = unsafe { self.device.create_descriptor_set_layout(&create_info, None) }
+        let created = unsafe { self.device.create_descriptor_set_layout(&create_info, None) }
             .map_err(|e| {
                 GraphicsError::ResourceCreationFailed(format!(
                     "Failed to create descriptor set layout: {:?}",
@@ -329,7 +472,19 @@ impl PipelineManager {
                 ))
             })?;
 
-        Ok(layout)
+        // Two threads may have raced to create the same layout; keep the
+        // winner in the map and destroy the loser so exactly one handle per
+        // key is ever handed out.
+        match self.ds_layout_cache.lock().entry(key) {
+            std::collections::hash_map::Entry::Occupied(e) => {
+                unsafe { self.device.destroy_descriptor_set_layout(created, None) };
+                Ok(*e.get())
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(created);
+                Ok(created)
+            }
+        }
     }
 
     /// Create a pipeline layout from descriptor set layouts.
@@ -589,7 +744,7 @@ impl PipelineManager {
 
         let pipelines = unsafe {
             self.device
-                .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+                .create_graphics_pipelines(self.pipeline_cache, &[pipeline_info], None)
         }
         .map_err(|(_, e)| {
             GraphicsError::ResourceCreationFailed(format!(
@@ -598,6 +753,7 @@ impl PipelineManager {
             ))
         })?;
 
+        self.mark_cache_dirty();
         Ok(pipelines[0])
     }
 
@@ -626,7 +782,7 @@ impl PipelineManager {
 
         let pipelines = unsafe {
             self.device
-                .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_info], None)
+                .create_compute_pipelines(self.pipeline_cache, &[pipeline_info], None)
         }
         .map_err(|(_, e)| {
             GraphicsError::ResourceCreationFailed(format!(
@@ -635,6 +791,7 @@ impl PipelineManager {
             ))
         })?;
 
+        self.mark_cache_dirty();
         Ok(pipelines[0])
     }
 
@@ -676,10 +833,28 @@ impl PipelineManager {
         }
 
         // Pipelines are owned by Materials and destroyed when their last Arc is dropped.
-        // We only need to destroy the descriptor pools here.
+
+        // Persist the accumulated pipeline cache, then destroy it.
+        // SAFETY (all destroys below): caller guarantees GPU is idle and the
+        // device is valid.
+        if self.pipeline_cache != vk::PipelineCache::null() {
+            self.persist_cache_if_dirty();
+            unsafe {
+                self.device
+                    .destroy_pipeline_cache(self.pipeline_cache, None)
+            };
+            self.pipeline_cache = vk::PipelineCache::null();
+        }
+
+        // Destroy the deduplicated descriptor set layouts (owned here, not by
+        // the GpuPipelines that reference them).
+        for (_, layout) in self.ds_layout_cache.lock().drain() {
+            unsafe {
+                self.device.destroy_descriptor_set_layout(layout, None);
+            }
+        }
 
         // Destroy every pool in every per-slot chain.
-        // SAFETY: Caller guarantees GPU is idle and device is valid
         for slot in &self.descriptor_pools {
             for &pool in slot.lock().iter() {
                 unsafe {
@@ -705,6 +880,73 @@ impl Drop for PipelineManager {
             "PipelineManager::drop() called without explicit destroy(). \
              Resources may have leaked. Always call destroy() before dropping the device."
         );
+    }
+}
+
+/// Where the serialized pipeline cache lives: `.redlilium/` in the working
+/// directory — the same per-project scratch dir the editor uses (it is
+/// gitignored). `None` disables persistence.
+fn pipeline_cache_disk_path() -> Option<PathBuf> {
+    Some(PathBuf::from(".redlilium").join("vk_pipeline_cache.bin"))
+}
+
+/// Byte offsets of `VkPipelineCacheHeaderVersionOne` fields, per the Vulkan
+/// spec: u32 headerSize, u32 headerVersion, u32 vendorID, u32 deviceID,
+/// u8[16] pipelineCacheUUID — written in host byte order.
+const CACHE_HEADER_MIN_SIZE: usize = 32;
+
+/// Whether serialized pipeline-cache data belongs to this (device, driver)
+/// pair. The spec requires `pInitialData` to have been produced by a
+/// compatible cache, so a foreign or corrupt blob must be dropped here rather
+/// than handed to the driver.
+fn pipeline_cache_data_compatible(data: &[u8], props: &vk::PhysicalDeviceProperties) -> bool {
+    if data.len() < CACHE_HEADER_MIN_SIZE {
+        return false;
+    }
+    let read_u32 = |offset: usize| {
+        u32::from_ne_bytes(
+            data[offset..offset + 4]
+                .try_into()
+                .expect("length checked above"),
+        )
+    };
+    let header_size = read_u32(0) as usize;
+    let header_version = read_u32(4);
+    let vendor_id = read_u32(8);
+    let device_id = read_u32(12);
+    let uuid = &data[16..32];
+
+    header_size >= CACHE_HEADER_MIN_SIZE
+        && header_size <= data.len()
+        && header_version == vk::PipelineCacheHeaderVersion::ONE.as_raw() as u32
+        && vendor_id == props.vendor_id
+        && device_id == props.device_id
+        && uuid == props.pipeline_cache_uuid
+}
+
+/// Atomically persist pipeline-cache data: write to a sibling temp file, then
+/// rename over the target so concurrent processes never observe a partial
+/// file (last writer wins). Failures are logged, never fatal — the cache is
+/// an optimization.
+fn save_pipeline_cache(path: &Path, data: &[u8]) {
+    let write = || -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+        std::fs::write(&tmp, data)?;
+        std::fs::rename(&tmp, path)
+    };
+    match write() {
+        Ok(()) => log::info!(
+            "Saved Vulkan pipeline cache to {} ({} bytes)",
+            path.display(),
+            data.len()
+        ),
+        Err(e) => log::warn!(
+            "Failed to save Vulkan pipeline cache to {}: {e}",
+            path.display()
+        ),
     }
 }
 
@@ -879,6 +1121,73 @@ mod tests {
         let mut spv = module(&[entry_point(0, "main")]);
         spv[0] = 0xDEAD_BEEF;
         assert_eq!(spirv_entry_point_name(&spv, ShaderStage::Vertex), None);
+    }
+
+    fn cache_props() -> vk::PhysicalDeviceProperties {
+        vk::PhysicalDeviceProperties {
+            vendor_id: 0x106B,
+            device_id: 0x42,
+            pipeline_cache_uuid: [7; 16],
+            ..Default::default()
+        }
+    }
+
+    fn cache_header(props: &vk::PhysicalDeviceProperties) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(&32u32.to_ne_bytes()); // headerSize
+        data.extend_from_slice(&1u32.to_ne_bytes()); // headerVersion ONE
+        data.extend_from_slice(&props.vendor_id.to_ne_bytes());
+        data.extend_from_slice(&props.device_id.to_ne_bytes());
+        data.extend_from_slice(&props.pipeline_cache_uuid);
+        data
+    }
+
+    #[test]
+    fn pipeline_cache_header_validation() {
+        let props = cache_props();
+        let valid = cache_header(&props);
+        assert!(pipeline_cache_data_compatible(&valid, &props));
+
+        // Too short (empty file, truncated header).
+        assert!(!pipeline_cache_data_compatible(&[], &props));
+        assert!(!pipeline_cache_data_compatible(&valid[..31], &props));
+
+        // Different device.
+        let mut other = props;
+        other.device_id = 0x43;
+        assert!(!pipeline_cache_data_compatible(&valid, &other));
+
+        // Driver update: same device, new cache UUID.
+        let mut updated = props;
+        updated.pipeline_cache_uuid = [8; 16];
+        assert!(!pipeline_cache_data_compatible(&valid, &updated));
+
+        // Corrupt header size (larger than the blob).
+        let mut corrupt = valid.clone();
+        corrupt[0..4].copy_from_slice(&1000u32.to_ne_bytes());
+        assert!(!pipeline_cache_data_compatible(&corrupt, &props));
+
+        // Wrong header version.
+        let mut wrong_version = valid;
+        wrong_version[4..8].copy_from_slice(&2u32.to_ne_bytes());
+        assert!(!pipeline_cache_data_compatible(&wrong_version, &props));
+    }
+
+    #[test]
+    fn ds_layout_key_ignores_labels() {
+        let a = BindingLayout::new()
+            .with_uniform_buffer(0)
+            .with_texture(1)
+            .with_label("material A bindings");
+        let b = BindingLayout::new()
+            .with_uniform_buffer(0)
+            .with_texture(1)
+            .with_label("material B bindings");
+        assert_eq!(ds_layout_key(&a), ds_layout_key(&b));
+
+        // Content differences must produce different keys.
+        let c = BindingLayout::new().with_uniform_buffer(0).with_sampler(1);
+        assert_ne!(ds_layout_key(&a), ds_layout_key(&c));
     }
 
     #[test]
