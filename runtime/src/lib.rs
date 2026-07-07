@@ -46,7 +46,7 @@ mod handler;
 
 pub use abi::{
     ABI_FINGERPRINT, ABI_FINGERPRINT_SYMBOL, AbiFingerprintFn, GAME_MODULE_SYMBOL, GameModule,
-    GameModuleError, GameModuleFn, abi_fingerprint,
+    GameModuleError, GameModuleFn, LOGGER_INIT_SYMBOL, LoggerInitFn, abi_fingerprint,
 };
 pub use app::App;
 pub use engine_context::EngineContext;

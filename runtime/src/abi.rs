@@ -97,12 +97,20 @@ pub const GAME_MODULE_SYMBOL: &[u8] = b"redlilium_game_module";
 /// The exported symbol name for the ABI fingerprint.
 pub const ABI_FINGERPRINT_SYMBOL: &[u8] = b"redlilium_abi_fingerprint";
 
+/// The exported symbol name for the logger initializer.
+pub const LOGGER_INIT_SYMBOL: &[u8] = b"redlilium_logger_init";
+
 /// Signature of the game entry symbol. Rust-ABI: only call after the
 /// fingerprint gate passes.
 pub type GameModuleFn = unsafe extern "Rust" fn() -> Box<dyn Plugin>;
 
 /// Signature of the fingerprint symbol. C-ABI: always safe to call.
 pub type AbiFingerprintFn = unsafe extern "C" fn() -> *const c_char;
+
+/// Signature of the logger init symbol. Rust-ABI: takes the host's logger
+/// instance and max level, installs them in the game module's logger static.
+/// Called once after `redlilium_game_module` succeeds.
+pub type LoggerInitFn = unsafe extern "Rust" fn(&'static dyn log::Log, log::LevelFilter);
 
 /// This build's fingerprint as a Rust string, for comparison and display.
 ///
@@ -235,11 +243,18 @@ impl GameModule {
     ///
     /// - **`parking_lot` parking table.** A blocking lock/unlock on the *same*
     ///   lock instance from the two images uses two different global parking
-    ///   tables → lost wakeups / deadlock under contention.
+    ///   tables → lost wakeups / deadlock under contention. **Mitigated by #45
+    ///   Track 1:** the ECS uses [`crate::sync`] instead, which forwards to
+    ///   `std::sync` (cross-image safe by construction).
     /// - **Split panic bookkeeping.** A panic raised in the cdylib image and
     ///   caught here (the `catch_unwind` below, or any unwind through host
     ///   frames) touches two libstd panic counters → `thread::panicking()` can
-    ///   misreport afterward.
+    ///   misreport afterward. **Verification (#57):** System panics are wrapped
+    ///   in `catch_unwind` by the multi-threaded runner (see
+    ///   `ecs/src/runner/multi/mod.rs`), converting a game system panic into
+    ///   `SystemError::Panicked` without terminating the host. The cross-image
+    ///   panic-counter duplication does not cause host termination or abort
+    ///   under normal play-mode operation.
     pub unsafe fn load(path: impl AsRef<std::ffi::OsStr>) -> Result<Self, GameModuleError> {
         unsafe {
             let library = libloading::Library::new(path).map_err(GameModuleError::Load)?;
@@ -278,6 +293,19 @@ impl GameModule {
                     drop(payload);
                     GameModuleError::EntryPanicked
                 })?;
+
+            // Hand the host's logger to the game module. The logger_init symbol
+            // is always available (macro-generated), but we call it only if the
+            // logger was initialized; otherwise game logging silently drops (as
+            // before). `log::logger()` resolves to a `dyn Log` that stays valid
+            // for the lifetime of the program.
+            let current_level = log::max_level();
+            if current_level != log::LevelFilter::Off {
+                let logger_init: libloading::Symbol<'_, LoggerInitFn> = library
+                    .get(LOGGER_INIT_SYMBOL)
+                    .map_err(GameModuleError::Load)?;
+                logger_init(log::logger(), current_level);
+            }
 
             Ok(Self {
                 plugin,
@@ -339,6 +367,18 @@ macro_rules! redlilium_game_module {
                 buf
             };
             FINGERPRINT.as_ptr() as *const ::std::ffi::c_char
+        }
+
+        /// Logger initializer — installs the host's logger in this cdylib's
+        /// global logger static. Rust ABI: the host calls this once after
+        /// `redlilium_game_module` succeeds (fingerprint gate passed).
+        #[unsafe(no_mangle)]
+        pub extern "Rust" fn redlilium_logger_init(
+            logger: &'static dyn ::log::Log,
+            level: ::log::LevelFilter,
+        ) {
+            let _ = ::log::set_logger(logger);
+            ::log::set_max_level(level);
         }
     };
 }
