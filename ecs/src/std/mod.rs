@@ -29,7 +29,8 @@ pub use hierarchy::{
     HierarchyCommands, despawn_recursive, disable, enable, remove_parent, set_parent,
 };
 pub use play_mode::{
-    ManagePlayModeTransitions, PlayControl, PlayModeAwareRegistry, PlayModeTransition, PlayState,
+    ManagePlayModeTransitions, PlayControl, PlayModeAwareRegistry, PlayModeTransition,
+    PlayStartTick, PlayState,
 };
 pub use spawn::spawn_scene;
 #[cfg(feature = "rendering")]

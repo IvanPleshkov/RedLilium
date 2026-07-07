@@ -20,9 +20,9 @@ use redlilium_ecs::{
     FlushUploads, ForwardRender, FrameRing, FreeFlyCamera, GameTime, GlobalTransform, GridConfig,
     HotReload, ManagePlayModeTransitions, MaterialInstanceLoad, MaterialInstanceSource,
     MeshGenerator, MeshLoad, MeshRenderer, MeshSource, Name, PlayControl, PlayModeAwareRegistry,
-    PostUpdate, PreUpdate, Primitive, RealTime, Render, RenderSchedule, ScenePass, Schedules,
-    Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms,
-    Visibility, WindowInput, World, register_std_components,
+    PlayStartTick, PostUpdate, PreUpdate, Primitive, RealTime, Render, RenderSchedule, ScenePass,
+    Schedules, Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera,
+    UpdateGlobalTransforms, Visibility, WindowInput, World, register_std_components,
 };
 use redlilium_runtime::EngineContext;
 
@@ -196,6 +196,7 @@ pub fn create_editor_world(
     // Play/Pause/Resume/Stop state machine for game code.
     world.insert_resource(PlayControl::default());
     world.insert_resource(PlayModeAwareRegistry::default());
+    world.insert_resource(PlayStartTick(0));
 
     // Insert debug drawing resources
     let debug_drawer_handle = world.insert_resource(DebugDrawer::new());

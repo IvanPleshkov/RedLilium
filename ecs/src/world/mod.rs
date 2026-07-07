@@ -412,7 +412,8 @@ impl World {
 
     /// Spawns a new entity and returns its ID.
     pub fn spawn(&mut self) -> Entity {
-        self.entities.allocate()
+        let tick = self.current_tick();
+        self.entities.allocate(tick)
     }
 
     /// Despawns an entity, removing all its components.

@@ -632,6 +632,11 @@ impl World {
         self.entities.get_flags(entity.index())
     }
 
+    /// Returns the world tick when the entity was spawned.
+    pub fn get_entity_world_tick(&self, entity: Entity) -> u64 {
+        self.entities.get_world_tick(entity.index())
+    }
+
     /// Sets flag bits on an entity (OR operation).
     ///
     /// # Panics

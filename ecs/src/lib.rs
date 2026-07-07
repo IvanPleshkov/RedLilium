@@ -150,7 +150,8 @@ pub use self::std::hierarchy::{
     set_parent, unmark_editor, unmark_static,
 };
 pub use self::std::play_mode::{
-    ManagePlayModeTransitions, PlayControl, PlayModeAwareRegistry, PlayModeTransition, PlayState,
+    ManagePlayModeTransitions, PlayControl, PlayModeAwareRegistry, PlayModeTransition,
+    PlayStartTick, PlayState,
 };
 pub use self::std::spawn::spawn_scene;
 pub use self::std::systems;

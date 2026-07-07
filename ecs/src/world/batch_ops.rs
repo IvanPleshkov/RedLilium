@@ -23,7 +23,8 @@ impl World {
     /// assert_eq!(entities.len(), 100);
     /// ```
     pub fn spawn_batch(&mut self, count: u32) -> Vec<Entity> {
-        self.entities.allocate_many(count)
+        let tick = self.current_tick();
+        self.entities.allocate_many(count, tick)
     }
 
     /// Spawns `count` entities, each with a clone of the given bundle.
@@ -46,7 +47,8 @@ impl World {
         // Validate upfront — no entities spawned if types are wrong
         bundle.validate(self)?;
 
-        let entities = self.entities.allocate_many(count);
+        let tick = self.current_tick();
+        let entities = self.entities.allocate_many(count, tick);
         for &entity in &entities {
             bundle.clone().insert_into(self, entity);
         }
@@ -80,7 +82,8 @@ impl World {
             f(0).validate(self)?;
         }
 
-        let entities = self.entities.allocate_many(count);
+        let tick = self.current_tick();
+        let entities = self.entities.allocate_many(count, tick);
         for (i, &entity) in entities.iter().enumerate() {
             f(i).insert_into(self, entity);
         }

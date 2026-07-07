@@ -4,7 +4,7 @@
 //! and stop modes. Triggers [`PlayModeAware`](crate::PlayModeAware) lifecycle
 //! hooks and manages visibility of editor-only entities.
 
-use crate::{PlayModeAware, SystemError, World};
+use crate::{Entity, PlayModeAware, SystemError, World};
 
 /// Event emitted when play-mode state transitions occur.
 ///
@@ -17,6 +17,14 @@ pub struct PlayModeTransition {
     /// New play state.
     pub to: PlayState,
 }
+
+/// The spawn_tick captured when the game transitioned to Playing.
+///
+/// Used to identify and despawn entities created during play mode.
+/// Entities with spawn_tick >= play_start_tick (and not marked EditorOnly)
+/// are cleaned up when transitioning to Stopped.
+#[derive(Debug, Clone, Copy)]
+pub struct PlayStartTick(pub u64);
 
 /// Game loop execution state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -176,9 +184,38 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
         handler(world, transition);
     }
 
-    // Reset GameTime when transitioning to Playing.
+    // Capture play_start_tick when transitioning to Playing.
     if to == PlayState::Playing {
+        let tick = world.current_tick();
+        if !world.has_resource::<PlayStartTick>() {
+            world.insert_resource(PlayStartTick(tick));
+        } else {
+            *world.resource_mut::<PlayStartTick>() = PlayStartTick(tick);
+        }
         world.resource_mut::<crate::GameTime>().reset();
+    }
+
+    // Clean up play-spawned entities when transitioning to Stopped.
+    if to == PlayState::Stopped {
+        let play_start_tick = if world.has_resource::<PlayStartTick>() {
+            world.resource::<PlayStartTick>().0
+        } else {
+            0
+        };
+
+        let entities_to_despawn: Vec<Entity> = world
+            .iter_entities()
+            .filter(|entity| {
+                let world_tick = world.get_entity_world_tick(*entity);
+                let flags = world.get_entity_flags(*entity);
+                let is_editor = flags & Entity::EDITOR != 0;
+                world_tick >= play_start_tick && !is_editor
+            })
+            .collect();
+
+        for entity in entities_to_despawn {
+            world.despawn(entity);
+        }
     }
 }
 
@@ -215,6 +252,7 @@ impl crate::ExclusiveSystem for ManagePlayModeTransitions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ExclusiveSystem;
 
     #[test]
     fn play_control_initial_state() {
@@ -273,5 +311,146 @@ mod tests {
         assert_eq!(control.pending, Some(PlayState::Playing));
         control.play(); // should be ignored
         assert_eq!(control.pending, Some(PlayState::Playing)); // unchanged
+    }
+
+    #[test]
+    fn entity_cleanup_spawned_during_play_are_deleted() {
+        let mut world = World::new();
+        world.insert_resource(PlayControl::default());
+        world.insert_resource(PlayModeAwareRegistry::default());
+        world.insert_resource(PlayStartTick(0));
+        world.insert_resource(crate::GameTime::default());
+
+        // Create an entity before play
+        let pre_play = world.spawn();
+
+        // Advance tick to separate pre-play and play entities
+        world.advance_tick();
+
+        // Transition to Playing
+        let mut control = world.resource_mut::<PlayControl>();
+        control.play();
+        drop(control);
+
+        let mut system = ManagePlayModeTransitions;
+        system.run(&mut world).unwrap();
+        assert_eq!(world.resource::<PlayControl>().state(), PlayState::Playing);
+
+        // Spawn an entity during play
+        let during_play = world.spawn();
+
+        // Verify both entities exist
+        assert!(world.is_alive(pre_play));
+        assert!(world.is_alive(during_play));
+
+        // Transition to Stopped
+        let mut control = world.resource_mut::<PlayControl>();
+        control.stop();
+        drop(control);
+
+        system.run(&mut world).unwrap();
+        assert_eq!(world.resource::<PlayControl>().state(), PlayState::Stopped);
+
+        // Verify pre-play entity survived, play-spawned entity was deleted
+        assert!(world.is_alive(pre_play));
+        assert!(!world.is_alive(during_play));
+    }
+
+    #[test]
+    fn entity_cleanup_preserves_pre_play_entities() {
+        let mut world = World::new();
+        world.insert_resource(PlayControl::default());
+        world.insert_resource(PlayModeAwareRegistry::default());
+        world.insert_resource(PlayStartTick(0));
+        world.insert_resource(crate::GameTime::default());
+
+        // Spawn entities before play
+        let e1 = world.spawn();
+        let e2 = world.spawn();
+        let e3 = world.spawn();
+
+        // Advance tick to separate pre-play and play entities
+        world.advance_tick();
+
+        // Transition to Playing
+        let mut control = world.resource_mut::<PlayControl>();
+        control.play();
+        drop(control);
+
+        let mut system = ManagePlayModeTransitions;
+        system.run(&mut world).unwrap();
+
+        // Transition immediately to Stopped (no new entities spawned)
+        let mut control = world.resource_mut::<PlayControl>();
+        control.stop();
+        drop(control);
+
+        system.run(&mut world).unwrap();
+
+        // All pre-play entities should survive
+        assert!(world.is_alive(e1));
+        assert!(world.is_alive(e2));
+        assert!(world.is_alive(e3));
+    }
+
+    #[test]
+    fn entity_cleanup_preserves_editor_entities() {
+        use crate::mark_editor;
+
+        let mut world = World::new();
+        world.insert_resource(PlayControl::default());
+        world.insert_resource(PlayModeAwareRegistry::default());
+        world.insert_resource(PlayStartTick(0));
+        world.insert_resource(crate::GameTime::default());
+
+        // Transition to Playing
+        let mut control = world.resource_mut::<PlayControl>();
+        control.play();
+        drop(control);
+
+        let mut system = ManagePlayModeTransitions;
+        system.run(&mut world).unwrap();
+
+        // Spawn an entity and mark it as editor-only
+        let editor_entity = world.spawn();
+        mark_editor(&mut world, editor_entity);
+
+        // Spawn a regular entity
+        let regular_entity = world.spawn();
+
+        // Transition to Stopped
+        let mut control = world.resource_mut::<PlayControl>();
+        control.stop();
+        drop(control);
+
+        system.run(&mut world).unwrap();
+
+        // Editor entity should survive, regular entity should be deleted
+        assert!(world.is_alive(editor_entity));
+        assert!(!world.is_alive(regular_entity));
+    }
+
+    #[test]
+    fn play_start_tick_captured_on_playing_transition() {
+        let mut world = World::new();
+        world.insert_resource(PlayControl::default());
+        world.insert_resource(PlayModeAwareRegistry::default());
+        world.insert_resource(PlayStartTick(0));
+        world.insert_resource(crate::GameTime::default());
+
+        let tick_before = world.current_tick();
+
+        let mut control = world.resource_mut::<PlayControl>();
+        control.play();
+        drop(control);
+
+        let mut system = ManagePlayModeTransitions;
+        system.run(&mut world).unwrap();
+
+        let captured_tick = world.resource::<PlayStartTick>().0;
+        let tick_after = world.current_tick();
+
+        // Captured tick should be between before and after (or equal to one of them)
+        assert!(captured_tick >= tick_before && captured_tick <= tick_after);
     }
 }

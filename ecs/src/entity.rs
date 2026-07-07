@@ -125,6 +125,8 @@ pub struct Entities {
     next_generation: Vec<u64>,
     /// Per-slot flag bits (disabled, inherited-disabled, etc.).
     flags: Vec<u32>,
+    /// Per-slot world tick at allocation time (used for play-spawned entity cleanup).
+    world_ticks: Vec<u64>,
     /// Free list of recyclable indices (LIFO stack).
     free_list: Vec<u32>,
     /// Total number of currently alive entities.
@@ -141,6 +143,7 @@ impl Entities {
             generations: Vec::new(),
             next_generation: Vec::new(),
             flags: Vec::new(),
+            world_ticks: Vec::new(),
             free_list: Vec::new(),
             count: 0,
         }
@@ -157,13 +160,15 @@ impl Entities {
     ///
     /// The handle's generation is independent of the world tick, so a slot
     /// recycled within the same frame yields a fresh, non-aliasing handle.
-    pub(crate) fn allocate(&mut self) -> Entity {
+    /// The world_tick is stored separately to track when this entity was spawned.
+    pub(crate) fn allocate(&mut self, world_tick: u64) -> Entity {
         self.count += 1;
 
         if let Some(index) = self.free_list.pop() {
             let idx = index as usize;
             let generation = self.next_generation[idx];
             self.generations[idx] = generation;
+            self.world_ticks[idx] = world_tick;
             self.flags[idx] = 0;
             Entity::new(index, generation)
         } else {
@@ -176,6 +181,7 @@ impl Entities {
             self.generations.push(0);
             self.next_generation.push(Self::next_after(0));
             self.flags.push(0);
+            self.world_ticks.push(world_tick);
             Entity::new(index, 0)
         }
     }
@@ -238,11 +244,16 @@ impl Entities {
         self.generations[index as usize]
     }
 
+    /// Returns the world tick when the entity at the given slot was spawned.
+    pub fn get_world_tick(&self, index: u32) -> u64 {
+        self.world_ticks.get(index as usize).copied().unwrap_or(0)
+    }
+
     /// Allocates `count` entities at once, reusing recycled slots first.
     ///
     /// More efficient than calling [`allocate`](Self::allocate) in a loop
     /// because internal vectors are grown in bulk.
-    pub(crate) fn allocate_many(&mut self, count: u32) -> Vec<Entity> {
+    pub(crate) fn allocate_many(&mut self, count: u32, world_tick: u64) -> Vec<Entity> {
         let reuse = count.min(self.free_list.len() as u32);
         let fresh = count - reuse;
         // Checked in u64 before any allocation: `start + fresh` computed in
@@ -261,6 +272,7 @@ impl Entities {
             let idx = index as usize;
             let generation = self.next_generation[idx];
             self.generations[idx] = generation;
+            self.world_ticks[idx] = world_tick;
             self.flags[idx] = 0;
             entities.push(Entity::new(index, generation));
         }
@@ -272,6 +284,7 @@ impl Entities {
                 self.generations.push(0);
                 self.next_generation.push(Self::next_after(0));
                 self.flags.push(0);
+                self.world_ticks.push(world_tick);
                 entities.push(Entity::new(start + i, 0));
             }
         }
@@ -332,9 +345,9 @@ mod tests {
     #[test]
     fn allocate_sequential() {
         let mut alloc = Entities::new();
-        let e0 = alloc.allocate();
-        let e1 = alloc.allocate();
-        let e2 = alloc.allocate();
+        let e0 = alloc.allocate(0);
+        let e1 = alloc.allocate(0);
+        let e2 = alloc.allocate(0);
 
         assert_eq!(e0.index(), 0);
         assert_eq!(e1.index(), 1);
@@ -348,14 +361,14 @@ mod tests {
     #[test]
     fn is_alive_after_allocate() {
         let mut alloc = Entities::new();
-        let entity = alloc.allocate();
+        let entity = alloc.allocate(0);
         assert!(alloc.is_alive(entity));
     }
 
     #[test]
     fn deallocate_makes_dead() {
         let mut alloc = Entities::new();
-        let entity = alloc.allocate();
+        let entity = alloc.allocate(0);
         assert!(alloc.deallocate(entity));
         assert!(!alloc.is_alive(entity));
     }
@@ -363,7 +376,7 @@ mod tests {
     #[test]
     fn deallocate_stale_entity() {
         let mut alloc = Entities::new();
-        let entity = alloc.allocate();
+        let entity = alloc.allocate(0);
         assert!(alloc.deallocate(entity));
         // Deallocating again returns false
         assert!(!alloc.deallocate(entity));
@@ -372,9 +385,9 @@ mod tests {
     #[test]
     fn recycled_slot_bumps_generation() {
         let mut alloc = Entities::new();
-        let e0 = alloc.allocate();
+        let e0 = alloc.allocate(0);
         alloc.deallocate(e0);
-        let e1 = alloc.allocate();
+        let e1 = alloc.allocate(0);
 
         assert_eq!(e1.index(), 0); // Same slot
         assert_eq!(e0.spawn_tick(), 0);
@@ -388,9 +401,9 @@ mod tests {
         // must yield a distinct handle even with no intervening world-tick
         // change. The generation alone guarantees this.
         let mut alloc = Entities::new();
-        let old = alloc.allocate();
+        let old = alloc.allocate(0);
         alloc.deallocate(old);
-        let new = alloc.allocate();
+        let new = alloc.allocate(0);
 
         assert_eq!(old.index(), new.index());
         assert_ne!(old, new);
@@ -401,10 +414,10 @@ mod tests {
     #[test]
     fn generation_increments_across_many_recycles() {
         let mut alloc = Entities::new();
-        let mut prev = alloc.allocate();
+        let mut prev = alloc.allocate(0);
         for expected_gen in 1..5u64 {
             alloc.deallocate(prev);
-            let next = alloc.allocate();
+            let next = alloc.allocate(0);
             assert_eq!(next.index(), 0);
             assert_eq!(next.spawn_tick(), expected_gen);
             assert!(!alloc.is_alive(prev));
@@ -415,9 +428,9 @@ mod tests {
     #[test]
     fn stale_entity_not_alive() {
         let mut alloc = Entities::new();
-        let old = alloc.allocate();
+        let old = alloc.allocate(0);
         alloc.deallocate(old);
-        let _new = alloc.allocate();
+        let _new = alloc.allocate(0);
 
         // Old handle (generation 0) is not alive even though slot 0 is alive.
         assert!(!alloc.is_alive(old));
@@ -428,8 +441,8 @@ mod tests {
         let mut alloc = Entities::new();
         assert_eq!(alloc.count(), 0);
 
-        let e0 = alloc.allocate();
-        let _e1 = alloc.allocate();
+        let e0 = alloc.allocate(0);
+        let _e1 = alloc.allocate(0);
         assert_eq!(alloc.count(), 2);
 
         alloc.deallocate(e0);
@@ -439,7 +452,7 @@ mod tests {
     #[test]
     fn iter_alive_correctness() {
         let mut alloc = Entities::new();
-        let entities: Vec<_> = (0..5).map(|_| alloc.allocate()).collect();
+        let entities: Vec<_> = (0..5).map(|_| alloc.allocate(0)).collect();
 
         alloc.deallocate(entities[1]);
         alloc.deallocate(entities[3]);
@@ -461,7 +474,7 @@ mod tests {
     #[test]
     fn allocate_many_fresh() {
         let mut alloc = Entities::new();
-        let entities = alloc.allocate_many(5);
+        let entities = alloc.allocate_many(5, 0);
 
         assert_eq!(entities.len(), 5);
         assert_eq!(alloc.count(), 5);
@@ -475,13 +488,13 @@ mod tests {
     #[test]
     fn allocate_many_reuses_free_list() {
         let mut alloc = Entities::new();
-        let originals: Vec<_> = (0..5).map(|_| alloc.allocate()).collect();
+        let originals: Vec<_> = (0..5).map(|_| alloc.allocate(0)).collect();
 
         // Despawn some
         alloc.deallocate(originals[1]);
         alloc.deallocate(originals[3]);
 
-        let batch = alloc.allocate_many(4);
+        let batch = alloc.allocate_many(4, 0);
         assert_eq!(batch.len(), 4);
         assert_eq!(alloc.count(), 7); // 3 original alive + 4 new
 
@@ -511,15 +524,15 @@ mod tests {
         // Two live slots + u32::MAX fresh: `start + fresh - 1` in u32 is
         // exactly the wrapping case (2 + u32::MAX - 1 == 0 mod 2^32).
         let mut alloc = Entities::new();
-        alloc.allocate();
-        alloc.allocate();
-        alloc.allocate_many(u32::MAX);
+        alloc.allocate(0);
+        alloc.allocate(0);
+        alloc.allocate_many(u32::MAX, 0);
     }
 
     #[test]
     fn allocate_many_zero() {
         let mut alloc = Entities::new();
-        let entities = alloc.allocate_many(0);
+        let entities = alloc.allocate_many(0, 0);
         assert!(entities.is_empty());
         assert_eq!(alloc.count(), 0);
     }
@@ -545,7 +558,7 @@ mod tests {
     #[test]
     fn flag_operations() {
         let mut alloc = Entities::new();
-        let e = alloc.allocate();
+        let e = alloc.allocate(0);
         assert_eq!(alloc.get_flags(e.index()), 0);
 
         alloc.set_flags(e.index(), Entity::DISABLED);
@@ -570,11 +583,11 @@ mod tests {
     #[test]
     fn deallocate_clears_flags() {
         let mut alloc = Entities::new();
-        let e = alloc.allocate();
+        let e = alloc.allocate(0);
         alloc.set_flags(e.index(), Entity::DISABLED);
         alloc.deallocate(e);
 
-        let e2 = alloc.allocate();
+        let e2 = alloc.allocate(0);
         assert_eq!(e2.index(), 0); // Same slot
         assert_eq!(alloc.get_flags(e2.index()), 0); // Flags reset
     }
