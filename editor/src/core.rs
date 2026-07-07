@@ -17,11 +17,11 @@ use redlilium_core::math::Vec3;
 use redlilium_debug_drawer::DebugDrawer;
 use redlilium_ecs::{
     AssetGpuFlush, AssetPump, Camera, DebugRender, DrawGrid, DrawSelectionAabb, EguiRender, Entity,
-    FlushUploads, ForwardRender, FrameRing, FreeFlyCamera, GlobalTransform, GridConfig, HotReload,
-    MaterialInstanceLoad, MaterialInstanceSource, MeshGenerator, MeshLoad, MeshRenderer,
-    MeshSource, Name, PostUpdate, Primitive, Render, RenderSchedule, ScenePass, Schedules,
-    Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms,
-    Visibility, WindowInput, World, register_std_components,
+    FlushUploads, ForwardRender, FrameRing, FreeFlyCamera, GameTime, GlobalTransform, GridConfig,
+    HotReload, MaterialInstanceLoad, MaterialInstanceSource, MeshGenerator, MeshLoad, MeshRenderer,
+    MeshSource, Name, PostUpdate, Primitive, RealTime, Render, RenderSchedule, ScenePass,
+    Schedules, Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera,
+    UpdateGlobalTransforms, Visibility, WindowInput, World, register_std_components,
 };
 use redlilium_runtime::EngineContext;
 
@@ -187,6 +187,10 @@ pub fn create_editor_world(
 
     // Insert WindowInput resource
     let window_input_handle = world.insert_resource(WindowInput::default());
+
+    // Dual-clock time management for Play/Pause support.
+    world.insert_resource(RealTime::default());
+    world.insert_resource(GameTime::default());
 
     // Insert debug drawing resources
     let debug_drawer_handle = world.insert_resource(DebugDrawer::new());

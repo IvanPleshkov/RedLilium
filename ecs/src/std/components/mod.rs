@@ -1,4 +1,5 @@
 mod camera;
+mod editor_only;
 mod free_fly_camera;
 #[cfg(feature = "rendering")]
 pub(crate) mod grid;
@@ -10,6 +11,7 @@ mod visibility;
 mod window_input;
 
 pub use camera::Camera;
+pub use editor_only::EditorOnly;
 pub use free_fly_camera::FreeFlyCamera;
 #[cfg(feature = "rendering")]
 pub use grid::GridConfig;

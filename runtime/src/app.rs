@@ -5,9 +5,9 @@ use std::sync::Arc;
 use redlilium_ecs::sync::RwLock;
 
 use redlilium_ecs::{
-    AssetGpuFlush, AssetPump, Component, FlushUploads, ForwardRender, FrameRing, HotReload,
-    MaterialInstanceLoad, MeshLoad, PostUpdate, Render, RenderSchedule, Resource, ScenePass,
-    ScheduleLabel, Schedules, System, SystemsContainer, UpdateCameraMatrices,
+    AssetGpuFlush, AssetPump, Component, FlushUploads, ForwardRender, FrameRing, GameTime,
+    HotReload, MaterialInstanceLoad, MeshLoad, PostUpdate, RealTime, Render, RenderSchedule,
+    Resource, ScenePass, ScheduleLabel, Schedules, System, SystemsContainer, UpdateCameraMatrices,
     UpdateGlobalTransforms, WindowInput, World, register_rendering_components,
     register_std_components,
 };
@@ -57,6 +57,10 @@ impl App {
             .expect("failed to create game frame ring");
         world.insert_resource(frame_ring);
         let window_input = world.insert_resource(WindowInput::default());
+
+        // Dual-clock time management for Play/Pause support.
+        world.insert_resource(RealTime::default());
+        world.insert_resource(GameTime::default());
 
         let mut schedules = Schedules::new();
         {

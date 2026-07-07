@@ -99,7 +99,7 @@ pub use redlilium_core::compute::{
     ComputeWriteGuard, IoHandle, IoRunner, Priority, YieldNow, reset_yield_timer,
     set_yield_interval, yield_now,
 };
-pub use resource::{Resource, ResourceRef, ResourceRefMut, SnapshotResource};
+pub use resource::{PlayModeAware, Resource, ResourceRef, ResourceRefMut, SnapshotResource};
 pub use sparse_set::{Mut, Ref, RefMut, SparseSetInner};
 pub use type_identity::{QualifiedTypeId, SourceId};
 pub use world::{ComponentNotRegistered, InspectResult, World, WorldError, set_component_actions};
@@ -156,6 +156,7 @@ pub use self::std::systems::DrawGrid;
 #[cfg(feature = "rendering")]
 pub use self::std::systems::{DrawSelectionAabb, SelectionAabbMode};
 pub use self::std::systems::{UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms};
+pub use self::std::time::{GameTime, RealTime};
 
 // Asset-system ECS bridge (feature-gated): loader-agnostic systems that tick an
 // AssetProcessor resource. Consumers dep `redlilium-assets` directly.
@@ -204,6 +205,9 @@ pub fn register_std_components(world: &mut World) {
     // Inspector-enabled, readonly (no Default — constructed with parameters)
     world.register_inspector::<Camera>();
     world.register_inspector_default::<FreeFlyCamera>();
+
+    // Editor-only marker component
+    world.register_inspector_default::<EditorOnly>();
 
     // Hierarchy components (inspector-enabled for clone/remap support)
     world.register_inspector::<Parent>();

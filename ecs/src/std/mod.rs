@@ -21,6 +21,7 @@ pub mod remote;
 pub mod rendering;
 pub mod spawn;
 pub mod systems;
+pub mod time;
 
 pub use components::*;
 pub use hierarchy::{
@@ -30,3 +31,4 @@ pub use spawn::spawn_scene;
 #[cfg(feature = "rendering")]
 pub use systems::DrawGrid;
 pub use systems::{UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms};
+pub use time::{GameTime, RealTime};
