@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use crate::log_capture::LogBuffer;
 
-/// Console panel that displays captured log entries.
+/// Console panel that displays captured log entries and panic information.
 pub struct ConsolePanel {
     buffer: Arc<Mutex<LogBuffer>>,
     /// Reference time for displaying elapsed seconds.
@@ -27,7 +27,59 @@ impl ConsolePanel {
         }
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui) {
+    /// Display the console panel with optional panic info banner.
+    pub fn show(&mut self, ui: &mut egui::Ui, panic_info: Option<redlilium_ecs::PanicInfo>) {
+        // Display panic banner if active
+        if let Some(ref info) = panic_info {
+            ui.painter().rect_filled(
+                ui.available_rect_before_wrap(),
+                egui::CornerRadius::default(),
+                crate::theme::ERROR.gamma_multiply(0.2),
+            );
+            ui.vertical(|ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new("⚠ GAME PANIC")
+                            .size(14.0)
+                            .color(crate::theme::ERROR)
+                            .strong(),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(format!("System: {}", info.system))
+                            .color(crate::theme::TEXT_PRIMARY),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(format!("Schedule: {}", info.schedule))
+                            .color(crate::theme::TEXT_SECONDARY),
+                    );
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new(format!("Tick: {}", info.tick))
+                            .color(crate::theme::TEXT_SECONDARY),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(format!("Error: {}", info.message))
+                            .monospace()
+                            .color(crate::theme::TEXT_PRIMARY),
+                    );
+                    ui.add_space(4.0);
+                });
+                ui.add_space(4.0);
+            });
+            ui.separator();
+        }
+
         // Top toolbar
         ui.horizontal(|ui| {
             // Level filter buttons

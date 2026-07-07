@@ -29,7 +29,7 @@ pub use hierarchy::{
     HierarchyCommands, despawn_recursive, disable, enable, remove_parent, set_parent,
 };
 pub use play_mode::{
-    ManagePlayModeTransitions, PlayControl, PlayModeAwareRegistry, PlayModeTransition,
+    ManagePlayModeTransitions, PanicInfo, PlayControl, PlayModeAwareRegistry, PlayModeTransition,
     PlayStartTick, PlayState, PlayTasks,
 };
 pub use spawn::spawn_scene;

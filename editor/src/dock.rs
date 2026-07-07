@@ -147,7 +147,15 @@ impl TabViewer for EditorTabViewer<'_> {
                 self.asset_browser.show(ui, self.vfs, db.as_deref());
             }
             Tab::Console => {
-                self.console.show(ui);
+                let panic_info = if self.world.has_resource::<redlilium_ecs::PlayControl>() {
+                    self.world
+                        .resource::<redlilium_ecs::PlayControl>()
+                        .panic_info()
+                        .cloned()
+                } else {
+                    None
+                };
+                self.console.show(ui, panic_info);
             }
             Tab::History => {
                 crate::history_panel::show_history(ui, self.history);
