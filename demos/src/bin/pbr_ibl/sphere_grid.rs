@@ -6,35 +6,45 @@ use redlilium_core::math::{Mat4, Vec3, mat4_to_cols_array_2d};
 use redlilium_core::mesh::generators;
 use redlilium_core::profiling::{profile_function, profile_scope};
 use redlilium_graphics::{
-    BindingGroup, BufferUsage, GraphicsDevice, Material, MaterialDescriptor, MaterialInstance,
-    PolygonMode, RenderGraph, RingBuffer, ShaderSource, ShaderStage, TextureFormat, TransferConfig,
-    TransferOperation, TransferPass,
+    BindingGroupDescriptor, BufferUsage, GraphicsDevice, Material, MaterialDescriptor,
+    MaterialInstance, PolygonMode, RenderGraph, RingBuffer, ShaderSource, ShaderStage,
+    TextureFormat, TransferConfig, TransferOperation, TransferPass,
 };
 
-use crate::uniforms::{CameraUniforms, SphereInstance};
+use crate::uniforms::{CameraUniforms, SPHERE_INSTANCE_STRIDE, SphereInstance};
 
 const GBUFFER_SHADER_SLANG: &str = include_str!("../../../shaders/deferred_gbuffer.slang");
 
 /// Sphere grid with G-buffer material, instanced mesh, and camera/instance rings.
+///
+/// # Frame-invariant binding groups (issue #40)
+///
+/// Both material instances' binding groups are created **once** in [`create`]
+/// and reused every frame — the demo issues zero `create_binding_group` calls
+/// in steady state. The camera set (binding 0) is a dynamic uniform bound at
+/// offset 0 and selected per draw via [`camera_offset`](Self::camera_offset).
+/// The instance storage set (binding 1) binds the **whole** instance ring at
+/// offset 0; each frame's block is addressed by an element index
+/// ([`CameraUniforms::instance_base`]) the vertex shader adds to
+/// `SV_InstanceID`, so the group never has to be rebuilt for a new ring slot.
 pub struct SphereGrid {
     pub material_instance: Arc<MaterialInstance>,
     pub wireframe_material_instance: Arc<MaterialInstance>,
     pub mesh: Arc<redlilium_graphics::Mesh>,
-
-    // Materials are kept so the per-frame material instances can be rebuilt to
-    // point at this frame's camera + instance ring slots.
-    material: Arc<Material>,
-    wireframe_material: Arc<Material>,
 
     /// Per-frame camera uniform ring (one slot written per frame). Bound by
     /// range and additionally addressed via a per-draw dynamic offset.
     camera_ring: RingBuffer,
     /// This frame's offset into `camera_ring`.
     camera_offset: u32,
-    /// Per-frame instance storage ring (one slot written per frame).
+    /// Per-frame instance storage ring (one block written per frame). Bound in
+    /// full at offset 0; the current block is selected by `instance_base`.
     instance_ring: RingBuffer,
     /// Number of instances written this frame.
     instance_count: u32,
+    /// Element index of this frame's instance block within `instance_ring`
+    /// (`alloc.offset / SPHERE_INSTANCE_STRIDE`), folded into the camera uniform.
+    instance_base: u32,
 
     /// Mesh data queued at init, flushed into the first frame's graph.
     pending_uploads: Vec<TransferOperation>,
@@ -102,18 +112,13 @@ impl SphereGrid {
         )
         .expect("Failed to create instance ring");
 
-        // Initial material instances binding the rings' first slots; rebuilt each
-        // frame to point at the frame's camera + instance slots.
-        let camera_size = std::mem::size_of::<CameraUniforms>() as u64;
+        // Frame-invariant material instances: the binding groups are created
+        // once here (camera dynamic uniform at offset 0, whole instance ring at
+        // offset 0) and reused every frame — see the type-level doc.
         let material_instance =
-            Self::make_instance(&material, &camera_ring, &instance_ring, 0, camera_size);
-        let wireframe_material_instance = Self::make_instance(
-            &wireframe_material,
-            &camera_ring,
-            &instance_ring,
-            0,
-            camera_size,
-        );
+            Self::make_instance(device, &material, &camera_ring, &instance_ring);
+        let wireframe_material_instance =
+            Self::make_instance(device, &wireframe_material, &camera_ring, &instance_ring);
 
         // Create GPU mesh; its data uploads through the frame graph.
         let (mesh, mesh_ops) = device
@@ -124,37 +129,41 @@ impl SphereGrid {
             material_instance,
             wireframe_material_instance,
             mesh,
-            material,
-            wireframe_material,
             camera_ring,
             camera_offset: 0,
             instance_ring,
             instance_count: 0,
+            instance_base: 0,
             pending_uploads: mesh_ops,
         }
     }
 
-    /// Build a material instance binding the camera ring slot (group 0, binding
-    /// 0, addressed by dynamic offset) and an instance ring slot (binding 1).
+    /// Build a frame-invariant material instance: binding 0 is the camera ring
+    /// bound at offset 0 (a dynamic uniform selected per draw via
+    /// [`camera_offset`](Self::camera_offset)); binding 1 is the **whole**
+    /// instance ring bound at offset 0 (this frame's block is selected in-shader
+    /// by [`CameraUniforms::instance_base`]). Neither depends on the frame, so
+    /// the group is created once and never rebuilt.
     fn make_instance(
+        device: &Arc<GraphicsDevice>,
         material: &Arc<Material>,
         camera_ring: &RingBuffer,
         instance_ring: &RingBuffer,
-        instance_off: u64,
-        instance_size: u64,
     ) -> Arc<MaterialInstance> {
         let camera_size = std::mem::size_of::<CameraUniforms>() as u64;
-        #[allow(clippy::arc_with_non_send_sync)]
-        let binding_group = Arc::new(
-            BindingGroup::new()
-                .with_buffer_range(0, camera_ring.buffer().clone(), 0, camera_size)
-                .with_buffer_range(
-                    1,
-                    instance_ring.buffer().clone(),
-                    instance_off,
-                    instance_size,
-                ),
-        );
+        let binding_group = device
+            .create_binding_group(
+                material.binding_layouts()[0].clone(),
+                BindingGroupDescriptor::new()
+                    .with_buffer_range(0, camera_ring.buffer().clone(), 0, camera_size)
+                    .with_buffer_range(
+                        1,
+                        instance_ring.buffer().clone(),
+                        0,
+                        instance_ring.capacity(),
+                    ),
+            )
+            .expect("create sphere binding group");
         Arc::new(MaterialInstance::new(material.clone()).with_binding_group(binding_group))
     }
 
@@ -179,8 +188,12 @@ impl SphereGrid {
         graph.add_transfer_pass(pass);
     }
 
-    /// Write sphere instance data into the instance ring and rebuild the
-    /// material instances to bind this frame's instance slot.
+    /// Write sphere instance data into the instance ring and record this frame's
+    /// block base index. The binding groups are frame-invariant (bound to the
+    /// whole ring), so nothing is rebuilt here.
+    ///
+    /// Call this **before** [`write_camera_uniforms`](Self::write_camera_uniforms):
+    /// the base index it records is folded into the camera uniform.
     pub fn write_instances(&mut self, instances: &[SphereInstance]) {
         profile_scope!("SphereGrid::write_instances");
 
@@ -199,24 +212,16 @@ impl SphereGrid {
                 .expect("Failed to write instance ring");
         }
         self.instance_count = count as u32;
-
-        self.material_instance = Self::make_instance(
-            &self.material,
-            &self.camera_ring,
-            &self.instance_ring,
-            alloc.offset,
-            size,
-        );
-        self.wireframe_material_instance = Self::make_instance(
-            &self.wireframe_material,
-            &self.camera_ring,
-            &self.instance_ring,
-            alloc.offset,
-            size,
-        );
+        // The ring's 256-byte alignment is a multiple of the 128-byte stride, so
+        // the offset divides exactly into an element index.
+        debug_assert_eq!(alloc.offset % SPHERE_INSTANCE_STRIDE, 0);
+        self.instance_base = (alloc.offset / SPHERE_INSTANCE_STRIDE) as u32;
     }
 
     /// Update camera uniforms by writing this frame's slot into the camera ring.
+    ///
+    /// Folds in the instance base index recorded by the preceding
+    /// [`write_instances`](Self::write_instances) call.
     pub fn write_camera_uniforms(&mut self, view: Mat4, proj: Mat4, camera_pos: Vec3) {
         profile_scope!("SphereGrid::write_camera_uniforms");
         let view_proj = proj * view;
@@ -226,6 +231,8 @@ impl SphereGrid {
             view: mat4_to_cols_array_2d(&view),
             proj: mat4_to_cols_array_2d(&proj),
             camera_pos: [camera_pos.x, camera_pos.y, camera_pos.z, 1.0],
+            instance_base: self.instance_base,
+            _pad: [0; 3],
         };
 
         let bytes = bytemuck::bytes_of(&uniforms);

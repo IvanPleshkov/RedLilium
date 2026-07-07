@@ -8,17 +8,27 @@ mod pass_encoding;
 mod resources;
 pub mod swapchain;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Scratch buffers reused across draw commands to avoid per-draw heap allocations.
-///
-/// Only contains types without Rust lifetimes (can be stored long-term).
-/// Vecs are cleared between draws but retain their capacity across frames.
-#[derive(Default)]
-struct WgpuEncoderScratch {
-    // GPU handle Vecs (no lifetimes, safe to pool):
-    bind_group_layouts: Vec<wgpu::BindGroupLayout>,
-    bind_groups: Vec<wgpu::BindGroup>,
+use crate::materials::{BindingType, ShaderStageFlags};
+
+/// Content key for bind-group-layout dedup: one entry per binding, in
+/// declaration order (binding index, type, visibility). Labels excluded —
+/// layouts differing only by label are wgpu-equivalent. Mirrors the Vulkan
+/// `ds_layout_cache` key so a binding group and the pipelines that use it share
+/// the same `wgpu::BindGroupLayout` object (wgpu requires them to be
+/// compatible).
+type BindGroupLayoutKey = Vec<(u32, BindingType, ShaderStageFlags)>;
+
+pub(crate) fn bind_group_layout_key(
+    layout: &crate::materials::BindingLayout,
+) -> BindGroupLayoutKey {
+    layout
+        .entries
+        .iter()
+        .map(|e| (e.binding, e.binding_type, e.visibility))
+        .collect()
 }
 
 /// A texture view for a surface texture (swapchain image).
@@ -58,11 +68,12 @@ pub struct WgpuBackend {
     adapter: wgpu::Adapter,
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
-    // parking_lot: no poisoning. With std::sync::Mutex a single panicking
-    // encode poisoned the scratch forever, failing every subsequent frame
-    // even when the original cause was transient. The scratch buffers are
-    // cleared before each use, so recovery is always safe.
-    encoder_scratch: parking_lot::Mutex<WgpuEncoderScratch>,
+    /// Content-keyed dedup of bind group layouts. Both pipeline creation and
+    /// `create_binding_group` pull from here, so a binding group's
+    /// `wgpu::BindGroupLayout` is the *same object* as the pipelines that use
+    /// it — the clean way to satisfy wgpu's bind-group/pipeline compatibility.
+    // parking_lot: no poisoning.
+    bind_group_layout_cache: parking_lot::Mutex<HashMap<BindGroupLayoutKey, wgpu::BindGroupLayout>>,
 }
 
 impl std::fmt::Debug for WgpuBackend {
@@ -124,7 +135,7 @@ impl WgpuBackend {
             adapter,
             device: Arc::new(device),
             queue: Arc::new(queue),
-            encoder_scratch: parking_lot::Mutex::new(WgpuEncoderScratch::default()),
+            bind_group_layout_cache: parking_lot::Mutex::new(HashMap::new()),
         })
     }
 
@@ -244,6 +255,10 @@ impl WgpuBackend {
         self.adapter = new_adapter;
         self.device = Arc::new(new_device);
         self.queue = Arc::new(new_queue);
+        // The cached bind group layouts belong to the old device; drop them so
+        // materials/binding groups recreated against the new device get fresh,
+        // compatible layouts.
+        self.bind_group_layout_cache.lock().clear();
 
         Ok(true)
     }

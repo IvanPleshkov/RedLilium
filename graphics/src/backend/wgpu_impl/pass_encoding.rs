@@ -177,148 +177,32 @@ impl WgpuBackend {
             render_pass.set_scissor_rect(0, 0, width, height);
         }
 
-        // Lock scratch ONCE for all draw commands in this pass.
-        // Destructure to allow independent field borrows.
-        let scratch = &mut *self.encoder_scratch.lock();
-        let super::WgpuEncoderScratch {
-            bind_group_layouts: scratch_bind_group_layouts,
-            bind_groups: scratch_bind_groups,
-            ..
-        } = scratch;
-
-        // Reusable Vec for types with Rust lifetimes (can't go in scratch).
-        // Allocated once, cleared per bind group — after the first draw, capacity is warm.
-        let mut bind_group_entries: Vec<wgpu::BindGroupEntry> = Vec::new();
-
         // Encode each draw command
         for draw_cmd in pass.draw_commands() {
             let material_arc = draw_cmd.material.material();
             let mesh = &draw_cmd.mesh;
 
             // -- Pipeline: owned by Material, created at create_material() time --
-            let super::super::GpuPipeline::WgpuGraphics {
-                pipeline,
-                bind_group_layouts,
-            } = material_arc.gpu_handle()
+            let super::super::GpuPipeline::WgpuGraphics { pipeline, .. } =
+                material_arc.gpu_handle()
             else {
                 log::warn!("Material has no wgpu graphics pipeline");
                 continue;
             };
 
-            scratch_bind_group_layouts.clear();
-            scratch_bind_group_layouts.extend(bind_group_layouts.iter().cloned());
-
-            // -- Bind groups (always per draw: resources may change each frame) --
-            let material_instance = &draw_cmd.material;
-            scratch_bind_groups.clear();
-
-            for (binding_group, bg_layout) in material_instance
-                .binding_groups()
-                .iter()
-                .zip(scratch_bind_group_layouts.iter())
-            {
-                bind_group_entries.clear();
-                for entry in &binding_group.entries {
-                    // CombinedTextureSampler is a single material binding, but
-                    // Slang reflection emits a separate texture (binding N) and
-                    // sampler (binding N+1). Emit BOTH so the bind group matches
-                    // the reflected layout — otherwise the sampler is missing and
-                    // wgpu rejects the bind group.
-                    if let crate::materials::BoundResource::CombinedTextureSampler {
-                        texture,
-                        sampler,
-                    } = &entry.resource
-                    {
-                        if let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() {
-                            bind_group_entries.push(wgpu::BindGroupEntry {
-                                binding: entry.binding,
-                                resource: wgpu::BindingResource::TextureView(view),
-                            });
-                        }
-                        if let crate::backend::GpuSampler::Wgpu(wgpu_sampler) = sampler.gpu_handle()
-                        {
-                            bind_group_entries.push(wgpu::BindGroupEntry {
-                                binding: entry.binding + 1,
-                                resource: wgpu::BindingResource::Sampler(wgpu_sampler),
-                            });
-                        }
-                        continue;
-                    }
-
-                    // A non-wgpu GPU handle here means a resource from another
-                    // backend was bound. Silently skipping it would desync the
-                    // bind group from its layout (entry count mismatch) and
-                    // surface as a confusing wgpu validation error later, so
-                    // fail loudly at the actual cause instead.
-                    let mismatch = |kind: &str| {
-                        GraphicsError::InvalidParameter(format!(
-                            "wgpu: {kind} bound at binding {} has a non-wgpu GPU handle \
-                             (resource from a different backend)",
-                            entry.binding
-                        ))
-                    };
-                    let resource = match &entry.resource {
-                        crate::materials::BoundResource::Buffer(buffer) => {
-                            let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() else {
-                                return Err(mismatch("buffer"));
-                            };
-                            wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: wgpu_buffer,
-                                offset: 0,
-                                size: None,
-                            })
-                        }
-                        crate::materials::BoundResource::BufferRange {
-                            buffer,
-                            offset,
-                            size,
-                        } => {
-                            let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() else {
-                                return Err(mismatch("buffer"));
-                            };
-                            wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: wgpu_buffer,
-                                offset: *offset,
-                                size: std::num::NonZeroU64::new(*size),
-                            })
-                        }
-                        crate::materials::BoundResource::Texture(texture) => {
-                            let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() else {
-                                return Err(mismatch("texture"));
-                            };
-                            wgpu::BindingResource::TextureView(view)
-                        }
-                        crate::materials::BoundResource::Sampler(sampler) => {
-                            let crate::backend::GpuSampler::Wgpu(wgpu_sampler) =
-                                sampler.gpu_handle()
-                            else {
-                                return Err(mismatch("sampler"));
-                            };
-                            wgpu::BindingResource::Sampler(wgpu_sampler)
-                        }
-                        crate::materials::BoundResource::CombinedTextureSampler { .. } => {
-                            unreachable!("CombinedTextureSampler handled above")
-                        }
-                    };
-                    bind_group_entries.push(wgpu::BindGroupEntry {
-                        binding: entry.binding,
-                        resource,
-                    });
-                }
-
-                scratch_bind_groups.push(self.device.create_bind_group(
-                    &wgpu::BindGroupDescriptor {
-                        label: binding_group.label.as_deref(),
-                        layout: bg_layout,
-                        entries: &bind_group_entries,
-                    },
-                ));
-            }
-
             // -- Record into render pass --
             render_pass.set_pipeline(pipeline);
 
-            for (index, bind_group) in scratch_bind_groups.iter().enumerate() {
+            // Bind each group's pre-built, cached bind group — no per-draw
+            // creation. Compatibility with the pipeline is guaranteed by the
+            // shared, content-deduped bind group layout.
+            for (index, group) in draw_cmd.material.binding_groups().iter().enumerate() {
+                let super::super::GpuBindingGroup::Wgpu(bind_group) = group.gpu_handle() else {
+                    return Err(GraphicsError::InvalidParameter(format!(
+                        "wgpu: binding group {index} has no wgpu bind group \
+                         (resource from a different backend)"
+                    )));
+                };
                 let offsets: &[u32] = draw_cmd
                     .dynamic_offsets
                     .get(index)
@@ -649,142 +533,28 @@ impl WgpuBackend {
             timestamp_writes: None,
         });
 
-        let scratch = &mut *self.encoder_scratch.lock();
-        let super::WgpuEncoderScratch {
-            bind_group_layouts: scratch_bind_group_layouts,
-            bind_groups: scratch_bind_groups,
-            ..
-        } = scratch;
-
-        let mut bind_group_entries: Vec<wgpu::BindGroupEntry> = Vec::new();
-
         for dispatch_cmd in pass.dispatch_commands() {
             let material_arc = dispatch_cmd.material.material();
 
             // -- Pipeline: owned by Material, created at create_material() time --
-            let super::super::GpuPipeline::WgpuCompute {
-                pipeline,
-                bind_group_layouts,
-            } = material_arc.gpu_handle()
+            let super::super::GpuPipeline::WgpuCompute { pipeline, .. } = material_arc.gpu_handle()
             else {
                 log::warn!("Material has no wgpu compute pipeline");
                 continue;
             };
 
-            scratch_bind_group_layouts.clear();
-            scratch_bind_group_layouts.extend(bind_group_layouts.iter().cloned());
-
-            // -- Bind groups (always per dispatch: resources may change each frame) --
-            let material_instance = &dispatch_cmd.material;
-            scratch_bind_groups.clear();
-
-            for (binding_group, bg_layout) in material_instance
-                .binding_groups()
-                .iter()
-                .zip(scratch_bind_group_layouts.iter())
-            {
-                bind_group_entries.clear();
-                for entry in &binding_group.entries {
-                    // CombinedTextureSampler is a single material binding, but
-                    // Slang reflection emits a separate texture (binding N) and
-                    // sampler (binding N+1). Emit BOTH so the bind group matches
-                    // the reflected layout — otherwise the sampler is missing and
-                    // wgpu rejects the bind group.
-                    if let crate::materials::BoundResource::CombinedTextureSampler {
-                        texture,
-                        sampler,
-                    } = &entry.resource
-                    {
-                        if let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() {
-                            bind_group_entries.push(wgpu::BindGroupEntry {
-                                binding: entry.binding,
-                                resource: wgpu::BindingResource::TextureView(view),
-                            });
-                        }
-                        if let crate::backend::GpuSampler::Wgpu(wgpu_sampler) = sampler.gpu_handle()
-                        {
-                            bind_group_entries.push(wgpu::BindGroupEntry {
-                                binding: entry.binding + 1,
-                                resource: wgpu::BindingResource::Sampler(wgpu_sampler),
-                            });
-                        }
-                        continue;
-                    }
-
-                    // A non-wgpu GPU handle here means a resource from another
-                    // backend was bound. Silently skipping it would desync the
-                    // bind group from its layout (entry count mismatch) and
-                    // surface as a confusing wgpu validation error later, so
-                    // fail loudly at the actual cause instead.
-                    let mismatch = |kind: &str| {
-                        GraphicsError::InvalidParameter(format!(
-                            "wgpu: {kind} bound at binding {} has a non-wgpu GPU handle \
-                             (resource from a different backend)",
-                            entry.binding
-                        ))
-                    };
-                    let resource = match &entry.resource {
-                        crate::materials::BoundResource::Buffer(buffer) => {
-                            let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() else {
-                                return Err(mismatch("buffer"));
-                            };
-                            wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: wgpu_buffer,
-                                offset: 0,
-                                size: None,
-                            })
-                        }
-                        crate::materials::BoundResource::BufferRange {
-                            buffer,
-                            offset,
-                            size,
-                        } => {
-                            let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() else {
-                                return Err(mismatch("buffer"));
-                            };
-                            wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: wgpu_buffer,
-                                offset: *offset,
-                                size: std::num::NonZeroU64::new(*size),
-                            })
-                        }
-                        crate::materials::BoundResource::Texture(texture) => {
-                            let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() else {
-                                return Err(mismatch("texture"));
-                            };
-                            wgpu::BindingResource::TextureView(view)
-                        }
-                        crate::materials::BoundResource::Sampler(sampler) => {
-                            let crate::backend::GpuSampler::Wgpu(wgpu_sampler) =
-                                sampler.gpu_handle()
-                            else {
-                                return Err(mismatch("sampler"));
-                            };
-                            wgpu::BindingResource::Sampler(wgpu_sampler)
-                        }
-                        crate::materials::BoundResource::CombinedTextureSampler { .. } => {
-                            unreachable!("CombinedTextureSampler handled above")
-                        }
-                    };
-                    bind_group_entries.push(wgpu::BindGroupEntry {
-                        binding: entry.binding,
-                        resource,
-                    });
-                }
-
-                scratch_bind_groups.push(self.device.create_bind_group(
-                    &wgpu::BindGroupDescriptor {
-                        label: binding_group.label.as_deref(),
-                        layout: bg_layout,
-                        entries: &bind_group_entries,
-                    },
-                ));
-            }
-
             // Record into compute pass
             compute_pass.set_pipeline(pipeline);
 
-            for (index, bind_group) in scratch_bind_groups.iter().enumerate() {
+            // Bind each group's cached, pre-built bind group (no per-dispatch
+            // creation).
+            for (index, group) in dispatch_cmd.material.binding_groups().iter().enumerate() {
+                let super::super::GpuBindingGroup::Wgpu(bind_group) = group.gpu_handle() else {
+                    return Err(GraphicsError::InvalidParameter(format!(
+                        "wgpu: binding group {index} has no wgpu bind group \
+                         (resource from a different backend)"
+                    )));
+                };
                 compute_pass.set_bind_group(index as u32, bind_group, &[]);
             }
 

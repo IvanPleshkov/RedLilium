@@ -3,8 +3,10 @@
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ash::vk;
+use parking_lot::Mutex;
 
 use crate::error::GraphicsError;
 use crate::materials::{
@@ -17,8 +19,101 @@ use redlilium_core::mesh::{PrimitiveTopology, VertexLayout};
 use super::conversion::{convert_blend_state, convert_texture_format};
 
 /// Number of descriptor sets each individual descriptor pool can hand out
-/// before a new pool is appended to the slot's chain.
+/// before a new pool is appended to the chain.
 const SETS_PER_POOL: u32 = 1000;
+
+/// A growable chain of persistent descriptor pools that hand out
+/// **individually-freeable** descriptor sets (`FREE_DESCRIPTOR_SET`).
+///
+/// Unlike the old per-frame transient pools (bulk-reset each frame), sets here
+/// live as long as their owning `Arc<BindingGroup>` and are freed one at a time
+/// in [`GpuBindingGroup::Vulkan`](crate::backend::GpuBindingGroup)'s `Drop`.
+/// Shared via `Arc<Mutex<_>>` so that `Drop` — which may run on any thread — can
+/// free back to the same pool the set was allocated from (host access to a pool
+/// must be externally synchronized; the mutex provides it).
+pub struct PersistentDescriptorPools {
+    device: ash::Device,
+    /// Template used to size each additional pool when the current ones fill.
+    pool_sizes: Vec<vk::DescriptorPoolSize>,
+    /// The chain; always at least one pool. Grows (append) when an allocation
+    /// exhausts the current pools.
+    pools: Vec<vk::DescriptorPool>,
+}
+
+impl PersistentDescriptorPools {
+    fn create_pool(
+        device: &ash::Device,
+        pool_sizes: &[vk::DescriptorPoolSize],
+    ) -> Result<vk::DescriptorPool, GraphicsError> {
+        let pool_info = vk::DescriptorPoolCreateInfo::default()
+            .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
+            .max_sets(SETS_PER_POOL)
+            .pool_sizes(pool_sizes);
+        unsafe { device.create_descriptor_pool(&pool_info, None) }.map_err(|e| {
+            GraphicsError::ResourceCreationFailed(format!(
+                "Failed to create persistent descriptor pool: {e:?}"
+            ))
+        })
+    }
+
+    /// Create the chain with a single pool.
+    fn new(
+        device: ash::Device,
+        pool_sizes: Vec<vk::DescriptorPoolSize>,
+    ) -> Result<Self, GraphicsError> {
+        let pool = Self::create_pool(&device, &pool_sizes)?;
+        Ok(Self {
+            device,
+            pool_sizes,
+            pools: vec![pool],
+        })
+    }
+
+    /// Allocate one set of `layout`, returning it together with the pool it came
+    /// from (needed to free it later). Grows the chain once on exhaustion.
+    pub fn allocate(
+        &mut self,
+        layout: vk::DescriptorSetLayout,
+    ) -> Result<(vk::DescriptorSet, vk::DescriptorPool), GraphicsError> {
+        let layouts = [layout];
+        let mut grew = false;
+        loop {
+            let pool = *self.pools.last().expect("chain always has one pool");
+            let alloc_info = vk::DescriptorSetAllocateInfo::default()
+                .descriptor_pool(pool)
+                .set_layouts(&layouts);
+            match unsafe { self.device.allocate_descriptor_sets(&alloc_info) } {
+                Ok(sets) => return Ok((sets[0], pool)),
+                Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY)
+                | Err(vk::Result::ERROR_FRAGMENTED_POOL)
+                    if !grew =>
+                {
+                    let new_pool = Self::create_pool(&self.device, &self.pool_sizes)?;
+                    self.pools.push(new_pool);
+                    grew = true;
+                }
+                Err(e) => {
+                    return Err(GraphicsError::ResourceCreationFailed(format!(
+                        "Failed to allocate persistent descriptor set: {e:?}"
+                    )));
+                }
+            }
+        }
+    }
+
+    /// Destroy every pool in the chain.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the GPU is idle and every set handed out has
+    /// already been dropped (no outstanding `GpuBindingGroup::Vulkan`).
+    unsafe fn destroy(&mut self) {
+        for &pool in &self.pools {
+            unsafe { self.device.destroy_descriptor_pool(pool, None) };
+        }
+        self.pools.clear();
+    }
+}
 
 /// Content key for descriptor-set-layout dedup: one entry per binding, in
 /// declaration order. Labels are deliberately excluded — layouts that differ
@@ -40,15 +135,12 @@ pub struct PipelineManager {
     /// (see `VulkanBackend::vk_texture_format`); pipeline attachment formats
     /// must match what `create_texture` actually created.
     depth24_stencil8_format: vk::Format,
-    /// Pool-size template used to create each additional pool when a slot's
-    /// current pools run out of descriptor sets.
-    pool_sizes: Vec<vk::DescriptorPoolSize>,
-    /// Per-slot growable chain of descriptor pools — at least one per frame in
-    /// flight. A slot's chain grows (an extra pool is appended) when allocation
-    /// exhausts the current pools, removing the previous hard cap of
-    /// [`SETS_PER_POOL`] sets per frame. The whole chain is reset together once
-    /// the slot's fence signals, so resets never race in-flight descriptors.
-    descriptor_pools: [parking_lot::Mutex<Vec<vk::DescriptorPool>>; super::MAX_FRAMES_IN_FLIGHT],
+    /// Persistent, growable descriptor-pool chain handing out individually
+    /// freeable sets for [`BindingGroup`](crate::BindingGroup)s. Shared with the
+    /// `GpuBindingGroup::Vulkan` handles so their `Drop` can free sets back to
+    /// it. Replaces the old per-slot transient pools (binding groups are now
+    /// created eagerly and cached, not allocated per draw).
+    persistent_pools: Arc<Mutex<PersistentDescriptorPools>>,
     /// Driver pipeline cache shared by every graphics/compute pipeline this
     /// manager creates. Seeded from [`Self::pipeline_cache_path`] on startup
     /// and written back in [`Self::destroy`], so shader recompilation is paid
@@ -74,24 +166,6 @@ pub struct PipelineManager {
 }
 
 impl PipelineManager {
-    /// Create a single descriptor pool sized by `pool_sizes`.
-    fn create_pool(
-        device: &ash::Device,
-        pool_sizes: &[vk::DescriptorPoolSize],
-    ) -> Result<vk::DescriptorPool, GraphicsError> {
-        // No FREE_DESCRIPTOR_SET: sets are never freed individually, the whole
-        // pool is bulk-reset once the slot's fence signals. This lets drivers
-        // use a linear allocator and removes the fragmentation failure mode.
-        let pool_info = vk::DescriptorPoolCreateInfo::default()
-            .max_sets(SETS_PER_POOL)
-            .pool_sizes(pool_sizes);
-        unsafe { device.create_descriptor_pool(&pool_info, None) }.map_err(|e| {
-            GraphicsError::ResourceCreationFailed(format!(
-                "Failed to create descriptor pool: {e:?}"
-            ))
-        })
-    }
-
     /// Create a new pipeline manager.
     ///
     /// `device_properties` identifies the (device, driver) pair the on-disk
@@ -137,18 +211,12 @@ impl PipelineManager {
             },
         ];
 
-        // Create one descriptor pool per frame slot so each can be reset
-        // independently; each slot starts with a single-pool chain.
-        let mut slots: Vec<parking_lot::Mutex<Vec<vk::DescriptorPool>>> =
-            Vec::with_capacity(super::MAX_FRAMES_IN_FLIGHT);
-        for _ in 0..super::MAX_FRAMES_IN_FLIGHT {
-            let pool = Self::create_pool(&device, &pool_sizes)?;
-            slots.push(parking_lot::Mutex::new(vec![pool]));
-        }
-        let descriptor_pools: [parking_lot::Mutex<Vec<vk::DescriptorPool>>;
-            super::MAX_FRAMES_IN_FLIGHT] = slots
-            .try_into()
-            .unwrap_or_else(|_| unreachable!("created exactly MAX_FRAMES_IN_FLIGHT pools"));
+        // A single persistent pool chain hands out individually-freeable sets
+        // for eagerly-created binding groups (freed on the group's Drop).
+        let persistent_pools = Arc::new(Mutex::new(PersistentDescriptorPools::new(
+            device.clone(),
+            pool_sizes,
+        )?));
 
         let pipeline_cache_path = pipeline_cache_disk_path();
         let pipeline_cache =
@@ -157,8 +225,7 @@ impl PipelineManager {
         Ok(Self {
             device,
             depth24_stencil8_format,
-            pool_sizes,
-            descriptor_pools,
+            persistent_pools,
             pipeline_cache,
             pipeline_cache_path,
             pipeline_cache_dirty: std::sync::atomic::AtomicBool::new(false),
@@ -504,47 +571,10 @@ impl PipelineManager {
         Ok(layout)
     }
 
-    /// Allocate a descriptor set from the pool for the given frame slot.
-    pub fn allocate_descriptor_set(
-        &self,
-        slot: usize,
-        layout: vk::DescriptorSetLayout,
-    ) -> Result<vk::DescriptorSet, GraphicsError> {
-        let layouts = [layout];
-        let mut chain = self.descriptor_pools[slot].lock();
-
-        // Try the most-recently-added pool; if it's exhausted, append a fresh
-        // pool and retry once. `grew` bounds this so a layout that can't fit
-        // in any single pool errors instead of looping forever.
-        // (FRAGMENTED_POOL is kept defensively: without FREE_DESCRIPTOR_SET
-        // pools can't actually fragment.)
-        let mut grew = false;
-        loop {
-            let pool = *chain
-                .last()
-                .expect("each slot always has at least one pool");
-            let alloc_info = vk::DescriptorSetAllocateInfo::default()
-                .descriptor_pool(pool)
-                .set_layouts(&layouts);
-
-            match unsafe { self.device.allocate_descriptor_sets(&alloc_info) } {
-                Ok(sets) => return Ok(sets[0]),
-                Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY)
-                | Err(vk::Result::ERROR_FRAGMENTED_POOL)
-                    if !grew =>
-                {
-                    // Grow the chain and retry against the fresh pool.
-                    let new_pool = Self::create_pool(&self.device, &self.pool_sizes)?;
-                    chain.push(new_pool);
-                    grew = true;
-                }
-                Err(e) => {
-                    return Err(GraphicsError::ResourceCreationFailed(format!(
-                        "Failed to allocate descriptor set: {e:?}"
-                    )));
-                }
-            }
-        }
+    /// The shared persistent descriptor-pool chain. Cloned into each
+    /// `GpuBindingGroup::Vulkan` so its `Drop` can free the set back.
+    pub fn persistent_pools(&self) -> &Arc<Mutex<PersistentDescriptorPools>> {
+        &self.persistent_pools
     }
 
     /// Create a graphics pipeline.
@@ -792,26 +822,6 @@ impl PipelineManager {
         self.mark_cache_dirty();
         Ok(pipelines[0])
     }
-
-    /// Reset every descriptor pool in a frame slot's chain, freeing all their
-    /// descriptor sets. Pools are kept (not destroyed) so the chain — sized to
-    /// the slot's peak usage — is reused next frame without reallocation.
-    ///
-    /// This should only be called after the slot's fence has signaled,
-    /// ensuring no descriptor sets from these pools are in use by the GPU.
-    pub fn reset_descriptor_pool(&self, slot: usize) -> Result<(), GraphicsError> {
-        let chain = self.descriptor_pools[slot].lock();
-        for &pool in chain.iter() {
-            unsafe {
-                self.device
-                    .reset_descriptor_pool(pool, vk::DescriptorPoolResetFlags::empty())
-            }
-            .map_err(|e| {
-                GraphicsError::Internal(format!("Failed to reset descriptor pool: {e:?}"))
-            })?;
-        }
-        Ok(())
-    }
 }
 
 impl PipelineManager {
@@ -852,14 +862,10 @@ impl PipelineManager {
             }
         }
 
-        // Destroy every pool in every per-slot chain.
-        for slot in &self.descriptor_pools {
-            for &pool in slot.lock().iter() {
-                unsafe {
-                    self.device.destroy_descriptor_pool(pool, None);
-                }
-            }
-        }
+        // Destroy the persistent descriptor pools. Safe: caller guarantees the
+        // GPU is idle; any outstanding sets belong to `GpuBindingGroup`s that
+        // are dropped before backend teardown (they keep the device alive).
+        unsafe { self.persistent_pools.lock().destroy() };
 
         self.destroyed = true;
     }

@@ -10,10 +10,11 @@ use redlilium_core::math::{self, Mat4, Vec3, mat4_to_cols_array_2d};
 use redlilium_ecs::physics::physics2d::PhysicsWorld2D;
 use redlilium_ecs::physics::physics3d::PhysicsWorld3D;
 use redlilium_graphics::{
-    BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BufferUsage, GraphicsDevice,
-    GraphicsPass, Material, MaterialDescriptor, MaterialInstance, Mesh, RenderGraph, RingBuffer,
-    ShaderSource, ShaderStage, ShaderStageFlags, Texture, TextureDescriptor, TextureFormat,
-    TextureUsage, TransferConfig, TransferOperation, TransferPass,
+    BindingGroupDescriptor, BindingLayout, BindingLayoutEntry, BindingType, BufferUsage,
+    DrawCommand, GraphicsDevice, GraphicsPass, Material, MaterialDescriptor, MaterialInstance,
+    Mesh, RenderGraph, RingBuffer, ShaderSource, ShaderStage, ShaderStageFlags, Texture,
+    TextureDescriptor, TextureFormat, TextureUsage, TransferConfig, TransferOperation,
+    TransferPass,
 };
 
 const MAX_INSTANCES: usize = 4096;
@@ -28,6 +29,10 @@ struct CameraUniforms {
     view_proj: mat4x4<f32>,
     camera_pos: vec4<f32>,
     light_dir: vec4<f32>,
+    // Element index of this draw's first instance within the whole-buffer-bound
+    // instance ring; added to instance_index so the binding group stays
+    // frame-invariant. Selected per draw via the camera's dynamic offset.
+    instance_base: u32,
 }
 
 struct ShapeInstance {
@@ -36,6 +41,11 @@ struct ShapeInstance {
     model_2: vec4<f32>,
     model_3: vec4<f32>,
     color: vec4<f32>,
+    // Padding to a 128-byte stride so the CPU can address a batch's block by an
+    // exact element index (CameraUniforms.instance_base).
+    _pad0: vec4<f32>,
+    _pad1: vec4<f32>,
+    _pad2: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> camera: CameraUniforms;
@@ -55,7 +65,7 @@ struct VertexOutput {
 
 @vertex
 fn vs_main(in: VertexInput, @builtin(instance_index) iid: u32) -> VertexOutput {
-    let inst = instances[iid];
+    let inst = instances[camera.instance_base + iid];
     let model = mat4x4<f32>(inst.model_0, inst.model_1, inst.model_2, inst.model_3);
     let world_pos = model * vec4(in.position, 1.0);
     let normal_mat = mat3x3<f32>(model[0].xyz, model[1].xyz, model[2].xyz);
@@ -95,13 +105,22 @@ struct CameraUniforms {
     view_proj: [[f32; 4]; 4],
     camera_pos: [f32; 4],
     light_dir: [f32; 4],
+    /// Element index of this draw's first instance within the instance ring;
+    /// added to `instance_index` in the vertex shader.
+    instance_base: u32,
+    _pad: [u32; 3],
 }
 
+/// Per-instance data. Padded to 128 bytes (a divisor of the ring's 256-byte
+/// allocation alignment) so each batch's block starts at an offset that is an
+/// exact multiple of the stride, making `offset / 128` a valid element index
+/// (passed to the shader as [`CameraUniforms::instance_base`]).
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct ShapeInstance {
     model: [[f32; 4]; 4],
     color: [f32; 4],
+    _pad: [[f32; 4]; 3],
 }
 
 // ---------------------------------------------------------------------------
@@ -181,24 +200,37 @@ fn generate_box_cpu() -> redlilium_graphics::CpuMesh {
 
 struct ShapeBatch {
     mesh: Arc<Mesh>,
-    /// Rebuilt each frame to bind this frame's camera + instance ring slots.
-    material_instance: Arc<MaterialInstance>,
     count: u32,
+    /// This frame's camera dynamic offset for this batch. The camera slot it
+    /// points at carries the batch's `instance_base`, so the shared (frame-
+    /// invariant) binding group needs no per-batch rebuild.
+    camera_offset: u32,
 }
 
 // ---------------------------------------------------------------------------
 // PhysicsRenderer
 // ---------------------------------------------------------------------------
 
+/// # Frame-invariant binding group (issue #40)
+///
+/// A single [`MaterialInstance`] with one binding group is created in [`new`]
+/// and shared by both shape batches, so the demo issues zero
+/// `create_binding_group` calls per frame. Binding 0 is the camera ring bound
+/// as a dynamic uniform at offset 0; binding 1 is the **whole** instance ring
+/// bound at offset 0. Each frame the two batches write their instances into
+/// distinct ring blocks and get their own camera slot (carrying that block's
+/// `instance_base`); the per-draw camera dynamic offset selects the slot, and
+/// the vertex shader adds `instance_base` to `instance_index`.
 pub struct PhysicsRenderer {
     depth_texture: Arc<Texture>,
-    /// Per-frame camera uniform ring (one slot written per frame).
+    /// Per-frame camera uniform ring (one slot written per batch per frame).
     camera_ring: RingBuffer,
-    /// Per-frame instance storage ring (sphere + box slots written per frame).
+    /// Per-frame instance storage ring (bound in full; batches write distinct
+    /// blocks selected in-shader by `instance_base`).
     instance_ring: RingBuffer,
-    material: Arc<Material>,
-    #[allow(dead_code)]
-    binding_layout: Arc<BindingLayout>,
+    /// Shared, frame-invariant material instance (its binding group is created
+    /// once and reused by every draw).
+    material_instance: Arc<MaterialInstance>,
     sphere_batch: ShapeBatch,
     box_batch: ShapeBatch,
     /// Mesh uploads queued at init, flushed into the first frame's graph.
@@ -240,11 +272,12 @@ impl PhysicsRenderer {
         )
         .expect("instance ring");
 
-        // Binding layout: binding 0 = camera uniform, binding 1 = instance storage
+        // Binding layout: binding 0 = camera uniform (dynamic — the per-draw
+        // offset selects each batch's slot), binding 1 = instance storage.
         let binding_layout = Arc::new(
             BindingLayout::new()
                 .with_entry(
-                    BindingLayoutEntry::new(0, BindingType::UniformBuffer)
+                    BindingLayoutEntry::new(0, BindingType::DynamicUniformBuffer)
                         .with_visibility(ShaderStageFlags::VERTEX | ShaderStageFlags::FRAGMENT),
                 )
                 .with_entry(
@@ -291,64 +324,74 @@ impl PhysicsRenderer {
         pending_uploads.extend(sphere_ops);
         pending_uploads.extend(box_ops);
 
-        // Initial material instances binding the rings' first slots; rebuilt each
-        // frame by `upload_batch` to point at the frame's camera + instance slots.
-        let sphere_mi = Self::make_instance(&material, &camera_ring, 0, &instance_ring, 0, 1);
-        let box_mi = Self::make_instance(&material, &camera_ring, 0, &instance_ring, 0, 1);
+        // Single frame-invariant material instance shared by both batches: the
+        // binding group is created once (camera dynamic uniform at offset 0,
+        // whole instance ring at offset 0) and reused every frame.
+        let material_instance = Self::make_instance(
+            device,
+            binding_layout,
+            &material,
+            &camera_ring,
+            &instance_ring,
+        );
 
         Self {
             depth_texture,
             camera_ring,
             instance_ring,
-            material,
-            binding_layout,
+            material_instance,
             sphere_batch: ShapeBatch {
                 mesh: sphere_mesh,
-                material_instance: sphere_mi,
                 count: 0,
+                camera_offset: 0,
             },
             box_batch: ShapeBatch {
                 mesh: box_mesh,
-                material_instance: box_mi,
                 count: 0,
+                camera_offset: 0,
             },
             pending_uploads,
         }
     }
 
-    /// Build a material instance binding the camera slot (group 0, binding 0) and
-    /// an instance ring slot (binding 1) by range.
+    /// Build the shared, frame-invariant material instance: binding 0 is the
+    /// camera ring bound at offset 0 (a dynamic uniform selected per draw),
+    /// binding 1 is the **whole** instance ring bound at offset 0 (each draw's
+    /// block is selected in-shader by `CameraUniforms.instance_base`).
     fn make_instance(
+        device: &Arc<GraphicsDevice>,
+        layout: Arc<BindingLayout>,
         material: &Arc<Material>,
         camera_ring: &RingBuffer,
-        camera_off: u64,
         instance_ring: &RingBuffer,
-        instance_off: u64,
-        instance_size: u64,
     ) -> Arc<MaterialInstance> {
         let camera_size = std::mem::size_of::<CameraUniforms>() as u64;
-        #[allow(clippy::arc_with_non_send_sync)]
-        let bg = Arc::new(
-            BindingGroup::new()
-                .with_buffer_range(0, camera_ring.buffer().clone(), camera_off, camera_size)
-                .with_buffer_range(
-                    1,
-                    instance_ring.buffer().clone(),
-                    instance_off,
-                    instance_size,
-                ),
-        );
+        let bg = device
+            .create_binding_group(
+                layout,
+                BindingGroupDescriptor::new()
+                    .with_buffer_range(0, camera_ring.buffer().clone(), 0, camera_size)
+                    .with_buffer_range(
+                        1,
+                        instance_ring.buffer().clone(),
+                        0,
+                        instance_ring.capacity(),
+                    ),
+            )
+            .expect("create shape binding group");
         #[allow(clippy::arc_with_non_send_sync)]
         Arc::new(MaterialInstance::new(material.clone()).with_binding_group(bg))
     }
 
-    /// Write this frame's camera uniforms into the camera ring; returns the slot
-    /// offset.
-    fn write_camera_ring(&mut self, view_proj: Mat4, camera_pos: Vec3) -> u64 {
+    /// Write a camera slot carrying `instance_base` into the camera ring; returns
+    /// its offset (used as a batch's per-draw dynamic offset).
+    fn write_camera_slot(&mut self, view_proj: Mat4, camera_pos: Vec3, instance_base: u32) -> u32 {
         let uniforms = CameraUniforms {
             view_proj: mat4_to_cols_array_2d(&view_proj),
             camera_pos: [camera_pos.x, camera_pos.y, camera_pos.z, 0.0],
             light_dir: [0.4, 0.8, 0.5, 0.0],
+            instance_base,
+            _pad: [0; 3],
         };
         let bytes = bytemuck::bytes_of(&uniforms);
         let size = bytes.len() as u64;
@@ -361,16 +404,14 @@ impl PhysicsRenderer {
         self.camera_ring
             .write(&alloc, bytes)
             .expect("write camera ring");
-        alloc.offset
+        alloc.offset as u32
     }
 
-    /// Write a batch's instances into the instance ring and rebuild its material
-    /// instance to bind this frame's camera + instance slots. Returns the count.
-    fn upload_batch(
-        &mut self,
-        camera_off: u64,
-        instances: &[ShapeInstance],
-    ) -> Arc<MaterialInstance> {
+    /// Write a batch's instances into the instance ring. Returns
+    /// `(instance_base, count)`: the block's element index (for the shader) and
+    /// the number of instances written. The binding group is frame-invariant, so
+    /// nothing is rebuilt here.
+    fn write_instances(&mut self, instances: &[ShapeInstance]) -> (u32, u32) {
         let count = instances.len().min(MAX_INSTANCES);
         let size = (count.max(1) * INSTANCE_STRIDE) as u64;
         let alloc = self.instance_ring.allocate(size).unwrap_or_else(|| {
@@ -385,14 +426,11 @@ impl PhysicsRenderer {
                 .write(&alloc, bytes)
                 .expect("write instance ring");
         }
-        Self::make_instance(
-            &self.material,
-            &self.camera_ring,
-            camera_off,
-            &self.instance_ring,
-            alloc.offset,
-            size,
-        )
+        // The ring's 256-byte alignment is a multiple of the 128-byte stride, so
+        // the offset divides exactly into an element index.
+        debug_assert_eq!(alloc.offset % INSTANCE_STRIDE as u64, 0);
+        let base = (alloc.offset / INSTANCE_STRIDE as u64) as u32;
+        (base, count as u32)
     }
 
     /// Flush queued mesh uploads into the current frame's render graph.
@@ -426,8 +464,6 @@ impl PhysicsRenderer {
     /// Build instance data from a 3D physics world and upload to the rings.
     pub fn update_3d(&mut self, physics: &PhysicsWorld3D, view_proj: Mat4, camera_pos: Vec3) {
         use redlilium_ecs::physics::rapier3d::prelude::*;
-
-        let camera_off = self.write_camera_ring(view_proj, camera_pos);
 
         let mut sphere_instances = Vec::new();
         let mut box_instances = Vec::new();
@@ -470,6 +506,7 @@ impl PhysicsRenderer {
                     sphere_instances.push(ShapeInstance {
                         model: mat4_to_cols_array_2d(&model),
                         color,
+                        ..bytemuck::Zeroable::zeroed()
                     });
                 }
                 TypedShape::Cuboid(cuboid) => {
@@ -481,6 +518,7 @@ impl PhysicsRenderer {
                     box_instances.push(ShapeInstance {
                         model: mat4_to_cols_array_2d(&model),
                         color,
+                        ..bytemuck::Zeroable::zeroed()
                     });
                 }
                 TypedShape::Capsule(capsule) => {
@@ -493,6 +531,7 @@ impl PhysicsRenderer {
                     sphere_instances.push(ShapeInstance {
                         model: mat4_to_cols_array_2d(&model),
                         color,
+                        ..bytemuck::Zeroable::zeroed()
                     });
                 }
                 // For trimesh, heightfield, etc. — render as a box using AABB
@@ -510,23 +549,26 @@ impl PhysicsRenderer {
                     box_instances.push(ShapeInstance {
                         model: mat4_to_cols_array_2d(&model),
                         color,
+                        ..bytemuck::Zeroable::zeroed()
                     });
                 }
             }
         }
 
         // Upload instances into the ring and rebuild the batches' bindings.
-        self.sphere_batch.material_instance = self.upload_batch(camera_off, &sphere_instances);
-        self.sphere_batch.count = sphere_instances.len().min(MAX_INSTANCES) as u32;
-        self.box_batch.material_instance = self.upload_batch(camera_off, &box_instances);
-        self.box_batch.count = box_instances.len().min(MAX_INSTANCES) as u32;
+        // Instances first: each batch's block base is folded into its camera slot.
+        let (sphere_base, sphere_count) = self.write_instances(&sphere_instances);
+        let (box_base, box_count) = self.write_instances(&box_instances);
+        self.sphere_batch.count = sphere_count;
+        self.sphere_batch.camera_offset =
+            self.write_camera_slot(view_proj, camera_pos, sphere_base);
+        self.box_batch.count = box_count;
+        self.box_batch.camera_offset = self.write_camera_slot(view_proj, camera_pos, box_base);
     }
 
     /// Build instance data from a 2D physics world and upload to the rings.
     pub fn update_2d(&mut self, physics: &PhysicsWorld2D, view_proj: Mat4, camera_pos: Vec3) {
         use redlilium_ecs::physics::rapier2d::prelude::*;
-
-        let camera_off = self.write_camera_ring(view_proj, camera_pos);
 
         let mut sphere_instances = Vec::new();
         let mut box_instances = Vec::new();
@@ -566,6 +608,7 @@ impl PhysicsRenderer {
                     sphere_instances.push(ShapeInstance {
                         model: mat4_to_cols_array_2d(&model),
                         color,
+                        ..bytemuck::Zeroable::zeroed()
                     });
                 }
                 TypedShape::Cuboid(cuboid) => {
@@ -576,6 +619,7 @@ impl PhysicsRenderer {
                     box_instances.push(ShapeInstance {
                         model: mat4_to_cols_array_2d(&model),
                         color,
+                        ..bytemuck::Zeroable::zeroed()
                     });
                 }
                 TypedShape::Capsule(capsule) => {
@@ -587,6 +631,7 @@ impl PhysicsRenderer {
                     sphere_instances.push(ShapeInstance {
                         model: mat4_to_cols_array_2d(&model),
                         color,
+                        ..bytemuck::Zeroable::zeroed()
                     });
                 }
                 _ => {
@@ -601,32 +646,34 @@ impl PhysicsRenderer {
                     box_instances.push(ShapeInstance {
                         model: mat4_to_cols_array_2d(&model),
                         color,
+                        ..bytemuck::Zeroable::zeroed()
                     });
                 }
             }
         }
 
-        self.sphere_batch.material_instance = self.upload_batch(camera_off, &sphere_instances);
-        self.sphere_batch.count = sphere_instances.len().min(MAX_INSTANCES) as u32;
-        self.box_batch.material_instance = self.upload_batch(camera_off, &box_instances);
-        self.box_batch.count = box_instances.len().min(MAX_INSTANCES) as u32;
+        // Instances first: each batch's block base is folded into its camera slot.
+        let (sphere_base, sphere_count) = self.write_instances(&sphere_instances);
+        let (box_base, box_count) = self.write_instances(&box_instances);
+        self.sphere_batch.count = sphere_count;
+        self.sphere_batch.camera_offset =
+            self.write_camera_slot(view_proj, camera_pos, sphere_base);
+        self.box_batch.count = box_count;
+        self.box_batch.camera_offset = self.write_camera_slot(view_proj, camera_pos, box_base);
     }
 
-    /// Add draw commands for all shape batches to the graphics pass.
+    /// Add draw commands for all shape batches to the graphics pass. Both draws
+    /// share the frame-invariant binding group; the per-batch camera dynamic
+    /// offset selects the slot carrying that batch's `instance_base`.
     pub fn add_draws(&self, pass: &mut GraphicsPass) {
-        if self.sphere_batch.count > 0 {
-            pass.add_draw_instanced(
-                self.sphere_batch.mesh.clone(),
-                self.sphere_batch.material_instance.clone(),
-                self.sphere_batch.count,
-            );
-        }
-        if self.box_batch.count > 0 {
-            pass.add_draw_instanced(
-                self.box_batch.mesh.clone(),
-                self.box_batch.material_instance.clone(),
-                self.box_batch.count,
-            );
+        for batch in [&self.sphere_batch, &self.box_batch] {
+            if batch.count > 0 {
+                pass.add_draw_command(
+                    DrawCommand::new(batch.mesh.clone(), self.material_instance.clone())
+                        .with_instance_count(batch.count)
+                        .with_dynamic_offsets(vec![vec![batch.camera_offset]]),
+                );
+            }
         }
     }
 }

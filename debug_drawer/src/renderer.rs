@@ -6,7 +6,8 @@ use redlilium_graphics::graph::{
     RenderTargetConfig,
 };
 use redlilium_graphics::materials::{
-    BindingGroup, MaterialDescriptor, MaterialInstance, ShaderSource, ShaderStage,
+    BindingGroup, BindingGroupDescriptor, MaterialDescriptor, MaterialInstance, ShaderSource,
+    ShaderStage,
 };
 use redlilium_graphics::mesh::{
     Mesh, PrimitiveTopology, VertexAttribute, VertexAttributeFormat, VertexAttributeSemantic,
@@ -41,6 +42,8 @@ const VERTEX_RING_CAPACITY: u64 = 1 << 22;
 pub struct DebugDrawerRenderer {
     device: Arc<GraphicsDevice>,
     material: Arc<Material>,
+    /// Lazily-created uniform binding group (bound with a per-draw dynamic offset).
+    uniform_binding: Option<Arc<BindingGroup>>,
     vertex_layout: Arc<VertexLayout>,
     uniform_ring: RingBuffer,
     vertex_ring: RingBuffer,
@@ -130,6 +133,7 @@ impl DebugDrawerRenderer {
         Self {
             device,
             material,
+            uniform_binding: None,
             vertex_layout,
             uniform_ring,
             vertex_ring,
@@ -182,13 +186,25 @@ impl DebugDrawerRenderer {
         );
 
         let uniform_size = std::mem::size_of::<DebugUniforms>() as u64;
-        #[allow(clippy::arc_with_non_send_sync)]
-        let uniform_binding = Arc::new(BindingGroup::new().with_buffer_range(
-            0,
-            self.uniform_ring.buffer().clone(),
-            0,
-            uniform_size,
-        ));
+        let uniform_binding = match &self.uniform_binding {
+            Some(g) => g.clone(),
+            None => {
+                let g = self
+                    .device
+                    .create_binding_group(
+                        self.material.binding_layouts()[0].clone(),
+                        BindingGroupDescriptor::new().with_buffer_range(
+                            0,
+                            self.uniform_ring.buffer().clone(),
+                            0,
+                            uniform_size,
+                        ),
+                    )
+                    .expect("debug draw uniform binding group");
+                self.uniform_binding = Some(g.clone());
+                g
+            }
+        };
 
         let material_instance = Arc::new(
             MaterialInstance::new(self.material.clone()).with_binding_group(uniform_binding),

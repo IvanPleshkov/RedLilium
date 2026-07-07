@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
 
 use redlilium_graphics::{
-    BackendType, BindingGroup, Buffer, BufferDescriptor, BufferUsage, ColorAttachment,
+    BackendType, BindingGroupDescriptor, Buffer, BufferDescriptor, BufferUsage, ColorAttachment,
     DepthStencilAttachment, FramePipeline, GraphicsDevice, GraphicsInstance, GraphicsPass,
     InstanceParameters, LoadOp, Material, MaterialDescriptor, MaterialInstance, Mesh,
     MeshDescriptor, RenderGraph, RenderTargetConfig, SamplerDescriptor, ShaderSource, StoreOp,
@@ -835,12 +835,16 @@ pub fn create_texture_sample_instance(
         .expect("Failed to create sampler");
 
     // Create binding group with texture at binding 0 and sampler at binding 1
-    let binding_group = Arc::new(
-        BindingGroup::new()
-            .with_texture(0, texture)
-            .with_sampler(1, sampler)
-            .with_label("texture_sample_bindings"),
-    );
+    let binding_group = ctx
+        .device
+        .create_binding_group(
+            material.binding_layouts()[0].clone(),
+            BindingGroupDescriptor::new()
+                .with_texture(0, texture)
+                .with_sampler(1, sampler)
+                .with_label("texture_sample_bindings"),
+        )
+        .expect("Failed to create texture sample binding group");
 
     Arc::new(
         MaterialInstance::new(material)

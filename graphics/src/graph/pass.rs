@@ -848,7 +848,7 @@ fn extract_material_resources(
     let binding_layouts = material.material().binding_layouts();
     for (group_index, group) in material.binding_groups().iter().enumerate() {
         let layout = binding_layouts.get(group_index);
-        for entry in &group.entries {
+        for entry in group.entries() {
             let buffer = match &entry.resource {
                 BoundResource::Texture(tex) => {
                     usage.add_texture(Arc::clone(tex), TextureAccessMode::ShaderRead);

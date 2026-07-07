@@ -187,6 +187,7 @@ impl EcsScene {
                     model: mat4_to_cols_array_2d(&global.0),
                     base_color: sphere.base_color,
                     metallic_roughness: [sphere.metallic, sphere.roughness, 0.0, 0.0],
+                    ..bytemuck::Zeroable::zeroed()
                 });
             }
         }

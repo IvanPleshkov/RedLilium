@@ -43,6 +43,7 @@ pub(crate) const FENCE_WAIT_TIMEOUT_NS: u64 = 10_000_000_000;
 /// so a destroyed texture's id is never reused (no layout aliasing).
 static NEXT_TEXTURE_ID: AtomicU64 = AtomicU64::new(1);
 pub use layout::{TextureLayout, TextureLayoutTracker, TextureUsageGraph};
+pub use pipeline::PersistentDescriptorPools;
 
 /// Handles of destroyed resources awaiting removal from the barrier trackers.
 ///
@@ -68,10 +69,28 @@ use self::layout::TextureId;
 /// between draws but retain their capacity across frames.
 #[derive(Default)]
 struct VulkanEncoderScratch {
-    descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
+    /// Cached descriptor sets collected per draw/dispatch for
+    /// `cmd_bind_descriptor_sets`. Reused across draws to avoid per-draw heap
+    /// allocation. (Binding groups are now created eagerly, so there is no
+    /// per-draw allocation/write scratch.)
     descriptor_sets: Vec<vk::DescriptorSet>,
-    buffer_infos: Vec<vk::DescriptorBufferInfo>,
-    image_infos: Vec<vk::DescriptorImageInfo>,
+}
+
+/// Whether two binding layouts are descriptor-set-layout compatible: identical
+/// bindings, in order, with matching type and stage visibility. A binding group
+/// created against a layout compatible with the material's set layout binds
+/// correctly (content-equal layouts share the same `VkDescriptorSetLayout` via
+/// the pipeline manager's dedup).
+fn binding_layouts_compatible(
+    a: &crate::materials::BindingLayout,
+    b: &crate::materials::BindingLayout,
+) -> bool {
+    a.entries.len() == b.entries.len()
+        && a.entries.iter().zip(&b.entries).all(|(x, y)| {
+            x.binding == y.binding
+                && x.binding_type == y.binding_type
+                && x.visibility == y.visibility
+        })
 }
 
 /// A texture view for a Vulkan surface texture (swapchain image).
@@ -511,9 +530,9 @@ impl VulkanBackend {
         // TextureLayoutTracker docs) — no per-frame reset, so persistent
         // textures keep their contents.
 
-        // Reset the oldest slot's descriptor pool — safe because the fence wait
-        // guarantees the GPU is done with all descriptor sets from this slot.
-        let _ = self.pipeline_manager.reset_descriptor_pool(oldest);
+        // Binding-group descriptor sets are no longer per-slot/transient: they
+        // are created eagerly, cached for the group's lifetime, and freed on the
+        // group's Drop — so there is no per-slot descriptor pool to reset here.
 
         // Return the oldest slot's staging-belt chunks to the pool — same
         // safety argument: the fence wait guarantees their copies completed.
@@ -1149,6 +1168,206 @@ impl VulkanBackend {
         })
     }
 
+    /// Create a binding group: allocate one descriptor set from the persistent
+    /// pool for `layout`'s (deduped) `VkDescriptorSetLayout` and write it once.
+    ///
+    /// The written set is cached inside the returned handle and bound as-is on
+    /// every draw — encoding performs zero descriptor allocations/writes.
+    pub fn create_binding_group(
+        &self,
+        layout: &crate::materials::BindingLayout,
+        descriptor: &crate::materials::BindingGroupDescriptor,
+    ) -> Result<super::GpuBindingGroup, GraphicsError> {
+        // Deduped layout: a group created against a `BindingLayout` gets the
+        // same `VkDescriptorSetLayout` as any material with an equal-content
+        // layout, so the cached set is compatible with those pipelines.
+        let ds_layout = self.pipeline_manager.create_descriptor_set_layout(layout)?;
+
+        let (descriptor_set, pool) = self
+            .pipeline_manager
+            .persistent_pools()
+            .lock()
+            .allocate(ds_layout)?;
+
+        // Write the set once, now. Freed on the group's Drop.
+        self.write_binding_group_set(descriptor_set, descriptor, layout);
+
+        Ok(super::GpuBindingGroup::Vulkan {
+            device: self.device.clone(),
+            descriptor_set,
+            pool,
+            pools: Arc::clone(self.pipeline_manager.persistent_pools()),
+        })
+    }
+
+    /// Write a freshly-allocated descriptor set from a binding group's
+    /// descriptor. Called once at group-creation time (never per draw).
+    ///
+    /// # Image layout invariant
+    ///
+    /// A set written once at creation must record the layout each sampled image
+    /// will be in **at draw time**, not the (possibly `UNDEFINED`) layout at
+    /// creation time. Every texture bound through a material-instance binding
+    /// group is declared `TextureAccessMode::ShaderRead` by the render graph
+    /// (`graph::pass::extract_material_resources`), so the barrier system always
+    /// transitions it to `SHADER_READ_ONLY_OPTIMAL` before the draw. There are
+    /// no storage-image bindings on this path. Hence the deterministic at-draw
+    /// layout is `SHADER_READ_ONLY_OPTIMAL`.
+    fn write_binding_group_set(
+        &self,
+        descriptor_set: vk::DescriptorSet,
+        descriptor: &crate::materials::BindingGroupDescriptor,
+        layout: &crate::materials::BindingLayout,
+    ) {
+        use crate::materials::BoundResource;
+
+        let mut buffer_infos: Vec<vk::DescriptorBufferInfo> = Vec::new();
+        let mut image_infos: Vec<vk::DescriptorImageInfo> = Vec::new();
+
+        for entry in &descriptor.entries {
+            match &entry.resource {
+                BoundResource::Buffer(buffer) => {
+                    if let GpuBuffer::Vulkan {
+                        buffer: vk_buffer,
+                        size,
+                        ..
+                    } = buffer.gpu_handle()
+                    {
+                        buffer_infos.push(vk::DescriptorBufferInfo {
+                            buffer: *vk_buffer,
+                            offset: 0,
+                            range: *size,
+                        });
+                    }
+                }
+                BoundResource::BufferRange {
+                    buffer,
+                    offset,
+                    size,
+                } => {
+                    if let GpuBuffer::Vulkan {
+                        buffer: vk_buffer, ..
+                    } = buffer.gpu_handle()
+                    {
+                        buffer_infos.push(vk::DescriptorBufferInfo {
+                            buffer: *vk_buffer,
+                            offset: *offset,
+                            range: *size,
+                        });
+                    }
+                }
+                BoundResource::Texture(texture) => {
+                    if let GpuTexture::Vulkan { view, .. } = texture.gpu_handle() {
+                        image_infos.push(vk::DescriptorImageInfo {
+                            sampler: vk::Sampler::null(),
+                            image_view: *view,
+                            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        });
+                    }
+                }
+                BoundResource::Sampler(sampler) => {
+                    if let GpuSampler::Vulkan {
+                        sampler: vk_sampler,
+                        ..
+                    } = sampler.gpu_handle()
+                    {
+                        image_infos.push(vk::DescriptorImageInfo {
+                            sampler: *vk_sampler,
+                            image_view: vk::ImageView::null(),
+                            image_layout: vk::ImageLayout::UNDEFINED,
+                        });
+                    }
+                }
+                BoundResource::CombinedTextureSampler { texture, sampler } => {
+                    if let (
+                        GpuTexture::Vulkan { view, .. },
+                        GpuSampler::Vulkan {
+                            sampler: vk_sampler,
+                            ..
+                        },
+                    ) = (texture.gpu_handle(), sampler.gpu_handle())
+                    {
+                        image_infos.push(vk::DescriptorImageInfo {
+                            sampler: *vk_sampler,
+                            image_view: *view,
+                            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Build write descriptors referencing the info slices.
+        let mut writes: Vec<vk::WriteDescriptorSet> = Vec::new();
+        let mut buffer_idx = 0;
+        let mut image_idx = 0;
+        for entry in &descriptor.entries {
+            // Layout is authoritative for the descriptor type. `create_binding_group`
+            // already validated every binding is declared, so this always resolves.
+            let binding_type = layout
+                .entries
+                .iter()
+                .find(|e| e.binding == entry.binding)
+                .map(|e| e.binding_type);
+
+            let write = match &entry.resource {
+                BoundResource::Buffer(_) | BoundResource::BufferRange { .. } => {
+                    let info = &buffer_infos[buffer_idx..buffer_idx + 1];
+                    buffer_idx += 1;
+                    let descriptor_type = match binding_type {
+                        Some(crate::materials::BindingType::StorageBuffer)
+                        | Some(crate::materials::BindingType::StorageBufferReadOnly) => {
+                            vk::DescriptorType::STORAGE_BUFFER
+                        }
+                        Some(crate::materials::BindingType::DynamicUniformBuffer) => {
+                            vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC
+                        }
+                        _ => vk::DescriptorType::UNIFORM_BUFFER,
+                    };
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(descriptor_set)
+                        .dst_binding(entry.binding)
+                        .descriptor_type(descriptor_type)
+                        .buffer_info(info)
+                }
+                BoundResource::Texture(_) => {
+                    let info = &image_infos[image_idx..image_idx + 1];
+                    image_idx += 1;
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(descriptor_set)
+                        .dst_binding(entry.binding)
+                        .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                        .image_info(info)
+                }
+                BoundResource::Sampler(_) => {
+                    let info = &image_infos[image_idx..image_idx + 1];
+                    image_idx += 1;
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(descriptor_set)
+                        .dst_binding(entry.binding)
+                        .descriptor_type(vk::DescriptorType::SAMPLER)
+                        .image_info(info)
+                }
+                BoundResource::CombinedTextureSampler { .. } => {
+                    let info = &image_infos[image_idx..image_idx + 1];
+                    image_idx += 1;
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(descriptor_set)
+                        .dst_binding(entry.binding)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .image_info(info)
+                }
+            };
+            writes.push(write);
+        }
+
+        if !writes.is_empty() {
+            unsafe {
+                self.device.update_descriptor_sets(&writes, &[]);
+            }
+        }
+    }
+
     /// Create a GPU pipeline from a material descriptor.
     ///
     /// Compiles shaders, creates descriptor set layouts, pipeline layout,
@@ -1555,27 +1774,6 @@ impl VulkanBackend {
         let _ = command_buffers;
 
         Ok(())
-    }
-
-    /// Layout to declare in a sampled-image descriptor for a texture.
-    ///
-    /// Descriptors must state the layout the image will actually be in at
-    /// draw/dispatch time. The barrier system has already transitioned the
-    /// pass's textures when descriptors are written (barriers are generated
-    /// before pass encoding), so the tracked layout is authoritative: a depth
-    /// texture declared `DepthStencilReadOnly` (sampling + depth test, e.g.
-    /// shadow mapping) is in `DEPTH_STENCIL_READ_ONLY_OPTIMAL`, not the
-    /// previously hardcoded `SHADER_READ_ONLY_OPTIMAL`.
-    fn sampled_image_layout(&self, texture_id: u64) -> vk::ImageLayout {
-        match self
-            .layout_tracker
-            .lock()
-            .get_layout(TextureId::from_raw(texture_id))
-        {
-            TextureLayout::DepthStencilReadOnly => vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-            TextureLayout::General => vk::ImageLayout::GENERAL,
-            _ => vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-        }
     }
 
     /// Generate barriers for a pass's resource usage into `batch`.
@@ -2614,8 +2812,6 @@ impl VulkanBackend {
         pass_scissor: vk::Rect2D,
         target_extent: vk::Extent2D,
     ) -> Result<(), GraphicsError> {
-        use crate::materials::BoundResource;
-
         let material_arc = draw_cmd.material.material();
         let mesh = &draw_cmd.mesh;
 
@@ -2634,209 +2830,53 @@ impl VulkanBackend {
         let pipeline = *pipeline;
         let pipeline_layout = *pipeline_layout;
 
-        // Take scratch buffers — reuses capacity from previous draws.
-        // Destructure to allow independent field borrows.
+        // Collect the cached descriptor sets — reuses scratch capacity.
         let scratch = &mut *self.encoder_scratch.lock();
         let VulkanEncoderScratch {
-            descriptor_set_layouts: scratch_ds_layouts,
             descriptor_sets: scratch_ds_sets,
-            buffer_infos: scratch_buffer_infos,
-            image_infos: scratch_image_infos,
             ..
         } = scratch;
 
-        scratch_ds_layouts.clear();
-        scratch_ds_layouts.extend_from_slice(descriptor_set_layouts);
-
-        // Create and bind descriptor sets
         let material_instance = &draw_cmd.material;
         let binding_groups = material_instance.binding_groups();
 
         // A zip would silently drop trailing groups on either side, drawing
         // with unbound descriptor sets (UB) — make the mismatch an error.
-        if binding_groups.len() != scratch_ds_layouts.len() {
+        if binding_groups.len() != descriptor_set_layouts.len() {
             return Err(GraphicsError::InvalidParameter(format!(
                 "material instance provides {} binding group(s) but the material's pipeline \
                  layout declares {} descriptor set(s)",
                 binding_groups.len(),
-                scratch_ds_layouts.len()
+                descriptor_set_layouts.len()
             )));
         }
 
+        // Pull each group's pre-built, cached descriptor set. Zero allocations,
+        // zero writes — the sets were written once at group creation.
         scratch_ds_sets.clear();
-        for (group_idx, (group, ds_layout)) in binding_groups
-            .iter()
-            .zip(scratch_ds_layouts.iter())
-            .enumerate()
-        {
-            let slot = self.current_slot.load(Ordering::Relaxed);
-            let descriptor_set = self
-                .pipeline_manager
-                .allocate_descriptor_set(slot, *ds_layout)?;
-
-            // Get the corresponding binding layout to look up binding types
-            let binding_layout = material_arc.binding_layouts().get(group_idx);
-
-            // Write descriptor set entries — reuse scratch Vecs across binding groups
-            scratch_buffer_infos.clear();
-            scratch_image_infos.clear();
-
-            for entry in &group.entries {
-                match &entry.resource {
-                    BoundResource::Buffer(buffer) => {
-                        if let GpuBuffer::Vulkan {
-                            buffer: vk_buffer,
-                            size,
-                            ..
-                        } = buffer.gpu_handle()
-                        {
-                            scratch_buffer_infos.push(vk::DescriptorBufferInfo {
-                                buffer: *vk_buffer,
-                                offset: 0,
-                                range: *size,
-                            });
-                        }
-                    }
-                    BoundResource::BufferRange {
-                        buffer,
-                        offset,
-                        size,
-                    } => {
-                        if let GpuBuffer::Vulkan {
-                            buffer: vk_buffer, ..
-                        } = buffer.gpu_handle()
-                        {
-                            scratch_buffer_infos.push(vk::DescriptorBufferInfo {
-                                buffer: *vk_buffer,
-                                offset: *offset,
-                                range: *size,
-                            });
-                        }
-                    }
-                    BoundResource::Texture(texture) => {
-                        if let GpuTexture::Vulkan { view, id, .. } = texture.gpu_handle() {
-                            scratch_image_infos.push(vk::DescriptorImageInfo {
-                                sampler: vk::Sampler::null(),
-                                image_view: *view,
-                                image_layout: self.sampled_image_layout(*id),
-                            });
-                        }
-                    }
-                    BoundResource::Sampler(sampler) => {
-                        if let GpuSampler::Vulkan {
-                            sampler: vk_sampler,
-                            ..
-                        } = sampler.gpu_handle()
-                        {
-                            scratch_image_infos.push(vk::DescriptorImageInfo {
-                                sampler: *vk_sampler,
-                                image_view: vk::ImageView::null(),
-                                image_layout: vk::ImageLayout::UNDEFINED,
-                            });
-                        }
-                    }
-                    BoundResource::CombinedTextureSampler { texture, sampler } => {
-                        if let (
-                            GpuTexture::Vulkan { view, id, .. },
-                            GpuSampler::Vulkan {
-                                sampler: vk_sampler,
-                                ..
-                            },
-                        ) = (texture.gpu_handle(), sampler.gpu_handle())
-                        {
-                            scratch_image_infos.push(vk::DescriptorImageInfo {
-                                sampler: *vk_sampler,
-                                image_view: *view,
-                                image_layout: self.sampled_image_layout(*id),
-                            });
-                        }
-                    }
-                }
+        for (group_idx, group) in binding_groups.iter().enumerate() {
+            // The set was allocated against the group's layout; validate it is
+            // compatible with the material's declared set layout (deduped
+            // content-equal layouts share the same VkDescriptorSetLayout, so
+            // this holds by construction — the check guards against a group
+            // built against the wrong layout).
+            if let Some(mat_layout) = material_arc.binding_layouts().get(group_idx)
+                && !Arc::ptr_eq(group.layout(), mat_layout)
+                && !binding_layouts_compatible(group.layout(), mat_layout)
+            {
+                return Err(GraphicsError::InvalidParameter(format!(
+                    "binding group {group_idx} was created against a layout incompatible \
+                     with the material's descriptor set {group_idx}"
+                )));
             }
 
-            // Build write descriptors
-            let mut writes: Vec<vk::WriteDescriptorSet> = Vec::new();
-            let mut buffer_idx = 0;
-            let mut image_idx = 0;
-            for entry in &group.entries {
-                // Look up the binding type from the layout
-                let binding_type = binding_layout.and_then(|layout| {
-                    layout
-                        .entries
-                        .iter()
-                        .find(|e| e.binding == entry.binding)
-                        .map(|e| e.binding_type)
-                });
-
-                let write = match &entry.resource {
-                    BoundResource::Buffer(_) | BoundResource::BufferRange { .. } => {
-                        let info = &scratch_buffer_infos[buffer_idx..buffer_idx + 1];
-                        buffer_idx += 1;
-                        // The layout entry is authoritative for the descriptor
-                        // type; a binding the layout doesn't declare would be
-                        // written as a guessed type into a set the pipeline
-                        // reads differently — error instead.
-                        let Some(binding_type) = binding_type else {
-                            return Err(GraphicsError::InvalidParameter(format!(
-                                "binding {} in group {} is not declared by the material's \
-                                 binding layout",
-                                entry.binding, group_idx
-                            )));
-                        };
-                        let descriptor_type = match binding_type {
-                            crate::materials::BindingType::StorageBuffer
-                            | crate::materials::BindingType::StorageBufferReadOnly => {
-                                vk::DescriptorType::STORAGE_BUFFER
-                            }
-                            crate::materials::BindingType::DynamicUniformBuffer => {
-                                vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC
-                            }
-                            _ => vk::DescriptorType::UNIFORM_BUFFER,
-                        };
-                        vk::WriteDescriptorSet::default()
-                            .dst_set(descriptor_set)
-                            .dst_binding(entry.binding)
-                            .descriptor_type(descriptor_type)
-                            .buffer_info(info)
-                    }
-                    BoundResource::Texture(_) => {
-                        let info = &scratch_image_infos[image_idx..image_idx + 1];
-                        image_idx += 1;
-                        vk::WriteDescriptorSet::default()
-                            .dst_set(descriptor_set)
-                            .dst_binding(entry.binding)
-                            .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                            .image_info(info)
-                    }
-                    BoundResource::Sampler(_) => {
-                        let info = &scratch_image_infos[image_idx..image_idx + 1];
-                        image_idx += 1;
-                        vk::WriteDescriptorSet::default()
-                            .dst_set(descriptor_set)
-                            .dst_binding(entry.binding)
-                            .descriptor_type(vk::DescriptorType::SAMPLER)
-                            .image_info(info)
-                    }
-                    BoundResource::CombinedTextureSampler { .. } => {
-                        let info = &scratch_image_infos[image_idx..image_idx + 1];
-                        image_idx += 1;
-                        vk::WriteDescriptorSet::default()
-                            .dst_set(descriptor_set)
-                            .dst_binding(entry.binding)
-                            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                            .image_info(info)
-                    }
-                };
-                writes.push(write);
-            }
-
-            if !writes.is_empty() {
-                unsafe {
-                    self.device.update_descriptor_sets(&writes, &[]);
-                }
-            }
-
-            scratch_ds_sets.push(descriptor_set);
+            let super::GpuBindingGroup::Vulkan { descriptor_set, .. } = group.gpu_handle() else {
+                return Err(GraphicsError::InvalidParameter(format!(
+                    "binding group {group_idx} has no Vulkan descriptor set \
+                     (resource from a different backend)"
+                )));
+            };
+            scratch_ds_sets.push(*descriptor_set);
         }
 
         // Bind pipeline
@@ -3287,8 +3327,6 @@ impl VulkanBackend {
         cmd: vk::CommandBuffer,
         pass: &crate::graph::ComputePass,
     ) -> Result<(), GraphicsError> {
-        use crate::materials::BoundResource;
-
         if !pass.has_dispatches() {
             return Ok(());
         }
@@ -3313,200 +3351,45 @@ impl VulkanBackend {
 
             let scratch = &mut *self.encoder_scratch.lock();
             let VulkanEncoderScratch {
-                descriptor_set_layouts: scratch_ds_layouts,
                 descriptor_sets: scratch_ds_sets,
-                buffer_infos: scratch_buffer_infos,
-                image_infos: scratch_image_infos,
                 ..
             } = scratch;
 
-            scratch_ds_layouts.clear();
-            scratch_ds_layouts.extend_from_slice(descriptor_set_layouts);
-
-            // Create and bind descriptor sets
             let material_instance = &dispatch_cmd.material;
             let binding_groups = material_instance.binding_groups();
 
             // A zip would silently drop trailing groups on either side,
             // dispatching with unbound descriptor sets (UB) — error instead.
-            if binding_groups.len() != scratch_ds_layouts.len() {
+            if binding_groups.len() != descriptor_set_layouts.len() {
                 return Err(GraphicsError::InvalidParameter(format!(
                     "material instance provides {} binding group(s) but the material's \
                      pipeline layout declares {} descriptor set(s)",
                     binding_groups.len(),
-                    scratch_ds_layouts.len()
+                    descriptor_set_layouts.len()
                 )));
             }
 
+            // Pull each group's cached descriptor set (written once at creation).
             scratch_ds_sets.clear();
-            for (group_idx, (group, ds_layout)) in binding_groups
-                .iter()
-                .zip(scratch_ds_layouts.iter())
-                .enumerate()
-            {
-                let slot = self.current_slot.load(Ordering::Relaxed);
-                let descriptor_set = self
-                    .pipeline_manager
-                    .allocate_descriptor_set(slot, *ds_layout)?;
-
-                let binding_layout = material_arc.binding_layouts().get(group_idx);
-
-                scratch_buffer_infos.clear();
-                scratch_image_infos.clear();
-
-                for entry in &group.entries {
-                    match &entry.resource {
-                        BoundResource::Buffer(buffer) => {
-                            if let GpuBuffer::Vulkan {
-                                buffer: vk_buffer,
-                                size,
-                                ..
-                            } = buffer.gpu_handle()
-                            {
-                                scratch_buffer_infos.push(vk::DescriptorBufferInfo {
-                                    buffer: *vk_buffer,
-                                    offset: 0,
-                                    range: *size,
-                                });
-                            }
-                        }
-                        BoundResource::BufferRange {
-                            buffer,
-                            offset,
-                            size,
-                        } => {
-                            if let GpuBuffer::Vulkan {
-                                buffer: vk_buffer, ..
-                            } = buffer.gpu_handle()
-                            {
-                                scratch_buffer_infos.push(vk::DescriptorBufferInfo {
-                                    buffer: *vk_buffer,
-                                    offset: *offset,
-                                    range: *size,
-                                });
-                            }
-                        }
-                        BoundResource::Texture(texture) => {
-                            if let GpuTexture::Vulkan { view, id, .. } = texture.gpu_handle() {
-                                scratch_image_infos.push(vk::DescriptorImageInfo {
-                                    sampler: vk::Sampler::null(),
-                                    image_view: *view,
-                                    image_layout: self.sampled_image_layout(*id),
-                                });
-                            }
-                        }
-                        BoundResource::Sampler(sampler) => {
-                            if let GpuSampler::Vulkan {
-                                sampler: vk_sampler,
-                                ..
-                            } = sampler.gpu_handle()
-                            {
-                                scratch_image_infos.push(vk::DescriptorImageInfo {
-                                    sampler: *vk_sampler,
-                                    image_view: vk::ImageView::null(),
-                                    image_layout: vk::ImageLayout::UNDEFINED,
-                                });
-                            }
-                        }
-                        BoundResource::CombinedTextureSampler { texture, sampler } => {
-                            if let (
-                                GpuTexture::Vulkan { view, id, .. },
-                                GpuSampler::Vulkan {
-                                    sampler: vk_sampler,
-                                    ..
-                                },
-                            ) = (texture.gpu_handle(), sampler.gpu_handle())
-                            {
-                                scratch_image_infos.push(vk::DescriptorImageInfo {
-                                    sampler: *vk_sampler,
-                                    image_view: *view,
-                                    image_layout: self.sampled_image_layout(*id),
-                                });
-                            }
-                        }
-                    }
+            for (group_idx, group) in binding_groups.iter().enumerate() {
+                if let Some(mat_layout) = material_arc.binding_layouts().get(group_idx)
+                    && !Arc::ptr_eq(group.layout(), mat_layout)
+                    && !binding_layouts_compatible(group.layout(), mat_layout)
+                {
+                    return Err(GraphicsError::InvalidParameter(format!(
+                        "binding group {group_idx} was created against a layout incompatible \
+                         with the material's descriptor set {group_idx}"
+                    )));
                 }
 
-                // Build write descriptors
-                let mut writes: Vec<vk::WriteDescriptorSet> = Vec::new();
-                let mut buffer_idx = 0;
-                let mut image_idx = 0;
-                for entry in &group.entries {
-                    let binding_type = binding_layout.and_then(|layout| {
-                        layout
-                            .entries
-                            .iter()
-                            .find(|e| e.binding == entry.binding)
-                            .map(|e| e.binding_type)
-                    });
-
-                    let write = match &entry.resource {
-                        BoundResource::Buffer(_) | BoundResource::BufferRange { .. } => {
-                            let info = &scratch_buffer_infos[buffer_idx..buffer_idx + 1];
-                            buffer_idx += 1;
-                            // The layout entry is authoritative — see the
-                            // graphics twin in `encode_draw_command`.
-                            let Some(binding_type) = binding_type else {
-                                return Err(GraphicsError::InvalidParameter(format!(
-                                    "binding {} in group {} is not declared by the material's \
-                                     binding layout",
-                                    entry.binding, group_idx
-                                )));
-                            };
-                            let descriptor_type = match binding_type {
-                                crate::materials::BindingType::StorageBuffer
-                                | crate::materials::BindingType::StorageBufferReadOnly => {
-                                    vk::DescriptorType::STORAGE_BUFFER
-                                }
-                                crate::materials::BindingType::DynamicUniformBuffer => {
-                                    vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC
-                                }
-                                _ => vk::DescriptorType::UNIFORM_BUFFER,
-                            };
-                            vk::WriteDescriptorSet::default()
-                                .dst_set(descriptor_set)
-                                .dst_binding(entry.binding)
-                                .descriptor_type(descriptor_type)
-                                .buffer_info(info)
-                        }
-                        BoundResource::Texture(_) => {
-                            let info = &scratch_image_infos[image_idx..image_idx + 1];
-                            image_idx += 1;
-                            vk::WriteDescriptorSet::default()
-                                .dst_set(descriptor_set)
-                                .dst_binding(entry.binding)
-                                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                                .image_info(info)
-                        }
-                        BoundResource::Sampler(_) => {
-                            let info = &scratch_image_infos[image_idx..image_idx + 1];
-                            image_idx += 1;
-                            vk::WriteDescriptorSet::default()
-                                .dst_set(descriptor_set)
-                                .dst_binding(entry.binding)
-                                .descriptor_type(vk::DescriptorType::SAMPLER)
-                                .image_info(info)
-                        }
-                        BoundResource::CombinedTextureSampler { .. } => {
-                            let info = &scratch_image_infos[image_idx..image_idx + 1];
-                            image_idx += 1;
-                            vk::WriteDescriptorSet::default()
-                                .dst_set(descriptor_set)
-                                .dst_binding(entry.binding)
-                                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                                .image_info(info)
-                        }
-                    };
-                    writes.push(write);
-                }
-
-                if !writes.is_empty() {
-                    unsafe {
-                        self.device.update_descriptor_sets(&writes, &[]);
-                    }
-                }
-
-                scratch_ds_sets.push(descriptor_set);
+                let super::GpuBindingGroup::Vulkan { descriptor_set, .. } = group.gpu_handle()
+                else {
+                    return Err(GraphicsError::InvalidParameter(format!(
+                        "binding group {group_idx} has no Vulkan descriptor set \
+                         (resource from a different backend)"
+                    )));
+                };
+                scratch_ds_sets.push(*descriptor_set);
             }
 
             // Bind pipeline

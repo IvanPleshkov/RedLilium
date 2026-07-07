@@ -11,6 +11,11 @@ struct InstanceData {
     column_major float4x4 model;
     float4 base_color;
     float4 metallic_roughness;
+    // Padding to a 128-byte stride so the CPU can address this frame's instance
+    // block by an exact element index (CameraUniforms.instance_base); see
+    // SphereInstance in uniforms.rs.
+    float4 _pad0;
+    float4 _pad1;
 };
 
 // =============================================================================
@@ -23,6 +28,9 @@ cbuffer CameraUniforms {
     column_major float4x4 view;
     column_major float4x4 proj;
     float4 camera_pos;
+    // First-instance element index into the whole-buffer-bound instance ring;
+    // added to SV_InstanceID so the instance binding group stays frame-invariant.
+    uint instance_base;
 };
 
 [[vk::binding(1, 0)]]
@@ -53,7 +61,7 @@ struct VsOutput {
 VsOutput vs_main(VsInput input) {
     VsOutput output;
 
-    InstanceData instance = instances[input.instance_id];
+    InstanceData instance = instances[instance_base + input.instance_id];
     float4 world_pos = mul(instance.model, float4(input.position, 1.0));
     float3x3 normal_matrix = float3x3(
         instance.model[0].xyz,

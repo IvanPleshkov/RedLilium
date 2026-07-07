@@ -13,11 +13,12 @@ use redlilium_ecs::{
     Camera, CameraTarget, Entity, GlobalTransform, MeshRenderer, Visibility, World, shaders,
 };
 use redlilium_graphics::{
-    BindingGroup, Buffer, BufferDescriptor, BufferTextureCopyRegion, BufferTextureLayout,
-    BufferUsage, ColorAttachment, DepthStencilAttachment, DrawCommand, GraphicsDevice,
-    GraphicsPass, LoadOp, Material, MaterialInstance, RenderTarget, RenderTargetConfig, RingBuffer,
-    ScissorRect, StoreOp, TextureCopyLocation, TextureDescriptor, TextureFormat, TextureOrigin,
-    TextureUsage, TransferConfig, TransferOperation, TransferPass, Viewport,
+    BindingGroup, BindingGroupDescriptor, Buffer, BufferDescriptor, BufferTextureCopyRegion,
+    BufferTextureLayout, BufferUsage, ColorAttachment, DepthStencilAttachment, DrawCommand,
+    GraphicsDevice, GraphicsPass, LoadOp, Material, MaterialInstance, RenderTarget,
+    RenderTargetConfig, RingBuffer, ScissorRect, StoreOp, TextureCopyLocation, TextureDescriptor,
+    TextureFormat, TextureOrigin, TextureUsage, TransferConfig, TransferOperation, TransferPass,
+    Viewport,
 };
 
 /// Manages GPU resources and rendering for the editor's SceneView panel.
@@ -38,6 +39,10 @@ pub struct SceneViewState {
 
     // --- Picking ---
     entity_index_material: Arc<Material>,
+    /// The picking group (group 0): binds the entity-index ring at offset 0, the
+    /// per-draw dynamic offset selecting the entity's slot. Built once (the ring
+    /// buffer and material layout are stable) and reused every frame.
+    entity_index_group: Arc<BindingGroup>,
     entity_index_texture: Arc<redlilium_graphics::Texture>,
     readback_buffer: Arc<Buffer>,
     /// Pixel coordinates (physical) of a pending pick request, resolved next frame.
@@ -109,6 +114,19 @@ impl SceneViewState {
         )
         .expect("Failed to create entity-index transform ring");
 
+        // Picking group 0: eager, built once against the stable ring buffer.
+        let entity_index_group = device
+            .create_binding_group(
+                entity_index_material.binding_layouts()[0].clone(),
+                BindingGroupDescriptor::new().with_buffer_range(
+                    0,
+                    entity_index_ring.buffer().clone(),
+                    0,
+                    std::mem::size_of::<shaders::EntityIndexUniforms>() as u64,
+                ),
+            )
+            .expect("Failed to create entity-index binding group");
+
         Self {
             device,
             color_format: surface_format,
@@ -118,6 +136,7 @@ impl SceneViewState {
             last_size: (256, 256),
             scene_target_size: (256, 256),
             entity_index_material,
+            entity_index_group,
             entity_index_texture,
             readback_buffer,
             pending_pick: None,
@@ -287,15 +306,9 @@ impl SceneViewState {
 
         // The picking pipeline is a single global material (fixed layout); group 0
         // binds the shared entity-index ring, the per-draw offset selecting the
-        // entity's slot. No per-primitive material is involved (picking writes only
-        // the entity id), so the instance is assembled here on the fly.
-        let ei_size = std::mem::size_of::<shaders::EntityIndexUniforms>() as u64;
-        let ei_group = Arc::new(BindingGroup::new().with_buffer_range(
-            0,
-            self.entity_index_ring.buffer().clone(),
-            0,
-            ei_size,
-        ));
+        // entity's slot. The group is created once (see `entity_index_group`);
+        // here we just reuse it per draw.
+        let ei_group = self.entity_index_group.clone();
 
         for (entity_idx, renderer) in renderers.iter() {
             if let Some(vis) = visibilities.get(entity_idx)

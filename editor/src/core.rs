@@ -346,7 +346,7 @@ pub fn create_editor_world(
     // debug pass reads the forward pass handle through system_result).
     schedules.get_mut::<Render>().add(FlushUploads);
     schedules.get_mut::<Render>().add(AssetGpuFlush);
-    schedules.get_mut::<Render>().add(ForwardRender);
+    schedules.get_mut::<Render>().add(ForwardRender::default());
     schedules.get_mut::<Render>().add(DebugRender);
     schedules
         .get_mut::<Render>()

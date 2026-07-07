@@ -248,11 +248,11 @@ impl AppHandler for PbrIblDemo {
             let width = ctx.width();
             let height = ctx.height();
             if let Some(spheres) = &mut self.spheres {
-                spheres.write_camera_uniforms(view, proj, camera_pos);
-
-                // Build instance data from ECS entities
+                // Instances first: their ring block's base index is folded into
+                // the camera uniform written next.
                 let instances = scene.build_sphere_instances();
                 spheres.write_instances(&instances);
+                spheres.write_camera_uniforms(view, proj, camera_pos);
             }
             if let Some(skybox) = &mut self.skybox {
                 skybox.update_uniforms(view, proj, camera_pos);

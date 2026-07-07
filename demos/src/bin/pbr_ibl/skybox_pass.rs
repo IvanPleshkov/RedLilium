@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use redlilium_core::profiling::profile_scope;
 use redlilium_graphics::{
-    BindingGroup, BufferUsage, GraphicsDevice, MaterialDescriptor, MaterialInstance,
+    BindingGroupDescriptor, BufferUsage, GraphicsDevice, MaterialDescriptor, MaterialInstance,
     MeshDescriptor, RenderGraph, RingBuffer, ShaderSource, ShaderStage, TextureFormat,
     TransferConfig, TransferOperation, TransferPass, VertexBufferLayout, VertexLayout,
 };
@@ -73,18 +73,20 @@ impl SkyboxPass {
         .expect("Failed to create skybox uniform ring");
 
         // Create material instance binding the ring by range.
-        #[allow(clippy::arc_with_non_send_sync)]
-        let skybox_binding_group = Arc::new(
-            BindingGroup::new()
-                .with_buffer_range(
-                    0,
-                    uniform_ring.buffer().clone(),
-                    0,
-                    std::mem::size_of::<SkyboxUniforms>() as u64,
-                )
-                .with_texture(1, ibl.prefilter_cubemap.clone())
-                .with_sampler(2, ibl.sampler.clone()),
-        );
+        let skybox_binding_group = device
+            .create_binding_group(
+                skybox_material.binding_layouts()[0].clone(),
+                BindingGroupDescriptor::new()
+                    .with_buffer_range(
+                        0,
+                        uniform_ring.buffer().clone(),
+                        0,
+                        std::mem::size_of::<SkyboxUniforms>() as u64,
+                    )
+                    .with_texture(1, ibl.prefilter_cubemap.clone())
+                    .with_sampler(2, ibl.sampler.clone()),
+            )
+            .expect("create skybox binding group");
 
         let material_instance = Arc::new(
             MaterialInstance::new(skybox_material).with_binding_group(skybox_binding_group),

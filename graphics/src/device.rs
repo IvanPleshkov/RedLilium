@@ -323,9 +323,17 @@ impl GraphicsDevice {
                     compiler.reflect_all_bindings(&shaders_for_reflect)?;
                 // Rate-classified sets are self-describing: a `dynamic` block's
                 // implicit uniform buffer binds with a per-draw offset
-                // (docs/MATERIAL_ASSETS.md Decision 7).
+                // (docs/MATERIAL_ASSETS.md Decision 7). `external` sets (the
+                // per-view camera block) bind the same way now that groups are
+                // created eagerly: a per-slot ring buffer bound once at offset 0
+                // with the view's offset supplied per draw — so their uniform
+                // buffer is dynamic too.
                 for (layout, rate) in layouts.iter_mut().zip(&update_rates) {
-                    if *rate == Some(crate::materials::UpdateRate::Dynamic) {
+                    if matches!(
+                        *rate,
+                        Some(crate::materials::UpdateRate::Dynamic)
+                            | Some(crate::materials::UpdateRate::External)
+                    ) {
                         for entry in &mut layout.entries {
                             if entry.binding_type == crate::materials::BindingType::UniformBuffer {
                                 entry.binding_type =
@@ -370,6 +378,56 @@ impl GraphicsDevice {
         }
 
         Ok(material)
+    }
+
+    /// Create a binding group: the compiled, immutable form of a
+    /// [`BindingGroupDescriptor`], created eagerly against `layout` (like
+    /// [`create_material`](Self::create_material) compiles a pipeline). The
+    /// backend descriptor set / bind group is built and written **once** here;
+    /// encoding a draw then only binds it — no per-draw descriptor allocations
+    /// or writes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an entry's binding is not declared in `layout`, if a
+    /// bound resource's kind does not match the layout's declared
+    /// [`BindingType`](crate::BindingType), or if backend resource creation
+    /// fails.
+    pub fn create_binding_group(
+        self: &Arc<Self>,
+        layout: Arc<crate::materials::BindingLayout>,
+        descriptor: crate::materials::BindingGroupDescriptor,
+    ) -> Result<Arc<crate::materials::BindingGroup>, GraphicsError> {
+        profile_scope!("create_binding_group");
+
+        // Validate every entry against the layout up front (this replaces the
+        // per-draw validation the backends used to do in encode_draw_command).
+        for entry in &descriptor.entries {
+            let Some(decl) = layout.entries.iter().find(|e| e.binding == entry.binding) else {
+                return Err(GraphicsError::InvalidParameter(format!(
+                    "binding {} is not declared by the binding layout",
+                    entry.binding
+                )));
+            };
+            if !resource_matches_binding_type(&entry.resource, decl.binding_type) {
+                return Err(GraphicsError::InvalidParameter(format!(
+                    "binding {} bound resource does not match the layout's declared type {:?}",
+                    entry.binding, decl.binding_type
+                )));
+            }
+        }
+
+        let gpu_handle = self
+            .instance
+            .backend()
+            .create_binding_group(&layout, &descriptor)?;
+
+        Ok(Arc::new(crate::materials::BindingGroup::new(
+            Arc::clone(self),
+            layout,
+            descriptor,
+            gpu_handle,
+        )))
     }
 
     /// Create a mesh with vertex and optional index buffers.
@@ -675,6 +733,41 @@ impl std::fmt::Debug for GraphicsDevice {
 
 // Ensure GraphicsDevice is Send + Sync
 static_assertions::assert_impl_all!(GraphicsDevice: Send, Sync);
+
+/// Whether a bound resource's kind is compatible with a layout's declared
+/// [`BindingType`](crate::BindingType). Used to validate a binding group at
+/// creation time.
+fn resource_matches_binding_type(
+    resource: &crate::materials::BoundResource,
+    binding_type: crate::materials::BindingType,
+) -> bool {
+    use crate::materials::{BindingType, BoundResource};
+    match resource {
+        BoundResource::Buffer(_) | BoundResource::BufferRange { .. } => matches!(
+            binding_type,
+            BindingType::UniformBuffer
+                | BindingType::DynamicUniformBuffer
+                | BindingType::StorageBuffer
+                | BindingType::StorageBufferReadOnly
+        ),
+        BoundResource::Texture(_) => matches!(
+            binding_type,
+            BindingType::Texture
+                | BindingType::TextureCube
+                | BindingType::Texture2DArray
+                | BindingType::DepthTexture
+        ),
+        BoundResource::Sampler(_) => {
+            matches!(
+                binding_type,
+                BindingType::Sampler | BindingType::ComparisonSampler
+            )
+        }
+        BoundResource::CombinedTextureSampler { .. } => {
+            matches!(binding_type, BindingType::CombinedTextureSampler)
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

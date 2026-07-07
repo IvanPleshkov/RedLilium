@@ -230,6 +230,50 @@ impl std::fmt::Debug for GpuPipeline {
     }
 }
 
+/// Handle to a GPU binding group (a compiled [`BindingGroup`]).
+///
+/// This is the eagerly-created descriptor set (Vulkan) / bind group (wgpu) that
+/// backs a [`BindingGroup`](crate::BindingGroup). It is created once at
+/// `GraphicsDevice::create_binding_group()` time and bound — never rebuilt — on
+/// every draw. Its lifetime equals the owning `Arc<BindingGroup>`; `Drop` frees
+/// the GPU resource.
+#[allow(clippy::large_enum_variant)]
+pub enum GpuBindingGroup {
+    /// Dummy backend (no GPU allocation).
+    Dummy,
+    /// wgpu backend bind group.
+    #[cfg(feature = "wgpu-backend")]
+    Wgpu(wgpu::BindGroup),
+    /// Vulkan backend descriptor set, allocated from the persistent pool chain.
+    #[cfg(feature = "vulkan-backend")]
+    Vulkan {
+        device: ash::Device,
+        descriptor_set: vk::DescriptorSet,
+        /// The specific pool this set was allocated from — `vkFreeDescriptorSets`
+        /// must target it.
+        pool: vk::DescriptorPool,
+        /// The shared persistent pool chain, held so `Drop` can free the set
+        /// back to it from any thread (host access to the pool must be
+        /// externally synchronized — the shared mutex provides that).
+        pools: Arc<Mutex<vulkan::PersistentDescriptorPools>>,
+    },
+}
+
+impl std::fmt::Debug for GpuBindingGroup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dummy => write!(f, "GpuBindingGroup::Dummy"),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(bg) => f.debug_tuple("GpuBindingGroup::Wgpu").field(bg).finish(),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan { descriptor_set, .. } => f
+                .debug_struct("GpuBindingGroup::Vulkan")
+                .field("descriptor_set", descriptor_set)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
 /// Handle to a GPU fence for CPU-GPU synchronization.
 ///
 /// # Backend Differences
@@ -839,6 +883,33 @@ impl Drop for GpuFence {
 }
 
 #[cfg(feature = "vulkan-backend")]
+impl Drop for GpuBindingGroup {
+    fn drop(&mut self) {
+        if let GpuBindingGroup::Vulkan {
+            device,
+            descriptor_set,
+            pool,
+            pools,
+        } = self
+        {
+            // Free the set directly, no deferred queue. Safety: submitted render
+            // graphs retain their `Arc<MaterialInstance>` → `Arc<BindingGroup>`
+            // (and thus this handle) until `FramePipeline` recycles the slot
+            // after its fence wait, so the GPU is guaranteed done with the set
+            // before this runs — the same invariant that makes `GpuBuffer`'s
+            // immediate destroy-on-Drop safe. The shared pool mutex provides the
+            // external synchronization `vkFreeDescriptorSets` requires.
+            let _guard = pools.lock();
+            unsafe {
+                if let Err(e) = device.free_descriptor_sets(*pool, &[*descriptor_set]) {
+                    log::error!("Failed to free descriptor set: {e:?}");
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "vulkan-backend")]
 impl Drop for GpuPipeline {
     fn drop(&mut self) {
         if let GpuPipeline::Vulkan {
@@ -958,6 +1029,23 @@ impl GpuBackend {
             Self::Wgpu(backend) => backend.create_pipeline(descriptor),
             #[cfg(feature = "vulkan-backend")]
             Self::Vulkan(backend) => backend.create_pipeline(descriptor),
+        }
+    }
+
+    /// Create a binding group: the eagerly-compiled descriptor set / bind group
+    /// for a [`BindingGroupDescriptor`](crate::BindingGroupDescriptor) against
+    /// `layout`. The GPU handle is written once here and only bound at draw time.
+    pub fn create_binding_group(
+        &self,
+        layout: &crate::materials::BindingLayout,
+        descriptor: &crate::materials::BindingGroupDescriptor,
+    ) -> Result<GpuBindingGroup, GraphicsError> {
+        match self {
+            Self::Dummy(_) => Ok(GpuBindingGroup::Dummy),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(backend) => backend.create_binding_group(layout, descriptor),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => backend.create_binding_group(layout, descriptor),
         }
     }
 

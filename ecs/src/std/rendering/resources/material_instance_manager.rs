@@ -25,8 +25,8 @@ use std::sync::Arc;
 
 use redlilium_assets::{AssetDb, AssetManager, AssetProcessor, Guid, ResidentCache};
 use redlilium_graphics::{
-    BindingGroup, BufferDescriptor, BufferUsage, GraphicsDevice, GraphicsError, RenderGraph,
-    TransferConfig, TransferOperation, TransferPass,
+    BindingGroup, BindingGroupDescriptor, BindingLayout, BufferDescriptor, BufferUsage,
+    GraphicsDevice, GraphicsError, RenderGraph, TransferConfig, TransferOperation, TransferPass,
 };
 
 use super::{MaterialAssetManager, ShaderManager, TextureManager};
@@ -54,9 +54,35 @@ pub struct ResolvedInstance {
     /// order — the binding order). Retained so hot reload can pull-validate: a
     /// re-resolved texture (`Arc` mismatch) triggers a rebuild.
     pub textures: Vec<(TextureSource, Arc<super::ResolvedTexture>)>,
-    /// The static material-property binding group (group 1): the packed uniform
-    /// buffer at binding 0, then texture/sampler pairs per texture property.
-    pub props_group: Arc<BindingGroup>,
+    /// Description of the static material-property binding (group 1): the packed
+    /// uniform buffer at binding 0, then texture/sampler pairs per texture
+    /// property. The compiled [`BindingGroup`] is built lazily against the
+    /// material's reflected group-1 layout (only available once the pipeline is
+    /// specialized at draw time) and cached in [`props_group`](Self::props_group).
+    pub props: BindingGroupDescriptor,
+    /// The eagerly-compiled group, materialized once from [`props`](Self::props)
+    /// against the pipeline's group-1 layout. Interior-mutable so it can be built
+    /// on first draw; tied to this instance's lifetime (rebuilt with the instance
+    /// on reload).
+    props_group: std::sync::Mutex<Option<Arc<BindingGroup>>>,
+}
+
+impl ResolvedInstance {
+    /// Get (materializing on first call) the compiled static property binding
+    /// group, built against `layout` — the material's reflected group-1 layout.
+    pub fn props_group(
+        &self,
+        device: &Arc<GraphicsDevice>,
+        layout: Arc<BindingLayout>,
+    ) -> Result<Arc<BindingGroup>, GraphicsError> {
+        let mut slot = self.props_group.lock().expect("props_group mutex poisoned");
+        if let Some(group) = &*slot {
+            return Ok(group.clone());
+        }
+        let group = device.create_binding_group(layout, self.props.clone())?;
+        *slot = Some(group.clone());
+        Ok(group)
+    }
 }
 
 // A component-side `AssetRef<MaterialInstanceSource>` resolves to the manager's
@@ -226,15 +252,16 @@ impl MaterialInstanceManager {
 
         // Build static buffers + publish.
         for (guid, bytes, parent_guid, parent, textures) in ready {
-            match self.build_props_group(&bytes, &textures) {
-                Ok(props_group) => {
+            match self.build_props_descriptor(&bytes, &textures) {
+                Ok(props) => {
                     let resolved = Arc::new(ResolvedInstance {
                         parent_guid,
                         shader_guid: parent.shader_guid,
                         shader: parent.shader.clone(),
                         parent,
                         textures,
-                        props_group,
+                        props,
+                        props_group: std::sync::Mutex::new(None),
                     });
                     self.demanded.remove(&guid);
                     self.cache.publish(guid, resolved);
@@ -272,12 +299,12 @@ impl MaterialInstanceManager {
     /// `1 + 2*i`, sampler at `2 + 2*i` — the convention the model's shader
     /// declares). The sampler is the texture's own resolved one (record
     /// settings, interned by the texture manager).
-    fn build_props_group(
+    fn build_props_descriptor(
         &mut self,
         bytes: &[u8],
         textures: &[(TextureSource, Arc<super::ResolvedTexture>)],
-    ) -> Result<Arc<BindingGroup>, GraphicsError> {
-        let mut group = BindingGroup::new();
+    ) -> Result<BindingGroupDescriptor, GraphicsError> {
+        let mut group = BindingGroupDescriptor::new();
         if !bytes.is_empty() {
             let buffer = self.device.create_buffer(
                 &BufferDescriptor::new(
@@ -299,7 +326,7 @@ impl MaterialInstanceManager {
                 .with_texture(base, resolved.texture.clone())
                 .with_sampler(base + 1, resolved.sampler.clone());
         }
-        Ok(Arc::new(group))
+        Ok(group)
     }
 }
 

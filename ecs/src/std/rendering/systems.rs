@@ -1,11 +1,13 @@
 //! Render systems — they run in the [`Render`](crate::Render) schedule and
 //! contribute passes to the frame graph held in the [`RenderSchedule`] resource.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use redlilium_core::math::{Mat4, mat4_to_cols_array_2d};
 use redlilium_graphics::{
-    BindingGroup, ColorAttachment, DepthStencilAttachment, DrawCommand, GraphicsPass,
+    BindingGroup, BindingGroupDescriptor, BindingLayout, Buffer, ColorAttachment,
+    DepthStencilAttachment, DrawCommand, GraphicsDevice, GraphicsError, GraphicsPass,
     MaterialInstance, PassHandle, RenderTarget, RenderTargetConfig,
 };
 
@@ -63,7 +65,53 @@ impl System for FlushUploads {
 ///
 /// Camera + CameraTarget are read via `read_all` (the editor camera is
 /// EDITOR-flagged, which the filtered `read` iterator skips).
-pub struct ForwardRender;
+///
+/// # Binding groups are created eagerly (issue #40)
+///
+/// A `BindingGroup` is now a device resource whose GPU descriptor set is built
+/// once at creation, so steady-state frames must issue **zero**
+/// `create_binding_group` calls. The camera (external) and model (dynamic) sets
+/// bind the frame ring buffer at offset 0 and select the per-view / per-entity
+/// slot with a per-draw dynamic offset — so the group is frame-invariant and
+/// cached here by the material's set-layout identity. The empty (unclassified)
+/// set is likewise one cached group per layout. The static material-property
+/// set is cached inside its [`ResolvedInstance`]. After warm-up every set is a
+/// cache hit.
+#[derive(Default)]
+pub struct ForwardRender {
+    /// Frame-invariant camera/model/empty groups, keyed by the material's
+    /// set-layout pointer (stable — pipelines are cached, and each cached group
+    /// keeps its layout `Arc` alive so the pointer can't be reused while cached).
+    binding_cache: std::sync::Mutex<ForwardBindingCache>,
+}
+
+/// Cache of the frame-invariant binding groups assembled by [`ForwardRender`].
+/// Values keyed by `Arc::as_ptr(layout) as usize` (a `Send` key).
+#[derive(Default)]
+struct ForwardBindingCache {
+    camera: HashMap<usize, Arc<BindingGroup>>,
+    model: HashMap<usize, Arc<BindingGroup>>,
+    empty: HashMap<usize, Arc<BindingGroup>>,
+}
+
+impl ForwardBindingCache {
+    /// Get (or create + cache) a binding group for `layout`, building its
+    /// descriptor with `make_desc` on the first miss.
+    fn get_or_create(
+        map: &mut HashMap<usize, Arc<BindingGroup>>,
+        device: &Arc<GraphicsDevice>,
+        layout: &Arc<BindingLayout>,
+        make_desc: impl FnOnce() -> BindingGroupDescriptor,
+    ) -> Result<Arc<BindingGroup>, GraphicsError> {
+        let key = Arc::as_ptr(layout) as usize;
+        if let Some(group) = map.get(&key) {
+            return Ok(group.clone());
+        }
+        let group = device.create_binding_group(Arc::clone(layout), make_desc())?;
+        map.insert(key, group.clone());
+        Ok(group)
+    }
+}
 
 impl System for ForwardRender {
     /// The scene pass's handle (so a dependent render system can order after it
@@ -137,19 +185,16 @@ impl System for ForwardRender {
             let camera = shaders::CameraUniforms {
                 view_projection: vp,
             };
+            // The camera set is `external` (a dynamic uniform now): bind offset 0,
+            // supply this view's ring offset per draw.
             let camera_off = ring.push(bytemuck::bytes_of(&camera));
-            let camera_group = Arc::new(BindingGroup::new().with_buffer_range(
-                0,
-                ring.buffer().clone(),
-                camera_off as u64,
-                std::mem::size_of::<shaders::CameraUniforms>() as u64,
-            ));
-            let model_group = Arc::new(BindingGroup::new().with_buffer_range(
-                0,
-                ring.buffer().clone(),
-                0,
-                std::mem::size_of::<shaders::ModelUniforms>() as u64,
-            ));
+            let ring_buffer: Arc<Buffer> = ring.buffer().clone();
+            let camera_size = std::mem::size_of::<shaders::CameraUniforms>() as u64;
+            let model_size = std::mem::size_of::<shaders::ModelUniforms>() as u64;
+            let mut cache = self
+                .binding_cache
+                .lock()
+                .expect("forward binding cache poisoned");
             for (idx, renderer) in renderers.iter() {
                 if let Some(vis) = visibilities.get(idx)
                     && !vis.is_visible()
@@ -188,21 +233,77 @@ impl System for ForwardRender {
                         );
                         continue;
                     }
-                    let mut gfx_instance = MaterialInstance::new(pipeline);
+                    let device = pipeline.device();
+                    let mut gfx_instance = MaterialInstance::new(Arc::clone(&pipeline));
                     let mut offsets: Vec<Vec<u32>> = Vec::with_capacity(rates.len());
-                    for rate in &rates {
+                    // Assemble one binding group per set, all frame-invariant and
+                    // cached (see the type-level doc). A creation failure skips the
+                    // draw rather than the whole frame.
+                    let mut assembled = true;
+                    for (set_idx, rate) in rates.iter().enumerate() {
                         use redlilium_graphics::UpdateRate;
+                        let Some(layout) = pipeline.binding_layouts().get(set_idx) else {
+                            // A rate-classified set with no reflected layout is a
+                            // reflection bug; skip the draw to avoid a bad bind.
+                            assembled = false;
+                            break;
+                        };
                         let group = match rate {
-                            Some(UpdateRate::External) => Arc::clone(&camera_group),
-                            Some(UpdateRate::Dynamic) => Arc::clone(&model_group),
-                            Some(UpdateRate::Static) => Arc::clone(&instance.props_group),
-                            None => Arc::new(BindingGroup::new()),
+                            Some(UpdateRate::External) => ForwardBindingCache::get_or_create(
+                                &mut cache.camera,
+                                device,
+                                layout,
+                                || {
+                                    BindingGroupDescriptor::new().with_buffer_range(
+                                        0,
+                                        ring_buffer.clone(),
+                                        0,
+                                        camera_size,
+                                    )
+                                },
+                            ),
+                            Some(UpdateRate::Dynamic) => ForwardBindingCache::get_or_create(
+                                &mut cache.model,
+                                device,
+                                layout,
+                                || {
+                                    BindingGroupDescriptor::new().with_buffer_range(
+                                        0,
+                                        ring_buffer.clone(),
+                                        0,
+                                        model_size,
+                                    )
+                                },
+                            ),
+                            Some(UpdateRate::Static) => {
+                                instance.props_group(device, Arc::clone(layout))
+                            }
+                            None => ForwardBindingCache::get_or_create(
+                                &mut cache.empty,
+                                device,
+                                layout,
+                                BindingGroupDescriptor::new,
+                            ),
+                        };
+                        let group = match group {
+                            Ok(g) => g,
+                            Err(e) => {
+                                log::warn!("forward render: failed to build binding group: {e}");
+                                assembled = false;
+                                break;
+                            }
                         };
                         gfx_instance = gfx_instance.with_binding_group(group);
+                        // External + Dynamic sets bind at offset 0 and select their
+                        // slot via a per-draw dynamic offset.
                         offsets.push(match rate {
+                            Some(UpdateRate::External) => vec![camera_off],
                             Some(UpdateRate::Dynamic) => vec![model_off],
                             _ => Vec::new(),
                         });
+                    }
+                    if !assembled {
+                        continue;
                     }
                     pass.add_draw_command(
                         DrawCommand::new(mesh, Arc::new(gfx_instance))

@@ -8,8 +8,11 @@
 
 use std::sync::Arc;
 
+use crate::backend::GpuBindingGroup;
+use crate::device::GraphicsDevice;
 use crate::resources::{Buffer, Sampler, Texture};
 
+use super::bindings::BindingLayout;
 use super::material::Material;
 
 /// A bound resource for a specific binding slot.
@@ -97,12 +100,16 @@ impl BindingEntry {
     }
 }
 
-/// A group of bound resources.
+/// A description of the resources to bind in a group.
 ///
-/// Binding groups are typically wrapped in `Arc` and shared between material instances
-/// to enable efficient batching by pointer comparison.
+/// This is the *un-compiled* form: a plain builder holding the entries and an
+/// optional label. It is handed to
+/// [`GraphicsDevice::create_binding_group`](crate::GraphicsDevice::create_binding_group),
+/// which compiles it into an immutable [`BindingGroup`] resource (the GPU
+/// descriptor set / bind group is created eagerly there, exactly as a
+/// [`Material`] is the compiled form of a `MaterialDescriptor`).
 #[derive(Debug, Clone)]
-pub struct BindingGroup {
+pub struct BindingGroupDescriptor {
     /// The bound entries.
     pub entries: Vec<BindingEntry>,
 
@@ -110,8 +117,8 @@ pub struct BindingGroup {
     pub label: Option<String>,
 }
 
-impl BindingGroup {
-    /// Create a new empty binding group.
+impl BindingGroupDescriptor {
+    /// Create a new empty binding group descriptor.
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
@@ -163,9 +170,99 @@ impl BindingGroup {
     }
 }
 
-impl Default for BindingGroup {
+impl Default for BindingGroupDescriptor {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// Ensure BindingGroupDescriptor is Send + Sync
+static_assertions::assert_impl_all!(BindingGroupDescriptor: Send, Sync);
+
+/// An immutable, device-created binding group — the *compiled* form of a
+/// [`BindingGroupDescriptor`].
+///
+/// Created via
+/// [`GraphicsDevice::create_binding_group`](crate::GraphicsDevice::create_binding_group),
+/// which builds the backend GPU handle (a Vulkan descriptor set / a wgpu bind
+/// group) **eagerly, once**, against the given [`BindingLayout`]. Encoding a
+/// draw then performs zero descriptor allocations and zero descriptor writes —
+/// it only binds the cached handle.
+///
+/// # Immutability
+///
+/// The group is sealed: all fields are private and there are no mutating
+/// methods. This is a correctness requirement — the GPU handle was written once
+/// from `descriptor` and must never disagree with it. To change bindings,
+/// create a new group and swap it on the [`MaterialInstance`].
+///
+/// # Lifetime
+///
+/// The GPU handle lives exactly as long as the `Arc<BindingGroup>`: when the
+/// last `Arc` drops, the descriptor set / bind group is freed. There is no
+/// cache, no key, no eviction. In-flight safety is provided by the same
+/// invariant as [`Buffer`]/[`Material`]: submitted render graphs retain their
+/// `Arc<MaterialInstance>` (and thus `Arc<BindingGroup>`) until the frame slot
+/// is recycled after its fence wait.
+pub struct BindingGroup {
+    descriptor: BindingGroupDescriptor,
+    layout: Arc<BindingLayout>,
+    gpu_handle: GpuBindingGroup,
+    /// Declared after `gpu_handle` deliberately: fields drop in declaration
+    /// order, and this keep-alive must outlive the handle's `Drop`, which
+    /// needs the backend (owned by the device→instance chain) alive. See #50.
+    device: Arc<GraphicsDevice>,
+}
+
+impl BindingGroup {
+    /// Create a compiled binding group (called by
+    /// [`GraphicsDevice::create_binding_group`]).
+    pub(crate) fn new(
+        device: Arc<GraphicsDevice>,
+        layout: Arc<BindingLayout>,
+        descriptor: BindingGroupDescriptor,
+        gpu_handle: GpuBindingGroup,
+    ) -> Self {
+        Self {
+            device,
+            layout,
+            descriptor,
+            gpu_handle,
+        }
+    }
+
+    /// The bound entries.
+    pub fn entries(&self) -> &[BindingEntry] {
+        &self.descriptor.entries
+    }
+
+    /// The debug label, if set.
+    pub fn label(&self) -> Option<&str> {
+        self.descriptor.label.as_deref()
+    }
+
+    /// The layout this group was created against.
+    pub fn layout(&self) -> &Arc<BindingLayout> {
+        &self.layout
+    }
+
+    /// The backend GPU handle (descriptor set / bind group), created eagerly.
+    pub fn gpu_handle(&self) -> &GpuBindingGroup {
+        &self.gpu_handle
+    }
+
+    /// The parent device.
+    pub fn device(&self) -> &Arc<GraphicsDevice> {
+        &self.device
+    }
+}
+
+impl std::fmt::Debug for BindingGroup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BindingGroup")
+            .field("entry_count", &self.descriptor.entries.len())
+            .field("label", &self.descriptor.label)
+            .finish()
     }
 }
 
@@ -187,9 +284,12 @@ static_assertions::assert_impl_all!(BindingGroup: Send, Sync);
 /// # Example
 ///
 /// ```ignore
-/// let binding_group = Arc::new(BindingGroup::new()
-///     .with_buffer(0, properties_buffer)
-///     .with_combined(1, albedo_texture, linear_sampler));
+/// let binding_group = device.create_binding_group(
+///     layout.clone(),
+///     BindingGroupDescriptor::new()
+///         .with_buffer(0, properties_buffer)
+///         .with_combined(1, albedo_texture, linear_sampler),
+/// )?;
 ///
 /// let instance = MaterialInstance::new(material.clone())
 ///     .with_binding_group(binding_group);
@@ -269,13 +369,17 @@ static_assertions::assert_impl_all!(MaterialInstance: Send, Sync);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::GraphicsDevice;
     use crate::instance::GraphicsInstance;
-    use crate::materials::{MaterialDescriptor, ShaderSource};
+    use crate::materials::{BindingLayout, MaterialDescriptor, ShaderSource};
     use crate::types::{BufferDescriptor, BufferUsage};
 
+    fn test_device() -> Arc<GraphicsDevice> {
+        GraphicsInstance::new().unwrap().create_device().unwrap()
+    }
+
     fn create_test_material() -> Arc<Material> {
-        let instance = GraphicsInstance::new().unwrap();
-        let device = instance.create_device().unwrap();
+        let device = test_device();
         let desc = MaterialDescriptor::new()
             .with_shader(ShaderSource::vertex(b"vs".to_vec(), "main"))
             .with_label("test_material");
@@ -286,11 +390,20 @@ mod tests {
         ))
     }
 
-    fn create_test_buffer() -> Arc<Buffer> {
-        let instance = GraphicsInstance::new().unwrap();
-        let device = instance.create_device().unwrap();
-        device
+    fn uniform_layout() -> Arc<BindingLayout> {
+        Arc::new(BindingLayout::new().with_uniform_buffer(0))
+    }
+
+    /// A single-uniform-buffer binding group on `device` (dummy backend).
+    fn create_test_group(device: &Arc<GraphicsDevice>) -> Arc<BindingGroup> {
+        let buffer = device
             .create_buffer(&BufferDescriptor::new(256, BufferUsage::UNIFORM))
+            .unwrap();
+        device
+            .create_binding_group(
+                uniform_layout(),
+                BindingGroupDescriptor::new().with_buffer(0, buffer),
+            )
             .unwrap()
     }
 
@@ -304,22 +417,81 @@ mod tests {
     }
 
     #[test]
-    fn test_binding_group() {
-        let buffer = create_test_buffer();
-        let group = BindingGroup::new()
+    fn test_binding_group_descriptor() {
+        let device = test_device();
+        let buffer = device
+            .create_buffer(&BufferDescriptor::new(256, BufferUsage::UNIFORM))
+            .unwrap();
+        let desc = BindingGroupDescriptor::new()
             .with_buffer(0, buffer)
             .with_label("test_group");
 
-        assert_eq!(group.entries.len(), 1);
-        assert_eq!(group.label, Some("test_group".to_string()));
+        assert_eq!(desc.entries.len(), 1);
+        assert_eq!(desc.label, Some("test_group".to_string()));
+    }
+
+    #[test]
+    fn test_create_binding_group_exposes_getters() {
+        let device = test_device();
+        let group = device
+            .create_binding_group(
+                uniform_layout(),
+                BindingGroupDescriptor::new()
+                    .with_buffer(
+                        0,
+                        device
+                            .create_buffer(&BufferDescriptor::new(256, BufferUsage::UNIFORM))
+                            .unwrap(),
+                    )
+                    .with_label("g"),
+            )
+            .unwrap();
+        assert_eq!(group.entries().len(), 1);
+        assert_eq!(group.label(), Some("g"));
+        assert_eq!(group.layout().entries.len(), 1);
+        // `gpu_handle()` is present (the concrete backend variant depends on
+        // which backend the test build selected).
+        let _ = group.gpu_handle();
+    }
+
+    #[test]
+    fn test_create_binding_group_undeclared_binding_errors() {
+        let device = test_device();
+        let buffer = device
+            .create_buffer(&BufferDescriptor::new(256, BufferUsage::UNIFORM))
+            .unwrap();
+        // Layout declares only binding 0, but the group binds binding 1.
+        let result = device.create_binding_group(
+            uniform_layout(),
+            BindingGroupDescriptor::new().with_buffer(1, buffer),
+        );
+        assert!(result.is_err(), "binding not in layout must error");
+    }
+
+    #[test]
+    fn test_create_binding_group_type_mismatch_errors() {
+        let device = test_device();
+        let texture = device
+            .create_texture(&crate::types::TextureDescriptor::new_2d(
+                4,
+                4,
+                crate::types::TextureFormat::Rgba8Unorm,
+                crate::types::TextureUsage::TEXTURE_BINDING,
+            ))
+            .unwrap();
+        // Layout declares a uniform buffer at 0, but a texture is bound there.
+        let result = device.create_binding_group(
+            uniform_layout(),
+            BindingGroupDescriptor::new().with_texture(0, texture),
+        );
+        assert!(result.is_err(), "resource-kind mismatch must error");
     }
 
     #[test]
     fn test_material_instance_with_bindings() {
+        let device = test_device();
         let material = create_test_material();
-        let buffer = create_test_buffer();
-
-        let group = Arc::new(BindingGroup::new().with_buffer(0, buffer));
+        let group = create_test_group(&device);
         let instance = MaterialInstance::new(material).with_binding_group(group);
 
         assert_eq!(instance.binding_groups().len(), 1);
@@ -329,11 +501,11 @@ mod tests {
 
     #[test]
     fn test_binding_group_sharing() {
+        let device = test_device();
         let material = create_test_material();
-        let buffer = create_test_buffer();
 
-        // Create a shared binding group
-        let shared_group = Arc::new(BindingGroup::new().with_buffer(0, buffer));
+        // A binding group shared between two instances.
+        let shared_group = create_test_group(&device);
 
         let instance1 =
             MaterialInstance::new(material.clone()).with_binding_group(shared_group.clone());

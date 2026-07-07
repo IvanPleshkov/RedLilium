@@ -13,6 +13,50 @@ use super::conversion::{
 };
 
 impl WgpuBackend {
+    /// Get (or create + cache) the `wgpu::BindGroupLayout` for a binding layout,
+    /// deduped by content. Shared between pipeline creation and binding-group
+    /// creation so a group's layout is the same object the pipeline uses.
+    pub(super) fn get_or_create_bind_group_layout(
+        &self,
+        layout: &crate::materials::BindingLayout,
+    ) -> wgpu::BindGroupLayout {
+        let key = super::bind_group_layout_key(layout);
+        if let Some(cached) = self.bind_group_layout_cache.lock().get(&key) {
+            return cached.clone();
+        }
+        let entries = super::conversion::binding_layout_entries(layout);
+        let created = self
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: layout.label.as_deref(),
+                entries: &entries,
+            });
+        // Another thread may have raced; keep one object per key.
+        self.bind_group_layout_cache
+            .lock()
+            .entry(key)
+            .or_insert(created)
+            .clone()
+    }
+
+    /// Create a binding group: build the `wgpu::BindGroup` **once**, against the
+    /// deduped bind group layout for `layout`. Encoding a draw then only calls
+    /// `set_bind_group` with this cached group.
+    pub fn create_binding_group(
+        &self,
+        layout: &crate::materials::BindingLayout,
+        descriptor: &crate::materials::BindingGroupDescriptor,
+    ) -> Result<super::super::GpuBindingGroup, GraphicsError> {
+        let bg_layout = self.get_or_create_bind_group_layout(layout);
+        let entries = build_wgpu_bind_group_entries(&descriptor.entries)?;
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: descriptor.label.as_deref(),
+            layout: &bg_layout,
+            entries: &entries,
+        });
+        Ok(super::super::GpuBindingGroup::Wgpu(bind_group))
+    }
+
     /// Create a buffer resource.
     pub fn create_buffer(&self, descriptor: &BufferDescriptor) -> Result<GpuBuffer, GraphicsError> {
         let usage = convert_buffer_usage(descriptor.usage);
@@ -214,17 +258,12 @@ impl WgpuBackend {
             }
         }
 
-        // Bind group layouts (binding_layout_entries owns the
-        // CombinedTextureSampler texture+sampler split)
+        // Bind group layouts, pulled from the content-keyed dedup cache so a
+        // binding group created against the same `BindingLayout` reuses the
+        // exact same object (wgpu requires the group's layout be compatible).
         let mut bind_group_layouts = Vec::new();
         for bg_layout in &descriptor.binding_layouts {
-            let entries = super::conversion::binding_layout_entries(bg_layout);
-            bind_group_layouts.push(self.device.create_bind_group_layout(
-                &wgpu::BindGroupLayoutDescriptor {
-                    label: bg_layout.label.as_deref(),
-                    entries: &entries,
-                },
-            ));
+            bind_group_layouts.push(self.get_or_create_bind_group_layout(bg_layout));
         }
 
         // Pipeline layout
@@ -354,17 +393,12 @@ impl WgpuBackend {
             ));
         };
 
-        // Bind group layouts (binding_layout_entries owns the
-        // CombinedTextureSampler texture+sampler split)
+        // Bind group layouts, pulled from the content-keyed dedup cache so a
+        // binding group created against the same `BindingLayout` reuses the
+        // exact same object (wgpu requires the group's layout be compatible).
         let mut bind_group_layouts = Vec::new();
         for bg_layout in &descriptor.binding_layouts {
-            let entries = super::conversion::binding_layout_entries(bg_layout);
-            bind_group_layouts.push(self.device.create_bind_group_layout(
-                &wgpu::BindGroupLayoutDescriptor {
-                    label: bg_layout.label.as_deref(),
-                    entries: &entries,
-                },
-            ));
+            bind_group_layouts.push(self.get_or_create_bind_group_layout(bg_layout));
         }
 
         let pipeline_layout = {
@@ -755,4 +789,96 @@ impl WgpuBackend {
             )),
         }
     }
+}
+
+/// Build the `wgpu::BindGroupEntry` list for a binding group descriptor.
+///
+/// Factored out of the per-draw encode paths: it now runs **once**, at
+/// `create_binding_group` time. The returned entries borrow the resources'
+/// wgpu handles (via the `Arc`s inside `entries`), so they must be consumed
+/// while `entries` is alive.
+///
+/// `CombinedTextureSampler` is one material binding but wgpu (via Slang's WGSL
+/// reflection) expects a texture at binding N **plus** a sampler at N + 1, so it
+/// expands to two entries.
+fn build_wgpu_bind_group_entries(
+    entries: &[crate::materials::BindingEntry],
+) -> Result<Vec<wgpu::BindGroupEntry<'_>>, GraphicsError> {
+    use crate::materials::BoundResource;
+
+    let mut out: Vec<wgpu::BindGroupEntry> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if let BoundResource::CombinedTextureSampler { texture, sampler } = &entry.resource {
+            if let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() {
+                out.push(wgpu::BindGroupEntry {
+                    binding: entry.binding,
+                    resource: wgpu::BindingResource::TextureView(view),
+                });
+            }
+            if let GpuSampler::Wgpu(wgpu_sampler) = sampler.gpu_handle() {
+                out.push(wgpu::BindGroupEntry {
+                    binding: entry.binding + 1,
+                    resource: wgpu::BindingResource::Sampler(wgpu_sampler),
+                });
+            }
+            continue;
+        }
+
+        // A non-wgpu GPU handle here means a resource from another backend was
+        // bound. Fail loudly at the actual cause rather than desyncing the bind
+        // group from its layout.
+        let mismatch = |kind: &str| {
+            GraphicsError::InvalidParameter(format!(
+                "wgpu: {kind} bound at binding {} has a non-wgpu GPU handle \
+                 (resource from a different backend)",
+                entry.binding
+            ))
+        };
+        let resource = match &entry.resource {
+            BoundResource::Buffer(buffer) => {
+                let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() else {
+                    return Err(mismatch("buffer"));
+                };
+                wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: wgpu_buffer,
+                    offset: 0,
+                    size: None,
+                })
+            }
+            BoundResource::BufferRange {
+                buffer,
+                offset,
+                size,
+            } => {
+                let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() else {
+                    return Err(mismatch("buffer"));
+                };
+                wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: wgpu_buffer,
+                    offset: *offset,
+                    size: std::num::NonZeroU64::new(*size),
+                })
+            }
+            BoundResource::Texture(texture) => {
+                let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() else {
+                    return Err(mismatch("texture"));
+                };
+                wgpu::BindingResource::TextureView(view)
+            }
+            BoundResource::Sampler(sampler) => {
+                let GpuSampler::Wgpu(wgpu_sampler) = sampler.gpu_handle() else {
+                    return Err(mismatch("sampler"));
+                };
+                wgpu::BindingResource::Sampler(wgpu_sampler)
+            }
+            BoundResource::CombinedTextureSampler { .. } => {
+                unreachable!("CombinedTextureSampler handled above")
+            }
+        };
+        out.push(wgpu::BindGroupEntry {
+            binding: entry.binding,
+            resource,
+        });
+    }
+    Ok(out)
 }
