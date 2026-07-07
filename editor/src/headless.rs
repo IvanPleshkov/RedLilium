@@ -74,8 +74,12 @@ pub fn run() {
         1.0,
     );
 
-    // Single-threaded (see the windowed editor): MT needs schedule hardening.
-    let runner = EcsRunner::single_thread();
+    // Multi-threaded runner enabled after Track 2 MT-hardening (#45).
+    let runner = EcsRunner::multi_thread(
+        std::thread::available_parallelism()
+            .map(|p| p.get().saturating_sub(2).max(1))
+            .unwrap_or(1),
+    );
     // Persistent engine state + the startup mount scan (ADR-020).
     let engine = redlilium_runtime::EngineContext::with_vfs(device.clone(), vfs.clone());
     crate::core::scan_local_mounts(&engine, &local_mounts);
