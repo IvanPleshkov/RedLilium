@@ -136,7 +136,7 @@ pub use native::NativeMenu;
 #[cfg(not(target_os = "macos"))]
 pub struct MenuBarResult {
     pub action: Option<MenuAction>,
-    pub play_state: crate::toolbar::PlayState,
+    pub play_action: Option<crate::toolbar::PlayAction>,
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -145,9 +145,10 @@ pub fn draw_menu_bar(
     window: &Arc<Window>,
     custom_titlebar: bool,
     play_state: crate::toolbar::PlayState,
+    paused_due_to_panic: bool,
 ) -> MenuBarResult {
     let mut action = None;
-    let mut new_play_state = play_state;
+    let mut play_action = None;
     let window_for_drag = window.clone();
 
     egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
@@ -205,7 +206,8 @@ pub fn draw_menu_bar(
                     .max_rect(play_rect)
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
-            new_play_state = crate::toolbar::draw_play_controls(&mut play_ui, play_state);
+            play_action =
+                crate::toolbar::draw_play_controls(&mut play_ui, play_state, paused_due_to_panic);
 
             // Right: window control buttons (custom titlebar only)
             if custom_titlebar {
@@ -238,7 +240,7 @@ pub fn draw_menu_bar(
 
     MenuBarResult {
         action,
-        play_state: new_play_state,
+        play_action,
     }
 }
 

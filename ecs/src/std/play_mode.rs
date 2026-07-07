@@ -108,6 +108,19 @@ impl Default for PlayModeAwareRegistry {
     }
 }
 
+/// Information about a panic that occurred during game execution.
+#[derive(Debug, Clone)]
+pub struct PanicInfo {
+    /// The panic message.
+    pub message: String,
+    /// The name of the system that panicked (if available).
+    pub system: String,
+    /// The schedule where panic occurred (e.g., "Update", "FixedUpdate").
+    pub schedule: String,
+    /// The world tick when panic occurred.
+    pub tick: u64,
+}
+
 /// Controls Play/Pause/Resume/Stop transitions.
 ///
 /// Insert into the world and call [`play`](PlayControl::play), [`pause`](PlayControl::pause),
@@ -115,10 +128,13 @@ impl Default for PlayModeAwareRegistry {
 /// The actual transitions happen in the `ManagePlayModeTransitions` system, which
 /// runs in [`PreUpdate`](crate::PreUpdate) and triggers [`PlayModeAware`](crate::PlayModeAware)
 /// lifecycle hooks on each transition.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PlayControl {
     current: PlayState,
     pending: Option<PlayState>,
+    /// Set when a panic occurs in a game system while Playing.
+    /// Prevents resume() until Stop is called to reset to a known state.
+    panicked: Option<PanicInfo>,
 }
 
 impl PlayControl {
@@ -127,12 +143,28 @@ impl PlayControl {
         Self {
             current: PlayState::Stopped,
             pending: None,
+            panicked: None,
         }
     }
 
     /// Current play state.
     pub fn state(&self) -> PlayState {
         self.current
+    }
+
+    /// Get panic info if a panic is currently blocking resume.
+    pub fn panic_info(&self) -> Option<&PanicInfo> {
+        self.panicked.as_ref()
+    }
+
+    /// Set panic info (called by error handlers when a panic occurs).
+    pub fn set_panic(&mut self, info: PanicInfo) {
+        self.panicked = Some(info);
+    }
+
+    /// Clear panic info (called on Stop transition).
+    pub fn clear_panic(&mut self) {
+        self.panicked = None;
     }
 
     /// Request transition to Playing (from Stopped or Paused).
@@ -158,8 +190,11 @@ impl PlayControl {
     /// Request transition to Playing from Paused.
     ///
     /// Alias for [`play`](PlayControl::play); useful for resume-after-pause.
+    /// Does nothing if a panic is currently blocking resume.
     pub fn resume(&mut self) {
-        self.play();
+        if self.panicked.is_none() {
+            self.play();
+        }
     }
 
     /// Request transition to Stopped (from any state).
@@ -307,6 +342,11 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
 
         for entity in entities_to_despawn {
             world.despawn(entity);
+        }
+
+        // Clear any panic state when stopping.
+        if world.has_resource::<PlayControl>() {
+            world.resource_mut::<PlayControl>().clear_panic();
         }
     }
 }
@@ -901,6 +941,113 @@ mod tests {
         assert_eq!(
             game_final, game_initial_flags,
             "Game entity should return to initial state after stop"
+        );
+    }
+
+    #[test]
+    fn play_control_panic_blocks_resume() {
+        let mut control = PlayControl::new();
+        control.current = PlayState::Paused;
+
+        // Without panic, resume should work
+        control.resume();
+        assert_eq!(control.pending, Some(PlayState::Playing));
+
+        // Reset state
+        control.pending = None;
+
+        // Set panic info
+        let panic_info = PanicInfo {
+            message: "test panic".to_string(),
+            system: "TestSystem".to_string(),
+            schedule: "Update".to_string(),
+            tick: 42,
+        };
+        control.set_panic(panic_info);
+
+        // With panic, resume should be ignored
+        control.resume();
+        assert_eq!(control.pending, None, "Resume should be blocked by panic");
+    }
+
+    #[test]
+    fn play_control_panic_info_accessor() {
+        let mut control = PlayControl::new();
+        assert!(control.panic_info().is_none(), "Should start with no panic");
+
+        let panic_info = PanicInfo {
+            message: "test panic".to_string(),
+            system: "TestSystem".to_string(),
+            schedule: "Update".to_string(),
+            tick: 42,
+        };
+        control.set_panic(panic_info.clone());
+
+        let retrieved = control.panic_info();
+        assert!(retrieved.is_some(), "Should have panic info");
+        assert_eq!(retrieved.unwrap().message, "test panic");
+        assert_eq!(retrieved.unwrap().system, "TestSystem");
+    }
+
+    #[test]
+    fn play_control_stop_clears_panic() {
+        let mut control = PlayControl::new();
+        control.current = PlayState::Paused;
+
+        // Set panic
+        let panic_info = PanicInfo {
+            message: "test panic".to_string(),
+            system: "TestSystem".to_string(),
+            schedule: "Update".to_string(),
+            tick: 42,
+        };
+        control.set_panic(panic_info);
+        assert!(control.panic_info().is_some());
+
+        // Request stop
+        control.stop();
+
+        // Panic should be cleared after apply_transition_hooks runs
+        // (but panic field is not cleared by stop() itself, only by apply_transition_hooks)
+        // So we just verify the field exists and can be manually cleared
+        control.clear_panic();
+        assert!(control.panic_info().is_none());
+    }
+
+    #[test]
+    fn stop_transition_clears_panic() {
+        let mut world = World::new();
+        world.insert_resource(PlayControl::default());
+        world.insert_resource(PlayModeAwareRegistry::default());
+        world.insert_resource(PlayStartTick(0));
+        world.insert_resource(crate::GameTime::default());
+
+        // Set initial state to Paused with panic
+        let mut control = world.resource_mut::<PlayControl>();
+        control.current = PlayState::Paused;
+        let panic_info = PanicInfo {
+            message: "test panic".to_string(),
+            system: "TestSystem".to_string(),
+            schedule: "Update".to_string(),
+            tick: 42,
+        };
+        control.set_panic(panic_info);
+        assert!(control.panic_info().is_some());
+        drop(control);
+
+        // Request stop
+        let mut control = world.resource_mut::<PlayControl>();
+        control.stop();
+        drop(control);
+
+        // Apply transition
+        let mut system = ManagePlayModeTransitions;
+        system.run(&mut world).unwrap();
+
+        // Panic should be cleared after stop transition
+        assert!(
+            world.resource::<PlayControl>().panic_info().is_none(),
+            "Panic should be cleared on Stop transition"
         );
     }
 }

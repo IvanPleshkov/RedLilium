@@ -6,35 +6,52 @@ pub enum PlayState {
     Paused,
 }
 
+/// Action requested by the play controls UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayAction {
+    Play,
+    Pause,
+    Resume,
+    Stop,
+}
+
 /// Draw the play/pause/stop controls inline in a horizontal UI region.
 ///
-/// Used inside the titlebar / menu bar. Returns the updated play state.
-pub fn draw_play_controls(ui: &mut egui::Ui, play_state: PlayState) -> PlayState {
-    let mut new_state = play_state;
-
+/// Used inside the titlebar / menu bar. Returns an action if a button was clicked,
+/// or None if no button was clicked.
+/// If `paused_due_to_panic` is true, the Resume button is disabled.
+pub fn draw_play_controls(
+    ui: &mut egui::Ui,
+    play_state: PlayState,
+    paused_due_to_panic: bool,
+) -> Option<PlayAction> {
     match play_state {
         PlayState::Editing => {
             if ui.button("\u{25B6} Play").clicked() {
-                new_state = PlayState::Playing;
+                Some(PlayAction::Play)
+            } else {
+                None
             }
         }
         PlayState::Playing => {
             if ui.button("\u{23F8} Pause").clicked() {
-                new_state = PlayState::Paused;
+                return Some(PlayAction::Pause);
             }
             if ui.button("\u{23F9} Stop").clicked() {
-                new_state = PlayState::Editing;
+                return Some(PlayAction::Stop);
             }
+            None
         }
         PlayState::Paused => {
-            if ui.button("\u{25B6} Resume").clicked() {
-                new_state = PlayState::Playing;
+            let resume_btn =
+                ui.add_enabled(!paused_due_to_panic, egui::Button::new("\u{25B6} Resume"));
+            if resume_btn.clicked() {
+                return Some(PlayAction::Resume);
             }
             if ui.button("\u{23F9} Stop").clicked() {
-                new_state = PlayState::Editing;
+                return Some(PlayAction::Stop);
             }
+            None
         }
     }
-
-    new_state
 }

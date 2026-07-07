@@ -201,6 +201,33 @@ impl Editor {
             .is_some_and(|ew| ew.history.has_unsaved_changes())
     }
 
+    /// Apply a play action (Play/Pause/Resume/Stop) to the game.
+    fn apply_play_action(&mut self, action: crate::toolbar::PlayAction) {
+        if let Some(ew) = self.world.as_mut() {
+            let mut play_control = ew.world.resource_mut::<redlilium_ecs::PlayControl>();
+            match action {
+                crate::toolbar::PlayAction::Play => play_control.play(),
+                crate::toolbar::PlayAction::Pause => play_control.pause(),
+                crate::toolbar::PlayAction::Resume => play_control.resume(),
+                crate::toolbar::PlayAction::Stop => play_control.stop(),
+            }
+        }
+        // Update display state to match PlayControl (will sync on next frame)
+        self.sync_play_state();
+    }
+
+    /// Sync toolbar's play_state to match PlayControl's current state.
+    fn sync_play_state(&mut self) {
+        if let Some(ew) = self.world.as_ref() {
+            let pc_state = ew.world.resource::<redlilium_ecs::PlayControl>().state();
+            self.play_state = match pc_state {
+                redlilium_ecs::PlayState::Stopped => crate::toolbar::PlayState::Editing,
+                redlilium_ecs::PlayState::Playing => crate::toolbar::PlayState::Playing,
+                redlilium_ecs::PlayState::Paused => crate::toolbar::PlayState::Paused,
+            };
+        }
+    }
+
     /// Run `f` with the egui controller resource, if the world (and thus the
     /// controller) exists. The controller is an ECS resource (see `on_init`).
     fn with_egui(&self, f: impl FnOnce(&mut EguiController)) {
@@ -920,8 +947,21 @@ impl AppHandler for Editor {
                             // Traffic lights occupy ~70px on the left
                             let available = ui.available_width();
                             ui.add_space((available / 2.0 - 40.0).max(0.0));
-                            self.play_state =
-                                crate::toolbar::draw_play_controls(ui, self.play_state);
+
+                            let ew = self.world.as_ref().unwrap();
+                            let paused_due_to_panic = ew
+                                .world
+                                .resource::<redlilium_ecs::PlayControl>()
+                                .panic_info()
+                                .is_some();
+
+                            if let Some(play_action) = crate::toolbar::draw_play_controls(
+                                ui,
+                                self.play_state,
+                                paused_due_to_panic,
+                            ) {
+                                self.apply_play_action(play_action);
+                            }
                         });
 
                         // Double-click on background toggles maximize
@@ -944,9 +984,23 @@ impl AppHandler for Editor {
             // Menu bar with play controls (egui fallback for non-macOS platforms)
             #[cfg(not(target_os = "macos"))]
             {
-                let result =
-                    menu::draw_menu_bar(&egui_ctx, &window, custom_titlebar, self.play_state);
-                self.play_state = result.play_state;
+                let ew = self.world.as_ref().unwrap();
+                let paused_due_to_panic = ew
+                    .world
+                    .resource::<redlilium_ecs::PlayControl>()
+                    .panic_info()
+                    .is_some();
+
+                let result = menu::draw_menu_bar(
+                    &egui_ctx,
+                    &window,
+                    custom_titlebar,
+                    self.play_state,
+                    paused_due_to_panic,
+                );
+                if let Some(play_action) = result.play_action {
+                    self.apply_play_action(play_action);
+                }
                 if let Some(action) = result.action {
                     use crate::menu::MenuAction;
                     match action {
