@@ -1215,4 +1215,154 @@ mod tests {
         // h2 should be cancelled and pool empty
         assert_eq!(pool.pending_count(), 0);
     }
+
+    #[test]
+    fn full_flow_panic_pause_clear_play() {
+        let mut world = World::new();
+        world.insert_resource(PlayControl::default());
+        world.insert_resource(PlayModeAwareRegistry::default());
+        world.insert_resource(PlayStartTick(0));
+        world.insert_resource(crate::GameTime::default());
+        world.insert_resource(PlayTasks::default());
+
+        // Step 1: Transition to Playing
+        let mut control = world.resource_mut::<PlayControl>();
+        control.play();
+        drop(control);
+
+        let mut system = ManagePlayModeTransitions;
+        system.run(&mut world).unwrap();
+        assert_eq!(world.resource::<PlayControl>().state(), PlayState::Playing);
+        assert!(world.resource::<PlayControl>().panic_info().is_none());
+
+        // Step 2: Simulate panic in Update schedule
+        let panic_info = PanicInfo {
+            message: "test panic message".to_string(),
+            system: "TestUpdateSystem".to_string(),
+            schedule: "Update".to_string(),
+            tick: 100,
+        };
+        let mut control = world.resource_mut::<PlayControl>();
+        control.pause();
+        control.set_panic(panic_info.clone());
+        drop(control);
+
+        system.run(&mut world).unwrap();
+        assert_eq!(world.resource::<PlayControl>().state(), PlayState::Paused);
+        let stored_panic = world.resource::<PlayControl>().panic_info().cloned();
+        assert!(stored_panic.is_some());
+        if let Some(info) = stored_panic {
+            assert_eq!(info.message, "test panic message");
+            assert_eq!(info.system, "TestUpdateSystem");
+            assert_eq!(info.schedule, "Update");
+            assert_eq!(info.tick, 100);
+        }
+
+        // Step 3: Verify resume is blocked
+        let mut control = world.resource_mut::<PlayControl>();
+        control.resume(); // Should be blocked by guard
+        assert_eq!(
+            control.pending, None,
+            "Resume should be blocked when panic is present"
+        );
+        drop(control);
+
+        // Step 4: Stop transition clears panic
+        let mut control = world.resource_mut::<PlayControl>();
+        control.stop();
+        drop(control);
+
+        system.run(&mut world).unwrap();
+        assert_eq!(world.resource::<PlayControl>().state(), PlayState::Stopped);
+        assert!(
+            world.resource::<PlayControl>().panic_info().is_none(),
+            "Panic should be cleared after Stop"
+        );
+
+        // Step 5: Can play again
+        let mut control = world.resource_mut::<PlayControl>();
+        control.play();
+        drop(control);
+
+        system.run(&mut world).unwrap();
+        assert_eq!(world.resource::<PlayControl>().state(), PlayState::Playing);
+        assert!(
+            world.resource::<PlayControl>().panic_info().is_none(),
+            "No panic on fresh play"
+        );
+    }
+
+    #[test]
+    fn play_tasks_spawn_across_multiple_generations() {
+        use crate::{ComputePool, Priority};
+        use redlilium_core::compute::yield_now;
+
+        let pool = ComputePool::new(crate::IoRuntime::new());
+        let mut tasks = PlayTasks::new();
+
+        // Generation 1: spawn task (gen 1 == tasks.current_generation() + 1 after on_play_start)
+        tasks.on_play_start();
+        assert_eq!(tasks.current_generation(), 1);
+        let h1_gen1 = tasks.spawn(&pool, Priority::Low, |_ctx| async { 1u32 });
+        assert!(!h1_gen1.is_done());
+
+        // Stop gen 1: cancel all gen 1 tasks
+        tasks.on_stop();
+        pool.tick();
+        assert_eq!(pool.pending_count(), 0, "Gen 1 task should be cancelled");
+
+        // Generation 2: spawn new task
+        tasks.on_play_start();
+        assert_eq!(tasks.current_generation(), 2);
+        let h2_gen2 = tasks.spawn(&pool, Priority::Low, |_ctx| async { 2u32 });
+        assert!(!h2_gen2.is_done());
+
+        // Stop gen 2: cancel all gen 2 tasks
+        tasks.on_stop();
+        pool.tick();
+        assert_eq!(pool.pending_count(), 0, "Gen 2 task should be cancelled");
+
+        // Verify we can start gen 3 with no residual state
+        tasks.on_play_start();
+        assert_eq!(tasks.current_generation(), 3);
+        let h3_gen3 = tasks.spawn(&pool, Priority::Low, |_ctx| async {
+            yield_now().await;
+            3u32
+        });
+        assert!(!h3_gen3.is_done());
+
+        tasks.on_stop();
+        pool.tick();
+        assert_eq!(pool.pending_count(), 0, "Gen 3 task should be cancelled");
+    }
+
+    #[test]
+    fn play_tasks_mixed_completed_and_pending_cancel() {
+        use crate::{ComputePool, Priority};
+        use redlilium_core::compute::yield_now;
+
+        let pool = ComputePool::new(crate::IoRuntime::new());
+        let mut tasks = PlayTasks::new();
+
+        tasks.on_play_start();
+
+        // Spawn task that completes immediately
+        let h1 = tasks.spawn(&pool, Priority::Low, |_ctx| async { 1u32 });
+        pool.tick();
+        assert!(h1.is_done());
+
+        // Spawn task that yields (pending)
+        let h2 = tasks.spawn(&pool, Priority::Low, |_ctx| async {
+            yield_now().await;
+            2u32
+        });
+        assert!(!h2.is_done());
+
+        // Stop cancels only pending tasks for current generation
+        tasks.on_stop();
+        pool.tick();
+
+        // Both should be handled (completed one was already done, pending one was cancelled)
+        assert_eq!(pool.pending_count(), 0);
+    }
 }
