@@ -453,4 +453,78 @@ mod tests {
         // Captured tick should be between before and after (or equal to one of them)
         assert!(captured_tick >= tick_before && captured_tick <= tick_after);
     }
+
+    #[test]
+    fn changed_query_sees_spawned_entities_during_play() {
+        use crate::Component;
+
+        #[derive(Component, Debug, Clone, Copy)]
+        struct Position(f32);
+
+        let mut world = World::new();
+        world.register_component::<Position>();
+        world.insert_resource(PlayControl::default());
+        world.insert_resource(PlayModeAwareRegistry::default());
+        world.insert_resource(PlayStartTick(0));
+        world.insert_resource(crate::GameTime::default());
+
+        // Spawn entity before play
+        let entity = world.spawn();
+        world.insert(entity, Position(10.0)).unwrap();
+        world.advance_tick();
+
+        // Transition to Playing (this captures a play_start_tick)
+        let mut control = world.resource_mut::<PlayControl>();
+        control.play();
+        drop(control);
+
+        let mut system = ManagePlayModeTransitions;
+        system.run(&mut world).unwrap();
+
+        let play_start_tick = world.resource::<PlayStartTick>().0;
+
+        // Spawn entity during play - it gets inserted at current tick
+        let play_entity = world.spawn();
+        world.insert(play_entity, Position(20.0)).unwrap();
+
+        // Advance tick to finalize the insert
+        world.advance_tick();
+
+        // Changed query from play_start_tick-1 should see play_entity as changed
+        let changed_filter = world.changed::<Position>(play_start_tick - 1);
+        let changed_count = world
+            .iter_entities()
+            .filter(|e| changed_filter.matches(e.index()))
+            .count();
+        assert_eq!(
+            changed_count, 1,
+            "Play-spawned entity should show as changed"
+        );
+    }
+
+    #[test]
+    fn slow_motion_accumulator_prevents_drift() {
+        use crate::GameTime;
+
+        let mut gt = GameTime::new();
+        let dt = 0.016; // 60 FPS frame
+        let scale = 0.25; // Quarter speed: 0.004 per frame
+
+        // Over many frames at quarter speed
+        for _ in 0..1000 {
+            gt.tick(dt, scale);
+        }
+
+        let expected = 1000.0 * 0.004; // 4.0
+        let drift = (gt.elapsed() - expected).abs();
+
+        // With fractional accumulator, drift should be minimal (< 1 microsecond)
+        assert!(
+            drift < 0.000001,
+            "Drift {} exceeds threshold at quarter-speed; accumulated {} vs expected {}",
+            drift,
+            gt.elapsed(),
+            expected
+        );
+    }
 }

@@ -58,6 +58,9 @@ impl Default for RealTime {
 pub struct GameTime {
     elapsed: f64,
     delta: f64,
+    /// Fractional accumulator to prevent slow-motion drift at speeds like 0.5× or 0.25×.
+    /// Accumulated deltas are applied to elapsed when the fractional part exceeds the precision threshold.
+    fractional: f64,
 }
 
 impl GameTime {
@@ -66,6 +69,7 @@ impl GameTime {
         Self {
             elapsed: 0.0,
             delta: 0.0,
+            fractional: 0.0,
         }
     }
 
@@ -74,11 +78,21 @@ impl GameTime {
     /// `dt` is the frame delta (e.g., 1/60 for a 60fps frame).
     /// `scale` is the time multiplier (0.0 = paused, 1.0 = normal, 0.5 = half-speed).
     ///
-    /// The delta is scaled directly: at 0.5× scale, each frame advances half the
-    /// wall-clock time. This keeps game simulation smooth across any speed scale.
+    /// Uses a fractional accumulator to prevent slow-motion drift at speeds like 0.5× or 0.25×.
+    /// Accumulated fractional time is applied when it reaches sufficient precision.
     pub fn tick(&mut self, dt: f64, scale: f64) {
-        self.delta = dt * scale;
-        self.elapsed += self.delta;
+        let scaled_delta = dt * scale;
+        self.delta = scaled_delta;
+
+        // Accumulate fractional time to prevent drift at low speeds
+        self.fractional += scaled_delta;
+
+        // Apply accumulated time when fractional part is significant (> 1 microsecond)
+        let threshold = 0.000001;
+        if self.fractional >= threshold || self.fractional <= -threshold {
+            self.elapsed += self.fractional;
+            self.fractional = 0.0;
+        }
     }
 
     /// Frame delta (game time advanced this frame).
@@ -95,6 +109,7 @@ impl GameTime {
     pub fn reset(&mut self) {
         self.elapsed = 0.0;
         self.delta = 0.0;
+        self.fractional = 0.0;
     }
 }
 
@@ -162,5 +177,48 @@ mod tests {
         gt.reset();
         assert!((gt.elapsed()).abs() < f64::EPSILON);
         assert!((gt.delta()).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn game_time_fractional_accumulator_prevents_drift() {
+        let mut gt = GameTime::new();
+        let dt = 0.016; // 60 FPS frame
+        let scale = 0.25; // Quarter speed
+        let expected_per_frame = dt * scale;
+
+        // Over 100 frames, accumulator should prevent significant drift
+        for _ in 0..100 {
+            gt.tick(dt, scale);
+        }
+
+        let expected = 100.0 * expected_per_frame;
+        // With fractional accumulator, drift should be < 1 microsecond per frame
+        let max_drift = 100.0 * 0.000001;
+        assert!(
+            (gt.elapsed() - expected).abs() < max_drift,
+            "Drift {} exceeds maximum {} at quarter speed over 100 frames",
+            (gt.elapsed() - expected).abs(),
+            max_drift
+        );
+    }
+
+    #[test]
+    fn game_time_fractional_accumulator_half_speed() {
+        let mut gt = GameTime::new();
+        let dt = 0.016;
+        let scale = 0.5;
+
+        // 60 frames at half speed: 0.016 * 0.5 * 60 = 0.48
+        for _ in 0..60 {
+            gt.tick(dt, scale);
+        }
+
+        let expected = 0.48;
+        assert!(
+            (gt.elapsed() - expected).abs() < 0.0001,
+            "Half-speed accumulation drifted: {} vs {}",
+            gt.elapsed(),
+            expected
+        );
     }
 }
