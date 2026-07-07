@@ -373,6 +373,22 @@ impl Schedules {
         self.startup_done = true;
     }
 
+    /// Resets the last_run tick for all game-logic schedules (Update, FixedUpdate, PostUpdate).
+    /// Called on Pause to "freeze" the game: Changed<T> queries will see no changes
+    /// (until the game resumes and systems actually modify components).
+    /// Also called on Play start to reset to 0 so first game Update sees all components as changed.
+    pub fn reset_game_schedule_last_runs(&mut self, tick: u64) {
+        for schedule_id in [
+            ScheduleId::of::<Update>(),
+            ScheduleId::of::<FixedUpdate>(),
+            ScheduleId::of::<PostUpdate>(),
+        ] {
+            if let Some(container) = self.schedules.get(&schedule_id) {
+                container.reset_all_last_runs(tick);
+            }
+        }
+    }
+
     /// Runs the [`Startup`] schedule once.
     ///
     /// Subsequent calls are no-ops. Call this before your main loop.

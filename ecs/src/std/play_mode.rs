@@ -184,7 +184,7 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
         handler(world, transition);
     }
 
-    // Capture play_start_tick when transitioning to Playing.
+    // Capture play_start_tick and reset game-schedule last_runs when transitioning to Playing.
     if to == PlayState::Playing {
         let tick = world.current_tick();
         if !world.has_resource::<PlayStartTick>() {
@@ -193,6 +193,25 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
             *world.resource_mut::<PlayStartTick>() = PlayStartTick(tick);
         }
         world.resource_mut::<crate::GameTime>().reset();
+
+        // Reset game schedules' last_run to 0 so first Update sees all components as changed.
+        // This ensures proper change detection after snapshot restore.
+        if world.has_resource::<crate::Schedules>() {
+            world
+                .resource_mut::<crate::Schedules>()
+                .reset_game_schedule_last_runs(0);
+        }
+    }
+
+    // Reset game-schedule last_runs when transitioning to Paused.
+    // This "freezes" the game: Changed<T> queries will see no changes until resumed.
+    if to == PlayState::Paused {
+        let tick = world.current_tick();
+        if world.has_resource::<crate::Schedules>() {
+            world
+                .resource_mut::<crate::Schedules>()
+                .reset_game_schedule_last_runs(tick);
+        }
     }
 
     // Clean up play-spawned entities when transitioning to Stopped.
