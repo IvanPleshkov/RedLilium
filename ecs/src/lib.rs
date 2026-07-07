@@ -151,7 +151,7 @@ pub use self::std::hierarchy::{
 };
 pub use self::std::play_mode::{
     ManagePlayModeTransitions, PlayControl, PlayModeAwareRegistry, PlayModeTransition,
-    PlayStartTick, PlayState,
+    PlayStartTick, PlayState, PlayTasks,
 };
 pub use self::std::spawn::spawn_scene;
 pub use self::std::systems;

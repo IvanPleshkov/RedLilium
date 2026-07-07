@@ -7,6 +7,8 @@
 use super::components::Parent;
 use super::hierarchy::{hide_in_play, show_in_play};
 use crate::{Entity, PlayModeAware, SystemError, World};
+use redlilium_core::compute::CancellationToken;
+use std::collections::BTreeMap;
 
 /// Validates that no game entities (non-EDITOR) are parented under editor-only entities.
 /// Panics with a clear error message if a violation is found.
@@ -354,6 +356,91 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
 impl Default for PlayControl {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Manages play-scoped task lifecycle with generation-based cancellation.
+///
+/// Game plugins should spawn async tasks via [`PlayTasks::spawn`] instead of directly
+/// using [`ComputePool`](crate::ComputePool). On Stop transition, all tasks spawned during
+/// the current play generation are cancelled, ensuring no game code remains executing
+/// before warm-reload dylib unmap.
+///
+/// This is a critical soundness requirement: without generation-scoped cancellation,
+/// futures running dylib code could access dangling pointers during reload.
+///
+/// # Generation Lifecycle
+///
+/// - **On Play**: generation counter increments; new tasks join the active generation
+/// - **On Stop**: all tokens for the active generation are cancelled; the map entry is cleared
+#[derive(Clone)]
+pub struct PlayTasks {
+    current_generation: u64,
+    /// Cancellation tokens per play generation. When Stop occurs, we cancel all
+    /// tokens for the active generation and clear that map entry.
+    generation_tokens: std::sync::Arc<crate::sync::Mutex<BTreeMap<u64, Vec<CancellationToken>>>>,
+}
+
+impl PlayTasks {
+    /// Create a new PlayTasks resource in generation 0.
+    pub fn new() -> Self {
+        Self {
+            current_generation: 0,
+            generation_tokens: std::sync::Arc::new(crate::sync::Mutex::new(BTreeMap::new())),
+        }
+    }
+
+    /// Returns the current play generation.
+    pub fn current_generation(&self) -> u64 {
+        self.current_generation
+    }
+
+    /// Spawn an async compute task scoped to the current play generation.
+    ///
+    /// On Stop transition, this task's cancellation token will be automatically cancelled,
+    /// terminating the task cooperatively (at its next checkpoint or yield).
+    pub fn spawn<T, F, Fut>(
+        &mut self,
+        pool: &crate::ComputePool,
+        priority: redlilium_core::compute::Priority,
+        f: F,
+    ) -> crate::TaskHandle<T>
+    where
+        T: Send + 'static,
+        Fut: std::future::Future<Output = T> + Send + 'static,
+        F: FnOnce(crate::EcsComputeContext) -> Fut + Send + 'static,
+    {
+        let handle = pool.spawn(priority, f);
+        let token = handle.cancellation_token();
+
+        let mut tokens = self.generation_tokens.lock();
+        tokens
+            .entry(self.current_generation)
+            .or_default()
+            .push(token);
+
+        handle
+    }
+}
+
+impl Default for PlayTasks {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PlayModeAware for PlayTasks {
+    fn on_play_start(&mut self) {
+        self.current_generation += 1;
+    }
+
+    fn on_stop(&mut self) {
+        let mut tokens = self.generation_tokens.lock();
+        if let Some(to_cancel) = tokens.remove(&self.current_generation) {
+            for token in to_cancel {
+                token.cancel();
+            }
+        }
     }
 }
 
@@ -1049,5 +1136,83 @@ mod tests {
             world.resource::<PlayControl>().panic_info().is_none(),
             "Panic should be cleared on Stop transition"
         );
+    }
+
+    #[test]
+    fn play_tasks_initial_generation() {
+        let tasks = PlayTasks::new();
+        assert_eq!(tasks.current_generation(), 0);
+    }
+
+    #[test]
+    fn play_tasks_increments_generation_on_play_start() {
+        let mut tasks = PlayTasks::new();
+        assert_eq!(tasks.current_generation(), 0);
+
+        tasks.on_play_start();
+        assert_eq!(tasks.current_generation(), 1);
+
+        tasks.on_play_start();
+        assert_eq!(tasks.current_generation(), 2);
+    }
+
+    #[test]
+    fn play_tasks_cancels_tokens_on_stop() {
+        use crate::{ComputePool, Priority};
+        use redlilium_core::compute::yield_now;
+
+        let pool = ComputePool::new(crate::IoRuntime::new());
+        let mut tasks = PlayTasks::new();
+
+        // Increment generation to 1 (simulating Play)
+        tasks.on_play_start();
+
+        // Spawn a task that yields
+        let handle = tasks.spawn(&pool, Priority::Low, |_ctx| async {
+            yield_now().await;
+            42u32
+        });
+
+        // Task should be pending
+        assert!(!handle.is_done());
+
+        // Trigger Stop (cancel tokens for generation 1)
+        tasks.on_stop();
+
+        // Tick the pool — task should complete (be removed/cancelled)
+        pool.tick();
+
+        // Pool should be empty (task was cancelled/removed)
+        assert_eq!(pool.pending_count(), 0);
+    }
+
+    #[test]
+    fn play_tasks_only_cancels_current_generation() {
+        use crate::{ComputePool, Priority};
+        use redlilium_core::compute::yield_now;
+
+        let pool = ComputePool::new(crate::IoRuntime::new());
+        let mut tasks = PlayTasks::new();
+
+        // Generation 1: spawn and complete a task
+        tasks.on_play_start();
+        let h1 = tasks.spawn(&pool, Priority::Low, |_ctx| async { 1u32 });
+        pool.tick();
+        assert!(h1.is_done());
+
+        // Generation 2: spawn a task that yields
+        tasks.on_play_start();
+        let h2 = tasks.spawn(&pool, Priority::Low, |_ctx| async {
+            yield_now().await;
+            2u32
+        });
+        assert!(!h2.is_done());
+
+        // Stop only cancels generation 2's tasks, not generation 1's (which is already done)
+        tasks.on_stop();
+        pool.tick();
+
+        // h2 should be cancelled and pool empty
+        assert_eq!(pool.pending_count(), 0);
     }
 }

@@ -89,6 +89,14 @@ impl<T> TaskHandle<T> {
         self.state.token.is_cancelled()
     }
 
+    /// Returns a clone of the task's cancellation token.
+    ///
+    /// Useful for managing task lifecycle through generation-scoped token collections
+    /// (e.g., [`PlayTasks`](crate::PlayTasks)) where tokens need to be cancelled in bulk.
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.state.token.clone()
+    }
+
     /// Returns whether the task panicked during execution.
     ///
     /// If true, [`try_recv()`](TaskHandle::try_recv) will return `None`

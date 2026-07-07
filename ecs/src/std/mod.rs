@@ -30,7 +30,7 @@ pub use hierarchy::{
 };
 pub use play_mode::{
     ManagePlayModeTransitions, PlayControl, PlayModeAwareRegistry, PlayModeTransition,
-    PlayStartTick, PlayState,
+    PlayStartTick, PlayState, PlayTasks,
 };
 pub use spawn::spawn_scene;
 #[cfg(feature = "rendering")]
