@@ -419,7 +419,13 @@ impl Schedules {
     /// 5. Run [`FixedUpdate`] (accumulator loop)
     /// 6. Run [`Update`]
     /// 7. Run [`PostUpdate`]
+    ///
+    /// If any panic occurs in FixedUpdate or Update while Playing,
+    /// the game is automatically paused and PlayControl.panicked is set.
     pub fn run_frame(&mut self, world: &mut World, runner: &EcsRunner, delta_time: f64) {
+        use crate::std::play_mode::{PanicInfo, PlayControl, PlayState};
+        use log::error;
+
         // 1. Update Time resource
         if !world.has_resource::<Time>() {
             world.insert_resource(Time::new(self.fixed_timestep));
@@ -441,7 +447,10 @@ impl Schedules {
 
         // 3. Run PreUpdate
         if let Some(schedule) = self.schedules.get(&ScheduleId::of::<PreUpdate>()) {
-            runner.run(world, schedule);
+            let errors = runner.run(world, schedule);
+            for err in errors {
+                error!("System error in PreUpdate: {}", err);
+            }
         }
 
         // 4. Check state transitions and run OnExit / OnEnter
@@ -459,7 +468,26 @@ impl Schedules {
             while self.fixed_accumulator >= self.fixed_timestep {
                 // Set effective delta to fixed timestep
                 world.resource_mut::<Time>().delta = self.fixed_timestep;
-                runner.run(world, schedule);
+                let errors = runner.run(world, schedule);
+                for err in errors {
+                    error!("System error in FixedUpdate: {}", err);
+                    // If currently Playing, pause and record panic
+                    if world.has_resource::<PlayControl>() {
+                        let play_control = world.resource::<PlayControl>();
+                        if play_control.state() == PlayState::Playing {
+                            drop(play_control);
+                            let tick = world.current_tick();
+                            let panic_info = PanicInfo {
+                                message: err.to_string(),
+                                system: "unknown".to_string(),
+                                schedule: "FixedUpdate".to_string(),
+                                tick,
+                            };
+                            world.resource_mut::<PlayControl>().set_panic(panic_info);
+                            world.resource_mut::<PlayControl>().pause();
+                        }
+                    }
+                }
                 self.fixed_accumulator -= self.fixed_timestep;
             }
         } else {
@@ -473,12 +501,34 @@ impl Schedules {
 
         // 6. Run Update
         if let Some(schedule) = self.schedules.get(&ScheduleId::of::<Update>()) {
-            runner.run(world, schedule);
+            let errors = runner.run(world, schedule);
+            for err in errors {
+                error!("System error in Update: {}", err);
+                // If currently Playing, pause and record panic
+                if world.has_resource::<PlayControl>() {
+                    let play_control = world.resource::<PlayControl>();
+                    if play_control.state() == PlayState::Playing {
+                        drop(play_control);
+                        let tick = world.current_tick();
+                        let panic_info = PanicInfo {
+                            message: err.to_string(),
+                            system: "unknown".to_string(),
+                            schedule: "Update".to_string(),
+                            tick,
+                        };
+                        world.resource_mut::<PlayControl>().set_panic(panic_info);
+                        world.resource_mut::<PlayControl>().pause();
+                    }
+                }
+            }
         }
 
         // 7. Run PostUpdate
         if let Some(schedule) = self.schedules.get(&ScheduleId::of::<PostUpdate>()) {
-            runner.run(world, schedule);
+            let errors = runner.run(world, schedule);
+            for err in errors {
+                error!("System error in PostUpdate: {}", err);
+            }
         }
 
         // 8. Advance the change-detection tick. Systems already get their own
@@ -897,5 +947,189 @@ mod tests {
         // This should not panic or accumulate unbounded time
         schedules.run_frame(&mut world, &runner, 1.0); // 60 fixed steps worth
         schedules.run_frame(&mut world, &runner, 0.016);
+    }
+
+    #[test]
+    fn fixed_update_panic_pauses_while_playing() {
+        use crate::ExclusiveSystem as _;
+        use crate::std::play_mode::{ManagePlayModeTransitions, PlayControl, PlayState};
+
+        struct PanicSystem;
+        impl System for PanicSystem {
+            type Result = ();
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+                Err(SystemError::Panicked(
+                    "test panic in FixedUpdate".to_string(),
+                ))
+            }
+        }
+
+        let mut world = World::new();
+        let mut schedules = Schedules::new();
+        let runner = EcsRunner::single_thread();
+
+        // Set up PlayControl and transition to Playing
+        world.insert_resource(PlayControl::new());
+        world.insert_resource(crate::GameTime::default());
+        let mut control = world.resource_mut::<PlayControl>();
+        control.play();
+        drop(control);
+
+        // Apply the transition
+        let mut manage_system = ManagePlayModeTransitions;
+        manage_system.run(&mut world).unwrap();
+
+        // Verify now in Playing state
+        assert_eq!(world.resource::<PlayControl>().state(), PlayState::Playing);
+
+        // Add panic system to FixedUpdate
+        schedules.get_mut::<FixedUpdate>().add(PanicSystem);
+
+        // Run frame - should trigger pause + set panic
+        schedules.run_frame(&mut world, &runner, 1.0 / 60.0);
+
+        // Verify panic info was set
+        let control = world.resource::<PlayControl>();
+        let panic_info = control.panic_info();
+        assert!(
+            panic_info.is_some(),
+            "Panic info should be set after FixedUpdate error"
+        );
+        assert_eq!(panic_info.unwrap().schedule, "FixedUpdate");
+        assert!(panic_info.unwrap().message.contains("test panic"));
+    }
+
+    #[test]
+    fn update_panic_pauses_while_playing() {
+        use crate::ExclusiveSystem as _;
+        use crate::std::play_mode::{ManagePlayModeTransitions, PlayControl, PlayState};
+
+        struct PanicSystem;
+        impl System for PanicSystem {
+            type Result = ();
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+                Err(SystemError::Panicked("test panic in Update".to_string()))
+            }
+        }
+
+        let mut world = World::new();
+        let mut schedules = Schedules::new();
+        let runner = EcsRunner::single_thread();
+
+        // Set up PlayControl and transition to Playing
+        world.insert_resource(PlayControl::new());
+        world.insert_resource(crate::GameTime::default());
+        let mut control = world.resource_mut::<PlayControl>();
+        control.play();
+        drop(control);
+
+        let mut manage_system = ManagePlayModeTransitions;
+        manage_system.run(&mut world).unwrap();
+
+        // Verify now in Playing state
+        assert_eq!(world.resource::<PlayControl>().state(), PlayState::Playing);
+
+        // Add panic system to Update
+        schedules.get_mut::<Update>().add(PanicSystem);
+
+        // Run frame - should trigger pause + set panic
+        schedules.run_frame(&mut world, &runner, 1.0 / 60.0);
+
+        // Verify panic info was set
+        let control = world.resource::<PlayControl>();
+        let panic_info = control.panic_info();
+        assert!(
+            panic_info.is_some(),
+            "Panic info should be set after Update error"
+        );
+        assert_eq!(panic_info.unwrap().schedule, "Update");
+    }
+
+    #[test]
+    fn preupdate_panic_does_not_pause() {
+        use crate::ExclusiveSystem as _;
+        use crate::std::play_mode::{ManagePlayModeTransitions, PlayControl, PlayState};
+
+        struct PanicSystem;
+        impl System for PanicSystem {
+            type Result = ();
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+                Err(SystemError::Panicked("test panic in PreUpdate".to_string()))
+            }
+        }
+
+        let mut world = World::new();
+        let mut schedules = Schedules::new();
+        let runner = EcsRunner::single_thread();
+
+        // Set up PlayControl and transition to Playing
+        world.insert_resource(PlayControl::new());
+        world.insert_resource(crate::GameTime::default());
+        let mut control = world.resource_mut::<PlayControl>();
+        control.play();
+        drop(control);
+
+        let mut manage_system = ManagePlayModeTransitions;
+        manage_system.run(&mut world).unwrap();
+
+        assert_eq!(world.resource::<PlayControl>().state(), PlayState::Playing);
+
+        // Add panic system to PreUpdate
+        schedules.get_mut::<PreUpdate>().add(PanicSystem);
+
+        // Run frame - should NOT trigger pause (not a game schedule)
+        schedules.run_frame(&mut world, &runner, 1.0 / 60.0);
+
+        // Verify state is still Playing
+        let control = world.resource::<PlayControl>();
+        assert_eq!(control.state(), PlayState::Playing);
+
+        // Verify panic info was NOT set (PreUpdate is not a game schedule)
+        assert!(
+            control.panic_info().is_none(),
+            "PreUpdate panic should not set panic info"
+        );
+    }
+
+    #[test]
+    fn panic_while_stopped_does_not_trigger_pause() {
+        use crate::std::play_mode::{PlayControl, PlayState};
+
+        struct PanicSystem;
+        impl System for PanicSystem {
+            type Result = ();
+            fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+                Err(SystemError::Panicked(
+                    "test panic while stopped".to_string(),
+                ))
+            }
+        }
+
+        let mut world = World::new();
+        let mut schedules = Schedules::new();
+        let runner = EcsRunner::single_thread();
+
+        // Set up PlayControl in Stopped state (default)
+        world.insert_resource(PlayControl::new());
+
+        // Add panic system to Update
+        schedules.get_mut::<Update>().add(PanicSystem);
+
+        // Run frame - should log error but NOT trigger pause
+        schedules.run_frame(&mut world, &runner, 1.0 / 60.0);
+
+        // Verify state is still Stopped
+        let control = world.resource::<PlayControl>();
+        assert_eq!(
+            control.state(),
+            PlayState::Stopped,
+            "Panic while stopped should not change state"
+        );
+
+        // Verify panic info was NOT set (not Playing)
+        assert!(
+            control.panic_info().is_none(),
+            "Panic while stopped should not set panic info"
+        );
     }
 }
