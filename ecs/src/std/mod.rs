@@ -28,7 +28,9 @@ pub use components::*;
 pub use hierarchy::{
     HierarchyCommands, despawn_recursive, disable, enable, remove_parent, set_parent,
 };
-pub use play_mode::{ManagePlayModeTransitions, PlayControl, PlayModeTransition, PlayState};
+pub use play_mode::{
+    ManagePlayModeTransitions, PlayControl, PlayModeAwareRegistry, PlayModeTransition, PlayState,
+};
 pub use spawn::spawn_scene;
 #[cfg(feature = "rendering")]
 pub use systems::DrawGrid;

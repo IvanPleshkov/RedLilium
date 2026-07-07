@@ -4,7 +4,7 @@
 //! and stop modes. Triggers [`PlayModeAware`](crate::PlayModeAware) lifecycle
 //! hooks and manages visibility of editor-only entities.
 
-use crate::{SystemError, World};
+use crate::{PlayModeAware, SystemError, World};
 
 /// Event emitted when play-mode state transitions occur.
 ///
@@ -27,6 +27,54 @@ pub enum PlayState {
     Playing,
     /// Game is paused (time is frozen, can resume).
     Paused,
+}
+
+type PlayModeHookHandler = std::sync::Arc<dyn Fn(&mut World, PlayModeTransition) + Send + Sync>;
+
+/// Registry of PlayModeAware resources, in registration order (for deterministic hook dispatch).
+///
+/// Insert this into the world to enable PlayModeAware lifecycle hook dispatch.
+/// Resources that implement PlayModeAware should be registered via [`register_play_mode_aware`].
+pub struct PlayModeAwareRegistry {
+    handlers: Vec<PlayModeHookHandler>,
+}
+
+impl PlayModeAwareRegistry {
+    /// Create a new empty registry.
+    pub fn new() -> Self {
+        Self {
+            handlers: Vec::new(),
+        }
+    }
+
+    /// Register a PlayModeAware resource type. Must be called for each PlayModeAware resource
+    /// type **after** inserting it into the world for the hooks to be dispatched.
+    pub fn register<T: PlayModeAware + 'static>(&mut self) {
+        self.handlers.push(std::sync::Arc::new(
+            |world: &mut World, transition: PlayModeTransition| {
+                if !world.has_resource::<T>() {
+                    return;
+                }
+
+                let hook = match (transition.from, transition.to) {
+                    (PlayState::Stopped, PlayState::Playing) => PlayModeAware::on_play_start,
+                    (PlayState::Playing, PlayState::Paused) => PlayModeAware::on_pause,
+                    (PlayState::Paused, PlayState::Playing) => PlayModeAware::on_resume,
+                    (_, PlayState::Stopped) => PlayModeAware::on_stop,
+                    _ => return,
+                };
+
+                let mut resource = world.resource_mut::<T>();
+                hook(&mut *resource);
+            },
+        ));
+    }
+}
+
+impl Default for PlayModeAwareRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Controls Play/Pause/Resume/Stop transitions.
@@ -107,14 +155,26 @@ impl PlayControl {
 
 /// Apply transition events and hooks to resources.
 fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
+    let transition = PlayModeTransition { from, to };
+
     // Emit transition event for PlayModeAware subscribers.
     if !world.has_resource::<crate::Events<PlayModeTransition>>() {
         world.add_event::<PlayModeTransition>();
     }
-    let event = PlayModeTransition { from, to };
     world
         .resource_mut::<crate::Events<PlayModeTransition>>()
-        .send(event);
+        .send(transition);
+
+    // Dispatch PlayModeAware lifecycle hooks (if registry exists).
+    let handlers = if world.has_resource::<PlayModeAwareRegistry>() {
+        world.resource::<PlayModeAwareRegistry>().handlers.clone()
+    } else {
+        Vec::new()
+    };
+    // Registry borrow is now dropped; we can call handlers with mutable world access.
+    for handler in handlers {
+        handler(world, transition);
+    }
 
     // Reset GameTime when transitioning to Playing.
     if to == PlayState::Playing {

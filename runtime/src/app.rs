@@ -6,10 +6,11 @@ use redlilium_ecs::sync::RwLock;
 
 use redlilium_ecs::{
     AssetGpuFlush, AssetPump, Component, FlushUploads, ForwardRender, FrameRing, GameTime,
-    HotReload, ManagePlayModeTransitions, MaterialInstanceLoad, MeshLoad, PlayControl, PostUpdate,
-    PreUpdate, RealTime, Render, RenderSchedule, Resource, ScenePass, ScheduleLabel, Schedules,
-    System, SystemsContainer, UpdateCameraMatrices, UpdateGlobalTransforms, WindowInput, World,
-    register_rendering_components, register_std_components,
+    HotReload, ManagePlayModeTransitions, MaterialInstanceLoad, MeshLoad, PlayControl,
+    PlayModeAwareRegistry, PostUpdate, PreUpdate, RealTime, Render, RenderSchedule, Resource,
+    ScenePass, ScheduleLabel, Schedules, System, SystemsContainer, UpdateCameraMatrices,
+    UpdateGlobalTransforms, WindowInput, World, register_rendering_components,
+    register_std_components,
 };
 
 use crate::EngineContext;
@@ -64,6 +65,7 @@ impl App {
 
         // Play/Pause/Resume/Stop state machine for editor integration.
         world.insert_resource(PlayControl::default());
+        world.insert_resource(PlayModeAwareRegistry::default());
 
         let mut schedules = Schedules::new();
         {
