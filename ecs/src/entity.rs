@@ -47,6 +47,10 @@ impl Entity {
     pub const EDITOR: u32 = 1 << 4;
     /// Entity is an editor entity because a parent was marked as editor (propagated).
     pub const INHERITED_EDITOR: u32 = 1 << 5;
+    /// Entity is hidden during play mode (e.g., editor-only entities at Play transition).
+    pub const HIDDEN_IN_PLAY: u32 = 1 << 6;
+    /// Entity is hidden in play mode because a parent was marked hidden-in-play (propagated).
+    pub const INHERITED_HIDDEN_IN_PLAY: u32 = 1 << 7;
 
     const ID_BITS: u32 = 24;
     const ID_MASK: u64 = (1u64 << Self::ID_BITS) - 1; // 0x00FF_FFFF

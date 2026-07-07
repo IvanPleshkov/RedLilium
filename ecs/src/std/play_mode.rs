@@ -4,7 +4,30 @@
 //! and stop modes. Triggers [`PlayModeAware`](crate::PlayModeAware) lifecycle
 //! hooks and manages visibility of editor-only entities.
 
+use super::components::Parent;
+use super::hierarchy::{hide_in_play, show_in_play};
 use crate::{Entity, PlayModeAware, SystemError, World};
+
+/// Validates that no game entities (non-EDITOR) are parented under editor-only entities.
+/// Panics with a clear error message if a violation is found.
+fn validate_no_game_under_editor(world: &World) {
+    for entity in world.iter_entities() {
+        if let Some(parent) = world.get::<Parent>(entity) {
+            let entity_flags = world.get_entity_flags(entity);
+            let parent_flags = world.get_entity_flags(parent.0);
+
+            let is_entity_editor = entity_flags & Entity::EDITOR != 0;
+            let is_parent_editor = parent_flags & Entity::EDITOR != 0;
+
+            if is_parent_editor && !is_entity_editor {
+                panic!(
+                    "Game entity {:?} cannot be parented under editor-only entity {:?} at Play time",
+                    entity, parent.0
+                );
+            }
+        }
+    }
+}
 
 /// Event emitted when play-mode state transitions occur.
 ///
@@ -201,6 +224,32 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
                 .resource_mut::<crate::Schedules>()
                 .reset_game_schedule_last_runs(0);
         }
+
+        // Validate: forbid game entities (non-EDITOR) parented under EditorOnly parents.
+        validate_no_game_under_editor(world);
+
+        // Hide all root editor-only entities (and their children recursively) at Play transition.
+        // Only hide those without an editor parent to avoid double-processing.
+        let root_editor_entities: Vec<Entity> = world
+            .iter_entities()
+            .filter(|entity| {
+                let flags = world.get_entity_flags(*entity);
+                let is_editor = flags & Entity::EDITOR != 0;
+
+                // Check if parent is also editor
+                let parent_is_editor = if let Some(parent) = world.get::<Parent>(*entity) {
+                    let parent_flags = world.get_entity_flags(parent.0);
+                    parent_flags & Entity::EDITOR != 0
+                } else {
+                    false
+                };
+
+                is_editor && !parent_is_editor
+            })
+            .collect();
+        for entity in root_editor_entities {
+            hide_in_play(world, entity);
+        }
     }
 
     // Reset game-schedule last_runs when transitioning to Paused.
@@ -211,6 +260,30 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
             world
                 .resource_mut::<crate::Schedules>()
                 .reset_game_schedule_last_runs(tick);
+        }
+
+        // Show all hidden-in-play entities (editor entities and their children) at Pause transition.
+        // This allows inspection and selection during pause.
+        // Only show root hidden entities (those without a hidden parent) to avoid double-processing.
+        let root_hidden_entities: Vec<Entity> = world
+            .iter_entities()
+            .filter(|entity| {
+                let flags = world.get_entity_flags(*entity);
+                let is_hidden = flags & Entity::HIDDEN_IN_PLAY != 0;
+
+                // Check if parent is also hidden
+                let parent_is_hidden = if let Some(parent) = world.get::<Parent>(*entity) {
+                    let parent_flags = world.get_entity_flags(parent.0);
+                    parent_flags & Entity::HIDDEN_IN_PLAY != 0
+                } else {
+                    false
+                };
+
+                is_hidden && !parent_is_hidden
+            })
+            .collect();
+        for entity in root_hidden_entities {
+            show_in_play(world, entity);
         }
     }
 
@@ -544,6 +617,290 @@ mod tests {
             drift,
             gt.elapsed(),
             expected
+        );
+    }
+
+    #[test]
+    fn editor_entities_hidden_at_play() {
+        use crate::mark_editor;
+
+        let mut world = World::new();
+        world.insert_resource(PlayControl::default());
+        world.insert_resource(PlayModeAwareRegistry::default());
+        world.insert_resource(PlayStartTick(0));
+        world.insert_resource(crate::GameTime::default());
+
+        // Create an editor entity before play
+        let editor_entity = world.spawn();
+        mark_editor(&mut world, editor_entity);
+
+        // Verify not hidden before play
+        let flags_before = world.get_entity_flags(editor_entity);
+        assert_eq!(flags_before & Entity::HIDDEN_IN_PLAY, 0);
+
+        // Transition to Playing
+        let mut control = world.resource_mut::<PlayControl>();
+        control.play();
+        drop(control);
+
+        let mut system = ManagePlayModeTransitions;
+        system.run(&mut world).unwrap();
+
+        // Verify hidden after play
+        let flags_after = world.get_entity_flags(editor_entity);
+        assert_ne!(
+            flags_after & Entity::HIDDEN_IN_PLAY,
+            0,
+            "Editor entity should be hidden at play"
+        );
+    }
+
+    #[test]
+    fn editor_children_inherit_hidden_at_play() {
+        use crate::{mark_editor, set_parent};
+
+        let mut world = World::new();
+        world.register_component::<Parent>();
+        world.register_component::<crate::Children>();
+        world.insert_resource(PlayControl::default());
+        world.insert_resource(PlayModeAwareRegistry::default());
+        world.insert_resource(PlayStartTick(0));
+        world.insert_resource(crate::GameTime::default());
+
+        // Create editor parent and editor child
+        let editor_parent = world.spawn();
+        let editor_child = world.spawn();
+
+        mark_editor(&mut world, editor_parent);
+        mark_editor(&mut world, editor_child);
+        set_parent(&mut world, editor_child, editor_parent);
+
+        // Transition to Playing
+        let mut control = world.resource_mut::<PlayControl>();
+        control.play();
+        drop(control);
+
+        let mut system = ManagePlayModeTransitions;
+        system.run(&mut world).unwrap();
+
+        // Both should be hidden
+        let parent_flags = world.get_entity_flags(editor_parent);
+        let child_flags = world.get_entity_flags(editor_child);
+
+        assert_ne!(
+            parent_flags & Entity::HIDDEN_IN_PLAY,
+            0,
+            "Editor parent should be hidden"
+        );
+        assert_ne!(
+            child_flags & Entity::HIDDEN_IN_PLAY,
+            0,
+            "Editor child should be hidden"
+        );
+        // Child should have inherited bit set (because mark_editor was called first before hide)
+        assert_ne!(
+            child_flags & Entity::INHERITED_HIDDEN_IN_PLAY,
+            0,
+            "Inherited bit should be set on child"
+        );
+    }
+
+    #[test]
+    fn hidden_entities_shown_at_pause() {
+        use crate::mark_editor;
+
+        let mut world = World::new();
+        world.insert_resource(PlayControl::default());
+        world.insert_resource(PlayModeAwareRegistry::default());
+        world.insert_resource(PlayStartTick(0));
+        world.insert_resource(crate::GameTime::default());
+
+        // Create and hide an editor entity
+        let editor_entity = world.spawn();
+        mark_editor(&mut world, editor_entity);
+
+        let mut control = world.resource_mut::<PlayControl>();
+        control.play();
+        drop(control);
+
+        let mut system = ManagePlayModeTransitions;
+        system.run(&mut world).unwrap();
+
+        // Verify hidden
+        let flags_hidden = world.get_entity_flags(editor_entity);
+        assert_ne!(flags_hidden & Entity::HIDDEN_IN_PLAY, 0);
+
+        // Transition to Paused
+        let mut control = world.resource_mut::<PlayControl>();
+        control.pause();
+        drop(control);
+
+        system.run(&mut world).unwrap();
+
+        // Verify shown again
+        let flags_shown = world.get_entity_flags(editor_entity);
+        assert_eq!(
+            flags_shown & Entity::HIDDEN_IN_PLAY,
+            0,
+            "Hidden entities should be shown at pause"
+        );
+    }
+
+    #[test]
+    fn user_disabled_entities_stay_disabled_through_play_pause() {
+        use crate::disable;
+
+        let mut world = World::new();
+        world.insert_resource(PlayControl::default());
+        world.insert_resource(PlayModeAwareRegistry::default());
+        world.insert_resource(PlayStartTick(0));
+        world.insert_resource(crate::GameTime::default());
+
+        // Create a game entity and manually disable it
+        let game_entity = world.spawn();
+        disable(&mut world, game_entity);
+
+        // Verify disabled with manual flag set
+        let flags_before = world.get_entity_flags(game_entity);
+        assert_ne!(flags_before & Entity::DISABLED, 0);
+        assert_eq!(flags_before & Entity::INHERITED_DISABLED, 0);
+
+        // Transition to Playing
+        let mut control = world.resource_mut::<PlayControl>();
+        control.play();
+        drop(control);
+
+        let mut system = ManagePlayModeTransitions;
+        system.run(&mut world).unwrap();
+
+        // Verify still disabled (no HIDDEN_IN_PLAY should be set for non-editor)
+        let flags_during_play = world.get_entity_flags(game_entity);
+        assert_ne!(
+            flags_during_play & Entity::DISABLED,
+            0,
+            "Disabled status should persist"
+        );
+        assert_eq!(
+            flags_during_play & Entity::HIDDEN_IN_PLAY,
+            0,
+            "Game entity should not be hidden-in-play"
+        );
+
+        // Transition to Paused
+        let mut control = world.resource_mut::<PlayControl>();
+        control.pause();
+        drop(control);
+
+        system.run(&mut world).unwrap();
+
+        // Verify still disabled
+        let flags_after_pause = world.get_entity_flags(game_entity);
+        assert_ne!(
+            flags_after_pause & Entity::DISABLED,
+            0,
+            "Disabled status should persist after pause"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot be parented under editor-only")]
+    fn play_rejects_game_under_editor() {
+        use crate::{mark_editor, set_parent};
+
+        let mut world = World::new();
+        world.register_component::<Parent>();
+        world.register_component::<crate::Children>();
+        world.insert_resource(PlayControl::default());
+        world.insert_resource(PlayModeAwareRegistry::default());
+        world.insert_resource(PlayStartTick(0));
+        world.insert_resource(crate::GameTime::default());
+
+        // Create editor parent and game child
+        let editor_parent = world.spawn();
+        let game_child = world.spawn();
+
+        mark_editor(&mut world, editor_parent);
+        set_parent(&mut world, game_child, editor_parent);
+
+        // Transition to Playing should panic
+        let mut control = world.resource_mut::<PlayControl>();
+        control.play();
+        drop(control);
+
+        let mut system = ManagePlayModeTransitions;
+        let _ = system.run(&mut world);
+    }
+
+    #[test]
+    fn play_pause_resume_stop_hierarchy_fixed_point() {
+        use crate::mark_editor;
+
+        let mut world = World::new();
+        world.insert_resource(PlayControl::default());
+        world.insert_resource(PlayModeAwareRegistry::default());
+        world.insert_resource(PlayStartTick(0));
+        world.insert_resource(crate::GameTime::default());
+
+        // Create entities: editor parent and game sibling
+        let editor_entity = world.spawn();
+        let game_entity = world.spawn();
+
+        mark_editor(&mut world, editor_entity);
+
+        // Record initial state
+        let game_initial_flags = world.get_entity_flags(game_entity);
+
+        let mut system = ManagePlayModeTransitions;
+
+        // Play: editor hidden, game unchanged
+        let mut control = world.resource_mut::<PlayControl>();
+        control.play();
+        drop(control);
+        system.run(&mut world).unwrap();
+
+        let game_during_play = world.get_entity_flags(game_entity);
+        assert_eq!(
+            game_during_play & Entity::HIDDEN_IN_PLAY,
+            0,
+            "Game entity should not be hidden during play"
+        );
+
+        // Pause: editor shown, game still unchanged
+        let mut control = world.resource_mut::<PlayControl>();
+        control.pause();
+        drop(control);
+        system.run(&mut world).unwrap();
+
+        let game_paused = world.get_entity_flags(game_entity);
+        assert_eq!(
+            game_paused & Entity::HIDDEN_IN_PLAY,
+            0,
+            "Game entity should not be hidden when paused"
+        );
+
+        // Resume (play from pause): editor hidden again, game unchanged
+        let mut control = world.resource_mut::<PlayControl>();
+        control.resume();
+        drop(control);
+        system.run(&mut world).unwrap();
+
+        let game_resumed = world.get_entity_flags(game_entity);
+        assert_eq!(
+            game_resumed & Entity::HIDDEN_IN_PLAY,
+            0,
+            "Game entity should not be hidden when resumed"
+        );
+
+        // Stop: all entities returned to initial state
+        let mut control = world.resource_mut::<PlayControl>();
+        control.stop();
+        drop(control);
+        system.run(&mut world).unwrap();
+
+        let game_final = world.get_entity_flags(game_entity);
+        assert_eq!(
+            game_final, game_initial_flags,
+            "Game entity should return to initial state after stop"
         );
     }
 }

@@ -343,6 +343,74 @@ fn unmark_editor_subtree(world: &mut World, entity: Entity) {
     }
 }
 
+// ---- Entity hidden-in-play marking (always recursive, flag-based) ----
+
+/// Hides an entity and all descendants during play mode recursively.
+///
+/// The target entity gets the `HIDDEN_IN_PLAY` flag set and `INHERITED_HIDDEN_IN_PLAY`
+/// cleared (marking it as manually hidden-in-play). Descendants that are not
+/// already hidden-in-play receive both `HIDDEN_IN_PLAY` and `INHERITED_HIDDEN_IN_PLAY` flags.
+/// Already-hidden-in-play descendants keep their manual status.
+///
+/// Used at Play transition to hide editor-only entities and their children.
+pub fn hide_in_play(world: &mut World, entity: Entity) {
+    world.set_entity_flags(entity, Entity::HIDDEN_IN_PLAY);
+    world.clear_entity_flags(entity, Entity::INHERITED_HIDDEN_IN_PLAY);
+    hide_in_play_subtree(world, entity);
+}
+
+fn hide_in_play_subtree(world: &mut World, entity: Entity) {
+    let child_entities = world
+        .get::<Children>(entity)
+        .map(|c| c.0.clone())
+        .unwrap_or_default();
+    for child in child_entities {
+        let flags = world.get_entity_flags(child);
+        if flags & Entity::HIDDEN_IN_PLAY == 0 {
+            // Child was not hidden-in-play — mark it as inherited
+            world.set_entity_flags(
+                child,
+                Entity::HIDDEN_IN_PLAY | Entity::INHERITED_HIDDEN_IN_PLAY,
+            );
+        }
+        hide_in_play_subtree(world, child);
+    }
+}
+
+/// Shows an entity and re-enables inherited-hidden-in-play descendants.
+///
+/// Descendants that were manually marked hidden-in-play (have `HIDDEN_IN_PLAY` without
+/// `INHERITED_HIDDEN_IN_PLAY`) are left alone — their subtrees are not traversed.
+pub fn show_in_play(world: &mut World, entity: Entity) {
+    world.clear_entity_flags(
+        entity,
+        Entity::HIDDEN_IN_PLAY | Entity::INHERITED_HIDDEN_IN_PLAY,
+    );
+    show_in_play_subtree(world, entity);
+}
+
+fn show_in_play_subtree(world: &mut World, entity: Entity) {
+    let child_entities = world
+        .get::<Children>(entity)
+        .map(|c| c.0.clone())
+        .unwrap_or_default();
+    for child in child_entities {
+        let flags = world.get_entity_flags(child);
+        if flags & Entity::INHERITED_HIDDEN_IN_PLAY != 0 {
+            // Child was inherited-hidden-in-play — clear it and recurse
+            world.clear_entity_flags(
+                child,
+                Entity::HIDDEN_IN_PLAY | Entity::INHERITED_HIDDEN_IN_PLAY,
+            );
+            show_in_play_subtree(world, child);
+        } else if flags & Entity::HIDDEN_IN_PLAY == 0 {
+            // Child is not hidden-in-play — recurse in case deeper descendants are inherited
+            show_in_play_subtree(world, child);
+        }
+        // If child has HIDDEN_IN_PLAY but NOT INHERITED_HIDDEN_IN_PLAY, it was manually marked — skip
+    }
+}
+
 // ---- CommandBuffer extensions ----
 
 /// Extension trait adding hierarchy commands to [`CommandBuffer`].
