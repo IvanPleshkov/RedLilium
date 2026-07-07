@@ -15,7 +15,7 @@ use redlilium_assets::{AssetDb, AssetProcessor};
 
 use crate::std::components::{Camera, GlobalTransform, Visibility};
 use crate::system::SystemError;
-use crate::{DebugDrawer, DebugDrawerRenderer, System, SystemContext};
+use crate::{DebugDrawer, DebugDrawerRenderer, ExclusiveSystem, System, SystemContext, World};
 
 use super::{
     CameraTarget, FrameRing, MaterialAssetManager, MaterialInstanceManager, MeshManager,
@@ -365,26 +365,24 @@ impl System for EguiRender {
 /// previous scan are visited — new/edited refs still get demand-requested, but
 /// an idle scene costs nothing per frame. Any generation bump falls back to a
 /// full walk (a reload must re-resolve refs anywhere in the world).
+///
+/// Syncs asset references across all components as asset managers change their
+/// state. Runs as an exclusive barrier to avoid contending with component-writing
+/// systems (e.g., `UpdateGlobalTransforms`) under the multi-threaded runner.
 #[derive(Default)]
 pub struct MeshLoad {
-    /// Gating state (`run` takes `&self`; PostUpdate runs it single-threaded).
-    gate: std::sync::Mutex<SyncGate>,
-}
-
-#[derive(Default)]
-struct SyncGate {
-    /// Manager generations at the previous scan.
+    /// Manager generations at the previous scan. Used to gate: unchanged generations
+    /// → skip the expensive scan pass.
     last_gens: Option<[u64; 3]>,
 }
 
-impl System for MeshLoad {
+impl ExclusiveSystem for MeshLoad {
     type Result = ();
-    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<Self::Result, SystemError> {
+    fn run(&mut self, world: &mut World) -> Result<Self::Result, SystemError> {
         use redlilium_assets::AssetRef;
 
         use super::loaders::{MaterialInstanceSource, MeshSource, TextureSource};
 
-        let world = ctx.world();
         if !world.has_resource::<MeshManager>()
             || !world.has_resource::<VertexLayoutManager>()
             || !world.has_resource::<AssetProcessor>()
@@ -400,9 +398,6 @@ impl System for MeshLoad {
             mesh_mgr.drive(&mut processor, &db, &mut layout_mgr);
         }
 
-        // Sync pass A (read): scan components' refs, collecting the
-        // (component, entity) pairs that need a re-resolve and demand-requesting
-        // unknown sources. Nothing is written, so untouched components stay clean.
         let mut instance_mgr = world
             .has_resource::<MaterialInstanceManager>()
             .then(|| world.resource_mut::<MaterialInstanceManager>());
@@ -410,23 +405,20 @@ impl System for MeshLoad {
             .has_resource::<TextureManager>()
             .then(|| world.resource_mut::<TextureManager>());
 
-        // Gen-gating: unchanged generations → visit only components changed
-        // since this system's previous run. `ctx.last_run_tick()` is exact:
-        // every system run gets its own tick, so writes later in the previous
-        // frame are stamped after it and `changed_since`'s strict comparison
-        // catches them (no back-off guard needed).
         let gens = [
             mesh_mgr.generation(),
             instance_mgr.as_ref().map_or(0, |m| m.generation()),
             texture_mgr.as_ref().map_or(0, |m| m.generation()),
         ];
-        let mut gate = self.gate.lock().expect("sync gate poisoned");
-        let since = (gate.last_gens == Some(gens)).then(|| ctx.last_run_tick());
-        gate.last_gens = Some(gens);
-        drop(gate);
+        let changed = self.last_gens != Some(gens);
+        self.last_gens = Some(gens);
+
+        if !changed {
+            return Ok(());
+        }
 
         let mut stale: Vec<(&'static str, u32)> = Vec::new();
-        world.scan_asset_refs(since, &mut |component, idx, any| {
+        world.scan_asset_refs(None, &mut |component, idx, any| {
             if let Some(r) = any.downcast_ref::<AssetRef<MeshSource>>() {
                 match mesh_mgr.get(r.source()) {
                     Some(mesh) if !r.is_current(mesh) => stale.push((component, idx)),
@@ -452,8 +444,6 @@ impl System for MeshLoad {
             }
         });
 
-        // Sync pass B (write): re-visit only the stale components and apply the
-        // new resolutions (marks each patched component dirty exactly once).
         stale.sort_unstable();
         stale.dedup();
         for (component, idx) in stale {

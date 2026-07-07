@@ -376,8 +376,12 @@ pub fn create_editor_world(
 
     // Asset loading: MeshLoad resolves layouts + requests meshes, then
     // AssetPump drains the async stages onto the compute/IO pools + collects.
+    // MeshLoad is an ExclusiveSystem (barrier) so it doesn't contend with
+    // component-writing systems under the multi-threaded runner.
     schedules.get_mut::<PostUpdate>().add(HotReload);
-    schedules.get_mut::<PostUpdate>().add(MeshLoad::default());
+    schedules
+        .get_mut::<PostUpdate>()
+        .add_exclusive(MeshLoad::default());
     schedules
         .get_mut::<PostUpdate>()
         .add(redlilium_ecs::RemoteServe);

@@ -66,7 +66,7 @@ impl App {
             post.add_edge::<UpdateGlobalTransforms, UpdateCameraMatrices>()
                 .expect("no cycle");
             post.add(HotReload);
-            post.add(MeshLoad::default());
+            post.add_exclusive(MeshLoad::default());
             post.add(MaterialInstanceLoad);
             post.add(AssetPump);
             post.add_edge::<MeshLoad, AssetPump>().expect("no cycle");
