@@ -22,9 +22,12 @@ use crate::types::{Extent3d, TextureDescriptor, TextureDimension, TextureFormat}
 /// println!("Texture size: {}x{}", texture.width(), texture.height());
 /// ```
 pub struct Texture {
-    device: Arc<GraphicsDevice>,
     descriptor: TextureDescriptor,
     gpu_handle: GpuTexture,
+    /// Declared after `gpu_handle` deliberately: fields drop in declaration
+    /// order, and this keep-alive must outlive the handle's `Drop`, which
+    /// needs the backend (owned by the device→instance chain) alive. See #50.
+    device: Arc<GraphicsDevice>,
 }
 
 impl Texture {

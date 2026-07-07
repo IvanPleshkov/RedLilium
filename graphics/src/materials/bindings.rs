@@ -67,10 +67,30 @@ pub enum BindingType {
     /// 2D array texture (for sampling texture arrays in shaders).
     Texture2DArray,
 
+    /// Depth texture sampled in a shader (shadow mapping).
+    ///
+    /// On wgpu this declares `TextureSampleType::Depth`, which WebGPU
+    /// requires for sampling depth formats; a plain [`Texture`](Self::Texture)
+    /// binding fails layout validation there. On Vulkan both map to a sampled
+    /// image.
+    DepthTexture,
+
     /// Texture sampler.
     Sampler,
 
+    /// Comparison sampler (`SamplerComparisonState` /
+    /// `sampler_comparison`), used with [`DepthTexture`](Self::DepthTexture)
+    /// for hardware PCF shadow lookups. The sampler bound at this slot must
+    /// have a `compare` function set.
+    ComparisonSampler,
+
     /// Combined texture and sampler.
+    ///
+    /// Vulkan binds this as one `COMBINED_IMAGE_SAMPLER` descriptor at the
+    /// declared binding. wgpu has no combined bindings: the entry expands to
+    /// a texture at the declared binding N **plus** a sampler at N + 1 (the
+    /// convention Slang uses when emitting WGSL), so binding N + 1 must be
+    /// left unoccupied in the layout.
     CombinedTextureSampler,
 }
 

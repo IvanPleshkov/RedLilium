@@ -8,17 +8,27 @@ mod pass_encoding;
 mod resources;
 pub mod swapchain;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Scratch buffers reused across draw commands to avoid per-draw heap allocations.
-///
-/// Only contains types without Rust lifetimes (can be stored long-term).
-/// Vecs are cleared between draws but retain their capacity across frames.
-#[derive(Default)]
-struct WgpuEncoderScratch {
-    // GPU handle Vecs (no lifetimes, safe to pool):
-    bind_group_layouts: Vec<wgpu::BindGroupLayout>,
-    bind_groups: Vec<wgpu::BindGroup>,
+use crate::materials::{BindingType, ShaderStageFlags};
+
+/// Content key for bind-group-layout dedup: one entry per binding, in
+/// declaration order (binding index, type, visibility). Labels excluded —
+/// layouts differing only by label are wgpu-equivalent. Mirrors the Vulkan
+/// `ds_layout_cache` key so a binding group and the pipelines that use it share
+/// the same `wgpu::BindGroupLayout` object (wgpu requires them to be
+/// compatible).
+type BindGroupLayoutKey = Vec<(u32, BindingType, ShaderStageFlags)>;
+
+pub(crate) fn bind_group_layout_key(
+    layout: &crate::materials::BindingLayout,
+) -> BindGroupLayoutKey {
+    layout
+        .entries
+        .iter()
+        .map(|e| (e.binding, e.binding_type, e.visibility))
+        .collect()
 }
 
 /// A texture view for a surface texture (swapchain image).
@@ -58,7 +68,12 @@ pub struct WgpuBackend {
     adapter: wgpu::Adapter,
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
-    encoder_scratch: std::sync::Mutex<WgpuEncoderScratch>,
+    /// Content-keyed dedup of bind group layouts. Both pipeline creation and
+    /// `create_binding_group` pull from here, so a binding group's
+    /// `wgpu::BindGroupLayout` is the *same object* as the pipelines that use
+    /// it — the clean way to satisfy wgpu's bind-group/pipeline compatibility.
+    // parking_lot: no poisoning.
+    bind_group_layout_cache: parking_lot::Mutex<HashMap<BindGroupLayoutKey, wgpu::BindGroupLayout>>,
 }
 
 impl std::fmt::Debug for WgpuBackend {
@@ -113,9 +128,46 @@ impl WgpuBackend {
         log::info!("wgpu adapter: {:?}", adapter.get_info());
 
         // Request device
+        let (device, queue) = Self::request_device(&adapter)?;
+
+        Ok(Self {
+            instance,
+            adapter,
+            device: Arc::new(device),
+            queue: Arc::new(queue),
+            bind_group_layout_cache: parking_lot::Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Features requested opportunistically when the adapter supports them:
+    /// compressed texture formats (BC/ETC2/ASTC) so `create_texture` with
+    /// those formats works wherever the hardware can, and filterable 32-bit
+    /// float textures.
+    fn optional_features(adapter: &wgpu::Adapter) -> wgpu::Features {
+        let supported = adapter.features();
+        [
+            wgpu::Features::TEXTURE_COMPRESSION_BC,
+            wgpu::Features::TEXTURE_COMPRESSION_ETC2,
+            wgpu::Features::TEXTURE_COMPRESSION_ASTC,
+            wgpu::Features::FLOAT32_FILTERABLE,
+        ]
+        .into_iter()
+        .filter(|f| supported.contains(*f))
+        .fold(wgpu::Features::empty(), |acc, f| acc | f)
+    }
+
+    /// Request a device from `adapter` with the engine's feature set and an
+    /// uncaptured-error handler installed.
+    ///
+    /// Without a handler every uncaptured wgpu validation error aborts the
+    /// process; routing them to the log makes a bad draw degrade (missing
+    /// output + error message) instead of killing the app.
+    fn request_device(
+        adapter: &wgpu::Adapter,
+    ) -> Result<(wgpu::Device, wgpu::Queue), GraphicsError> {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("RedLilium Device"),
-            required_features: wgpu::Features::POLYGON_MODE_LINE,
+            required_features: wgpu::Features::POLYGON_MODE_LINE | Self::optional_features(adapter),
             required_limits: wgpu::Limits::default(),
             memory_hints: wgpu::MemoryHints::default(),
             experimental_features: wgpu::ExperimentalFeatures::default(),
@@ -125,13 +177,11 @@ impl WgpuBackend {
             GraphicsError::ResourceCreationFailed(format!("Device creation failed: {e}"))
         })?;
 
-        Ok(Self {
-            instance,
-            adapter,
-            device: Arc::new(device),
-            queue: Arc::new(queue),
-            encoder_scratch: std::sync::Mutex::new(WgpuEncoderScratch::default()),
-        })
+        device.on_uncaptured_error(std::sync::Arc::new(|error| {
+            log::error!("wgpu uncaptured error: {error}");
+        }));
+
+        Ok((device, queue))
     }
 
     /// Get the wgpu instance.
@@ -196,18 +246,7 @@ impl WgpuBackend {
         );
 
         // Request device from the new adapter
-        let (new_device, new_queue) =
-            pollster::block_on(new_adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("RedLilium Device"),
-                required_features: wgpu::Features::POLYGON_MODE_LINE,
-                required_limits: wgpu::Limits::default(),
-                memory_hints: wgpu::MemoryHints::default(),
-                experimental_features: wgpu::ExperimentalFeatures::default(),
-                trace: wgpu::Trace::Off,
-            }))
-            .map_err(|e| {
-                GraphicsError::ResourceCreationFailed(format!("Device creation failed: {e}"))
-            })?;
+        let (new_device, new_queue) = Self::request_device(&new_adapter)?;
 
         // Update the backend with new adapter and device.
         // Note: Pipelines are now owned by Materials (GpuPipeline),
@@ -216,6 +255,10 @@ impl WgpuBackend {
         self.adapter = new_adapter;
         self.device = Arc::new(new_device);
         self.queue = Arc::new(new_queue);
+        // The cached bind group layouts belong to the old device; drop them so
+        // materials/binding groups recreated against the new device get fresh,
+        // compatible layouts.
+        self.bind_group_layout_cache.lock().clear();
 
         Ok(true)
     }
@@ -241,7 +284,9 @@ impl WgpuBackend {
     /// - If `signal_fence` is provided: returns immediately after submission;
     ///   the submission index is stored in the fence for async polling.
     /// - If `signal_fence` is `None`: currently blocks until the submission
-    ///   completes (`poll(Wait)`).
+    ///   completes (`poll(Wait)`) and returns an error on timeout/poll
+    ///   failure. Per the trait-level contract this blocking is an
+    ///   implementation detail — callers must not rely on it.
     ///
     /// NOTE: the `None`-fence block is conservative. CPU/GPU overlap is bounded
     /// per frame by the frame-in-flight fence waited in
@@ -285,23 +330,28 @@ impl WgpuBackend {
         };
 
         // Store submission index in fence for async polling
-        if let Some(GpuFence::Wgpu {
-            submission_index: fence_idx,
-            ..
-        }) = signal_fence
-            && let Ok(mut guard) = fence_idx.lock()
+        if let Some(GpuFence::Wgpu { state, .. }) = signal_fence
+            && let Ok(mut guard) = state.lock()
         {
-            *guard = Some(submission_index);
+            *guard = crate::backend::WgpuFenceState::Submitted(submission_index);
             // Async path: return immediately, caller will wait on fence
             return Ok(());
         }
 
-        // Sync path: no fence provided, wait for GPU to complete before returning
-        let _ = self.device.poll(wgpu::PollType::Wait {
+        // Sync path: no fence provided, wait for GPU to complete before
+        // returning. A timeout or poll failure must be surfaced — pretending
+        // the work finished lets callers recycle in-flight resources.
+        match self.device.poll(wgpu::PollType::Wait {
             submission_index: Some(submission_index),
             timeout: Some(std::time::Duration::from_secs(10)),
-        });
-
-        Ok(())
+        }) {
+            Ok(status) if status.wait_finished() => Ok(()),
+            Ok(_) => Err(GraphicsError::Timeout(
+                "render graph submission did not complete within 10 s; GPU may be hung".into(),
+            )),
+            Err(e) => Err(GraphicsError::Internal(format!(
+                "device poll failed after graph submission: {e}"
+            ))),
+        }
     }
 }

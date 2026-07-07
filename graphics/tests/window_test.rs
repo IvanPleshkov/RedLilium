@@ -49,8 +49,8 @@ use winit::platform::windows::EventLoopBuilderExtWindows;
 use winit::window::{Window, WindowId};
 
 use redlilium_graphics::{
-    BackendType, ColorAttachment, FramePipeline, GraphicsDevice, GraphicsInstance, GraphicsPass,
-    InstanceParameters, LoadOp, PresentMode, RenderTargetConfig, StoreOp, Surface,
+    BackendType, ColorAttachment, FramePipeline, GraphicsDevice, GraphicsError, GraphicsInstance,
+    GraphicsPass, InstanceParameters, LoadOp, PresentMode, RenderTargetConfig, StoreOp, Surface,
     SurfaceConfiguration, WgpuBackendType,
 };
 
@@ -77,7 +77,7 @@ struct WindowTestApp {
     /// Instance parameters for backend selection.
     params: InstanceParameters,
     /// Window handle (created on resume).
-    window: Option<Window>,
+    window: Option<std::sync::Arc<Window>>,
     /// Graphics instance.
     instance: Option<Arc<GraphicsInstance>>,
     /// Graphics device.
@@ -130,7 +130,7 @@ impl WindowTestApp {
         };
 
         // Create surface first (needed to select compatible adapter)
-        let surface = match instance.create_surface(window) {
+        let surface = match instance.create_surface(window.clone()) {
             Ok(s) => s,
             Err(e) => {
                 log::warn!("Failed to create surface: {}", e);
@@ -197,6 +197,17 @@ impl WindowTestApp {
         // Acquire swapchain texture
         let swapchain_texture = match surface.acquire_texture() {
             Ok(t) => t,
+            Err(GraphicsError::SurfaceOutdated | GraphicsError::SurfaceLost) => {
+                // Reconfigure with the current size and skip this frame.
+                log::info!("Surface outdated, reconfiguring");
+                let config = SurfaceConfiguration::new(self.window_size.0, self.window_size.1)
+                    .with_format(surface.preferred_format())
+                    .with_present_mode(PresentMode::Fifo);
+                if let Some(device) = &self.device {
+                    let _ = surface.configure(device, &config);
+                }
+                return true;
+            }
             Err(e) => {
                 log::warn!("Failed to acquire swapchain texture: {}", e);
                 return false;
@@ -210,7 +221,7 @@ impl WindowTestApp {
         let (r, g, b) = hue_to_rgb(hue);
 
         // Execute using FramePipeline and FrameSchedule (as documented in ARCHITECTURE.md)
-        let mut schedule = pipeline.begin_frame();
+        let mut schedule = pipeline.begin_frame().expect("begin_frame failed");
 
         let mut graph = schedule.acquire_graph();
         let mut pass = GraphicsPass::new(format!("frame_{}", self.frame_count));
@@ -230,7 +241,10 @@ impl WindowTestApp {
         pipeline.end_frame(schedule);
 
         // Present the swapchain texture
-        swapchain_texture.present();
+        if let Err(e) = swapchain_texture.present() {
+            // SurfaceOutdated here is non-fatal: the next acquire reconfigures.
+            log::warn!("Present reported: {}", e);
+        }
 
         log::info!(
             "Frame {} rendered (clear color: RGB({:.2}, {:.2}, {:.2}))",
@@ -267,7 +281,7 @@ impl ApplicationHandler for WindowTestApp {
             match event_loop.create_window(window_attributes) {
                 Ok(window) => {
                     log::info!("Test window created successfully");
-                    self.window = Some(window);
+                    self.window = Some(std::sync::Arc::new(window));
 
                     // Initialize graphics
                     if !self.init_graphics() {
@@ -324,7 +338,7 @@ impl ApplicationHandler for WindowTestApp {
 
                         // Wait for GPU to finish before exiting
                         if let Some(pipeline) = &self.pipeline {
-                            pipeline.wait_idle();
+                            pipeline.wait_idle().expect("wait_idle failed");
                         }
 
                         event_loop.exit();
@@ -467,7 +481,7 @@ fn run_window_test(params: InstanceParameters) -> bool {
 
     // Cleanup
     if let Some(pipeline) = &app.pipeline {
-        pipeline.wait_idle();
+        let _ = pipeline.wait_idle();
     }
 
     match app.result {

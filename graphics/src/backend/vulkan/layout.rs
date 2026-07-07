@@ -94,12 +94,25 @@ impl TextureLayout {
     }
 
     /// Get the access mask for this layout (as destination).
+    ///
+    /// Attachment layouts include their read bits: blending and
+    /// `LoadOp::Load` read the color attachment, the depth test reads the
+    /// depth attachment, and `DepthStencilReadOnly` is sampled by shaders in
+    /// addition to feeding the depth test. Omitting them would leave those
+    /// reads outside the barrier's visibility scope.
     pub fn dst_access_mask(self) -> vk::AccessFlags {
         match self {
             Self::Undefined => vk::AccessFlags::empty(),
-            Self::ColorAttachment => vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-            Self::DepthStencilAttachment => vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-            Self::DepthStencilReadOnly => vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ,
+            Self::ColorAttachment => {
+                vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::COLOR_ATTACHMENT_READ
+            }
+            Self::DepthStencilAttachment => {
+                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+            }
+            Self::DepthStencilReadOnly => {
+                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ | vk::AccessFlags::SHADER_READ
+            }
             Self::ShaderReadOnly => vk::AccessFlags::SHADER_READ,
             Self::TransferSrc => vk::AccessFlags::TRANSFER_READ,
             Self::TransferDst => vk::AccessFlags::TRANSFER_WRITE,
@@ -114,7 +127,13 @@ impl TextureLayout {
             Self::Undefined => vk::PipelineStageFlags::TOP_OF_PIPE,
             Self::ColorAttachment => vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
             Self::DepthStencilAttachment => vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-            Self::DepthStencilReadOnly => vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+            // Read both by the depth test and by shaders sampling it.
+            Self::DepthStencilReadOnly => {
+                vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags::VERTEX_SHADER
+                    | vk::PipelineStageFlags::FRAGMENT_SHADER
+                    | vk::PipelineStageFlags::COMPUTE_SHADER
+            }
             // ShaderReadOnly textures can be sampled from vertex, fragment, or compute shaders.
             // Use all shader stages to ensure correct synchronization.
             Self::ShaderReadOnly => {
@@ -140,7 +159,13 @@ impl TextureLayout {
             Self::Undefined => vk::PipelineStageFlags::TOP_OF_PIPE,
             Self::ColorAttachment => vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
             Self::DepthStencilAttachment => vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-            Self::DepthStencilReadOnly => vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+            // Read both by the depth test and by shaders sampling it.
+            Self::DepthStencilReadOnly => {
+                vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags::VERTEX_SHADER
+                    | vk::PipelineStageFlags::FRAGMENT_SHADER
+                    | vk::PipelineStageFlags::COMPUTE_SHADER
+            }
             // ShaderReadOnly textures can be sampled from vertex, fragment, or compute shaders.
             // Use all shader stages to ensure correct synchronization.
             Self::ShaderReadOnly => {
@@ -165,6 +190,23 @@ impl TextureLayout {
         matches!(
             self,
             Self::DepthStencilAttachment | Self::DepthStencilReadOnly
+        )
+    }
+
+    /// Check if a pass using the image in this layout may write it.
+    ///
+    /// Drives same-layout barrier decisions: two consecutive passes using an
+    /// image in one of these layouts have a WAW/RAW hazard even though no
+    /// layout transition happens (dynamic rendering has no implicit
+    /// inter-pass dependencies), so a memory barrier is still required.
+    /// Read-only layouts back-to-back need nothing.
+    pub fn is_write(self) -> bool {
+        matches!(
+            self,
+            Self::ColorAttachment
+                | Self::DepthStencilAttachment
+                | Self::TransferDst
+                | Self::General
         )
     }
 }
@@ -400,9 +442,14 @@ impl TextureId {
 /// frames**, so this is a single global map (not reset each frame). Offscreen
 /// textures only ever change layout through the barriers this tracker emits
 /// (the swapchain image is handled separately by the present path and is not
-/// tracked here), and submits are serialized on one queue with per-frame
-/// fences — so this CPU-side map, updated in pass-record order, matches GPU
-/// execution order.
+/// tracked here).
+///
+/// INVARIANT (single queue): this CPU-side map, updated in pass-record order,
+/// matches GPU execution order only because submits are serialized on the one
+/// graphics queue with per-frame fences. The emitted layout-transition
+/// barriers synchronize across submissions within that queue; they do not
+/// cross queues. A second queue would need semaphores + queue-family ownership
+/// transfers — see #47 (this tracker has no queue-ownership concept).
 ///
 /// Keeping layouts across frames is what lets **persistent / history textures**
 /// (temporal AA, accumulation, motion blur) retain their contents: their first
@@ -414,9 +461,10 @@ impl TextureId {
 /// `vk::Image` handle: a destroyed image's handle may be reused by a new
 /// texture, which — without a reset — would otherwise inherit a stale layout.
 ///
-/// NOTE: entries accumulate with the total number of textures ever created
-/// (no per-frame clear). This is fine for typical workloads; if texture churn
-/// becomes significant, add removal on texture destruction.
+/// Destroyed textures are unregistered via the retirement queue: their drop
+/// pushes the stable id, and `advance_frame` drains the queue and calls
+/// [`remove`](Self::remove) — the map stays bounded by live textures instead
+/// of growing with every texture ever created.
 #[derive(Debug)]
 pub struct TextureLayoutTracker {
     /// Current layout of each tracked texture, by stable id.
@@ -456,6 +504,12 @@ impl TextureLayoutTracker {
     /// Update the tracked layout after a transition.
     pub fn set_layout(&mut self, id: TextureId, layout: TextureLayout) {
         self.layouts.insert(id, layout);
+    }
+
+    /// Remove a destroyed texture's entry (called from the retirement drain
+    /// in `advance_frame`; ids are never reused, so removal is always safe).
+    pub fn remove(&mut self, id: TextureId) {
+        self.layouts.remove(&id);
     }
 }
 

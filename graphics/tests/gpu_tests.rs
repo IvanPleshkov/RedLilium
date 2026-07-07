@@ -31,7 +31,8 @@ use common::{
     Backend, ExpectedPixel, FULLSCREEN_QUAD_VERTICES, LEFT_HALF_QUAD_VERTICES, TestContext,
     create_fullscreen_quad, create_left_half_quad, create_material_instance, create_mrt_pass,
     create_render_pass_with_depth, create_simple_render_pass, create_solid_color_material,
-    generate_test_pattern, get_pixel, readback_buffer_size, verify_pixel, write_quad_vertices,
+    create_texture_sample_instance, create_texture_sample_material, generate_test_pattern,
+    get_pixel, readback_buffer_size, verify_pixel, write_quad_vertices,
 };
 use redlilium_graphics::{
     BufferUsage, RenderGraph, RenderGraphCompilationMode, TextureFormat, TextureUsage,
@@ -950,4 +951,114 @@ fn test_texture_contents_persist_across_frames(#[case] backend: Backend) {
         verify_pixel(&data, W, W / 2, H / 2, expected, 2),
         "texture contents did not persist across the frame boundary (backend {backend:?})"
     );
+}
+
+// ============================================================================
+// Eager binding-group lifetime tests (issue #40)
+// ============================================================================
+
+/// A binding group's GPU descriptor set is created **once** and reused on every
+/// draw. Rendering the same `MaterialInstance` (holding one `Arc<BindingGroup>`)
+/// for several consecutive frames binds that one cached set from a different
+/// frame slot each time — this must be valid (no per-slot allocation, no
+/// validation errors, no double-write).
+#[rstest]
+#[case::dummy(Backend::Dummy)]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_binding_group_reused_across_frames(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new(backend) else {
+        eprintln!("Backend {:?} not available, skipping", backend);
+        return;
+    };
+
+    const W: u32 = 16;
+    const H: u32 = 16;
+
+    // A texture-sample material whose instance carries a single cached binding
+    // group (texture at 0, sampler at 1).
+    let material = create_texture_sample_material(&ctx);
+    let sampled = ctx.create_texture_2d(
+        4,
+        4,
+        TextureFormat::Rgba8Unorm,
+        TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST,
+    );
+    let instance = create_texture_sample_instance(&ctx, material, sampled);
+
+    // Render the SAME instance for 3 consecutive frames. Each execute_graph
+    // advances the frame pipeline, so the cached set is bound from a different
+    // slot each frame.
+    for frame in 0..3 {
+        let render_target = ctx.create_render_target(W, H);
+        let quad = create_fullscreen_quad(&ctx);
+        write_quad_vertices(&ctx, &quad, &FULLSCREEN_QUAD_VERTICES);
+
+        let mut graph = RenderGraph::new();
+        let mut pass =
+            create_simple_render_pass("reuse_frame", render_target, [0.0, 0.0, 0.0, 1.0]);
+        pass.add_draw(quad, instance.clone());
+        graph.add_graphics_pass(pass);
+        // A validation error or crash here fails the test (execute_graph
+        // panics internally on backend errors).
+        ctx.execute_graph(graph);
+        let _ = frame;
+    }
+}
+
+/// Dropping the last `Arc<BindingGroup>` right after submit must be safe: the
+/// submitted graph retains the instance until its frame slot is recycled after
+/// the fence wait, so the descriptor set is freed (via `GpuBindingGroup`'s
+/// `Drop`) only once the GPU is done with it. Advancing several frames forces
+/// that recycle; a use-after-free or pool/free-descriptor-set validation error
+/// would surface here or on teardown.
+#[rstest]
+#[case::dummy(Backend::Dummy)]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_binding_group_dropped_while_in_flight(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new(backend) else {
+        eprintln!("Backend {:?} not available, skipping", backend);
+        return;
+    };
+
+    const W: u32 = 16;
+    const H: u32 = 16;
+
+    let material = create_texture_sample_material(&ctx);
+    let sampled = ctx.create_texture_2d(
+        4,
+        4,
+        TextureFormat::Rgba8Unorm,
+        TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST,
+    );
+    let instance = create_texture_sample_instance(&ctx, material, sampled);
+
+    let render_target = ctx.create_render_target(W, H);
+    let quad = create_fullscreen_quad(&ctx);
+    write_quad_vertices(&ctx, &quad, &FULLSCREEN_QUAD_VERTICES);
+
+    let mut graph = RenderGraph::new();
+    let mut pass = create_simple_render_pass("drop_inflight", render_target, [0.0, 0.0, 0.0, 1.0]);
+    pass.add_draw(quad, instance.clone());
+    graph.add_graphics_pass(pass);
+    ctx.execute_graph(graph);
+
+    // Drop our references immediately after submit. The frame slot still holds a
+    // clone of the graph (and thus the Arc<BindingGroup>), so the set isn't
+    // freed yet.
+    drop(instance);
+
+    // Advance frames so the slot holding the submitted graph recycles, dropping
+    // the last Arc<BindingGroup> and freeing its descriptor set.
+    for _ in 0..3 {
+        let rt = ctx.create_render_target(W, H);
+        let mut g = RenderGraph::new();
+        g.add_graphics_pass(create_simple_render_pass(
+            "advance",
+            rt,
+            [0.0, 0.0, 0.0, 1.0],
+        ));
+        ctx.execute_graph(g);
+    }
 }

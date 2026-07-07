@@ -52,47 +52,52 @@ impl DummyBackend {
     }
 
     /// Create a fence for CPU-GPU synchronization.
-    pub fn create_fence(&self, signaled: bool) -> GpuFence {
-        GpuFence::Dummy {
+    pub fn create_fence(&self, signaled: bool) -> Result<GpuFence, GraphicsError> {
+        Ok(GpuFence::Dummy {
             signaled: AtomicBool::new(signaled),
-        }
+        })
     }
 
     /// Wait for a fence to be signaled.
-    pub fn wait_fence(&self, fence: &GpuFence) {
+    pub fn wait_fence(&self, fence: &GpuFence) -> Result<(), GraphicsError> {
         match fence {
             GpuFence::Dummy { signaled } => {
                 // In dummy mode, just spin until signaled (or assume signaled)
                 while !signaled.load(Ordering::Acquire) {
                     std::thread::yield_now();
                 }
+                Ok(())
             }
             #[cfg(feature = "wgpu-backend")]
-            GpuFence::Wgpu { .. } => {}
+            GpuFence::Wgpu { .. } => Ok(()),
             #[cfg(feature = "vulkan-backend")]
-            GpuFence::Vulkan { .. } => {}
+            GpuFence::Vulkan { .. } => Ok(()),
         }
     }
 
     /// Wait for a fence to be signaled with a timeout.
     ///
-    /// Returns `true` if the fence was signaled, `false` if the timeout elapsed.
-    pub fn wait_fence_timeout(&self, fence: &GpuFence, timeout: std::time::Duration) -> bool {
+    /// Returns `Ok(true)` if the fence was signaled, `Ok(false)` on timeout.
+    pub fn wait_fence_timeout(
+        &self,
+        fence: &GpuFence,
+        timeout: std::time::Duration,
+    ) -> Result<bool, GraphicsError> {
         match fence {
             GpuFence::Dummy { signaled } => {
                 let start = std::time::Instant::now();
                 while !signaled.load(Ordering::Acquire) {
                     if start.elapsed() >= timeout {
-                        return false;
+                        return Ok(false);
                     }
                     std::thread::yield_now();
                 }
-                true
+                Ok(true)
             }
             #[cfg(feature = "wgpu-backend")]
-            GpuFence::Wgpu { .. } => false,
+            GpuFence::Wgpu { .. } => Ok(false),
             #[cfg(feature = "vulkan-backend")]
-            GpuFence::Vulkan { .. } => false,
+            GpuFence::Vulkan { .. } => Ok(false),
         }
     }
 
@@ -145,10 +150,14 @@ impl DummyBackend {
         Ok(())
     }
 
-    /// Read data from a buffer.
-    pub fn read_buffer(&self, _buffer: &GpuBuffer, _offset: u64, size: u64) -> Vec<u8> {
-        // Return zeroed data
-        vec![0u8; size as usize]
+    /// Read data from a buffer (dummy: zeroed data of the requested size).
+    pub fn read_buffer(
+        &self,
+        _buffer: &GpuBuffer,
+        _offset: u64,
+        size: u64,
+    ) -> Result<Vec<u8>, GraphicsError> {
+        Ok(vec![0u8; size as usize])
     }
 
     /// Write data to a texture.
@@ -165,5 +174,41 @@ impl DummyBackend {
 impl Default for DummyBackend {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Cross-backend fence contract (XB-M2): a fence created unsignaled must
+    /// poll as unsignaled until something signals it, on every backend.
+    #[test]
+    fn fresh_unsignaled_fence_polls_unsignaled() {
+        let backend = DummyBackend::new();
+        let fence = backend.create_fence(false).unwrap();
+        assert!(!backend.is_fence_signaled(&fence));
+        // Nothing will signal it — a bounded wait must time out, not succeed.
+        assert!(
+            !backend
+                .wait_fence_timeout(&fence, std::time::Duration::from_millis(5))
+                .unwrap()
+        );
+
+        backend.signal_fence(&fence);
+        assert!(backend.is_fence_signaled(&fence));
+        backend.wait_fence(&fence).unwrap();
+    }
+
+    #[test]
+    fn fresh_signaled_fence_polls_signaled() {
+        let backend = DummyBackend::new();
+        let fence = backend.create_fence(true).unwrap();
+        assert!(backend.is_fence_signaled(&fence));
+        assert!(
+            backend
+                .wait_fence_timeout(&fence, std::time::Duration::from_millis(5))
+                .unwrap()
+        );
     }
 }

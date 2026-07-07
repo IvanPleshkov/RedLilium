@@ -95,9 +95,10 @@ pub use instance::{
     AdapterInfo, AdapterType, BackendType, GraphicsInstance, InstanceParameters, WgpuBackendType,
 };
 pub use materials::{
-    BindingGroup, BindingLayout, BindingLayoutEntry, BindingType, BlendComponent, BlendFactor,
-    BlendOperation, BlendState, BoundResource, Material, MaterialDescriptor, MaterialInstance,
-    PolygonMode, ShaderSource, ShaderSourceLanguage, ShaderStage, ShaderStageFlags, UpdateRate,
+    BindingGroup, BindingGroupDescriptor, BindingLayout, BindingLayoutEntry, BindingType,
+    BlendComponent, BlendFactor, BlendOperation, BlendState, BoundResource, Material,
+    MaterialDescriptor, MaterialInstance, PolygonMode, ShaderSource, ShaderSourceLanguage,
+    ShaderStage, ShaderStageFlags, UpdateRate,
 };
 pub use mesh::{
     CpuMesh, IndexFormat, Mesh, MeshDescriptor, PrimitiveTopology, VertexAttribute,

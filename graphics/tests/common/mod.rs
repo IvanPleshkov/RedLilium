@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
 
 use redlilium_graphics::{
-    BackendType, BindingGroup, Buffer, BufferDescriptor, BufferUsage, ColorAttachment,
+    BackendType, BindingGroupDescriptor, Buffer, BufferDescriptor, BufferUsage, ColorAttachment,
     DepthStencilAttachment, FramePipeline, GraphicsDevice, GraphicsInstance, GraphicsPass,
     InstanceParameters, LoadOp, Material, MaterialDescriptor, MaterialInstance, Mesh,
     MeshDescriptor, RenderGraph, RenderTargetConfig, SamplerDescriptor, ShaderSource, StoreOp,
@@ -75,9 +75,9 @@ impl Backend {
     pub fn to_instance_parameters(self) -> InstanceParameters {
         match self {
             Backend::Dummy => InstanceParameters::new().with_backend(BackendType::Dummy),
-            Backend::Vulkan => InstanceParameters::new()
-                .with_backend(BackendType::Wgpu)
-                .with_wgpu_backend(WgpuBackendType::Auto),
+            // The native ash backend, NOT wgpu-on-vulkan: these cases exist to
+            // cover graphics/src/backend/vulkan/.
+            Backend::Vulkan => InstanceParameters::new().with_backend(BackendType::Vulkan),
             Backend::WebGpu => InstanceParameters::new()
                 .with_backend(BackendType::Wgpu)
                 .with_wgpu_backend(WgpuBackendType::Auto),
@@ -190,7 +190,7 @@ impl TestContext {
     /// graph execution through the frame scheduling system.
     pub fn execute_graph(&self, graph: RenderGraph) {
         let mut pipeline = self.pipeline.borrow_mut();
-        let mut schedule = pipeline.begin_frame();
+        let mut schedule = pipeline.begin_frame().expect("begin_frame failed");
 
         // Render the single graph - this actually executes on the GPU
         schedule.render(graph);
@@ -199,7 +199,7 @@ impl TestContext {
         pipeline.end_frame(schedule);
 
         // Wait for all GPU work to complete before returning
-        pipeline.wait_idle();
+        pipeline.wait_idle().expect("wait_idle failed");
     }
 
     /// Read back a buffer's contents through the frame graph.
@@ -221,17 +221,17 @@ impl TestContext {
 
         let mut pipeline = self.pipeline.borrow_mut();
         // Frame 1: record + submit the readback op.
-        let mut schedule = pipeline.begin_frame();
+        let mut schedule = pipeline.begin_frame().expect("begin_frame failed");
         schedule.render(graph);
         pipeline.end_frame(schedule);
-        pipeline.wait_idle();
+        pipeline.wait_idle().expect("wait_idle failed");
         // Frame 2: recycling the slot runs its post-fence readback processing in
         // begin_frame (filling `dst`); render an empty graph to complete the
         // frame (the scheduler requires render() before end_frame).
-        let mut schedule = pipeline.begin_frame();
+        let mut schedule = pipeline.begin_frame().expect("begin_frame failed");
         schedule.render(RenderGraph::new());
         pipeline.end_frame(schedule);
-        pipeline.wait_idle();
+        pipeline.wait_idle().expect("wait_idle failed");
 
         dst.lock().unwrap().clone()
     }
@@ -253,7 +253,7 @@ impl TestContext {
 impl Drop for TestContext {
     fn drop(&mut self) {
         // Ensure GPU is idle before cleanup
-        self.pipeline.borrow().wait_idle();
+        let _ = self.pipeline.borrow().wait_idle();
     }
 }
 
@@ -835,12 +835,16 @@ pub fn create_texture_sample_instance(
         .expect("Failed to create sampler");
 
     // Create binding group with texture at binding 0 and sampler at binding 1
-    let binding_group = Arc::new(
-        BindingGroup::new()
-            .with_texture(0, texture)
-            .with_sampler(1, sampler)
-            .with_label("texture_sample_bindings"),
-    );
+    let binding_group = ctx
+        .device
+        .create_binding_group(
+            material.binding_layouts()[0].clone(),
+            BindingGroupDescriptor::new()
+                .with_texture(0, texture)
+                .with_sampler(1, sampler)
+                .with_label("texture_sample_bindings"),
+        )
+        .expect("Failed to create texture sample binding group");
 
     Arc::new(
         MaterialInstance::new(material)

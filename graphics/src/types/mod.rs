@@ -9,6 +9,6 @@ mod sampler;
 mod texture;
 
 pub use buffer::{BufferDescriptor, BufferUsage, DrawIndexedIndirectArgs, DrawIndirectArgs};
-pub use common::{ClearValue, Extent3d, ScissorRect, Viewport};
+pub use common::{ClampedScissor, ClearValue, Extent3d, ScissorRect, Viewport};
 pub use sampler::{AddressMode, CompareFunction, CpuSampler, FilterMode, SamplerDescriptor};
 pub use texture::{CpuTexture, TextureDescriptor, TextureDimension, TextureFormat, TextureUsage};

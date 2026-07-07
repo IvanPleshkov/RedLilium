@@ -103,6 +103,7 @@ pub fn run() {
     let mut rc = RemoteCommands::default();
 
     let mut calm = 0u32;
+    let mut render_failures = 0u32;
     let mut shutdown = false;
     while !shutdown {
         let busy = rc.has_pending() || !remote_commands::assets_idle(&ew.world);
@@ -119,7 +120,7 @@ pub fn run() {
             }
         }
 
-        shutdown = tick(
+        let outcome = tick(
             &mut ew,
             &mut rc,
             &mut scene_view,
@@ -129,23 +130,37 @@ pub fn run() {
             width,
             height,
         );
+        shutdown = outcome.shutdown;
 
-        // Even a busy headless editor has no vsync to pace it — yield a
-        // little so asset waits don't spin a core at full tilt.
-        std::thread::sleep(Duration::from_millis(1));
+        if outcome.rendered {
+            render_failures = 0;
+            // Even a busy headless editor has no vsync to pace it — yield a
+            // little so asset waits don't spin a core at full tilt.
+            std::thread::sleep(Duration::from_millis(1));
+        } else {
+            // Rendering failed (device error, wedged fence). Without vsync or
+            // an asset-idle signal this loop would spin at ~1 kHz retrying
+            // (the #46 CPU burn). Back off exponentially, capped at 250 ms —
+            // still responsive to commands, and recovers immediately once a
+            // frame succeeds again.
+            render_failures = render_failures.saturating_add(1);
+            let backoff = (1u64 << render_failures.min(8)).min(250);
+            std::thread::sleep(Duration::from_millis(backoff));
+        }
     }
 
     // The shutdown ack is queued on the IO runtime's writer task; give it a
     // beat to reach the socket before tearing the process down.
     std::thread::sleep(Duration::from_millis(150));
-    pipeline.wait_idle();
+    if let Err(e) = pipeline.wait_idle() {
+        log::error!("wait_idle failed during shutdown: {e}");
+    }
     let _ = std::fs::remove_file(".redlilium/editor.port");
     log::info!("headless editor: shutdown");
 }
 
 /// One editor frame: the same sequence as the windowed shell's
-/// `on_update` + `on_draw`, minus input, picking, and egui. Returns `true`
-/// when a remote `shutdown` arrived.
+/// `on_update` + `on_draw`, minus input, picking, and egui.
 #[allow(clippy::too_many_arguments)]
 fn tick(
     ew: &mut EditorWorld,
@@ -156,7 +171,7 @@ fn tick(
     local_mounts: &[(&'static str, &'static str)],
     width: u32,
     height: u32,
-) -> bool {
+) -> TickOutcome {
     ew.persist_dirty_mounts(local_mounts);
     ew.debug_drawer.read().advance_tick();
 
@@ -197,7 +212,19 @@ fn tick(
     ew.schedules.run_frame(&mut ew.world, runner, FIXED_DT);
 
     // Render into the camera's off-screen target (created on first tick).
-    let mut schedule = pipeline.begin_frame();
+    // On fence-wait failure skip rendering this tick — the fence stays in its
+    // slot and the next tick retries the wait.
+    let mut schedule = match pipeline.begin_frame() {
+        Ok(schedule) => schedule,
+        Err(e) => {
+            log::error!("begin_frame failed, skipping frame: {e}");
+            ew.window_input.write().begin_frame();
+            return TickOutcome {
+                shutdown,
+                rendered: false,
+            };
+        }
+    };
     let mut graph = schedule.acquire_graph();
     scene_view.ensure_camera_target(&mut ew.world, ew.editor_camera, width, height);
     ew.world.resource_mut::<RenderSchedule>().set(graph);
@@ -237,7 +264,20 @@ fn tick(
     pipeline.end_frame(schedule);
 
     ew.window_input.write().begin_frame();
-    shutdown
+    TickOutcome {
+        shutdown,
+        rendered: true,
+    }
+}
+
+/// Result of one headless [`tick`].
+struct TickOutcome {
+    /// A remote `shutdown` command arrived this tick.
+    shutdown: bool,
+    /// The frame reached the GPU (`begin_frame` succeeded). `false` means the
+    /// frame was skipped (fence-wait failure) — the loop backs off so a
+    /// persistent failure does not spin a core.
+    rendered: bool,
 }
 
 /// Scene target size: `REDLILIUM_HEADLESS_SIZE=WxH`, default 1280x720.

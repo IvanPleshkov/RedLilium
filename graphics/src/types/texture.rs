@@ -142,6 +142,22 @@ impl TextureDescriptor {
         self.dimension = dimension;
         self
     }
+
+    /// Array layer count and real depth implied by `dimension` and `size`.
+    ///
+    /// Matches how `create_texture` interprets the descriptor on both
+    /// backends: `size.depth` holds the layer count for array textures, the
+    /// cube count for `CubeArray` (× 6 faces), and the actual depth only for
+    /// `D3`. `Cube` is always 6 layers regardless of `size.depth`.
+    pub fn layers_and_depth(&self) -> (u32, u32) {
+        match self.dimension {
+            TextureDimension::D1 | TextureDimension::D2 => (1, 1),
+            TextureDimension::D1Array | TextureDimension::D2Array => (self.size.depth.max(1), 1),
+            TextureDimension::D3 => (1, self.size.depth.max(1)),
+            TextureDimension::Cube => (6, 1),
+            TextureDimension::CubeArray => (self.size.depth.max(1) * 6, 1),
+        }
+    }
 }
 
 impl Default for TextureDescriptor {

@@ -31,6 +31,8 @@ use std::sync::Arc;
 #[cfg(feature = "vulkan-backend")]
 use ash::vk;
 #[cfg(feature = "vulkan-backend")]
+use ash::vk::Handle;
+#[cfg(feature = "vulkan-backend")]
 use gpu_allocator::vulkan::Allocation;
 #[cfg(feature = "vulkan-backend")]
 use gpu_allocator::vulkan::Allocator;
@@ -60,6 +62,9 @@ pub enum GpuBuffer {
         size: u64,
         /// Allocator for freeing memory on drop.
         allocator: Arc<Mutex<Allocator>>,
+        /// Shared retirement queue: `Drop` pushes the buffer handle here so
+        /// the backend removes its access-tracker entry in `advance_frame`.
+        retired: Arc<Mutex<vulkan::RetiredTrackerHandles>>,
     },
 }
 
@@ -105,6 +110,9 @@ pub enum GpuTexture {
         /// raw `image` handle, this is never reused after the texture is
         /// destroyed, so it can't alias a recreated texture's tracked layout.
         id: u64,
+        /// Shared retirement queue: `Drop` pushes `id` here so the backend
+        /// removes its layout-tracker entry in `advance_frame`.
+        retired: Arc<Mutex<vulkan::RetiredTrackerHandles>>,
     },
 }
 
@@ -193,6 +201,10 @@ pub enum GpuPipeline {
         device: ash::Device,
         pipeline: vk::Pipeline,
         pipeline_layout: vk::PipelineLayout,
+        /// Layouts for per-draw descriptor-set allocation. Borrowed copies of
+        /// handles owned by the backend's `PipelineManager` dedup cache —
+        /// shared between materials with identical binding layouts and valid
+        /// for the backend's lifetime. `Drop` must not destroy them.
         descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
     },
 }
@@ -218,6 +230,50 @@ impl std::fmt::Debug for GpuPipeline {
     }
 }
 
+/// Handle to a GPU binding group (a compiled [`BindingGroup`]).
+///
+/// This is the eagerly-created descriptor set (Vulkan) / bind group (wgpu) that
+/// backs a [`BindingGroup`](crate::BindingGroup). It is created once at
+/// `GraphicsDevice::create_binding_group()` time and bound — never rebuilt — on
+/// every draw. Its lifetime equals the owning `Arc<BindingGroup>`; `Drop` frees
+/// the GPU resource.
+#[allow(clippy::large_enum_variant)]
+pub enum GpuBindingGroup {
+    /// Dummy backend (no GPU allocation).
+    Dummy,
+    /// wgpu backend bind group.
+    #[cfg(feature = "wgpu-backend")]
+    Wgpu(wgpu::BindGroup),
+    /// Vulkan backend descriptor set, allocated from the persistent pool chain.
+    #[cfg(feature = "vulkan-backend")]
+    Vulkan {
+        device: ash::Device,
+        descriptor_set: vk::DescriptorSet,
+        /// The specific pool this set was allocated from — `vkFreeDescriptorSets`
+        /// must target it.
+        pool: vk::DescriptorPool,
+        /// The shared persistent pool chain, held so `Drop` can free the set
+        /// back to it from any thread (host access to the pool must be
+        /// externally synchronized — the shared mutex provides that).
+        pools: Arc<Mutex<vulkan::PersistentDescriptorPools>>,
+    },
+}
+
+impl std::fmt::Debug for GpuBindingGroup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dummy => write!(f, "GpuBindingGroup::Dummy"),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(bg) => f.debug_tuple("GpuBindingGroup::Wgpu").field(bg).finish(),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan { descriptor_set, .. } => f
+                .debug_struct("GpuBindingGroup::Vulkan")
+                .field("descriptor_set", descriptor_set)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
 /// Handle to a GPU fence for CPU-GPU synchronization.
 ///
 /// # Backend Differences
@@ -229,14 +285,13 @@ impl std::fmt::Debug for GpuPipeline {
 /// when command buffer execution completes. CPU can wait or poll the fence status.
 /// This provides precise synchronization and supports multiple frames in flight.
 ///
-/// ## wgpu (`SubmissionIndex`)
+/// ## wgpu ([`WgpuFenceState`])
 /// wgpu abstracts over multiple backends (Vulkan, Metal, DX12, WebGPU) and doesn't
-/// expose native fence handles to maintain portability. Instead, it uses submission
-/// indices that can be polled via `device.poll()`. Key differences:
-/// - No true "unsignaled" state - fence tracks submissions, not binary state
-/// - Polling checks if work is complete, not a specific fence state
-/// - `execute_graph` with fence provided returns immediately (async)
-/// - `execute_graph` without fence blocks until completion (sync, backwards compatible)
+/// expose native fence handles to maintain portability. The fence emulates
+/// Vulkan's binary semantics with a small state machine:
+/// - `Unsignaled` / `Signaled` — the initial state chosen by `create_fence`
+/// - `Submitted(index)` — set by `execute_graph`; polling/waiting resolves the
+///   state by asking the device about that submission
 ///
 /// **Why not expose GPU fences in wgpu?** Each backend (Metal, DX12, WebGPU) has
 /// different synchronization primitives. wgpu's submission index abstraction works
@@ -250,13 +305,11 @@ pub enum GpuFence {
     Dummy {
         signaled: std::sync::atomic::AtomicBool,
     },
-    /// wgpu backend - tracks submission index for polling.
-    /// Note: wgpu fences track submissions rather than binary state.
-    /// A fence with `submission_index: None` is considered "signaled" (no pending work).
+    /// wgpu backend - binary fence emulated over submission indices.
     #[cfg(feature = "wgpu-backend")]
     Wgpu {
         device: Arc<wgpu::Device>,
-        submission_index: std::sync::Mutex<Option<wgpu::SubmissionIndex>>,
+        state: std::sync::Mutex<WgpuFenceState>,
     },
     /// Vulkan backend - true GPU fence via `vkFence`.
     #[cfg(feature = "vulkan-backend")]
@@ -274,11 +327,9 @@ impl std::fmt::Debug for GpuFence {
                 .field("signaled", signaled)
                 .finish(),
             #[cfg(feature = "wgpu-backend")]
-            Self::Wgpu {
-                submission_index, ..
-            } => f
+            Self::Wgpu { state, .. } => f
                 .debug_struct("GpuFence::Wgpu")
-                .field("submission_index", submission_index)
+                .field("state", state)
                 .finish_non_exhaustive(),
             #[cfg(feature = "vulkan-backend")]
             Self::Vulkan { fence, .. } => f
@@ -287,6 +338,24 @@ impl std::fmt::Debug for GpuFence {
                 .finish_non_exhaustive(),
         }
     }
+}
+
+/// State of a wgpu fence (see [`GpuFence::Wgpu`]).
+///
+/// Emulates Vulkan's binary fence semantics on top of wgpu submission
+/// indices: `create_fence` picks `Unsignaled` or `Signaled`, and
+/// `execute_graph` moves the fence to `Submitted` so waits/polls resolve
+/// against the actual GPU submission.
+#[cfg(feature = "wgpu-backend")]
+#[derive(Debug, Clone)]
+pub enum WgpuFenceState {
+    /// Created unsignaled; no submission will ever signal it until
+    /// `execute_graph` ties one. Polls as unsignaled; waiting is an error.
+    Unsignaled,
+    /// Created signaled (or trivially complete); polls as signaled.
+    Signaled,
+    /// Tied to a queue submission; polls/waits resolve via `device.poll`.
+    Submitted(wgpu::SubmissionIndex),
 }
 
 /// Handle to an acquired surface texture for presentation.
@@ -328,6 +397,10 @@ pub enum GpuSurfaceTexture {
         in_flight_fence: vk::Fence,
         /// The command buffer for presentation.
         present_command_buffer: vk::CommandBuffer,
+        /// Whether the acquire reported the swapchain as suboptimal — the
+        /// frame is rendered and presented normally, but present reports
+        /// `SurfaceOutdated` so the caller reconfigures.
+        suboptimal: bool,
     },
 }
 
@@ -380,13 +453,17 @@ impl GpuSurfaceTexture {
     /// Present the surface texture.
     ///
     /// Takes the backend for Vulkan presentation.
-    pub fn present(self, backend: &GpuBackend, frame_index: u64) {
+    ///
+    /// # Errors
+    ///
+    /// `SurfaceOutdated` / `SurfaceLost` mean the surface must be
+    /// reconfigured before the next acquire (the frame may still have been
+    /// shown). Other errors indicate the frame was not presented.
+    pub fn present(self, backend: &GpuBackend, frame_index: u64) -> Result<(), GraphicsError> {
         match self {
-            Self::Dummy => {}
+            Self::Dummy => Ok(()),
             #[cfg(feature = "wgpu-backend")]
-            Self::Wgpu { texture, .. } => {
-                wgpu_impl::swapchain::present_surface_texture(texture);
-            }
+            Self::Wgpu { texture, .. } => wgpu_impl::swapchain::present_surface_texture(texture),
             #[cfg(feature = "vulkan-backend")]
             Self::Vulkan {
                 view,
@@ -397,10 +474,11 @@ impl GpuSurfaceTexture {
                 render_finished_semaphore,
                 in_flight_fence,
                 present_command_buffer,
+                suboptimal,
                 ..
             } => {
                 if let GpuBackend::Vulkan(vulkan_backend) = backend {
-                    if let Err(e) = vulkan::swapchain::present_vulkan_frame(
+                    vulkan::swapchain::present_vulkan_frame(
                         vulkan_backend,
                         &view,
                         swapchain,
@@ -411,11 +489,38 @@ impl GpuSurfaceTexture {
                         in_flight_fence,
                         present_command_buffer,
                         frame_index,
-                    ) {
-                        log::error!("Failed to present Vulkan frame: {}", e);
+                    )?;
+                    if suboptimal {
+                        Err(GraphicsError::SurfaceOutdated)
+                    } else {
+                        Ok(())
                     }
                 } else {
-                    log::error!("Vulkan surface texture requires Vulkan backend for presentation");
+                    Err(GraphicsError::Internal(
+                        "Vulkan surface texture requires Vulkan backend for presentation"
+                            .to_string(),
+                    ))
+                }
+            }
+        }
+    }
+
+    /// Release an acquired surface texture that will not be rendered.
+    ///
+    /// On Vulkan an acquired image carries pending binary-semaphore signals
+    /// that can only be drained by presenting, so this presents the
+    /// (undrawn) image — one undefined frame on an error path beats
+    /// permanently poisoned sync objects. On wgpu, dropping the texture is
+    /// the supported cancellation path.
+    pub fn abandon(self, backend: &GpuBackend, frame_index: u64) {
+        match self {
+            Self::Dummy => {}
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu { .. } => {}
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan { .. } => {
+                if let Err(e) = self.present(backend, frame_index) {
+                    log::warn!("Failed to release abandoned surface texture: {e}");
                 }
             }
         }
@@ -443,6 +548,14 @@ pub enum GpuSurface {
         surface: vk::SurfaceKHR,
         /// The Vulkan swapchain (created on configure).
         swapchain: RwLock<Option<vulkan::swapchain::VulkanSwapchain>>,
+        /// Surface-extension fn table, kept so `Drop` can destroy the
+        /// `VkSurfaceKHR` (the frontend `Surface` keeps the `VkInstance`
+        /// alive until after this drops).
+        surface_loader: ash::khr::surface::Instance,
+        /// Keeps the window alive for as long as the `VkSurfaceKHR` references
+        /// it. The `wgpu` variant needs no equivalent — its `Surface<'static>`
+        /// owns an `Arc<Window>` clone internally.
+        _window: Arc<dyn std::any::Any + Send + Sync>,
     },
 }
 
@@ -496,16 +609,59 @@ impl GpuSurface {
                         .filter_map(|sf| vulkan::conversion::from_vulkan_format(sf.format))
                         .collect(),
                     Err(e) => {
+                        // Report honestly: pretending Bgra8Unorm is supported
+                        // lets configuration proceed with a format the
+                        // backend will reject (or worse, silently mismatch).
                         log::warn!("Failed to query Vulkan surface formats: {}", e);
-                        vec![crate::types::TextureFormat::Bgra8Unorm]
+                        Vec::new()
                     }
                 }
             }
 
             #[allow(unreachable_patterns)]
-            _ => {
-                vec![crate::types::TextureFormat::Bgra8Unorm]
+            _ => Vec::new(),
+        }
+    }
+
+    /// Query the present modes actually supported by this surface.
+    pub fn get_supported_present_modes(
+        &self,
+        backend: &GpuBackend,
+    ) -> Vec<crate::swapchain::PresentMode> {
+        match (self, backend) {
+            (Self::Dummy, _) => vec![
+                crate::swapchain::PresentMode::Fifo,
+                crate::swapchain::PresentMode::Immediate,
+                crate::swapchain::PresentMode::Mailbox,
+                crate::swapchain::PresentMode::FifoRelaxed,
+            ],
+
+            #[cfg(feature = "wgpu-backend")]
+            (Self::Wgpu { surface }, GpuBackend::Wgpu(wgpu_backend)) => {
+                let caps = surface.get_capabilities(wgpu_backend.adapter());
+                caps.present_modes
+                    .iter()
+                    .filter_map(|m| wgpu_impl::conversion::from_wgpu_present_mode(*m))
+                    .collect()
             }
+
+            #[cfg(feature = "vulkan-backend")]
+            (Self::Vulkan { surface, .. }, GpuBackend::Vulkan(vulkan_backend)) => {
+                match vulkan_backend.get_surface_present_modes(*surface) {
+                    Ok(modes) => modes
+                        .iter()
+                        .filter_map(|m| vulkan::conversion::from_vulkan_present_mode(*m))
+                        .collect(),
+                    Err(e) => {
+                        log::warn!("Failed to query Vulkan surface present modes: {}", e);
+                        // FIFO is guaranteed by the Vulkan spec.
+                        vec![crate::swapchain::PresentMode::Fifo]
+                    }
+                }
+            }
+
+            #[allow(unreachable_patterns)]
+            _ => vec![crate::swapchain::PresentMode::Fifo],
         }
     }
 
@@ -526,24 +682,45 @@ impl GpuSurface {
 
             #[cfg(feature = "wgpu-backend")]
             (Self::Wgpu { surface }, GpuBackend::Wgpu(wgpu_backend)) => {
-                wgpu_impl::swapchain::configure_surface(surface, wgpu_backend, config);
-                Ok(())
+                wgpu_impl::swapchain::configure_surface(surface, wgpu_backend, config)
             }
 
             #[cfg(feature = "vulkan-backend")]
-            (Self::Vulkan { surface, swapchain }, GpuBackend::Vulkan(vulkan_backend)) => {
+            (
+                Self::Vulkan {
+                    surface, swapchain, ..
+                },
+                GpuBackend::Vulkan(vulkan_backend),
+            ) => {
                 use vulkan::swapchain::VulkanSwapchain;
 
-                // Destroy old swapchain if it exists
-                if let Some(ref mut old_swapchain) = *swapchain.write() {
-                    old_swapchain.destroy();
-                }
+                // Create the new swapchain BEFORE destroying the old one,
+                // passing the old handle so the driver can recreate
+                // seamlessly. On failure the old swapchain stays in place —
+                // rendering continues on the previous configuration instead
+                // of losing the surface entirely.
+                let old = swapchain.write().take();
+                let old_handle = old
+                    .as_ref()
+                    .map(|s| s.swapchain)
+                    .unwrap_or(vk::SwapchainKHR::null());
 
-                // Create new swapchain
-                let new_swapchain = VulkanSwapchain::new(vulkan_backend, *surface, config)?;
-                *swapchain.write() = Some(new_swapchain);
-                log::info!("Configured Vulkan swapchain");
-                Ok(())
+                match VulkanSwapchain::new(vulkan_backend, *surface, config, old_handle) {
+                    Ok(new_swapchain) => {
+                        // The old swapchain is retired by the create call;
+                        // destroy its images/sync objects now.
+                        if let Some(mut old) = old {
+                            old.destroy();
+                        }
+                        *swapchain.write() = Some(new_swapchain);
+                        log::info!("Configured Vulkan swapchain");
+                        Ok(())
+                    }
+                    Err(e) => {
+                        *swapchain.write() = old;
+                        Err(e)
+                    }
+                }
             }
 
             #[allow(unreachable_patterns)]
@@ -586,6 +763,7 @@ impl GpuSurface {
                         render_finished_semaphore: result.render_finished_semaphore,
                         in_flight_fence: result.in_flight_fence,
                         present_command_buffer: result.present_command_buffer,
+                        suboptimal: result.suboptimal,
                     })
                 } else {
                     Err(GraphicsError::Internal(
@@ -605,11 +783,22 @@ impl GpuSurface {
 #[cfg(feature = "vulkan-backend")]
 impl Drop for GpuSurface {
     fn drop(&mut self) {
-        if let GpuSurface::Vulkan { swapchain, .. } = self {
-            // Destroy the swapchain before the surface is dropped.
+        if let GpuSurface::Vulkan {
+            surface,
+            swapchain,
+            surface_loader,
+            ..
+        } = self
+        {
+            // Destroy the swapchain before the surface it was created from.
             // The VulkanSwapchain stores its own device handles for cleanup.
             if let Some(ref mut sc) = *swapchain.write() {
                 sc.destroy();
+            }
+            // SAFETY: the frontend Surface keeps the instance (and thus the
+            // VkInstance behind `surface_loader`) alive until after this Drop.
+            if *surface != vk::SurfaceKHR::null() {
+                unsafe { surface_loader.destroy_surface(*surface, None) };
             }
         }
     }
@@ -632,6 +821,7 @@ impl Drop for GpuBuffer {
             buffer,
             allocation,
             allocator,
+            retired,
             ..
         } = self
         {
@@ -640,6 +830,7 @@ impl Drop for GpuBuffer {
             {
                 log::error!("Failed to free buffer allocation: {}", e);
             }
+            retired.lock().buffers.push(buffer.as_raw());
             unsafe { device.destroy_buffer(*buffer, None) };
         }
     }
@@ -654,6 +845,8 @@ impl Drop for GpuTexture {
             view,
             allocation,
             allocator,
+            id,
+            retired,
             ..
         } = self
         {
@@ -662,6 +855,7 @@ impl Drop for GpuTexture {
             {
                 log::error!("Failed to free texture allocation: {}", e);
             }
+            retired.lock().textures.push(*id);
             unsafe {
                 device.destroy_image_view(*view, None);
                 device.destroy_image(*image, None);
@@ -689,21 +883,49 @@ impl Drop for GpuFence {
 }
 
 #[cfg(feature = "vulkan-backend")]
+impl Drop for GpuBindingGroup {
+    fn drop(&mut self) {
+        if let GpuBindingGroup::Vulkan {
+            device,
+            descriptor_set,
+            pool,
+            pools,
+        } = self
+        {
+            // Free the set directly, no deferred queue. Safety: submitted render
+            // graphs retain their `Arc<MaterialInstance>` → `Arc<BindingGroup>`
+            // (and thus this handle) until `FramePipeline` recycles the slot
+            // after its fence wait, so the GPU is guaranteed done with the set
+            // before this runs — the same invariant that makes `GpuBuffer`'s
+            // immediate destroy-on-Drop safe. The shared pool mutex provides the
+            // external synchronization `vkFreeDescriptorSets` requires.
+            let _guard = pools.lock();
+            unsafe {
+                if let Err(e) = device.free_descriptor_sets(*pool, &[*descriptor_set]) {
+                    log::error!("Failed to free descriptor set: {e:?}");
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "vulkan-backend")]
 impl Drop for GpuPipeline {
     fn drop(&mut self) {
         if let GpuPipeline::Vulkan {
             device,
             pipeline,
             pipeline_layout,
-            descriptor_set_layouts,
+            descriptor_set_layouts: _,
         } = self
         {
+            // descriptor_set_layouts are NOT destroyed here: they are shared
+            // handles owned by the PipelineManager's dedup cache (other
+            // materials may still reference them). The manager destroys them
+            // in its destroy().
             unsafe {
                 device.destroy_pipeline(*pipeline, None);
                 device.destroy_pipeline_layout(*pipeline_layout, None);
-                for layout in descriptor_set_layouts {
-                    device.destroy_descriptor_set_layout(*layout, None);
-                }
             }
         }
     }
@@ -810,8 +1032,25 @@ impl GpuBackend {
         }
     }
 
+    /// Create a binding group: the eagerly-compiled descriptor set / bind group
+    /// for a [`BindingGroupDescriptor`](crate::BindingGroupDescriptor) against
+    /// `layout`. The GPU handle is written once here and only bound at draw time.
+    pub fn create_binding_group(
+        &self,
+        layout: &crate::materials::BindingLayout,
+        descriptor: &crate::materials::BindingGroupDescriptor,
+    ) -> Result<GpuBindingGroup, GraphicsError> {
+        match self {
+            Self::Dummy(_) => Ok(GpuBindingGroup::Dummy),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(backend) => backend.create_binding_group(layout, descriptor),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => backend.create_binding_group(layout, descriptor),
+        }
+    }
+
     /// Create a fence for CPU-GPU synchronization.
-    pub fn create_fence(&self, signaled: bool) -> GpuFence {
+    pub fn create_fence(&self, signaled: bool) -> Result<GpuFence, GraphicsError> {
         match self {
             Self::Dummy(backend) => backend.create_fence(signaled),
             #[cfg(feature = "wgpu-backend")]
@@ -822,7 +1061,12 @@ impl GpuBackend {
     }
 
     /// Wait for a fence to be signaled.
-    pub fn wait_fence(&self, fence: &GpuFence) {
+    ///
+    /// Uses a backend-internal timeout (10 s) to avoid hanging forever on a
+    /// hung GPU. Returns an error on timeout or device loss — the caller must
+    /// NOT recycle resources guarded by this fence in that case, because the
+    /// GPU may still be using them.
+    pub fn wait_fence(&self, fence: &GpuFence) -> Result<(), GraphicsError> {
         match self {
             Self::Dummy(backend) => backend.wait_fence(fence),
             #[cfg(feature = "wgpu-backend")]
@@ -834,8 +1078,13 @@ impl GpuBackend {
 
     /// Wait for a fence to be signaled with a timeout.
     ///
-    /// Returns `true` if the fence was signaled, `false` if the timeout elapsed.
-    pub fn wait_fence_timeout(&self, fence: &GpuFence, timeout: std::time::Duration) -> bool {
+    /// Returns `Ok(true)` if the fence was signaled, `Ok(false)` if the
+    /// timeout elapsed, and an error on device loss or wait failure.
+    pub fn wait_fence_timeout(
+        &self,
+        fence: &GpuFence,
+        timeout: std::time::Duration,
+    ) -> Result<bool, GraphicsError> {
         match self {
             Self::Dummy(backend) => backend.wait_fence_timeout(fence, timeout),
             #[cfg(feature = "wgpu-backend")]
@@ -871,9 +1120,16 @@ impl GpuBackend {
     ///
     /// This records commands from the graph into a command buffer and submits it.
     ///
-    /// # Arguments
+    /// # Synchronization contract
     ///
-    /// * `signal_fence` - Optional fence to signal when execution completes (for CPU waiting)
+    /// * `signal_fence: Some(_)` — returns immediately after submission on
+    ///   every backend; the fence is signaled when the GPU finishes, and the
+    ///   caller waits/polls it before recycling frame resources.
+    /// * `signal_fence: None` — **fire-and-forget with no CPU-side completion
+    ///   guarantee.** Backends may return immediately after submission
+    ///   (Vulkan) or block conservatively (wgpu today) — callers must not
+    ///   rely on either behavior. If you need to know when the work is done,
+    ///   pass a fence.
     ///
     /// One render graph is submitted per frame, so there is no cross-graph
     /// semaphore ordering. Swapchain acquire/present synchronization is handled
@@ -921,10 +1177,22 @@ impl GpuBackend {
         }
     }
 
-    /// Read data from a buffer.
+    /// Read a host-visible buffer's mapped memory into a `Vec`.
     ///
-    /// This is a blocking operation that waits for the GPU to finish.
-    pub fn read_buffer(&self, buffer: &GpuBuffer, offset: u64, size: u64) -> Vec<u8> {
+    /// Contract (identical on both backends): the buffer must be host-readable
+    /// (`BufferUsage::MAP_READ`) and the caller must ensure the GPU has
+    /// finished writing it — read *after* the frame fence (this is what the
+    /// pipeline's post-fence readback drain does). This method performs **no**
+    /// GPU wait and **no** staging copy of its own: reading a device-local
+    /// buffer is an error, not a silent zero-fill — copy it to a readback
+    /// buffer with [`TransferOperation::ReadbackBuffer`](crate::TransferOperation)
+    /// first.
+    pub fn read_buffer(
+        &self,
+        buffer: &GpuBuffer,
+        offset: u64,
+        size: u64,
+    ) -> Result<Vec<u8>, GraphicsError> {
         match self {
             Self::Dummy(backend) => backend.read_buffer(buffer, offset, size),
             #[cfg(feature = "wgpu-backend")]
@@ -934,7 +1202,20 @@ impl GpuBackend {
         }
     }
 
-    /// Write data to a texture.
+    /// Write tightly-packed data covering mip 0 of every layer of a texture.
+    ///
+    /// **Blocking convenience path** for tools and one-time setup: the
+    /// Vulkan backend performs a synchronous staging upload (a full GPU
+    /// round-trip per call). Load-time and streaming uploads belong in the
+    /// frame graph via
+    /// [`TransferOperation::upload_texture_data`](crate::TransferOperation::upload_texture_data)
+    /// — batched staging-belt infrastructure is tracked in issue #41.
+    ///
+    /// Contract (identical on both backends): `data` is tightly packed for
+    /// the whole image (all layers back to back, compressed formats in block
+    /// rows) and its size is validated; textures with `mip_level_count > 1`
+    /// and combined depth-stencil formats are rejected — upload those with
+    /// explicit regions through the transfer ops.
     pub fn write_texture(
         &self,
         texture: &GpuTexture,
@@ -950,14 +1231,20 @@ impl GpuBackend {
         }
     }
 
-    /// Create a surface from a window.
+    /// Create a surface from an owned window.
     ///
-    /// # Safety
-    ///
-    /// The window handle must remain valid for the lifetime of the surface.
-    pub fn create_surface<W>(&self, window: &W) -> Result<GpuSurface, GraphicsError>
+    /// Takes an `Arc<W>` so the window's lifetime is genuinely tied to the
+    /// surface: `wgpu`'s `Surface<'static>` is created from the owned `Arc`
+    /// (no lifetime-erasing `transmute`), and the Vulkan variant keeps a clone
+    /// alive for as long as the `VkSurfaceKHR`. Dropping the window while the
+    /// surface lives is therefore impossible.
+    pub fn create_surface<W>(&self, window: Arc<W>) -> Result<GpuSurface, GraphicsError>
     where
-        W: raw_window_handle::HasWindowHandle + raw_window_handle::HasDisplayHandle + Sync,
+        W: raw_window_handle::HasWindowHandle
+            + raw_window_handle::HasDisplayHandle
+            + Send
+            + Sync
+            + 'static,
     {
         match self {
             Self::Dummy(_) => {
@@ -967,20 +1254,18 @@ impl GpuBackend {
 
             #[cfg(feature = "wgpu-backend")]
             Self::Wgpu(wgpu_backend) => {
-                // Create wgpu surface from window
-                // SAFETY: The caller guarantees the window handle remains valid for the
-                // lifetime of the surface. We transmute to 'static to satisfy wgpu's
-                // Surface<'static> requirement, but the Surface is dropped before the
-                // window in practice.
-                let surface: wgpu::Surface<'static> = unsafe {
-                    std::mem::transmute(wgpu_backend.instance().create_surface(window).map_err(
-                        |e| {
-                            GraphicsError::ResourceCreationFailed(format!(
-                                "Failed to create wgpu surface: {e}"
-                            ))
-                        },
-                    )?)
-                };
+                // The owned Arc converts into wgpu's `SurfaceTarget<'static>`
+                // (it is `HasWindowHandle + HasDisplayHandle + Send + Sync +
+                // 'static`), so wgpu returns a genuine `Surface<'static>` that
+                // holds the window itself — no `transmute`.
+                let surface = wgpu_backend
+                    .instance()
+                    .create_surface(window)
+                    .map_err(|e| {
+                        GraphicsError::ResourceCreationFailed(format!(
+                            "Failed to create wgpu surface: {e}"
+                        ))
+                    })?;
                 log::info!("Created wgpu surface");
                 Ok(GpuSurface::Wgpu { surface })
             }
@@ -1017,6 +1302,8 @@ impl GpuBackend {
                 Ok(GpuSurface::Vulkan {
                     surface,
                     swapchain: RwLock::new(None),
+                    surface_loader: vulkan_backend.surface_loader().clone(),
+                    _window: window,
                 })
             }
         }
@@ -1029,6 +1316,27 @@ impl GpuBackend {
     /// device supports the surface.
     ///
     /// Returns `Ok(true)` if compatible, `Err` if no compatible adapter could be found.
+    /// Whether the backend's current adapter can present to `surface`,
+    /// without changing any state.
+    pub fn surface_compatible(&self, surface: &GpuSurface) -> bool {
+        match (self, surface) {
+            (Self::Dummy(_), _) => true,
+
+            #[cfg(feature = "wgpu-backend")]
+            (Self::Wgpu(wgpu_backend), GpuSurface::Wgpu { surface }) => {
+                wgpu_backend.is_adapter_compatible_with_surface(surface)
+            }
+
+            #[cfg(feature = "vulkan-backend")]
+            (Self::Vulkan(vulkan_backend), GpuSurface::Vulkan { surface, .. }) => {
+                vulkan_backend.is_surface_supported(*surface)
+            }
+
+            #[allow(unreachable_patterns)]
+            _ => false,
+        }
+    }
+
     pub fn ensure_compatible_with_surface(
         &mut self,
         surface: &GpuSurface,

@@ -149,6 +149,49 @@ impl ScissorRect {
     pub fn from_dimensions(width: u32, height: u32) -> Self {
         Self::new(0, 0, width, height)
     }
+
+    /// Clamp this rect to a `target_width` × `target_height` render target,
+    /// returning non-negative, in-bounds integer bounds usable by either
+    /// backend.
+    ///
+    /// Both APIs reject out-of-bounds scissors — Vulkan requires
+    /// `offset >= 0` and the rect within the framebuffer
+    /// (VUID-vkCmdSetScissor-x-00595), wgpu requires the rect ⊆ target and a
+    /// negative origin cast to `u32` becomes ~4 billion — yet UI clip rects
+    /// (egui) routinely go negative or past the edge during a resize. Clamp
+    /// in this one shared place. A rect fully outside the target yields zero
+    /// width/height (draws nothing), which is the correct result.
+    pub fn clamped(&self, target_width: u32, target_height: u32) -> ClampedScissor {
+        let tw = i64::from(target_width);
+        let th = i64::from(target_height);
+        // i64 math avoids overflow when x + width wraps i32/u32.
+        let left = i64::from(self.x).clamp(0, tw);
+        let top = i64::from(self.y).clamp(0, th);
+        // `clamp` is monotonic, so right >= left and bottom >= top.
+        let right = (i64::from(self.x) + i64::from(self.width)).clamp(0, tw);
+        let bottom = (i64::from(self.y) + i64::from(self.height)).clamp(0, th);
+        ClampedScissor {
+            x: left as u32,
+            y: top as u32,
+            width: (right - left) as u32,
+            height: (bottom - top) as u32,
+        }
+    }
+}
+
+/// A [`ScissorRect`] clamped to a render target: non-negative origin, extent
+/// within bounds. Produced by [`ScissorRect::clamped`]; the `u32` fields are
+/// safe to hand to both `vkCmdSetScissor` and `wgpu::RenderPass::set_scissor_rect`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ClampedScissor {
+    /// Non-negative x origin, within `[0, target_width]`.
+    pub x: u32,
+    /// Non-negative y origin, within `[0, target_height]`.
+    pub y: u32,
+    /// Width, with `x + width <= target_width`.
+    pub width: u32,
+    /// Height, with `y + height <= target_height`.
+    pub height: u32,
 }
 
 // ============================================================================
@@ -216,5 +259,49 @@ impl ClearValue {
     /// No clear operation.
     pub fn none() -> Self {
         Self::None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scissor_within_bounds_unchanged() {
+        let c = ScissorRect::new(10, 20, 100, 50).clamped(800, 600);
+        assert_eq!((c.x, c.y, c.width, c.height), (10, 20, 100, 50));
+    }
+
+    #[test]
+    fn scissor_negative_origin_shrinks_extent() {
+        // Origin left/above the target: clamp to 0 and shrink the extent by
+        // the clipped-off amount (egui clip rect during resize).
+        let c = ScissorRect::new(-5, -8, 20, 30).clamped(800, 600);
+        assert_eq!((c.x, c.y, c.width, c.height), (0, 0, 15, 22));
+    }
+
+    #[test]
+    fn scissor_past_edge_clamps_extent() {
+        // Extends past the right/bottom edge: extent shrinks to fit.
+        let c = ScissorRect::new(790, 590, 100, 100).clamped(800, 600);
+        assert_eq!((c.x, c.y, c.width, c.height), (790, 590, 10, 10));
+    }
+
+    #[test]
+    fn scissor_fully_outside_is_empty() {
+        // Entirely past the edge → zero extent (draws nothing).
+        let c = ScissorRect::new(900, 700, 50, 50).clamped(800, 600);
+        assert_eq!((c.x, c.y, c.width, c.height), (800, 600, 0, 0));
+    }
+
+    #[test]
+    fn scissor_extreme_values_do_not_overflow() {
+        // i32::MIN origin + u32::MAX width spans [-2.1e9, +2.1e9], which fully
+        // contains the target — clamps to cover it, no panic or wrap.
+        let c = ScissorRect::new(i32::MIN, i32::MIN, u32::MAX, u32::MAX).clamped(800, 600);
+        assert_eq!((c.x, c.y, c.width, c.height), (0, 0, 800, 600));
+        // i32::MAX origin is past the far edge → empty.
+        let c = ScissorRect::new(i32::MAX, i32::MAX, u32::MAX, u32::MAX).clamped(800, 600);
+        assert_eq!((c.x, c.y, c.width, c.height), (800, 600, 0, 0));
     }
 }

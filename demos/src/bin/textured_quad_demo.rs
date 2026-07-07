@@ -16,10 +16,10 @@ use redlilium_app::{App, AppArgs, AppContext, AppHandler, DefaultAppArgs, DrawCo
 use redlilium_core::math::{Mat4, Vec3, look_at_rh, mat4_to_cols_array_2d, orthographic_rh};
 use redlilium_core::mesh::generators;
 use redlilium_graphics::{
-    AddressMode, BindingGroup, BufferUsage, ColorAttachment, DepthStencilAttachment, DrawCommand,
-    FilterMode, FrameSchedule, GraphicsPass, Material, MaterialDescriptor, MaterialInstance, Mesh,
-    RenderTargetConfig, RingBuffer, SamplerDescriptor, ShaderSource, ShaderStage,
-    TextureDescriptor, TextureFormat, TextureUsage, TransferConfig, TransferOperation,
+    AddressMode, BindingGroupDescriptor, BufferUsage, ColorAttachment, DepthStencilAttachment,
+    DrawCommand, FilterMode, FrameSchedule, GraphicsPass, Material, MaterialDescriptor,
+    MaterialInstance, Mesh, RenderTargetConfig, RingBuffer, SamplerDescriptor, ShaderSource,
+    ShaderStage, TextureDescriptor, TextureFormat, TextureUsage, TransferConfig, TransferOperation,
     TransferPass, VertexLayout,
     resize::{ResizeManager, ResizeStrategy},
 };
@@ -239,18 +239,21 @@ impl TexturedQuadDemo {
         .expect("Failed to create uniform ring");
 
         // Create material instance with bindings
-        #[allow(clippy::arc_with_non_send_sync)]
-        let binding_group = Arc::new(
-            BindingGroup::new()
-                .with_buffer_range(
-                    0,
-                    uniform_ring.buffer().clone(),
-                    0,
-                    size_of::<Uniforms>() as u64,
-                )
-                .with_texture(1, self.texture.clone().unwrap())
-                .with_sampler(2, sampler),
-        );
+        let layout = material.binding_layouts()[0].clone();
+        let binding_group = device
+            .create_binding_group(
+                layout,
+                BindingGroupDescriptor::new()
+                    .with_buffer_range(
+                        0,
+                        uniform_ring.buffer().clone(),
+                        0,
+                        size_of::<Uniforms>() as u64,
+                    )
+                    .with_texture(1, self.texture.clone().unwrap())
+                    .with_sampler(2, sampler),
+            )
+            .expect("create binding group");
         self.uniform_ring = Some(uniform_ring);
 
         let material_instance =

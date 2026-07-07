@@ -49,8 +49,12 @@ impl TextureDimension {
 }
 
 /// Texture format enumeration.
+///
+/// Deliberately NOT `#[non_exhaustive]`: the backend format converters match
+/// exhaustively so that adding a variant here is a compile error at every
+/// converter, instead of a silent wildcard fallback rendering the new format
+/// as RGBA8.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-#[non_exhaustive]
 pub enum TextureFormat {
     // 8-bit formats
     /// 8-bit red channel, unsigned normalized.

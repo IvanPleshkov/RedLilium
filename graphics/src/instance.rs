@@ -217,9 +217,20 @@ pub enum AdapterType {
 pub struct GraphicsInstance {
     /// Weak self-reference for creating devices.
     self_ref: RwLock<Weak<GraphicsInstance>>,
-    /// Devices created by this instance.
-    devices: RwLock<Vec<Arc<GraphicsDevice>>>,
+    /// Number of currently alive [`GraphicsDevice`]s created by this
+    /// instance (incremented on create, decremented by the device's `Drop`).
+    /// Only used as a guard signal (see `create_device_for_surface`); the
+    /// instance deliberately holds NO references to its devices.
+    live_devices: std::sync::atomic::AtomicUsize,
     /// GPU backend for this instance (wrapped in RwLock for interior mutability).
+    ///
+    /// OWNERSHIP: the instance does not own or track the devices it creates —
+    /// ownership flows strictly upward (resources → `GraphicsDevice` →
+    /// `GraphicsInstance`), Vulkan-style. Each device holds a strong `Arc`
+    /// back to the instance, so the backend outlives everything created from
+    /// it and drops (running real teardown: `device_wait_idle`, pool/cache
+    /// destruction) once the last device and resource are gone. An
+    /// instance→device link would recreate the reference cycle fixed in #50.
     backend: RwLock<backend::GpuBackend>,
 }
 
@@ -265,7 +276,7 @@ impl GraphicsInstance {
 
         let instance = Arc::new(Self {
             self_ref: RwLock::new(Weak::new()),
-            devices: RwLock::new(Vec::new()),
+            live_devices: std::sync::atomic::AtomicUsize::new(0),
             backend: RwLock::new(backend),
         });
 
@@ -343,27 +354,25 @@ impl GraphicsInstance {
         let instance = self.arc_self().ok_or_else(|| {
             GraphicsError::ResourceCreationFailed("instance has been dropped".to_string())
         })?;
-        let device = Arc::new(GraphicsDevice::new(instance, adapter.name.clone()));
-
-        // Track the device
-        if let Ok(mut devices) = self.devices.write() {
-            devices.push(device.clone());
-        }
-
-        Ok(device)
+        // The device owns a strong Arc to the instance; the instance keeps no
+        // reference back (see the `backend` field docs), only a live counter.
+        self.live_devices
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(Arc::new(GraphicsDevice::new(
+            instance,
+            adapter.name.clone(),
+        )))
     }
 
-    /// Get all devices created by this instance.
-    pub fn devices(&self) -> Vec<Arc<GraphicsDevice>> {
-        self.devices
-            .read()
-            .map(|d| d.clone())
-            .unwrap_or_else(|_| Vec::new())
+    /// Called by [`GraphicsDevice`]'s `Drop`.
+    pub(crate) fn device_dropped(&self) {
+        self.live_devices
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Get the number of devices created by this instance.
+    /// Number of currently alive devices created by this instance.
     pub fn device_count(&self) -> usize {
-        self.devices.read().map(|d| d.len()).unwrap_or(0)
+        self.live_devices.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Create a surface for presenting to a window.
@@ -383,9 +392,9 @@ impl GraphicsInstance {
     /// surface.configure(&device, &SurfaceConfiguration::new(800, 600));
     /// ```
     #[allow(clippy::arc_with_non_send_sync)] // Surface is intentionally !Send+!Sync for window safety
-    pub fn create_surface<W>(&self, window: &W) -> Result<Arc<Surface>, GraphicsError>
+    pub fn create_surface<W>(&self, window: Arc<W>) -> Result<Arc<Surface>, GraphicsError>
     where
-        W: HasWindowHandle + HasDisplayHandle + Sync,
+        W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
     {
         let instance = self.arc_self().ok_or_else(|| {
             GraphicsError::ResourceCreationFailed("instance has been dropped".to_string())
@@ -422,6 +431,21 @@ impl GraphicsInstance {
         // Ensure the backend is compatible with the surface
         {
             let mut backend = self.backend_mut();
+
+            // On wgpu an incompatible adapter is fixed by swapping the
+            // backend's device — safe only while nothing has been created
+            // yet. Resources made through an existing GraphicsDevice belong
+            // to the old wgpu device; after a swap the first draw touching
+            // them is a cross-device validation error. Refuse instead.
+            if self.device_count() > 0 && !backend.surface_compatible(surface.gpu_surface()) {
+                return Err(GraphicsError::InvalidParameter(
+                    "surface requires a different GPU adapter, but graphics devices (and \
+                     potentially their resources) already exist on the current one; create \
+                     the surface and its device before any other device"
+                        .to_string(),
+                ));
+            }
+
             backend.ensure_compatible_with_surface(surface.gpu_surface())?;
         }
 
@@ -487,5 +511,27 @@ mod tests {
         let device = instance.create_device().unwrap();
         // Device holds a strong reference to instance
         assert!(Arc::ptr_eq(device.instance(), &instance));
+    }
+
+    /// Regression test for #50: the instance must hold no references to its
+    /// devices, or the instance↔device cycle keeps both alive forever and
+    /// backend teardown (`device_wait_idle`, pool/cache destruction) becomes
+    /// unreachable dead code.
+    #[test]
+    fn test_no_instance_device_cycle() {
+        let instance = GraphicsInstance::new().unwrap();
+        let device = instance.create_device().unwrap();
+        let weak_instance = Arc::downgrade(&instance);
+        let weak_device = Arc::downgrade(&device);
+
+        drop(device);
+        assert!(weak_device.upgrade().is_none(), "device leaked");
+        assert_eq!(instance.device_count(), 0);
+
+        drop(instance);
+        assert!(
+            weak_instance.upgrade().is_none(),
+            "instance leaked — something re-introduced an instance→device reference"
+        );
     }
 }

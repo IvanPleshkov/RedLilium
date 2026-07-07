@@ -5,9 +5,10 @@ use std::sync::Arc;
 use redlilium_core::math::Vec3;
 use redlilium_core::profiling::profile_scope;
 use redlilium_graphics::{
-    BindingGroup, BufferUsage, CpuSampler, GraphicsDevice, MaterialDescriptor, MaterialInstance,
-    MeshDescriptor, RenderGraph, RingBuffer, ShaderSource, ShaderStage, TextureFormat,
-    TransferConfig, TransferOperation, TransferPass, VertexBufferLayout, VertexLayout,
+    BindingGroupDescriptor, BufferUsage, CpuSampler, GraphicsDevice, MaterialDescriptor,
+    MaterialInstance, MeshDescriptor, RenderGraph, RingBuffer, ShaderSource, ShaderStage,
+    TextureFormat, TransferConfig, TransferOperation, TransferPass, VertexBufferLayout,
+    VertexLayout,
 };
 
 use crate::gbuffer::GBuffer;
@@ -88,31 +89,39 @@ impl ResolvePass {
             .expect("Failed to create resolve material");
 
         // Create binding groups
-        #[allow(clippy::arc_with_non_send_sync)]
-        let resolve_uniform_binding = Arc::new(BindingGroup::new().with_buffer_range(
-            0,
-            uniform_ring.buffer().clone(),
-            0,
-            std::mem::size_of::<ResolveUniforms>() as u64,
-        ));
+        let resolve_uniform_binding = device
+            .create_binding_group(
+                resolve_material.binding_layouts()[0].clone(),
+                BindingGroupDescriptor::new().with_buffer_range(
+                    0,
+                    uniform_ring.buffer().clone(),
+                    0,
+                    std::mem::size_of::<ResolveUniforms>() as u64,
+                ),
+            )
+            .expect("create resolve uniform binding group");
 
-        #[allow(clippy::arc_with_non_send_sync)]
-        let gbuffer_binding = Arc::new(
-            BindingGroup::new()
-                .with_texture(0, gbuffer.albedo.clone())
-                .with_texture(1, gbuffer.normal_metallic.clone())
-                .with_texture(2, gbuffer.position_roughness.clone())
-                .with_sampler(3, gbuffer_sampler),
-        );
+        let gbuffer_binding = device
+            .create_binding_group(
+                resolve_material.binding_layouts()[1].clone(),
+                BindingGroupDescriptor::new()
+                    .with_texture(0, gbuffer.albedo.clone())
+                    .with_texture(1, gbuffer.normal_metallic.clone())
+                    .with_texture(2, gbuffer.position_roughness.clone())
+                    .with_sampler(3, gbuffer_sampler),
+            )
+            .expect("create gbuffer binding group");
 
-        #[allow(clippy::arc_with_non_send_sync)]
-        let ibl_binding = Arc::new(
-            BindingGroup::new()
-                .with_texture(0, ibl.irradiance_cubemap.clone())
-                .with_texture(1, ibl.prefilter_cubemap.clone())
-                .with_texture(2, ibl.brdf_lut.clone())
-                .with_sampler(3, ibl.sampler.clone()),
-        );
+        let ibl_binding = device
+            .create_binding_group(
+                resolve_material.binding_layouts()[2].clone(),
+                BindingGroupDescriptor::new()
+                    .with_texture(0, ibl.irradiance_cubemap.clone())
+                    .with_texture(1, ibl.prefilter_cubemap.clone())
+                    .with_texture(2, ibl.brdf_lut.clone())
+                    .with_sampler(3, ibl.sampler.clone()),
+            )
+            .expect("create ibl binding group");
 
         let material_instance = Arc::new(
             MaterialInstance::new(resolve_material)

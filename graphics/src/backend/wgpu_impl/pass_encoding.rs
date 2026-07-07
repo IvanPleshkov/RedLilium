@@ -45,14 +45,19 @@ impl WgpuBackend {
             return Ok(());
         };
 
-        // Build color attachments on stack (8 = wgpu max_color_attachments default).
-        let color_count = render_targets.color_attachments.len().min(8);
-        debug_assert!(
-            render_targets.color_attachments.len() <= 8,
-            "More than 8 color attachments exceeds wgpu default limits"
-        );
+        // Build color attachments on stack (8 = wgpu max_color_attachments
+        // default). Exceeding it must be an error: silently dropping trailing
+        // attachments would render without them and corrupt MRT output.
+        let color_count = render_targets.color_attachments.len();
+        if color_count > 8 {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "pass '{}' declares {} color attachments; wgpu supports at most 8",
+                pass.name(),
+                color_count
+            )));
+        }
         let mut color_attachments = [const { None }; 8];
-        for (i, attachment) in render_targets.color_attachments.iter().enumerate().take(8) {
+        for (i, attachment) in render_targets.color_attachments.iter().enumerate() {
             color_attachments[i] = match &attachment.target {
                 RenderTarget::Texture { texture, .. } => {
                     let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() else {
@@ -91,32 +96,49 @@ impl WgpuBackend {
         }
         let color_attachments = &color_attachments[..color_count];
 
-        // Build depth stencil attachment if present
-        let depth_stencil_attachment =
-            render_targets
-                .depth_stencil_attachment
-                .as_ref()
-                .map(|attachment| {
-                    let GpuTexture::Wgpu { view, .. } = attachment.texture().gpu_handle() else {
-                        panic!("Invalid depth texture GPU handle");
-                    };
-                    let stencil_ops = if attachment.target.format().has_stencil() {
-                        Some(wgpu::Operations {
-                            load: convert_stencil_load_op(&attachment.stencil_load_op()),
-                            store: convert_store_op(&attachment.stencil_store_op()),
-                        })
-                    } else {
-                        None
-                    };
-                    wgpu::RenderPassDepthStencilAttachment {
-                        view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: convert_depth_load_op(&attachment.depth_load_op()),
-                            store: convert_store_op(&attachment.depth_store_op()),
-                        }),
-                        stencil_ops,
+        // Build depth stencil attachment if present. Mismatched handles are
+        // errors, not panics — matching the color/buffer handling in this
+        // file (a panic here also poisons the encoder scratch mutex).
+        let depth_stencil_attachment = match &render_targets.depth_stencil_attachment {
+            Some(attachment) => {
+                let view = match &attachment.target {
+                    RenderTarget::Texture { texture, .. } => {
+                        let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() else {
+                            return Err(GraphicsError::InvalidParameter(format!(
+                                "wgpu: depth attachment of pass '{}' has a non-wgpu GPU \
+                                 handle (resource from a different backend)",
+                                pass.name()
+                            )));
+                        };
+                        view
                     }
-                });
+                    RenderTarget::Surface { .. } => {
+                        return Err(GraphicsError::InvalidParameter(format!(
+                            "wgpu: pass '{}' uses the surface as a depth attachment; \
+                             surfaces are color-only",
+                            pass.name()
+                        )));
+                    }
+                };
+                let stencil_ops = if attachment.target.format().has_stencil() {
+                    Some(wgpu::Operations {
+                        load: convert_stencil_load_op(&attachment.stencil_load_op()),
+                        store: convert_store_op(&attachment.stencil_store_op()),
+                    })
+                } else {
+                    None
+                };
+                Some(wgpu::RenderPassDepthStencilAttachment {
+                    view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: convert_depth_load_op(&attachment.depth_load_op()),
+                        store: convert_store_op(&attachment.depth_store_op()),
+                    }),
+                    stencil_ops,
+                })
+            }
+            None => None,
+        };
 
         // Check if we have any valid attachments - wgpu requires at least one
         let has_valid_color = color_attachments.iter().any(|a| a.is_some());
@@ -143,26 +165,17 @@ impl WgpuBackend {
             render_pass.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
         }
 
-        // Set scissor rect (use pass override or fall back to full target dimensions)
+        // Set scissor rect (use pass override or fall back to full target
+        // dimensions). An explicit scissor is clamped to the target — wgpu
+        // requires the rect ⊆ target, and a negative origin cast to u32
+        // becomes ~4 billion and panics.
         let pass_scissor = pass.scissor_rect();
-        if let Some(sr) = pass_scissor {
-            render_pass.set_scissor_rect(sr.x as u32, sr.y as u32, sr.width, sr.height);
+        if let (Some(sr), Some((width, height))) = (pass_scissor, default_dims) {
+            let c = sr.clamped(width, height);
+            render_pass.set_scissor_rect(c.x, c.y, c.width, c.height);
         } else if let Some((width, height)) = default_dims {
             render_pass.set_scissor_rect(0, 0, width, height);
         }
-
-        // Lock scratch ONCE for all draw commands in this pass.
-        // Destructure to allow independent field borrows.
-        let scratch = &mut *self.encoder_scratch.lock().unwrap();
-        let super::WgpuEncoderScratch {
-            bind_group_layouts: scratch_bind_group_layouts,
-            bind_groups: scratch_bind_groups,
-            ..
-        } = scratch;
-
-        // Reusable Vec for types with Rust lifetimes (can't go in scratch).
-        // Allocated once, cleared per bind group — after the first draw, capacity is warm.
-        let mut bind_group_entries: Vec<wgpu::BindGroupEntry> = Vec::new();
 
         // Encode each draw command
         for draw_cmd in pass.draw_commands() {
@@ -170,129 +183,26 @@ impl WgpuBackend {
             let mesh = &draw_cmd.mesh;
 
             // -- Pipeline: owned by Material, created at create_material() time --
-            let super::super::GpuPipeline::WgpuGraphics {
-                pipeline,
-                bind_group_layouts,
-            } = material_arc.gpu_handle()
+            let super::super::GpuPipeline::WgpuGraphics { pipeline, .. } =
+                material_arc.gpu_handle()
             else {
                 log::warn!("Material has no wgpu graphics pipeline");
                 continue;
             };
 
-            scratch_bind_group_layouts.clear();
-            scratch_bind_group_layouts.extend(bind_group_layouts.iter().cloned());
-
-            // -- Bind groups (always per draw: resources may change each frame) --
-            let material_instance = &draw_cmd.material;
-            scratch_bind_groups.clear();
-
-            for (binding_group, bg_layout) in material_instance
-                .binding_groups()
-                .iter()
-                .zip(scratch_bind_group_layouts.iter())
-            {
-                bind_group_entries.clear();
-                for entry in &binding_group.entries {
-                    // CombinedTextureSampler is a single material binding, but
-                    // Slang reflection emits a separate texture (binding N) and
-                    // sampler (binding N+1). Emit BOTH so the bind group matches
-                    // the reflected layout — otherwise the sampler is missing and
-                    // wgpu rejects the bind group.
-                    if let crate::materials::BoundResource::CombinedTextureSampler {
-                        texture,
-                        sampler,
-                    } = &entry.resource
-                    {
-                        if let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() {
-                            bind_group_entries.push(wgpu::BindGroupEntry {
-                                binding: entry.binding,
-                                resource: wgpu::BindingResource::TextureView(view),
-                            });
-                        }
-                        if let crate::backend::GpuSampler::Wgpu(wgpu_sampler) = sampler.gpu_handle()
-                        {
-                            bind_group_entries.push(wgpu::BindGroupEntry {
-                                binding: entry.binding + 1,
-                                resource: wgpu::BindingResource::Sampler(wgpu_sampler),
-                            });
-                        }
-                        continue;
-                    }
-
-                    // A non-wgpu GPU handle here means a resource from another
-                    // backend was bound. Silently skipping it would desync the
-                    // bind group from its layout (entry count mismatch) and
-                    // surface as a confusing wgpu validation error later, so
-                    // fail loudly at the actual cause instead.
-                    let mismatch = |kind: &str| {
-                        GraphicsError::InvalidParameter(format!(
-                            "wgpu: {kind} bound at binding {} has a non-wgpu GPU handle \
-                             (resource from a different backend)",
-                            entry.binding
-                        ))
-                    };
-                    let resource = match &entry.resource {
-                        crate::materials::BoundResource::Buffer(buffer) => {
-                            let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() else {
-                                return Err(mismatch("buffer"));
-                            };
-                            wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: wgpu_buffer,
-                                offset: 0,
-                                size: None,
-                            })
-                        }
-                        crate::materials::BoundResource::BufferRange {
-                            buffer,
-                            offset,
-                            size,
-                        } => {
-                            let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() else {
-                                return Err(mismatch("buffer"));
-                            };
-                            wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: wgpu_buffer,
-                                offset: *offset,
-                                size: std::num::NonZeroU64::new(*size),
-                            })
-                        }
-                        crate::materials::BoundResource::Texture(texture) => {
-                            let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() else {
-                                return Err(mismatch("texture"));
-                            };
-                            wgpu::BindingResource::TextureView(view)
-                        }
-                        crate::materials::BoundResource::Sampler(sampler) => {
-                            let crate::backend::GpuSampler::Wgpu(wgpu_sampler) =
-                                sampler.gpu_handle()
-                            else {
-                                return Err(mismatch("sampler"));
-                            };
-                            wgpu::BindingResource::Sampler(wgpu_sampler)
-                        }
-                        crate::materials::BoundResource::CombinedTextureSampler { .. } => {
-                            unreachable!("CombinedTextureSampler handled above")
-                        }
-                    };
-                    bind_group_entries.push(wgpu::BindGroupEntry {
-                        binding: entry.binding,
-                        resource,
-                    });
-                }
-
-                scratch_bind_groups.push(self.device.create_bind_group(
-                    &wgpu::BindGroupDescriptor {
-                        label: binding_group.label.as_deref(),
-                        layout: bg_layout,
-                        entries: &bind_group_entries,
-                    },
-                ));
-            }
-
             // -- Record into render pass --
             render_pass.set_pipeline(pipeline);
 
-            for (index, bind_group) in scratch_bind_groups.iter().enumerate() {
+            // Bind each group's pre-built, cached bind group — no per-draw
+            // creation. Compatibility with the pipeline is guaranteed by the
+            // shared, content-deduped bind group layout.
+            for (index, group) in draw_cmd.material.binding_groups().iter().enumerate() {
+                let super::super::GpuBindingGroup::Wgpu(bind_group) = group.gpu_handle() else {
+                    return Err(GraphicsError::InvalidParameter(format!(
+                        "wgpu: binding group {index} has no wgpu bind group \
+                         (resource from a different backend)"
+                    )));
+                };
                 let offsets: &[u32] = draw_cmd
                     .dynamic_offsets
                     .get(index)
@@ -309,15 +219,12 @@ impl WgpuBackend {
                 }
             }
 
-            // Set per-draw scissor rect if specified
+            // Set per-draw scissor rect if specified (clamped to the target,
+            // as above).
             let custom_scissor = draw_cmd.scissor_rect.is_some();
-            if let Some(scissor) = &draw_cmd.scissor_rect {
-                render_pass.set_scissor_rect(
-                    scissor.x as u32,
-                    scissor.y as u32,
-                    scissor.width,
-                    scissor.height,
-                );
+            if let (Some(scissor), Some((width, height))) = (&draw_cmd.scissor_rect, default_dims) {
+                let c = scissor.clamped(width, height);
+                render_pass.set_scissor_rect(c.x, c.y, c.width, c.height);
             }
 
             if mesh.is_indexed() {
@@ -343,10 +250,12 @@ impl WgpuBackend {
                 );
             }
 
-            // Restore pass-level scissor after per-draw override
+            // Restore pass-level scissor after per-draw override (clamped, as
+            // when it was first set).
             if custom_scissor {
-                if let Some(sr) = pass_scissor {
-                    render_pass.set_scissor_rect(sr.x as u32, sr.y as u32, sr.width, sr.height);
+                if let (Some(sr), Some((width, height))) = (pass_scissor, default_dims) {
+                    let c = sr.clamped(width, height);
+                    render_pass.set_scissor_rect(c.x, c.y, c.width, c.height);
                 } else if let Some((width, height)) = default_dims {
                     render_pass.set_scissor_rect(0, 0, width, height);
                 }
@@ -387,6 +296,7 @@ impl WgpuBackend {
                     return Ok(());
                 };
 
+                crate::graph::validate_buffer_copy_alignment(regions)?;
                 for region in regions {
                     encoder.copy_buffer_to_buffer(
                         src_buffer,
@@ -468,29 +378,16 @@ impl WgpuBackend {
                 };
 
                 let format = src.format();
-                let block_size = format.block_size();
 
                 for region in regions {
-                    let bytes_per_row =
-                        region
-                            .buffer_layout
-                            .bytes_per_row
-                            .or(if region.extent.height > 1 {
-                                let unpadded = region.extent.width * block_size;
-                                Some((unpadded + 255) & !255)
-                            } else {
-                                None
-                            });
-
-                    let rows_per_image =
-                        region
-                            .buffer_layout
-                            .rows_per_image
-                            .or(if region.extent.depth > 1 {
-                                Some(region.extent.height)
-                            } else {
-                                None
-                            });
+                    // Shared resolver: same tight-packing/block math and
+                    // alignment validation as the Vulkan backend.
+                    let layout = region
+                        .buffer_layout
+                        .resolve(format, region.extent)
+                        .map_err(|e| {
+                            GraphicsError::InvalidParameter(format!("TextureToBuffer: {e}"))
+                        })?;
 
                     encoder.copy_texture_to_buffer(
                         wgpu::TexelCopyTextureInfo {
@@ -506,9 +403,10 @@ impl WgpuBackend {
                         wgpu::TexelCopyBufferInfo {
                             buffer: dst_buffer,
                             layout: wgpu::TexelCopyBufferLayout {
-                                offset: region.buffer_layout.offset,
-                                bytes_per_row,
-                                rows_per_image,
+                                offset: layout.offset,
+                                bytes_per_row: layout.multi_row.then_some(layout.bytes_per_row),
+                                rows_per_image: (region.extent.depth > 1)
+                                    .then_some(layout.rows_per_image_blocks),
                             },
                         },
                         wgpu::Extent3d {
@@ -532,37 +430,25 @@ impl WgpuBackend {
                 };
 
                 let format = dst.format();
-                let block_size = format.block_size();
 
                 for region in regions {
-                    let bytes_per_row =
-                        region
-                            .buffer_layout
-                            .bytes_per_row
-                            .or(if region.extent.height > 1 {
-                                let unpadded = region.extent.width * block_size;
-                                Some((unpadded + 255) & !255)
-                            } else {
-                                None
-                            });
-
-                    let rows_per_image =
-                        region
-                            .buffer_layout
-                            .rows_per_image
-                            .or(if region.extent.depth > 1 {
-                                Some(region.extent.height)
-                            } else {
-                                None
-                            });
+                    // Shared resolver: same tight-packing/block math and
+                    // alignment validation as the Vulkan backend.
+                    let layout = region
+                        .buffer_layout
+                        .resolve(format, region.extent)
+                        .map_err(|e| {
+                            GraphicsError::InvalidParameter(format!("BufferToTexture: {e}"))
+                        })?;
 
                     encoder.copy_buffer_to_texture(
                         wgpu::TexelCopyBufferInfo {
                             buffer: src_buffer,
                             layout: wgpu::TexelCopyBufferLayout {
-                                offset: region.buffer_layout.offset,
-                                bytes_per_row,
-                                rows_per_image,
+                                offset: layout.offset,
+                                bytes_per_row: layout.multi_row.then_some(layout.bytes_per_row),
+                                rows_per_image: (region.extent.depth > 1)
+                                    .then_some(layout.rows_per_image_blocks),
                             },
                         },
                         wgpu::TexelCopyTextureInfo {
@@ -647,142 +533,28 @@ impl WgpuBackend {
             timestamp_writes: None,
         });
 
-        let scratch = &mut *self.encoder_scratch.lock().unwrap();
-        let super::WgpuEncoderScratch {
-            bind_group_layouts: scratch_bind_group_layouts,
-            bind_groups: scratch_bind_groups,
-            ..
-        } = scratch;
-
-        let mut bind_group_entries: Vec<wgpu::BindGroupEntry> = Vec::new();
-
         for dispatch_cmd in pass.dispatch_commands() {
             let material_arc = dispatch_cmd.material.material();
 
             // -- Pipeline: owned by Material, created at create_material() time --
-            let super::super::GpuPipeline::WgpuCompute {
-                pipeline,
-                bind_group_layouts,
-            } = material_arc.gpu_handle()
+            let super::super::GpuPipeline::WgpuCompute { pipeline, .. } = material_arc.gpu_handle()
             else {
                 log::warn!("Material has no wgpu compute pipeline");
                 continue;
             };
 
-            scratch_bind_group_layouts.clear();
-            scratch_bind_group_layouts.extend(bind_group_layouts.iter().cloned());
-
-            // -- Bind groups (always per dispatch: resources may change each frame) --
-            let material_instance = &dispatch_cmd.material;
-            scratch_bind_groups.clear();
-
-            for (binding_group, bg_layout) in material_instance
-                .binding_groups()
-                .iter()
-                .zip(scratch_bind_group_layouts.iter())
-            {
-                bind_group_entries.clear();
-                for entry in &binding_group.entries {
-                    // CombinedTextureSampler is a single material binding, but
-                    // Slang reflection emits a separate texture (binding N) and
-                    // sampler (binding N+1). Emit BOTH so the bind group matches
-                    // the reflected layout — otherwise the sampler is missing and
-                    // wgpu rejects the bind group.
-                    if let crate::materials::BoundResource::CombinedTextureSampler {
-                        texture,
-                        sampler,
-                    } = &entry.resource
-                    {
-                        if let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() {
-                            bind_group_entries.push(wgpu::BindGroupEntry {
-                                binding: entry.binding,
-                                resource: wgpu::BindingResource::TextureView(view),
-                            });
-                        }
-                        if let crate::backend::GpuSampler::Wgpu(wgpu_sampler) = sampler.gpu_handle()
-                        {
-                            bind_group_entries.push(wgpu::BindGroupEntry {
-                                binding: entry.binding + 1,
-                                resource: wgpu::BindingResource::Sampler(wgpu_sampler),
-                            });
-                        }
-                        continue;
-                    }
-
-                    // A non-wgpu GPU handle here means a resource from another
-                    // backend was bound. Silently skipping it would desync the
-                    // bind group from its layout (entry count mismatch) and
-                    // surface as a confusing wgpu validation error later, so
-                    // fail loudly at the actual cause instead.
-                    let mismatch = |kind: &str| {
-                        GraphicsError::InvalidParameter(format!(
-                            "wgpu: {kind} bound at binding {} has a non-wgpu GPU handle \
-                             (resource from a different backend)",
-                            entry.binding
-                        ))
-                    };
-                    let resource = match &entry.resource {
-                        crate::materials::BoundResource::Buffer(buffer) => {
-                            let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() else {
-                                return Err(mismatch("buffer"));
-                            };
-                            wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: wgpu_buffer,
-                                offset: 0,
-                                size: None,
-                            })
-                        }
-                        crate::materials::BoundResource::BufferRange {
-                            buffer,
-                            offset,
-                            size,
-                        } => {
-                            let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() else {
-                                return Err(mismatch("buffer"));
-                            };
-                            wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: wgpu_buffer,
-                                offset: *offset,
-                                size: std::num::NonZeroU64::new(*size),
-                            })
-                        }
-                        crate::materials::BoundResource::Texture(texture) => {
-                            let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() else {
-                                return Err(mismatch("texture"));
-                            };
-                            wgpu::BindingResource::TextureView(view)
-                        }
-                        crate::materials::BoundResource::Sampler(sampler) => {
-                            let crate::backend::GpuSampler::Wgpu(wgpu_sampler) =
-                                sampler.gpu_handle()
-                            else {
-                                return Err(mismatch("sampler"));
-                            };
-                            wgpu::BindingResource::Sampler(wgpu_sampler)
-                        }
-                        crate::materials::BoundResource::CombinedTextureSampler { .. } => {
-                            unreachable!("CombinedTextureSampler handled above")
-                        }
-                    };
-                    bind_group_entries.push(wgpu::BindGroupEntry {
-                        binding: entry.binding,
-                        resource,
-                    });
-                }
-
-                scratch_bind_groups.push(self.device.create_bind_group(
-                    &wgpu::BindGroupDescriptor {
-                        label: binding_group.label.as_deref(),
-                        layout: bg_layout,
-                        entries: &bind_group_entries,
-                    },
-                ));
-            }
-
             // Record into compute pass
             compute_pass.set_pipeline(pipeline);
 
-            for (index, bind_group) in scratch_bind_groups.iter().enumerate() {
+            // Bind each group's cached, pre-built bind group (no per-dispatch
+            // creation).
+            for (index, group) in dispatch_cmd.material.binding_groups().iter().enumerate() {
+                let super::super::GpuBindingGroup::Wgpu(bind_group) = group.gpu_handle() else {
+                    return Err(GraphicsError::InvalidParameter(format!(
+                        "wgpu: binding group {index} has no wgpu bind group \
+                         (resource from a different backend)"
+                    )));
+                };
                 compute_pass.set_bind_group(index as u32, bind_group, &[]);
             }
 

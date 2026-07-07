@@ -154,16 +154,18 @@ impl BufferAccessMode {
     }
 
     /// Get the Vulkan pipeline stage for this buffer access mode (as source).
+    ///
+    /// `BufferAccessMode` does not record which shader stage performs the
+    /// access, so shader modes return the union of all stages that could —
+    /// including `COMPUTE_SHADER` for uniform reads (a UBO can feed a
+    /// dispatch just as well as a draw).
     #[cfg(feature = "vulkan-backend")]
     pub fn src_stage(self) -> ash::vk::PipelineStageFlags {
         use ash::vk::PipelineStageFlags;
         match self {
             Self::VertexBuffer => PipelineStageFlags::VERTEX_INPUT,
             Self::IndexBuffer => PipelineStageFlags::VERTEX_INPUT,
-            Self::UniformRead => {
-                PipelineStageFlags::VERTEX_SHADER | PipelineStageFlags::FRAGMENT_SHADER
-            }
-            Self::StorageRead | Self::StorageWrite | Self::StorageReadWrite => {
+            Self::UniformRead | Self::StorageRead | Self::StorageWrite | Self::StorageReadWrite => {
                 PipelineStageFlags::VERTEX_SHADER
                     | PipelineStageFlags::FRAGMENT_SHADER
                     | PipelineStageFlags::COMPUTE_SHADER
@@ -174,16 +176,16 @@ impl BufferAccessMode {
     }
 
     /// Get the Vulkan pipeline stage for this buffer access mode (as destination).
+    ///
+    /// See [`src_stage`](Self::src_stage) for why shader modes return the
+    /// union of vertex/fragment/compute stages.
     #[cfg(feature = "vulkan-backend")]
     pub fn dst_stage(self) -> ash::vk::PipelineStageFlags {
         use ash::vk::PipelineStageFlags;
         match self {
             Self::VertexBuffer => PipelineStageFlags::VERTEX_INPUT,
             Self::IndexBuffer => PipelineStageFlags::VERTEX_INPUT,
-            Self::UniformRead => {
-                PipelineStageFlags::VERTEX_SHADER | PipelineStageFlags::FRAGMENT_SHADER
-            }
-            Self::StorageRead | Self::StorageWrite | Self::StorageReadWrite => {
+            Self::UniformRead | Self::StorageRead | Self::StorageWrite | Self::StorageReadWrite => {
                 PipelineStageFlags::VERTEX_SHADER
                     | PipelineStageFlags::FRAGMENT_SHADER
                     | PipelineStageFlags::COMPUTE_SHADER
@@ -198,6 +200,15 @@ impl BufferAccessMode {
 ///
 /// This describes how a single texture is used within a pass,
 /// including the access mode and subresource range.
+///
+/// # Subresource granularity
+///
+/// The mip/layer range fields describe intent, but the Vulkan barrier system
+/// currently tracks one layout per image and emits **whole-image**
+/// transitions — a pass cannot yet hold different mips/layers of one image
+/// in different layouts (e.g. write mip N while sampling mip N−1 during
+/// mipmap generation). Nothing in the engine declares partial ranges today;
+/// per-subresource tracking is the prerequisite for such workflows.
 #[derive(Debug, Clone)]
 pub struct TextureUsageDecl {
     /// The texture being used.
@@ -299,6 +310,15 @@ impl BufferUsageDecl {
 }
 
 /// How the swapchain surface is accessed by a pass.
+///
+/// # `Load` scope
+///
+/// `LoadOp::Load` on the surface preserves contents **within a frame only**
+/// (e.g. a UI overlay pass loading the scene pass's output). The first
+/// surface-writing pass of each frame starts from discarded contents — the
+/// previously *presented* image is stale (swapchain images rotate) and the
+/// Vulkan backend transitions it from `UNDEFINED`. For cross-frame
+/// accumulation, render to an offscreen texture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SurfaceAccess {
     /// Write only (Clear or DontCare load op).

@@ -223,7 +223,8 @@ pub fn convert_texture_format(format: TextureFormat) -> wgpu::TextureFormat {
             block: wgpu::AstcBlock::B12x12,
             channel: wgpu::AstcChannel::UnormSrgb,
         },
-        _ => wgpu::TextureFormat::Rgba8Unorm,
+        // No wildcard arm on purpose: a new TextureFormat variant must fail
+        // to compile here rather than silently alias to RGBA8.
     }
 }
 
@@ -450,6 +451,20 @@ pub fn convert_present_mode(mode: crate::swapchain::PresentMode) -> wgpu::Presen
     }
 }
 
+/// Convert a wgpu present mode back to the engine's PresentMode.
+///
+/// Returns `None` for modes the engine does not expose (`AutoVsync`,
+/// `AutoNoVsync` are request-only aliases and never appear in capabilities).
+pub fn from_wgpu_present_mode(mode: wgpu::PresentMode) -> Option<crate::swapchain::PresentMode> {
+    match mode {
+        wgpu::PresentMode::Immediate => Some(crate::swapchain::PresentMode::Immediate),
+        wgpu::PresentMode::Mailbox => Some(crate::swapchain::PresentMode::Mailbox),
+        wgpu::PresentMode::Fifo => Some(crate::swapchain::PresentMode::Fifo),
+        wgpu::PresentMode::FifoRelaxed => Some(crate::swapchain::PresentMode::FifoRelaxed),
+        _ => None,
+    }
+}
+
 /// Convert ShaderStageFlags to wgpu shader stages.
 pub fn convert_shader_stages(flags: crate::materials::ShaderStageFlags) -> wgpu::ShaderStages {
     let mut result = wgpu::ShaderStages::empty();
@@ -554,11 +569,21 @@ pub fn convert_binding_type(binding_type: crate::materials::BindingType) -> wgpu
             view_dimension: wgpu::TextureViewDimension::D2Array,
             multisampled: false,
         },
+        crate::materials::BindingType::DepthTexture => wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Depth,
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
         crate::materials::BindingType::Sampler => {
             wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)
         }
+        crate::materials::BindingType::ComparisonSampler => {
+            wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison)
+        }
         crate::materials::BindingType::CombinedTextureSampler => {
-            // wgpu doesn't have combined texture/sampler, use texture binding
+            // wgpu has no combined texture/sampler binding. The layout side
+            // expands this entry to texture at N + sampler at N+1 (see
+            // `binding_layout_entries`); this arm provides the texture half.
             wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Float { filterable: true },
                 view_dimension: wgpu::TextureViewDimension::D2,
@@ -566,6 +591,37 @@ pub fn convert_binding_type(binding_type: crate::materials::BindingType) -> wgpu
             }
         }
     }
+}
+
+/// Expand a [`BindingLayout`](crate::materials::BindingLayout) into wgpu bind
+/// group layout entries.
+///
+/// This owns the `CombinedTextureSampler` split contract: the bind-group side
+/// (`pass_encoding`) emits a texture view at binding N and a sampler at
+/// binding N + 1 for a combined entry — matching Slang's WGSL emission — so
+/// the layout must declare both. Every other entry maps 1:1.
+pub fn binding_layout_entries(
+    layout: &crate::materials::BindingLayout,
+) -> Vec<wgpu::BindGroupLayoutEntry> {
+    let mut entries = Vec::with_capacity(layout.entries.len());
+    for entry in &layout.entries {
+        let visibility = convert_shader_stages(entry.visibility);
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: entry.binding,
+            visibility,
+            ty: convert_binding_type(entry.binding_type),
+            count: None,
+        });
+        if entry.binding_type == crate::materials::BindingType::CombinedTextureSampler {
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: entry.binding + 1,
+                visibility,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            });
+        }
+    }
+    entries
 }
 
 #[cfg(test)]

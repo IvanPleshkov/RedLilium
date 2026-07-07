@@ -1187,3 +1187,59 @@ still outside its scope, because they need real generations to matter:
   world is dropped whole on reload; #45 introduces per-generation registration
   and teardown, at which point the guard becomes reachable in production (today
   it fires only via the test-only `force_type_source_for_test` seam).
+
+---
+
+## ADR-021: Device-Local Buffers with a Pooled Staging Belt (Vulkan)
+
+**Date**: 2026-07-05
+**Status**: Accepted
+
+### Context
+
+Every Vulkan buffer with `COPY_DST` usage was allocated host-visible
+(`CpuToGpu`), because the old heuristic assumed `COPY_DST` implies direct CPU
+writes. All mesh buffers carry `VERTEX|COPY_DST`/`INDEX|COPY_DST`, so all
+geometry — including write-once static meshes — lived in host-visible memory:
+on discrete GPUs every draw fetches vertices over PCIe instead of VRAM
+(invisible on unified-memory dev machines, costly on the discrete-GPU
+targets). Meanwhile every `TransferOperation::WriteBuffer` allocated and
+destroyed a dedicated transient staging buffer per operation per frame.
+
+The upload architecture itself was already correct: production code uploads
+through the frame graph (`create_mesh_deferred`, `upload_texture_data`,
+material managers' `pending_uploads`), and transient staging retires per frame
+slot after the slot's fence.
+
+### Decision
+
+1. **Memory location follows mappability, not copyability.** `MAP_READ` →
+   `GpuToCpu`, `MAP_WRITE` → `CpuToGpu`, everything else — including
+   `COPY_DST` — → `GpuOnly`. GPU-side copies do not need host-visible
+   destinations; buffers the CPU writes directly must say so with `MAP_WRITE`.
+2. **The `RING` usage flag marks host-visible intent** — a ring buffer is by
+   definition CPU-written every frame, so the Vulkan backend allocates
+   `RING` buffers host-visible. The flag stays engine-side: adding wgpu's
+   `MAP_WRITE` instead would be invalid there (it only combines with
+   `COPY_SRC`), and wgpu rings are written via `Queue::write_buffer`.
+3. **`GpuBackend::write_buffer` becomes dual-path**: mapped write for
+   host-visible buffers (unchanged); for device-local buffers it is a
+   *blocking convenience path* (staging + one-shot submit + wait), mirroring
+   the documented `write_texture` contract. Production uploads go through
+   `TransferOperation`s in the frame graph.
+4. **Staging belt**: transient staging for graph uploads is sub-allocated from
+   pooled chunks (bump allocator) instead of one `vkCreateBuffer` +
+   allocation per operation. Chunks retire per frame slot (same fence
+   guarantee as the old per-op buffers) and return to a free pool;
+   oversized allocations get a dedicated chunk destroyed on retirement.
+
+### Consequences
+
+- ✅ Static geometry and uniform buffers reside in VRAM on discrete GPUs
+- ✅ Zero per-operation buffer/allocation churn for graph uploads
+- ✅ No API changes for production code (deferred paths already used)
+- ⚠️ Direct `Buffer::write` on a non-`MAP_WRITE` buffer now takes the slow
+  blocking path — fine for tools/tests, wrong for per-frame data (use a
+  `RingBuffer` or `MAP_WRITE`)
+- ⚠️ Belt chunks hold memory at the high-water mark of a frame's uploads;
+  oversized chunks are destroyed on retirement to bound growth

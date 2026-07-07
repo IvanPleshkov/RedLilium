@@ -14,7 +14,8 @@ use crate::graph::{
     RenderTargetConfig, TransferConfig, TransferOperation, TransferPass,
 };
 use crate::materials::{
-    BindingGroup, Material, MaterialDescriptor, MaterialInstance, ShaderSource, ShaderStage,
+    BindingGroupDescriptor, Material, MaterialDescriptor, MaterialInstance, ShaderSource,
+    ShaderStage,
 };
 use crate::mesh::{
     IndexFormat, Mesh, PrimitiveTopology, VertexAttribute, VertexAttributeFormat,
@@ -89,6 +90,14 @@ pub struct EguiRenderer {
     index_ring: RingBuffer,
     sampler: Arc<Sampler>,
     textures: HashMap<TextureId, Arc<Texture>>,
+    /// Eagerly-created group-0 binding (the screen-size uniform, bound at
+    /// offset 0 with a per-draw dynamic offset). Built once against the
+    /// stable uniform ring buffer and reused every frame.
+    uniform_binding: Option<Arc<crate::materials::BindingGroup>>,
+    /// Eagerly-created group-1 (texture + sampler) bindings, one per egui
+    /// texture id. Built when a texture first appears and reused every frame;
+    /// dropped/rebuilt when its texture is replaced or freed.
+    texture_bindings: HashMap<TextureId, Arc<crate::materials::BindingGroup>>,
     /// CPU-side texture data for partial update support.
     texture_data: HashMap<TextureId, TextureData>,
     /// Counter for generating unique user texture IDs.
@@ -214,6 +223,8 @@ impl EguiRenderer {
             index_ring,
             sampler,
             textures: HashMap::new(),
+            uniform_binding: None,
+            texture_bindings: HashMap::new(),
             texture_data: HashMap::new(),
             next_user_texture_id: 0,
             scratch_vertices: Vec::new(),
@@ -242,10 +253,16 @@ impl EguiRenderer {
         for id in &textures_delta.free {
             self.textures.remove(id);
             self.texture_data.remove(id);
+            // Drop the cached binding group so it can't outlive its texture.
+            self.texture_bindings.remove(id);
         }
 
         // Set or update textures
         for (id, delta) in &textures_delta.set {
+            // A replaced/updated texture may swap the underlying `Arc<Texture>`;
+            // invalidate the cached binding so `create_graphics_pass` rebuilds
+            // it against the current texture.
+            self.texture_bindings.remove(id);
             self.set_texture(*id, delta);
         }
     }
@@ -480,17 +497,33 @@ impl EguiRenderer {
             alloc.offset
         };
 
-        // Uniform binding: bind the whole element range; the draw selects this
-        // frame's slot via a dynamic offset.
-        #[allow(clippy::arc_with_non_send_sync)]
-        // Base offset 0: the per-frame slot is selected by the dynamic offset
-        // (`uniform_offset`) supplied on each draw, not baked into the binding.
-        let uniform_binding = Arc::new(BindingGroup::new().with_buffer_range(
-            0,
-            self.uniform_ring.buffer().clone(),
-            0,
-            uniform_size,
-        ));
+        // Uniform binding: bind the whole element range at offset 0; each draw
+        // selects this frame's slot via a dynamic offset. The ring buffer is
+        // stable, so this group is built once and reused every frame.
+        let uniform_binding = match &self.uniform_binding {
+            Some(g) => g.clone(),
+            None => {
+                let layout = self.material.binding_layouts()[0].clone();
+                match self.device.create_binding_group(
+                    layout,
+                    BindingGroupDescriptor::new().with_buffer_range(
+                        0,
+                        self.uniform_ring.buffer().clone(),
+                        0,
+                        uniform_size,
+                    ),
+                ) {
+                    Ok(group) => {
+                        self.uniform_binding = Some(group.clone());
+                        group
+                    }
+                    Err(e) => {
+                        log::error!("egui: failed to create uniform binding group: {e}");
+                        return pass;
+                    }
+                }
+            }
+        };
 
         // Process each primitive
         for ClippedPrimitive {
@@ -546,13 +579,29 @@ impl EguiRenderer {
                         .with_buffer_offsets(vec![v_off], i_off),
                     );
 
-                    // Create texture binding group
-                    #[allow(clippy::arc_with_non_send_sync)]
-                    let texture_binding = Arc::new(
-                        BindingGroup::new()
-                            .with_texture(0, texture)
-                            .with_sampler(1, self.sampler.clone()),
-                    );
+                    // Texture binding group (group 1): built once per texture id
+                    // and reused; rebuilt when the texture is replaced/freed.
+                    let texture_binding = match self.texture_bindings.get(&mesh.texture_id) {
+                        Some(g) => g.clone(),
+                        None => {
+                            let layout = self.material.binding_layouts()[1].clone();
+                            match self.device.create_binding_group(
+                                layout,
+                                BindingGroupDescriptor::new()
+                                    .with_texture(0, texture)
+                                    .with_sampler(1, self.sampler.clone()),
+                            ) {
+                                Ok(group) => {
+                                    self.texture_bindings.insert(mesh.texture_id, group.clone());
+                                    group
+                                }
+                                Err(e) => {
+                                    log::warn!("egui: failed to create texture binding group: {e}");
+                                    continue;
+                                }
+                            }
+                        }
+                    };
 
                     // Create material instance
                     let material_instance = Arc::new(

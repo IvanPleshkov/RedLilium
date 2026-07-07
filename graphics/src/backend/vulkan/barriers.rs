@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use ash::vk;
 use ash::vk::Handle;
 
-use super::layout::{TextureId, TextureLayout, TextureLayoutTracker};
-use crate::graph::resource_usage::{BufferAccessMode, PassResourceUsage};
+use super::layout::{TextureId, TextureLayout};
+use crate::graph::resource_usage::BufferAccessMode;
 
 /// Unique identifier for a Vulkan buffer within the barrier batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -31,6 +31,113 @@ impl BufferId {
     /// Get the raw handle value.
     pub fn raw(&self) -> u64 {
         self.0
+    }
+}
+
+/// Synchronization state of a single buffer on the GPU timeline.
+///
+/// Tracks the last write (stage + access) plus which read scopes that write
+/// has already been made visible to, so repeated readers don't re-emit
+/// barriers (VK-P7) and writers get a precise source scope instead of a
+/// hardcoded `TRANSFER` guess (VK-C3).
+#[derive(Debug, Default, Clone, Copy)]
+struct BufferAccessState {
+    /// Pipeline stages of the last tracked write.
+    last_write_stage: vk::PipelineStageFlags,
+    /// Access mask of the last tracked write.
+    last_write_access: vk::AccessFlags,
+    /// Read stages the last write has been made visible to (via a barrier).
+    visible_stages: vk::PipelineStageFlags,
+    /// Read access types the last write has been made visible to.
+    visible_access: vk::AccessFlags,
+    /// All read stages seen since the last write (for write-after-read
+    /// execution dependencies).
+    reads_since_write: vk::PipelineStageFlags,
+}
+
+/// Tracks the last access to every buffer used by render graphs, mirroring
+/// [`super::layout::TextureLayoutTracker`] for buffers.
+///
+/// The tracker is global and persists across frames.
+///
+/// INVARIANT (single queue): correctness relies on every tracked access being
+/// on the one graphics queue. A `vkCmdPipelineBarrier` synchronizes across
+/// submissions only *within a queue*, so a write recorded in frame N is a
+/// valid source scope for a read in frame N+1 only because both submits are on
+/// that queue in submission order. This tracker has no concept of queue
+/// ownership: a second queue (async compute) would need semaphores +
+/// ownership transfers instead, and adding one without that would silently
+/// drop synchronization. See #47 before introducing a second queue.
+///
+/// Keyed by the raw `vk::Buffer` handle. Unlike texture layouts, stale state
+/// after handle reuse is benign: it can only produce an unnecessary or
+/// overly-broad barrier, never skip a needed one (a new buffer has no GPU
+/// writes to synchronize until a tracked write records one, which resets the
+/// entry). Destroyed buffers are removed via the retirement queue drained in
+/// `advance_frame`, keeping the map bounded by live resources.
+#[derive(Debug, Default)]
+pub struct BufferAccessTracker {
+    states: HashMap<BufferId, BufferAccessState>,
+}
+
+impl BufferAccessTracker {
+    /// Create a new empty tracker.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record an access and return the source scope for a barrier, if one is
+    /// needed before it.
+    ///
+    /// Returns `Some((src_stage, src_access))` when a barrier must be placed
+    /// before the pass performing `access`, or `None` when the access is
+    /// already synchronized (first GPU use, host-written buffers, or a read
+    /// scope the last write is already visible to).
+    pub fn request_access(
+        &mut self,
+        id: BufferId,
+        access: BufferAccessMode,
+    ) -> Option<(vk::PipelineStageFlags, vk::AccessFlags)> {
+        let state = self.states.entry(id).or_default();
+        let stage = access.dst_stage();
+        let access_mask = access.dst_access_mask();
+
+        if access.is_write() {
+            // Writes must wait for the previous write (WAW) and for all reads
+            // issued since it (WAR — execution dependency only, so reads
+            // contribute no source access mask).
+            let src_stage = state.last_write_stage | state.reads_since_write;
+            let src_access = state.last_write_access;
+
+            *state = BufferAccessState {
+                last_write_stage: stage,
+                last_write_access: access_mask,
+                ..Default::default()
+            };
+
+            (!src_stage.is_empty()).then_some((src_stage, src_access))
+        } else {
+            state.reads_since_write |= stage;
+
+            if state.last_write_access.is_empty() {
+                // No tracked GPU write: nothing to make visible. Host writes
+                // are made visible by queue submission itself.
+                return None;
+            }
+            if state.visible_stages.contains(stage) && state.visible_access.contains(access_mask) {
+                // The last write is already visible to this read scope.
+                return None;
+            }
+            state.visible_stages |= stage;
+            state.visible_access |= access_mask;
+            Some((state.last_write_stage, state.last_write_access))
+        }
+    }
+
+    /// Remove a destroyed buffer's entry (called from the retirement drain
+    /// in `advance_frame`).
+    pub fn remove(&mut self, id: BufferId) {
+        self.states.remove(&id);
     }
 }
 
@@ -62,13 +169,16 @@ struct ImageBarrierInfo {
 }
 
 /// Information for a single buffer barrier.
+///
+/// Barriers always cover the whole buffer: the access tracker works at
+/// whole-buffer granularity, and a range-limited barrier would only make a
+/// write visible for that range while the tracker marks the whole buffer as
+/// synchronized.
 #[derive(Debug, Clone)]
 struct BufferBarrierInfo {
     buffer: vk::Buffer,
     src_access_mask: vk::AccessFlags,
     dst_access_mask: vk::AccessFlags,
-    offset: u64,
-    size: u64,
 }
 
 impl BarrierBatch {
@@ -79,8 +189,17 @@ impl BarrierBatch {
 
     /// Add an image layout transition barrier.
     ///
-    /// If a barrier for the same image already exists, it will be replaced.
-    /// Barriers where `old_layout == new_layout` are skipped.
+    /// Same-layout uses are skipped only for read-only layouts: two
+    /// consecutive passes writing an image in the same layout (color target
+    /// rendered twice, storage image in `General` across dispatches) have a
+    /// WAW/RAW hazard that dynamic rendering does not implicitly order, so a
+    /// memory barrier without a layout transition is emitted.
+    ///
+    /// If a barrier for the same image already exists in the batch, the
+    /// transitions are collapsed into one chain: the existing `old_layout`
+    /// is kept, the new `new_layout` wins, and access scopes are unioned —
+    /// replacing the entry outright would submit a barrier whose
+    /// `old_layout` no longer matches the image's actual layout.
     pub fn add_image_barrier(
         &mut self,
         id: TextureId,
@@ -89,56 +208,61 @@ impl BarrierBatch {
         new_layout: TextureLayout,
         aspect_mask: vk::ImageAspectFlags,
     ) {
-        // Skip if no transition needed
-        if old_layout == new_layout {
+        // Same read-only layout: no hazard, nothing to do.
+        if old_layout == new_layout && !new_layout.is_write() {
             return;
         }
 
-        let info = ImageBarrierInfo {
-            image,
-            old_layout: old_layout.to_vk(),
-            new_layout: new_layout.to_vk(),
-            src_access_mask: old_layout.src_access_mask(),
-            dst_access_mask: new_layout.dst_access_mask(),
-            aspect_mask,
-        };
-
-        self.image_barriers.insert(id, info);
+        match self.image_barriers.entry(id) {
+            std::collections::hash_map::Entry::Occupied(mut occupied) => {
+                let info = occupied.get_mut();
+                info.new_layout = new_layout.to_vk();
+                info.src_access_mask |= old_layout.src_access_mask();
+                info.dst_access_mask |= new_layout.dst_access_mask();
+            }
+            std::collections::hash_map::Entry::Vacant(vacant) => {
+                vacant.insert(ImageBarrierInfo {
+                    image,
+                    old_layout: old_layout.to_vk(),
+                    new_layout: new_layout.to_vk(),
+                    src_access_mask: old_layout.src_access_mask(),
+                    dst_access_mask: new_layout.dst_access_mask(),
+                    aspect_mask,
+                });
+            }
+        }
         self.src_stage_mask |= old_layout.src_stage();
         self.dst_stage_mask |= new_layout.dst_stage();
     }
 
-    /// Add a buffer memory barrier.
+    /// Add a buffer memory barrier with explicit stage/access scopes.
     ///
     /// Buffer barriers ensure memory coherence between different access types.
-    /// If a barrier for the same buffer already exists, it will be replaced.
-    /// Barriers where `src_access == dst_access` are skipped (no synchronization needed).
+    /// If a barrier for the same buffer already exists in the batch, the
+    /// scopes are merged (mask union) — a pass that both reads and writes a
+    /// buffer gets one barrier covering both dependencies, not whichever
+    /// happened to be added last.
     pub fn add_buffer_barrier(
         &mut self,
         id: BufferId,
         buffer: vk::Buffer,
-        src_access: BufferAccessMode,
-        dst_access: BufferAccessMode,
-        offset: u64,
-        size: u64,
+        src_stage: vk::PipelineStageFlags,
+        src_access: vk::AccessFlags,
+        dst_stage: vk::PipelineStageFlags,
+        dst_access: vk::AccessFlags,
     ) {
-        // Skip if no access change needed (same read-only access)
-        // Note: we still need barriers for write→read or read→write transitions
-        if src_access == dst_access && !src_access.is_write() {
-            return;
-        }
-
-        let info = BufferBarrierInfo {
-            buffer,
-            src_access_mask: src_access.src_access_mask(),
-            dst_access_mask: dst_access.dst_access_mask(),
-            offset,
-            size,
-        };
-
-        self.buffer_barriers.insert(id, info);
-        self.src_stage_mask |= src_access.src_stage();
-        self.dst_stage_mask |= dst_access.dst_stage();
+        let info = self
+            .buffer_barriers
+            .entry(id)
+            .or_insert_with(|| BufferBarrierInfo {
+                buffer,
+                src_access_mask: vk::AccessFlags::empty(),
+                dst_access_mask: vk::AccessFlags::empty(),
+            });
+        info.src_access_mask |= src_access;
+        info.dst_access_mask |= dst_access;
+        self.src_stage_mask |= src_stage;
+        self.dst_stage_mask |= dst_stage;
     }
 
     /// Check if the batch has any barriers.
@@ -199,8 +323,8 @@ impl BarrierBatch {
                     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                     .buffer(info.buffer)
-                    .offset(info.offset)
-                    .size(info.size)
+                    .offset(0)
+                    .size(vk::WHOLE_SIZE)
                     .src_access_mask(info.src_access_mask)
                     .dst_access_mask(info.dst_access_mask)
             })
@@ -228,82 +352,6 @@ impl BarrierBatch {
     }
 }
 
-impl TextureLayoutTracker {
-    /// Generate barriers for a pass's resource usage.
-    ///
-    /// This examines each texture usage declaration, determines if a layout
-    /// transition is needed, and adds the appropriate barrier to the batch.
-    /// After generating barriers, the tracker's state is updated to reflect
-    /// the new layouts.
-    ///
-    /// # Arguments
-    ///
-    /// * `usage` - The resource usage declarations for the pass
-    /// * `get_image_info` - A closure that returns `(vk::Image, vk::Format)` for a texture,
-    ///   or `None` if the texture should be skipped (e.g., non-Vulkan backend)
-    ///
-    /// # Returns
-    ///
-    /// A `BarrierBatch` containing all necessary image memory barriers.
-    pub fn generate_barriers<F>(
-        &mut self,
-        usage: &PassResourceUsage,
-        get_image_info: F,
-    ) -> BarrierBatch
-    where
-        F: Fn(&crate::resources::Texture) -> Option<(vk::Image, vk::Format, bool)>,
-    {
-        let mut batch = BarrierBatch::new();
-
-        for decl in &usage.texture_usages {
-            // Get image info from the texture
-            let Some((image, format, is_depth)) = get_image_info(&decl.texture) else {
-                continue;
-            };
-
-            let texture_id = TextureId::from(image);
-            let current_layout = self.get_layout(texture_id);
-            let required_layout = decl.access.to_layout();
-
-            // Determine aspect mask based on format
-            let aspect_mask = if is_depth {
-                if format_has_stencil(format) {
-                    vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
-                } else {
-                    vk::ImageAspectFlags::DEPTH
-                }
-            } else {
-                vk::ImageAspectFlags::COLOR
-            };
-
-            // Add barrier if layout change is needed
-            batch.add_image_barrier(
-                texture_id,
-                image,
-                current_layout,
-                required_layout,
-                aspect_mask,
-            );
-
-            // Update tracked state
-            self.set_layout(texture_id, required_layout);
-        }
-
-        batch
-    }
-}
-
-/// Check if a Vulkan format has a stencil component.
-fn format_has_stencil(format: vk::Format) -> bool {
-    matches!(
-        format,
-        vk::Format::D24_UNORM_S8_UINT
-            | vk::Format::D32_SFLOAT_S8_UINT
-            | vk::Format::S8_UINT
-            | vk::Format::D16_UNORM_S8_UINT
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,12 +366,32 @@ mod tests {
     }
 
     #[test]
-    fn test_barrier_batch_skip_same_layout() {
+    fn test_barrier_batch_skip_same_readonly_layout() {
         let mut batch = BarrierBatch::new();
         let id = TextureId::from_raw(12345);
         let image = vk::Image::from_raw(12345);
 
-        // Adding a barrier with same old and new layout should be skipped
+        // Same read-only layout: read-after-read, no hazard, no barrier.
+        batch.add_image_barrier(
+            id,
+            image,
+            TextureLayout::ShaderReadOnly,
+            TextureLayout::ShaderReadOnly,
+            vk::ImageAspectFlags::COLOR,
+        );
+
+        assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn test_barrier_batch_same_write_layout_emits_barrier() {
+        let mut batch = BarrierBatch::new();
+        let id = TextureId::from_raw(12345);
+        let image = vk::Image::from_raw(12345);
+
+        // Rendering to the same color target in two consecutive passes is a
+        // WAW hazard even though the layout doesn't change (VK-H1): a memory
+        // barrier without a transition must be emitted.
         batch.add_image_barrier(
             id,
             image,
@@ -332,7 +400,45 @@ mod tests {
             vk::ImageAspectFlags::COLOR,
         );
 
-        assert!(batch.is_empty());
+        assert_eq!(batch.image_barrier_count(), 1);
+        let info = batch.image_barriers.values().next().unwrap();
+        assert_eq!(info.old_layout, info.new_layout);
+        assert!(
+            info.dst_access_mask
+                .contains(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+        );
+    }
+
+    #[test]
+    fn test_barrier_batch_duplicate_collapses_chain() {
+        let mut batch = BarrierBatch::new();
+        let id = TextureId::from_raw(12345);
+        let image = vk::Image::from_raw(12345);
+
+        // One pass declaring two transitions for the same image: the batch
+        // must collapse them into old(first) -> new(last) — replacing the
+        // entry would submit a barrier whose old_layout doesn't match the
+        // image's actual layout (VK-L1).
+        batch.add_image_barrier(
+            id,
+            image,
+            TextureLayout::Undefined,
+            TextureLayout::TransferDst,
+            vk::ImageAspectFlags::COLOR,
+        );
+        batch.add_image_barrier(
+            id,
+            image,
+            TextureLayout::TransferDst,
+            TextureLayout::ShaderReadOnly,
+            vk::ImageAspectFlags::COLOR,
+        );
+
+        assert_eq!(batch.image_barrier_count(), 1);
+        let info = batch.image_barriers.values().next().unwrap();
+        assert_eq!(info.old_layout, vk::ImageLayout::UNDEFINED);
+        assert_eq!(info.new_layout, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+        assert!(info.dst_access_mask.contains(vk::AccessFlags::SHADER_READ));
     }
 
     #[test]
@@ -413,20 +519,29 @@ mod tests {
 
     // Buffer barrier tests
 
+    /// Shorthand: barrier scopes for "transfer write -> vertex read".
+    fn transfer_to_vertex() -> (
+        vk::PipelineStageFlags,
+        vk::AccessFlags,
+        vk::PipelineStageFlags,
+        vk::AccessFlags,
+    ) {
+        (
+            BufferAccessMode::TransferWrite.src_stage(),
+            BufferAccessMode::TransferWrite.src_access_mask(),
+            BufferAccessMode::VertexBuffer.dst_stage(),
+            BufferAccessMode::VertexBuffer.dst_access_mask(),
+        )
+    }
+
     #[test]
     fn test_buffer_barrier_adds() {
         let mut batch = BarrierBatch::new();
         let id = BufferId::from_raw(12345);
         let buffer = vk::Buffer::from_raw(12345);
 
-        batch.add_buffer_barrier(
-            id,
-            buffer,
-            BufferAccessMode::TransferWrite,
-            BufferAccessMode::VertexBuffer,
-            0,
-            1024,
-        );
+        let (src_stage, src_access, dst_stage, dst_access) = transfer_to_vertex();
+        batch.add_buffer_barrier(id, buffer, src_stage, src_access, dst_stage, dst_access);
 
         assert!(!batch.is_empty());
         assert_eq!(batch.len(), 1);
@@ -435,72 +550,137 @@ mod tests {
     }
 
     #[test]
-    fn test_buffer_barrier_skip_same_read_access() {
+    fn test_buffer_barrier_merges_scopes() {
         let mut batch = BarrierBatch::new();
         let id = BufferId::from_raw(12345);
         let buffer = vk::Buffer::from_raw(12345);
 
-        // Same read-only access should be skipped
+        // Same buffer, two different dependencies in one pass: the scopes
+        // must merge into one barrier covering both, not replace each other.
+        let (src_stage, src_access, dst_stage, dst_access) = transfer_to_vertex();
+        batch.add_buffer_barrier(id, buffer, src_stage, src_access, dst_stage, dst_access);
         batch.add_buffer_barrier(
             id,
             buffer,
-            BufferAccessMode::VertexBuffer,
-            BufferAccessMode::VertexBuffer,
-            0,
-            1024,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::AccessFlags::SHADER_WRITE,
+            vk::PipelineStageFlags::VERTEX_SHADER,
+            vk::AccessFlags::UNIFORM_READ,
         );
 
-        assert!(batch.is_empty());
+        assert_eq!(batch.buffer_barrier_count(), 1);
+        let info = batch.buffer_barriers.values().next().unwrap();
+        assert!(
+            info.src_access_mask
+                .contains(vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::SHADER_WRITE)
+        );
+        assert!(
+            info.dst_access_mask
+                .contains(vk::AccessFlags::VERTEX_ATTRIBUTE_READ | vk::AccessFlags::UNIFORM_READ)
+        );
+        assert!(
+            batch.src_stage_mask.contains(
+                vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::COMPUTE_SHADER
+            )
+        );
+    }
+
+    // Buffer access tracker tests (VK-C3 / VK-P7)
+
+    #[test]
+    fn tracker_first_read_needs_no_barrier() {
+        let mut tracker = BufferAccessTracker::new();
+        let id = BufferId::from_raw(1);
+
+        // Host-written (or never-written) buffer: reads need no barrier.
+        assert_eq!(
+            tracker.request_access(id, BufferAccessMode::VertexBuffer),
+            None
+        );
+        assert_eq!(
+            tracker.request_access(id, BufferAccessMode::UniformRead),
+            None
+        );
     }
 
     #[test]
-    fn test_buffer_barrier_write_to_read() {
-        let mut batch = BarrierBatch::new();
-        let id = BufferId::from_raw(12345);
-        let buffer = vk::Buffer::from_raw(12345);
+    fn tracker_compute_write_then_read_uses_shader_src_scope() {
+        let mut tracker = BufferAccessTracker::new();
+        let id = BufferId::from_raw(1);
 
-        // Write to read transition should be added
-        batch.add_buffer_barrier(
-            id,
-            buffer,
-            BufferAccessMode::StorageWrite,
-            BufferAccessMode::VertexBuffer,
-            0,
-            1024,
+        // First write: nothing earlier to synchronize against.
+        assert_eq!(
+            tracker.request_access(id, BufferAccessMode::StorageReadWrite),
+            None
         );
 
-        assert!(!batch.is_empty());
-        assert_eq!(batch.buffer_barrier_count(), 1);
+        // Read after the compute write: src scope must be the shader write —
+        // the old hardcoded TRANSFER source would miss it entirely (VK-C3).
+        let (src_stage, src_access) = tracker
+            .request_access(id, BufferAccessMode::VertexBuffer)
+            .expect("read after write needs a barrier");
+        assert!(src_stage.contains(vk::PipelineStageFlags::COMPUTE_SHADER));
+        assert!(src_access.contains(vk::AccessFlags::SHADER_WRITE));
     }
 
     #[test]
-    fn test_buffer_barrier_deduplicates() {
-        let mut batch = BarrierBatch::new();
-        let id = BufferId::from_raw(12345);
-        let buffer = vk::Buffer::from_raw(12345);
+    fn tracker_repeated_read_is_skipped() {
+        let mut tracker = BufferAccessTracker::new();
+        let id = BufferId::from_raw(1);
 
-        // Add first barrier
-        batch.add_buffer_barrier(
-            id,
-            buffer,
-            BufferAccessMode::TransferWrite,
-            BufferAccessMode::VertexBuffer,
-            0,
-            1024,
+        tracker.request_access(id, BufferAccessMode::TransferWrite);
+        assert!(
+            tracker
+                .request_access(id, BufferAccessMode::VertexBuffer)
+                .is_some()
         );
-
-        // Add second barrier for same buffer (should replace)
-        batch.add_buffer_barrier(
-            id,
-            buffer,
-            BufferAccessMode::VertexBuffer,
-            BufferAccessMode::UniformRead,
-            0,
-            512,
+        // Same read scope again (next pass, next frame): already visible,
+        // no redundant barrier (VK-P7).
+        assert_eq!(
+            tracker.request_access(id, BufferAccessMode::VertexBuffer),
+            None
         );
+        // A *different* read scope still needs its own visibility.
+        assert!(
+            tracker
+                .request_access(id, BufferAccessMode::IndirectRead)
+                .is_some()
+        );
+    }
 
-        // Should still only have 1 buffer barrier
-        assert_eq!(batch.buffer_barrier_count(), 1);
+    #[test]
+    fn tracker_write_after_read_has_execution_dependency() {
+        let mut tracker = BufferAccessTracker::new();
+        let id = BufferId::from_raw(1);
+
+        tracker.request_access(id, BufferAccessMode::VertexBuffer);
+        // Write after read: needs an execution dependency on the read stage,
+        // with no source access (reads make nothing available).
+        let (src_stage, src_access) = tracker
+            .request_access(id, BufferAccessMode::TransferWrite)
+            .expect("write after read needs a barrier");
+        assert!(src_stage.contains(vk::PipelineStageFlags::VERTEX_INPUT));
+        assert_eq!(src_access, vk::AccessFlags::empty());
+    }
+
+    #[test]
+    fn tracker_write_after_write_chains_scopes() {
+        let mut tracker = BufferAccessTracker::new();
+        let id = BufferId::from_raw(1);
+
+        tracker.request_access(id, BufferAccessMode::TransferWrite);
+        let (src_stage, src_access) = tracker
+            .request_access(id, BufferAccessMode::StorageWrite)
+            .expect("write after write needs a barrier");
+        assert!(src_stage.contains(vk::PipelineStageFlags::TRANSFER));
+        assert!(src_access.contains(vk::AccessFlags::TRANSFER_WRITE));
+
+        // And a read now synchronizes against the SECOND write.
+        let (src_stage, src_access) = tracker
+            .request_access(id, BufferAccessMode::UniformRead)
+            .expect("read after write needs a barrier");
+        assert!(src_stage.contains(vk::PipelineStageFlags::COMPUTE_SHADER));
+        assert!(src_access.contains(vk::AccessFlags::SHADER_WRITE));
     }
 
     #[test]
@@ -521,14 +701,8 @@ mod tests {
         // Add buffer barrier
         let buf_id = BufferId::from_raw(22222);
         let buffer = vk::Buffer::from_raw(22222);
-        batch.add_buffer_barrier(
-            buf_id,
-            buffer,
-            BufferAccessMode::TransferWrite,
-            BufferAccessMode::VertexBuffer,
-            0,
-            1024,
-        );
+        let (src_stage, src_access, dst_stage, dst_access) = transfer_to_vertex();
+        batch.add_buffer_barrier(buf_id, buffer, src_stage, src_access, dst_stage, dst_access);
 
         assert!(!batch.is_empty());
         assert_eq!(batch.len(), 2);
@@ -554,14 +728,8 @@ mod tests {
         // Add buffer barrier
         let buf_id = BufferId::from_raw(22222);
         let buffer = vk::Buffer::from_raw(22222);
-        batch.add_buffer_barrier(
-            buf_id,
-            buffer,
-            BufferAccessMode::TransferWrite,
-            BufferAccessMode::VertexBuffer,
-            0,
-            1024,
-        );
+        let (src_stage, src_access, dst_stage, dst_access) = transfer_to_vertex();
+        batch.add_buffer_barrier(buf_id, buffer, src_stage, src_access, dst_stage, dst_access);
 
         assert_eq!(batch.len(), 2);
 

@@ -9,8 +9,8 @@
 use std::sync::Arc;
 
 use redlilium_graphics::{
-    BindingGroup, ColorAttachment, CpuSampler, DrawCommand, GraphicsDevice, GraphicsPass, Material,
-    MaterialDescriptor, MaterialInstance, Mesh, MeshDescriptor, PassHandle, RenderGraph,
+    BindingGroupDescriptor, ColorAttachment, CpuSampler, DrawCommand, GraphicsDevice, GraphicsPass,
+    Material, MaterialDescriptor, MaterialInstance, Mesh, MeshDescriptor, PassHandle, RenderGraph,
     RenderTargetConfig, Sampler, ShaderSource, ShaderStage, SurfaceTexture, Texture, TextureFormat,
     TransferConfig, TransferOperation, TransferPass, VertexBufferLayout, VertexLayout,
 };
@@ -57,6 +57,8 @@ float4 fs_main(VsOutput input) : SV_Target {
 /// Host-side resources for the present blit (material, sampler, and the
 /// 3-vertex dummy mesh backing the fullscreen triangle).
 pub(crate) struct PresentBlit {
+    /// Device handle, kept to build the source binding group eagerly (#40).
+    device: Arc<GraphicsDevice>,
     material: Arc<Material>,
     mesh: Arc<Mesh>,
     sampler: Arc<Sampler>,
@@ -120,6 +122,7 @@ impl PresentBlit {
         }
 
         Self {
+            device: device.clone(),
             material,
             mesh,
             sampler,
@@ -180,12 +183,17 @@ impl PresentBlit {
         {
             return instance.clone();
         }
-        #[allow(clippy::arc_with_non_send_sync)]
-        let group = Arc::new(
-            BindingGroup::new()
-                .with_texture(0, source.clone())
-                .with_sampler(1, self.sampler.clone()),
-        );
+        // Eagerly-built binding group (#40): descriptor set created once here,
+        // cached per source texture and rebuilt only when the target changes.
+        let group = self
+            .device
+            .create_binding_group(
+                self.material.binding_layouts()[0].clone(),
+                BindingGroupDescriptor::new()
+                    .with_texture(0, source.clone())
+                    .with_sampler(1, self.sampler.clone()),
+            )
+            .expect("create present blit binding group");
         #[allow(clippy::arc_with_non_send_sync)]
         let instance =
             Arc::new(MaterialInstance::new(self.material.clone()).with_binding_group(group));

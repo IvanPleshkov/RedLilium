@@ -35,8 +35,8 @@ use winit::platform::windows::EventLoopBuilderExtWindows;
 use winit::window::{Window, WindowId};
 
 use redlilium_graphics::{
-    BackendType, ColorAttachment, FramePipeline, GraphicsDevice, GraphicsInstance, GraphicsPass,
-    InstanceParameters, LoadOp, PresentMode, RenderTargetConfig, StoreOp, Surface,
+    BackendType, ColorAttachment, FramePipeline, GraphicsDevice, GraphicsError, GraphicsInstance,
+    GraphicsPass, InstanceParameters, LoadOp, PresentMode, RenderTargetConfig, StoreOp, Surface,
     SurfaceConfiguration, WgpuBackendType,
 };
 
@@ -56,7 +56,7 @@ enum TestResult {
 struct WindowTestApp {
     result: TestResult,
     params: InstanceParameters,
-    window: Option<Window>,
+    window: Option<std::sync::Arc<Window>>,
     instance: Option<Arc<GraphicsInstance>>,
     device: Option<Arc<GraphicsDevice>>,
     surface: Option<Arc<Surface>>,
@@ -100,7 +100,7 @@ impl WindowTestApp {
         };
 
         // Create surface first (needed to select compatible adapter)
-        let surface = match instance.create_surface(window) {
+        let surface = match instance.create_surface(window.clone()) {
             Ok(s) => s,
             Err(e) => {
                 log::warn!("Failed to create surface: {}", e);
@@ -162,6 +162,17 @@ impl WindowTestApp {
 
         let swapchain_texture = match surface.acquire_texture() {
             Ok(t) => t,
+            Err(GraphicsError::SurfaceOutdated | GraphicsError::SurfaceLost) => {
+                // Reconfigure with the current size and skip this frame.
+                log::info!("Surface outdated, reconfiguring");
+                let config = SurfaceConfiguration::new(self.window_size.0, self.window_size.1)
+                    .with_format(surface.preferred_format())
+                    .with_present_mode(PresentMode::Fifo);
+                if let Some(device) = &self.device {
+                    let _ = surface.configure(device, &config);
+                }
+                return true;
+            }
             Err(e) => {
                 log::warn!("Failed to acquire swapchain texture: {}", e);
                 return false;
@@ -171,7 +182,7 @@ impl WindowTestApp {
         let hue = (self.frame_count as f32 / FRAMES_TO_RENDER as f32) * 360.0;
         let (r, g, b) = hue_to_rgb(hue);
 
-        let mut schedule = pipeline.begin_frame();
+        let mut schedule = pipeline.begin_frame().expect("begin_frame failed");
 
         let mut graph = schedule.acquire_graph();
         let mut pass = GraphicsPass::new(format!("frame_{}", self.frame_count));
@@ -187,7 +198,10 @@ impl WindowTestApp {
         schedule.render(graph);
         pipeline.end_frame(schedule);
 
-        swapchain_texture.present();
+        if let Err(e) = swapchain_texture.present() {
+            // SurfaceOutdated here is non-fatal: the next acquire reconfigures.
+            log::warn!("Present reported: {}", e);
+        }
 
         log::info!(
             "Frame {} rendered (clear color: RGB({:.2}, {:.2}, {:.2}))",
@@ -222,7 +236,7 @@ impl ApplicationHandler for WindowTestApp {
             match event_loop.create_window(window_attributes) {
                 Ok(window) => {
                     log::info!("Test window created successfully");
-                    self.window = Some(window);
+                    self.window = Some(std::sync::Arc::new(window));
 
                     if !self.init_graphics() {
                         log::info!("Graphics initialization failed, skipping test");
@@ -273,7 +287,7 @@ impl ApplicationHandler for WindowTestApp {
                         self.result = TestResult::Passed;
 
                         if let Some(pipeline) = &self.pipeline {
-                            pipeline.wait_idle();
+                            pipeline.wait_idle().expect("wait_idle failed");
                         }
 
                         event_loop.exit();
@@ -366,7 +380,7 @@ fn run_window_test(params: InstanceParameters) -> bool {
     }
 
     if let Some(pipeline) = &app.pipeline {
-        pipeline.wait_idle();
+        let _ = pipeline.wait_idle();
     }
 
     match app.result {
@@ -394,11 +408,15 @@ fn main() {
 
     let args: Vec<String> = std::env::args().collect();
     let backend = args.get(1).map(|s| s.as_str()).unwrap_or("wgpu");
+    // `--validation` as any later arg enables GPU validation layers.
+    let validation = args.iter().skip(2).any(|a| a == "--validation");
 
     let params = match backend {
         "vulkan" => {
-            log::info!("Using Vulkan backend");
-            InstanceParameters::new().with_backend(BackendType::Vulkan)
+            log::info!("Using Vulkan backend (validation: {validation})");
+            InstanceParameters::new()
+                .with_backend(BackendType::Vulkan)
+                .with_validation(validation)
         }
         "wgpu" => {
             log::info!("Using wgpu backend with Auto mode");

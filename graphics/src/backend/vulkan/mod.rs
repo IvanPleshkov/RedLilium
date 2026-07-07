@@ -12,6 +12,7 @@ mod device;
 mod instance;
 pub mod layout;
 mod pipeline;
+mod staging;
 pub mod swapchain;
 
 use std::mem::ManuallyDrop;
@@ -32,12 +33,34 @@ use super::{GpuBuffer, GpuFence, GpuSampler, GpuTexture};
 /// Maximum number of frames in flight for per-slot resource tracking.
 pub const MAX_FRAMES_IN_FLIGHT: usize = 3;
 
+/// Upper bound for every CPU-side GPU wait (fences, swapchain acquire).
+///
+/// A hung GPU must surface as a [`GraphicsError::Timeout`] instead of
+/// freezing the process forever; 10 s is far beyond any legitimate frame.
+pub(crate) const FENCE_WAIT_TIMEOUT_NS: u64 = 10_000_000_000;
+
 /// Process-wide source of stable texture ids for the layout tracker. Monotonic
 /// so a destroyed texture's id is never reused (no layout aliasing).
 static NEXT_TEXTURE_ID: AtomicU64 = AtomicU64::new(1);
 pub use layout::{TextureLayout, TextureLayoutTracker, TextureUsageGraph};
+pub use pipeline::PersistentDescriptorPools;
 
-use self::barriers::{BarrierBatch, BufferId};
+/// Handles of destroyed resources awaiting removal from the barrier trackers.
+///
+/// `GpuTexture`/`GpuBuffer` drops push their tracker keys here (they can't
+/// touch the trackers directly — drops happen wherever the last `Arc` dies);
+/// [`VulkanBackend::advance_frame`] drains the queue and removes the entries,
+/// so tracker maps stay bounded by the number of live resources instead of
+/// growing with every texture/buffer ever created.
+#[derive(Debug, Default)]
+pub struct RetiredTrackerHandles {
+    /// Stable texture ids (the layout-tracker keys).
+    pub textures: Vec<u64>,
+    /// Raw `vk::Buffer` handles (the access-tracker keys).
+    pub buffers: Vec<u64>,
+}
+
+use self::barriers::{BarrierBatch, BufferAccessTracker, BufferId};
 use self::layout::TextureId;
 
 /// Scratch buffers reused across draw commands to avoid per-draw heap allocations.
@@ -46,10 +69,28 @@ use self::layout::TextureId;
 /// between draws but retain their capacity across frames.
 #[derive(Default)]
 struct VulkanEncoderScratch {
-    descriptor_set_layouts: Vec<vk::DescriptorSetLayout>,
+    /// Cached descriptor sets collected per draw/dispatch for
+    /// `cmd_bind_descriptor_sets`. Reused across draws to avoid per-draw heap
+    /// allocation. (Binding groups are now created eagerly, so there is no
+    /// per-draw allocation/write scratch.)
     descriptor_sets: Vec<vk::DescriptorSet>,
-    buffer_infos: Vec<vk::DescriptorBufferInfo>,
-    image_infos: Vec<vk::DescriptorImageInfo>,
+}
+
+/// Whether two binding layouts are descriptor-set-layout compatible: identical
+/// bindings, in order, with matching type and stage visibility. A binding group
+/// created against a layout compatible with the material's set layout binds
+/// correctly (content-equal layouts share the same `VkDescriptorSetLayout` via
+/// the pipeline manager's dedup).
+fn binding_layouts_compatible(
+    a: &crate::materials::BindingLayout,
+    b: &crate::materials::BindingLayout,
+) -> bool {
+    a.entries.len() == b.entries.len()
+        && a.entries.iter().zip(&b.entries).all(|(x, y)| {
+            x.binding == y.binding
+                && x.binding_type == y.binding_type
+                && x.visibility == y.visibility
+        })
 }
 
 /// A texture view for a Vulkan surface texture (swapchain image).
@@ -128,6 +169,10 @@ pub struct VulkanBackend {
     debug_utils: Option<ash::ext::debug_utils::Instance>,
     /// Selected physical device.
     physical_device: vk::PhysicalDevice,
+    /// Resolved Vulkan format for `TextureFormat::Depth24PlusStencil8`:
+    /// `D24_UNORM_S8_UINT` where the device supports it as a depth-stencil
+    /// attachment, `D32_SFLOAT_S8_UINT` otherwise (optional on e.g. AMD).
+    depth24_stencil8_format: vk::Format,
     /// Logical device.
     device: ash::Device,
     /// Graphics queue.
@@ -175,16 +220,22 @@ pub struct VulkanBackend {
     /// Layout tracker for automatic barrier placement.
     /// Uses interior mutability since execute_graph takes &self.
     layout_tracker: Mutex<TextureLayoutTracker>,
+    /// Per-buffer last-access tracker for precise buffer barriers
+    /// (mirrors `layout_tracker` for buffers).
+    buffer_tracker: Mutex<BufferAccessTracker>,
+    /// Tracker keys of destroyed textures/buffers, pushed by resource drops
+    /// and drained in [`advance_frame`](Self::advance_frame) so the tracker
+    /// maps don't grow with every resource ever created.
+    retired_tracker_handles: Arc<Mutex<RetiredTrackerHandles>>,
     /// Pipeline manager for shader compilation and pipeline creation.
     pipeline_manager: pipeline::PipelineManager,
     /// Scratch buffers for allocation reuse during pass encoding.
     encoder_scratch: Mutex<VulkanEncoderScratch>,
-    /// Transient staging buffers created while encoding a frame (e.g. for
-    /// `WriteBuffer` transfer ops), retired per frame slot. A slot's buffers
-    /// are destroyed in [`advance_frame`](Self::advance_frame) once its fence
-    /// has signalled, so the GPU is guaranteed to be done with them.
-    retired_staging:
-        Mutex<[Vec<(vk::Buffer, gpu_allocator::vulkan::Allocation)>; MAX_FRAMES_IN_FLIGHT]>,
+    /// Pooled staging memory for frame-graph uploads (`WriteBuffer` transfer
+    /// ops). Chunks written during a frame stay owned by its slot and return
+    /// to the pool in [`advance_frame`](Self::advance_frame) once the slot's
+    /// fence has signalled, so the GPU is guaranteed to be done with them.
+    staging_belt: Mutex<staging::StagingBelt>,
 }
 
 impl std::fmt::Debug for VulkanBackend {
@@ -233,14 +284,17 @@ impl VulkanBackend {
             device.clone(),
         )?));
 
-        // Create command pool (staging uploads + swapchain present).
-        let command_pool = command::create_command_pool(&device, graphics_queue_family)?;
+        // Create command pool (staging uploads + swapchain present). Present
+        // command buffers are reset individually each frame, so this pool
+        // needs per-buffer reset.
+        let command_pool = command::create_command_pool(&device, graphics_queue_family, true)?;
 
-        // Per-frame-slot pools for the render-graph submit, reset per slot.
+        // Per-frame-slot pools for the render-graph submit — only ever
+        // bulk-reset once the slot's fence signals, so no per-buffer reset.
         let frame_command_pools = {
             let mut pools = [vk::CommandPool::null(); MAX_FRAMES_IN_FLIGHT];
             for pool in &mut pools {
-                *pool = command::create_command_pool(&device, graphics_queue_family)?;
+                *pool = command::create_command_pool(&device, graphics_queue_family, false)?;
             }
             pools
         };
@@ -257,8 +311,39 @@ impl VulkanBackend {
         // Create layout tracker for automatic barrier placement
         let layout_tracker = Mutex::new(TextureLayoutTracker::new());
 
-        // Create pipeline manager for shader compilation and graphics pipelines
-        let pipeline_manager = pipeline::PipelineManager::new(device.clone())?;
+        // D24_UNORM_S8_UINT is optional (commonly absent on AMD); the spec
+        // only guarantees that one of D24S8/D32S8 supports depth-stencil
+        // attachment. Resolve the actual format for Depth24PlusStencil8 once.
+        let depth24_stencil8_format = {
+            let props = unsafe {
+                instance.get_physical_device_format_properties(
+                    physical_device,
+                    vk::Format::D24_UNORM_S8_UINT,
+                )
+            };
+            if props
+                .optimal_tiling_features
+                .contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
+            {
+                vk::Format::D24_UNORM_S8_UINT
+            } else {
+                log::info!(
+                    "D24_UNORM_S8_UINT not supported by this device; \
+                     Depth24PlusStencil8 maps to D32_SFLOAT_S8_UINT"
+                );
+                vk::Format::D32_SFLOAT_S8_UINT
+            }
+        };
+
+        // Create pipeline manager for shader compilation and graphics pipelines.
+        // Device properties identify the on-disk pipeline cache's owner
+        // (vendor/device/cacheUUID header validation).
+        let device_properties = unsafe { instance.get_physical_device_properties(physical_device) };
+        let pipeline_manager = pipeline::PipelineManager::new(
+            device.clone(),
+            depth24_stencil8_format,
+            &device_properties,
+        )?;
 
         log::info!(
             "Vulkan backend initialized (validation: {})",
@@ -284,10 +369,28 @@ impl VulkanBackend {
             frame_command_pools,
             current_slot: AtomicUsize::new(0),
             layout_tracker,
+            buffer_tracker: Mutex::new(BufferAccessTracker::new()),
+            retired_tracker_handles: Arc::new(Mutex::new(RetiredTrackerHandles::default())),
             pipeline_manager,
+            depth24_stencil8_format,
             encoder_scratch: Mutex::new(VulkanEncoderScratch::default()),
-            retired_staging: Mutex::new(Default::default()),
+            staging_belt: Mutex::new(staging::StagingBelt::default()),
         })
+    }
+
+    /// Convert an engine texture format to the Vulkan format this device
+    /// actually uses for it.
+    ///
+    /// Identical to [`conversion::convert_texture_format`] except for
+    /// `Depth24PlusStencil8`, whose Vulkan format is device-dependent
+    /// (D24S8 where supported, D32S8 otherwise). Texture creation and
+    /// pipeline attachment formats must both go through this so they agree.
+    pub(crate) fn vk_texture_format(&self, format: crate::types::TextureFormat) -> vk::Format {
+        if format == crate::types::TextureFormat::Depth24PlusStencil8 {
+            self.depth24_stencil8_format
+        } else {
+            convert_texture_format(format)
+        }
     }
 
     /// Get the Vulkan device.
@@ -354,6 +457,7 @@ impl VulkanBackend {
         sync.image_available = Some(image_available);
         sync.image_render_finished = Some(image_render_finished);
         sync.consumed = false;
+        sync.surface_transitioned = false;
     }
 
     /// If a swapchain acquire is pending and not yet consumed, returns the
@@ -377,6 +481,20 @@ impl VulkanBackend {
     /// by a render submit this frame. Used by present to pick its wait semaphore.
     pub(crate) fn swapchain_render_consumed(&self) -> bool {
         self.swapchain_sync.lock().consumed
+    }
+
+    /// Undo `take_swapchain_render_sync` after a failed queue submit.
+    ///
+    /// The failed submit enqueued nothing, so `image_available` still has its
+    /// pending signal from the acquire and `image_render_finished` will never
+    /// be signaled. Restoring the un-consumed state makes present fall back to
+    /// waiting on `image_available` directly (the "nothing rendered" path),
+    /// which drains the pending signal and keeps both semaphores reusable —
+    /// instead of present blocking forever on `image_render_finished`.
+    pub(crate) fn restore_swapchain_render_sync(&self, image_available: vk::Semaphore) {
+        let mut sync = self.swapchain_sync.lock();
+        sync.image_available = Some(image_available);
+        sync.consumed = false;
     }
 
     /// Advance to the next frame.
@@ -412,20 +530,38 @@ impl VulkanBackend {
         // TextureLayoutTracker docs) — no per-frame reset, so persistent
         // textures keep their contents.
 
-        // Reset the oldest slot's descriptor pool — safe because the fence wait
-        // guarantees the GPU is done with all descriptor sets from this slot.
-        let _ = self.pipeline_manager.reset_descriptor_pool(oldest);
+        // Binding-group descriptor sets are no longer per-slot/transient: they
+        // are created eagerly, cached for the group's lifetime, and freed on the
+        // group's Drop — so there is no per-slot descriptor pool to reset here.
 
-        // Destroy the oldest slot's transient staging buffers — same safety
-        // argument: the fence wait guarantees their copies have completed.
-        let retired: Vec<_> = self.retired_staging.lock()[oldest].drain(..).collect();
-        if !retired.is_empty() {
-            let mut allocator = self.allocator.lock();
-            for (buffer, allocation) in retired {
-                unsafe { self.device.destroy_buffer(buffer, None) };
-                let _ = allocator.free(allocation);
+        // Return the oldest slot's staging-belt chunks to the pool — same
+        // safety argument: the fence wait guarantees their copies completed.
+        self.staging_belt
+            .lock()
+            .retire_slot(&self.device, &mut self.allocator.lock(), oldest);
+
+        // Remove destroyed resources from the barrier trackers so the maps
+        // stay bounded by live resources. Safe at any point: texture ids are
+        // never reused, and a buffer handle reused before this drain merely
+        // loses benign access state (next use counts as first).
+        let retired = std::mem::take(&mut *self.retired_tracker_handles.lock());
+        if !retired.textures.is_empty() {
+            let mut tracker = self.layout_tracker.lock();
+            for id in retired.textures {
+                tracker.remove(layout::TextureId::from_raw(id));
             }
         }
+        if !retired.buffers.is_empty() {
+            let mut tracker = self.buffer_tracker.lock();
+            for handle in retired.buffers {
+                tracker.remove(BufferId::from_raw(handle));
+            }
+        }
+
+        // Flush freshly compiled pipelines to the on-disk pipeline cache.
+        // Done here (not only at teardown) so the cache survives abnormal
+        // exits; a no-op on frames without pipeline compilation.
+        self.pipeline_manager.persist_cache_if_dirty();
     }
 
     /// Get the layout tracker for direct access (for testing).
@@ -534,6 +670,113 @@ fn graph_writes_swapchain(graph: &RenderGraph) -> bool {
     })
 }
 
+/// Aspect mask for whole-image operations, derived from the format.
+///
+/// Depth formats must not be addressed with `COLOR` (invalid usage);
+/// image↔image copies may cover depth and stencil together.
+fn image_aspect_mask(format: crate::types::TextureFormat) -> vk::ImageAspectFlags {
+    if format.is_depth_stencil() {
+        if format.has_stencil() {
+            vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+        } else {
+            vk::ImageAspectFlags::DEPTH
+        }
+    } else {
+        vk::ImageAspectFlags::COLOR
+    }
+}
+
+/// Resolved layer/z addressing of a texture copy location.
+struct ResolvedLayerZ {
+    base_layer: u32,
+    layer_count: u32,
+    z_offset: i32,
+    /// Real z-depth of the copied region (1 for array-like textures — their
+    /// "depth" moved into `layer_count`).
+    extent_depth: u32,
+}
+
+/// Split a copy location's `origin.z` / `extent.depth` into array-layer and
+/// z-offset terms.
+///
+/// For array-like dimensions (arrays, cubes) `origin.z` addresses the base
+/// layer and `extent.depth` the number of layers — matching wgpu's
+/// `Origin3d::z` / `depth_or_array_layers` semantics. For 1D/2D/3D they are a
+/// real z offset and depth (Vulkan requires layer terms in the subresource,
+/// not the offset).
+fn resolve_layer_z(
+    dimension: crate::types::TextureDimension,
+    origin_z: u32,
+    extent: crate::types::Extent3d,
+) -> ResolvedLayerZ {
+    use crate::types::TextureDimension;
+    let array_like = matches!(
+        dimension,
+        TextureDimension::D1Array
+            | TextureDimension::D2Array
+            | TextureDimension::Cube
+            | TextureDimension::CubeArray
+    );
+    if array_like {
+        ResolvedLayerZ {
+            base_layer: origin_z,
+            layer_count: extent.depth.max(1),
+            z_offset: 0,
+            extent_depth: 1,
+        }
+    } else {
+        ResolvedLayerZ {
+            base_layer: 0,
+            layer_count: 1,
+            z_offset: origin_z as i32,
+            extent_depth: extent.depth.max(1),
+        }
+    }
+}
+
+/// Build validated `vk::BufferImageCopy` regions for buffer↔image transfer
+/// ops. Layout math (tight pitch, block conversion, alignment rules) comes
+/// from the shared [`BufferTextureLayout::resolve`], so wgpu and Vulkan
+/// accept and reject exactly the same graphs.
+fn build_buffer_image_copies(
+    format: crate::types::TextureFormat,
+    dimension: crate::types::TextureDimension,
+    regions: &[crate::graph::BufferTextureCopyRegion],
+    op_name: &str,
+) -> Result<Vec<vk::BufferImageCopy>, GraphicsError> {
+    let aspect_mask = image_aspect_mask(format);
+    regions
+        .iter()
+        .map(|r| {
+            let layout = r
+                .buffer_layout
+                .resolve(format, r.extent)
+                .map_err(|e| GraphicsError::InvalidParameter(format!("{op_name}: {e}")))?;
+            let loc = resolve_layer_z(dimension, r.texture_location.origin.z, r.extent);
+            Ok(vk::BufferImageCopy::default()
+                .buffer_offset(layout.offset)
+                .buffer_row_length(layout.row_length_texels)
+                .buffer_image_height(layout.rows_per_image_texels)
+                .image_subresource(vk::ImageSubresourceLayers {
+                    aspect_mask,
+                    mip_level: r.texture_location.mip_level,
+                    base_array_layer: loc.base_layer,
+                    layer_count: loc.layer_count,
+                })
+                .image_offset(vk::Offset3D {
+                    x: r.texture_location.origin.x as i32,
+                    y: r.texture_location.origin.y as i32,
+                    z: loc.z_offset,
+                })
+                .image_extent(vk::Extent3D {
+                    width: r.extent.width,
+                    height: r.extent.height,
+                    depth: loc.extent_depth,
+                }))
+        })
+        .collect()
+}
+
 /// Per-frame swapchain synchronization handoff between `acquire_next_image`,
 /// the render submit (in `execute_graph`), and present.
 #[derive(Default)]
@@ -546,6 +789,12 @@ struct SwapchainSync {
     /// Whether a render submit this frame consumed `image_available` (i.e. wrote
     /// the swapchain image). Present uses this to pick its wait semaphore.
     consumed: bool,
+    /// Whether the acquired image has been transitioned to
+    /// `COLOR_ATTACHMENT_OPTIMAL` this frame. Only the FIRST surface-writing
+    /// pass transitions from `UNDEFINED` (discarding stale presented
+    /// contents); later passes emit a same-layout WAW barrier so their
+    /// `LoadOp::Load` sees the earlier passes' output.
+    surface_transitioned: bool,
 }
 
 impl Drop for VulkanBackend {
@@ -565,18 +814,11 @@ impl Drop for VulkanBackend {
             }
             self.device.destroy_command_pool(self.command_pool, None);
 
-            // Destroy any staging buffers still retired in frame slots (the
-            // device_wait_idle above guarantees the GPU is done with them).
-            {
-                let mut slots = self.retired_staging.lock();
-                let mut allocator = self.allocator.lock();
-                for slot in slots.iter_mut() {
-                    for (buffer, allocation) in slot.drain(..) {
-                        self.device.destroy_buffer(buffer, None);
-                        let _ = allocator.free(allocation);
-                    }
-                }
-            }
+            // Destroy the staging belt (the device_wait_idle above
+            // guarantees the GPU is done with every chunk).
+            self.staging_belt
+                .lock()
+                .destroy(&self.device, &mut self.allocator.lock());
 
             // Drop the allocator BEFORE destroying the device. gpu-allocator's
             // `Allocator::drop` frees its pooled memory blocks using the device,
@@ -610,10 +852,15 @@ impl VulkanBackend {
     pub fn create_buffer(&self, descriptor: &BufferDescriptor) -> Result<GpuBuffer, GraphicsError> {
         let usage = convert_buffer_usage(descriptor.usage);
 
-        // Determine memory location based on usage flags.
-        // Buffers that need CPU access (MAP_READ, MAP_WRITE, or COPY_DST for CPU writes)
-        // should use host-visible memory. UNIFORM and VERTEX buffers with COPY_DST are
-        // commonly updated from CPU, so use CpuToGpu for those too.
+        // Memory location follows mappability, not copyability (ADR-021):
+        // COPY_DST destinations are written by GPU-side copies and belong in
+        // device-local memory — the old `COPY_DST => CpuToGpu` heuristic put
+        // every mesh/uniform buffer in host-visible memory, so draws fetched
+        // over PCIe on discrete GPUs. Buffers the CPU writes directly are
+        // marked MAP_WRITE or RING (ring buffers are mapped-written every
+        // frame; RING stays an engine-side flag because wgpu's MAP_WRITE has
+        // different combination rules and rings use Queue::write_buffer
+        // there).
         let location = if descriptor
             .usage
             .contains(crate::types::BufferUsage::MAP_READ)
@@ -621,17 +868,26 @@ impl VulkanBackend {
             gpu_allocator::MemoryLocation::GpuToCpu
         } else if descriptor
             .usage
-            .contains(crate::types::BufferUsage::MAP_WRITE)
-            || descriptor
-                .usage
-                .contains(crate::types::BufferUsage::COPY_DST)
+            .intersects(crate::types::BufferUsage::MAP_WRITE | crate::types::BufferUsage::RING)
         {
-            // COPY_DST buffers are typically updated from CPU via write_buffer,
-            // so they need host-visible memory for direct mapping
             gpu_allocator::MemoryLocation::CpuToGpu
         } else {
             gpu_allocator::MemoryLocation::GpuOnly
         };
+
+        // Guard the ADR-021 contract: a buffer meant for direct mapped writes
+        // (RING every frame, or MAP_WRITE) must be host-visible. If a future
+        // policy change let one land GpuOnly, `write_buffer`'s mapped path
+        // would silently fall through to the blocking one-shot staging copy —
+        // every frame — a catastrophic, invisible perf regression (the exact
+        // class the editor smoke caught during #41).
+        debug_assert!(
+            !descriptor
+                .usage
+                .intersects(crate::types::BufferUsage::MAP_WRITE | crate::types::BufferUsage::RING)
+                || location != gpu_allocator::MemoryLocation::GpuOnly,
+            "RING/MAP_WRITE buffer must be host-visible (see ADR-021); got GpuOnly"
+        );
 
         // Create buffer
         let buffer_info = vk::BufferCreateInfo::default()
@@ -680,6 +936,7 @@ impl VulkanBackend {
             allocation: Mutex::new(Some(allocation)),
             size: descriptor.size,
             allocator: Arc::clone(&self.allocator),
+            retired: Arc::clone(&self.retired_tracker_handles),
         })
     }
 
@@ -690,7 +947,7 @@ impl VulkanBackend {
     ) -> Result<GpuTexture, GraphicsError> {
         use crate::types::TextureDimension;
 
-        let format = convert_texture_format(descriptor.format);
+        let format = self.vk_texture_format(descriptor.format);
         let usage = convert_texture_usage(descriptor.usage, descriptor.format);
 
         // Determine image type, array layers, and flags based on dimension
@@ -870,6 +1127,7 @@ impl VulkanBackend {
             extent,
             allocator: Arc::clone(&self.allocator),
             id: NEXT_TEXTURE_ID.fetch_add(1, Ordering::Relaxed),
+            retired: Arc::clone(&self.retired_tracker_handles),
         })
     }
 
@@ -908,6 +1166,206 @@ impl VulkanBackend {
             device: self.device.clone(),
             sampler,
         })
+    }
+
+    /// Create a binding group: allocate one descriptor set from the persistent
+    /// pool for `layout`'s (deduped) `VkDescriptorSetLayout` and write it once.
+    ///
+    /// The written set is cached inside the returned handle and bound as-is on
+    /// every draw — encoding performs zero descriptor allocations/writes.
+    pub fn create_binding_group(
+        &self,
+        layout: &crate::materials::BindingLayout,
+        descriptor: &crate::materials::BindingGroupDescriptor,
+    ) -> Result<super::GpuBindingGroup, GraphicsError> {
+        // Deduped layout: a group created against a `BindingLayout` gets the
+        // same `VkDescriptorSetLayout` as any material with an equal-content
+        // layout, so the cached set is compatible with those pipelines.
+        let ds_layout = self.pipeline_manager.create_descriptor_set_layout(layout)?;
+
+        let (descriptor_set, pool) = self
+            .pipeline_manager
+            .persistent_pools()
+            .lock()
+            .allocate(ds_layout)?;
+
+        // Write the set once, now. Freed on the group's Drop.
+        self.write_binding_group_set(descriptor_set, descriptor, layout);
+
+        Ok(super::GpuBindingGroup::Vulkan {
+            device: self.device.clone(),
+            descriptor_set,
+            pool,
+            pools: Arc::clone(self.pipeline_manager.persistent_pools()),
+        })
+    }
+
+    /// Write a freshly-allocated descriptor set from a binding group's
+    /// descriptor. Called once at group-creation time (never per draw).
+    ///
+    /// # Image layout invariant
+    ///
+    /// A set written once at creation must record the layout each sampled image
+    /// will be in **at draw time**, not the (possibly `UNDEFINED`) layout at
+    /// creation time. Every texture bound through a material-instance binding
+    /// group is declared `TextureAccessMode::ShaderRead` by the render graph
+    /// (`graph::pass::extract_material_resources`), so the barrier system always
+    /// transitions it to `SHADER_READ_ONLY_OPTIMAL` before the draw. There are
+    /// no storage-image bindings on this path. Hence the deterministic at-draw
+    /// layout is `SHADER_READ_ONLY_OPTIMAL`.
+    fn write_binding_group_set(
+        &self,
+        descriptor_set: vk::DescriptorSet,
+        descriptor: &crate::materials::BindingGroupDescriptor,
+        layout: &crate::materials::BindingLayout,
+    ) {
+        use crate::materials::BoundResource;
+
+        let mut buffer_infos: Vec<vk::DescriptorBufferInfo> = Vec::new();
+        let mut image_infos: Vec<vk::DescriptorImageInfo> = Vec::new();
+
+        for entry in &descriptor.entries {
+            match &entry.resource {
+                BoundResource::Buffer(buffer) => {
+                    if let GpuBuffer::Vulkan {
+                        buffer: vk_buffer,
+                        size,
+                        ..
+                    } = buffer.gpu_handle()
+                    {
+                        buffer_infos.push(vk::DescriptorBufferInfo {
+                            buffer: *vk_buffer,
+                            offset: 0,
+                            range: *size,
+                        });
+                    }
+                }
+                BoundResource::BufferRange {
+                    buffer,
+                    offset,
+                    size,
+                } => {
+                    if let GpuBuffer::Vulkan {
+                        buffer: vk_buffer, ..
+                    } = buffer.gpu_handle()
+                    {
+                        buffer_infos.push(vk::DescriptorBufferInfo {
+                            buffer: *vk_buffer,
+                            offset: *offset,
+                            range: *size,
+                        });
+                    }
+                }
+                BoundResource::Texture(texture) => {
+                    if let GpuTexture::Vulkan { view, .. } = texture.gpu_handle() {
+                        image_infos.push(vk::DescriptorImageInfo {
+                            sampler: vk::Sampler::null(),
+                            image_view: *view,
+                            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        });
+                    }
+                }
+                BoundResource::Sampler(sampler) => {
+                    if let GpuSampler::Vulkan {
+                        sampler: vk_sampler,
+                        ..
+                    } = sampler.gpu_handle()
+                    {
+                        image_infos.push(vk::DescriptorImageInfo {
+                            sampler: *vk_sampler,
+                            image_view: vk::ImageView::null(),
+                            image_layout: vk::ImageLayout::UNDEFINED,
+                        });
+                    }
+                }
+                BoundResource::CombinedTextureSampler { texture, sampler } => {
+                    if let (
+                        GpuTexture::Vulkan { view, .. },
+                        GpuSampler::Vulkan {
+                            sampler: vk_sampler,
+                            ..
+                        },
+                    ) = (texture.gpu_handle(), sampler.gpu_handle())
+                    {
+                        image_infos.push(vk::DescriptorImageInfo {
+                            sampler: *vk_sampler,
+                            image_view: *view,
+                            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Build write descriptors referencing the info slices.
+        let mut writes: Vec<vk::WriteDescriptorSet> = Vec::new();
+        let mut buffer_idx = 0;
+        let mut image_idx = 0;
+        for entry in &descriptor.entries {
+            // Layout is authoritative for the descriptor type. `create_binding_group`
+            // already validated every binding is declared, so this always resolves.
+            let binding_type = layout
+                .entries
+                .iter()
+                .find(|e| e.binding == entry.binding)
+                .map(|e| e.binding_type);
+
+            let write = match &entry.resource {
+                BoundResource::Buffer(_) | BoundResource::BufferRange { .. } => {
+                    let info = &buffer_infos[buffer_idx..buffer_idx + 1];
+                    buffer_idx += 1;
+                    let descriptor_type = match binding_type {
+                        Some(crate::materials::BindingType::StorageBuffer)
+                        | Some(crate::materials::BindingType::StorageBufferReadOnly) => {
+                            vk::DescriptorType::STORAGE_BUFFER
+                        }
+                        Some(crate::materials::BindingType::DynamicUniformBuffer) => {
+                            vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC
+                        }
+                        _ => vk::DescriptorType::UNIFORM_BUFFER,
+                    };
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(descriptor_set)
+                        .dst_binding(entry.binding)
+                        .descriptor_type(descriptor_type)
+                        .buffer_info(info)
+                }
+                BoundResource::Texture(_) => {
+                    let info = &image_infos[image_idx..image_idx + 1];
+                    image_idx += 1;
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(descriptor_set)
+                        .dst_binding(entry.binding)
+                        .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                        .image_info(info)
+                }
+                BoundResource::Sampler(_) => {
+                    let info = &image_infos[image_idx..image_idx + 1];
+                    image_idx += 1;
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(descriptor_set)
+                        .dst_binding(entry.binding)
+                        .descriptor_type(vk::DescriptorType::SAMPLER)
+                        .image_info(info)
+                }
+                BoundResource::CombinedTextureSampler { .. } => {
+                    let info = &image_infos[image_idx..image_idx + 1];
+                    image_idx += 1;
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(descriptor_set)
+                        .dst_binding(entry.binding)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .image_info(info)
+                }
+            };
+            writes.push(write);
+        }
+
+        if !writes.is_empty() {
+            unsafe {
+                self.device.update_descriptor_sets(&writes, &[]);
+            }
+        }
     }
 
     /// Create a GPU pipeline from a material descriptor.
@@ -1067,7 +1525,7 @@ impl VulkanBackend {
     }
 
     /// Create a fence for CPU-GPU synchronization.
-    pub fn create_fence(&self, signaled: bool) -> GpuFence {
+    pub fn create_fence(&self, signaled: bool) -> Result<GpuFence, GraphicsError> {
         let flags = if signaled {
             vk::FenceCreateFlags::SIGNALED
         } else {
@@ -1076,44 +1534,48 @@ impl VulkanBackend {
 
         let fence_info = vk::FenceCreateInfo::default().flags(flags);
 
-        let fence =
-            unsafe { self.device.create_fence(&fence_info, None) }.expect("Failed to create fence");
+        let fence = unsafe { self.device.create_fence(&fence_info, None) }.map_err(|e| {
+            GraphicsError::ResourceCreationFailed(format!("Failed to create fence: {:?}", e))
+        })?;
 
-        GpuFence::Vulkan {
+        Ok(GpuFence::Vulkan {
             device: self.device.clone(),
             fence,
-        }
+        })
     }
 
     /// Wait for a fence to be signaled.
     ///
     /// Uses a 10-second timeout to prevent indefinite hangs on corrupted fences
-    /// or GPU lockups. If timeout occurs, logs a warning but continues.
-    pub fn wait_fence(&self, fence: &GpuFence) {
+    /// or GPU lockups. Timeout and device loss are returned as errors — the
+    /// caller must not recycle resources guarded by this fence in that case.
+    pub fn wait_fence(&self, fence: &GpuFence) -> Result<(), GraphicsError> {
         if let GpuFence::Vulkan { device, fence, .. } = fence {
-            // 10 second timeout in nanoseconds
-            const FENCE_TIMEOUT_NS: u64 = 10_000_000_000;
             unsafe {
-                match device.wait_for_fences(&[*fence], true, FENCE_TIMEOUT_NS) {
-                    Ok(()) => {}
-                    Err(vk::Result::TIMEOUT) => {
-                        log::warn!(
-                            "Fence wait timed out after 10 seconds. \
-                             GPU may be hung or fence was never signaled."
-                        );
-                    }
-                    Err(e) => {
-                        log::error!("Fence wait failed: {:?}", e);
-                    }
+                match device.wait_for_fences(&[*fence], true, FENCE_WAIT_TIMEOUT_NS) {
+                    Ok(()) => Ok(()),
+                    Err(vk::Result::TIMEOUT) => Err(GraphicsError::Timeout(
+                        "fence wait timed out after 10 s; GPU may be hung".into(),
+                    )),
+                    Err(vk::Result::ERROR_DEVICE_LOST) => Err(GraphicsError::DeviceLost),
+                    Err(e) => Err(GraphicsError::Internal(format!(
+                        "Fence wait failed: {:?}",
+                        e
+                    ))),
                 }
             }
+        } else {
+            Ok(())
         }
     }
 
     /// Check if a fence is signaled (non-blocking).
+    ///
+    /// `get_fence_status` returns `Ok(false)` for `VK_NOT_READY`, so the
+    /// success of the call alone does NOT mean the fence is signaled.
     pub fn is_fence_signaled(&self, fence: &GpuFence) -> bool {
         if let GpuFence::Vulkan { device, fence, .. } = fence {
-            unsafe { device.get_fence_status(*fence).is_ok() }
+            matches!(unsafe { device.get_fence_status(*fence) }, Ok(true))
         } else {
             false
         }
@@ -1121,23 +1583,29 @@ impl VulkanBackend {
 
     /// Wait for a fence to be signaled with a timeout.
     ///
-    /// Returns `true` if the fence was signaled, `false` if the timeout elapsed.
-    pub fn wait_fence_timeout(&self, fence: &GpuFence, timeout: std::time::Duration) -> bool {
+    /// Returns `Ok(true)` if the fence was signaled, `Ok(false)` on timeout,
+    /// and an error on device loss or wait failure.
+    pub fn wait_fence_timeout(
+        &self,
+        fence: &GpuFence,
+        timeout: std::time::Duration,
+    ) -> Result<bool, GraphicsError> {
         if let GpuFence::Vulkan { device, fence, .. } = fence {
             // Convert Duration to nanoseconds for Vulkan
             let timeout_ns = timeout.as_nanos() as u64;
             unsafe {
                 match device.wait_for_fences(&[*fence], true, timeout_ns) {
-                    Ok(()) => true,
-                    Err(vk::Result::TIMEOUT) => false,
-                    Err(e) => {
-                        log::error!("Fence wait failed: {:?}", e);
-                        false
-                    }
+                    Ok(()) => Ok(true),
+                    Err(vk::Result::TIMEOUT) => Ok(false),
+                    Err(vk::Result::ERROR_DEVICE_LOST) => Err(GraphicsError::DeviceLost),
+                    Err(e) => Err(GraphicsError::Internal(format!(
+                        "Fence wait failed: {:?}",
+                        e
+                    ))),
                 }
             }
         } else {
-            false
+            Ok(false)
         }
     }
 
@@ -1162,9 +1630,15 @@ impl VulkanBackend {
     ///   holds `Arc`s to them until the slot's frame fence is waited in
     ///   [`FramePipeline::begin_frame`](crate::pipeline::FramePipeline::begin_frame).
     ///
-    /// Cross-graph ordering is enforced via the GPU semaphores in
-    /// `wait_semaphores` / `signal_semaphores` (built by the scheduler from the
-    /// dependency graph).
+    /// INVARIANT: exactly one graph is executed per frame, as one submit on the
+    /// single graphics queue. There are NO cross-graph GPU semaphores — the
+    /// only semaphores are the swapchain acquire/present handshake below.
+    /// Ordering between consecutive frames' graphs is provided entirely by the
+    /// persistent barrier trackers (`layout_tracker`, `buffer_tracker`), whose
+    /// `vkCmdPipelineBarrier`s synchronize across submissions *because they are
+    /// on one queue in submission order*. Adding a second queue or a second
+    /// per-frame submit would break this silently (pipeline barriers do not
+    /// cross queues) — see #47 before doing either.
     pub fn execute_graph(
         &self,
         graph: &RenderGraph,
@@ -1203,11 +1677,15 @@ impl VulkanBackend {
         {
             profile_scope!("record_passes");
             let pass_usages = compiled.pass_usages();
+            // One batch reused across passes: its merge maps keep their
+            // capacity instead of two fresh HashMaps per pass.
+            let mut barriers = BarrierBatch::new();
             for (i, handle) in compiled.pass_order().iter().enumerate() {
                 let pass = &passes[handle.index()];
 
                 // Generate barriers from pre-computed resource usage
-                let barriers = self.generate_barriers_for_pass(&pass_usages[i]);
+                barriers.clear();
+                self.generate_barriers_for_pass(&mut barriers, &pass_usages[i]);
                 barriers.submit(&self.device, cmd);
 
                 // Encode the pass
@@ -1222,23 +1700,26 @@ impl VulkanBackend {
 
         // One render graph per frame: the only synchronization is the swapchain
         // acquire/render-finished handshake below. There is no cross-graph
-        // semaphore ordering (a single submit per frame).
-        let mut vk_wait_semaphores: Vec<vk::Semaphore> = Vec::new();
-        let mut wait_stage_masks: Vec<vk::PipelineStageFlags> = Vec::new();
-        let mut vk_signal_semaphores: Vec<vk::Semaphore> = Vec::new();
-
+        // semaphore ordering (a single submit per frame) — at most one
+        // wait/signal pair, held in fixed-size arrays (no per-frame Vecs).
+        //
         // If this graph writes the acquired swapchain image, this submit must
         // wait on `image_available` (so it does not write the image before the
         // presentation engine releases it) and signal `image_render_finished`
         // (so present transitions/presents only after rendering completes).
-        if graph_writes_swapchain(graph)
-            && let Some((image_available, image_render_finished)) =
-                self.take_swapchain_render_sync()
-        {
-            vk_wait_semaphores.push(image_available);
-            wait_stage_masks.push(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT);
-            vk_signal_semaphores.push(image_render_finished);
-        }
+        let swapchain_pair = if graph_writes_swapchain(graph) {
+            self.take_swapchain_render_sync()
+        } else {
+            None
+        };
+        let (vk_wait_semaphores, vk_signal_semaphores) = match swapchain_pair {
+            Some((image_available, image_render_finished)) => {
+                ([image_available], [image_render_finished])
+            }
+            None => ([vk::Semaphore::null()], [vk::Semaphore::null()]),
+        };
+        let wait_stage_masks = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+        let sem_count = usize::from(swapchain_pair.is_some());
 
         // Get fence to signal
         let fence = signal_fence.and_then(|f| {
@@ -1258,26 +1739,34 @@ impl VulkanBackend {
             profile_scope!("queue_submit");
             let mut submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
 
-            if !vk_wait_semaphores.is_empty() {
+            if sem_count > 0 {
                 submit_info = submit_info
-                    .wait_semaphores(&vk_wait_semaphores)
-                    .wait_dst_stage_mask(&wait_stage_masks);
+                    .wait_semaphores(&vk_wait_semaphores[..sem_count])
+                    .wait_dst_stage_mask(&wait_stage_masks[..sem_count])
+                    .signal_semaphores(&vk_signal_semaphores[..sem_count]);
             }
 
-            if !vk_signal_semaphores.is_empty() {
-                submit_info = submit_info.signal_semaphores(&vk_signal_semaphores);
-            }
-
-            unsafe {
+            let submit_result = unsafe {
                 self.device.queue_submit(
                     self.graphics_queue,
                     &[submit_info],
                     fence.unwrap_or(vk::Fence::null()),
                 )
+            };
+            if let Err(e) = submit_result {
+                // Nothing was enqueued: hand the swapchain semaphore pair back
+                // so present can still consume `image_available` cleanly
+                // instead of waiting forever on `image_render_finished`.
+                if let Some((image_available, _)) = swapchain_pair {
+                    self.restore_swapchain_render_sync(image_available);
+                }
+                return Err(match e {
+                    vk::Result::ERROR_DEVICE_LOST => GraphicsError::DeviceLost,
+                    other => GraphicsError::Internal(format!(
+                        "Failed to submit command buffer: {other:?}"
+                    )),
+                });
             }
-            .map_err(|e| {
-                GraphicsError::Internal(format!("Failed to submit command buffer: {:?}", e))
-            })?;
         }
 
         // No per-buffer freeing: the slot's pool is reset wholesale in
@@ -1287,18 +1776,20 @@ impl VulkanBackend {
         Ok(())
     }
 
-    /// Generate barriers for a pass's resource usage.
+    /// Generate barriers for a pass's resource usage into `batch`.
     ///
     /// This examines the texture and buffer usages declared by the pass, determines
     /// required layout transitions and memory barriers, and updates tracker state.
+    /// The caller provides (and clears) the batch so its maps' capacity is
+    /// reused across passes.
     fn generate_barriers_for_pass(
         &self,
+        batch: &mut BarrierBatch,
         usage: &crate::graph::resource_usage::PassResourceUsage,
-    ) -> BarrierBatch {
+    ) {
         use crate::graph::resource_usage::TextureAccessMode;
 
         let mut tracker = self.layout_tracker.lock();
-        let mut batch = BarrierBatch::new();
 
         // Generate texture (image) barriers
         for decl in &usage.texture_usages {
@@ -1342,9 +1833,11 @@ impl VulkanBackend {
             tracker.set_layout(texture_id, required_layout);
         }
 
-        // Generate buffer barriers
-        // Note: Buffer barriers are needed for synchronization between passes that
-        // write and read the same buffer. We track the previous access mode per buffer.
+        // Generate buffer barriers from per-buffer last-access tracking: the
+        // tracker knows what wrote each buffer last (compute, transfer, …)
+        // and which read scopes that write is already visible to, so reads
+        // get a precise source scope and repeat reads emit nothing.
+        let mut buffer_tracker = self.buffer_tracker.lock();
         for decl in &usage.buffer_usages {
             // Get Vulkan buffer info
             let GpuBuffer::Vulkan { buffer, .. } = decl.buffer.gpu_handle() else {
@@ -1353,37 +1846,19 @@ impl VulkanBackend {
 
             let buffer_id = BufferId::from(*buffer);
 
-            // For buffer barriers, we need to track previous access mode.
-            // Since we don't have per-buffer tracking yet, we generate barriers
-            // for all write operations and write-to-read transitions.
-            // This is conservative but safe - a future optimization could add
-            // buffer state tracking similar to texture layout tracking.
-            if decl.access.is_write() {
-                // Always barrier before writes to ensure previous reads complete
+            if let Some((src_stage, src_access)) =
+                buffer_tracker.request_access(buffer_id, decl.access)
+            {
                 batch.add_buffer_barrier(
                     buffer_id,
                     *buffer,
-                    decl.access, // Use same access as src (will be optimized away if same read)
-                    decl.access,
-                    decl.offset,
-                    decl.size,
-                );
-            } else {
-                // For reads after potential writes, we need barriers.
-                // Since we don't track previous state, use TransferWrite as conservative src.
-                // This ensures any previous transfer/storage writes are visible.
-                batch.add_buffer_barrier(
-                    buffer_id,
-                    *buffer,
-                    crate::graph::resource_usage::BufferAccessMode::TransferWrite,
-                    decl.access,
-                    decl.offset,
-                    decl.size,
+                    src_stage,
+                    src_access,
+                    decl.access.dst_stage(),
+                    decl.access.dst_access_mask(),
                 );
             }
         }
-
-        batch
     }
 
     /// Write data to a buffer.
@@ -1395,11 +1870,217 @@ impl VulkanBackend {
         offset: u64,
         data: &[u8],
     ) -> Result<(), GraphicsError> {
-        let GpuBuffer::Vulkan { allocation, .. } = buffer else {
+        let GpuBuffer::Vulkan {
+            buffer: dst_buffer,
+            allocation,
+            size,
+            ..
+        } = buffer
+        else {
             return Err(GraphicsError::Internal(
                 "write_buffer called with non-Vulkan buffer".to_string(),
             ));
         };
+
+        if data.is_empty() {
+            return Ok(());
+        }
+        let end = offset.checked_add(data.len() as u64);
+        if end.is_none_or(|end| end > *size) {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "write_buffer range at offset {offset} ({} bytes) exceeds buffer size {size}",
+                data.len()
+            )));
+        }
+
+        // Host-visible buffer (MAP_WRITE/MAP_READ): direct mapped write.
+        {
+            let guard = allocation.lock();
+            let Some(alloc) = guard.as_ref() else {
+                return Err(GraphicsError::Internal(
+                    "Buffer allocation is None".to_string(),
+                ));
+            };
+            if let Some(mapped_ptr) = alloc.mapped_ptr() {
+                unsafe {
+                    let dst = mapped_ptr.as_ptr().add(offset as usize);
+                    std::ptr::copy_nonoverlapping(data.as_ptr(), dst as *mut u8, data.len());
+                }
+                return Ok(());
+            }
+        }
+
+        // Device-local destination: **blocking convenience path** (ADR-021),
+        // mirroring `write_texture` — one-shot staging copy + synchronous
+        // wait. Fine for tools/tests/one-time setup; per-frame data belongs
+        // in a RingBuffer (MAP_WRITE) or a `TransferOperation::WriteBuffer`
+        // in the frame graph. Assumes the buffer is not concurrently read by
+        // in-flight frames (same contract as `write_texture`).
+        let (staging, staging_alloc) =
+            self.create_transient_staging(data, "write_buffer_oneshot")?;
+        let dst = *dst_buffer;
+        let byte_len = data.len() as u64;
+        let result = self.submit_one_shot(|device, cmd| {
+            let region = vk::BufferCopy::default()
+                .src_offset(0)
+                .dst_offset(offset)
+                .size(byte_len);
+            // The one-shot submit is outside the frame graph, so the buffer
+            // tracker knows nothing about this write — make it visible to
+            // any later use up front.
+            let barrier = vk::BufferMemoryBarrier::default()
+                .buffer(dst)
+                .offset(0)
+                .size(vk::WHOLE_SIZE)
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
+            unsafe {
+                device.cmd_copy_buffer(cmd, staging, dst, &[region]);
+                device.cmd_pipeline_barrier(
+                    cmd,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::ALL_COMMANDS,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[barrier],
+                    &[],
+                );
+            }
+        });
+        match result {
+            Ok(()) => {
+                unsafe {
+                    self.device.destroy_buffer(staging, None);
+                }
+                if let Err(e) = self.allocator.lock().free(staging_alloc) {
+                    log::error!("Failed to free one-shot staging allocation: {e}");
+                }
+                Ok(())
+            }
+            Err(e) => {
+                // On timeout/device loss the GPU may still read the staging
+                // buffer — leak it rather than freeing in-use memory.
+                log::error!("One-shot write_buffer failed ({e}); leaking staging buffer");
+                Err(e)
+            }
+        }
+    }
+
+    /// Record and synchronously execute a one-shot command buffer on the
+    /// graphics queue.
+    ///
+    /// Blocking convenience paths only. On fence-wait failure the command
+    /// buffer is leaked (the GPU may still be executing it) and the error is
+    /// returned.
+    fn submit_one_shot(
+        &self,
+        record: impl FnOnce(&ash::Device, vk::CommandBuffer),
+    ) -> Result<(), GraphicsError> {
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(self.command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        let cmd_buffers =
+            unsafe { self.device.allocate_command_buffers(&alloc_info) }.map_err(|e| {
+                GraphicsError::Internal(format!("Failed to allocate command buffer: {e:?}"))
+            })?;
+        let cmd = cmd_buffers[0];
+
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        let recorded = unsafe { self.device.begin_command_buffer(cmd, &begin_info) }
+            .map_err(|e| GraphicsError::Internal(format!("Failed to begin command buffer: {e:?}")))
+            .map(|_| record(&self.device, cmd))
+            .and_then(|_| {
+                unsafe { self.device.end_command_buffer(cmd) }.map_err(|e| {
+                    GraphicsError::Internal(format!("Failed to end command buffer: {e:?}"))
+                })
+            });
+        if let Err(e) = recorded {
+            unsafe {
+                self.device
+                    .free_command_buffers(self.command_pool, &cmd_buffers);
+            }
+            return Err(e);
+        }
+
+        let fence = unsafe {
+            self.device
+                .create_fence(&vk::FenceCreateInfo::default(), None)
+        }
+        .map_err(|e| {
+            unsafe {
+                self.device
+                    .free_command_buffers(self.command_pool, &cmd_buffers);
+            }
+            GraphicsError::Internal(format!("Failed to create one-shot fence: {e:?}"))
+        })?;
+
+        let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
+        if let Err(e) = unsafe {
+            self.device
+                .queue_submit(self.graphics_queue, &[submit_info], fence)
+        } {
+            unsafe {
+                self.device.destroy_fence(fence, None);
+                self.device
+                    .free_command_buffers(self.command_pool, &cmd_buffers);
+            }
+            return Err(match e {
+                vk::Result::ERROR_DEVICE_LOST => GraphicsError::DeviceLost,
+                other => GraphicsError::Internal(format!("One-shot submit failed: {other:?}")),
+            });
+        }
+
+        if let Err(e) = unsafe {
+            self.device
+                .wait_for_fences(&[fence], true, FENCE_WAIT_TIMEOUT_NS)
+        } {
+            log::error!("One-shot fence wait failed ({e:?}); leaking command buffer and fence");
+            return Err(match e {
+                vk::Result::TIMEOUT => {
+                    GraphicsError::Timeout("one-shot submit did not complete within 10 s".into())
+                }
+                vk::Result::ERROR_DEVICE_LOST => GraphicsError::DeviceLost,
+                other => GraphicsError::Internal(format!("one-shot fence wait failed: {other:?}")),
+            });
+        }
+        unsafe {
+            self.device.destroy_fence(fence, None);
+            self.device
+                .free_command_buffers(self.command_pool, &cmd_buffers);
+        }
+        Ok(())
+    }
+
+    /// Read a host-visible buffer's mapped memory. See the trait contract on
+    /// [`GpuBackend::read_buffer`](crate::backend::GpuBackend::read_buffer).
+    pub fn read_buffer(
+        &self,
+        buffer: &GpuBuffer,
+        offset: u64,
+        size: u64,
+    ) -> Result<Vec<u8>, GraphicsError> {
+        let GpuBuffer::Vulkan {
+            allocation,
+            size: buf_size,
+            ..
+        } = buffer
+        else {
+            return Err(GraphicsError::Internal(
+                "read_buffer called with non-Vulkan buffer".to_string(),
+            ));
+        };
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        if offset.checked_add(size).is_none_or(|end| end > *buf_size) {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "read_buffer range at offset {offset} ({size} bytes) exceeds buffer size {buf_size}"
+            )));
+        }
 
         let guard = allocation.lock();
         let Some(allocation) = guard.as_ref() else {
@@ -1407,50 +2088,50 @@ impl VulkanBackend {
                 "Buffer allocation is None".to_string(),
             ));
         };
-
+        // No mapped pointer ⇒ device-local buffer. Reading it here would
+        // silently return zeros; require a host-visible readback buffer.
         let Some(mapped_ptr) = allocation.mapped_ptr() else {
-            return Err(GraphicsError::Internal(
-                "Buffer is not mapped for CPU access".to_string(),
+            return Err(GraphicsError::InvalidParameter(
+                "read_buffer on a device-local buffer; copy it to a MAP_READ readback \
+                 buffer via TransferOperation::ReadbackBuffer first"
+                    .to_string(),
             ));
         };
 
+        let mut result = vec![0u8; size as usize];
         unsafe {
-            let dst = mapped_ptr.as_ptr().add(offset as usize);
-            std::ptr::copy_nonoverlapping(data.as_ptr(), dst as *mut u8, data.len());
+            let src = mapped_ptr.as_ptr().add(offset as usize);
+            std::ptr::copy_nonoverlapping(src as *const u8, result.as_mut_ptr(), size as usize);
         }
-        Ok(())
+        Ok(result)
     }
 
-    /// Read data from a buffer.
-    pub fn read_buffer(&self, buffer: &GpuBuffer, offset: u64, size: u64) -> Vec<u8> {
-        if let GpuBuffer::Vulkan { allocation, .. } = buffer
-            && let Some(allocation) = allocation.lock().as_ref()
-            && let Some(mapped_ptr) = allocation.mapped_ptr()
-        {
-            let mut result = vec![0u8; size as usize];
-            unsafe {
-                let src = mapped_ptr.as_ptr().add(offset as usize);
-                std::ptr::copy_nonoverlapping(src as *const u8, result.as_mut_ptr(), size as usize);
-            }
-            return result;
-        }
-        vec![0u8; size as usize]
-    }
-
-    /// Write data to a texture.
+    /// Write tightly-packed data covering mip 0 of every layer of a texture.
     ///
-    /// Uses a staging buffer to upload texture data. The staging buffer and
-    /// command buffer are submitted asynchronously and cleaned up via deferred
-    /// destruction after the GPU finishes.
+    /// **Blocking convenience path**: uploads through a one-shot staging
+    /// buffer and waits for the copy synchronously — fine for tools and
+    /// one-time setup, wrong for streaming (each call is a full GPU
+    /// round-trip). Load-time/streaming uploads belong in the frame graph
+    /// via [`TransferOperation::upload_texture_data`]; batching/staging-belt
+    /// perf work is tracked in issue #41.
     ///
-    /// Returns an error if the texture write fails.
+    /// `data` must be tightly packed for the whole image: all array layers
+    /// (cube faces) back to back, block-compressed formats in block rows.
+    /// Textures with `mip_level_count > 1` are rejected — upload each mip
+    /// with an explicit region through the transfer ops instead. Combined
+    /// depth-stencil formats are rejected (single-aspect copies only).
+    ///
+    /// After the upload the image is in `SHADER_READ_ONLY_OPTIMAL` and the
+    /// layout tracker is updated accordingly, so the first render-graph use
+    /// does not re-transition from `UNDEFINED` (which could legally discard
+    /// the uploaded texels).
     pub fn write_texture(
         &self,
         texture: &GpuTexture,
         data: &[u8],
         descriptor: &crate::types::TextureDescriptor,
     ) -> Result<(), GraphicsError> {
-        let GpuTexture::Vulkan { image, .. } = texture else {
+        let GpuTexture::Vulkan { image, id, .. } = texture else {
             return Err(GraphicsError::Internal(
                 "write_texture called with non-Vulkan texture".to_string(),
             ));
@@ -1459,6 +2140,41 @@ impl VulkanBackend {
         if data.is_empty() {
             return Ok(());
         }
+
+        let format = descriptor.format;
+        if format.is_depth_stencil() && format.has_stencil() {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "write_texture does not support combined depth-stencil formats ({format:?})"
+            )));
+        }
+        if descriptor.mip_level_count > 1 {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "write_texture uploads mip 0 only, but the texture has {} mip levels — upload \
+                 each mip with an explicit region via TransferOperation::upload_texture",
+                descriptor.mip_level_count
+            )));
+        }
+
+        // Tightly-packed size for mip 0 of every layer/depth slice.
+        let (block_w, block_h) = format.block_dimensions();
+        let block_size = format.block_size();
+        let row_blocks = descriptor.size.width.div_ceil(block_w);
+        let col_blocks = descriptor.size.height.div_ceil(block_h);
+        let (layer_count, depth) = descriptor.layers_and_depth();
+        let expected = row_blocks as usize
+            * col_blocks as usize
+            * block_size as usize
+            * depth as usize
+            * layer_count as usize;
+        if data.len() != expected {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "write_texture data size {} does not match the texture's tightly-packed size \
+                 {expected} ({row_blocks}x{col_blocks} blocks x {block_size} bytes x \
+                 {layer_count} layers x {depth} depth)",
+                data.len(),
+            )));
+        }
+        let aspect_mask = image_aspect_mask(format);
 
         // Create staging buffer
         let staging_buffer_info = vk::BufferCreateInfo::default()
@@ -1588,7 +2304,8 @@ impl VulkanBackend {
             )));
         }
 
-        // Transition image layout to TRANSFER_DST_OPTIMAL
+        // Transition the WHOLE image (all layers/aspects) to
+        // TRANSFER_DST_OPTIMAL so no subresource is left in UNDEFINED.
         let barrier = vk::ImageMemoryBarrier::default()
             .old_layout(vk::ImageLayout::UNDEFINED)
             .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
@@ -1596,11 +2313,11 @@ impl VulkanBackend {
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .image(*image)
             .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
+                aspect_mask,
                 base_mip_level: 0,
-                level_count: 1,
+                level_count: vk::REMAINING_MIP_LEVELS,
                 base_array_layer: 0,
-                layer_count: 1,
+                layer_count: vk::REMAINING_ARRAY_LAYERS,
             })
             .src_access_mask(vk::AccessFlags::empty())
             .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
@@ -1617,22 +2334,22 @@ impl VulkanBackend {
             );
         }
 
-        // Copy buffer to image
+        // Copy mip 0 of every layer (tightly packed, layers back to back).
         let region = vk::BufferImageCopy::default()
             .buffer_offset(0)
             .buffer_row_length(0) // 0 means tightly packed
             .buffer_image_height(0)
             .image_subresource(vk::ImageSubresourceLayers {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
+                aspect_mask,
                 mip_level: 0,
                 base_array_layer: 0,
-                layer_count: 1,
+                layer_count,
             })
             .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
             .image_extent(vk::Extent3D {
                 width: descriptor.size.width,
                 height: descriptor.size.height,
-                depth: 1,
+                depth,
             });
 
         unsafe {
@@ -1645,7 +2362,9 @@ impl VulkanBackend {
             );
         }
 
-        // Transition image layout to SHADER_READ_ONLY_OPTIMAL
+        // Transition the whole image to SHADER_READ_ONLY_OPTIMAL. The dst
+        // scope covers every shader stage that may sample it — fragment-only
+        // would leave vertex/compute sampling unsynchronized.
         let barrier = vk::ImageMemoryBarrier::default()
             .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
             .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
@@ -1653,11 +2372,11 @@ impl VulkanBackend {
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .image(*image)
             .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
+                aspect_mask,
                 base_mip_level: 0,
-                level_count: 1,
+                level_count: vk::REMAINING_MIP_LEVELS,
                 base_array_layer: 0,
-                layer_count: 1,
+                layer_count: vk::REMAINING_ARRAY_LAYERS,
             })
             .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
             .dst_access_mask(vk::AccessFlags::SHADER_READ);
@@ -1666,7 +2385,9 @@ impl VulkanBackend {
             self.device.cmd_pipeline_barrier(
                 cmd,
                 vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::PipelineStageFlags::VERTEX_SHADER
+                    | vk::PipelineStageFlags::FRAGMENT_SHADER
+                    | vk::PipelineStageFlags::COMPUTE_SHADER,
                 vk::DependencyFlags::empty(),
                 &[],
                 &[],
@@ -1729,11 +2450,23 @@ impl VulkanBackend {
             )));
         }
 
-        // Wait for staging copy to complete, then free staging resources immediately
-        let _ = unsafe {
+        // Wait for staging copy to complete, then free staging resources
+        // immediately. On timeout/device-loss the GPU may still be reading the
+        // staging buffer — leak it (and the fence) instead of freeing in-use
+        // memory, and surface the error.
+        if let Err(e) = unsafe {
             self.device
-                .wait_for_fences(&[staging_fence], true, u64::MAX)
-        };
+                .wait_for_fences(&[staging_fence], true, FENCE_WAIT_TIMEOUT_NS)
+        } {
+            log::error!("Staging copy fence wait failed ({e:?}); leaking staging buffer and fence");
+            return Err(match e {
+                vk::Result::TIMEOUT => {
+                    GraphicsError::Timeout("staging copy did not complete within 10 s".into())
+                }
+                vk::Result::ERROR_DEVICE_LOST => GraphicsError::DeviceLost,
+                other => GraphicsError::Internal(format!("staging fence wait failed: {other:?}")),
+            });
+        }
         unsafe {
             self.device.destroy_fence(staging_fence, None);
             self.device
@@ -1743,6 +2476,14 @@ impl VulkanBackend {
         if let Err(e) = self.allocator.lock().free(staging_allocation) {
             log::error!("Failed to free staging allocation: {}", e);
         }
+
+        // The whole image is now in SHADER_READ_ONLY_OPTIMAL. Registering it
+        // keeps the render graph's first use from re-transitioning out of
+        // UNDEFINED — a transition that may legally discard the texels we
+        // just uploaded.
+        self.layout_tracker
+            .lock()
+            .set_layout(TextureId::from_raw(*id), TextureLayout::ShaderReadOnly);
 
         Ok(())
     }
@@ -1905,17 +2646,45 @@ impl VulkanBackend {
         // generation system in execute_graph() before each pass is encoded.
         // Surface images (swapchain) are handled specially below.
 
-        // Transition surface images from UNDEFINED/PRESENT_SRC to COLOR_ATTACHMENT_OPTIMAL.
-        // Using UNDEFINED as old_layout is valid from any actual layout (contents are discarded
-        // but that's OK since we're clearing the render target).
+        // Surface (swapchain) image barrier.
+        //
+        // Only the FIRST surface-writing pass of the frame transitions the
+        // image, from `UNDEFINED` (valid from any actual layout; discards the
+        // stale contents of the previously presented image — the engine always
+        // renders full frames, so cross-frame `LoadOp::Load` on the surface is
+        // not supported; use an offscreen target for accumulation). Later
+        // passes emit a same-layout WAW barrier instead, so a UI overlay pass
+        // with `LoadOp::Load` sees the scene pass's output rather than
+        // re-discarding it.
+        //
+        // src stage is COLOR_ATTACHMENT_OUTPUT in both cases — the submit
+        // waits the `image_available` semaphore at that stage, and a
+        // `TOP_OF_PIPE` source would NOT be ordered after the semaphore wait
+        // (the canonical WSI hazard: the transition could execute while the
+        // presentation engine still reads the image).
         for attachment in &render_targets.color_attachments {
             if let RenderTarget::Surface {
                 vulkan_view: Some(surface_view),
                 ..
             } = &attachment.target
             {
+                let first_write = {
+                    let mut sync = self.swapchain_sync.lock();
+                    let first = !sync.surface_transitioned;
+                    sync.surface_transitioned = true;
+                    first
+                };
+                let (old_layout, src_access) = if first_write {
+                    (vk::ImageLayout::UNDEFINED, vk::AccessFlags::empty())
+                } else {
+                    (
+                        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                        vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                    )
+                };
+
                 let barrier = vk::ImageMemoryBarrier::default()
-                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .old_layout(old_layout)
                     .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
@@ -1927,13 +2696,16 @@ impl VulkanBackend {
                         base_array_layer: 0,
                         layer_count: 1,
                     })
-                    .src_access_mask(vk::AccessFlags::empty())
-                    .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
+                    .src_access_mask(src_access)
+                    .dst_access_mask(
+                        vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                            | vk::AccessFlags::COLOR_ATTACHMENT_READ,
+                    );
 
                 unsafe {
                     self.device.cmd_pipeline_barrier(
                         cmd,
-                        vk::PipelineStageFlags::TOP_OF_PIPE,
+                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                         vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                         vk::DependencyFlags::empty(),
                         &[],
@@ -1992,13 +2764,19 @@ impl VulkanBackend {
             self.device.cmd_set_viewport(cmd, 0, &[viewport]);
         }
 
-        // Set scissor rect (use pass override or fall back to render area)
+        // Set scissor rect (use pass override or fall back to render area).
+        // An explicit scissor is clamped to the render area — Vulkan rejects
+        // negative offsets and out-of-bounds extents (VUID-vkCmdSetScissor).
         let default_scissor = if let Some(sr) = pass.scissor_rect() {
+            let c = sr.clamped(render_area.extent.width, render_area.extent.height);
             vk::Rect2D {
-                offset: vk::Offset2D { x: sr.x, y: sr.y },
+                offset: vk::Offset2D {
+                    x: c.x as i32,
+                    y: c.y as i32,
+                },
                 extent: vk::Extent2D {
-                    width: sr.width,
-                    height: sr.height,
+                    width: c.width,
+                    height: c.height,
                 },
             }
         } else {
@@ -2013,7 +2791,7 @@ impl VulkanBackend {
 
         // Encode draw commands
         for draw_cmd in pass.draw_commands() {
-            self.encode_draw_command(cmd, draw_cmd, default_scissor)?;
+            self.encode_draw_command(cmd, draw_cmd, default_scissor, render_area.extent)?;
         }
 
         // End dynamic rendering
@@ -2032,9 +2810,8 @@ impl VulkanBackend {
         cmd: vk::CommandBuffer,
         draw_cmd: &crate::graph::DrawCommand,
         pass_scissor: vk::Rect2D,
+        target_extent: vk::Extent2D,
     ) -> Result<(), GraphicsError> {
-        use crate::materials::BoundResource;
-
         let material_arc = draw_cmd.material.material();
         let mesh = &draw_cmd.mesh;
 
@@ -2053,188 +2830,53 @@ impl VulkanBackend {
         let pipeline = *pipeline;
         let pipeline_layout = *pipeline_layout;
 
-        // Take scratch buffers — reuses capacity from previous draws.
-        // Destructure to allow independent field borrows.
+        // Collect the cached descriptor sets — reuses scratch capacity.
         let scratch = &mut *self.encoder_scratch.lock();
         let VulkanEncoderScratch {
-            descriptor_set_layouts: scratch_ds_layouts,
             descriptor_sets: scratch_ds_sets,
-            buffer_infos: scratch_buffer_infos,
-            image_infos: scratch_image_infos,
             ..
         } = scratch;
 
-        scratch_ds_layouts.clear();
-        scratch_ds_layouts.extend_from_slice(descriptor_set_layouts);
-
-        // Create and bind descriptor sets
         let material_instance = &draw_cmd.material;
         let binding_groups = material_instance.binding_groups();
 
+        // A zip would silently drop trailing groups on either side, drawing
+        // with unbound descriptor sets (UB) — make the mismatch an error.
+        if binding_groups.len() != descriptor_set_layouts.len() {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "material instance provides {} binding group(s) but the material's pipeline \
+                 layout declares {} descriptor set(s)",
+                binding_groups.len(),
+                descriptor_set_layouts.len()
+            )));
+        }
+
+        // Pull each group's pre-built, cached descriptor set. Zero allocations,
+        // zero writes — the sets were written once at group creation.
         scratch_ds_sets.clear();
-        for (group_idx, (group, ds_layout)) in binding_groups
-            .iter()
-            .zip(scratch_ds_layouts.iter())
-            .enumerate()
-        {
-            let slot = self.current_slot.load(Ordering::Relaxed);
-            let descriptor_set = self
-                .pipeline_manager
-                .allocate_descriptor_set(slot, *ds_layout)?;
-
-            // Get the corresponding binding layout to look up binding types
-            let binding_layout = material_arc.binding_layouts().get(group_idx);
-
-            // Write descriptor set entries — reuse scratch Vecs across binding groups
-            scratch_buffer_infos.clear();
-            scratch_image_infos.clear();
-
-            for entry in &group.entries {
-                match &entry.resource {
-                    BoundResource::Buffer(buffer) => {
-                        if let GpuBuffer::Vulkan {
-                            buffer: vk_buffer,
-                            size,
-                            ..
-                        } = buffer.gpu_handle()
-                        {
-                            scratch_buffer_infos.push(vk::DescriptorBufferInfo {
-                                buffer: *vk_buffer,
-                                offset: 0,
-                                range: *size,
-                            });
-                        }
-                    }
-                    BoundResource::BufferRange {
-                        buffer,
-                        offset,
-                        size,
-                    } => {
-                        if let GpuBuffer::Vulkan {
-                            buffer: vk_buffer, ..
-                        } = buffer.gpu_handle()
-                        {
-                            scratch_buffer_infos.push(vk::DescriptorBufferInfo {
-                                buffer: *vk_buffer,
-                                offset: *offset,
-                                range: *size,
-                            });
-                        }
-                    }
-                    BoundResource::Texture(texture) => {
-                        if let GpuTexture::Vulkan { view, .. } = texture.gpu_handle() {
-                            scratch_image_infos.push(vk::DescriptorImageInfo {
-                                sampler: vk::Sampler::null(),
-                                image_view: *view,
-                                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                            });
-                        }
-                    }
-                    BoundResource::Sampler(sampler) => {
-                        if let GpuSampler::Vulkan {
-                            sampler: vk_sampler,
-                            ..
-                        } = sampler.gpu_handle()
-                        {
-                            scratch_image_infos.push(vk::DescriptorImageInfo {
-                                sampler: *vk_sampler,
-                                image_view: vk::ImageView::null(),
-                                image_layout: vk::ImageLayout::UNDEFINED,
-                            });
-                        }
-                    }
-                    BoundResource::CombinedTextureSampler { texture, sampler } => {
-                        if let (
-                            GpuTexture::Vulkan { view, .. },
-                            GpuSampler::Vulkan {
-                                sampler: vk_sampler,
-                                ..
-                            },
-                        ) = (texture.gpu_handle(), sampler.gpu_handle())
-                        {
-                            scratch_image_infos.push(vk::DescriptorImageInfo {
-                                sampler: *vk_sampler,
-                                image_view: *view,
-                                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                            });
-                        }
-                    }
-                }
+        for (group_idx, group) in binding_groups.iter().enumerate() {
+            // The set was allocated against the group's layout; validate it is
+            // compatible with the material's declared set layout (deduped
+            // content-equal layouts share the same VkDescriptorSetLayout, so
+            // this holds by construction — the check guards against a group
+            // built against the wrong layout).
+            if let Some(mat_layout) = material_arc.binding_layouts().get(group_idx)
+                && !Arc::ptr_eq(group.layout(), mat_layout)
+                && !binding_layouts_compatible(group.layout(), mat_layout)
+            {
+                return Err(GraphicsError::InvalidParameter(format!(
+                    "binding group {group_idx} was created against a layout incompatible \
+                     with the material's descriptor set {group_idx}"
+                )));
             }
 
-            // Build write descriptors
-            let mut writes: Vec<vk::WriteDescriptorSet> = Vec::new();
-            let mut buffer_idx = 0;
-            let mut image_idx = 0;
-            for entry in &group.entries {
-                // Look up the binding type from the layout
-                let binding_type = binding_layout.and_then(|layout| {
-                    layout
-                        .entries
-                        .iter()
-                        .find(|e| e.binding == entry.binding)
-                        .map(|e| e.binding_type)
-                });
-
-                let write = match &entry.resource {
-                    BoundResource::Buffer(_) | BoundResource::BufferRange { .. } => {
-                        let info = &scratch_buffer_infos[buffer_idx..buffer_idx + 1];
-                        buffer_idx += 1;
-                        // Use the binding type from layout, defaulting to UNIFORM_BUFFER
-                        let descriptor_type = match binding_type {
-                            Some(
-                                crate::materials::BindingType::StorageBuffer
-                                | crate::materials::BindingType::StorageBufferReadOnly,
-                            ) => vk::DescriptorType::STORAGE_BUFFER,
-                            Some(crate::materials::BindingType::DynamicUniformBuffer) => {
-                                vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC
-                            }
-                            _ => vk::DescriptorType::UNIFORM_BUFFER,
-                        };
-                        vk::WriteDescriptorSet::default()
-                            .dst_set(descriptor_set)
-                            .dst_binding(entry.binding)
-                            .descriptor_type(descriptor_type)
-                            .buffer_info(info)
-                    }
-                    BoundResource::Texture(_) => {
-                        let info = &scratch_image_infos[image_idx..image_idx + 1];
-                        image_idx += 1;
-                        vk::WriteDescriptorSet::default()
-                            .dst_set(descriptor_set)
-                            .dst_binding(entry.binding)
-                            .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                            .image_info(info)
-                    }
-                    BoundResource::Sampler(_) => {
-                        let info = &scratch_image_infos[image_idx..image_idx + 1];
-                        image_idx += 1;
-                        vk::WriteDescriptorSet::default()
-                            .dst_set(descriptor_set)
-                            .dst_binding(entry.binding)
-                            .descriptor_type(vk::DescriptorType::SAMPLER)
-                            .image_info(info)
-                    }
-                    BoundResource::CombinedTextureSampler { .. } => {
-                        let info = &scratch_image_infos[image_idx..image_idx + 1];
-                        image_idx += 1;
-                        vk::WriteDescriptorSet::default()
-                            .dst_set(descriptor_set)
-                            .dst_binding(entry.binding)
-                            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                            .image_info(info)
-                    }
-                };
-                writes.push(write);
-            }
-
-            if !writes.is_empty() {
-                unsafe {
-                    self.device.update_descriptor_sets(&writes, &[]);
-                }
-            }
-
-            scratch_ds_sets.push(descriptor_set);
+            let super::GpuBindingGroup::Vulkan { descriptor_set, .. } = group.gpu_handle() else {
+                return Err(GraphicsError::InvalidParameter(format!(
+                    "binding group {group_idx} has no Vulkan descriptor set \
+                     (resource from a different backend)"
+                )));
+            };
+            scratch_ds_sets.push(*descriptor_set);
         }
 
         // Bind pipeline
@@ -2277,19 +2919,20 @@ impl VulkanBackend {
             }
         }
 
-        // Set per-draw scissor rect if specified
+        // Set per-draw scissor rect if specified. Clamped to the target — a
+        // negative/out-of-bounds rect (egui clip during resize) is a
+        // validation error / UB on Vulkan otherwise.
         let custom_scissor = draw_cmd.scissor_rect.is_some();
         if let Some(scissor) = &draw_cmd.scissor_rect {
-            // Convert ScissorRect to Vulkan Rect2D
-            // Note: x and y can be negative in ScissorRect but Vulkan offset uses i32
+            let c = scissor.clamped(target_extent.width, target_extent.height);
             let vk_scissor = vk::Rect2D {
                 offset: vk::Offset2D {
-                    x: scissor.x,
-                    y: scissor.y,
+                    x: c.x as i32,
+                    y: c.y as i32,
                 },
                 extent: vk::Extent2D {
-                    width: scissor.width,
-                    height: scissor.height,
+                    width: c.width,
+                    height: c.height,
                 },
             };
             unsafe {
@@ -2439,7 +3082,7 @@ impl VulkanBackend {
         cmd: vk::CommandBuffer,
         operation: &crate::graph::TransferOperation,
     ) -> Result<(), GraphicsError> {
-        use crate::graph::TransferOperation;
+        use crate::graph::{TransferOperation, validate_buffer_copy_alignment};
 
         match operation {
             TransferOperation::BufferToBuffer { src, dst, regions } => {
@@ -2456,6 +3099,7 @@ impl VulkanBackend {
                     return Ok(());
                 };
 
+                validate_buffer_copy_alignment(regions)?;
                 let copy_regions: Vec<vk::BufferCopy> = regions
                     .iter()
                     .map(|r| {
@@ -2503,31 +3147,34 @@ impl VulkanBackend {
                         bytes.len()
                     )));
                 }
-                // Copy via a transient staging buffer at THIS point in the
-                // command buffer, so the write lands at the transfer pass's
-                // position in the graph: passes ordered before it see the old
-                // contents, passes after it see the new. A host memcpy here
-                // would instead be visible to the whole frame — and race any
+                // Copy via belt staging at THIS point in the command buffer,
+                // so the write lands at the transfer pass's position in the
+                // graph: passes ordered before it see the old contents,
+                // passes after it see the new. A host memcpy here would
+                // instead be visible to the whole frame — and race any
                 // still-executing previous frame reading the same memory.
-                let (staging, staging_alloc) =
-                    self.create_transient_staging(bytes, "write_buffer_staging")?;
+                // The belt chunk stays owned by this frame slot until its
+                // fence signals (retired in `advance_frame`).
+                let slot = self.current_slot.load(Ordering::Relaxed);
+                let (staging, src_offset) = self.staging_belt.lock().write(
+                    &self.device,
+                    &mut self.allocator.lock(),
+                    slot,
+                    bytes,
+                )?;
                 let region = vk::BufferCopy::default()
-                    .src_offset(0)
+                    .src_offset(src_offset)
                     .dst_offset(*dst_offset)
                     .size(bytes.len() as u64);
                 unsafe {
                     self.device
                         .cmd_copy_buffer(cmd, staging, *dst_buffer, &[region]);
                 }
-                let slot = self.current_slot.load(Ordering::Relaxed);
-                self.retired_staging.lock()[slot].push((staging, staging_alloc));
             }
             // Drained by the frame pipeline after the fence (CPU read); nothing
             // to encode here.
             TransferOperation::ReadbackBuffer { .. } => {}
             TransferOperation::TextureToBuffer { src, dst, regions } => {
-                use crate::types::TextureDimension;
-
                 let GpuTexture::Vulkan {
                     image: src_image, ..
                 } = src.gpu_handle()
@@ -2544,71 +3191,12 @@ impl VulkanBackend {
                 // NOTE: Layout transitions are now handled automatically by the barrier
                 // generation system in execute_graph() before each pass is encoded.
 
-                let block_size = src.format().block_size();
-                let dimension = src.dimension();
-
-                // For cubemaps and 2D arrays, origin.z specifies the array layer, not the z offset.
-                // Vulkan requires z offset to be 0 for 2D images, with layer specified in subresource.
-                let uses_array_layers = matches!(
-                    dimension,
-                    TextureDimension::D1Array
-                        | TextureDimension::D2Array
-                        | TextureDimension::Cube
-                        | TextureDimension::CubeArray
-                );
-
-                let copy_regions: Vec<vk::BufferImageCopy> = regions
-                    .iter()
-                    .map(|r| {
-                        // Compute bytes_per_row with 256-byte alignment for consistency with wgpu
-                        // If bytes_per_row is not specified and we have multiple rows, align to 256 bytes
-                        let bytes_per_row = r.buffer_layout.bytes_per_row.unwrap_or_else(|| {
-                            if r.extent.height > 1 {
-                                let unpadded = r.extent.width * block_size;
-                                // Align to 256 bytes for wgpu compatibility
-                                (unpadded + 255) & !255
-                            } else {
-                                0 // Single row - tight packing
-                            }
-                        });
-
-                        // Vulkan's buffer_row_length is in texels (pixels), not bytes
-                        // Convert from bytes to texels by dividing by block_size
-                        let row_length_texels = if bytes_per_row > 0 {
-                            bytes_per_row / block_size
-                        } else {
-                            0 // 0 means tightly packed
-                        };
-
-                        // Determine array layer and z offset based on texture type
-                        let (base_array_layer, z_offset) = if uses_array_layers {
-                            (r.texture_location.origin.z, 0)
-                        } else {
-                            (0, r.texture_location.origin.z as i32)
-                        };
-
-                        vk::BufferImageCopy::default()
-                            .buffer_offset(r.buffer_layout.offset)
-                            .buffer_row_length(row_length_texels)
-                            .buffer_image_height(r.buffer_layout.rows_per_image.unwrap_or(0))
-                            .image_subresource(vk::ImageSubresourceLayers {
-                                aspect_mask: vk::ImageAspectFlags::COLOR,
-                                mip_level: r.texture_location.mip_level,
-                                base_array_layer,
-                                layer_count: 1,
-                            })
-                            .image_offset(vk::Offset3D {
-                                x: r.texture_location.origin.x as i32,
-                                y: r.texture_location.origin.y as i32,
-                                z: z_offset,
-                            })
-                            .image_extent(vk::Extent3D {
-                                width: r.extent.width,
-                                height: r.extent.height,
-                                depth: r.extent.depth.max(1),
-                            })
-                    })
-                    .collect();
+                let copy_regions = build_buffer_image_copies(
+                    src.format(),
+                    src.dimension(),
+                    regions,
+                    "TextureToBuffer",
+                )?;
 
                 unsafe {
                     self.device.cmd_copy_image_to_buffer(
@@ -2621,8 +3209,6 @@ impl VulkanBackend {
                 }
             }
             TransferOperation::BufferToTexture { src, dst, regions } => {
-                use crate::types::TextureDimension;
-
                 let GpuBuffer::Vulkan {
                     buffer: src_buffer, ..
                 } = src.gpu_handle()
@@ -2639,68 +3225,12 @@ impl VulkanBackend {
                 // NOTE: Layout transitions are now handled automatically by the barrier
                 // generation system in execute_graph() before each pass is encoded.
 
-                let block_size = dst.format().block_size();
-                let dimension = dst.dimension();
-
-                // For cubemaps and 2D arrays, origin.z specifies the array layer, not the z offset.
-                // Vulkan requires z offset to be 0 for 2D images, with layer specified in subresource.
-                let uses_array_layers = matches!(
-                    dimension,
-                    TextureDimension::D1Array
-                        | TextureDimension::D2Array
-                        | TextureDimension::Cube
-                        | TextureDimension::CubeArray
-                );
-
-                let copy_regions: Vec<vk::BufferImageCopy> = regions
-                    .iter()
-                    .map(|r| {
-                        // Compute bytes_per_row with 256-byte alignment for consistency with wgpu
-                        let bytes_per_row = r.buffer_layout.bytes_per_row.unwrap_or_else(|| {
-                            if r.extent.height > 1 {
-                                let unpadded = r.extent.width * block_size;
-                                (unpadded + 255) & !255
-                            } else {
-                                0
-                            }
-                        });
-
-                        // Convert from bytes to texels for Vulkan
-                        let row_length_texels = if bytes_per_row > 0 {
-                            bytes_per_row / block_size
-                        } else {
-                            0
-                        };
-
-                        // Determine array layer and z offset based on texture type
-                        let (base_array_layer, z_offset) = if uses_array_layers {
-                            (r.texture_location.origin.z, 0)
-                        } else {
-                            (0, r.texture_location.origin.z as i32)
-                        };
-
-                        vk::BufferImageCopy::default()
-                            .buffer_offset(r.buffer_layout.offset)
-                            .buffer_row_length(row_length_texels)
-                            .buffer_image_height(r.buffer_layout.rows_per_image.unwrap_or(0))
-                            .image_subresource(vk::ImageSubresourceLayers {
-                                aspect_mask: vk::ImageAspectFlags::COLOR,
-                                mip_level: r.texture_location.mip_level,
-                                base_array_layer,
-                                layer_count: 1,
-                            })
-                            .image_offset(vk::Offset3D {
-                                x: r.texture_location.origin.x as i32,
-                                y: r.texture_location.origin.y as i32,
-                                z: z_offset,
-                            })
-                            .image_extent(vk::Extent3D {
-                                width: r.extent.width,
-                                height: r.extent.height,
-                                depth: r.extent.depth.max(1),
-                            })
-                    })
-                    .collect();
+                let copy_regions = build_buffer_image_copies(
+                    dst.format(),
+                    dst.dimension(),
+                    regions,
+                    "BufferToTexture",
+                )?;
 
                 unsafe {
                     self.device.cmd_copy_buffer_to_image(
@@ -2729,36 +3259,50 @@ impl VulkanBackend {
                 // NOTE: Layout transitions are now handled automatically by the barrier
                 // generation system in execute_graph() before each pass is encoded.
 
+                // Aspect follows the format (a depth copy with COLOR aspect is
+                // invalid); image-to-image copies may cover both depth and
+                // stencil at once, unlike buffer<->image copies.
+                let src_aspect = image_aspect_mask(src.format());
+                let dst_aspect = image_aspect_mask(dst.format());
+
                 let copy_regions: Vec<vk::ImageCopy> = regions
                     .iter()
                     .map(|r| {
+                        // For array-like textures origin.z addresses the layer
+                        // and extent.depth the layer count (matching wgpu);
+                        // for 1D/2D/3D they are a real z offset and depth.
+                        let src_loc = resolve_layer_z(src.dimension(), r.src.origin.z, r.extent);
+                        let dst_loc = resolve_layer_z(dst.dimension(), r.dst.origin.z, r.extent);
+                        // vk::ImageCopy has one extent; a 3D side keeps real
+                        // depth, array<->array copies move layers instead.
+                        let depth = src_loc.extent_depth.max(dst_loc.extent_depth);
                         vk::ImageCopy::default()
                             .src_subresource(vk::ImageSubresourceLayers {
-                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                aspect_mask: src_aspect,
                                 mip_level: r.src.mip_level,
-                                base_array_layer: 0,
-                                layer_count: 1,
+                                base_array_layer: src_loc.base_layer,
+                                layer_count: src_loc.layer_count,
                             })
                             .src_offset(vk::Offset3D {
                                 x: r.src.origin.x as i32,
                                 y: r.src.origin.y as i32,
-                                z: r.src.origin.z as i32,
+                                z: src_loc.z_offset,
                             })
                             .dst_subresource(vk::ImageSubresourceLayers {
-                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                aspect_mask: dst_aspect,
                                 mip_level: r.dst.mip_level,
-                                base_array_layer: 0,
-                                layer_count: 1,
+                                base_array_layer: dst_loc.base_layer,
+                                layer_count: dst_loc.layer_count,
                             })
                             .dst_offset(vk::Offset3D {
                                 x: r.dst.origin.x as i32,
                                 y: r.dst.origin.y as i32,
-                                z: r.dst.origin.z as i32,
+                                z: dst_loc.z_offset,
                             })
                             .extent(vk::Extent3D {
                                 width: r.extent.width,
                                 height: r.extent.height,
-                                depth: r.extent.depth.max(1),
+                                depth,
                             })
                     })
                     .collect();
@@ -2783,8 +3327,6 @@ impl VulkanBackend {
         cmd: vk::CommandBuffer,
         pass: &crate::graph::ComputePass,
     ) -> Result<(), GraphicsError> {
-        use crate::materials::BoundResource;
-
         if !pass.has_dispatches() {
             return Ok(());
         }
@@ -2809,180 +3351,45 @@ impl VulkanBackend {
 
             let scratch = &mut *self.encoder_scratch.lock();
             let VulkanEncoderScratch {
-                descriptor_set_layouts: scratch_ds_layouts,
                 descriptor_sets: scratch_ds_sets,
-                buffer_infos: scratch_buffer_infos,
-                image_infos: scratch_image_infos,
                 ..
             } = scratch;
 
-            scratch_ds_layouts.clear();
-            scratch_ds_layouts.extend_from_slice(descriptor_set_layouts);
-
-            // Create and bind descriptor sets
             let material_instance = &dispatch_cmd.material;
             let binding_groups = material_instance.binding_groups();
 
+            // A zip would silently drop trailing groups on either side,
+            // dispatching with unbound descriptor sets (UB) — error instead.
+            if binding_groups.len() != descriptor_set_layouts.len() {
+                return Err(GraphicsError::InvalidParameter(format!(
+                    "material instance provides {} binding group(s) but the material's \
+                     pipeline layout declares {} descriptor set(s)",
+                    binding_groups.len(),
+                    descriptor_set_layouts.len()
+                )));
+            }
+
+            // Pull each group's cached descriptor set (written once at creation).
             scratch_ds_sets.clear();
-            for (group_idx, (group, ds_layout)) in binding_groups
-                .iter()
-                .zip(scratch_ds_layouts.iter())
-                .enumerate()
-            {
-                let slot = self.current_slot.load(Ordering::Relaxed);
-                let descriptor_set = self
-                    .pipeline_manager
-                    .allocate_descriptor_set(slot, *ds_layout)?;
-
-                let binding_layout = material_arc.binding_layouts().get(group_idx);
-
-                scratch_buffer_infos.clear();
-                scratch_image_infos.clear();
-
-                for entry in &group.entries {
-                    match &entry.resource {
-                        BoundResource::Buffer(buffer) => {
-                            if let GpuBuffer::Vulkan {
-                                buffer: vk_buffer,
-                                size,
-                                ..
-                            } = buffer.gpu_handle()
-                            {
-                                scratch_buffer_infos.push(vk::DescriptorBufferInfo {
-                                    buffer: *vk_buffer,
-                                    offset: 0,
-                                    range: *size,
-                                });
-                            }
-                        }
-                        BoundResource::BufferRange {
-                            buffer,
-                            offset,
-                            size,
-                        } => {
-                            if let GpuBuffer::Vulkan {
-                                buffer: vk_buffer, ..
-                            } = buffer.gpu_handle()
-                            {
-                                scratch_buffer_infos.push(vk::DescriptorBufferInfo {
-                                    buffer: *vk_buffer,
-                                    offset: *offset,
-                                    range: *size,
-                                });
-                            }
-                        }
-                        BoundResource::Texture(texture) => {
-                            if let GpuTexture::Vulkan { view, .. } = texture.gpu_handle() {
-                                scratch_image_infos.push(vk::DescriptorImageInfo {
-                                    sampler: vk::Sampler::null(),
-                                    image_view: *view,
-                                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                                });
-                            }
-                        }
-                        BoundResource::Sampler(sampler) => {
-                            if let GpuSampler::Vulkan {
-                                sampler: vk_sampler,
-                                ..
-                            } = sampler.gpu_handle()
-                            {
-                                scratch_image_infos.push(vk::DescriptorImageInfo {
-                                    sampler: *vk_sampler,
-                                    image_view: vk::ImageView::null(),
-                                    image_layout: vk::ImageLayout::UNDEFINED,
-                                });
-                            }
-                        }
-                        BoundResource::CombinedTextureSampler { texture, sampler } => {
-                            if let (
-                                GpuTexture::Vulkan { view, .. },
-                                GpuSampler::Vulkan {
-                                    sampler: vk_sampler,
-                                    ..
-                                },
-                            ) = (texture.gpu_handle(), sampler.gpu_handle())
-                            {
-                                scratch_image_infos.push(vk::DescriptorImageInfo {
-                                    sampler: *vk_sampler,
-                                    image_view: *view,
-                                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                                });
-                            }
-                        }
-                    }
+            for (group_idx, group) in binding_groups.iter().enumerate() {
+                if let Some(mat_layout) = material_arc.binding_layouts().get(group_idx)
+                    && !Arc::ptr_eq(group.layout(), mat_layout)
+                    && !binding_layouts_compatible(group.layout(), mat_layout)
+                {
+                    return Err(GraphicsError::InvalidParameter(format!(
+                        "binding group {group_idx} was created against a layout incompatible \
+                         with the material's descriptor set {group_idx}"
+                    )));
                 }
 
-                // Build write descriptors
-                let mut writes: Vec<vk::WriteDescriptorSet> = Vec::new();
-                let mut buffer_idx = 0;
-                let mut image_idx = 0;
-                for entry in &group.entries {
-                    let binding_type = binding_layout.and_then(|layout| {
-                        layout
-                            .entries
-                            .iter()
-                            .find(|e| e.binding == entry.binding)
-                            .map(|e| e.binding_type)
-                    });
-
-                    let write = match &entry.resource {
-                        BoundResource::Buffer(_) | BoundResource::BufferRange { .. } => {
-                            let info = &scratch_buffer_infos[buffer_idx..buffer_idx + 1];
-                            buffer_idx += 1;
-                            let descriptor_type = match binding_type {
-                                Some(
-                                    crate::materials::BindingType::StorageBuffer
-                                    | crate::materials::BindingType::StorageBufferReadOnly,
-                                ) => vk::DescriptorType::STORAGE_BUFFER,
-                                Some(crate::materials::BindingType::DynamicUniformBuffer) => {
-                                    vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC
-                                }
-                                _ => vk::DescriptorType::UNIFORM_BUFFER,
-                            };
-                            vk::WriteDescriptorSet::default()
-                                .dst_set(descriptor_set)
-                                .dst_binding(entry.binding)
-                                .descriptor_type(descriptor_type)
-                                .buffer_info(info)
-                        }
-                        BoundResource::Texture(_) => {
-                            let info = &scratch_image_infos[image_idx..image_idx + 1];
-                            image_idx += 1;
-                            vk::WriteDescriptorSet::default()
-                                .dst_set(descriptor_set)
-                                .dst_binding(entry.binding)
-                                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                                .image_info(info)
-                        }
-                        BoundResource::Sampler(_) => {
-                            let info = &scratch_image_infos[image_idx..image_idx + 1];
-                            image_idx += 1;
-                            vk::WriteDescriptorSet::default()
-                                .dst_set(descriptor_set)
-                                .dst_binding(entry.binding)
-                                .descriptor_type(vk::DescriptorType::SAMPLER)
-                                .image_info(info)
-                        }
-                        BoundResource::CombinedTextureSampler { .. } => {
-                            let info = &scratch_image_infos[image_idx..image_idx + 1];
-                            image_idx += 1;
-                            vk::WriteDescriptorSet::default()
-                                .dst_set(descriptor_set)
-                                .dst_binding(entry.binding)
-                                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                                .image_info(info)
-                        }
-                    };
-                    writes.push(write);
-                }
-
-                if !writes.is_empty() {
-                    unsafe {
-                        self.device.update_descriptor_sets(&writes, &[]);
-                    }
-                }
-
-                scratch_ds_sets.push(descriptor_set);
+                let super::GpuBindingGroup::Vulkan { descriptor_set, .. } = group.gpu_handle()
+                else {
+                    return Err(GraphicsError::InvalidParameter(format!(
+                        "binding group {group_idx} has no Vulkan descriptor set \
+                         (resource from a different backend)"
+                    )));
+                };
+                scratch_ds_sets.push(*descriptor_set);
             }
 
             // Bind pipeline

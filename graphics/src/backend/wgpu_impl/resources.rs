@@ -13,6 +13,50 @@ use super::conversion::{
 };
 
 impl WgpuBackend {
+    /// Get (or create + cache) the `wgpu::BindGroupLayout` for a binding layout,
+    /// deduped by content. Shared between pipeline creation and binding-group
+    /// creation so a group's layout is the same object the pipeline uses.
+    pub(super) fn get_or_create_bind_group_layout(
+        &self,
+        layout: &crate::materials::BindingLayout,
+    ) -> wgpu::BindGroupLayout {
+        let key = super::bind_group_layout_key(layout);
+        if let Some(cached) = self.bind_group_layout_cache.lock().get(&key) {
+            return cached.clone();
+        }
+        let entries = super::conversion::binding_layout_entries(layout);
+        let created = self
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: layout.label.as_deref(),
+                entries: &entries,
+            });
+        // Another thread may have raced; keep one object per key.
+        self.bind_group_layout_cache
+            .lock()
+            .entry(key)
+            .or_insert(created)
+            .clone()
+    }
+
+    /// Create a binding group: build the `wgpu::BindGroup` **once**, against the
+    /// deduped bind group layout for `layout`. Encoding a draw then only calls
+    /// `set_bind_group` with this cached group.
+    pub fn create_binding_group(
+        &self,
+        layout: &crate::materials::BindingLayout,
+        descriptor: &crate::materials::BindingGroupDescriptor,
+    ) -> Result<super::super::GpuBindingGroup, GraphicsError> {
+        let bg_layout = self.get_or_create_bind_group_layout(layout);
+        let entries = build_wgpu_bind_group_entries(&descriptor.entries)?;
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: descriptor.label.as_deref(),
+            layout: &bg_layout,
+            entries: &entries,
+        });
+        Ok(super::super::GpuBindingGroup::Wgpu(bind_group))
+    }
+
     /// Create a buffer resource.
     pub fn create_buffer(&self, descriptor: &BufferDescriptor) -> Result<GpuBuffer, GraphicsError> {
         let usage = convert_buffer_usage(descriptor.usage);
@@ -46,7 +90,33 @@ impl WgpuBackend {
         }
 
         let format = convert_texture_format(descriptor.format);
+
+        // Feature-gated formats (BC/ETC2/ASTC compression, etc.) are requested
+        // opportunistically at device creation; if this adapter lacks the
+        // feature, creating the texture would raise an uncaptured validation
+        // error. Fail with a clear error at the actual cause instead.
+        let required = format.required_features();
+        if !self.device.features().contains(required) {
+            return Err(GraphicsError::FeatureNotSupported(format!(
+                "texture format {:?} requires wgpu feature(s) {:?}, which this adapter \
+                 does not support",
+                descriptor.format,
+                required.difference(self.device.features())
+            )));
+        }
+
         let usage = convert_texture_usage(descriptor.usage);
+
+        // WebGPU has no arrayed 1D textures at all; the old mapping created a
+        // multi-layer D1 texture with a D1 (non-array) view, which fails
+        // bind-group validation on first use. Reject it up front.
+        if descriptor.dimension == TextureDimension::D1Array {
+            return Err(GraphicsError::FeatureNotSupported(
+                "D1Array textures are not supported by the wgpu backend (WebGPU has no \
+                 arrayed 1D textures); use a D2Array with height 1 instead"
+                    .into(),
+            ));
+        }
 
         // Convert our texture dimension to wgpu's
         let (wgpu_dimension, depth_or_array_layers) = match descriptor.dimension {
@@ -122,8 +192,7 @@ impl WgpuBackend {
         descriptor: &crate::materials::MaterialDescriptor,
     ) -> Result<super::super::GpuPipeline, GraphicsError> {
         use super::conversion::{
-            convert_binding_type, convert_blend_state, convert_shader_stages, convert_step_mode,
-            convert_topology, convert_vertex_format,
+            convert_blend_state, convert_step_mode, convert_topology, convert_vertex_format,
         };
         use crate::materials::ShaderStage;
 
@@ -189,25 +258,12 @@ impl WgpuBackend {
             }
         }
 
-        // Bind group layouts
+        // Bind group layouts, pulled from the content-keyed dedup cache so a
+        // binding group created against the same `BindingLayout` reuses the
+        // exact same object (wgpu requires the group's layout be compatible).
         let mut bind_group_layouts = Vec::new();
         for bg_layout in &descriptor.binding_layouts {
-            let entries: Vec<wgpu::BindGroupLayoutEntry> = bg_layout
-                .entries
-                .iter()
-                .map(|entry| wgpu::BindGroupLayoutEntry {
-                    binding: entry.binding,
-                    visibility: convert_shader_stages(entry.visibility),
-                    ty: convert_binding_type(entry.binding_type),
-                    count: None,
-                })
-                .collect();
-            bind_group_layouts.push(self.device.create_bind_group_layout(
-                &wgpu::BindGroupLayoutDescriptor {
-                    label: bg_layout.label.as_deref(),
-                    entries: &entries,
-                },
-            ));
+            bind_group_layouts.push(self.get_or_create_bind_group_layout(bg_layout));
         }
 
         // Pipeline layout
@@ -312,7 +368,6 @@ impl WgpuBackend {
         &self,
         descriptor: &crate::materials::MaterialDescriptor,
     ) -> Result<super::super::GpuPipeline, GraphicsError> {
-        use super::conversion::{convert_binding_type, convert_shader_stages};
         use crate::materials::ShaderStage;
 
         let mut compute_module = None;
@@ -338,25 +393,12 @@ impl WgpuBackend {
             ));
         };
 
-        // Bind group layouts
+        // Bind group layouts, pulled from the content-keyed dedup cache so a
+        // binding group created against the same `BindingLayout` reuses the
+        // exact same object (wgpu requires the group's layout be compatible).
         let mut bind_group_layouts = Vec::new();
         for bg_layout in &descriptor.binding_layouts {
-            let entries: Vec<wgpu::BindGroupLayoutEntry> = bg_layout
-                .entries
-                .iter()
-                .map(|entry| wgpu::BindGroupLayoutEntry {
-                    binding: entry.binding,
-                    visibility: convert_shader_stages(entry.visibility),
-                    ty: convert_binding_type(entry.binding_type),
-                    count: None,
-                })
-                .collect();
-            bind_group_layouts.push(self.device.create_bind_group_layout(
-                &wgpu::BindGroupLayoutDescriptor {
-                    label: bg_layout.label.as_deref(),
-                    entries: &entries,
-                },
-            ));
+            bind_group_layouts.push(self.get_or_create_bind_group_layout(bg_layout));
         }
 
         let pipeline_layout = {
@@ -424,103 +466,146 @@ impl WgpuBackend {
 
     /// Create a fence for CPU-GPU synchronization.
     ///
-    /// Note: wgpu fences work differently from Vulkan fences. Instead of a binary
-    /// signaled/unsignaled state, wgpu tracks submission indices. A fence with no
-    /// submission (None) is considered "signaled" (no work to wait for).
-    ///
-    /// The `signaled` parameter is acknowledged but has limited effect:
-    /// - `signaled=true`: Fence starts with no submission (effectively signaled)
-    /// - `signaled=false`: Same as above - wgpu cannot represent an unsignaled fence
-    ///   without pending work. The fence becomes meaningful only after `execute_graph`
-    ///   stores a submission index.
-    pub fn create_fence(&self, _signaled: bool) -> GpuFence {
-        // Note: wgpu fences track submissions, not binary state.
-        // Fence will appear signaled until work is submitted.
-        GpuFence::Wgpu {
+    /// wgpu has no native binary fence, so the state is emulated (see
+    /// [`WgpuFenceState`](crate::backend::WgpuFenceState)): the fence starts
+    /// `Signaled` or `Unsignaled` exactly as requested — matching Vulkan — and
+    /// becomes submission-tracked once `execute_graph` ties a submission to it.
+    pub fn create_fence(&self, signaled: bool) -> Result<GpuFence, GraphicsError> {
+        Ok(GpuFence::Wgpu {
             device: self.device.clone(),
-            submission_index: Mutex::new(None),
-        }
+            state: Mutex::new(if signaled {
+                crate::backend::WgpuFenceState::Signaled
+            } else {
+                crate::backend::WgpuFenceState::Unsignaled
+            }),
+        })
     }
 
     /// Wait for a fence to be signaled.
-    pub fn wait_fence(&self, fence: &GpuFence) {
-        if let GpuFence::Wgpu {
-            device,
-            submission_index,
-        } = fence
-            && let Ok(guard) = submission_index.lock()
-            && let Some(idx) = guard.clone()
-        {
-            // Wait for the specific submission
-            let _ = device.poll(wgpu::PollType::Wait {
-                submission_index: Some(idx),
-                timeout: Some(std::time::Duration::from_secs(10)),
-            });
+    ///
+    /// Bounded by a 10 s timeout; timeout and poll failures are returned as
+    /// errors so callers never mistake a hung GPU for completed work.
+    /// Waiting on an `Unsignaled` fence with no tied submission is an error:
+    /// nothing will ever signal it (Vulkan would stall the full timeout).
+    pub fn wait_fence(&self, fence: &GpuFence) -> Result<(), GraphicsError> {
+        use crate::backend::WgpuFenceState;
+        let GpuFence::Wgpu { device, state } = fence else {
+            return Ok(());
+        };
+        let current = state
+            .lock()
+            .map_err(|_| GraphicsError::Internal("wgpu fence mutex poisoned".into()))?
+            .clone();
+        match current {
+            WgpuFenceState::Signaled => Ok(()),
+            WgpuFenceState::Unsignaled => Err(GraphicsError::Timeout(
+                "waiting on an unsignaled wgpu fence with no pending submission — \
+                 it can never be signaled"
+                    .into(),
+            )),
+            WgpuFenceState::Submitted(idx) => {
+                match device.poll(wgpu::PollType::Wait {
+                    submission_index: Some(idx),
+                    timeout: Some(std::time::Duration::from_secs(10)),
+                }) {
+                    Ok(status) if status.wait_finished() => Ok(()),
+                    Ok(_) => Err(GraphicsError::Timeout(
+                        "fence wait timed out after 10 s; GPU may be hung".into(),
+                    )),
+                    Err(e) => {
+                        // The submission index was never validly submitted (a
+                        // rejected submit still returns an index that never
+                        // signals) or the device is lost — either way, waiting
+                        // on it again would fail forever. Abandon it: mark the
+                        // fence signaled so the next frame recovers the slot,
+                        // and report this frame's failure. See #46.
+                        Self::abandon_wgpu_fence(state);
+                        Err(GraphicsError::Internal(format!(
+                            "device poll failed during fence wait: {e}"
+                        )))
+                    }
+                }
+            }
+        }
+    }
+
+    /// Mark a wgpu fence signaled after an unrecoverable poll failure, so a
+    /// later wait on the same slot returns immediately instead of re-polling a
+    /// submission index that will never signal (the #46 wedge).
+    fn abandon_wgpu_fence(state: &std::sync::Mutex<crate::backend::WgpuFenceState>) {
+        if let Ok(mut guard) = state.lock() {
+            *guard = crate::backend::WgpuFenceState::Signaled;
         }
     }
 
     /// Check if a fence is signaled (non-blocking).
     ///
-    /// Returns `true` if:
-    /// - No work has been submitted yet (fence is in initial state)
-    /// - All submitted work has completed
-    ///
-    /// Returns `false` if:
-    /// - Work is still pending on the GPU
-    /// - Lock acquisition failed (conservative assumption)
-    /// - Not a wgpu fence
+    /// `Unsignaled` fences poll as unsignaled (matching Vulkan) until
+    /// `execute_graph` ties a submission to them.
     pub fn is_fence_signaled(&self, fence: &GpuFence) -> bool {
-        let GpuFence::Wgpu {
-            device,
-            submission_index,
-        } = fence
-        else {
+        use crate::backend::WgpuFenceState;
+        let GpuFence::Wgpu { device, state } = fence else {
             return false; // Not a wgpu fence
         };
 
-        let Ok(guard) = submission_index.lock() else {
+        let Ok(guard) = state.lock() else {
             return false; // Lock failed, assume not signaled (conservative)
         };
 
-        // No submission yet means fence is in initial "signaled" state
-        if guard.is_none() {
-            return true;
-        }
-
-        // Poll without blocking to check completion status.
-        // Note: wgpu's non-blocking poll checks if ALL queue work is done,
-        // not a specific submission. This is conservative but correct.
-        match device.poll(wgpu::PollType::Poll) {
-            Ok(status) => status.is_queue_empty(),
-            Err(_) => false, // Poll failed, assume not signaled
+        match &*guard {
+            WgpuFenceState::Signaled => true,
+            WgpuFenceState::Unsignaled => false,
+            // Poll without blocking to check completion status.
+            // Note: wgpu's non-blocking poll checks if ALL queue work is done,
+            // not a specific submission. This is conservative but correct.
+            WgpuFenceState::Submitted(_) => match device.poll(wgpu::PollType::Poll) {
+                Ok(status) => status.is_queue_empty(),
+                Err(_) => false, // Poll failed, assume not signaled
+            },
         }
     }
 
     /// Wait for a fence to be signaled with a timeout.
     ///
-    /// Returns `true` if the fence was signaled, `false` if the timeout elapsed.
-    pub fn wait_fence_timeout(&self, fence: &GpuFence, timeout: std::time::Duration) -> bool {
-        if let GpuFence::Wgpu {
-            device,
-            submission_index,
-        } = fence
-            && let Ok(guard) = submission_index.lock()
-            && let Some(idx) = guard.clone()
-        {
-            // Wait for the specific submission with user-specified timeout.
-            // `wait_finished()` is true for both QueueEmpty and WaitSucceeded;
-            // `is_queue_empty()` would report a spurious timeout whenever other
-            // submissions are still in flight.
-            match device.poll(wgpu::PollType::Wait {
-                submission_index: Some(idx),
-                timeout: Some(timeout),
-            }) {
-                Ok(status) => status.wait_finished(),
-                Err(_) => false,
+    /// Returns `Ok(true)` if the fence was signaled, `Ok(false)` on timeout
+    /// (including an untied `Unsignaled` fence, which can never signal), and
+    /// an error on poll failure.
+    pub fn wait_fence_timeout(
+        &self,
+        fence: &GpuFence,
+        timeout: std::time::Duration,
+    ) -> Result<bool, GraphicsError> {
+        use crate::backend::WgpuFenceState;
+        let GpuFence::Wgpu { device, state } = fence else {
+            return Ok(false);
+        };
+        let current = state
+            .lock()
+            .map_err(|_| GraphicsError::Internal("wgpu fence mutex poisoned".into()))?
+            .clone();
+        match current {
+            WgpuFenceState::Signaled => Ok(true),
+            // Nothing will ever signal it — report "not yet" immediately
+            // instead of sleeping out the timeout.
+            WgpuFenceState::Unsignaled => Ok(false),
+            WgpuFenceState::Submitted(idx) => {
+                // `wait_finished()` is true for both QueueEmpty and WaitSucceeded;
+                // `is_queue_empty()` would report a spurious timeout whenever other
+                // submissions are still in flight.
+                match device.poll(wgpu::PollType::Wait {
+                    submission_index: Some(idx),
+                    timeout: Some(timeout),
+                }) {
+                    Ok(status) => Ok(status.wait_finished()),
+                    Err(e) => {
+                        // Unrecoverable — abandon so the slot recovers (#46).
+                        Self::abandon_wgpu_fence(state);
+                        Err(GraphicsError::Internal(format!(
+                            "device poll failed during fence wait: {e}"
+                        )))
+                    }
+                }
             }
-        } else {
-            // No submission or not a wgpu fence - treat as signaled
-            true
         }
     }
 
@@ -546,38 +631,72 @@ impl WgpuBackend {
         }
     }
 
-    /// Write data to a texture.
+    /// Write tightly-packed data covering mip 0 of every layer of a texture.
+    ///
+    /// Mirrors the Vulkan backend's contract: block-compressed pitch is
+    /// computed in blocks (not texels), the data size is validated against
+    /// the tightly-packed image size, textures with `mip_level_count > 1`
+    /// and combined depth-stencil formats are rejected — upload those with
+    /// explicit regions via `TransferOperation::upload_texture`.
     pub fn write_texture(
         &self,
         texture: &GpuTexture,
         data: &[u8],
         descriptor: &TextureDescriptor,
     ) -> Result<(), crate::error::GraphicsError> {
-        use crate::types::TextureDimension;
+        use crate::error::GraphicsError;
 
         let GpuTexture::Wgpu {
             texture: wgpu_texture,
             ..
         } = texture
         else {
-            return Err(crate::error::GraphicsError::Internal(
+            return Err(GraphicsError::Internal(
                 "write_texture called with non-Wgpu texture".to_string(),
             ));
         };
 
-        let format = convert_texture_format(descriptor.format);
-        let block_size = format.block_copy_size(None).unwrap_or(4);
-        let bytes_per_row = descriptor.size.width * block_size;
+        if data.is_empty() {
+            return Ok(());
+        }
 
-        let depth_or_array_layers = match descriptor.dimension {
-            TextureDimension::Cube => 6,
-            TextureDimension::CubeArray => descriptor.size.depth * 6,
-            TextureDimension::D1
-            | TextureDimension::D1Array
-            | TextureDimension::D2
-            | TextureDimension::D2Array
-            | TextureDimension::D3 => descriptor.size.depth,
-        };
+        let format = descriptor.format;
+        if format.is_depth_stencil() && format.has_stencil() {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "write_texture does not support combined depth-stencil formats ({format:?})"
+            )));
+        }
+        if descriptor.mip_level_count > 1 {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "write_texture uploads mip 0 only, but the texture has {} mip levels — upload \
+                 each mip with an explicit region via TransferOperation::upload_texture",
+                descriptor.mip_level_count
+            )));
+        }
+
+        // Tight pitch in BLOCKS: width in texels / block width, times bytes
+        // per block (multiplying texel width by block bytes is 4x too large
+        // for BC/ETC/ASTC).
+        let (block_w, block_h) = format.block_dimensions();
+        let block_size = format.block_size();
+        let row_blocks = descriptor.size.width.div_ceil(block_w);
+        let col_blocks = descriptor.size.height.div_ceil(block_h);
+        let bytes_per_row = row_blocks * block_size;
+        // Same layer interpretation as create_texture (Cube -> 6, CubeArray
+        // -> cubes x 6, arrays -> size.depth, D3 -> real depth).
+        let (layer_count, depth) = descriptor.layers_and_depth();
+        let depth_or_array_layers = (layer_count * depth).max(1);
+
+        let expected =
+            bytes_per_row as usize * col_blocks as usize * depth_or_array_layers as usize;
+        if data.len() != expected {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "write_texture data size {} does not match the texture's tightly-packed size \
+                 {expected} ({row_blocks}x{col_blocks} blocks x {block_size} bytes x \
+                 {depth_or_array_layers} layers/depth)",
+                data.len(),
+            )));
+        }
 
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
@@ -590,7 +709,8 @@ impl WgpuBackend {
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(bytes_per_row),
-                rows_per_image: Some(descriptor.size.height),
+                // In block rows, not texel rows.
+                rows_per_image: Some(col_blocks),
             },
             wgpu::Extent3d {
                 width: descriptor.size.width,
@@ -603,67 +723,162 @@ impl WgpuBackend {
     }
 
     /// Read data from a buffer.
-    pub fn read_buffer(&self, buffer: &GpuBuffer, offset: u64, size: u64) -> Vec<u8> {
-        if let GpuBuffer::Wgpu(wgpu_buffer) = buffer {
-            // Try to map the buffer directly first (works if buffer has MAP_READ)
-            let slice = wgpu_buffer.slice(offset..offset + size);
-            let (tx, rx) = std::sync::mpsc::channel();
-            slice.map_async(wgpu::MapMode::Read, move |result| {
-                let _ = tx.send(result);
-            });
+    /// Read a host-visible buffer's mapped memory. See the trait contract on
+    /// [`GpuBackend::read_buffer`](crate::backend::GpuBackend::read_buffer).
+    pub fn read_buffer(
+        &self,
+        buffer: &GpuBuffer,
+        offset: u64,
+        size: u64,
+    ) -> Result<Vec<u8>, GraphicsError> {
+        let GpuBuffer::Wgpu(wgpu_buffer) = buffer else {
+            return Err(GraphicsError::Internal(
+                "read_buffer called with non-wgpu buffer".to_string(),
+            ));
+        };
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        if offset
+            .checked_add(size)
+            .is_none_or(|end| end > wgpu_buffer.size())
+        {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "read_buffer range at offset {offset} ({size} bytes) exceeds buffer size {}",
+                wgpu_buffer.size()
+            )));
+        }
+        // Check MAP_READ up front rather than letting `map_async` fail: a
+        // failed map is a device validation error (logged by the uncaptured
+        // handler) on every call, and the old staging-copy fallback then
+        // panicked in `get_mapped_range`. Require a readback buffer instead —
+        // matching the Vulkan backend, which also does not stage here.
+        if !wgpu_buffer.usage().contains(wgpu::BufferUsages::MAP_READ) {
+            return Err(GraphicsError::InvalidParameter(
+                "read_buffer on a buffer without MAP_READ; copy device-local data to a \
+                 readback buffer via TransferOperation::ReadbackBuffer first"
+                    .to_string(),
+            ));
+        }
 
-            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
-
-            if let Ok(Ok(())) = rx.recv() {
-                // Direct mapping succeeded
+        let slice = wgpu_buffer.slice(offset..offset + size);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        // Drive the map callback. The caller guarantees GPU completion
+        // (post-fence), so this returns promptly.
+        if let Err(e) = self.device.poll(wgpu::PollType::wait_indefinitely()) {
+            return Err(GraphicsError::Internal(format!(
+                "device poll failed during read_buffer map: {e}"
+            )));
+        }
+        match rx.recv() {
+            Ok(Ok(())) => {
+                // `get_mapped_range()` borrows the mapping; `.to_vec()` copies
+                // it out and drops the view before `unmap()`.
                 let data = slice.get_mapped_range().to_vec();
-                let _ = slice;
                 wgpu_buffer.unmap();
-                return data;
+                Ok(data)
             }
-
-            // Direct mapping failed - use staging buffer approach
-            // This requires the source buffer to have COPY_SRC
-            let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Read Staging Buffer"),
-                size,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            });
-
-            // Copy from source to staging
-            let mut encoder = self
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Read Buffer Encoder"),
-                });
-            encoder.copy_buffer_to_buffer(wgpu_buffer, offset, &staging, 0, size);
-
-            let idx = self.queue.submit(std::iter::once(encoder.finish()));
-
-            // Wait for copy to complete
-            let _ = self.device.poll(wgpu::PollType::Wait {
-                submission_index: Some(idx),
-                timeout: Some(std::time::Duration::from_secs(10)),
-            });
-
-            // Map and read
-            let slice = staging.slice(..);
-            let (tx, rx) = std::sync::mpsc::channel();
-            slice.map_async(wgpu::MapMode::Read, move |result| {
-                let _ = tx.send(result);
-            });
-
-            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
-            let _ = rx.recv();
-
-            let data = slice.get_mapped_range().to_vec();
-            let _ = slice;
-            staging.unmap();
-
-            data
-        } else {
-            vec![0u8; size as usize]
+            Ok(Err(e)) => Err(GraphicsError::Internal(format!(
+                "read_buffer map_async failed: {e}"
+            ))),
+            Err(_) => Err(GraphicsError::Internal(
+                "read_buffer map callback was dropped".to_string(),
+            )),
         }
     }
+}
+
+/// Build the `wgpu::BindGroupEntry` list for a binding group descriptor.
+///
+/// Factored out of the per-draw encode paths: it now runs **once**, at
+/// `create_binding_group` time. The returned entries borrow the resources'
+/// wgpu handles (via the `Arc`s inside `entries`), so they must be consumed
+/// while `entries` is alive.
+///
+/// `CombinedTextureSampler` is one material binding but wgpu (via Slang's WGSL
+/// reflection) expects a texture at binding N **plus** a sampler at N + 1, so it
+/// expands to two entries.
+fn build_wgpu_bind_group_entries(
+    entries: &[crate::materials::BindingEntry],
+) -> Result<Vec<wgpu::BindGroupEntry<'_>>, GraphicsError> {
+    use crate::materials::BoundResource;
+
+    let mut out: Vec<wgpu::BindGroupEntry> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if let BoundResource::CombinedTextureSampler { texture, sampler } = &entry.resource {
+            if let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() {
+                out.push(wgpu::BindGroupEntry {
+                    binding: entry.binding,
+                    resource: wgpu::BindingResource::TextureView(view),
+                });
+            }
+            if let GpuSampler::Wgpu(wgpu_sampler) = sampler.gpu_handle() {
+                out.push(wgpu::BindGroupEntry {
+                    binding: entry.binding + 1,
+                    resource: wgpu::BindingResource::Sampler(wgpu_sampler),
+                });
+            }
+            continue;
+        }
+
+        // A non-wgpu GPU handle here means a resource from another backend was
+        // bound. Fail loudly at the actual cause rather than desyncing the bind
+        // group from its layout.
+        let mismatch = |kind: &str| {
+            GraphicsError::InvalidParameter(format!(
+                "wgpu: {kind} bound at binding {} has a non-wgpu GPU handle \
+                 (resource from a different backend)",
+                entry.binding
+            ))
+        };
+        let resource = match &entry.resource {
+            BoundResource::Buffer(buffer) => {
+                let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() else {
+                    return Err(mismatch("buffer"));
+                };
+                wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: wgpu_buffer,
+                    offset: 0,
+                    size: None,
+                })
+            }
+            BoundResource::BufferRange {
+                buffer,
+                offset,
+                size,
+            } => {
+                let GpuBuffer::Wgpu(wgpu_buffer) = buffer.gpu_handle() else {
+                    return Err(mismatch("buffer"));
+                };
+                wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: wgpu_buffer,
+                    offset: *offset,
+                    size: std::num::NonZeroU64::new(*size),
+                })
+            }
+            BoundResource::Texture(texture) => {
+                let GpuTexture::Wgpu { view, .. } = texture.gpu_handle() else {
+                    return Err(mismatch("texture"));
+                };
+                wgpu::BindingResource::TextureView(view)
+            }
+            BoundResource::Sampler(sampler) => {
+                let GpuSampler::Wgpu(wgpu_sampler) = sampler.gpu_handle() else {
+                    return Err(mismatch("sampler"));
+                };
+                wgpu::BindingResource::Sampler(wgpu_sampler)
+            }
+            BoundResource::CombinedTextureSampler { .. } => {
+                unreachable!("CombinedTextureSampler handled above")
+            }
+        };
+        out.push(wgpu::BindGroupEntry {
+            binding: entry.binding,
+            resource,
+        });
+    }
+    Ok(out)
 }

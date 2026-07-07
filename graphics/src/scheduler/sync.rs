@@ -85,8 +85,10 @@ impl Fence {
         }
     }
 
-    /// Create a new CPU-only fence in the signaled state (for testing).
-    #[allow(dead_code)]
+    /// Create a new CPU-only fence in the signaled state.
+    ///
+    /// Used as the frame fence when a submit failed and no GPU work is in
+    /// flight (the slot is trivially safe to recycle), and in tests.
     pub(crate) fn new_signaled() -> Self {
         Self {
             inner: FenceInner::Dummy {
@@ -99,11 +101,13 @@ impl Fence {
     ///
     /// The fence is created in the signaled state initially (ready for first use).
     /// When passed to `execute_graph`, the GPU will signal it upon completion.
-    pub(crate) fn new_gpu(instance: Arc<GraphicsInstance>) -> Self {
-        let fence = Box::new(instance.backend().create_fence(true)); // Start signaled
-        Self {
+    pub(crate) fn new_gpu(
+        instance: Arc<GraphicsInstance>,
+    ) -> Result<Self, crate::error::GraphicsError> {
+        let fence = Box::new(instance.backend().create_fence(true)?); // Start signaled
+        Ok(Self {
             inner: FenceInner::Gpu { fence, instance },
-        }
+        })
     }
 
     /// Get the underlying GpuFence (if GPU-backed).
@@ -133,37 +137,43 @@ impl Fence {
         }
     }
 
-    /// Wait for the fence to be signaled (blocking).
+    /// Wait for the fence to be signaled (blocking, bounded).
     ///
     /// This blocks the calling thread until the GPU signals the fence.
-    /// Returns immediately if already signaled.
-    pub fn wait(&self) {
+    /// Returns immediately if already signaled. GPU-backed waits are bounded
+    /// by a backend-internal timeout (10 s); timeout and device loss are
+    /// returned as errors — in that case the GPU may still be using the
+    /// resources guarded by this fence, so they must not be recycled.
+    pub fn wait(&self) -> Result<(), crate::error::GraphicsError> {
         match &self.inner {
             FenceInner::Dummy { signaled } => {
                 while !signaled.load(Ordering::Acquire) {
                     std::hint::spin_loop();
                 }
+                Ok(())
             }
-            FenceInner::Gpu { fence, instance } => {
-                instance.backend().wait_fence(fence);
-            }
+            FenceInner::Gpu { fence, instance } => instance.backend().wait_fence(fence),
         }
     }
 
     /// Wait for the fence with a timeout.
     ///
-    /// Returns `true` if the fence was signaled, `false` if timeout elapsed.
-    pub fn wait_timeout(&self, timeout: std::time::Duration) -> bool {
+    /// Returns `Ok(true)` if the fence was signaled, `Ok(false)` if the
+    /// timeout elapsed, and an error on device loss or wait failure.
+    pub fn wait_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<bool, crate::error::GraphicsError> {
         match &self.inner {
             FenceInner::Dummy { signaled } => {
                 let start = std::time::Instant::now();
                 while !signaled.load(Ordering::Acquire) {
                     if start.elapsed() >= timeout {
-                        return false;
+                        return Ok(false);
                     }
                     std::hint::spin_loop();
                 }
-                true
+                Ok(true)
             }
             FenceInner::Gpu { fence, instance } => {
                 // Use proper backend wait with timeout instead of polling
@@ -260,7 +270,7 @@ mod tests {
             fence_clone.signal();
         });
 
-        fence.wait();
+        fence.wait().unwrap();
         assert!(fence.is_signaled());
     }
 
@@ -270,7 +280,7 @@ mod tests {
 
         // Should timeout since nothing signals it
         let result = fence.wait_timeout(std::time::Duration::from_millis(10));
-        assert!(!result);
+        assert!(!result.unwrap());
         assert!(!fence.is_signaled());
     }
 

@@ -21,6 +21,11 @@ pub enum GraphicsError {
     InvalidParameter(String),
     /// An internal error occurred.
     Internal(String),
+    /// A GPU wait (fence, submission poll, swapchain acquire) timed out.
+    ///
+    /// The GPU work may still complete later — the caller must not recycle
+    /// or destroy resources that the pending work references.
+    Timeout(String),
     /// The surface is outdated and needs to be reconfigured.
     SurfaceOutdated,
     /// The surface was lost and needs to be recreated.
@@ -37,6 +42,7 @@ impl fmt::Display for GraphicsError {
             Self::FeatureNotSupported(msg) => write!(f, "feature not supported: {msg}"),
             Self::OutOfMemory => write!(f, "out of GPU memory"),
             Self::DeviceLost => write!(f, "GPU device lost"),
+            Self::Timeout(msg) => write!(f, "GPU wait timed out: {msg}"),
             Self::InvalidParameter(msg) => write!(f, "invalid parameter: {msg}"),
             Self::Internal(msg) => write!(f, "internal error: {msg}"),
             Self::SurfaceOutdated => write!(f, "surface outdated, needs reconfiguration"),

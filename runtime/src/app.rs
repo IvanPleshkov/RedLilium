@@ -93,7 +93,7 @@ impl App {
             let render = schedules.get_mut::<Render>();
             render.add(FlushUploads);
             render.add(AssetGpuFlush);
-            render.add(ForwardRender);
+            render.add(ForwardRender::default());
             render
                 .add_edge::<FlushUploads, AssetGpuFlush>()
                 .expect("no cycle");
