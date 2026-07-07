@@ -332,6 +332,12 @@ pub fn create_editor_world(
     schedules.get_mut::<Render>().add(AssetGpuFlush);
     schedules.get_mut::<Render>().add(ForwardRender);
     schedules.get_mut::<Render>().add(DebugRender);
+    // Both FlushUploads and AssetGpuFlush use raw RenderSchedule access, so
+    // they must not run in parallel under the multi-threaded runner.
+    schedules
+        .get_mut::<Render>()
+        .add_edge::<FlushUploads, AssetGpuFlush>()
+        .expect("FlushUploads -> AssetGpuFlush edge");
     schedules
         .get_mut::<Render>()
         .add_edge::<FlushUploads, ForwardRender>()
@@ -374,8 +380,8 @@ pub fn create_editor_world(
         .add_edge::<UpdateGlobalTransforms, UpdateCameraMatrices>()
         .expect("No cycle");
 
-    // Asset loading: MeshLoad resolves layouts + requests meshes, then
-    // AssetPump drains the async stages onto the compute/IO pools + collects.
+    // Asset loading: HotReload -> MaterialInstanceLoad -> MeshLoad -> AssetPump.
+    // All share asset managers + ChangedAssets; raw access requires serialization.
     // MeshLoad is an ExclusiveSystem (barrier) so it doesn't contend with
     // component-writing systems under the multi-threaded runner.
     schedules.get_mut::<PostUpdate>().add(HotReload);
@@ -387,6 +393,16 @@ pub fn create_editor_world(
         .add(redlilium_ecs::RemoteServe);
     schedules.get_mut::<PostUpdate>().add(MaterialInstanceLoad);
     schedules.get_mut::<PostUpdate>().add(AssetPump);
+    // Serialize asset pipeline (HotReload -> MaterialInstanceLoad -> AssetPump)
+    // to avoid manager lock contention.
+    schedules
+        .get_mut::<PostUpdate>()
+        .add_edge::<HotReload, MaterialInstanceLoad>()
+        .expect("HotReload -> MaterialInstanceLoad edge");
+    schedules
+        .get_mut::<PostUpdate>()
+        .add_edge::<MaterialInstanceLoad, AssetPump>()
+        .expect("MaterialInstanceLoad -> AssetPump edge");
     schedules
         .get_mut::<PostUpdate>()
         .add_edge::<MeshLoad, AssetPump>()

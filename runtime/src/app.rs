@@ -69,6 +69,10 @@ impl App {
             post.add_exclusive(MeshLoad::default());
             post.add(MaterialInstanceLoad);
             post.add(AssetPump);
+            post.add_edge::<HotReload, MaterialInstanceLoad>()
+                .expect("no cycle");
+            post.add_edge::<MaterialInstanceLoad, AssetPump>()
+                .expect("no cycle");
             post.add_edge::<MeshLoad, AssetPump>().expect("no cycle");
         }
         {
@@ -76,6 +80,9 @@ impl App {
             render.add(FlushUploads);
             render.add(AssetGpuFlush);
             render.add(ForwardRender);
+            render
+                .add_edge::<FlushUploads, AssetGpuFlush>()
+                .expect("no cycle");
             render
                 .add_edge::<FlushUploads, ForwardRender>()
                 .expect("no cycle");
