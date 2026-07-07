@@ -149,6 +149,9 @@ pub use self::std::hierarchy::{
     HierarchyCommands, despawn_recursive, disable, enable, mark_editor, mark_static, remove_parent,
     set_parent, unmark_editor, unmark_static,
 };
+pub use self::std::play_mode::{
+    ManagePlayModeTransitions, PlayControl, PlayModeTransition, PlayState,
+};
 pub use self::std::spawn::spawn_scene;
 pub use self::std::systems;
 #[cfg(feature = "rendering")]

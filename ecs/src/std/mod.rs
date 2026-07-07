@@ -15,6 +15,7 @@ pub mod hierarchy;
     feature = "physics-2d-f32"
 ))]
 pub mod physics;
+pub mod play_mode;
 #[cfg(feature = "rendering")]
 pub mod remote;
 #[cfg(feature = "rendering")]
@@ -27,6 +28,7 @@ pub use components::*;
 pub use hierarchy::{
     HierarchyCommands, despawn_recursive, disable, enable, remove_parent, set_parent,
 };
+pub use play_mode::{ManagePlayModeTransitions, PlayControl, PlayModeTransition, PlayState};
 pub use spawn::spawn_scene;
 #[cfg(feature = "rendering")]
 pub use systems::DrawGrid;

@@ -18,10 +18,11 @@ use redlilium_debug_drawer::DebugDrawer;
 use redlilium_ecs::{
     AssetGpuFlush, AssetPump, Camera, DebugRender, DrawGrid, DrawSelectionAabb, EguiRender, Entity,
     FlushUploads, ForwardRender, FrameRing, FreeFlyCamera, GameTime, GlobalTransform, GridConfig,
-    HotReload, MaterialInstanceLoad, MaterialInstanceSource, MeshGenerator, MeshLoad, MeshRenderer,
-    MeshSource, Name, PostUpdate, Primitive, RealTime, Render, RenderSchedule, ScenePass,
-    Schedules, Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera,
-    UpdateGlobalTransforms, Visibility, WindowInput, World, register_std_components,
+    HotReload, ManagePlayModeTransitions, MaterialInstanceLoad, MaterialInstanceSource,
+    MeshGenerator, MeshLoad, MeshRenderer, MeshSource, Name, PlayControl, PostUpdate, PreUpdate,
+    Primitive, RealTime, Render, RenderSchedule, ScenePass, Schedules, Transform, Update,
+    UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms, Visibility, WindowInput,
+    World, register_std_components,
 };
 use redlilium_runtime::EngineContext;
 
@@ -192,6 +193,9 @@ pub fn create_editor_world(
     world.insert_resource(RealTime::default());
     world.insert_resource(GameTime::default());
 
+    // Play/Pause/Resume/Stop state machine for game code.
+    world.insert_resource(PlayControl::default());
+
     // Insert debug drawing resources
     let debug_drawer_handle = world.insert_resource(DebugDrawer::new());
     world.insert_resource(GridConfig::new());
@@ -319,6 +323,11 @@ pub fn create_editor_world(
 
     // --- Setup schedules ---
     let mut schedules = Schedules::new();
+
+    // PreUpdate: manage Play/Pause/Resume/Stop state transitions.
+    schedules
+        .get_mut::<PreUpdate>()
+        .add_exclusive(ManagePlayModeTransitions);
 
     // Update: read-only editor systems (debug grid, future interaction systems).
     // Systems here cannot mutate the world directly — they must push actions
