@@ -51,6 +51,27 @@ pub struct PlayModeTransition {
 #[derive(Debug, Clone, Copy)]
 pub struct PlayStartTick(pub u64);
 
+/// Snapshot of the world captured at Play transition.
+///
+/// When transitioning from Stopped to Playing, the entire world (all entities
+/// and opted-in resources) is serialized and stored. On Stop, the world is
+/// cleared (game entities removed) and this snapshot is restored, discarding
+/// all changes made during play (including edits in Pause mode).
+pub struct PlaySnapshot(pub Option<crate::serialize::SerializedWorld>);
+
+impl PlaySnapshot {
+    /// Create an empty snapshot.
+    pub fn new() -> Self {
+        Self(None)
+    }
+}
+
+impl Default for PlaySnapshot {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Game loop execution state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PlayState {
@@ -244,8 +265,16 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
         handler(world, transition);
     }
 
-    // Capture play_start_tick and reset game-schedule last_runs when transitioning to Playing.
+    // Capture snapshot and play_start_tick when transitioning to Playing.
     if to == PlayState::Playing {
+        // Save world snapshot for restore on Stop
+        let snapshot = world.serialize_world().ok();
+        if !world.has_resource::<PlaySnapshot>() {
+            world.insert_resource(PlaySnapshot(snapshot));
+        } else {
+            *world.resource_mut::<PlaySnapshot>() = PlaySnapshot(snapshot);
+        }
+
         let tick = world.current_tick();
         if !world.has_resource::<PlayStartTick>() {
             world.insert_resource(PlayStartTick(tick));
@@ -324,7 +353,8 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
         }
     }
 
-    // Clean up play-spawned entities when transitioning to Stopped.
+    // Restore world from snapshot when transitioning to Stopped.
+    // This discards all changes made during play/pause, including hot-edits.
     if to == PlayState::Stopped {
         let play_start_tick = if world.has_resource::<PlayStartTick>() {
             world.resource::<PlayStartTick>().0
@@ -332,6 +362,7 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
             0
         };
 
+        // Despawn all game entities (those created or spawned during play).
         let entities_to_despawn: Vec<Entity> = world
             .iter_entities()
             .filter(|entity| {
@@ -344,6 +375,38 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
 
         for entity in entities_to_despawn {
             world.despawn(entity);
+        }
+
+        // Restore editor entities from snapshot (undoes component edits made during pause).
+        // Since editor entities were present at play_start_tick, they match the snapshot.
+        if let Some(snapshot) = world
+            .has_resource::<PlaySnapshot>()
+            .then(|| world.resource::<PlaySnapshot>().0.clone())
+            .flatten()
+        {
+            // For each entity in snapshot, if it's an editor entity in the current world, restore its components.
+            for (idx, snap_entity) in snapshot.entities.iter().enumerate() {
+                let current_entity = world.entity_at_index(idx as u32);
+                if let Some(entity) = current_entity {
+                    let is_editor = world.get_entity_flags(entity) & Entity::EDITOR != 0;
+                    if is_editor {
+                        // Restore components for this editor entity from snapshot.
+                        // Deserialize each component and insert into the entity.
+                        for snap_component in &snap_entity.components {
+                            if let Err(e) =
+                                world.deserialize_component_by_name(entity, snap_component)
+                            {
+                                log::warn!(
+                                    "Failed to restore component {} on entity {:?}: {}",
+                                    snap_component.type_name,
+                                    entity,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Clear any panic state when stopping.
