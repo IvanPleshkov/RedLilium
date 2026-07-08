@@ -202,6 +202,11 @@ pub struct World {
     /// if a type is already registered under a dead generation, we allow the
     /// new generation to take over.
     pub(crate) generation_registry: crate::GameGenerationRegistry,
+    /// Registry of component migrations for handling schema changes during
+    /// deserialization (Phase 3, R3). When a component fails to deserialize,
+    /// a registered migration can transform the old-schema value into a
+    /// new-schema one, or the component is gracefully skipped.
+    pub(crate) migration_registry: crate::MigrationRegistry,
 }
 
 impl redlilium_core::abstract_editor::Editable for World {}
@@ -238,6 +243,7 @@ impl World {
             type_sources,
             current_source: crate::type_identity::SourceId::HOST,
             generation_registry: crate::GameGenerationRegistry::new(),
+            migration_registry: crate::MigrationRegistry::new(),
         }
     }
 
@@ -431,6 +437,46 @@ impl World {
         source: crate::type_identity::SourceId,
     ) {
         self.type_sources.insert(TypeId::of::<T>(), source);
+    }
+
+    // ---- Migration registry (Phase 3, R3) ----
+
+    /// Registers a migration function for a component type.
+    ///
+    /// When deserialization of a component fails, if a migration is registered
+    /// for that type, the migration function is called to attempt to transform
+    /// the old-schema value into a new-schema one.
+    ///
+    /// The migration function receives:
+    /// - `value: &Value` — the serialized component data
+    /// - `from_schema_version: u32` — version from the snapshot
+    /// - `to_schema_version: u32` — current component registration version
+    ///
+    /// Returns `Some(transformed)` if the migration was applied, `None` to skip.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// world.register_component_migration::<OldPosition>(
+    ///     |value, from_schema, to_schema| {
+    ///         if from_schema == 1 && to_schema == 2 {
+    ///             // Transform old-v1 to new-v2 format
+    ///             Some(Value::Object(map![
+    ///                 "x".into() => value["x"].clone(),
+    ///                 "y".into() => value["y"].clone(),
+    ///             ]))
+    ///         } else {
+    ///             None
+    ///         }
+    ///     }
+    /// );
+    /// ```
+    pub fn register_component_migration(
+        &mut self,
+        type_name: &'static str,
+        migration: crate::migration::ComponentMigrationFn,
+    ) {
+        self.migration_registry.register(type_name, migration);
     }
 
     // ---- Component lock helpers ----
