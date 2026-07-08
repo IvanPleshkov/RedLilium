@@ -94,6 +94,7 @@ fn serialize_component_fn<T: Component>(
     match comp.serialize_component(ctx) {
         Ok(value) => Ok(Some(crate::serialize::SerializedComponent {
             type_name: T::NAME.to_owned(),
+            schema_version: T::SCHEMA_VERSION,
             data: value,
         })),
         Err(crate::serialize::SerializeError::NotSerializable { .. }) => Ok(None),

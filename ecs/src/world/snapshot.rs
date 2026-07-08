@@ -34,6 +34,7 @@ fn capture_snapshot_resource<T: SnapshotResource>(
     let data = value::to_value(&*res)?;
     Ok(Some(SerializedResource {
         type_name: T::NAME.to_owned(),
+        schema_version: T::SCHEMA_VERSION,
         data,
     }))
 }

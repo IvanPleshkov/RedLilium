@@ -47,6 +47,13 @@ impl<T: Send + Sync + 'static> Resource for T {
 pub trait SnapshotResource: Resource + serde::Serialize + serde::de::DeserializeOwned {
     /// Stable type name used to match a captured resource to its restore hook.
     const NAME: &'static str;
+
+    /// The schema version of this resource type.
+    ///
+    /// Incremented when the resource's serialized fields change, allowing
+    /// migrations to transform old schema data to new schema during snapshot
+    /// restore. Defaults to 1.
+    const SCHEMA_VERSION: u32 = 1;
 }
 
 /// Trait for resources that respond to Play/Pause/Resume/Stop lifecycle events.

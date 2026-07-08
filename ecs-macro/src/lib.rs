@@ -33,7 +33,7 @@ use syn::{Data, DeriveInput, Fields, Meta, parse_macro_input};
 /// #[skip_serialization]
 /// struct RenderMesh(pub Arc<Mesh>);
 /// ```
-#[proc_macro_derive(Component, attributes(require, skip_serialization))]
+#[proc_macro_derive(Component, attributes(require, skip_serialization, schema_version))]
 pub fn derive_component(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
@@ -45,6 +45,19 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
         .attrs
         .iter()
         .any(|a| a.path().is_ident("skip_serialization"));
+
+    // Extract schema version from #[schema_version = N]
+    let mut schema_version: u32 = 1;
+    for attr in &input.attrs {
+        if attr.path().is_ident("schema_version")
+            && let Meta::NameValue(nv) = &attr.meta
+            && let syn::Expr::Lit(expr_lit) = &nv.value
+            && let syn::Lit::Int(lit_int) = &expr_lit.lit
+            && let Ok(val) = lit_int.base10_parse::<u32>()
+        {
+            schema_version = val;
+        }
+    }
 
     // Collect required component types from #[require(Type1, Type2, ...)]
     let mut required_types = Vec::new();
@@ -414,6 +427,7 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
     let expanded = quote! {
         impl #impl_generics redlilium_ecs::Component for #name #ty_generics #where_clause {
             const NAME: &'static str = #name_str;
+            const SCHEMA_VERSION: u32 = #schema_version;
 
             fn inspect_ui(&self, __ui: &mut redlilium_ecs::egui::Ui, _world: &redlilium_ecs::World, _entity: redlilium_ecs::Entity) -> redlilium_ecs::InspectResult {
                 #[allow(unused_imports)]
