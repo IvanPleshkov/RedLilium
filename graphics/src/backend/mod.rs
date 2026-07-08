@@ -306,10 +306,19 @@ pub enum GpuFence {
         signaled: std::sync::atomic::AtomicBool,
     },
     /// wgpu backend - binary fence emulated over submission indices.
+    ///
+    /// `state` is `Arc<Mutex>` (not a plain `Mutex`) so the `queue
+    /// .on_submitted_work_done` callback registered at submit can hold a clone
+    /// and flip it to `Signaled` when the GPU finishes — the only completion
+    /// signal available on wasm, where `device.poll` cannot block (#33).
+    /// `generation` mints a fresh id per submit; the callback only signals if
+    /// the state still carries its generation, so a late callback for a slot
+    /// fence that has since been re-submitted is a no-op (ABA guard).
     #[cfg(feature = "wgpu-backend")]
     Wgpu {
         device: Arc<wgpu::Device>,
-        state: std::sync::Mutex<WgpuFenceState>,
+        state: Arc<std::sync::Mutex<WgpuFenceState>>,
+        generation: Arc<std::sync::atomic::AtomicU64>,
     },
     /// Vulkan backend - true GPU fence via `vkFence`.
     #[cfg(feature = "vulkan-backend")]
@@ -354,8 +363,13 @@ pub enum WgpuFenceState {
     Unsignaled,
     /// Created signaled (or trivially complete); polls as signaled.
     Signaled,
-    /// Tied to a queue submission; polls/waits resolve via `device.poll`.
-    Submitted(wgpu::SubmissionIndex),
+    /// Tied to a queue submission. Native waits/polls resolve via
+    /// `device.poll(index)`; on all targets the `on_submitted_work_done`
+    /// callback flips this to `Signaled` when its `generation` matches.
+    Submitted {
+        index: wgpu::SubmissionIndex,
+        generation: u64,
+    },
 }
 
 /// Handle to an acquired surface texture for presentation.

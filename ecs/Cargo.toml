@@ -43,7 +43,10 @@ rapier3d-f64 = { workspace = true, optional = true }
 rapier3d = { workspace = true, optional = true }
 rapier2d-f64 = { workspace = true, optional = true }
 rapier2d = { workspace = true, optional = true }
-redlilium-graphics = { path = "../graphics", optional = true }
+redlilium-graphics = { path = "../graphics", optional = true, default-features = false, features = [
+    "dummy",
+    "wgpu-backend",
+] }
 redlilium-debug-drawer = { path = "../debug_drawer", optional = true }
 redlilium-assets = { path = "../assets", optional = true }
 redlilium-vfs = { path = "../vfs", optional = true }
@@ -51,6 +54,9 @@ image = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
+# Native re-enables the full graphics backend (Vulkan + runtime Slang) when the
+# `rendering` feature activates the optional graphics dep.
+redlilium-graphics = { path = "../graphics", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = { workspace = true }

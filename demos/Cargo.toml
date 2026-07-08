@@ -14,7 +14,11 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 redlilium-core = { path = "../core" }
-redlilium-graphics = { path = "../graphics" }
+# Portable graphics on wasm; native re-enables Vulkan/Slang below.
+redlilium-graphics = { path = "../graphics", default-features = false, features = [
+    "dummy",
+    "wgpu-backend",
+] }
 redlilium-app = { path = "../app" }
 redlilium-ecs = { path = "../ecs", features = ["physics", "rendering"] }
 redlilium-runtime = { path = "../runtime" }
@@ -26,6 +30,7 @@ bytemuck = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 env_logger.workspace = true
+redlilium-graphics = { path = "../graphics" }
 # For PBR IBL demo - HDR texture loading
 image = { version = "0.25", default-features = false, features = ["hdr", "png"] }
 ureq = "2.10"

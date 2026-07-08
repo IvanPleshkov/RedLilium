@@ -1,0 +1,20 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Build tooling for RedLilium (offline shader bake, #33)"
+publish = false
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
+# Native-only tooling: uses the Slang compiler (needs SLANG_DIR) to bake WGSL,
+# and the shared `shader::baked` key function so keys match the runtime.
+redlilium-graphics = { path = "../graphics", default-features = false, features = [
+    "slang-shaders",
+    "dummy",
+    "wgpu-backend",
+] }

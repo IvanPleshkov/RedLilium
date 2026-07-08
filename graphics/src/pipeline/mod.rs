@@ -206,6 +206,24 @@ impl FramePipeline {
     /// op's CPU `dst`, making GPU→CPU readbacks available one or more frames
     /// after they were requested.
     fn process_readbacks(&self, slot: usize) {
+        // On wasm this path maps a GPU buffer and reads it synchronously
+        // (`read_mapped` → `poll(Wait)` + `recv`), which would deadlock the
+        // browser thread. Readback is editor-only (picking/screenshot), not on
+        // the render-demo path, so it is a no-op here until step 4 reworks it to
+        // async `map_async` callbacks (#33).
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = slot;
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.drain_readbacks(slot);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn drain_readbacks(&self, slot: usize) {
         use crate::graph::TransferOperation;
         for graph in &self.slot_graphs[slot] {
             for pass in graph.passes() {
@@ -241,19 +259,45 @@ impl FramePipeline {
         }
     }
 
+    /// Begin a frame, blocking until this slot's previous GPU work completes.
+    ///
+    /// Native only in spirit — a browser thread cannot block. It is a thin
+    /// blocking wrapper over the canonical non-blocking [`try_begin_frame`]: it
+    /// waits the slot fence, then runs the exact same recycle-and-schedule body.
+    ///
+    /// On timeout or device loss the GPU may still be using this slot's
+    /// resources — the error propagates WITHOUT advancing frame state or
+    /// recycling anything. The fence stays in the slot, so a later call retries.
     pub fn begin_frame(&mut self) -> Result<FrameSchedule, GraphicsError> {
         profile_scope!("begin_frame");
-
-        // Wait for previous work in this slot to complete. On timeout or
-        // device loss the GPU may still be using this slot's resources —
-        // propagate the error WITHOUT advancing frame state or recycling
-        // anything (command pools, descriptor pools, graphs). The fence stays
-        // in the slot, so a later call retries the wait.
         if let Some(fence) = &self.frame_fences[self.current_slot] {
             profile_scope!("wait_fence");
             fence.wait()?;
         }
+        Ok(self.recycle_and_schedule())
+    }
 
+    /// Canonical non-blocking begin-frame: `Ok(None)` when this slot's previous
+    /// GPU work is not yet done (the caller should retry next tick), `Ok(Some)`
+    /// when the slot is ready and recycled. This is the shape the wasm frame
+    /// loop uses — it never blocks; completion arrives via the fence's
+    /// `on_submitted_work_done` callback and is observed by `is_signaled`.
+    pub fn try_begin_frame(&mut self) -> Result<Option<FrameSchedule>, GraphicsError> {
+        profile_scope!("try_begin_frame");
+        if let Some(fence) = &self.frame_fences[self.current_slot]
+            && !fence.is_signaled()
+        {
+            return Ok(None);
+        }
+        Ok(Some(self.recycle_and_schedule()))
+    }
+
+    /// The shared body of [`begin_frame`]/[`try_begin_frame`], run once the
+    /// slot's fence is known signaled: drain readbacks, advance backend frame
+    /// state, recycle the slot's graphs, and hand out a fresh [`FrameSchedule`].
+    /// Keeping it in one place means the blocking (native) and non-blocking
+    /// (wasm) entry points exercise identical recycling logic.
+    fn recycle_and_schedule(&mut self) -> FrameSchedule {
         // Fence passed: the GPU finished this slot's work, so readback source
         // buffers are safe to read. Drain them before recycling the graphs.
         self.process_readbacks(self.current_slot);
@@ -265,8 +309,8 @@ impl FramePipeline {
             self.device.advance_frame();
         }
 
-        // Now safe: reset old graphs from this slot. The fence wait guarantees
-        // the GPU is done, so dropping Arc references to GPU resources is safe.
+        // Now safe: reset old graphs from this slot. The fence guarantees the
+        // GPU is done, so dropping Arc references to GPU resources is safe.
         {
             profile_scope!("recycle_slot_graphs");
             for mut graph in self.slot_graphs[self.current_slot].drain(..) {
@@ -290,12 +334,12 @@ impl FramePipeline {
         // Take graph pool for this frame
         let graph_pool = std::mem::take(&mut self.graph_pool);
 
-        Ok(FrameSchedule::new(
+        FrameSchedule::new(
             self.device.clone(),
             self.current_slot,
             ring_buffer,
             graph_pool,
-        ))
+        )
     }
 
     /// Begin a new frame with a timeout.

@@ -11,7 +11,11 @@ use redlilium_ecs::{
     ShadingRegistry, TextureLoader, TextureManager, VertexLayoutLoader, VertexLayoutManager, World,
 };
 use redlilium_graphics::GraphicsDevice;
-use redlilium_vfs::{FileSystemProvider, Vfs};
+use redlilium_vfs::Vfs;
+// Native filesystem mounts vs. embedded in-memory mounts on wasm (no local disk
+// in a browser; std-assets are embedded — see #33).
+#[cfg(not(target_arch = "wasm32"))]
+use redlilium_vfs::FileSystemProvider;
 
 /// Engine state that outlives any single [`World`](redlilium_ecs::World):
 /// the GPU device, the asset database + processor, and the GPU resource
@@ -46,7 +50,16 @@ impl EngineContext {
     pub fn new(device: Arc<GraphicsDevice>, mounts: &[(&'static str, &'static str)]) -> Self {
         let mut vfs = Vfs::new();
         for &(name, dir) in mounts {
+            #[cfg(not(target_arch = "wasm32"))]
             vfs.mount(name, FileSystemProvider::new(dir));
+            // Wasm has no local disk: the pack is compiled into the binary and
+            // served from memory. An unknown mount (e.g. an empty project pack)
+            // gets an empty provider.
+            #[cfg(target_arch = "wasm32")]
+            vfs.mount(
+                name,
+                crate::embedded_assets::provider_for(dir).unwrap_or_default(),
+            );
         }
         let ctx = Self::with_vfs(device, vfs);
         for &(name, dir) in mounts {
@@ -89,6 +102,21 @@ impl EngineContext {
     /// Merge the mount's `<dir>/assets.db` (if present) into the shared
     /// asset database.
     pub fn load_mount_db(&self, mount: &str, dir: &str) {
+        // Wasm has no local disk: read the DB from the embedded pack instead of
+        // `std::fs` (and instead of the async VFS, so this stays synchronous).
+        #[cfg(target_arch = "wasm32")]
+        {
+            match crate::embedded_assets::assets_db_text(dir) {
+                Some(text) => {
+                    if let Err(e) = self.asset_db.write().merge_ron(mount, &text) {
+                        log::error!("failed to parse {mount} assets.db: {e}");
+                    }
+                }
+                None => log::warn!("mount '{mount}' has no embedded assets.db ({dir})"),
+            }
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         match std::fs::read_to_string(format!("{dir}/assets.db")) {
             Ok(text) => {
                 if let Err(e) = self.asset_db.write().merge_ron(mount, &text) {

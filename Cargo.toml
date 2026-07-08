@@ -12,6 +12,7 @@ members = [
     "debug_drawer",
     "vfs",
     "assets",
+    "xtask",
 ]
 
 [workspace.package]

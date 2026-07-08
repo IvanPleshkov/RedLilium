@@ -81,8 +81,11 @@ impl WgpuBackendType {
             Self::Auto => wgpu::Backends::VULKAN,
             #[cfg(target_os = "windows")]
             Self::Auto => wgpu::Backends::DX12,
+            // Web target is WebGPU-only (#33): the wgpu backend exists for the
+            // browser, and WebGL2 has no compute and caps limits well below a
+            // HiDPI canvas. Auto on wasm selects WebGPU, not GL (the WG-L7 bug).
             #[cfg(target_arch = "wasm32")]
-            Self::Auto => wgpu::Backends::GL,
+            Self::Auto => wgpu::Backends::BROWSER_WEBGPU,
             // Fallback for other platforms
             #[cfg(not(any(
                 target_os = "macos",
@@ -109,7 +112,7 @@ impl WgpuBackendType {
             Self::Gl => wgpu::Backends::GL,
 
             #[cfg(target_arch = "wasm32")]
-            Self::WebGpu => wgpu::Backends::GL,
+            Self::WebGpu => wgpu::Backends::BROWSER_WEBGPU,
         }
     }
 }

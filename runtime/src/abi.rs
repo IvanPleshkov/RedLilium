@@ -126,6 +126,8 @@ pub fn abi_fingerprint() -> &'static str {
 pub enum GameModuleError {
     /// `dlopen`/symbol resolution failed (missing file, unresolved symbols —
     /// e.g. the shared engine dylib was not found, missing exported symbol).
+    /// Native-only: wasm has no dynamic module loading (static linking only).
+    #[cfg(not(target_arch = "wasm32"))]
     Load(libloading::Error),
     /// The cdylib's fingerprint did not match this host's — a different
     /// toolchain or engine version. Loading is refused before any Rust-ABI
@@ -146,6 +148,7 @@ pub enum GameModuleError {
 impl std::fmt::Display for GameModuleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            #[cfg(not(target_arch = "wasm32"))]
             GameModuleError::Load(e) => write!(f, "failed to load game cdylib: {e}"),
             GameModuleError::FingerprintMismatch { host, module } => write!(
                 f,
@@ -189,15 +192,19 @@ pub struct GameModule {
     plugin: Box<dyn Plugin>,
     /// Kept alive for the handle's lifetime; `None` for a static plugin.
     /// Declared after `plugin` so it drops *after* it (see the type note).
+    /// Native-only: wasm links the game statically (no dylib to retain).
+    #[cfg(not(target_arch = "wasm32"))]
     _library: Option<libloading::Library>,
 }
 
 impl GameModule {
     /// Wrap a statically linked plugin — no dylib, no fingerprint check
-    /// (host and plugin are one compilation).
+    /// (host and plugin are one compilation). The only construction path on
+    /// wasm, where the game is always linked in.
     pub fn from_static(plugin: Box<dyn Plugin>) -> Self {
         Self {
             plugin,
+            #[cfg(not(target_arch = "wasm32"))]
             _library: None,
         }
     }
@@ -255,6 +262,7 @@ impl GameModule {
     ///   `SystemError::Panicked` without terminating the host. The cross-image
     ///   panic-counter duplication does not cause host termination or abort
     ///   under normal play-mode operation.
+    #[cfg(not(target_arch = "wasm32"))]
     pub unsafe fn load(path: impl AsRef<std::ffi::OsStr>) -> Result<Self, GameModuleError> {
         unsafe {
             let library = libloading::Library::new(path).map_err(GameModuleError::Load)?;

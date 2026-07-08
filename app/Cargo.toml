@@ -15,7 +15,12 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 redlilium-core = { path = "../core" }
-redlilium-graphics = { path = "../graphics" }
+# Portable graphics (no Vulkan/Slang) so this builds on wasm32; native
+# re-enables the full backend set in the not-wasm32 table below.
+redlilium-graphics = { path = "../graphics", default-features = false, features = [
+    "dummy",
+    "wgpu-backend",
+] }
 
 # Window and input handling
 winit = { workspace = true }
@@ -30,6 +35,8 @@ parking_lot = { workspace = true }
 env_logger = { workspace = true }
 pollster = { workspace = true }
 clap = { workspace = true }
+# Full graphics backend on native (adds Vulkan + runtime Slang compilation).
+redlilium-graphics = { path = "../graphics" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { workspace = true }

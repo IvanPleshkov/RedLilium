@@ -150,6 +150,13 @@ impl WgpuBackend {
             wgpu::Features::TEXTURE_COMPRESSION_ETC2,
             wgpu::Features::TEXTURE_COMPRESSION_ASTC,
             wgpu::Features::FLOAT32_FILTERABLE,
+            // Wireframe (`PolygonMode::Line`) is native-only — absent on WebGPU
+            // and WebGL. Requesting it unconditionally makes `request_device`
+            // fail outright on web (WG-C2). Request it only where supported and
+            // treat it as a runtime capability (`supports_wireframe`): pipeline
+            // creation downgrades `Line` to `Fill` when it is missing rather
+            // than tripping a validation error.
+            wgpu::Features::POLYGON_MODE_LINE,
         ]
         .into_iter()
         .filter(|f| supported.contains(*f))
@@ -167,8 +174,13 @@ impl WgpuBackend {
     ) -> Result<(wgpu::Device, wgpu::Queue), GraphicsError> {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("RedLilium Device"),
-            required_features: wgpu::Features::POLYGON_MODE_LINE | Self::optional_features(adapter),
-            required_limits: wgpu::Limits::default(),
+            required_features: Self::optional_features(adapter),
+            // `Limits::default()` are the WebGPU spec-guaranteed defaults —
+            // satisfiable on any WebGPU adapter (unlike the native defaults that
+            // exceeded WebGL limits, WG-C2). `using_resolution` raises the
+            // texture/buffer size caps to what this adapter actually reports, so
+            // a HiDPI canvas or large viewport isn't clamped to the 2048 floor.
+            required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
             memory_hints: wgpu::MemoryHints::default(),
             experimental_features: wgpu::ExperimentalFeatures::default(),
             trace: wgpu::Trace::Off,
@@ -329,18 +341,54 @@ impl WgpuBackend {
             self.queue.submit(std::iter::once(command_buffer))
         };
 
-        // Store submission index in fence for async polling
-        if let Some(GpuFence::Wgpu { state, .. }) = signal_fence
-            && let Ok(mut guard) = state.lock()
+        // Async path: tie the fence to this submission and register a completion
+        // callback. `on_submitted_work_done` fires when the GPU finishes — on
+        // native when `device.poll` runs it, on wasm from the browser event loop
+        // (the only completion signal there; `poll` can't block, #33). The
+        // generation guards against ABA: a slot fence re-submitted before this
+        // callback fires carries a newer generation, so this callback becomes a
+        // no-op (see `WgpuFenceState::Submitted`).
+        if let Some(GpuFence::Wgpu {
+            state, generation, ..
+        }) = signal_fence
         {
-            *guard = crate::backend::WgpuFenceState::Submitted(submission_index);
-            // Async path: return immediately, caller will wait on fence
+            let this_gen = generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            {
+                let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+                *guard = crate::backend::WgpuFenceState::Submitted {
+                    index: submission_index,
+                    generation: this_gen,
+                };
+            }
+            let state_cb = std::sync::Arc::clone(state);
+            self.queue.on_submitted_work_done(move || {
+                let mut guard = state_cb.lock().unwrap_or_else(|e| e.into_inner());
+                if let crate::backend::WgpuFenceState::Submitted { generation, .. } = &*guard
+                    && *generation == this_gen
+                {
+                    *guard = crate::backend::WgpuFenceState::Signaled;
+                }
+            });
             return Ok(());
         }
 
-        // Sync path: no fence provided, wait for GPU to complete before
-        // returning. A timeout or poll failure must be surfaced — pretending
-        // the work finished lets callers recycle in-flight resources.
+        // No-fence path: the caller wants CPU-synchronous completion. The frame
+        // pipeline always ties a fence, so this is never on the wasm hot path;
+        // still, a browser thread cannot block, so guard it loudly rather than
+        // silently returning stale (any real wasm need here must go async).
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = submission_index;
+            log::error!(
+                "execute_graph without a fence cannot block for completion on wasm; \
+                 returning without waiting — the caller must use a fenced submit + \
+                 non-blocking readiness polling instead"
+            );
+            Ok(())
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        // A timeout or poll failure must be surfaced — pretending the work
+        // finished lets callers recycle in-flight resources.
         match self.device.poll(wgpu::PollType::Wait {
             submission_index: Some(submission_index),
             timeout: Some(std::time::Duration::from_secs(10)),

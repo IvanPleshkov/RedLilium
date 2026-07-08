@@ -9,7 +9,11 @@ description = "Game runtime for RedLilium Engine: the Plugin API and the host lo
 [dependencies]
 redlilium-core = { path = "../core" }
 redlilium-app = { path = "../app" }
-redlilium-graphics = { path = "../graphics" }
+# Portable graphics on wasm; native re-enables Vulkan/Slang below.
+redlilium-graphics = { path = "../graphics", default-features = false, features = [
+    "dummy",
+    "wgpu-backend",
+] }
 redlilium-ecs = { path = "../ecs", features = ["rendering"] }
 redlilium-assets = { path = "../assets" }
 redlilium-vfs = { path = "../vfs" }
@@ -17,4 +21,8 @@ redlilium-vfs = { path = "../vfs" }
 winit = { workspace = true }
 log = { workspace = true }
 bytemuck = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+redlilium-graphics = { path = "../graphics" }
+# Native dynamic game-module loading (dlopen); unavailable on wasm.
 libloading = { workspace = true }

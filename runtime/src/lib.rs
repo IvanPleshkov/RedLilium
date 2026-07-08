@@ -41,6 +41,9 @@
 mod abi;
 mod app;
 mod blit;
+// Std-assets compiled into the wasm binary (no local disk in a browser, #33).
+#[cfg(target_arch = "wasm32")]
+mod embedded_assets;
 mod engine_context;
 mod handler;
 

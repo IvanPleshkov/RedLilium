@@ -341,7 +341,22 @@ impl WgpuBackend {
                     cull_mode: None,
                     polygon_mode: match descriptor.polygon_mode {
                         crate::materials::PolygonMode::Fill => wgpu::PolygonMode::Fill,
-                        crate::materials::PolygonMode::Line => wgpu::PolygonMode::Line,
+                        // Wireframe needs POLYGON_MODE_LINE, which WebGPU lacks
+                        // (WG-C2). Requesting `Line` on a device without it is a
+                        // validation error, so degrade to `Fill` at runtime when
+                        // the capability is absent rather than crashing on web.
+                        crate::materials::PolygonMode::Line
+                            if self.device.features().contains(wgpu::Features::POLYGON_MODE_LINE) =>
+                        {
+                            wgpu::PolygonMode::Line
+                        }
+                        crate::materials::PolygonMode::Line => {
+                            log::warn!(
+                                "wireframe (PolygonMode::Line) unsupported on this device; \
+                                 falling back to Fill"
+                            );
+                            wgpu::PolygonMode::Fill
+                        }
                     },
                     unclipped_depth: false,
                     conservative: false,
@@ -459,10 +474,29 @@ impl WgpuBackend {
                     .collect();
                 compiler.compile_to_wgsl(source_str, &shader.entry_point, &[], &defines)
             }
+            // Without the Slang compiler (wasm has no native Slang lib, #33, or
+            // any `--no-default-features` native build), serve the WGSL baked
+            // offline by `xtask bake-shaders`. A miss fails loudly and names the
+            // permutation, so a forgotten rebake is obvious rather than a silent
+            // gray screen.
             #[cfg(not(feature = "slang-shaders"))]
-            ShaderSourceLanguage::Slang => Err(GraphicsError::FeatureNotSupported(
-                "Slang shaders require the 'slang-shaders' feature".into(),
-            )),
+            ShaderSourceLanguage::Slang => {
+                let defines: Vec<(&str, &str)> = shader
+                    .defines
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect();
+                crate::shader::baked::lookup(source_str, &shader.entry_point, &defines)
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        GraphicsError::ShaderCompilationFailed(format!(
+                            "no baked WGSL for a Slang shader (entry '{}', defines {:?}); Slang \
+                             cannot compile at runtime on this target — add it to the xtask \
+                             registry and run `cargo run -p xtask -- bake-shaders`, then rebuild",
+                            shader.entry_point, shader.defines
+                        ))
+                    })
+            }
         }
     }
 
@@ -475,15 +509,18 @@ impl WgpuBackend {
     pub fn create_fence(&self, signaled: bool) -> Result<GpuFence, GraphicsError> {
         Ok(GpuFence::Wgpu {
             device: self.device.clone(),
-            state: Mutex::new(if signaled {
+            state: std::sync::Arc::new(Mutex::new(if signaled {
                 crate::backend::WgpuFenceState::Signaled
             } else {
                 crate::backend::WgpuFenceState::Unsignaled
-            }),
+            })),
+            generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
-    /// Wait for a fence to be signaled.
+    /// Wait for a fence to be signaled (blocking; native only — a browser thread
+    /// cannot block, so wasm drives completion through the submit callback and
+    /// polls [`is_fence_signaled`] instead).
     ///
     /// Bounded by a 10 s timeout; timeout and poll failures are returned as
     /// errors so callers never mistake a hung GPU for completed work.
@@ -491,13 +528,10 @@ impl WgpuBackend {
     /// nothing will ever signal it (Vulkan would stall the full timeout).
     pub fn wait_fence(&self, fence: &GpuFence) -> Result<(), GraphicsError> {
         use crate::backend::WgpuFenceState;
-        let GpuFence::Wgpu { device, state } = fence else {
+        let GpuFence::Wgpu { device, state, .. } = fence else {
             return Ok(());
         };
-        let current = state
-            .lock()
-            .map_err(|_| GraphicsError::Internal("wgpu fence mutex poisoned".into()))?
-            .clone();
+        let current = lock_fence_state(state).clone();
         match current {
             WgpuFenceState::Signaled => Ok(()),
             WgpuFenceState::Unsignaled => Err(GraphicsError::Timeout(
@@ -505,9 +539,9 @@ impl WgpuBackend {
                  it can never be signaled"
                     .into(),
             )),
-            WgpuFenceState::Submitted(idx) => {
+            WgpuFenceState::Submitted { index, .. } => {
                 match device.poll(wgpu::PollType::Wait {
-                    submission_index: Some(idx),
+                    submission_index: Some(index),
                     timeout: Some(std::time::Duration::from_secs(10)),
                 }) {
                     Ok(status) if status.wait_finished() => Ok(()),
@@ -535,36 +569,26 @@ impl WgpuBackend {
     /// later wait on the same slot returns immediately instead of re-polling a
     /// submission index that will never signal (the #46 wedge).
     fn abandon_wgpu_fence(state: &std::sync::Mutex<crate::backend::WgpuFenceState>) {
-        if let Ok(mut guard) = state.lock() {
-            *guard = crate::backend::WgpuFenceState::Signaled;
-        }
+        *lock_fence_state(state) = crate::backend::WgpuFenceState::Signaled;
     }
 
-    /// Check if a fence is signaled (non-blocking).
+    /// Check if a fence is signaled (non-blocking) — the wasm-safe readiness
+    /// check the frame loop polls each tick.
     ///
-    /// `Unsignaled` fences poll as unsignaled (matching Vulkan) until
-    /// `execute_graph` ties a submission to them.
+    /// Polls the device FIRST (driving `on_submitted_work_done` callbacks, which
+    /// flip `Submitted`→`Signaled`) and only THEN reads the state. Doing it in
+    /// this order matters: `device.poll` runs those callbacks, and they lock the
+    /// same non-reentrant `state` mutex — reading state while holding the lock
+    /// across `poll` would self-deadlock. On wasm `poll` is a no-op and the
+    /// callback fires from the event loop instead; reading the state still works.
     pub fn is_fence_signaled(&self, fence: &GpuFence) -> bool {
         use crate::backend::WgpuFenceState;
-        let GpuFence::Wgpu { device, state } = fence else {
+        let GpuFence::Wgpu { device, state, .. } = fence else {
             return false; // Not a wgpu fence
         };
-
-        let Ok(guard) = state.lock() else {
-            return false; // Lock failed, assume not signaled (conservative)
-        };
-
-        match &*guard {
-            WgpuFenceState::Signaled => true,
-            WgpuFenceState::Unsignaled => false,
-            // Poll without blocking to check completion status.
-            // Note: wgpu's non-blocking poll checks if ALL queue work is done,
-            // not a specific submission. This is conservative but correct.
-            WgpuFenceState::Submitted(_) => match device.poll(wgpu::PollType::Poll) {
-                Ok(status) => status.is_queue_empty(),
-                Err(_) => false, // Poll failed, assume not signaled
-            },
-        }
+        // Drive callbacks without holding the state lock (see doc note).
+        let _ = device.poll(wgpu::PollType::Poll);
+        matches!(&*lock_fence_state(state), WgpuFenceState::Signaled)
     }
 
     /// Wait for a fence to be signaled with a timeout.
@@ -578,24 +602,21 @@ impl WgpuBackend {
         timeout: std::time::Duration,
     ) -> Result<bool, GraphicsError> {
         use crate::backend::WgpuFenceState;
-        let GpuFence::Wgpu { device, state } = fence else {
+        let GpuFence::Wgpu { device, state, .. } = fence else {
             return Ok(false);
         };
-        let current = state
-            .lock()
-            .map_err(|_| GraphicsError::Internal("wgpu fence mutex poisoned".into()))?
-            .clone();
+        let current = lock_fence_state(state).clone();
         match current {
             WgpuFenceState::Signaled => Ok(true),
             // Nothing will ever signal it — report "not yet" immediately
             // instead of sleeping out the timeout.
             WgpuFenceState::Unsignaled => Ok(false),
-            WgpuFenceState::Submitted(idx) => {
+            WgpuFenceState::Submitted { index, .. } => {
                 // `wait_finished()` is true for both QueueEmpty and WaitSucceeded;
                 // `is_queue_empty()` would report a spurious timeout whenever other
                 // submissions are still in flight.
                 match device.poll(wgpu::PollType::Wait {
-                    submission_index: Some(idx),
+                    submission_index: Some(index),
                     timeout: Some(timeout),
                 }) {
                     Ok(status) => Ok(status.wait_finished()),
@@ -883,4 +904,14 @@ fn build_wgpu_bind_group_entries(
         });
     }
     Ok(out)
+}
+
+/// Lock the wgpu fence state, recovering from a poisoned mutex instead of
+/// panicking. The critical sections are tiny (a match + assign), but a panic
+/// while the lock is held would otherwise wedge every later `.lock()` — on wasm
+/// a poisoned unwrap in the submit callback means a permanently dead tab.
+fn lock_fence_state(
+    state: &std::sync::Mutex<crate::backend::WgpuFenceState>,
+) -> std::sync::MutexGuard<'_, crate::backend::WgpuFenceState> {
+    state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
