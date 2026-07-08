@@ -78,6 +78,8 @@ pub struct EditorTabViewer<'a> {
     pub drag_rect: Option<egui::Rect>,
     /// egui texture id of the off-screen scene color target (the SceneView image).
     pub scene_texture: Option<egui::TextureId>,
+    /// Phase 6: Lock inspector edits during Pause mode (read-only inspection only).
+    pub read_only: bool,
 }
 
 impl TabViewer for EditorTabViewer<'_> {
@@ -90,7 +92,7 @@ impl TabViewer for EditorTabViewer<'_> {
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Tab) {
         match tab {
             Tab::WorldInspector => {
-                redlilium_ecs::ui::show_world_inspector(ui, self.world, self.inspector_state);
+                redlilium_ecs::ui::show_world_inspector(ui, self.world, self.inspector_state, self.read_only);
             }
             Tab::ComponentInspector => {
                 // An asset selected in the browser takes precedence over the
@@ -104,6 +106,7 @@ impl TabViewer for EditorTabViewer<'_> {
                         ui,
                         self.world,
                         self.inspector_state,
+                        self.read_only,
                     );
                 }
             }

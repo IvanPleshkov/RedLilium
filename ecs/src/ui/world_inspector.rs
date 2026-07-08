@@ -22,11 +22,16 @@ use super::{InspectorState, PrefabFileDragPayload};
 ///
 /// The caller is responsible for placing this in whatever container they want
 /// (dock tab, side panel, window, etc.).
-pub fn show_world_inspector(ui: &mut egui::Ui, world: &World, state: &mut InspectorState) {
+///
+/// # Phase 6: Read-only mode
+///
+/// When `read_only` is true (during Pause), the UI shows the hierarchy but disables
+/// drag-and-drop reparenting and editing. Inspection only.
+pub fn show_world_inspector(ui: &mut egui::Ui, world: &World, state: &mut InspectorState, read_only: bool) {
     // Filter input
     ui.horizontal(|ui| {
         ui.label("Filter:");
-        ui.text_edit_singleline(&mut state.filter);
+        ui.add_enabled(!read_only, egui::TextEdit::singleline(&mut state.filter));
     });
 
     ui.checkbox(&mut state.show_editor_entities, "Show Editor Entities");
