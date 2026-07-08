@@ -1047,8 +1047,15 @@ impl AppHandler for Editor {
                 }
             }
 
-            // Status bar (bottom)
-            status_bar::draw_status_bar(&egui_ctx, self.fps);
+            // Phase 6: Full-screen Play mode
+            // During Playing, hide editor UI and show only the game viewport
+            // During Paused, show editor UI but lock editing (read-only inspection)
+            let is_playing = self.play_state == PlayState::Playing;
+
+            // Status bar (bottom) — hidden during Play, visible during Pause and Edit
+            if !is_playing {
+                status_bar::draw_status_bar(&egui_ctx, self.fps);
+            }
 
             // Dock area fills remaining space (transparent, no margin so it spans edge-to-edge)
             let panel_frame = egui::Frame::NONE.fill(egui::Color32::TRANSPARENT);
@@ -1073,52 +1080,71 @@ impl AppHandler for Editor {
                         } else {
                             None
                         };
-                        let mut tab_viewer = EditorTabViewer {
-                            world: &mut ew.world,
-                            inspector_state: &mut self.inspector_state,
-                            vfs: &self.vfs,
-                            asset_browser: &mut self.asset_browser,
-                            console: &mut self.console,
-                            history: &ew.history,
-                            scene_view_rect: None,
-                            drag_rect,
-                            scene_texture: self.scene_texture_id,
-                        };
-                        let mut dock_style = egui_dock::Style::from_egui(ui.style().as_ref());
-                        dock_style.tab_bar.corner_radius = egui::CornerRadius::ZERO;
-                        dock_style.tab_bar.bg_fill = crate::theme::BG;
-                        dock_style.tab.active.corner_radius = egui::CornerRadius::ZERO;
-                        dock_style.tab.active.bg_fill = crate::theme::SURFACE1;
-                        dock_style.tab.active.text_color = crate::theme::TEXT_PRIMARY;
-                        dock_style.tab.inactive.corner_radius = egui::CornerRadius::ZERO;
-                        dock_style.tab.inactive.bg_fill = crate::theme::BG;
-                        dock_style.tab.inactive.text_color = crate::theme::TEXT_MUTED;
-                        dock_style.tab.focused.corner_radius = egui::CornerRadius::ZERO;
-                        dock_style.tab.focused.bg_fill = crate::theme::SURFACE1;
-                        dock_style.tab.focused.text_color = crate::theme::TEXT_PRIMARY;
-                        dock_style.tab.hovered.corner_radius = egui::CornerRadius::ZERO;
-                        dock_style.tab.hovered.bg_fill = crate::theme::SURFACE3;
-                        dock_style.tab.hovered.text_color = crate::theme::TEXT_PRIMARY;
-                        dock_style.tab.inactive_with_kb_focus.corner_radius =
-                            egui::CornerRadius::ZERO;
-                        dock_style.tab.active_with_kb_focus.corner_radius =
-                            egui::CornerRadius::ZERO;
-                        dock_style.tab.focused_with_kb_focus.corner_radius =
-                            egui::CornerRadius::ZERO;
-                        dock_style.tab.tab_body.corner_radius = egui::CornerRadius::ZERO;
-                        dock_style.main_surface_border_rounding = egui::CornerRadius::ZERO;
-                        dock_style.separator.color_idle = crate::theme::BORDER;
-                        dock_style.separator.color_hovered = crate::theme::ACCENT_HOVER;
-                        dock_style.separator.color_dragged = crate::theme::ACCENT;
 
-                        egui_dock::DockArea::new(&mut self.dock_state)
-                            .style(dock_style)
-                            .show_leaf_collapse_buttons(false)
-                            .show_inside(ui, &mut tab_viewer);
-                        scene_view_rect = tab_viewer.scene_view_rect;
+                        if is_playing {
+                            // Full-screen game viewport during Play mode
+                            if let Some(texture_id) = self.scene_texture_id {
+                                let available = ui.available_rect_before_wrap();
+                                ui.painter().image(
+                                    texture_id,
+                                    available,
+                                    egui::Rect::from_min_max(
+                                        egui::pos2(0.0, 0.0),
+                                        egui::pos2(1.0, 1.0),
+                                    ),
+                                    egui::Color32::WHITE,
+                                );
+                                scene_view_rect = Some(available);
+                            }
+                        } else {
+                            // Normal dock layout during Edit and Pause modes
+                            let mut tab_viewer = EditorTabViewer {
+                                world: &mut ew.world,
+                                inspector_state: &mut self.inspector_state,
+                                vfs: &self.vfs,
+                                asset_browser: &mut self.asset_browser,
+                                console: &mut self.console,
+                                history: &ew.history,
+                                scene_view_rect: None,
+                                drag_rect,
+                                scene_texture: self.scene_texture_id,
+                            };
+                            let mut dock_style = egui_dock::Style::from_egui(ui.style().as_ref());
+                            dock_style.tab_bar.corner_radius = egui::CornerRadius::ZERO;
+                            dock_style.tab_bar.bg_fill = crate::theme::BG;
+                            dock_style.tab.active.corner_radius = egui::CornerRadius::ZERO;
+                            dock_style.tab.active.bg_fill = crate::theme::SURFACE1;
+                            dock_style.tab.active.text_color = crate::theme::TEXT_PRIMARY;
+                            dock_style.tab.inactive.corner_radius = egui::CornerRadius::ZERO;
+                            dock_style.tab.inactive.bg_fill = crate::theme::BG;
+                            dock_style.tab.inactive.text_color = crate::theme::TEXT_MUTED;
+                            dock_style.tab.focused.corner_radius = egui::CornerRadius::ZERO;
+                            dock_style.tab.focused.bg_fill = crate::theme::SURFACE1;
+                            dock_style.tab.focused.text_color = crate::theme::TEXT_PRIMARY;
+                            dock_style.tab.hovered.corner_radius = egui::CornerRadius::ZERO;
+                            dock_style.tab.hovered.bg_fill = crate::theme::SURFACE3;
+                            dock_style.tab.hovered.text_color = crate::theme::TEXT_PRIMARY;
+                            dock_style.tab.inactive_with_kb_focus.corner_radius =
+                                egui::CornerRadius::ZERO;
+                            dock_style.tab.active_with_kb_focus.corner_radius =
+                                egui::CornerRadius::ZERO;
+                            dock_style.tab.focused_with_kb_focus.corner_radius =
+                                egui::CornerRadius::ZERO;
+                            dock_style.tab.tab_body.corner_radius = egui::CornerRadius::ZERO;
+                            dock_style.main_surface_border_rounding = egui::CornerRadius::ZERO;
+                            dock_style.separator.color_idle = crate::theme::BORDER;
+                            dock_style.separator.color_hovered = crate::theme::ACCENT_HOVER;
+                            dock_style.separator.color_dragged = crate::theme::ACCENT;
 
-                        // Floating label near cursor while dragging
-                        show_drag_overlay(ui.ctx(), tab_viewer.world);
+                            egui_dock::DockArea::new(&mut self.dock_state)
+                                .style(dock_style)
+                                .show_leaf_collapse_buttons(false)
+                                .show_inside(ui, &mut tab_viewer);
+                            scene_view_rect = tab_viewer.scene_view_rect;
+
+                            // Floating label near cursor while dragging
+                            show_drag_overlay(ui.ctx(), tab_viewer.world);
+                        }
                     }
                 });
 
@@ -1374,11 +1400,16 @@ impl AppHandler for Editor {
         self.with_egui(|egui| {
             egui.on_mouse_button(button, pressed);
         });
+
+        // Phase 6: Block edit operations during Play mode (game input still flows through)
+        let is_playing = self.play_state == PlayState::Playing;
+
         // Releasing the primary button ends an edit gesture: the next recorded
         // action starts a fresh undo entry (drag-long edits keep coalescing
         // while the button is held).
         if button == MouseButton::Left
             && !pressed
+            && !is_playing
             && let Some(ew) = &mut self.world
         {
             ew.history.break_merge();
@@ -1404,7 +1435,8 @@ impl AppHandler for Editor {
             // LMB press: start potential drag for box selection.
             // LMB release: if it was a small movement → single-click GPU pick,
             // otherwise → box selection of all entities in the rectangle.
-            if button == MouseButton::Left && self.scene_view_rect_phys.is_some() {
+            // Phase 6: Block drag selection during Play mode
+            if button == MouseButton::Left && self.scene_view_rect_phys.is_some() && !is_playing {
                 if pressed && self.cursor_in_scene_view() && !self.egui_wants_pointer {
                     self.drag_start = Some(self.cursor_pos);
                     self.dragging_box = false;
