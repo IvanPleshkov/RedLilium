@@ -1053,9 +1053,8 @@ impl AppHandler for Editor {
 
             // Phase 6: Full-screen Play mode
             // During Playing, hide editor UI and show only the game viewport
-            // During Paused, show editor UI but lock editing (read-only inspection)
+            // During Paused, show editor UI with full hot-edit support
             let is_playing = self.play_state == PlayState::Playing;
-            let is_paused = self.play_state == PlayState::Paused;
 
             // Status bar (bottom) — hidden during Play, visible during Pause and Edit
             if !is_playing {
@@ -1113,7 +1112,6 @@ impl AppHandler for Editor {
                                 scene_view_rect: None,
                                 drag_rect,
                                 scene_texture: self.scene_texture_id,
-                                read_only: is_paused,
                                 is_playing,
                             };
                             let mut dock_style = egui_dock::Style::from_egui(ui.style().as_ref());
