@@ -232,8 +232,23 @@ impl App {
         aspect: f32,
         snapshot: &redlilium_ecs::serialize::SerializedWorld,
     ) -> Result<Self, redlilium_ecs::serialize::DeserializeError> {
+        let generation = engine.generation_registry().write().allocate_generation();
         let mut app = Self::new(engine, aspect);
-        plugin.build(&mut app);
+
+        let mut world = std::mem::take(&mut app.world);
+        world.with_registration_source(generation, |scoped_world| {
+            // Reconstruct a temporary app with the scoped world to call plugin.build
+            let mut temp_app = App {
+                world: std::mem::take(scoped_world),
+                schedules: std::mem::take(&mut app.schedules),
+                window_input: app.window_input.clone(),
+                aspect: app.aspect,
+            };
+            plugin.build(&mut temp_app);
+            // Move changes back to outer scope
+            app.world = std::mem::take(&mut temp_app.world);
+            app.schedules = std::mem::take(&mut temp_app.schedules);
+        });
         // The scene comes from the snapshot; `build` must not have spawned any
         // entities (contract: scene population lives in `spawn_scene`, skipped
         // on reload). A violation would stack the restored snapshot on top of a

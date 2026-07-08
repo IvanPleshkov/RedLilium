@@ -6,9 +6,10 @@ use redlilium_ecs::sync::RwLock;
 
 use redlilium_assets::{AssetDb, AssetProcessor};
 use redlilium_ecs::{
-    ChangedAssets, MaterialAssetManager, MaterialInstanceLoader, MaterialInstanceManager,
-    MaterialLoader, MeshLoader, MeshManager, PipelineCache, ShaderLoader, ShaderManager,
-    ShadingRegistry, TextureLoader, TextureManager, VertexLayoutLoader, VertexLayoutManager, World,
+    ChangedAssets, GameGenerationRegistry, MaterialAssetManager, MaterialInstanceLoader,
+    MaterialInstanceManager, MaterialLoader, MeshLoader, MeshManager, PipelineCache, ShaderLoader,
+    ShaderManager, ShadingRegistry, TextureLoader, TextureManager, VertexLayoutLoader,
+    VertexLayoutManager, World,
 };
 use redlilium_graphics::GraphicsDevice;
 use redlilium_vfs::{FileSystemProvider, Vfs};
@@ -21,6 +22,10 @@ use redlilium_vfs::{FileSystemProvider, Vfs};
 /// [`World::insert_resource_shared`], so a world can be dropped and rebuilt
 /// (warm-restart reload, Play-mode world swaps — ADR-020) without losing
 /// resident GPU resources or re-scanning assets.
+///
+/// Also tracks game code generation IDs for cross-dylib reload safety: each
+/// dylib load allocates a generation; when types re-register under a new generation,
+/// snapshots from the old generation trigger migrations (Phase 4) during restore.
 pub struct EngineContext {
     device: Arc<GraphicsDevice>,
     textures: Arc<RwLock<TextureManager>>,
@@ -34,6 +39,7 @@ pub struct EngineContext {
     changed_assets: Arc<RwLock<ChangedAssets>>,
     processor: Arc<RwLock<AssetProcessor>>,
     asset_db: Arc<RwLock<AssetDb>>,
+    generation_registry: Arc<RwLock<GameGenerationRegistry>>,
 }
 
 impl EngineContext {
@@ -82,6 +88,7 @@ impl EngineContext {
             changed_assets: Arc::new(RwLock::new(ChangedAssets::new())),
             processor: Arc::new(RwLock::new(processor)),
             asset_db: Arc::new(RwLock::new(AssetDb::new())),
+            generation_registry: Arc::new(RwLock::new(GameGenerationRegistry::new())),
             device,
         }
     }
@@ -117,6 +124,11 @@ impl EngineContext {
         &self.asset_db
     }
 
+    /// The game generation registry (tracks dylib reload IDs for type-safe re-registration).
+    pub fn generation_registry(&self) -> &Arc<RwLock<GameGenerationRegistry>> {
+        &self.generation_registry
+    }
+
     /// Insert every persistent manager into the world as a shared resource.
     ///
     /// The world and the `EngineContext` see the same underlying data and
@@ -134,5 +146,6 @@ impl EngineContext {
         world.insert_resource_shared(self.changed_assets.clone());
         world.insert_resource_shared(self.processor.clone());
         world.insert_resource_shared(self.asset_db.clone());
+        world.insert_resource_shared(self.generation_registry.clone());
     }
 }
