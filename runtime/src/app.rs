@@ -2,15 +2,16 @@
 
 use std::sync::Arc;
 
+use log::debug;
 use redlilium_ecs::sync::RwLock;
 
 use redlilium_ecs::{
     AssetGpuFlush, AssetPump, Component, FlushUploads, ForwardRender, FrameRing, GameTime,
     HotReload, ManagePlayModeTransitions, MaterialInstanceLoad, MeshLoad, PlayControl,
     PlayModeAwareRegistry, PlayStartTick, PostUpdate, PreUpdate, RealTime, Render, RenderSchedule,
-    Resource, ScenePass, ScheduleLabel, Schedules, System, SystemsContainer, UpdateCameraMatrices,
-    UpdateGlobalTransforms, WindowInput, World, register_rendering_components,
-    register_std_components,
+    Resource, ScenePass, ScheduleLabel, Schedules, System, SystemsContainer, UnloadStrategy,
+    UpdateCameraMatrices, UpdateGlobalTransforms, WindowInput, World,
+    register_rendering_components, register_std_components,
 };
 
 use crate::EngineContext;
@@ -232,7 +233,24 @@ impl App {
         aspect: f32,
         snapshot: &redlilium_ecs::serialize::SerializedWorld,
     ) -> Result<Self, redlilium_ecs::serialize::DeserializeError> {
-        let generation = engine.generation_registry().write().allocate_generation();
+        // Phase 6: Boundary guards — quiesce compute pool before generation change if needed
+        let registry = engine.generation_registry();
+        let strategy = registry.read().unload_strategy();
+
+        if let UnloadStrategy::SafeUnmapWithQuiesce { timeout } = strategy {
+            // SafeUnmapWithQuiesce: We need to ensure all async tasks from the old generation
+            // are complete before we allocate a new generation.
+            // The ComputePool would be injected in the active world, but since we're about
+            // to rebuild the world, we rely on the host to have quiesced it beforehand.
+            // For defensive coding, we log if this is a concern.
+            debug!(
+                "Phase 6: SafeUnmapWithQuiesce mode — \
+                 caller should have quiesced pool before reload (timeout: {:?})",
+                timeout
+            );
+        }
+
+        let generation = registry.write().allocate_generation();
         let mut app = Self::new(engine, aspect);
 
         let mut world = std::mem::take(&mut app.world);

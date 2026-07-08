@@ -198,11 +198,11 @@ pub struct World {
     /// [`SourceId::HOST`]; a future loader scopes game-cdylib registrations by
     /// flipping it via [`with_registration_source`](World::with_registration_source).
     current_source: crate::type_identity::SourceId,
-    /// Tracks game generation lifecycle and prevents unload while types are
-    /// registered (ADR-020 amendment, #72). Used for supersession on re-registration:
-    /// if a type is already registered under a dead generation, we allow the
-    /// new generation to take over.
-    pub(crate) generation_registry: crate::GameGenerationRegistry,
+    /// Tracks which generations this world has registered types under (used at
+    /// world drop to decrement counts in the shared registry). Maps generation_id
+    /// to count of types registered under that generation.
+    /// The authoritative registry lives in EngineContext, injected as a resource.
+    worlds_generations: HashMap<u32, usize>,
     /// Registry of component migrations for handling schema changes during
     /// deserialization (Phase 3, R3). When a component fails to deserialize,
     /// a registered migration can transform the old-schema value into a
@@ -243,7 +243,7 @@ impl World {
             snapshot_resources: BTreeMap::new(),
             type_sources,
             current_source: crate::type_identity::SourceId::HOST,
-            generation_registry: crate::GameGenerationRegistry::new(),
+            worlds_generations: HashMap::new(),
             migration_registry: crate::MigrationRegistry::new(),
         }
     }
@@ -287,46 +287,50 @@ impl World {
     /// recorded under a **different** source that is still active — the
     /// aliasing/collision case the ADR mandates be rejected loudly.
     pub(crate) fn record_type_source(&mut self, type_id: TypeId, type_name: &'static str) {
-        use std::collections::hash_map::Entry;
         let incoming = self.current_source;
-        let is_new = match self.type_sources.entry(type_id) {
-            Entry::Occupied(mut e) => {
-                let existing = *e.get();
-                if existing != incoming {
-                    // Check if the existing generation is still active.
-                    // If dead (no registrations), supersession is allowed.
-                    // If alive, reject the conflict.
-                    let existing_gen_id = existing.0;
-                    if self
-                        .generation_registry
-                        .is_generation_active(existing_gen_id)
-                    {
-                        panic!(
-                            "{}",
-                            WorldError::TypeSourceConflict {
-                                type_name,
-                                existing,
-                                incoming,
-                            }
-                        );
-                    }
-                    // Dead generation: overwrite with the incoming source (supersession).
-                    e.insert(incoming);
-                    true
-                } else {
-                    false
-                }
-            }
-            Entry::Vacant(v) => {
-                v.insert(incoming);
-                true
-            }
-        };
 
-        // Record in the generation registry if this is a new type registration.
-        if is_new {
-            self.generation_registry
-                .record_type_registration(type_id, incoming.0);
+        // Check shared registry BEFORE taking mutable borrows.
+        let existing_entry = self.type_sources.get(&type_id).copied();
+
+        // Determine if we can proceed with registration.
+        if let Some(existing) = existing_entry {
+            if existing != incoming {
+                // Check if the existing generation is still active.
+                let existing_gen_id = existing.0;
+                let is_active = self
+                    .with_generation_registry(|reg| reg.is_generation_active(existing_gen_id))
+                    .unwrap_or(true); // No shared registry = assume active (fail-safe)
+
+                if is_active {
+                    panic!(
+                        "{}",
+                        WorldError::TypeSourceConflict {
+                            type_name,
+                            existing,
+                            incoming,
+                        }
+                    );
+                }
+                // Dead generation: supersession allowed, overwrite.
+                self.type_sources.insert(type_id, incoming);
+                // Record in shared registry.
+                let incoming_gen_id = incoming.0;
+                let _ = self.with_generation_registry_mut(|reg| {
+                    reg.record_type_registration(type_id, incoming_gen_id);
+                });
+                // Track locally.
+                *self.worlds_generations.entry(incoming_gen_id).or_insert(0) += 1;
+            }
+            // Else: same generation, idempotent, no action needed.
+        } else {
+            // New registration.
+            self.type_sources.insert(type_id, incoming);
+            let incoming_gen_id = incoming.0;
+            let _ = self.with_generation_registry_mut(|reg| {
+                reg.record_type_registration(type_id, incoming_gen_id);
+            });
+            // Track locally.
+            *self.worlds_generations.entry(incoming_gen_id).or_insert(0) += 1;
         }
     }
 
@@ -594,6 +598,20 @@ impl World {
     /// Iterates over all currently alive entity IDs.
     pub fn iter_entities(&self) -> impl Iterator<Item = Entity> + '_ {
         self.entities.iter_alive()
+    }
+}
+
+impl Drop for World {
+    fn drop(&mut self) {
+        // Decrement registration counts in the shared registry for each generation
+        // this world registered types under. This marks generations as dead when
+        // the last world referencing them is dropped (Phase 6 blocker fix).
+        let generations_to_decrement: Vec<u32> = self.worlds_generations.keys().copied().collect();
+        let _ = self.with_generation_registry_mut(|reg| {
+            for generation_id in generations_to_decrement {
+                reg.decrement_registration_count(generation_id);
+            }
+        });
     }
 }
 

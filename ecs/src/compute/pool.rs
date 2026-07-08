@@ -1,12 +1,13 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::sync::Mutex;
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::time::{Duration, Instant};
 
+use log::warn;
 use redlilium_core::compute::{CancellationToken, Priority, reset_yield_timer};
 
 use crate::compute::EcsComputeContext;
@@ -223,6 +224,10 @@ pub struct ComputePool {
     queue: Mutex<TaskQueue>,
     next_id: Mutex<u64>,
     io: IoRuntime,
+    /// Counter of active tasks spawned on this pool (Phase 6: boundary guards).
+    /// Incremented at spawn, decremented when task completes.
+    /// Used by quiesce() to wait for all pending tasks.
+    active_tasks: AtomicU64,
 }
 
 impl ComputePool {
@@ -239,6 +244,7 @@ impl ComputePool {
             }),
             next_id: Mutex::new(0),
             io,
+            active_tasks: AtomicU64::new(0),
         }
     }
 
@@ -283,25 +289,34 @@ impl ComputePool {
         };
 
         self.queue.lock().tasks.push(task);
+        // Increment active tasks counter (Phase 6: boundary guards)
+        self.active_tasks.fetch_add(1, Ordering::AcqRel);
 
         TaskHandle { receiver, state }
     }
 
-    /// Polls a task once, catching panics.
+    /// Polls a task once, catching panics (Phase 6: decrements active_tasks on completion).
     ///
     /// Returns `true` if the task should be removed from the pool
     /// (completed, cancelled after grace poll, or panicked).
-    fn poll_task_guarded(task: &mut PendingTask, cx: &mut Context<'_>) -> bool {
+    fn poll_task_guarded(&self, task: &mut PendingTask, cx: &mut Context<'_>) -> bool {
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             task.future.as_mut().poll(cx)
         })) {
-            Ok(Poll::Ready(())) => true,
-            Ok(Poll::Pending) if task.state.token.is_cancelled() => true,
+            Ok(Poll::Ready(())) => {
+                self.active_tasks.fetch_sub(1, Ordering::AcqRel);
+                true
+            }
+            Ok(Poll::Pending) if task.state.token.is_cancelled() => {
+                self.active_tasks.fetch_sub(1, Ordering::AcqRel);
+                true
+            }
             Ok(Poll::Pending) => false,
             Err(payload) => {
                 let msg = crate::system::panic_payload_to_string(&*payload);
                 task.state.set_panicked(msg);
                 task.state.completed.store(true, Ordering::Release);
+                self.active_tasks.fetch_sub(1, Ordering::AcqRel);
                 true
             }
         }
@@ -371,7 +386,7 @@ impl ComputePool {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        if !Self::poll_task_guarded(&mut task, &mut cx) {
+        if !self.poll_task_guarded(&mut task, &mut cx) {
             self.requeue(task);
         }
 
@@ -401,7 +416,7 @@ impl ComputePool {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        batch.retain_mut(|task| !Self::poll_task_guarded(task, &mut cx));
+        batch.retain_mut(|task| !self.poll_task_guarded(task, &mut cx));
 
         let mut q = self.queue.lock();
         q.tasks.append(&mut batch);
@@ -439,7 +454,7 @@ impl ComputePool {
                 break;
             }
 
-            if Self::poll_task_guarded(&mut batch[i], &mut cx) {
+            if self.poll_task_guarded(&mut batch[i], &mut cx) {
                 batch.swap_remove(i);
             } else {
                 i += 1;
@@ -540,6 +555,36 @@ impl ComputePool {
     /// are not counted until they are re-queued.
     pub fn pending_count(&self) -> usize {
         self.queue.lock().tasks.len()
+    }
+
+    /// Quiescence: blocks until all spawned tasks complete (Phase 6: boundary guards).
+    ///
+    /// Continuously polls the pool until `active_tasks == 0`. This is used before
+    /// unloading a dylib generation to ensure async tasks don't outlive the code.
+    ///
+    /// If `timeout` is exceeded, logs a warning about stuck tasks and returns anyway —
+    /// this signals that a task is problematic (not properly yielding/cooperating).
+    /// The expectation is that all tasks use `yield_now()` and don't block on IO.
+    ///
+    /// # Returns
+    ///
+    /// - Time spent quiescing (useful for diagnostics)
+    /// - Note: if timeout expired, logs warn but still completes
+    pub fn quiesce(&self, timeout: Duration) -> Duration {
+        let start = Instant::now();
+        while self.active_tasks.load(Ordering::Acquire) > 0 {
+            if start.elapsed() > timeout {
+                warn!(
+                    "ComputePool::quiesce timeout: {} tasks still active after {:?}. \
+                    Check for tasks that don't yield properly.",
+                    self.active_tasks.load(Ordering::Acquire),
+                    timeout
+                );
+                break;
+            }
+            self.tick();
+        }
+        start.elapsed()
     }
 }
 

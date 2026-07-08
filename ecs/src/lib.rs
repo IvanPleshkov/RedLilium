@@ -87,7 +87,7 @@ pub use ecs_macro::{Bundle, Component};
 pub use egui;
 pub use entity::Entity;
 pub use events::{EventCursor, EventIter, Events};
-pub use generation::{GameGenerationRegistry, GenerationInUseError};
+pub use generation::{GameGenerationRegistry, GenerationInUseError, UnloadStrategy};
 pub use migration::MigrationRegistry;
 pub use observer::{OnAdd, OnInsert, OnRemove};
 pub use prefab::Prefab;

@@ -19,8 +19,29 @@
 
 use std::any::TypeId;
 use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::SourceId;
+
+/// Strategy for handling dylib unload when a generation becomes dead.
+///
+/// Phase 6: Boundary guards for safe dylib unmapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnloadStrategy {
+    /// **Never-Unmap** (dev/safe): Keep dead dylibs in memory indefinitely.
+    /// Simplest strategy: async tasks from old generation can safely complete.
+    /// Cost: memory grows with reload count (acceptable for dev).
+    NeverUnmap,
+
+    /// **Safe-Unmap** (production/robust): Quiesce ComputePool before unloading.
+    /// Waits for all pending tasks to complete, then unloads dylib.
+    /// Cost: may block if a task is problematic (signals issue to developer).
+    /// Includes timeout to detect stuck tasks.
+    SafeUnmapWithQuiesce {
+        /// Max time to wait for tasks to finish. If exceeded, logs warning but continues.
+        timeout: Duration,
+    },
+}
 
 /// Tracks active generations and their registration counts.
 ///
@@ -42,6 +63,9 @@ pub struct GameGenerationRegistry {
     /// Incremented when a type registers under a generation.
     /// Decremented when a world containing types from that generation is dropped.
     registration_counts: HashMap<u32, usize>,
+
+    /// Strategy for handling dylib unload (Phase 6: boundary guards).
+    unload_strategy: UnloadStrategy,
 }
 
 /// Metadata for a single generation (one game cdylib load).
@@ -54,9 +78,17 @@ pub struct GenerationInfo {
 }
 
 impl GameGenerationRegistry {
-    /// Create a new registry. Initializes generation 0 (HOST/engine) and ready to allocate
-    /// generations starting at 1.
+    /// Create a new registry with default unload strategy (SafeUnmapWithQuiesce).
+    ///
+    /// Initializes generation 0 (HOST/engine) and ready to allocate generations starting at 1.
     pub fn new() -> Self {
+        Self::with_strategy(UnloadStrategy::SafeUnmapWithQuiesce {
+            timeout: Duration::from_secs(5),
+        })
+    }
+
+    /// Create a new registry with a specific unload strategy.
+    pub fn with_strategy(unload_strategy: UnloadStrategy) -> Self {
         let mut generations = HashMap::new();
         let mut registration_counts = HashMap::new();
         // Pre-allocate generation 0 for HOST/engine types.
@@ -74,6 +106,7 @@ impl GameGenerationRegistry {
             generations,
             type_to_generation: HashMap::new(),
             registration_counts,
+            unload_strategy,
         }
     }
 
@@ -181,21 +214,43 @@ impl GameGenerationRegistry {
         }
     }
 
-    /// Attempt to unload a generation.
+    /// Attempt to unload a generation (Phase 6: boundary guards).
+    ///
+    /// Behavior depends on the configured `UnloadStrategy`:
+    ///
+    /// - **NeverUnmap**: Always succeeds; dylib stays in memory.
+    /// - **SafeUnmapWithQuiesce**: Checks that registration_count == 0.
+    ///   If count > 0, caller should have called `ComputePool::quiesce()` first.
     ///
     /// # Returns
     ///
-    /// - `Ok(())` if the generation can be safely unloaded (no active registrations).
-    /// - `Err(GenerationInUseError)` if types from this generation are still registered.
+    /// - `Ok(())` if the generation can be safely unloaded.
+    /// - `Err(GenerationInUseError)` if registrations still active (SafeUnmapWithQuiesce only).
     pub fn unload_generation(&self, generation_id: u32) -> Result<(), GenerationInUseError> {
-        let count = self.registration_count(generation_id);
-        if count > 0 {
-            return Err(GenerationInUseError {
-                generation: generation_id,
-                registration_count: count,
-            });
+        match self.unload_strategy {
+            UnloadStrategy::NeverUnmap => {
+                // Never-Unmap: Keep dylib in memory, always succeeds.
+                // (Dylib remains mapped, async tasks can safely complete)
+                Ok(())
+            }
+            UnloadStrategy::SafeUnmapWithQuiesce { .. } => {
+                // Safe-Unmap: Require registration_count == 0
+                // Caller must have quiesced ComputePool first.
+                let count = self.registration_count(generation_id);
+                if count > 0 {
+                    return Err(GenerationInUseError {
+                        generation: generation_id,
+                        registration_count: count,
+                    });
+                }
+                Ok(())
+            }
         }
-        Ok(())
+    }
+
+    /// Get the configured unload strategy.
+    pub fn unload_strategy(&self) -> UnloadStrategy {
+        self.unload_strategy
     }
 
     /// For testing: get all active generation IDs.
