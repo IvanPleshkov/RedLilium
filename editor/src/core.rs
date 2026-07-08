@@ -18,11 +18,12 @@ use redlilium_debug_drawer::DebugDrawer;
 use redlilium_ecs::{
     AssetGpuFlush, AssetPump, Camera, DebugRender, DrawGrid, DrawSelectionAabb, EguiRender, Entity,
     FlushUploads, ForwardRender, FrameRing, FreeFlyCamera, GameTime, GlobalTransform, GridConfig,
-    HotReload, ManagePlayModeTransitions, MaterialInstanceLoad, MaterialInstanceSource,
-    MeshGenerator, MeshLoad, MeshRenderer, MeshSource, Name, PlayControl, PlayModeAwareRegistry,
-    PlayStartTick, PostUpdate, PreUpdate, Primitive, RealTime, Render, RenderSchedule, ScenePass,
-    Schedules, Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera,
-    UpdateGlobalTransforms, Visibility, WindowInput, World, register_std_components,
+    HotReload, ManagePlayModeTransitions, MaterialInstanceLoad, MaterialInstanceManager,
+    MaterialInstanceSource, MeshGenerator, MeshLoad, MeshManager, MeshRenderer, MeshSource, Name,
+    PlayControl, PlayModeAwareRegistry, PlayStartTick, PostUpdate, PreUpdate, Primitive, RealTime,
+    Render, RenderSchedule, ScenePass, Schedules, TextureManager, Transform, Update,
+    UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms, Visibility, WindowInput,
+    World, register_std_components,
 };
 use redlilium_runtime::EngineContext;
 
@@ -195,7 +196,19 @@ pub fn create_editor_world(
 
     // Play/Pause/Resume/Stop state machine for game code.
     world.insert_resource(PlayControl::default());
-    world.insert_resource(PlayModeAwareRegistry::default());
+    let mut registry = PlayModeAwareRegistry::default();
+    // Register asset managers as PlayModeAware so they bump generation on Stop
+    // to force re-scan of unresolved refs after snapshot restore.
+    if world.has_resource::<MeshManager>() {
+        registry.register::<MeshManager>();
+    }
+    if world.has_resource::<MaterialInstanceManager>() {
+        registry.register::<MaterialInstanceManager>();
+    }
+    if world.has_resource::<TextureManager>() {
+        registry.register::<TextureManager>();
+    }
+    world.insert_resource(registry);
     world.insert_resource(PlayStartTick(0));
 
     // Insert debug drawing resources
