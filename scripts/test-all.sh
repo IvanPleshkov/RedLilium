@@ -269,6 +269,30 @@ test_clippy() {
     fi
 }
 
+# Check baked shaders are fresh (#33). The offline slang->WGSL bake
+# (graphics/src/shader/baked_generated.rs) can only be produced where the native
+# Slang compiler is available (SLANG_DIR). When it is, re-bake into memory and
+# byte-compare against the committed file (never writing it), so a forgotten
+# rebake fails preflight. When SLANG_DIR is unset (e.g. a dev without the SDK, or
+# a wasm-only checkout) skip with a warning, mirroring the wasm-pack skip above.
+test_shader_bake_check() {
+    if [ -z "$SLANG_DIR" ]; then
+        print_skip "Baked shader staleness check (SLANG_DIR not set)"
+        ((SKIPPED++))
+        return
+    fi
+
+    print_header "Checking Baked Shaders Are Fresh (WASM)"
+
+    if cargo run -q -p xtask -- bake-shaders --check 2>&1; then
+        print_success "Baked shaders match their sources"
+        ((PASSED++))
+    else
+        print_error "Baked shaders are stale — run: cargo run -p xtask -- bake-shaders"
+        ((FAILED++))
+    fi
+}
+
 # Print summary
 print_summary() {
     print_header "Test Summary"
@@ -297,6 +321,7 @@ main() {
     # Run all tests, collecting results
     test_native_build || true
     test_web_build || true
+    test_shader_bake_check || true
     test_unit_tests || true
     test_clippy || true
 

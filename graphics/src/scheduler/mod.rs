@@ -248,6 +248,9 @@ impl FrameSchedule {
             }
         };
 
+        #[cfg(debug_assertions)]
+        debug_assert_no_write_to_mapped(&graph);
+
         match graph.compile(RenderGraphCompilationMode::Strict) {
             Ok(_) => {
                 profile_scope!("execute_graph");
@@ -280,6 +283,50 @@ impl FrameSchedule {
         self.fence
             .take()
             .expect("render() must be called before end_frame()")
+    }
+}
+
+/// Debug-only guard (#33): a transfer must not write into a buffer whose async
+/// readback `map_async` is still in flight — that is UB / a wgpu validation
+/// error ("buffer already mapped").
+///
+/// Async maps are only ever issued in the frame pipeline's `process_readbacks`
+/// (during `begin_frame`), never mid-encode, so at execute time the buffer's
+/// `is_map_pending` flag deterministically reflects any map still outstanding
+/// from an earlier frame — exactly the hazard we want to catch here, before the
+/// backend encodes the copy.
+///
+/// The flag may clear between this check and actual GPU execution (the map
+/// completion callback runs on device poll), so a firing assert is *slightly*
+/// conservative — a rare false positive is acceptable for a dev-only guard; do
+/// not weaken it to silence such a case. A consumer that trips this every frame
+/// is doing a per-frame readback into a single buffer and genuinely needs
+/// double-buffering.
+#[cfg(debug_assertions)]
+fn debug_assert_no_write_to_mapped(graph: &RenderGraph) {
+    use crate::graph::TransferOperation;
+    for pass in graph.passes() {
+        let Some(transfer) = pass.as_transfer() else {
+            continue;
+        };
+        let Some(config) = transfer.transfer_config() else {
+            continue;
+        };
+        for op in &config.operations {
+            let dst = match op {
+                TransferOperation::BufferToBuffer { dst, .. }
+                | TransferOperation::WriteBuffer { dst, .. }
+                | TransferOperation::TextureToBuffer { dst, .. } => dst,
+                _ => continue,
+            };
+            debug_assert!(
+                !dst.is_map_pending(),
+                "transfer writes into buffer {:?} while an async readback map of it is still \
+                 in flight (write-while-mapped, #33) — this consumer must wait the map out or \
+                 double-buffer the readback target",
+                dst.label()
+            );
+        }
     }
 }
 

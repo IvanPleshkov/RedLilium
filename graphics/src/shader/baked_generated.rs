@@ -7,6 +7,12 @@
 //! `BAKED_WGSL`: key -> compiled WGSL. `BAKED_NAMES`: key -> `shader / entry /
 //! defines` (diagnostics on a miss). Both sorted ascending by key for binary search.
 
+/// Slang build tag this table was baked with. `xtask bake-shaders --check` compares
+/// this first, so a compiler upgrade reads as an explicit version message rather than
+/// an opaque WGSL byte-diff. Not referenced by the runtime.
+#[allow(dead_code)]
+pub static BAKED_SLANG_TAG: &str = "2026.3.1";
+
 /// key -> compiled WGSL, sorted ascending by key.
 pub static BAKED_WGSL: &[(u64, &str)] = &[
     (

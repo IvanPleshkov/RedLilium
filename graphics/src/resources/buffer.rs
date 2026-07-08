@@ -69,6 +69,16 @@ impl Buffer {
         self.descriptor.size
     }
 
+    /// True while an async `map_async` readback of this buffer is still in
+    /// flight (#33). Used by the debug write-while-mapped guard
+    /// ([`scheduler`](crate::scheduler)) and by consumers that must avoid
+    /// starting a new readback / reallocating the buffer until the prior map
+    /// resolves (e.g. the editor pick path). The map completion callback clears
+    /// it unconditionally, so it never stays set forever.
+    pub fn is_map_pending(&self) -> bool {
+        self.map_pending.load(Ordering::Acquire)
+    }
+
     /// Get the buffer label, if set.
     pub fn label(&self) -> Option<&str> {
         self.descriptor.label.as_deref()

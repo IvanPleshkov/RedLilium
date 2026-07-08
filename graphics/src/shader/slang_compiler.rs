@@ -77,6 +77,14 @@ impl SlangCompiler {
         Ok(Self { global_session })
     }
 
+    /// The Slang build tag (compiler version string) of the underlying global
+    /// session, e.g. `"v2024.1.30"`. Stamped into the offline-baked shader table
+    /// (`xtask bake-shaders`, #33) so a compiler upgrade shows up as an explicit
+    /// version message in `--check` rather than an opaque WGSL byte-diff.
+    pub fn build_tag(&self) -> &str {
+        self.global_session.build_tag_string()
+    }
+
     /// Compile a Slang source string to SPIR-V bytecode.
     ///
     /// Returns the compiled SPIR-V as a byte vector (aligned to u32 words).

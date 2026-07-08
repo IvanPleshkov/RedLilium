@@ -50,6 +50,10 @@ pub struct SceneViewState {
     /// Single-pixel pick result bytes, filled by the frame pipeline after the GPU
     /// readback completes (one or more frames later). Polled by `resolve_pick`.
     pick_result: Arc<Mutex<Vec<u8>>>,
+    /// Frames a pending pick has been held waiting on `readback_buffer`'s prior
+    /// async map to resolve (#33). Only a diagnostic — the map callback always
+    /// clears the flag, so this can't wedge; a high value flags a stuck readback.
+    pick_wait_frames: u32,
 
     // --- Rect selection readback ---
     pending_rect_pick: Option<[u32; 4]>,
@@ -58,6 +62,8 @@ pub struct SceneViewState {
     rect_result: Arc<Mutex<Vec<u8>>>,
     /// Dimensions [w, h] and padded bytes_per_row of the last rect readback.
     rect_pick_layout: [u32; 3],
+    /// As [`pick_wait_frames`](Self::pick_wait_frames) but for the rect readback.
+    rect_wait_frames: u32,
 
     // --- Per-draw dynamic-uniform rings ---
     /// Buffer of the scene forward `FrameRing` — now an ECS resource (filled by
@@ -141,10 +147,12 @@ impl SceneViewState {
             readback_buffer,
             pending_pick: None,
             pick_result: Arc::new(Mutex::new(Vec::new())),
+            pick_wait_frames: 0,
             pending_rect_pick: None,
             rect_readback_buffer,
             rect_result: Arc::new(Mutex::new(Vec::new())),
             rect_pick_layout: [0; 3],
+            rect_wait_frames: 0,
             frame_ring_buffer: None,
             entity_index_ring,
             picking_offsets: std::collections::HashMap::new(),
@@ -390,7 +398,30 @@ impl SceneViewState {
     }
 
     /// Take the pending pick coordinates (consumed once to build the readback pass).
+    ///
+    /// Retry guard (#33): if `readback_buffer`'s previous async readback map is
+    /// still in flight, DON'T start a new pick this frame — issuing a
+    /// `TextureToBuffer` into a still-mapped buffer is the write-while-mapped
+    /// hazard, and it would clobber the in-flight result. The pending pick is
+    /// kept and retried next frame; the map callback clears the flag
+    /// unconditionally, so this cannot wedge (the counter is only a diagnostic).
     pub fn take_pending_pick(&mut self) -> Option<[u32; 2]> {
+        if self.pending_pick.is_none() {
+            self.pick_wait_frames = 0;
+            return None;
+        }
+        if self.readback_buffer.is_map_pending() {
+            self.pick_wait_frames += 1;
+            if self.pick_wait_frames == 60 {
+                log::warn!(
+                    "pick held {} frames waiting on the readback map to resolve — possible \
+                     stuck readback",
+                    self.pick_wait_frames
+                );
+            }
+            return None;
+        }
+        self.pick_wait_frames = 0;
         self.pending_pick.take()
     }
 
@@ -421,8 +452,11 @@ impl SceneViewState {
 
     /// Request a rect readback at the given physical-pixel rectangle.
     ///
-    /// Resizes the readback buffer if needed. The result will be available
-    /// after 2 frames via [`resolve_rect_pick`].
+    /// The result will be available after 2 frames via [`resolve_rect_pick`].
+    /// Any buffer resize happens in [`take_pending_rect_pick`], AFTER the
+    /// map-pending guard — reallocating here could replace `rect_readback_buffer`
+    /// while a prior async map is still in flight, orphaning its pending flag and
+    /// racing the old callback against the new readback (#33).
     pub fn request_rect_pick(&mut self, x: u32, y: u32, w: u32, h: u32) {
         let (tex_w, tex_h) = self.last_size;
         let x = x.min(tex_w.saturating_sub(1));
@@ -430,10 +464,37 @@ impl SceneViewState {
         let w = w.min(tex_w - x).max(1);
         let h = h.min(tex_h - y).max(1);
 
+        self.pending_rect_pick = Some([x, y, w, h]);
+    }
+
+    /// Take the pending rect pick coordinates (consumed to build the readback pass).
+    ///
+    /// Same retry guard as [`take_pending_pick`](Self::take_pending_pick): while
+    /// `rect_readback_buffer`'s prior async map is in flight, keep the pending
+    /// pick and retry next frame. Once the buffer is free, resize it here if the
+    /// rectangle needs more room — safe only because no map is outstanding.
+    pub fn take_pending_rect_pick(&mut self) -> Option<[u32; 4]> {
+        let Some([_, _, w, h]) = self.pending_rect_pick else {
+            self.rect_wait_frames = 0;
+            return None;
+        };
+        if self.rect_readback_buffer.is_map_pending() {
+            self.rect_wait_frames += 1;
+            if self.rect_wait_frames == 60 {
+                log::warn!(
+                    "rect pick held {} frames waiting on the readback map to resolve — possible \
+                     stuck readback",
+                    self.rect_wait_frames
+                );
+            }
+            return None;
+        }
+        self.rect_wait_frames = 0;
+
+        // Buffer is free (no map in flight): safe to grow it for this rectangle.
         // Padded bytes_per_row (aligned to 256 for GPU transfer requirements).
         let bytes_per_row = (w * 4).div_ceil(256) * 256;
         let required_size = bytes_per_row as u64 * h as u64;
-
         if required_size > self.rect_readback_buffer.size() {
             self.rect_readback_buffer = self
                 .device
@@ -444,11 +505,6 @@ impl SceneViewState {
                 .expect("Failed to resize rect readback buffer");
         }
 
-        self.pending_rect_pick = Some([x, y, w, h]);
-    }
-
-    /// Take the pending rect pick coordinates (consumed to build the readback pass).
-    pub fn take_pending_rect_pick(&mut self) -> Option<[u32; 4]> {
         self.pending_rect_pick.take()
     }
 
