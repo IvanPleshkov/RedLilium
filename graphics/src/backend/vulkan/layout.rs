@@ -242,6 +242,11 @@ impl TextureUsageGraph {
         }
         if usage.contains(TextureUsage::TEXTURE_BINDING) {
             undefined_dests.insert(TextureLayout::ShaderReadOnly);
+            // A depth texture sampled as a read-only depth attachment on its
+            // first use goes straight to DEPTH_STENCIL_READ_ONLY_OPTIMAL (#60).
+            if usage.contains(TextureUsage::RENDER_ATTACHMENT) {
+                undefined_dests.insert(TextureLayout::DepthStencilReadOnly);
+            }
         }
         if usage.contains(TextureUsage::STORAGE_BINDING) {
             undefined_dests.insert(TextureLayout::General);
@@ -298,6 +303,9 @@ impl TextureUsageGraph {
             if usage.contains(TextureUsage::RENDER_ATTACHMENT) {
                 sr_dests.insert(TextureLayout::ColorAttachment);
                 sr_dests.insert(TextureLayout::DepthStencilAttachment);
+                // A sampled depth texture later co-used as a read-only depth
+                // attachment (e.g. a shadow map re-read while depth-testing).
+                sr_dests.insert(TextureLayout::DepthStencilReadOnly);
             }
             if usage.contains(TextureUsage::COPY_SRC) {
                 sr_dests.insert(TextureLayout::TransferSrc);

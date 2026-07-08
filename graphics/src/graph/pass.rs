@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use std::collections::HashSet;
 
-use crate::materials::{BindingType, BoundResource, MaterialInstance};
+use crate::materials::{BindingType, BoundResource, MaterialInstance, SampledDepthLayout};
 use crate::mesh::Mesh;
 use crate::resources::Buffer;
 use crate::types::{ScissorRect, Viewport};
@@ -767,7 +767,7 @@ impl GraphicsPass {
             if let Some(depth) = &targets.depth_stencil_attachment
                 && let RenderTarget::Texture { texture, .. } = &depth.target
             {
-                let access = if depth.depth_read_only && depth.stencil_read_only {
+                let access = if depth.effective_read_only() {
                     TextureAccessMode::DepthStencilReadOnly
                 } else {
                     TextureAccessMode::DepthStencilWrite
@@ -796,6 +796,37 @@ impl GraphicsPass {
                 &cmd.indirect_buffer,
                 BufferAccessMode::IndirectRead,
             );
+        }
+
+        // Diagnostic: a texture bound as a depth/stencil attachment AND sampled
+        // through a *plain* (ShaderRead) group in the same pass is a layout
+        // mistake — the barrier can pick only one layout, so the eagerly-written
+        // descriptor (SHADER_READ_ONLY_OPTIMAL) mismatches the attachment. The
+        // fix is `BindingGroupDescriptor::with_depth_texture_co_attached`, which
+        // makes both agree on DEPTH_STENCIL_READ_ONLY_OPTIMAL. Attachment intent
+        // still wins the transition (depth-test correctness); this names the
+        // real cause the validation layer would otherwise only hint at.
+        for (i, attach) in usage.texture_usages.iter().enumerate() {
+            if !matches!(
+                attach.access,
+                TextureAccessMode::DepthStencilReadOnly | TextureAccessMode::DepthStencilWrite
+            ) {
+                continue;
+            }
+            let sampled_plain = usage.texture_usages.iter().enumerate().any(|(j, other)| {
+                i != j
+                    && other.access == TextureAccessMode::ShaderRead
+                    && Arc::ptr_eq(&attach.texture, &other.texture)
+            });
+            if sampled_plain {
+                log::error!(
+                    "pass '{}': a depth/stencil attachment texture is also sampled through a \
+                     plain binding group; use \
+                     BindingGroupDescriptor::with_depth_texture_co_attached so the sampled \
+                     descriptor records DEPTH_STENCIL_READ_ONLY_OPTIMAL",
+                    self.name()
+                );
+            }
         }
 
         usage
@@ -849,13 +880,22 @@ fn extract_material_resources(
     for (group_index, group) in material.binding_groups().iter().enumerate() {
         let layout = binding_layouts.get(group_index);
         for entry in group.entries() {
+            // A depth texture co-used as a read-only depth attachment declares
+            // the depth-read-only layout so its transition matches the
+            // attachment (and its eagerly-written descriptor); everything else
+            // samples in SHADER_READ_ONLY_OPTIMAL. Both derive from the same
+            // creation-time `sampled_depth_layout`, so descriptor == barrier.
+            let sampled_access = match entry.sampled_depth_layout {
+                SampledDepthLayout::DepthStencilReadOnly => TextureAccessMode::DepthStencilReadOnly,
+                SampledDepthLayout::ShaderReadOnly => TextureAccessMode::ShaderRead,
+            };
             let buffer = match &entry.resource {
                 BoundResource::Texture(tex) => {
-                    usage.add_texture(Arc::clone(tex), TextureAccessMode::ShaderRead);
+                    usage.add_texture(Arc::clone(tex), sampled_access);
                     continue;
                 }
                 BoundResource::CombinedTextureSampler { texture, .. } => {
-                    usage.add_texture(Arc::clone(texture), TextureAccessMode::ShaderRead);
+                    usage.add_texture(Arc::clone(texture), sampled_access);
                     continue;
                 }
                 BoundResource::Buffer(buffer) => buffer,

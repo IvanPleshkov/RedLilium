@@ -83,6 +83,31 @@ impl BoundResource {
     }
 }
 
+/// The image layout a sampled depth texture will be in at draw time.
+///
+/// A binding group's GPU descriptor set is written **once** at creation (issue
+/// #40), recording each sampled image's layout. That layout must match the
+/// image's actual layout when the group is bound. For a depth texture the
+/// correct sampled layout depends on how the pass uses it, so the intent is
+/// declared here, at creation time, and the render graph transitions the image
+/// to exactly this layout before any pass that binds the group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum SampledDepthLayout {
+    /// Pure sampling (e.g. a shadow map sampled in a later pass):
+    /// `SHADER_READ_ONLY_OPTIMAL`. The default for every texture binding.
+    #[default]
+    ShaderReadOnly,
+
+    /// The depth texture is also bound as a **read-only depth attachment**
+    /// (sampling it in the *same* pass is allowed): `DEPTH_STENCIL_READ_ONLY_OPTIMAL`.
+    ///
+    /// This is the only layout valid for a simultaneous read-only depth
+    /// attachment + shader read. It is also a legal pure-sampling layout, so a
+    /// group marked this way stays valid even in a pass that only samples.
+    /// Valid only on a binding whose bound texture has a depth format.
+    DepthStencilReadOnly,
+}
+
 /// A binding entry with its slot and resource.
 #[derive(Debug, Clone)]
 pub struct BindingEntry {
@@ -91,12 +116,27 @@ pub struct BindingEntry {
 
     /// The bound resource.
     pub resource: BoundResource,
+
+    /// For a sampled depth texture, the layout it will be sampled in. Ignored
+    /// for buffers, samplers, and non-depth textures. Defaults to
+    /// [`ShaderReadOnly`](SampledDepthLayout::ShaderReadOnly).
+    pub sampled_depth_layout: SampledDepthLayout,
 }
 
 impl BindingEntry {
     /// Create a new binding entry.
     pub fn new(binding: u32, resource: BoundResource) -> Self {
-        Self { binding, resource }
+        Self {
+            binding,
+            resource,
+            sampled_depth_layout: SampledDepthLayout::ShaderReadOnly,
+        }
+    }
+
+    /// Set the sampled depth layout (see [`SampledDepthLayout`]).
+    pub fn with_sampled_depth_layout(mut self, layout: SampledDepthLayout) -> Self {
+        self.sampled_depth_layout = layout;
+        self
     }
 }
 
@@ -151,6 +191,19 @@ impl BindingGroupDescriptor {
     /// Add a texture binding.
     pub fn with_texture(self, binding: u32, texture: Arc<Texture>) -> Self {
         self.with_entry(binding, BoundResource::texture(texture))
+    }
+
+    /// Add a depth texture that this group's pass both **samples** and binds as
+    /// a **read-only depth attachment** (the co-use case). The descriptor
+    /// records `DEPTH_STENCIL_READ_ONLY_OPTIMAL`, matching the layout the render
+    /// graph transitions the image to; see [`SampledDepthLayout`]. The bound
+    /// texture must have a depth format.
+    pub fn with_depth_texture_co_attached(mut self, binding: u32, texture: Arc<Texture>) -> Self {
+        self.entries.push(
+            BindingEntry::new(binding, BoundResource::texture(texture))
+                .with_sampled_depth_layout(SampledDepthLayout::DepthStencilReadOnly),
+        );
+        self
     }
 
     /// Add a sampler binding.

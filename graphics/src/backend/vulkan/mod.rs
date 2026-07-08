@@ -8,6 +8,7 @@ pub mod barriers;
 mod command;
 pub(crate) mod conversion;
 mod debug;
+pub use debug::{reset_validation_error_count, validation_error_count};
 mod device;
 mod instance;
 pub mod layout;
@@ -738,6 +739,19 @@ fn resolve_layer_z(
 /// ops. Layout math (tight pitch, block conversion, alignment rules) comes
 /// from the shared [`BufferTextureLayout::resolve`], so wgpu and Vulkan
 /// accept and reject exactly the same graphs.
+/// Image layout for a depth/stencil attachment. A fully read-only attachment
+/// (`effective_read_only`) uses `DEPTH_STENCIL_READ_ONLY_OPTIMAL` so it can
+/// share the image with simultaneous sampling and matches the layout the
+/// barrier system transitions the image to; otherwise the writable attachment
+/// layout. (#60)
+fn ds_attachment_layout(attachment: &crate::graph::DepthStencilAttachment) -> vk::ImageLayout {
+    if attachment.effective_read_only() {
+        vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL
+    } else {
+        vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+    }
+}
+
 fn build_buffer_image_copies(
     format: crate::types::TextureFormat,
     dimension: crate::types::TextureDimension,
@@ -1207,24 +1221,36 @@ impl VulkanBackend {
     ///
     /// A set written once at creation must record the layout each sampled image
     /// will be in **at draw time**, not the (possibly `UNDEFINED`) layout at
-    /// creation time. Every texture bound through a material-instance binding
-    /// group is declared `TextureAccessMode::ShaderRead` by the render graph
-    /// (`graph::pass::extract_material_resources`), so the barrier system always
-    /// transitions it to `SHADER_READ_ONLY_OPTIMAL` before the draw. There are
-    /// no storage-image bindings on this path. Hence the deterministic at-draw
-    /// layout is `SHADER_READ_ONLY_OPTIMAL`.
+    /// creation time. A texture binding samples in `SHADER_READ_ONLY_OPTIMAL` by
+    /// default; a binding declared
+    /// [`SampledDepthLayout::DepthStencilReadOnly`](crate::SampledDepthLayout)
+    /// (a depth texture co-used as a read-only depth attachment) samples in
+    /// `DEPTH_STENCIL_READ_ONLY_OPTIMAL`. The render graph transitions the image
+    /// to exactly that layout: `graph::pass::extract_material_resources` maps the
+    /// same `sampled_depth_layout` to a `ShaderRead` / `DepthStencilReadOnly`
+    /// access, so the descriptor and the barrier always agree. There are no
+    /// storage-image bindings on this path.
     fn write_binding_group_set(
         &self,
         descriptor_set: vk::DescriptorSet,
         descriptor: &crate::materials::BindingGroupDescriptor,
         layout: &crate::materials::BindingLayout,
     ) {
-        use crate::materials::BoundResource;
+        use crate::materials::{BoundResource, SampledDepthLayout};
 
         let mut buffer_infos: Vec<vk::DescriptorBufferInfo> = Vec::new();
         let mut image_infos: Vec<vk::DescriptorImageInfo> = Vec::new();
 
         for entry in &descriptor.entries {
+            // The layout a sampled texture records is fixed at creation by the
+            // entry's `sampled_depth_layout`; the barrier system transitions the
+            // image to the same layout (see the doc-comment).
+            let sampled_layout = match entry.sampled_depth_layout {
+                SampledDepthLayout::ShaderReadOnly => vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                SampledDepthLayout::DepthStencilReadOnly => {
+                    vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                }
+            };
             match &entry.resource {
                 BoundResource::Buffer(buffer) => {
                     if let GpuBuffer::Vulkan {
@@ -1261,7 +1287,7 @@ impl VulkanBackend {
                         image_infos.push(vk::DescriptorImageInfo {
                             sampler: vk::Sampler::null(),
                             image_view: *view,
-                            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                            image_layout: sampled_layout,
                         });
                     }
                 }
@@ -1290,7 +1316,7 @@ impl VulkanBackend {
                         image_infos.push(vk::DescriptorImageInfo {
                             sampler: *vk_sampler,
                             image_view: *view,
-                            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                            image_layout: sampled_layout,
                         });
                     }
                 }
@@ -1447,6 +1473,7 @@ impl VulkanBackend {
             pipeline_layout,
             &descriptor.color_formats,
             descriptor.depth_format,
+            descriptor.depth_write,
             descriptor.blend_state.as_ref(),
             descriptor.polygon_mode,
             &self.dynamic_rendering,
@@ -2562,6 +2589,10 @@ impl VulkanBackend {
                     let (load_op, clear_value) =
                         conversion::convert_load_op_depth(&attachment.depth_load_op());
                     let store_op = conversion::convert_store_op(&attachment.depth_store_op());
+                    // A fully read-only attachment shares DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                    // matching the layout the barrier system transitions it to (and any
+                    // co-use sampling descriptor); otherwise it is a write target.
+                    let ds_layout = ds_attachment_layout(attachment);
 
                     match &attachment.target {
                         RenderTarget::Texture { texture, .. } => {
@@ -2572,7 +2603,7 @@ impl VulkanBackend {
                             Some(
                                 vk::RenderingAttachmentInfo::default()
                                     .image_view(*view)
-                                    .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                                    .image_layout(ds_layout)
                                     .load_op(load_op)
                                     .store_op(store_op)
                                     .clear_value(clear_value),
@@ -2583,7 +2614,7 @@ impl VulkanBackend {
                             vulkan_view.as_ref().map(|surface_view| {
                                 vk::RenderingAttachmentInfo::default()
                                     .image_view(surface_view.view())
-                                    .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                                    .image_layout(ds_layout)
                                     .load_op(load_op)
                                     .store_op(store_op)
                                     .clear_value(clear_value)
@@ -2601,6 +2632,8 @@ impl VulkanBackend {
                 let (load_op, clear_value) =
                     conversion::convert_load_op_stencil(&attachment.stencil_load_op());
                 let store_op = conversion::convert_store_op(&attachment.stencil_store_op());
+                // Same image as the depth attachment, so it must carry the same layout.
+                let ds_layout = ds_attachment_layout(attachment);
 
                 match &attachment.target {
                     RenderTarget::Texture { texture, .. } => {
@@ -2611,7 +2644,7 @@ impl VulkanBackend {
                         Some(
                             vk::RenderingAttachmentInfo::default()
                                 .image_view(*view)
-                                .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                                .image_layout(ds_layout)
                                 .load_op(load_op)
                                 .store_op(store_op)
                                 .clear_value(clear_value),
@@ -2621,7 +2654,7 @@ impl VulkanBackend {
                         vulkan_view.as_ref().map(|surface_view| {
                             vk::RenderingAttachmentInfo::default()
                                 .image_view(surface_view.view())
-                                .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                                .image_layout(ds_layout)
                                 .load_op(load_op)
                                 .store_op(store_op)
                                 .clear_value(clear_value)

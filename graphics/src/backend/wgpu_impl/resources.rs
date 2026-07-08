@@ -348,7 +348,9 @@ impl WgpuBackend {
                 },
                 depth_stencil: depth_format.map(|format| wgpu::DepthStencilState {
                     format,
-                    depth_write_enabled: true,
+                    // False for a pipeline that tests against a read-only depth
+                    // attachment (e.g. sampling the depth it tests against, #60).
+                    depth_write_enabled: descriptor.depth_write,
                     depth_compare: wgpu::CompareFunction::LessEqual,
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),

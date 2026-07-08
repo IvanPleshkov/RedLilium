@@ -590,6 +590,7 @@ impl PipelineManager {
         pipeline_layout: vk::PipelineLayout,
         color_formats: &[TextureFormat],
         depth_format: Option<TextureFormat>,
+        depth_write: bool,
         blend_state: Option<&crate::materials::BlendState>,
         polygon_mode: crate::materials::PolygonMode,
         _dynamic_rendering: &ash::khr::dynamic_rendering::Device,
@@ -700,7 +701,9 @@ impl PipelineManager {
 
         let depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo::default()
             .depth_test_enable(depth_format.is_some())
-            .depth_write_enable(depth_format.is_some())
+            // Writing depth to a read-only depth attachment is invalid; a pass
+            // that samples the depth it tests against sets `depth_write=false`.
+            .depth_write_enable(depth_format.is_some() && depth_write)
             .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
             .depth_bounds_test_enable(false)
             .stencil_test_enable(false);

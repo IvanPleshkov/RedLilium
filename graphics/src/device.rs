@@ -415,6 +415,24 @@ impl GraphicsDevice {
                     entry.binding, decl.binding_type
                 )));
             }
+            // A depth-read-only sampled layout is only meaningful for a depth
+            // texture (it records DEPTH_STENCIL_READ_ONLY_OPTIMAL).
+            if entry.sampled_depth_layout
+                == crate::materials::SampledDepthLayout::DepthStencilReadOnly
+            {
+                let depth = matches!(
+                    &entry.resource,
+                    crate::materials::BoundResource::Texture(t)
+                        if t.format().is_depth_stencil()
+                );
+                if !depth {
+                    return Err(GraphicsError::InvalidParameter(format!(
+                        "binding {} declares DepthStencilReadOnly sampled layout but is not a \
+                         depth texture",
+                        entry.binding
+                    )));
+                }
+            }
         }
 
         let gpu_handle = self

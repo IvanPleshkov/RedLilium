@@ -18,6 +18,7 @@ mod material;
 pub use bindings::{BindingLayout, BindingLayoutEntry, BindingType, ShaderStageFlags, UpdateRate};
 pub use instance::{
     BindingEntry, BindingGroup, BindingGroupDescriptor, BoundResource, MaterialInstance,
+    SampledDepthLayout,
 };
 pub use material::{
     BlendComponent, BlendFactor, BlendOperation, BlendState, Material, MaterialDescriptor,

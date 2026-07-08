@@ -1,10 +1,33 @@
 //! Vulkan validation layer debug messenger.
 
+use std::cell::Cell;
 use std::ffi::CStr;
 
 use ash::vk;
 
 use crate::error::GraphicsError;
+
+thread_local! {
+    /// Count of `ERROR`-severity `VALIDATION` messages seen on *this* thread.
+    ///
+    /// The validation layer invokes the debug callback synchronously on the
+    /// thread making the offending Vulkan call, so a test that drives all its
+    /// GPU work on one thread can bracket a section with
+    /// [`reset_validation_error_count`] / [`validation_error_count`] to assert
+    /// zero VUIDs without races from other tests' instances.
+    static VALIDATION_ERRORS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Number of Vulkan validation errors recorded on the current thread since the
+/// last [`reset_validation_error_count`].
+pub fn validation_error_count() -> usize {
+    VALIDATION_ERRORS.with(|c| c.get())
+}
+
+/// Reset the current thread's validation-error counter to zero.
+pub fn reset_validation_error_count() {
+    VALIDATION_ERRORS.with(|c| c.set(0));
+}
 
 /// Create a debug messenger for validation layer output.
 pub fn create_debug_messenger(
@@ -66,6 +89,9 @@ unsafe extern "system" fn debug_callback(
 
     match message_severity {
         vk::DebugUtilsMessageSeverityFlagsEXT::ERROR => {
+            if message_type.contains(vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION) {
+                VALIDATION_ERRORS.with(|c| c.set(c.get() + 1));
+            }
             log::error!("[Vulkan {}] {}", type_str, message);
         }
         vk::DebugUtilsMessageSeverityFlagsEXT::WARNING => {
