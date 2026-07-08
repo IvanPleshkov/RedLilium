@@ -27,16 +27,21 @@ mod common;
 
 use rstest::rstest;
 
+use std::sync::Arc;
+
 use common::{
     Backend, ExpectedPixel, FULLSCREEN_QUAD_VERTICES, LEFT_HALF_QUAD_VERTICES, TestContext,
     create_fullscreen_quad, create_left_half_quad, create_material_instance, create_mrt_pass,
     create_render_pass_with_depth, create_simple_render_pass, create_solid_color_material,
     create_texture_sample_instance, create_texture_sample_material, generate_test_pattern,
-    get_pixel, readback_buffer_size, verify_pixel, write_quad_vertices,
+    get_pixel, quad_vertex_layout, readback_buffer_size, verify_pixel, write_quad_vertices,
 };
 use redlilium_graphics::{
-    BufferUsage, RenderGraph, RenderGraphCompilationMode, TextureFormat, TextureUsage,
-    TransferConfig, TransferOperation, TransferPass,
+    BindingGroupDescriptor, BindingLayout, BindingLayoutEntry, BindingType, BufferUsage,
+    ColorAttachment, DepthStencilAttachment, GraphicsPass, LoadOp, MaterialDescriptor,
+    MaterialInstance, RenderGraph, RenderGraphCompilationMode, RenderTargetConfig,
+    SamplerDescriptor, ShaderSource, StoreOp, TextureFormat, TextureUsage, TransferConfig,
+    TransferOperation, TransferPass,
 };
 
 // ============================================================================
@@ -1060,5 +1065,232 @@ fn test_binding_group_dropped_while_in_flight(#[case] backend: Backend) {
             [0.0, 0.0, 0.0, 1.0],
         ));
         ctx.execute_graph(g);
+    }
+}
+
+// ============================================================================
+// Depth co-use: sampled + read-only depth attachment in one pass (issue #60)
+// ============================================================================
+
+/// WGSL shader that samples a depth texture and writes the sampled depth as
+/// the red channel. The vertex shader forces clip z = 0.1 so the fragment
+/// passes the LessEqual depth test against the pre-cleared depth of 0.25.
+const DEPTH_CO_USE_SHADER: &str = r#"
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+}
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@group(0) @binding(0) var depth_texture: texture_depth_2d;
+@group(0) @binding(1) var depth_sampler: sampler;
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.position = vec4<f32>(in.position.xy, 0.1, 1.0);
+    out.uv = in.uv;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let d = textureSample(depth_texture, depth_sampler, in.uv);
+    return vec4<f32>(d, 0.0, 0.0, 1.0);
+}
+"#;
+
+/// Regression test for issue #60: a depth texture sampled while bound as a
+/// **read-only depth attachment** in the same pass.
+///
+/// Descriptor (`with_depth_texture_co_attached`), barrier (render graph
+/// transition), and attachment (read-only depth) must all agree on
+/// `DEPTH_STENCIL_READ_ONLY_OPTIMAL`; the pipeline must not write depth
+/// (`with_depth_write(false)`).
+///
+/// Three sequential graphs (the layout tracker persists across executes):
+/// 1. Prepass: clear depth to 0.25 (no draws) — leaves the texture in the
+///    depth-attachment layout.
+/// 2. Co-use pass: the SAME depth texture as a read-only attachment (Load) +
+///    a material that samples it and outputs the depth as red. The quad is at
+///    clip z = 0.1, passing the LessEqual test against 0.25, so every
+///    fragment writes red = sampled depth (~0.25).
+/// 3. Readback of the color target.
+///
+/// On Vulkan the context runs with validation layers and asserts **zero**
+/// validation errors across the whole workload (the layouts this fix aligns
+/// are also exactly what a stricter driver or a sync-validation run would
+/// reject).
+#[rstest]
+#[case::dummy(Backend::Dummy)]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_depth_co_use_read_only_attachment(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        eprintln!("Backend {:?} not available, skipping", backend);
+        return;
+    };
+
+    // Bracket the whole GPU workload with the thread-local VUID counter. The
+    // validation callback fires synchronously on the offending thread, and all
+    // GPU work below runs on this test's thread.
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+    }
+
+    const W: u32 = 16;
+    const H: u32 = 16;
+    const PRE_CLEAR_DEPTH: f32 = 0.25;
+
+    // The depth texture is both a render attachment and sampled in a shader.
+    let depth = ctx.create_texture_2d(
+        W,
+        H,
+        TextureFormat::Depth32Float,
+        TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
+    );
+    let prepass_color = ctx.create_render_target(W, H);
+    let color = ctx.create_render_target(W, H);
+
+    // Graph 1 (prepass): clear depth to 0.25, no draws. Leaves the depth
+    // texture in the depth-attachment layout for the next graph.
+    let mut g1 = RenderGraph::new();
+    g1.add_graphics_pass(create_render_pass_with_depth(
+        "depth_prepass",
+        prepass_color,
+        depth.clone(),
+        [0.0, 0.0, 0.0, 1.0],
+        PRE_CLEAR_DEPTH,
+    ));
+    ctx.execute_graph(g1);
+
+    // Material: samples the depth texture (binding 0) with a sampler
+    // (binding 1), depth-tests against the read-only attachment without
+    // writing depth.
+    let binding_layout = Arc::new(
+        BindingLayout::new()
+            .with_entry(BindingLayoutEntry::new(0, BindingType::DepthTexture))
+            .with_sampler(1)
+            .with_label("depth_co_use_bindings"),
+    );
+    let material = ctx
+        .device
+        .create_material(
+            &MaterialDescriptor::new()
+                .with_shader(ShaderSource::vertex(
+                    DEPTH_CO_USE_SHADER.as_bytes().to_vec(),
+                    "vs_main",
+                ))
+                .with_shader(ShaderSource::fragment(
+                    DEPTH_CO_USE_SHADER.as_bytes().to_vec(),
+                    "fs_main",
+                ))
+                .with_vertex_layout(quad_vertex_layout())
+                .with_binding_layout(binding_layout)
+                .with_color_format(TextureFormat::Rgba8Unorm)
+                .with_depth_format(TextureFormat::Depth32Float)
+                .with_depth_write(false)
+                .with_label("depth_co_use_material"),
+        )
+        .expect("Failed to create depth co-use material");
+
+    let sampler = ctx
+        .device
+        .create_sampler(&SamplerDescriptor::nearest().with_label("depth_co_use_sampler"))
+        .expect("Failed to create sampler");
+
+    // The co-attached constructor records DEPTH_STENCIL_READ_ONLY_OPTIMAL in
+    // the eagerly-written descriptor, matching the attachment layout.
+    let binding_group = ctx
+        .device
+        .create_binding_group(
+            material.binding_layouts()[0].clone(),
+            BindingGroupDescriptor::new()
+                .with_depth_texture_co_attached(0, depth.clone())
+                .with_sampler(1, sampler)
+                .with_label("depth_co_use_group"),
+        )
+        .expect("Failed to create depth co-use binding group");
+
+    let instance = Arc::new(
+        MaterialInstance::new(material)
+            .with_binding_group(binding_group)
+            .with_label("depth_co_use_instance"),
+    );
+
+    let quad = create_fullscreen_quad(&ctx);
+    write_quad_vertices(&ctx, &quad, &FULLSCREEN_QUAD_VERTICES);
+
+    // Graph 2 (co-use pass): same depth texture as read-only attachment
+    // (Load) while the draw samples it.
+    let mut g2 = RenderGraph::new();
+    let mut pass = GraphicsPass::new("depth_co_use".into());
+    pass.set_render_targets(
+        RenderTargetConfig::new()
+            .with_color(
+                ColorAttachment::from_texture(color.clone())
+                    .with_load_op(LoadOp::clear_color(0.0, 0.0, 0.0, 1.0))
+                    .with_store_op(StoreOp::Store),
+            )
+            .with_depth_stencil(
+                DepthStencilAttachment::from_texture(depth.clone())
+                    .with_depth_load_op(LoadOp::Load)
+                    .with_depth_store_op(StoreOp::Store)
+                    .with_depth_read_only(true),
+            ),
+    );
+    pass.add_draw(quad, instance);
+    g2.add_graphics_pass(pass);
+    ctx.execute_graph(g2);
+
+    // Graph 3: read the color target back.
+    let readback_size = readback_buffer_size(W, H, 4);
+    let readback = ctx.create_readback_buffer(readback_size);
+    let mut g3 = RenderGraph::new();
+    let mut copy = TransferPass::new("depth_co_use_readback".into());
+    copy.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::readback_texture_whole(color, readback.clone()),
+    ));
+    g3.add_transfer_pass(copy);
+    ctx.execute_graph(g3);
+
+    // Dummy backend performs no real rendering — reaching here without a
+    // panic is the assertion.
+    if backend == Backend::Dummy {
+        return;
+    }
+
+    let data = ctx.read_buffer(&readback, readback_size);
+    let center = get_pixel(&data, W, W / 2, H / 2);
+    eprintln!("depth co-use center pixel ({backend:?}): {center:?}");
+    // Red channel = sampled depth = 0.25; the depth test consumed the same
+    // image (fragments at z=0.1 pass LessEqual against 0.25).
+    let expected = ExpectedPixel::from_float(PRE_CLEAR_DEPTH, 0.0, 0.0, 1.0);
+    assert!(
+        verify_pixel(&data, W, W / 2, H / 2, expected, 3),
+        "Center pixel should be red = sampled depth {:?}, but got {:?} (backend {:?})",
+        expected,
+        center,
+        backend
+    );
+
+    // Descriptor/barrier/attachment layouts agree, so the validation layer
+    // stays silent. Note: current validation layers (1.4.x) no longer perform
+    // submit-time descriptor-vs-image layout checks by default, so this
+    // counter is a general VUID guard for the whole workload rather than a
+    // targeted layout-mismatch detector; the pixel assertion above is the
+    // functional proof that sampling and depth-testing co-used the same image.
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        assert_eq!(
+            errors, 0,
+            "Vulkan validation reported {errors} error(s) during depth co-use"
+        );
     }
 }

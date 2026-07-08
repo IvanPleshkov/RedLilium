@@ -111,11 +111,26 @@ impl TestContext {
     ///
     /// Returns `None` if the backend is not available.
     pub fn new(backend: Backend) -> Option<Self> {
+        Self::with_validation(backend, false)
+    }
+
+    /// Create a test context with GPU validation layers enabled.
+    ///
+    /// Used by tests that assert on the Vulkan validation-error counter
+    /// (`redlilium_graphics::backend::vulkan::validation_error_count`): without
+    /// validation layers the counter is trivially zero. Falls back gracefully
+    /// (with a log warning) if the layers are not installed.
+    #[allow(dead_code)]
+    pub fn new_with_validation(backend: Backend) -> Option<Self> {
+        Self::with_validation(backend, true)
+    }
+
+    fn with_validation(backend: Backend, validation: bool) -> Option<Self> {
         if !backend.is_available() {
             return None;
         }
 
-        let params = backend.to_instance_parameters();
+        let params = backend.to_instance_parameters().with_validation(validation);
         let instance = GraphicsInstance::with_parameters(params).ok()?;
         let device = instance.create_device().ok()?;
         // Use 1 frame in flight for synchronous test execution

@@ -268,6 +268,13 @@ pub struct MaterialDescriptor {
     /// Depth attachment format, if any.
     pub depth_format: Option<TextureFormat>,
 
+    /// Whether the pipeline writes depth (default `true`). Set `false` for a
+    /// pipeline that only depth-tests against a **read-only** depth attachment
+    /// (writing depth to a read-only attachment is invalid) — e.g. a pass that
+    /// samples the same depth texture it tests against (#60). No effect unless
+    /// `depth_format` is set.
+    pub depth_write: bool,
+
     /// `(group, binding)` pairs whose reflected `UniformBuffer` should be made a
     /// [`DynamicUniformBuffer`](crate::BindingType::DynamicUniformBuffer) (bound
     /// with a per-draw offset). Applied after reflection in `create_material`.
@@ -294,6 +301,7 @@ impl Default for MaterialDescriptor {
             polygon_mode: PolygonMode::Fill,
             color_formats: Vec::new(),
             depth_format: None,
+            depth_write: true,
             dynamic_uniforms: Vec::new(),
             set_update_rates: Vec::new(),
             label: None,
@@ -359,6 +367,14 @@ impl MaterialDescriptor {
 
     pub fn with_depth_format(mut self, format: TextureFormat) -> Self {
         self.depth_format = Some(format);
+        self
+    }
+
+    /// Set whether the pipeline writes depth (default `true`). Use `false` for a
+    /// pipeline that depth-tests against a read-only depth attachment (see
+    /// [`depth_write`](Self::depth_write)).
+    pub fn with_depth_write(mut self, write: bool) -> Self {
+        self.depth_write = write;
         self
     }
 

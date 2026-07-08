@@ -120,20 +120,31 @@ impl WgpuBackend {
                         )));
                     }
                 };
-                let stencil_ops = if attachment.target.format().has_stencil() {
-                    Some(wgpu::Operations {
-                        load: convert_stencil_load_op(&attachment.stencil_load_op()),
-                        store: convert_store_op(&attachment.stencil_store_op()),
-                    })
-                } else {
+                // wgpu expresses a read-only depth/stencil attachment as
+                // `ops: None` (WebGPU `depthReadOnly` / `stencilReadOnly`). This
+                // is what lets the same depth texture be a depth attachment and
+                // be sampled in one pass (#60); WebGPU rejects a writable depth
+                // attachment that is also bound for sampling.
+                let depth_ops = if attachment.depth_read_only {
                     None
-                };
-                Some(wgpu::RenderPassDepthStencilAttachment {
-                    view,
-                    depth_ops: Some(wgpu::Operations {
+                } else {
+                    Some(wgpu::Operations {
                         load: convert_depth_load_op(&attachment.depth_load_op()),
                         store: convert_store_op(&attachment.depth_store_op()),
-                    }),
+                    })
+                };
+                let stencil_ops =
+                    if attachment.target.format().has_stencil() && !attachment.stencil_read_only {
+                        Some(wgpu::Operations {
+                            load: convert_stencil_load_op(&attachment.stencil_load_op()),
+                            store: convert_store_op(&attachment.stencil_store_op()),
+                        })
+                    } else {
+                        None
+                    };
+                Some(wgpu::RenderPassDepthStencilAttachment {
+                    view,
+                    depth_ops,
                     stencil_ops,
                 })
             }

@@ -306,6 +306,19 @@ impl DepthStencilAttachment {
         self
     }
 
+    /// Whether **every aspect the format has** is read-only, so the attachment
+    /// can legally share `DEPTH_STENCIL_READ_ONLY_OPTIMAL` with simultaneous
+    /// sampling. Depth-only formats need only `depth_read_only`; combined
+    /// depth+stencil formats need both flags.
+    ///
+    /// Mixed depth-read-only / stencil-write is *not* read-only here (its
+    /// correct layout, `DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL`, is not yet
+    /// modeled) — such a pass is treated as a depth/stencil write and cannot
+    /// co-use the attachment for sampling.
+    pub fn effective_read_only(&self) -> bool {
+        self.depth_read_only && (!self.target.format().has_stencil() || self.stencil_read_only)
+    }
+
     /// Get the texture for this attachment.
     ///
     /// Panics if this is a surface attachment (not a texture).
@@ -447,6 +460,19 @@ mod tests {
 
         assert!(matches!(attachment.depth_load_op, LoadOp::Clear(_)));
         assert_eq!(attachment.depth_store_op, StoreOp::DontCare);
+    }
+
+    #[test]
+    fn test_depth_stencil_attachment_effective_read_only() {
+        // Depth-only format (Depth32Float): `depth_read_only` alone makes the
+        // attachment effectively read-only (co-usable for sampling, #60).
+        let attachment =
+            DepthStencilAttachment::from_texture(create_depth_texture()).with_depth_read_only(true);
+        assert!(attachment.effective_read_only());
+
+        // Without the flag the attachment is writable.
+        let attachment = DepthStencilAttachment::from_texture(create_depth_texture());
+        assert!(!attachment.effective_read_only());
     }
 
     #[test]
