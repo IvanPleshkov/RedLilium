@@ -78,6 +78,10 @@ pub struct EditorTabViewer<'a> {
     pub drag_rect: Option<egui::Rect>,
     /// egui texture id of the off-screen scene color target (the SceneView image).
     pub scene_texture: Option<egui::TextureId>,
+    /// Phase 6: Lock inspector edits during Pause mode (read-only inspection only).
+    pub read_only: bool,
+    /// Phase 6: Dim/disable Assets and Console during Play mode.
+    pub is_playing: bool,
 }
 
 impl TabViewer for EditorTabViewer<'_> {
@@ -90,7 +94,12 @@ impl TabViewer for EditorTabViewer<'_> {
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Tab) {
         match tab {
             Tab::WorldInspector => {
-                redlilium_ecs::ui::show_world_inspector(ui, self.world, self.inspector_state);
+                redlilium_ecs::ui::show_world_inspector(
+                    ui,
+                    self.world,
+                    self.inspector_state,
+                    self.read_only,
+                );
             }
             Tab::ComponentInspector => {
                 // An asset selected in the browser takes precedence over the
@@ -104,6 +113,7 @@ impl TabViewer for EditorTabViewer<'_> {
                         ui,
                         self.world,
                         self.inspector_state,
+                        self.read_only,
                     );
                 }
             }
@@ -138,24 +148,34 @@ impl TabViewer for EditorTabViewer<'_> {
                 }
             }
             Tab::Assets => {
-                // The DB stamps dragged files with their asset identity so
-                // inspector reference fields can accept the drop.
-                let db = self
-                    .world
-                    .has_resource::<redlilium_assets::AssetDb>()
-                    .then(|| self.world.resource::<redlilium_assets::AssetDb>());
-                self.asset_browser.show(ui, self.vfs, db.as_deref());
+                // Phase 6: Disable Assets panel during Play mode
+                if self.is_playing {
+                    ui.disable();
+                    ui.label("Assets disabled during Play mode");
+                } else {
+                    let db = self
+                        .world
+                        .has_resource::<redlilium_assets::AssetDb>()
+                        .then(|| self.world.resource::<redlilium_assets::AssetDb>());
+                    self.asset_browser.show(ui, self.vfs, db.as_deref());
+                }
             }
             Tab::Console => {
-                let panic_info = if self.world.has_resource::<redlilium_ecs::PlayControl>() {
-                    self.world
-                        .resource::<redlilium_ecs::PlayControl>()
-                        .panic_info()
-                        .cloned()
+                // Phase 6: Disable Console panel during Play mode
+                if self.is_playing {
+                    ui.disable();
+                    ui.label("Console disabled during Play mode");
                 } else {
-                    None
-                };
-                self.console.show(ui, panic_info);
+                    let panic_info = if self.world.has_resource::<redlilium_ecs::PlayControl>() {
+                        self.world
+                            .resource::<redlilium_ecs::PlayControl>()
+                            .panic_info()
+                            .cloned()
+                    } else {
+                        None
+                    };
+                    self.console.show(ui, panic_info);
+                }
             }
             Tab::History => {
                 crate::history_panel::show_history(ui, self.history);

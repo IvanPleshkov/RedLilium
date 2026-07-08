@@ -15,6 +15,23 @@ pub enum PlayAction {
     Stop,
 }
 
+/// Draw play mode state indicator badge (showing "PLAYING" or "PAUSED").
+///
+/// Returns nothing; for display only. Empty during Editing mode.
+pub fn draw_play_mode_indicator(ui: &mut egui::Ui, play_state: PlayState) {
+    match play_state {
+        PlayState::Editing => {
+            // No indicator during Edit mode
+        }
+        PlayState::Playing => {
+            ui.colored_label(egui::Color32::from_rgb(200, 50, 50), "● PLAYING");
+        }
+        PlayState::Paused => {
+            ui.colored_label(egui::Color32::from_rgb(200, 180, 50), "⏸ PAUSED");
+        }
+    }
+}
+
 /// Draw the play/pause/stop controls inline in a horizontal UI region.
 ///
 /// Used inside the titlebar / menu bar. Returns an action if a button was clicked,

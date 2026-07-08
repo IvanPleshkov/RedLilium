@@ -43,6 +43,14 @@ pub trait Component: Clone + Send + Sync + 'static {
     /// without requiring an instance.
     const NAME: &'static str;
 
+    /// The schema version of this component type.
+    ///
+    /// Incremented when the component's serialized fields change, allowing
+    /// migrations to transform old schema data to new schema during snapshot
+    /// restore. Defaults to 1; derived components can override via
+    /// `#[schema_version = N]` attribute.
+    const SCHEMA_VERSION: u32 = 1;
+
     /// Returns the struct name (e.g. `"Transform"`).
     fn component_name(&self) -> &'static str {
         Self::NAME

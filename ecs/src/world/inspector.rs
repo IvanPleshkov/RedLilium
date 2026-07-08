@@ -726,10 +726,14 @@ impl World {
             .map(|(se, &new_e)| ((se.entity_index, se.entity_spawn_tick), new_e))
             .collect();
 
-        // 3. Extract deserialize fns by name (before borrowing self mutably via context)
+        // 3. Extract deserialize fns and schema versions by name (before borrowing self mutably via context)
         let deserialize_fns: HashMap<&str, DeserializeComponentFn> = self
             .iter_meta()
             .map(|m| (m.name, m.deserialize_fn))
+            .collect();
+        let schema_versions: HashMap<&str, u32> = self
+            .iter_meta()
+            .map(|m| (m.name, m.schema_version))
             .collect();
 
         // 4. Restore entity flags
@@ -739,33 +743,95 @@ impl World {
             }
         }
 
-        // 5. Create context with entity remap and Arc dedup cache
-        let mut ctx = crate::serialize::DeserializeContext::new(self);
-        ctx.set_entity_map(entity_map);
-        ctx.set_unmapped_policy(unmapped_policy);
-
-        // 5b. Pre-scan EVERY component's data (including those whose type is
+        // 5. Pre-scan EVERY component's data (including those whose type is
         // unknown/skipped) to record each shared Arc's raw inner. This lets an
         // `ArcRef` on a registered component resolve even when the original
         // `ArcValue` lived on a component that gets skipped below.
-        for se in entities {
-            for comp in &se.components {
-                ctx.prescan_arc_values(&comp.data);
+        {
+            let mut ctx = crate::serialize::DeserializeContext::new(self);
+            for se in entities {
+                for comp in &se.components {
+                    ctx.prescan_arc_values(&comp.data);
+                }
             }
-        }
+        } // ctx dropped here
 
-        // 6. For each entity, deserialize components
+        // 6. For each entity, deserialize components (with migration support for schema changes)
         for (i, se) in entities.iter().enumerate() {
             let entity = new_entities[i];
             for comp in &se.components {
                 if let Some(&deser_fn) = deserialize_fns.get(comp.type_name.as_str()) {
-                    ctx.set_current_component(&comp.type_name);
-                    match deser_fn(entity, &comp.data, &mut ctx) {
-                        Ok(()) => {}
-                        Err(crate::serialize::DeserializeError::NotDeserializable { .. }) => {
-                            // Skip components that don't support deserialization
+                    // Get the current schema version for this component type
+                    let current_schema = schema_versions
+                        .get(comp.type_name.as_str())
+                        .copied()
+                        .unwrap_or(1);
+
+                    // Check if schema version has changed (Phase 4: primary migration trigger)
+                    if comp.schema_version != current_schema {
+                        // Schema mismatch: attempt migration before normal deserialization
+                        let migration_result = self.migration_registry.try_migrate(
+                            comp.type_name.as_str(),
+                            &comp.data,
+                            comp.schema_version,
+                            current_schema,
+                        );
+
+                        if let Some(transformed) = migration_result {
+                            // Migration transformed the data; retry with transformed data
+                            let mut ctx = crate::serialize::DeserializeContext::new(self);
+                            ctx.set_entity_map(entity_map.clone());
+                            ctx.set_unmapped_policy(unmapped_policy);
+                            ctx.set_current_component(&comp.type_name);
+
+                            match deser_fn(entity, &transformed, &mut ctx) {
+                                Ok(()) => {
+                                    // Success after migration
+                                }
+                                Err(crate::serialize::DeserializeError::NotDeserializable {
+                                    ..
+                                }) => {
+                                    // Migrated data still can't deserialize; skip component
+                                    eprintln!(
+                                        "warning: Component `{}` on entity {:?} skipped: \
+                                         migrated data incompatible with deserializer.",
+                                        comp.type_name, entity
+                                    );
+                                }
+                                Err(e) => {
+                                    // Migration applied but deserialization still failed
+                                    return Err(e);
+                                }
+                            }
+                        } else {
+                            // No migration available for version mismatch; skip component
+                            eprintln!(
+                                "warning: Component `{}` on entity {:?} skipped: \
+                                 schema version changed ({} → {}) but no migration registered.",
+                                comp.type_name, entity, comp.schema_version, current_schema
+                            );
                         }
-                        Err(e) => return Err(e),
+                    } else {
+                        // Schema version matches; attempt normal deserialization
+                        let mut ctx = crate::serialize::DeserializeContext::new(self);
+                        ctx.set_entity_map(entity_map.clone());
+                        ctx.set_unmapped_policy(unmapped_policy);
+                        ctx.set_current_component(&comp.type_name);
+
+                        match deser_fn(entity, &comp.data, &mut ctx) {
+                            Ok(()) => {
+                                // Success on first try
+                            }
+                            Err(crate::serialize::DeserializeError::NotDeserializable {
+                                ..
+                            }) => {
+                                // Component type doesn't support deserialization
+                            }
+                            Err(deser_err) => {
+                                // Deserialization failed (data format mismatch, not schema change)
+                                return Err(deser_err);
+                            }
+                        }
                     }
                 }
                 // Skip unknown component types silently

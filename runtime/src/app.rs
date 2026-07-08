@@ -2,15 +2,16 @@
 
 use std::sync::Arc;
 
+use log::debug;
 use redlilium_ecs::sync::RwLock;
 
 use redlilium_ecs::{
     AssetGpuFlush, AssetPump, Component, FlushUploads, ForwardRender, FrameRing, GameTime,
     HotReload, ManagePlayModeTransitions, MaterialInstanceLoad, MeshLoad, PlayControl,
     PlayModeAwareRegistry, PlayStartTick, PostUpdate, PreUpdate, RealTime, Render, RenderSchedule,
-    Resource, ScenePass, ScheduleLabel, Schedules, System, SystemsContainer, UpdateCameraMatrices,
-    UpdateGlobalTransforms, WindowInput, World, register_rendering_components,
-    register_std_components,
+    Resource, ScenePass, ScheduleLabel, Schedules, System, SystemsContainer, UnloadStrategy,
+    UpdateCameraMatrices, UpdateGlobalTransforms, WindowInput, World,
+    register_rendering_components, register_std_components,
 };
 
 use crate::EngineContext;
@@ -232,8 +233,40 @@ impl App {
         aspect: f32,
         snapshot: &redlilium_ecs::serialize::SerializedWorld,
     ) -> Result<Self, redlilium_ecs::serialize::DeserializeError> {
+        // Phase 6: Boundary guards — quiesce compute pool before generation change if needed
+        let registry = engine.generation_registry();
+        let strategy = registry.read().unload_strategy();
+
+        if let UnloadStrategy::SafeUnmapWithQuiesce { timeout } = strategy {
+            // SafeUnmapWithQuiesce: We need to ensure all async tasks from the old generation
+            // are complete before we allocate a new generation.
+            // The ComputePool would be injected in the active world, but since we're about
+            // to rebuild the world, we rely on the host to have quiesced it beforehand.
+            // For defensive coding, we log if this is a concern.
+            debug!(
+                "Phase 6: SafeUnmapWithQuiesce mode — \
+                 caller should have quiesced pool before reload (timeout: {:?})",
+                timeout
+            );
+        }
+
+        let generation = registry.write().allocate_generation();
         let mut app = Self::new(engine, aspect);
-        plugin.build(&mut app);
+
+        let mut world = std::mem::take(&mut app.world);
+        world.with_registration_source(generation, |scoped_world| {
+            // Reconstruct a temporary app with the scoped world to call plugin.build
+            let mut temp_app = App {
+                world: std::mem::take(scoped_world),
+                schedules: std::mem::take(&mut app.schedules),
+                window_input: app.window_input.clone(),
+                aspect: app.aspect,
+            };
+            plugin.build(&mut temp_app);
+            // Move changes back to outer scope
+            app.world = std::mem::take(&mut temp_app.world);
+            app.schedules = std::mem::take(&mut temp_app.schedules);
+        });
         // The scene comes from the snapshot; `build` must not have spawned any
         // entities (contract: scene population lives in `spawn_scene`, skipped
         // on reload). A violation would stack the restored snapshot on top of a

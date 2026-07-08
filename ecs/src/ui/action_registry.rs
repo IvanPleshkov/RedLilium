@@ -125,6 +125,7 @@ impl ActionRegistry {
                 let data = field(params, "data").ok_or("missing 'data'")?;
                 let serialized = SerializedComponent {
                     type_name: component,
+                    schema_version: 1,
                     data: natural_to_value(data)?,
                 };
                 Ok(RegisteredAction::plain(ImportComponentAction::new(

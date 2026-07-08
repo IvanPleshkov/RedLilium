@@ -77,6 +77,40 @@ impl World {
         self.resources.borrow_mut::<T>()
     }
 
+    /// Try to get mutable access to the shared generation registry, if injected.
+    pub(crate) fn with_generation_registry_mut<R>(
+        &self,
+        f: impl FnOnce(&mut crate::GameGenerationRegistry) -> R,
+    ) -> Option<R> {
+        if !self.has_resource::<crate::GameGenerationRegistry>() {
+            return None;
+        }
+        let handle = self.resources.get_handle::<crate::GameGenerationRegistry>();
+        handle.try_write().and_then(|mut guard| {
+            guard
+                .as_any_mut()
+                .downcast_mut::<crate::GameGenerationRegistry>()
+                .map(f)
+        })
+    }
+
+    /// Try to get read access to the shared generation registry, if injected.
+    pub(crate) fn with_generation_registry<R>(
+        &self,
+        f: impl FnOnce(&crate::GameGenerationRegistry) -> R,
+    ) -> Option<R> {
+        if !self.has_resource::<crate::GameGenerationRegistry>() {
+            return None;
+        }
+        let handle = self.resources.get_handle::<crate::GameGenerationRegistry>();
+        handle.try_read().and_then(|guard| {
+            guard
+                .as_any()
+                .downcast_ref::<crate::GameGenerationRegistry>()
+                .map(f)
+        })
+    }
+
     /// Downcast source-guard (ADR-020 type-identity amendment): asserts the
     /// stored entry's recorded source matches the source `T` currently resolves
     /// to via the registration map, refusing to reinterpret data left by a

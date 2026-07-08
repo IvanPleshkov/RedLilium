@@ -688,6 +688,7 @@ mod prefab_refs {
                     entity_flags: 0,
                     components: vec![SerializedComponent {
                         type_name: "Link".to_string(),
+                        schema_version: 1,
                         data: Value::Map(vec![(
                             "target".to_string(),
                             Value::String("garbage".to_string()),

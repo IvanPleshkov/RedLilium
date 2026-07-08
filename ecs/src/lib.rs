@@ -46,10 +46,12 @@ pub mod component_field;
 mod compute;
 mod entity;
 mod events;
+pub mod generation;
 pub mod inspect;
 mod main_thread_dispatcher;
 mod main_thread_resource;
 pub mod map_entities;
+pub mod migration;
 mod observer;
 #[cfg(any(
     feature = "physics-3d",
@@ -85,6 +87,8 @@ pub use ecs_macro::{Bundle, Component};
 pub use egui;
 pub use entity::Entity;
 pub use events::{EventCursor, EventIter, Events};
+pub use generation::{GameGenerationRegistry, GenerationInUseError, UnloadStrategy};
+pub use migration::MigrationRegistry;
 pub use observer::{OnAdd, OnInsert, OnRemove};
 pub use prefab::Prefab;
 pub use query::{

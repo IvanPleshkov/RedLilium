@@ -429,6 +429,7 @@ impl AppHandler for PhysicsDemoApp {
                                 ui,
                                 world,
                                 &mut self.inspector_state,
+                                false,
                             );
                         });
                 }
@@ -442,6 +443,7 @@ impl AppHandler for PhysicsDemoApp {
                                 ui,
                                 world,
                                 &mut self.inspector_state,
+                                false,
                             );
                         });
                 }

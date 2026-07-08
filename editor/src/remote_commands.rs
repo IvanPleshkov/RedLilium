@@ -664,6 +664,7 @@ fn dispatch(
             };
             let serialized = SerializedComponent {
                 type_name: component.clone(),
+                schema_version: 1,
                 data: value,
             };
             let result = push_action(

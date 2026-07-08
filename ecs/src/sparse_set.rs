@@ -127,6 +127,8 @@ pub type InspectResult = Option<Vec<Box<dyn redlilium_core::abstract_editor::Edi
 pub(crate) struct ComponentMeta {
     /// The short component name (from `Component::NAME`).
     pub name: &'static str,
+    /// The schema version of this component type (from `Component::SCHEMA_VERSION`).
+    pub schema_version: u32,
     /// Check if an entity has this component.
     pub has_fn: fn(&World, Entity) -> bool,
     /// Render the component's inspector UI with an immutable world reference.

@@ -33,6 +33,13 @@ pub struct SerializedEntity {
 pub struct SerializedComponent {
     /// The component type name (matches [`Component::NAME`](crate::Component::NAME)).
     pub type_name: String,
+    /// The schema version of the component when serialized.
+    ///
+    /// Used during deserialization to select and execute the appropriate migration
+    /// when the current component schema differs from what was saved.
+    /// Defaults to 1 for backward compatibility with pre-Phase-4 snapshots.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
     /// The serialized field data.
     pub data: Value,
 }
@@ -63,6 +70,17 @@ pub struct SerializedResource {
     /// The resource type name (matches
     /// [`SnapshotResource::NAME`](crate::SnapshotResource::NAME)).
     pub type_name: String,
+    /// The schema version of the resource when serialized.
+    ///
+    /// Used during deserialization to select and execute the appropriate migration
+    /// when the current resource schema differs from what was saved.
+    /// Defaults to 1 for backward compatibility with pre-Phase-4 snapshots.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
     /// The serialized resource data.
     pub data: Value,
+}
+
+fn default_schema_version() -> u32 {
+    1
 }

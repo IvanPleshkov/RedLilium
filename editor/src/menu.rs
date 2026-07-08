@@ -209,6 +209,10 @@ pub fn draw_menu_bar(
             play_action =
                 crate::toolbar::draw_play_controls(&mut play_ui, play_state, paused_due_to_panic);
 
+            // Phase 6: Play mode indicator badge
+            play_ui.add_space(8.0);
+            crate::toolbar::draw_play_mode_indicator(&mut play_ui, play_state);
+
             // Right: window control buttons (custom titlebar only)
             if custom_titlebar {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
