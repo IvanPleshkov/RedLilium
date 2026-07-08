@@ -165,9 +165,12 @@ impl TextureManager {
     /// Force MeshLoad to re-scan all asset refs by bumping generation.
     /// Called on snapshot restore to ensure unresolved refs get re-requested.
     pub(crate) fn force_rescan(&mut self) {
-        // Invalidate all demanded sources to bump generation; residents stay cached
-        // but the generation bump signals MeshLoad to re-scan all refs.
-        let sources = self.demanded.to_vec();
+        // Invalidate all RESIDENT texture sources (the actual loaded textures)
+        // so the generation bumps. This forces MeshLoad to re-scan all asset refs
+        // even in steady state (when nothing is demanded/pending). On re-scan,
+        // unresolved refs get re-requested and re-resolved.
+        // We collect keys first because invalidate mutates the cache.
+        let sources: Vec<_> = self.cache.iter().map(|(k, _)| k.clone()).collect();
         for source in sources {
             self.cache.invalidate(&source);
         }
