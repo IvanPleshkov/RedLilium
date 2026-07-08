@@ -273,9 +273,10 @@ impl EcsRunnerMultiThread {
                             Ok(Ok(result)) => results_store.store(exc_idx, result),
                             Ok(Err(e)) => errors.push(e),
                             Err(payload) => {
-                                errors.push(SystemError::Panicked(panic_payload_to_string(
-                                    &*payload,
-                                )));
+                                errors.push(SystemError::Panicked {
+                                    system: system_name.to_string(),
+                                    message: panic_payload_to_string(&*payload),
+                                });
                             }
                         }
                     } else {
@@ -290,9 +291,10 @@ impl EcsRunnerMultiThread {
                             Ok(Ok(result)) => results_store.store(exc_idx, result),
                             Ok(Err(e)) => errors.push(e),
                             Err(payload) => {
-                                errors.push(SystemError::Panicked(panic_payload_to_string(
-                                    &*payload,
-                                )));
+                                errors.push(SystemError::Panicked {
+                                    system: system_name.to_string(),
+                                    message: panic_payload_to_string(&*payload),
+                                });
                             }
                         }
                     }
@@ -487,9 +489,10 @@ impl EcsRunnerMultiThread {
                             Ok(Ok(result)) => results_ref.store(idx, result),
                             Ok(Err(e)) => errors_ref.lock().push(e),
                             Err(payload) => {
-                                errors_ref.lock().push(SystemError::Panicked(
-                                    panic_payload_to_string(&*payload),
-                                ));
+                                errors_ref.lock().push(SystemError::Panicked {
+                                    system: system_name.to_string(),
+                                    message: panic_payload_to_string(&*payload),
+                                });
                             }
                         }
                         systems.set_last_run(idx, ticks.this_run);
@@ -560,10 +563,10 @@ impl EcsRunnerMultiThread {
                         if let Err(payload) =
                             std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
                         {
-                            thread_errors.lock().push(SystemError::Panicked(format!(
-                                "main-thread work panicked: {}",
-                                panic_payload_to_string(&*payload)
-                            )));
+                            thread_errors.lock().push(SystemError::Panicked {
+                                system: "main-thread-work".to_string(),
+                                message: panic_payload_to_string(&*payload),
+                            });
                         }
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {}

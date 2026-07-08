@@ -10,18 +10,25 @@ use crate::world::World;
 ///
 /// Covers explicit failures from system logic and panics caught by the
 /// runner via [`std::panic::catch_unwind`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum SystemError {
     /// The system panicked during execution.
     ///
-    /// Contains the panic message if it could be extracted from the payload.
-    Panicked(String),
+    /// Contains the system name and panic message.
+    Panicked {
+        /// Name of the system that panicked.
+        system: String,
+        /// The panic message if it could be extracted from the payload.
+        message: String,
+    },
 }
 
 impl fmt::Display for SystemError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SystemError::Panicked(msg) => write!(f, "system panicked: {msg}"),
+            SystemError::Panicked { system, message } => {
+                write!(f, "system '{}' panicked: {}", system, message)
+            }
         }
     }
 }

@@ -57,7 +57,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::runner::EcsRunner;
 use crate::system::SystemsContainer;
-use crate::system::{ApplyStateTransition, NextState, State, StateTransition, States};
+use crate::system::{ApplyStateTransition, NextState, State, StateTransition, States, SystemError};
 use crate::world::World;
 
 // ---------------------------------------------------------------------------
@@ -477,9 +477,10 @@ impl Schedules {
                         if play_control.state() == PlayState::Playing {
                             drop(play_control);
                             let tick = world.current_tick();
+                            let SystemError::Panicked { system, message } = err;
                             let panic_info = PanicInfo {
-                                message: err.to_string(),
-                                system: "unknown".to_string(),
+                                message,
+                                system,
                                 schedule: "FixedUpdate".to_string(),
                                 tick,
                             };
@@ -510,9 +511,10 @@ impl Schedules {
                     if play_control.state() == PlayState::Playing {
                         drop(play_control);
                         let tick = world.current_tick();
+                        let SystemError::Panicked { system, message } = err;
                         let panic_info = PanicInfo {
-                            message: err.to_string(),
-                            system: "unknown".to_string(),
+                            message,
+                            system,
                             schedule: "Update".to_string(),
                             tick,
                         };
@@ -958,9 +960,10 @@ mod tests {
         impl System for PanicSystem {
             type Result = ();
             fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
-                Err(SystemError::Panicked(
-                    "test panic in FixedUpdate".to_string(),
-                ))
+                Err(SystemError::Panicked {
+                    system: "PanicSystem".to_string(),
+                    message: "test panic in FixedUpdate".to_string(),
+                })
             }
         }
 
@@ -1008,7 +1011,10 @@ mod tests {
         impl System for PanicSystem {
             type Result = ();
             fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
-                Err(SystemError::Panicked("test panic in Update".to_string()))
+                Err(SystemError::Panicked {
+                    system: "PanicSystem".to_string(),
+                    message: "test panic in Update".to_string(),
+                })
             }
         }
 
@@ -1054,7 +1060,10 @@ mod tests {
         impl System for PanicSystem {
             type Result = ();
             fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
-                Err(SystemError::Panicked("test panic in PreUpdate".to_string()))
+                Err(SystemError::Panicked {
+                    system: "PanicSystem".to_string(),
+                    message: "test panic in PreUpdate".to_string(),
+                })
             }
         }
 
@@ -1099,9 +1108,10 @@ mod tests {
         impl System for PanicSystem {
             type Result = ();
             fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
-                Err(SystemError::Panicked(
-                    "test panic while stopped".to_string(),
-                ))
+                Err(SystemError::Panicked {
+                    system: "PanicSystem".to_string(),
+                    message: "test panic while stopped".to_string(),
+                })
             }
         }
 

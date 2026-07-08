@@ -168,9 +168,10 @@ impl EcsRunnerSingleThread {
                             Ok(Ok(result)) => results_store.store(idx, result),
                             Ok(Err(e)) => errors.push(e),
                             Err(payload) => {
-                                errors.push(SystemError::Panicked(panic_payload_to_string(
-                                    &*payload,
-                                )));
+                                errors.push(SystemError::Panicked {
+                                    system: systems.get_type_name(idx).to_string(),
+                                    message: panic_payload_to_string(&*payload),
+                                });
                             }
                         }
                     } else {
@@ -185,9 +186,10 @@ impl EcsRunnerSingleThread {
                             Ok(Ok(result)) => results_store.store(idx, result),
                             Ok(Err(e)) => errors.push(e),
                             Err(payload) => {
-                                errors.push(SystemError::Panicked(panic_payload_to_string(
-                                    &*payload,
-                                )));
+                                errors.push(SystemError::Panicked {
+                                    system: systems.get_type_name(idx).to_string(),
+                                    message: panic_payload_to_string(&*payload),
+                                });
                             }
                         }
                     }
@@ -234,7 +236,10 @@ impl EcsRunnerSingleThread {
                         Ok(Ok(result)) => results_store.store(idx, result),
                         Ok(Err(e)) => errors.push(e),
                         Err(payload) => {
-                            errors.push(SystemError::Panicked(panic_payload_to_string(&*payload)));
+                            errors.push(SystemError::Panicked {
+                                system: systems.get_type_name(idx).to_string(),
+                                message: panic_payload_to_string(&*payload),
+                            });
                         }
                     }
                     systems.set_last_run(idx, ticks.this_run);
