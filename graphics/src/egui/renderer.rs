@@ -387,6 +387,20 @@ impl EguiRenderer {
     /// * `texture` - The new GPU texture
     pub fn update_user_texture(&mut self, id: TextureId, texture: Arc<Texture>) {
         if matches!(id, TextureId::User(_)) {
+            // The binding group is eagerly built once per texture id and cached
+            // (#40). When the underlying texture is swapped for a new `Arc`
+            // (e.g. the scene target recreated on resize), the cached binding
+            // still points at the old texture — invalidate it so the next draw
+            // rebuilds against the current one. Same-`Arc` re-registration (the
+            // common per-frame call) leaves the cache intact, keeping the
+            // zero-per-draw descriptor win.
+            let changed = self
+                .textures
+                .get(&id)
+                .is_none_or(|existing| !Arc::ptr_eq(existing, &texture));
+            if changed {
+                self.texture_bindings.remove(&id);
+            }
             self.textures.insert(id, texture);
         } else {
             log::warn!("Attempted to update non-user texture {:?}", id);
@@ -648,5 +662,84 @@ impl EguiRenderer {
         }
 
         pass
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::instance::GraphicsInstance;
+
+    fn make_texture(device: &Arc<GraphicsDevice>) -> Arc<Texture> {
+        device
+            .create_texture(
+                &TextureDescriptor::new_2d(
+                    64,
+                    64,
+                    TextureFormat::Bgra8UnormSrgb,
+                    TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
+                )
+                .with_label("test_user_texture"),
+            )
+            .expect("create test texture")
+    }
+
+    /// Populate the eager binding cache for `id` the same way the draw path does
+    /// (`create_graphics_pass`): group 1 = the user texture + the shared sampler.
+    fn cache_binding(renderer: &mut EguiRenderer, id: TextureId, texture: Arc<Texture>) {
+        let layout = renderer.material.binding_layouts()[1].clone();
+        let group = renderer
+            .device
+            .create_binding_group(
+                layout,
+                BindingGroupDescriptor::new()
+                    .with_texture(0, texture)
+                    .with_sampler(1, renderer.sampler.clone()),
+            )
+            .expect("create user-texture binding group");
+        renderer.texture_bindings.insert(id, group);
+    }
+
+    /// Regression (#40 eager binding, exposed via the editor SceneView going
+    /// gray): swapping a user texture's underlying `Arc` (scene target recreated
+    /// on resize) must drop the cached binding so the next draw rebuilds against
+    /// the new texture — otherwise egui samples the stale (old) texture.
+    #[test]
+    fn update_user_texture_invalidates_binding_when_arc_swaps() {
+        let device = GraphicsInstance::new().unwrap().create_device().unwrap();
+        let mut renderer = EguiRenderer::new(device.clone(), TextureFormat::Bgra8UnormSrgb);
+
+        let tex_a = make_texture(&device);
+        let id = renderer.register_user_texture(tex_a.clone());
+        cache_binding(&mut renderer, id, tex_a);
+        assert!(renderer.texture_bindings.contains_key(&id));
+
+        // Resize path: a brand-new texture Arc replaces the old one.
+        let tex_b = make_texture(&device);
+        renderer.update_user_texture(id, tex_b);
+
+        assert!(
+            !renderer.texture_bindings.contains_key(&id),
+            "stale binding must be dropped when the user texture is swapped"
+        );
+    }
+
+    /// The common per-frame re-registration passes the *same* `Arc`; the cached
+    /// binding must survive so #40's zero-per-draw descriptor win is preserved.
+    #[test]
+    fn update_user_texture_keeps_binding_when_arc_unchanged() {
+        let device = GraphicsInstance::new().unwrap().create_device().unwrap();
+        let mut renderer = EguiRenderer::new(device.clone(), TextureFormat::Bgra8UnormSrgb);
+
+        let tex = make_texture(&device);
+        let id = renderer.register_user_texture(tex.clone());
+        cache_binding(&mut renderer, id, tex.clone());
+
+        renderer.update_user_texture(id, tex);
+
+        assert!(
+            renderer.texture_bindings.contains_key(&id),
+            "binding must be reused when the same texture Arc is re-registered"
+        );
     }
 }
