@@ -202,6 +202,10 @@ impl Editor {
     }
 
     /// Apply a play action (Play/Pause/Resume/Stop) to the game.
+    ///
+    /// Note: the actual state transition happens in ManagePlayModeTransitions system,
+    /// which runs at the start of the next game update. Do NOT sync_play_state here
+    /// as the transition hasn't been applied yet; it will sync naturally in on_update.
     fn apply_play_action(&mut self, action: crate::toolbar::PlayAction) {
         if let Some(ew) = self.world.as_mut() {
             let mut play_control = ew.world.resource_mut::<redlilium_ecs::PlayControl>();
@@ -212,8 +216,6 @@ impl Editor {
                 crate::toolbar::PlayAction::Stop => play_control.stop(),
             }
         }
-        // Update display state to match PlayControl (will sync on next frame)
-        self.sync_play_state();
     }
 
     /// Sync toolbar's play_state to match PlayControl's current state.
@@ -686,6 +688,9 @@ impl AppHandler for Editor {
             ew.schedules
                 .run_frame(&mut ew.world, runner, ctx.delta_time() as f64);
         }
+
+        // Sync play state after systems have run (ManagePlayModeTransitions applies state changes)
+        self.sync_play_state();
 
         // Process component export (inspector → asset browser)
         if let Some((entity, comp_name, vfs_dir)) =
