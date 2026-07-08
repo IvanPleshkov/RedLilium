@@ -377,6 +377,29 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
             world.despawn(entity);
         }
 
+        // Show all hidden-in-play entities (editor entities and their children) at Stop transition.
+        // These were hidden when Play started, and need to be visible again for editing.
+        let root_hidden_entities: Vec<Entity> = world
+            .iter_entities()
+            .filter(|entity| {
+                let flags = world.get_entity_flags(*entity);
+                let is_hidden = flags & Entity::HIDDEN_IN_PLAY != 0;
+
+                // Check if parent is also hidden
+                let parent_is_hidden = if let Some(parent) = world.get::<Parent>(*entity) {
+                    let parent_flags = world.get_entity_flags(parent.0);
+                    parent_flags & Entity::HIDDEN_IN_PLAY != 0
+                } else {
+                    false
+                };
+
+                is_hidden && !parent_is_hidden
+            })
+            .collect();
+        for entity in root_hidden_entities {
+            show_in_play(world, entity);
+        }
+
         // Restore all pre-existing entities from snapshot (undoes any component edits made during pause).
         // This includes both editor entities and game entities that existed before Play started.
         if let Some(snapshot) = world
