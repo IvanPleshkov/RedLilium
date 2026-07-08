@@ -346,7 +346,10 @@ impl WgpuBackend {
                         // validation error, so degrade to `Fill` at runtime when
                         // the capability is absent rather than crashing on web.
                         crate::materials::PolygonMode::Line
-                            if self.device.features().contains(wgpu::Features::POLYGON_MODE_LINE) =>
+                            if self
+                                .device
+                                .features()
+                                .contains(wgpu::Features::POLYGON_MODE_LINE) =>
                         {
                             wgpu::PolygonMode::Line
                         }
@@ -913,5 +916,7 @@ fn build_wgpu_bind_group_entries(
 fn lock_fence_state(
     state: &std::sync::Mutex<crate::backend::WgpuFenceState>,
 ) -> std::sync::MutexGuard<'_, crate::backend::WgpuFenceState> {
-    state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }

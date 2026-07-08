@@ -87,6 +87,9 @@ pub fn provider_for(dir: &str) -> Option<MemoryProvider> {
 /// the database synchronously, mirroring the native `std::fs` path.
 pub fn assets_db_text(dir: &str) -> Option<String> {
     let files = pack_for(dir)?;
-    let bytes = files.iter().find(|(p, _)| *p == "assets.db").map(|(_, b)| *b)?;
+    let bytes = files
+        .iter()
+        .find(|(p, _)| *p == "assets.db")
+        .map(|(_, b)| *b)?;
     Some(String::from_utf8_lossy(bytes).into_owned())
 }

@@ -39,11 +39,7 @@ struct ShaderSpec {
 const NO_DEFINES: &[&[(&str, &str)]] = &[&[]];
 // egui varies on the surface color space (see egui/renderer.rs): HDR, sRGB, or
 // neither (linear non-sRGB). Bake all three.
-const EGUI_DEFINES: &[&[(&str, &str)]] = &[
-    &[],
-    &[("HDR_OUTPUT", "")],
-    &[("SRGB_FRAMEBUFFER", "")],
-];
+const EGUI_DEFINES: &[&[(&str, &str)]] = &[&[], &[("HDR_OUTPUT", "")], &[("SRGB_FRAMEBUFFER", "")]];
 
 const REGISTRY: &[ShaderSpec] = &[
     ShaderSpec {
@@ -92,7 +88,13 @@ fn defines_label(defines: &[(&str, &str)]) -> String {
     } else {
         let inner: Vec<String> = defines
             .iter()
-            .map(|(k, v)| if v.is_empty() { k.to_string() } else { format!("{k}={v}") })
+            .map(|(k, v)| {
+                if v.is_empty() {
+                    k.to_string()
+                } else {
+                    format!("{k}={v}")
+                }
+            })
             .collect();
         format!("[{}]", inner.join(","))
     }
@@ -106,8 +108,8 @@ fn bake_shaders() -> Result<(), String> {
 
     for spec in REGISTRY {
         let full = root.join(spec.path);
-        let source = std::fs::read_to_string(&full)
-            .map_err(|e| format!("read {}: {e}", full.display()))?;
+        let source =
+            std::fs::read_to_string(&full).map_err(|e| format!("read {}: {e}", full.display()))?;
 
         for &entry in spec.entry_points {
             for defines in spec.define_sets {
@@ -123,7 +125,12 @@ fn bake_shaders() -> Result<(), String> {
                 let wgsl = compiler
                     .compile_to_wgsl(&source, entry, &[], defines)
                     .map_err(|e| {
-                        format!("compile {} / {} / {}: {e:?}", spec.name, entry, defines_label(defines))
+                        format!(
+                            "compile {} / {} / {}: {e:?}",
+                            spec.name,
+                            entry,
+                            defines_label(defines)
+                        )
                     })?;
 
                 let key = baked::shader_key(&source, entry, defines);
@@ -143,7 +150,11 @@ fn bake_shaders() -> Result<(), String> {
     let out = render_generated(&table);
     let dest = root.join("graphics/src/shader/baked_generated.rs");
     std::fs::write(&dest, out).map_err(|e| format!("write {}: {e}", dest.display()))?;
-    eprintln!("baked {} shader permutations -> {}", table.len(), dest.display());
+    eprintln!(
+        "baked {} shader permutations -> {}",
+        table.len(),
+        dest.display()
+    );
     Ok(())
 }
 

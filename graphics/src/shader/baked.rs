@@ -79,7 +79,11 @@ pub fn lookup(source: &str, entry_point: &str, defines: &[(&str, &str)]) -> Opti
 /// Human-readable name (`shader / entry / defines`) for a key, for diagnostics
 /// on a miss. Present for every baked permutation so a miss can name the shader
 /// that needs (re)baking rather than a bare hex hash.
-pub fn name_for_key(source: &str, entry_point: &str, defines: &[(&str, &str)]) -> Option<&'static str> {
+pub fn name_for_key(
+    source: &str,
+    entry_point: &str,
+    defines: &[(&str, &str)],
+) -> Option<&'static str> {
     let key = shader_key(source, entry_point, defines);
     baked_generated::BAKED_NAMES
         .binary_search_by_key(&key, |(k, _)| *k)
@@ -134,11 +138,15 @@ mod tests {
     #[test]
     fn baked_table_is_sorted_by_key() {
         assert!(
-            super::baked_generated::BAKED_WGSL.windows(2).all(|w| w[0].0 < w[1].0),
+            super::baked_generated::BAKED_WGSL
+                .windows(2)
+                .all(|w| w[0].0 < w[1].0),
             "BAKED_WGSL not strictly ascending by key"
         );
         assert!(
-            super::baked_generated::BAKED_NAMES.windows(2).all(|w| w[0].0 < w[1].0),
+            super::baked_generated::BAKED_NAMES
+                .windows(2)
+                .all(|w| w[0].0 < w[1].0),
             "BAKED_NAMES not strictly ascending by key"
         );
     }
