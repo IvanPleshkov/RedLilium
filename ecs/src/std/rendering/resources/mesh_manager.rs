@@ -22,6 +22,7 @@ use redlilium_assets::{AssetDb, AssetHandle, AssetProcessor, ResidentCache};
 use redlilium_graphics::Mesh;
 
 use super::VertexLayoutManager;
+use crate::PlayModeAware;
 use crate::std::rendering::loaders::{MeshLoader, MeshSource};
 
 // A component-side `AssetRef<MeshSource>` resolves to the shared GPU mesh.
@@ -154,5 +155,22 @@ impl MeshManager {
                 None => self.cache.fail(source),
             }
         }
+    }
+
+    /// Force MeshLoad to re-scan all asset refs by bumping generation.
+    /// Called on snapshot restore to ensure unresolved refs get re-requested.
+    pub(crate) fn force_rescan(&mut self) {
+        // Invalidate all pending loads to bump generation; residents stay cached
+        // but the generation bump signals MeshLoad to re-scan all refs.
+        let keys: Vec<_> = self.pending.keys().cloned().collect();
+        for source in keys {
+            self.cache.invalidate(&source);
+        }
+    }
+}
+
+impl PlayModeAware for MeshManager {
+    fn on_stop(&mut self) {
+        self.force_rescan();
     }
 }
