@@ -1051,7 +1051,16 @@ impl VulkanBackend {
         // Get memory requirements
         let mem_requirements = unsafe { self.device.get_image_memory_requirements(image) };
 
-        // Allocate GPU-only memory for textures
+        // Allocate GPU-only memory for textures.
+        //
+        // Images get a DEDICATED allocation (their own `VkDeviceMemory`) rather
+        // than a suballocation from a shared block. On unified-memory devices
+        // (MoltenVK) buffers and images land in the same memory type, and a
+        // suballocated image packed tightly next to a staging buffer trips
+        // `VUID-vkCmdCopyBufferToImage-pRegions-00173` (the validation layer
+        // reads the image's full `VkMemoryRequirements` footprint, which can
+        // reach into the adjacent buffer). A dedicated image allocation makes a
+        // buffer↔image memory overlap structurally impossible (#61).
         let allocation = {
             let mut allocator = self.allocator.lock();
             allocator
@@ -1060,7 +1069,9 @@ impl VulkanBackend {
                     requirements: mem_requirements,
                     location: gpu_allocator::MemoryLocation::GpuOnly,
                     linear: false,
-                    allocation_scheme: gpu_allocator::vulkan::AllocationScheme::GpuAllocatorManaged,
+                    allocation_scheme: gpu_allocator::vulkan::AllocationScheme::DedicatedImage(
+                        image,
+                    ),
                 })
                 .map_err(|e| {
                     GraphicsError::ResourceCreationFailed(format!(
