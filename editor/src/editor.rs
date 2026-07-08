@@ -962,6 +962,10 @@ impl AppHandler for Editor {
                             ) {
                                 self.apply_play_action(play_action);
                             }
+
+                            // Phase 6: Play mode indicator badge
+                            ui.add_space(8.0);
+                            crate::toolbar::draw_play_mode_indicator(ui, self.play_state);
                         });
 
                         // Double-click on background toggles maximize
