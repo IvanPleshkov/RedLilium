@@ -377,31 +377,38 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
             world.despawn(entity);
         }
 
-        // Restore editor entities from snapshot (undoes component edits made during pause).
-        // Since editor entities were present at play_start_tick, they match the snapshot.
+        // Restore all pre-existing entities from snapshot (undoes any component edits made during pause).
+        // This includes both editor entities and game entities that existed before Play started.
         if let Some(snapshot) = world
             .has_resource::<PlaySnapshot>()
             .then(|| world.resource::<PlaySnapshot>().0.clone())
             .flatten()
         {
-            // For each entity in snapshot, if it's an editor entity in the current world, restore its components.
-            for (idx, snap_entity) in snapshot.entities.iter().enumerate() {
-                let current_entity = world.entity_at_index(idx as u32);
-                if let Some(entity) = current_entity {
-                    let is_editor = world.get_entity_flags(entity) & Entity::EDITOR != 0;
-                    if is_editor {
-                        // Restore components for this editor entity from snapshot.
-                        // Deserialize each component and insert into the entity.
+            // For each entity in snapshot, restore its components if it still exists in the current world.
+            for snap_entity in snapshot.entities.iter() {
+                // Use both entity_index and entity_spawn_tick to uniquely identify the entity.
+                // This ensures we restore the correct entity even if entity indices have shifted.
+                let entity =
+                    crate::Entity::new(snap_entity.entity_index, snap_entity.entity_spawn_tick);
+
+                // Check if this exact entity still exists in the world.
+                if world.is_alive(entity) {
+                    let world_tick = world.get_entity_world_tick(entity);
+                    let should_restore = world_tick < play_start_tick;
+
+                    if should_restore {
+                        // Restore all components for this entity from snapshot.
                         for snap_component in &snap_entity.components {
-                            if let Err(e) =
-                                world.deserialize_component_by_name(entity, snap_component)
-                            {
-                                log::warn!(
-                                    "Failed to restore component {} on entity {:?}: {}",
-                                    snap_component.type_name,
-                                    entity,
-                                    e
-                                );
+                            match world.deserialize_component_by_name(entity, snap_component) {
+                                Ok(()) => {}
+                                Err(e) => {
+                                    log::warn!(
+                                        "Failed to restore component {} on entity {:?}: {}",
+                                        snap_component.type_name,
+                                        entity,
+                                        e
+                                    );
+                                }
                             }
                         }
                     }
