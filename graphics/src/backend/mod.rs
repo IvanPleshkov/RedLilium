@@ -1216,6 +1216,38 @@ impl GpuBackend {
         }
     }
 
+    /// Non-blocking readback: begin mapping `buffer[offset..offset+size]` and,
+    /// when the map resolves, copy it into `dst` and clear `map_pending`.
+    ///
+    /// This is the wasm-safe readback: on wgpu the copy happens in the
+    /// `map_async` completion callback (a browser thread cannot block for the
+    /// map, #33); native backends fill `dst` synchronously (the caller drains
+    /// after the frame fence, so the GPU is already done). Fire-and-forget:
+    /// failures are logged and `map_pending` is always cleared so the buffer
+    /// isn't wedged as permanently in-flight.
+    pub fn read_buffer_async(
+        &self,
+        buffer: &GpuBuffer,
+        offset: u64,
+        size: u64,
+        dst: Arc<std::sync::Mutex<Vec<u8>>>,
+        map_pending: Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        match self {
+            Self::Dummy(backend) => {
+                backend.read_buffer_async(buffer, offset, size, dst, map_pending)
+            }
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(backend) => {
+                backend.read_buffer_async(buffer, offset, size, dst, map_pending)
+            }
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => {
+                backend.read_buffer_async(buffer, offset, size, dst, map_pending)
+            }
+        }
+    }
+
     /// Write tightly-packed data covering mip 0 of every layer of a texture.
     ///
     /// **Blocking convenience path** for tools and one-time setup: the

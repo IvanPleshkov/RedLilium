@@ -2095,6 +2095,24 @@ impl VulkanBackend {
 
     /// Read a host-visible buffer's mapped memory. See the trait contract on
     /// [`GpuBackend::read_buffer`](crate::backend::GpuBackend::read_buffer).
+    /// Non-blocking readback (Vulkan is native-only, so it fills `dst`
+    /// synchronously — the caller drains after the frame fence, so the mapped
+    /// memory is already GPU-complete — and clears the pending flag).
+    pub fn read_buffer_async(
+        &self,
+        buffer: &GpuBuffer,
+        offset: u64,
+        size: u64,
+        dst: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        map_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        match self.read_buffer(buffer, offset, size) {
+            Ok(data) => *dst.lock().unwrap_or_else(|e| e.into_inner()) = data,
+            Err(e) => log::error!("read_buffer_async failed: {e}"),
+        }
+        map_pending.store(false, std::sync::atomic::Ordering::Release);
+    }
+
     pub fn read_buffer(
         &self,
         buffer: &GpuBuffer,

@@ -160,6 +160,22 @@ impl DummyBackend {
         Ok(vec![0u8; size as usize])
     }
 
+    /// Non-blocking readback (dummy: fills `dst` synchronously and clears the
+    /// pending flag — there is no real GPU to wait on).
+    pub fn read_buffer_async(
+        &self,
+        buffer: &GpuBuffer,
+        offset: u64,
+        size: u64,
+        dst: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        map_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        if let Ok(data) = self.read_buffer(buffer, offset, size) {
+            *dst.lock().unwrap_or_else(|e| e.into_inner()) = data;
+        }
+        map_pending.store(false, std::sync::atomic::Ordering::Release);
+    }
+
     /// Write data to a texture.
     pub fn write_texture(
         &self,

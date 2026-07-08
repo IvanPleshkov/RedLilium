@@ -199,31 +199,21 @@ impl FramePipeline {
     ///     pipeline.end_frame(schedule);
     /// }
     /// ```
-    /// Drain `ReadbackBuffer` operations from a slot's retired graphs.
+    /// Issue async readback of every `ReadbackBuffer` op in a slot's retired
+    /// graphs.
     ///
-    /// Must be called only after the slot's fence has signalled (GPU finished
-    /// writing the readback sources). Copies each `src[src_range]` into the
-    /// op's CPU `dst`, making GPU→CPU readbacks available one or more frames
-    /// after they were requested.
+    /// Called only after the slot's fence has signalled (GPU finished writing
+    /// the readback sources). Each `src[src_range]` is mapped non-blockingly;
+    /// the map's completion callback copies it into the op's CPU `dst` a tick
+    /// later (next `device.poll` on native, next event-loop turn on wasm) — so
+    /// this never blocks and is safe on the single browser thread (#33).
+    /// Consumers poll `dst` for readiness (it stays as-is until filled).
+    ///
+    /// Two-gate recycling: the map holds its own clones of the wgpu buffer and
+    /// the `dst`/`map_pending` handles, so it outlives this graph's recycle. The
+    /// `map_pending` flag on `src` prevents an overlapping map of the same
+    /// buffer.
     fn process_readbacks(&self, slot: usize) {
-        // On wasm this path maps a GPU buffer and reads it synchronously
-        // (`read_mapped` → `poll(Wait)` + `recv`), which would deadlock the
-        // browser thread. Readback is editor-only (picking/screenshot), not on
-        // the render-demo path, so it is a no-op here until step 4 reworks it to
-        // async `map_async` callbacks (#33).
-        #[cfg(target_arch = "wasm32")]
-        {
-            let _ = slot;
-            return;
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.drain_readbacks(slot);
-        }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn drain_readbacks(&self, slot: usize) {
         use crate::graph::TransferOperation;
         for graph in &self.slot_graphs[slot] {
             for pass in graph.passes() {
@@ -240,19 +230,11 @@ impl FramePipeline {
                         dst,
                     } = op
                     {
-                        match src.read_mapped(
+                        src.read_mapped_async(
                             src_range.start as u64,
                             (src_range.end - src_range.start) as u64,
-                        ) {
-                            Ok(bytes) => {
-                                if let Ok(mut guard) = dst.lock() {
-                                    *guard = bytes;
-                                }
-                            }
-                            Err(e) => {
-                                log::error!("readback drain failed: {e}");
-                            }
-                        }
+                            Arc::clone(dst),
+                        );
                     }
                 }
             }

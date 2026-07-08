@@ -757,63 +757,151 @@ impl WgpuBackend {
         offset: u64,
         size: u64,
     ) -> Result<Vec<u8>, GraphicsError> {
-        let GpuBuffer::Wgpu(wgpu_buffer) = buffer else {
+        // Blocking read (poll + recv) would deadlock the single browser thread.
+        // Nothing should reach here on wasm — the readback drain uses
+        // `read_buffer_async` — so fail loud rather than hang the tab (#33).
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (buffer, offset, size);
             return Err(GraphicsError::Internal(
-                "read_buffer called with non-wgpu buffer".to_string(),
+                "blocking read_buffer is unavailable on wasm; readback must go through \
+                 read_buffer_async (map_async) — a browser thread cannot block for the map"
+                    .into(),
             ));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let GpuBuffer::Wgpu(wgpu_buffer) = buffer else {
+                return Err(GraphicsError::Internal(
+                    "read_buffer called with non-wgpu buffer".to_string(),
+                ));
+            };
+            if size == 0 {
+                return Ok(Vec::new());
+            }
+            if offset
+                .checked_add(size)
+                .is_none_or(|end| end > wgpu_buffer.size())
+            {
+                return Err(GraphicsError::InvalidParameter(format!(
+                    "read_buffer range at offset {offset} ({size} bytes) exceeds buffer size {}",
+                    wgpu_buffer.size()
+                )));
+            }
+            // Check MAP_READ up front rather than letting `map_async` fail: a
+            // failed map is a device validation error (logged by the uncaptured
+            // handler) on every call, and the old staging-copy fallback then
+            // panicked in `get_mapped_range`. Require a readback buffer instead —
+            // matching the Vulkan backend, which also does not stage here.
+            if !wgpu_buffer.usage().contains(wgpu::BufferUsages::MAP_READ) {
+                return Err(GraphicsError::InvalidParameter(
+                    "read_buffer on a buffer without MAP_READ; copy device-local data to a \
+                 readback buffer via TransferOperation::ReadbackBuffer first"
+                        .to_string(),
+                ));
+            }
+
+            let slice = wgpu_buffer.slice(offset..offset + size);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |result| {
+                let _ = tx.send(result);
+            });
+            // Drive the map callback. The caller guarantees GPU completion
+            // (post-fence), so this returns promptly.
+            if let Err(e) = self.device.poll(wgpu::PollType::wait_indefinitely()) {
+                return Err(GraphicsError::Internal(format!(
+                    "device poll failed during read_buffer map: {e}"
+                )));
+            }
+            match rx.recv() {
+                Ok(Ok(())) => {
+                    // `get_mapped_range()` borrows the mapping; `.to_vec()` copies
+                    // it out and drops the view before `unmap()`.
+                    let data = slice.get_mapped_range().to_vec();
+                    wgpu_buffer.unmap();
+                    Ok(data)
+                }
+                Ok(Err(e)) => Err(GraphicsError::Internal(format!(
+                    "read_buffer map_async failed: {e}"
+                ))),
+                Err(_) => Err(GraphicsError::Internal(
+                    "read_buffer map callback was dropped".to_string(),
+                )),
+            }
+        }
+    }
+
+    /// Non-blocking readback: map `buffer[offset..offset+size]` and, in the
+    /// `map_async` completion callback, copy it into `dst` and clear
+    /// `map_pending`. The callback fires when the GPU finishes the map — on
+    /// native when `device.poll` runs it, on wasm from the browser event loop
+    /// (the only way to read back without blocking the thread, #33).
+    ///
+    /// Fire-and-forget: on any failure it logs and still clears `map_pending`,
+    /// so the buffer isn't wedged as permanently in-flight; poll `dst` for the
+    /// result (it stays whatever it was until the callback fills it).
+    pub fn read_buffer_async(
+        &self,
+        buffer: &GpuBuffer,
+        offset: u64,
+        size: u64,
+        dst: std::sync::Arc<Mutex<Vec<u8>>>,
+        map_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        use std::sync::atomic::Ordering;
+
+        let GpuBuffer::Wgpu(wgpu_buffer) = buffer else {
+            log::error!("read_buffer_async called with non-wgpu buffer");
+            map_pending.store(false, Ordering::Release);
+            return;
         };
         if size == 0 {
-            return Ok(Vec::new());
+            *dst.lock().unwrap_or_else(|e| e.into_inner()) = Vec::new();
+            map_pending.store(false, Ordering::Release);
+            return;
         }
         if offset
             .checked_add(size)
             .is_none_or(|end| end > wgpu_buffer.size())
         {
-            return Err(GraphicsError::InvalidParameter(format!(
-                "read_buffer range at offset {offset} ({size} bytes) exceeds buffer size {}",
+            log::error!(
+                "read_buffer_async range at offset {offset} ({size} bytes) exceeds buffer size {}",
                 wgpu_buffer.size()
-            )));
+            );
+            map_pending.store(false, Ordering::Release);
+            return;
         }
-        // Check MAP_READ up front rather than letting `map_async` fail: a
-        // failed map is a device validation error (logged by the uncaptured
-        // handler) on every call, and the old staging-copy fallback then
-        // panicked in `get_mapped_range`. Require a readback buffer instead —
-        // matching the Vulkan backend, which also does not stage here.
         if !wgpu_buffer.usage().contains(wgpu::BufferUsages::MAP_READ) {
-            return Err(GraphicsError::InvalidParameter(
-                "read_buffer on a buffer without MAP_READ; copy device-local data to a \
-                 readback buffer via TransferOperation::ReadbackBuffer first"
-                    .to_string(),
-            ));
+            log::error!(
+                "read_buffer_async on a buffer without MAP_READ; copy device-local data to a \
+                 readback buffer first"
+            );
+            map_pending.store(false, Ordering::Release);
+            return;
         }
 
-        let slice = wgpu_buffer.slice(offset..offset + size);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = tx.send(result);
-        });
-        // Drive the map callback. The caller guarantees GPU completion
-        // (post-fence), so this returns promptly.
-        if let Err(e) = self.device.poll(wgpu::PollType::wait_indefinitely()) {
-            return Err(GraphicsError::Internal(format!(
-                "device poll failed during read_buffer map: {e}"
-            )));
-        }
-        match rx.recv() {
-            Ok(Ok(())) => {
-                // `get_mapped_range()` borrows the mapping; `.to_vec()` copies
-                // it out and drops the view before `unmap()`.
-                let data = slice.get_mapped_range().to_vec();
-                wgpu_buffer.unmap();
-                Ok(data)
-            }
-            Ok(Err(e)) => Err(GraphicsError::Internal(format!(
-                "read_buffer map_async failed: {e}"
-            ))),
-            Err(_) => Err(GraphicsError::Internal(
-                "read_buffer map callback was dropped".to_string(),
-            )),
-        }
+        // `wgpu::Buffer` is Arc-backed: cheap clones all handle the same GPU
+        // buffer. One clone keeps it mapped/alive across the pending callback.
+        let buf_cb = wgpu_buffer.clone();
+        wgpu_buffer
+            .slice(offset..offset + size)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                match result {
+                    Ok(()) => {
+                        // Order matters (Fable): copy out, drop the borrowing
+                        // view, THEN unmap, then publish, then clear the flag
+                        // last so the map-pending window fully covers unmap.
+                        let data = buf_cb
+                            .slice(offset..offset + size)
+                            .get_mapped_range()
+                            .to_vec();
+                        buf_cb.unmap();
+                        *dst.lock().unwrap_or_else(|e| e.into_inner()) = data;
+                    }
+                    Err(e) => log::error!("read_buffer_async map failed: {e}"),
+                }
+                map_pending.store(false, Ordering::Release);
+            });
     }
 }
 

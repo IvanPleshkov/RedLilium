@@ -1,6 +1,7 @@
 //! GPU buffer resource.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::backend::GpuBuffer;
 use crate::device::GraphicsDevice;
@@ -21,6 +22,11 @@ use crate::types::BufferDescriptor;
 pub struct Buffer {
     descriptor: BufferDescriptor,
     gpu_handle: GpuBuffer,
+    /// True while an async `map_async` readback of this buffer is in flight
+    /// (#33). Guards against a second overlapping map (a wgpu validation error)
+    /// and against writing the buffer while it is still mapped. Cleared by the
+    /// readback completion callback. Shared into that callback via `Arc`.
+    map_pending: Arc<AtomicBool>,
     /// Declared after `gpu_handle` deliberately: fields drop in declaration
     /// order, and this keep-alive must outlive the handle's `Drop` (which
     /// calls `vkDestroyBuffer` and needs the backend, transitively owned by
@@ -39,6 +45,7 @@ impl Buffer {
             device,
             descriptor,
             gpu_handle,
+            map_pending: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -80,18 +87,33 @@ impl Buffer {
             .write_buffer(&self.gpu_handle, offset, data)
     }
 
-    /// Crate-internal read of this buffer's host-visible mapped memory.
+    /// Non-blocking readback: map this buffer and, when the map resolves, copy
+    /// `[offset, offset+size)` into `dst`. On wgpu the map completion is a
+    /// callback (the only way to read back without blocking the browser thread,
+    /// #33); native backends fill `dst` synchronously. Fire-and-forget — errors
+    /// are logged; poll the `dst` for readiness (it stays empty until filled).
     ///
-    /// Used by the frame pipeline to drain [`ReadbackBuffer`] operations after
-    /// the slot's fence has signalled (so the GPU has finished writing). Not
-    /// public so external code cannot read GPU memory that may still be in use.
-    ///
-    /// [`ReadbackBuffer`]: crate::TransferOperation::ReadbackBuffer
-    pub(crate) fn read_mapped(&self, offset: u64, size: u64) -> Result<Vec<u8>, GraphicsError> {
-        self.device
-            .instance()
-            .backend()
-            .read_buffer(&self.gpu_handle, offset, size)
+    /// Skips if a prior map of this buffer is still in flight (`map_pending`),
+    /// so an overlapping `map_async` can't raise a "buffer already mapped"
+    /// validation error; the completion callback clears the flag.
+    pub(crate) fn read_mapped_async(
+        &self,
+        offset: u64,
+        size: u64,
+        dst: Arc<std::sync::Mutex<Vec<u8>>>,
+    ) {
+        // Claim the buffer for one in-flight map; skip if already claimed.
+        if self.map_pending.swap(true, Ordering::AcqRel) {
+            log::debug!("read_mapped_async skipped: a map of this buffer is still pending");
+            return;
+        }
+        self.device.instance().backend().read_buffer_async(
+            &self.gpu_handle,
+            offset,
+            size,
+            dst,
+            Arc::clone(&self.map_pending),
+        );
     }
 }
 
