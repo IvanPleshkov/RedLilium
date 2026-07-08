@@ -27,7 +27,12 @@ use super::{InspectorState, PrefabFileDragPayload};
 ///
 /// When `read_only` is true (during Pause), the UI shows the hierarchy but disables
 /// drag-and-drop reparenting and editing. Inspection only.
-pub fn show_world_inspector(ui: &mut egui::Ui, world: &World, state: &mut InspectorState, read_only: bool) {
+pub fn show_world_inspector(
+    ui: &mut egui::Ui,
+    world: &World,
+    state: &mut InspectorState,
+    read_only: bool,
+) {
     // Filter input
     ui.horizontal(|ui| {
         ui.label("Filter:");

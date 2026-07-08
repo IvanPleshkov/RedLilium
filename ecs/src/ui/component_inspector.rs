@@ -262,7 +262,12 @@ impl EditAction<World> for ImportComponentAction {
 ///
 /// When `read_only` is true (during Pause), the UI shows component data but disables
 /// all editing operations (add/remove components, property edits, etc.). Inspection only.
-pub fn show_component_inspector(ui: &mut egui::Ui, world: &mut World, state: &mut InspectorState, read_only: bool) {
+pub fn show_component_inspector(
+    ui: &mut egui::Ui,
+    world: &mut World,
+    state: &mut InspectorState,
+    read_only: bool,
+) {
     // Apply deferred actions from world inspector (e.g. drag-and-drop reparenting)
     state.apply_pending_actions(world);
 
@@ -299,7 +304,10 @@ pub fn show_component_inspector(ui: &mut egui::Ui, world: &mut World, state: &mu
     // Enabled/Disabled toggle (Phase 6: disabled during read-only)
     let is_disabled = world.is_disabled(selected);
     let mut enabled = !is_disabled;
-    if ui.add_enabled(!read_only, egui::Checkbox::new(&mut enabled, "Enabled")).changed() {
+    if ui
+        .add_enabled(!read_only, egui::Checkbox::new(&mut enabled, "Enabled"))
+        .changed()
+    {
         actions.push(Box::new(SetEnabledAction {
             entity: selected,
             enable: enabled,
@@ -309,7 +317,10 @@ pub fn show_component_inspector(ui: &mut egui::Ui, world: &mut World, state: &mu
     // Static toggle (Phase 6: disabled during read-only)
     let is_static = world.is_static(selected);
     let mut static_val = is_static;
-    if ui.add_enabled(!read_only, egui::Checkbox::new(&mut static_val, "Static")).changed() {
+    if ui
+        .add_enabled(!read_only, egui::Checkbox::new(&mut static_val, "Static"))
+        .changed()
+    {
         actions.push(Box::new(SetStaticAction {
             entity: selected,
             mark_static: static_val,
@@ -369,7 +380,10 @@ pub fn show_component_inspector(ui: &mut egui::Ui, world: &mut World, state: &mu
 
                 // Phase 6: Disable remove during read-only
                 header_resp.header_response.context_menu(|ui| {
-                    if ui.add_enabled(!read_only, egui::Button::new("Remove Component")).clicked() {
+                    if ui
+                        .add_enabled(!read_only, egui::Button::new("Remove Component"))
+                        .clicked()
+                    {
                         actions.push(Box::new(RemoveComponentAction::new(
                             selected,
                             (*comp_name).to_owned(),
@@ -398,7 +412,10 @@ pub fn show_component_inspector(ui: &mut egui::Ui, world: &mut World, state: &mu
 
             // Add component button (Phase 6: disabled during read-only)
             ui.horizontal(|ui| {
-                if ui.add_enabled(!read_only, egui::Button::new("+ Add Component")).clicked() {
+                if ui
+                    .add_enabled(!read_only, egui::Button::new("+ Add Component"))
+                    .clicked()
+                {
                     state.add_component_open = !state.add_component_open;
                 }
             });

@@ -24,16 +24,10 @@ pub fn draw_play_mode_indicator(ui: &mut egui::Ui, play_state: PlayState) {
             // No indicator during Edit mode
         }
         PlayState::Playing => {
-            ui.colored_label(
-                egui::Color32::from_rgb(200, 50, 50),
-                "● PLAYING",
-            );
+            ui.colored_label(egui::Color32::from_rgb(200, 50, 50), "● PLAYING");
         }
         PlayState::Paused => {
-            ui.colored_label(
-                egui::Color32::from_rgb(200, 180, 50),
-                "⏸ PAUSED",
-            );
+            ui.colored_label(egui::Color32::from_rgb(200, 180, 50), "⏸ PAUSED");
         }
     }
 }

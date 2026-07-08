@@ -1114,6 +1114,7 @@ impl AppHandler for Editor {
                                 drag_rect,
                                 scene_texture: self.scene_texture_id,
                                 read_only: is_paused,
+                                is_playing,
                             };
                             let mut dock_style = egui_dock::Style::from_egui(ui.style().as_ref());
                             dock_style.tab_bar.corner_radius = egui::CornerRadius::ZERO;
