@@ -284,4 +284,68 @@ mod tests {
         world.force_type_source_for_test::<Score>(SourceId(1));
         let _ = world.resource::<Score>(); // guard: entry HOST != expected gen-1
     }
+
+    // ---- §5: Supersession on re-registration (Phase 2, R4) ----
+
+    // Registering a type under a dead (inactive) generation should succeed,
+    // overwriting the old source — this is the supersession case that allows
+    // re-stamping types during a hot-reload cycle.
+    #[test]
+    fn supersession_overwrites_dead_generation() {
+        let mut world = World::new();
+        // Register Marker under synthetic generation 1.
+        world.with_registration_source(SourceId(1), |w| {
+            w.register_component::<Marker>();
+        });
+        assert_eq!(
+            world.qualified_type_id_of::<Marker>(),
+            Some(QualifiedTypeId::new(TypeId::of::<Marker>(), SourceId(1)))
+        );
+
+        // Manually mark generation 1 as inactive (no registrations).
+        // This simulates the scenario where gen-1 was unloaded and now gen-2
+        // is trying to re-register the same TypeId.
+        // We do this by calling decrement to move the count to 0.
+        world.generation_registry.decrement_registration_count(1);
+
+        // Now register under generation 2 (HOST scope, but we'll check the registry manually).
+        world.with_registration_source(SourceId(2), |w| {
+            w.register_component::<Marker>();
+        });
+
+        // Supersession should have occurred: Marker is now under gen-2, not gen-1.
+        assert_eq!(
+            world.qualified_type_id_of::<Marker>(),
+            Some(QualifiedTypeId::new(TypeId::of::<Marker>(), SourceId(2)))
+        );
+    }
+
+    // If a generation is still active (has registrations), a conflicting
+    // re-registration should panic — this is the fail-fast that prevents UB.
+    #[test]
+    #[should_panic(expected = "type-identity conflict")]
+    fn active_generation_conflicts_on_reregistration() {
+        let mut world = World::new();
+        // Register Marker under generation 1, leaving it active.
+        world.with_registration_source(SourceId(1), |w| {
+            w.register_component::<Marker>();
+        });
+        // Marker is registered under gen-1 and gen-1 is active (count = 1).
+
+        // Try to register under generation 2 — should panic because gen-1 is active.
+        world.with_registration_source(SourceId(2), |w| {
+            w.register_component::<Marker>(); // panic: gen-1 still active
+        });
+    }
+
+    // Same-generation re-registration remains idempotent (no count increment).
+    #[test]
+    fn same_generation_registration_is_idempotent() {
+        let mut world = World::new();
+        world.register_component::<Marker>();
+        let initial_count = world.generation_registry.registration_count(0); // HOST = gen-0
+        world.register_component::<Marker>(); // re-register under HOST
+        let after_count = world.generation_registry.registration_count(0);
+        assert_eq!(initial_count, after_count); // count should not increase
+    }
 }

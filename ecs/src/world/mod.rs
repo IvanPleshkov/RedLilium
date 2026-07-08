@@ -197,6 +197,11 @@ pub struct World {
     /// [`SourceId::HOST`]; a future loader scopes game-cdylib registrations by
     /// flipping it via [`with_registration_source`](World::with_registration_source).
     current_source: crate::type_identity::SourceId,
+    /// Tracks game generation lifecycle and prevents unload while types are
+    /// registered (ADR-020 amendment, #72). Used for supersession on re-registration:
+    /// if a type is already registered under a dead generation, we allow the
+    /// new generation to take over.
+    pub(crate) generation_registry: crate::GameGenerationRegistry,
 }
 
 impl redlilium_core::abstract_editor::Editable for World {}
@@ -232,6 +237,7 @@ impl World {
             snapshot_resources: BTreeMap::new(),
             type_sources,
             current_source: crate::type_identity::SourceId::HOST,
+            generation_registry: crate::GameGenerationRegistry::new(),
         }
     }
 
@@ -256,31 +262,64 @@ impl World {
     /// Re-recording the *same* `(TypeId, source)` is idempotent (matching the
     /// idempotence of the `register_*` paths).
     ///
+    /// # Supersession (R4)
+    ///
+    /// If `type_id` is already recorded under a **different** source:
+    /// - If the existing source is a dead generation (no active registrations),
+    ///   the new source takes over (supersession).
+    /// - If the existing source is still alive, a [`WorldError::TypeSourceConflict`]
+    ///   panic is raised.
+    ///
+    /// This allows snapshot restore after a game cdylib reload to re-stamp types
+    /// under the new generation without falsely triggering a conflict when the
+    /// old generation is no longer active.
+    ///
     /// # Panics
     ///
     /// Panics with [`WorldError::TypeSourceConflict`] if `type_id` was already
-    /// recorded under a **different** source — the aliasing/collision case the
-    /// ADR mandates be rejected loudly rather than silently overwritten.
+    /// recorded under a **different** source that is still active — the
+    /// aliasing/collision case the ADR mandates be rejected loudly.
     pub(crate) fn record_type_source(&mut self, type_id: TypeId, type_name: &'static str) {
         use std::collections::hash_map::Entry;
         let incoming = self.current_source;
-        match self.type_sources.entry(type_id) {
-            Entry::Occupied(e) => {
+        let is_new = match self.type_sources.entry(type_id) {
+            Entry::Occupied(mut e) => {
                 let existing = *e.get();
                 if existing != incoming {
-                    panic!(
-                        "{}",
-                        WorldError::TypeSourceConflict {
-                            type_name,
-                            existing,
-                            incoming,
-                        }
-                    );
+                    // Check if the existing generation is still active.
+                    // If dead (no registrations), supersession is allowed.
+                    // If alive, reject the conflict.
+                    let existing_gen_id = existing.0;
+                    if self
+                        .generation_registry
+                        .is_generation_active(existing_gen_id)
+                    {
+                        panic!(
+                            "{}",
+                            WorldError::TypeSourceConflict {
+                                type_name,
+                                existing,
+                                incoming,
+                            }
+                        );
+                    }
+                    // Dead generation: overwrite with the incoming source (supersession).
+                    e.insert(incoming);
+                    true
+                } else {
+                    false
                 }
             }
             Entry::Vacant(v) => {
                 v.insert(incoming);
+                true
             }
+        };
+
+        // Record in the generation registry if this is a new type registration.
+        if is_new {
+            self.generation_registry
+                .record_type_registration(type_id, incoming.0);
         }
     }
 

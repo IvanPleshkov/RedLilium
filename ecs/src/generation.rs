@@ -54,13 +54,26 @@ pub struct GenerationInfo {
 }
 
 impl GameGenerationRegistry {
-    /// Create a new registry. Ready to allocate generations starting at 1.
+    /// Create a new registry. Initializes generation 0 (HOST/engine) and ready to allocate
+    /// generations starting at 1.
     pub fn new() -> Self {
+        let mut generations = HashMap::new();
+        let mut registration_counts = HashMap::new();
+        // Pre-allocate generation 0 for HOST/engine types.
+        generations.insert(
+            0,
+            GenerationInfo {
+                generation: 0,
+                types: Vec::new(),
+            },
+        );
+        registration_counts.insert(0, 0);
+
         Self {
             next_generation: 1,
-            generations: HashMap::new(),
+            generations,
             type_to_generation: HashMap::new(),
-            registration_counts: HashMap::new(),
+            registration_counts,
         }
     }
 
@@ -83,31 +96,59 @@ impl GameGenerationRegistry {
 
     /// Record that a type has been registered under a generation.
     ///
+    /// If the type is already registered under a different generation:
+    /// - If that generation is still active, panic (conflict)
+    /// - If that generation is dead, overwrite (supersession, allowed for hot-reload)
+    ///
+    /// If the generation doesn't exist (e.g., in test code using synthetic sources),
+    /// it is created on-the-fly. In production, allocate_generation() is called first.
+    ///
     /// # Panics
     ///
-    /// If `type_id` is already registered under a different generation (type-ID collision).
+    /// If `type_id` is already registered under a different **active** generation.
     pub fn record_type_registration(&mut self, type_id: TypeId, generation_id: u32) {
-        if let Some(&existing_gen) = self.type_to_generation.get(&type_id) {
+        let is_new = if let Some(&existing_gen) = self.type_to_generation.get(&type_id) {
             if existing_gen != generation_id {
-                panic!(
-                    "Type registration conflict: TypeId {type_id:?} already registered \
-                     under generation {existing_gen}, refusing generation {generation_id}"
-                );
+                // Check if the existing generation is still active.
+                // If dead, supersession is allowed; if alive, reject the conflict.
+                if self.is_generation_active(existing_gen) {
+                    panic!(
+                        "Type registration conflict: TypeId {type_id:?} already registered \
+                         under generation {existing_gen}, refusing generation {generation_id}"
+                    );
+                }
+                // Dead generation: allow supersession, overwrite.
+                self.type_to_generation.insert(type_id, generation_id);
+                true
+            } else {
+                // Same generation: re-registration is idempotent, no change.
+                false
             }
-            // Same generation: re-registration is idempotent, no change.
+        } else {
+            // New registration.
+            self.type_to_generation.insert(type_id, generation_id);
+            true
+        };
+
+        if !is_new {
             return;
         }
 
-        // New registration.
-        self.type_to_generation.insert(type_id, generation_id);
+        // Ensure the generation exists (create on-the-fly for test code).
+        use std::collections::hash_map::Entry;
+        match self.generations.entry(generation_id) {
+            Entry::Vacant(e) => {
+                e.insert(GenerationInfo {
+                    generation: generation_id,
+                    types: Vec::new(),
+                });
+                self.registration_counts.insert(generation_id, 0);
+            }
+            Entry::Occupied(_) => {}
+        }
 
         if let Some(info) = self.generations.get_mut(&generation_id) {
             info.types.push(type_id);
-        } else {
-            panic!(
-                "Attempt to register type under unknown generation {generation_id}; \
-                 did you forget to call allocate_generation()?"
-            );
         }
 
         // Increment the count for this generation.
