@@ -275,6 +275,31 @@ impl GraphicsInstance {
 
         // Create the GPU backend based on parameters
         let backend = backend::create_backend_with_params(&params)?;
+        Ok(Self::from_backend(backend))
+    }
+
+    /// Create a graphics instance, awaiting device creation.
+    ///
+    /// The browser entry point (#33): on wasm the wgpu adapter/device requests
+    /// are JS promises that only resolve while the event loop runs, so instance
+    /// creation cannot block. Call this from an async task
+    /// (`wasm_bindgen_futures::spawn_local`) before starting the window loop.
+    /// Equivalent to [`with_parameters`](Self::with_parameters) on native.
+    #[cfg(feature = "wgpu-backend")]
+    pub async fn with_parameters_async(
+        params: InstanceParameters,
+    ) -> Result<Arc<Self>, GraphicsError> {
+        log::info!(
+            "Creating GraphicsInstance (async) with params: {:?}",
+            params
+        );
+        let backend = backend::create_backend_with_params_async(&params).await?;
+        Ok(Self::from_backend(backend))
+    }
+
+    /// Wrap a created backend in a reference-counted instance with its weak
+    /// self-reference wired up. Shared by the blocking and async constructors.
+    fn from_backend(backend: backend::GpuBackend) -> Arc<Self> {
         log::info!("Using GPU backend: {}", backend.name());
 
         let instance = Arc::new(Self {
@@ -288,7 +313,7 @@ impl GraphicsInstance {
             *self_ref = Arc::downgrade(&instance);
         }
 
-        Ok(instance)
+        instance
     }
 
     /// Get the GPU backend for reading (internal use only).

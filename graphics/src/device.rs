@@ -260,6 +260,48 @@ impl GraphicsDevice {
         self.create_sampler(&descriptor)
     }
 
+    /// Apply reflected binding layouts to a material descriptor.
+    ///
+    /// Reclassifies a whole set's uniform buffers as
+    /// [`DynamicUniformBuffer`](crate::materials::BindingType::DynamicUniformBuffer)
+    /// when its update rate is `Dynamic`/`External` (rate-classified sets bind a
+    /// ring buffer once with a per-draw offset; `docs/MATERIAL_ASSETS.md`
+    /// Decision 7), honors the legacy explicit `dynamic_uniforms`, and stores the
+    /// layouts + update rates. Shared by the native (live Slang reflection) and
+    /// wasm (offline baked reflection) paths so the reclassification rules cannot
+    /// drift between them (#33).
+    fn apply_reflected_layouts(
+        desc: &mut MaterialDescriptor,
+        mut layouts: Vec<crate::materials::BindingLayout>,
+        update_rates: Vec<Option<crate::materials::UpdateRate>>,
+    ) {
+        use crate::materials::{BindingType, UpdateRate};
+        for (layout, rate) in layouts.iter_mut().zip(&update_rates) {
+            if matches!(
+                *rate,
+                Some(UpdateRate::Dynamic) | Some(UpdateRate::External)
+            ) {
+                for entry in &mut layout.entries {
+                    if entry.binding_type == BindingType::UniformBuffer {
+                        entry.binding_type = BindingType::DynamicUniformBuffer;
+                    }
+                }
+            }
+        }
+        for &(group, binding) in &desc.dynamic_uniforms {
+            if let Some(layout) = layouts.get_mut(group as usize) {
+                for entry in &mut layout.entries {
+                    if entry.binding == binding && entry.binding_type == BindingType::UniformBuffer
+                    {
+                        entry.binding_type = BindingType::DynamicUniformBuffer;
+                    }
+                }
+            }
+        }
+        desc.binding_layouts = layouts.into_iter().map(std::sync::Arc::new).collect();
+        desc.set_update_rates = update_rates;
+    }
+
     /// Create a material with its GPU pipeline.
     ///
     /// The pipeline is compiled eagerly from the descriptor's shaders,
@@ -319,45 +361,71 @@ impl GraphicsDevice {
                     })
                     .collect();
 
-                let (mut layouts, update_rates) =
+                let (layouts, update_rates) =
                     compiler.reflect_all_bindings(&shaders_for_reflect)?;
-                // Rate-classified sets are self-describing: a `dynamic` block's
-                // implicit uniform buffer binds with a per-draw offset
-                // (docs/MATERIAL_ASSETS.md Decision 7). `external` sets (the
-                // per-view camera block) bind the same way now that groups are
-                // created eagerly: a per-slot ring buffer bound once at offset 0
-                // with the view's offset supplied per draw — so their uniform
-                // buffer is dynamic too.
-                for (layout, rate) in layouts.iter_mut().zip(&update_rates) {
-                    if matches!(
-                        *rate,
-                        Some(crate::materials::UpdateRate::Dynamic)
-                            | Some(crate::materials::UpdateRate::External)
-                    ) {
-                        for entry in &mut layout.entries {
-                            if entry.binding_type == crate::materials::BindingType::UniformBuffer {
-                                entry.binding_type =
-                                    crate::materials::BindingType::DynamicUniformBuffer;
-                            }
-                        }
-                    }
-                }
-                // Legacy path: explicitly requested dynamic uniform bindings.
-                for &(group, binding) in &desc.dynamic_uniforms {
-                    if let Some(layout) = layouts.get_mut(group as usize) {
-                        for entry in &mut layout.entries {
-                            if entry.binding == binding
-                                && entry.binding_type
-                                    == crate::materials::BindingType::UniformBuffer
-                            {
-                                entry.binding_type =
-                                    crate::materials::BindingType::DynamicUniformBuffer;
-                            }
-                        }
-                    }
-                }
-                desc.binding_layouts = layouts.into_iter().map(std::sync::Arc::new).collect();
-                desc.set_update_rates = update_rates;
+                Self::apply_reflected_layouts(&mut desc, layouts, update_rates);
+            }
+            desc
+        };
+
+        // On wasm there is no Slang compiler, so binding layouts come from the
+        // offline reflection bake (#33), keyed by the shader SET. A miss is a
+        // hard error naming the material — never a silent empty layout (which
+        // would panic later at the first `binding_layouts()[0]` and leave the
+        // pipeline without bind-group layouts).
+        #[cfg(not(feature = "slang-shaders"))]
+        let descriptor = &{
+            let mut desc = descriptor.clone();
+            if desc.binding_layouts.is_empty()
+                && !desc.shaders.is_empty()
+                && desc
+                    .shaders
+                    .iter()
+                    .all(|s| s.language == crate::materials::ShaderSourceLanguage::Slang)
+            {
+                let sources: Vec<String> = desc
+                    .shaders
+                    .iter()
+                    .map(|s| String::from_utf8_lossy(&s.source).into_owned())
+                    .collect();
+                let defines: Vec<Vec<(&str, &str)>> = desc
+                    .shaders
+                    .iter()
+                    .map(|s| {
+                        s.defines
+                            .iter()
+                            .map(|(k, v)| (k.as_str(), v.as_str()))
+                            .collect()
+                    })
+                    .collect();
+                let set: Vec<crate::shader::baked::ShaderSetInput<'_>> = desc
+                    .shaders
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        (
+                            sources[i].as_str(),
+                            s.entry_point.as_str(),
+                            s.stage,
+                            defines[i].as_slice(),
+                        )
+                    })
+                    .collect();
+
+                let key = crate::shader::baked::shader_set_key(&set);
+                let (layouts, update_rates) = crate::shader::baked::lookup_reflection(key)
+                    .ok_or_else(|| {
+                        GraphicsError::ResourceCreationFailed(format!(
+                            "no baked binding-layout reflection for material {:?} (entries: {:?}); \
+                             add its shader set to the xtask registry and rebake (#33)",
+                            desc.label,
+                            desc.shaders
+                                .iter()
+                                .map(|s| s.entry_point.as_str())
+                                .collect::<Vec<_>>(),
+                        ))
+                    })?;
+                Self::apply_reflected_layouts(&mut desc, layouts, update_rates);
             }
             desc
         };

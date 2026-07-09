@@ -1,7 +1,8 @@
 //! Main application struct and event loop.
 
 use std::sync::Arc;
-use std::time::Instant;
+
+use web_time::Instant;
 
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
@@ -55,6 +56,11 @@ where
     args: A,
     window: Option<Arc<Window>>,
     context: Option<AppContext>,
+    /// A graphics instance created before the window (wasm/WebGPU, #33): device
+    /// creation is async there and must finish before `spawn_app`, so it is
+    /// built up front and consumed by `init_graphics`. `None` on native, where
+    /// `init_graphics` creates the instance synchronously.
+    prebuilt_instance: Option<Arc<GraphicsInstance>>,
     start_time: Instant,
     last_frame_time: Instant,
     running: bool,
@@ -73,10 +79,24 @@ where
             args,
             window: None,
             context: None,
+            prebuilt_instance: None,
             start_time: Instant::now(),
             last_frame_time: Instant::now(),
             running: true,
             initialized: false,
+        }
+    }
+
+    /// Create an application with a graphics instance built ahead of the window.
+    ///
+    /// Used by the wasm entry (#33), where the wgpu device is created inside an
+    /// async task before `spawn_app`; `init_graphics` then reuses this instance
+    /// instead of creating one (which would need a blocking request the browser
+    /// thread cannot make).
+    pub fn new_with_instance(handler: H, args: A, instance: Arc<GraphicsInstance>) -> Self {
+        Self {
+            prebuilt_instance: Some(instance),
+            ..Self::new(handler, args)
         }
     }
 
@@ -113,8 +133,15 @@ where
     }
 
     /// Run the application (WASM version).
+    ///
+    /// The browser thread cannot block, so device creation is done in an async
+    /// task first (#33); only once the instance exists do we build the event loop
+    /// and hand the app to winit's non-blocking `spawn_app` (which drives frames
+    /// via `requestAnimationFrame`). `run_app` would panic on web.
     #[cfg(target_arch = "wasm32")]
     pub fn run(handler: H, args: A) {
+        use winit::platform::web::EventLoopExtWebSys;
+
         console_error_panic_hook::set_once();
         console_log::init_with_level(log::Level::Info).expect("Failed to initialize logger");
 
@@ -122,9 +149,25 @@ where
         redlilium_graphics::init();
         crate::init();
 
-        let event_loop = EventLoop::new().expect("Failed to create event loop");
-        let mut app = Self::new(handler, args);
-        event_loop.run_app(&mut app).expect("Event loop error");
+        wasm_bindgen_futures::spawn_local(async move {
+            let params = InstanceParameters::new()
+                .with_backend(args.backend())
+                .with_wgpu_backend(args.wgpu_backend())
+                .with_validation(args.validation());
+
+            let instance = match GraphicsInstance::with_parameters_async(params).await {
+                Ok(i) => i,
+                Err(e) => {
+                    log::error!("Failed to create graphics instance: {e}");
+                    return;
+                }
+            };
+
+            let event_loop = EventLoop::new().expect("Failed to create event loop");
+            let app = Self::new_with_instance(handler, args, instance);
+            // Non-blocking: returns immediately, driving the app from rAF.
+            event_loop.spawn_app(app);
+        });
     }
 
     /// Initialize graphics after window creation.
@@ -137,17 +180,22 @@ where
             }
         };
 
-        // Create graphics instance with parameters from args
-        let params = InstanceParameters::new()
-            .with_backend(self.args.backend())
-            .with_wgpu_backend(self.args.wgpu_backend())
-            .with_validation(self.args.validation());
-
-        let instance = match GraphicsInstance::with_parameters(params) {
-            Ok(i) => i,
-            Err(e) => {
-                log::error!("Failed to create graphics instance: {}", e);
-                return false;
+        // Reuse an instance built ahead of the window (wasm async path, #33), or
+        // create one synchronously (native).
+        let instance = match self.prebuilt_instance.take() {
+            Some(instance) => instance,
+            None => {
+                let params = InstanceParameters::new()
+                    .with_backend(self.args.backend())
+                    .with_wgpu_backend(self.args.wgpu_backend())
+                    .with_validation(self.args.validation());
+                match GraphicsInstance::with_parameters(params) {
+                    Ok(i) => i,
+                    Err(e) => {
+                        log::error!("Failed to create graphics instance: {}", e);
+                        return false;
+                    }
+                }
             }
         };
 
@@ -172,6 +220,12 @@ where
         // Get scale factor and physical size from window
         let scale_factor = window.scale_factor();
         let physical_size = window.inner_size();
+        // On web the canvas can be 0×0 before the page's first layout, and WebGPU
+        // rejects a zero-sized `configure`. Clamp to at least 1×1; the first real
+        // `Resized` event corrects it through the frame-0 immediate-resize path
+        // (#33).
+        let width = physical_size.width.max(1);
+        let height = physical_size.height.max(1);
 
         // Configure surface with physical dimensions
         let present_mode = if self.args.vsync() {
@@ -183,7 +237,7 @@ where
         // Determine surface format - use HDR if requested and supported
         let (surface_format, hdr_active) = self.select_surface_format(&surface);
 
-        let config = SurfaceConfiguration::new(physical_size.width, physical_size.height)
+        let config = SurfaceConfiguration::new(width, height)
             .with_format(surface_format)
             .with_present_mode(present_mode);
 
@@ -198,15 +252,15 @@ where
         log::info!(
             "Graphics initialized: {} ({}x{} physical, scale_factor={}, format={:?}, hdr={})",
             device.name(),
-            physical_size.width,
-            physical_size.height,
+            width,
+            height,
             scale_factor,
             surface_format,
             hdr_active
         );
 
         let resize_manager = ResizeManager::new(
-            (physical_size.width, physical_size.height),
+            (width, height),
             self.args.resize_debounce_ms(),
             ResizeStrategy::Stretch,
         );
@@ -218,8 +272,8 @@ where
             device,
             surface,
             pipeline,
-            width: physical_size.width,
-            height: physical_size.height,
+            width,
+            height,
             scale_factor,
             frame_number: 0,
             delta_time: 0.0,
@@ -358,6 +412,15 @@ where
         // On failure the GPU may still be using them — skip the reconfigure
         // entirely (the next resize event or outdated report retries) rather
         // than recycling graphs the GPU still reads.
+        //
+        // wasm: `wait_idle` blocks on a fence whose completion callback can only
+        // fire from the event loop we're on — a guaranteed hang. WebGPU has no
+        // persistent back-buffer set (each frame's texture comes from
+        // `getCurrentTexture` and is released after present), and destroying a
+        // resource the GPU still reads is safe by construction there, so
+        // reconfiguring without draining is fine. The per-slot fence in
+        // `try_begin_frame` still gates re-recording a pooled graph. (#33)
+        #[cfg(not(target_arch = "wasm32"))]
         if let Err(e) = ctx.pipeline.wait_idle() {
             log::error!("wait_idle failed during resize, skipping surface reconfigure: {e}");
             return false;
@@ -415,34 +478,74 @@ where
             return;
         }
 
-        // Acquire swapchain texture
-        let swapchain_texture = match ctx.surface.acquire_texture() {
-            Ok(t) => t,
-            Err(
-                e @ (redlilium_graphics::GraphicsError::SurfaceOutdated
-                | redlilium_graphics::GraphicsError::SurfaceLost),
-            ) => {
-                // Skip this frame; the swapchain is recreated at the top of
-                // the next one.
-                log::debug!("Surface needs reconfiguration: {e}");
-                ctx.surface_outdated = true;
-                return;
-            }
-            Err(e) => {
-                log::warn!("Failed to acquire swapchain texture: {}", e);
-                return;
-            }
+        // Acquire the swapchain texture and begin the frame. The order differs by
+        // platform. On native, acquire first so a `SurfaceOutdated` is caught
+        // before the blocking `begin_frame` (which is also the frame pacing). On
+        // wasm, check the frame slot (non-blocking) FIRST and skip the rAF tick if
+        // it isn't ready — `getCurrentTexture` followed by no present flashes the
+        // canvas transparent-black, so we must not acquire on a skipped tick (#33).
+        #[cfg(not(target_arch = "wasm32"))]
+        let (swapchain_texture, schedule) = {
+            let swapchain_texture = match ctx.surface.acquire_texture() {
+                Ok(t) => t,
+                Err(
+                    e @ (redlilium_graphics::GraphicsError::SurfaceOutdated
+                    | redlilium_graphics::GraphicsError::SurfaceLost),
+                ) => {
+                    // Skip this frame; the swapchain is recreated at the top of
+                    // the next one.
+                    log::debug!("Surface needs reconfiguration: {e}");
+                    ctx.surface_outdated = true;
+                    return;
+                }
+                Err(e) => {
+                    log::warn!("Failed to acquire swapchain texture: {}", e);
+                    return;
+                }
+            };
+
+            // On fence-wait failure (GPU hang, device lost) the slot's resources
+            // must not be recycled — skip this frame; the fence stays in its slot
+            // and the next frame retries the wait.
+            let schedule = match ctx.pipeline.begin_frame() {
+                Ok(schedule) => schedule,
+                Err(e) => {
+                    log::error!("begin_frame failed, skipping frame: {e}");
+                    return;
+                }
+            };
+            (swapchain_texture, schedule)
         };
 
-        // Begin frame. On fence-wait failure (GPU hang, device lost) the
-        // slot's resources must not be recycled — skip this frame; the fence
-        // stays in its slot and the next frame retries the wait.
-        let schedule = match ctx.pipeline.begin_frame() {
-            Ok(schedule) => schedule,
-            Err(e) => {
-                log::error!("begin_frame failed, skipping frame: {e}");
-                return;
-            }
+        #[cfg(target_arch = "wasm32")]
+        let (swapchain_texture, schedule) = {
+            // Non-blocking: if this slot's previous GPU work isn't finished, skip
+            // this tick (completion arrives via the fence callback on a later rAF).
+            let schedule = match ctx.pipeline.try_begin_frame() {
+                Ok(Some(schedule)) => schedule,
+                Ok(None) => return,
+                Err(e) => {
+                    log::error!("try_begin_frame failed, skipping frame: {e}");
+                    return;
+                }
+            };
+
+            let swapchain_texture = match ctx.surface.acquire_texture() {
+                Ok(t) => t,
+                Err(
+                    e @ (redlilium_graphics::GraphicsError::SurfaceOutdated
+                    | redlilium_graphics::GraphicsError::SurfaceLost),
+                ) => {
+                    log::debug!("Surface needs reconfiguration: {e}");
+                    ctx.surface_outdated = true;
+                    return;
+                }
+                Err(e) => {
+                    log::warn!("Failed to acquire swapchain texture: {}", e);
+                    return;
+                }
+            };
+            (swapchain_texture, schedule)
         };
 
         // Create draw context
@@ -521,6 +624,27 @@ where
                 }
             }
 
+            // On web, attach the winit window to the page's existing canvas
+            // (winit does NOT insert a canvas into the DOM), so the WebGPU
+            // surface renders where the page laid it out (#33).
+            #[cfg(target_arch = "wasm32")]
+            let window_attributes = {
+                use wasm_bindgen::JsCast;
+                use winit::platform::web::WindowAttributesExtWebSys;
+
+                let canvas = web_sys::window()
+                    .and_then(|w| w.document())
+                    .and_then(|d| d.get_element_by_id("redlilium-canvas"))
+                    .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok());
+                if canvas.is_none() {
+                    log::error!(
+                        "canvas #redlilium-canvas not found; add <canvas id=\"redlilium-canvas\"> \
+                         to the page"
+                    );
+                }
+                window_attributes.with_canvas(canvas)
+            };
+
             match event_loop.create_window(window_attributes) {
                 Ok(window) => {
                     log::info!("Window created");
@@ -566,7 +690,11 @@ where
                     }
 
                     // Wait for GPU before exiting; on failure we exit anyway —
-                    // the process is going down.
+                    // the process is going down. wasm: a browser tab does not
+                    // really "close" here, and `wait_idle` would hang on a fence
+                    // serviced only by the event loop we're in — so drain on
+                    // native only (#33).
+                    #[cfg(not(target_arch = "wasm32"))]
                     if let Some(ctx) = &self.context
                         && let Err(e) = ctx.pipeline.wait_idle()
                     {

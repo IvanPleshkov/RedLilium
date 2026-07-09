@@ -30,6 +30,9 @@ log = { workspace = true }
 
 # Utilities
 parking_lot = { workspace = true }
+# Portable clock: std `Instant::now()` panics on wasm; `web-time` uses perf.now
+# there and re-exports std on native (#33).
+web-time = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 env_logger = { workspace = true }
@@ -41,6 +44,12 @@ redlilium-graphics = { path = "../graphics" }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
-web-sys = { workspace = true }
+# Fetch the target canvas from the DOM to attach the winit window to it (#33).
+web-sys = { workspace = true, features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+] }
 console_log = { workspace = true }
 console_error_panic_hook = { workspace = true }

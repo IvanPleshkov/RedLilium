@@ -68,7 +68,9 @@
 //! // ... render at render_size ...
 //! ```
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use web_time::Instant;
 
 /// Strategy for rendering during active resize.
 ///

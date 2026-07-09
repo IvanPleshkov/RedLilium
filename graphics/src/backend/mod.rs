@@ -746,17 +746,23 @@ impl GpuSurface {
 
     /// Acquire the next texture from the swapchain.
     ///
+    /// `view_format` is the engine's render format for the frame — the format the
+    /// acquired texture *view* is created as. On WebGPU this is the sRGB view over
+    /// a non-sRGB canvas (#33); on native it equals the surface format. Ignored by
+    /// backends whose view format is fixed at swapchain creation (Vulkan).
+    ///
     /// Returns a backend-specific surface texture for rendering.
     pub fn acquire_texture(
         &self,
         backend: &GpuBackend,
+        view_format: crate::types::TextureFormat,
     ) -> Result<GpuSurfaceTexture, GraphicsError> {
         match (self, backend) {
             (Self::Dummy, _) => Ok(GpuSurfaceTexture::Dummy),
 
             #[cfg(feature = "wgpu-backend")]
             (Self::Wgpu { surface }, GpuBackend::Wgpu(_)) => {
-                let result = wgpu_impl::swapchain::acquire_surface_texture(surface)?;
+                let result = wgpu_impl::swapchain::acquire_surface_texture(surface, view_format)?;
                 Ok(GpuSurfaceTexture::Wgpu {
                     texture: result.texture,
                     view: result.view,
@@ -1486,6 +1492,39 @@ pub fn create_backend_with_params(
                 ))
             }
         }
+    }
+}
+
+/// Async variant of [`create_backend_with_params`] for targets that cannot block
+/// on device creation (wasm/WebGPU, #33). Covers the Dummy and wgpu backends; the
+/// native Vulkan backend keeps its blocking constructor (it is never used on the
+/// async/web path).
+#[cfg(feature = "wgpu-backend")]
+pub async fn create_backend_with_params_async(
+    params: &crate::instance::InstanceParameters,
+) -> Result<GpuBackend, GraphicsError> {
+    use crate::instance::BackendType;
+
+    match params.backend {
+        BackendType::Dummy => {
+            log::info!("Using dummy backend (requested)");
+            Ok(GpuBackend::Dummy(dummy::DummyBackend::new()))
+        }
+        BackendType::Auto | BackendType::Wgpu => {
+            let backend = wgpu_impl::WgpuBackend::with_params_async(params).await?;
+            log::info!("Using wgpu backend (async)");
+            Ok(GpuBackend::Wgpu(backend))
+        }
+        #[cfg(feature = "vulkan-backend")]
+        BackendType::Vulkan => {
+            let backend = vulkan::VulkanBackend::with_params(params)?;
+            log::info!("Using Vulkan backend (requested)");
+            Ok(GpuBackend::Vulkan(backend))
+        }
+        #[cfg(not(feature = "vulkan-backend"))]
+        BackendType::Vulkan => Err(GraphicsError::ResourceCreationFailed(
+            "Vulkan backend requested but vulkan-backend feature is not enabled".to_string(),
+        )),
     }
 }
 

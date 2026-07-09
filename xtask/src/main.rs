@@ -19,21 +19,26 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use redlilium_graphics::ShaderStage;
 use redlilium_graphics::shader::{ShaderLibrary, SlangCompiler, baked};
 
-/// One shader source and the exact `(entry_point, defines)` permutations the
-/// runtime compiles it with. This registry is the reviewed source of truth —
+/// One shader source and the exact `(entry_point, stage, defines)` permutations
+/// the runtime compiles it with. This registry is the reviewed source of truth —
 /// permutations cannot be auto-discovered offline, so a new define-gated variant
-/// must be added here or it will miss loudly at runtime on wasm.
+/// must be added here or it will miss loudly at runtime on wasm (both the WGSL
+/// and the binding-layout reflection).
 struct ShaderSpec {
     /// Human name for diagnostics.
     name: &'static str,
     /// Workspace-relative path to the `.slang` source (must be the *same bytes*
     /// the runtime hashes — verbatim `include_str!`/embedded VFS content).
     path: &'static str,
-    /// Entry points to bake (each becomes its own WGSL output).
-    entry_points: &'static [&'static str],
-    /// Define sets; one WGSL output per (entry_point × define set).
+    /// Entry points to bake with their stage. Each becomes its own WGSL output;
+    /// together (per define set) they form one material shader SET whose binding
+    /// reflection is baked under [`baked::shader_set_key`].
+    entry_points: &'static [(&'static str, ShaderStage)],
+    /// Define sets; one WGSL output per (entry_point × define set) and one
+    /// reflection entry per (spec × define set).
     define_sets: &'static [&'static [(&'static str, &'static str)]],
 }
 
@@ -42,35 +47,40 @@ const NO_DEFINES: &[&[(&str, &str)]] = &[&[]];
 // neither (linear non-sRGB). Bake all three.
 const EGUI_DEFINES: &[&[(&str, &str)]] = &[&[], &[("HDR_OUTPUT", "")], &[("SRGB_FRAMEBUFFER", "")]];
 
+const VS_FS: &[(&str, ShaderStage)] = &[
+    ("vs_main", ShaderStage::Vertex),
+    ("fs_main", ShaderStage::Fragment),
+];
+
 const REGISTRY: &[ShaderSpec] = &[
     ShaderSpec {
         name: "egui",
         path: "shaders/library/egui.slang",
-        entry_points: &["vs_main", "fs_main"],
+        entry_points: VS_FS,
         define_sets: EGUI_DEFINES,
     },
     ShaderSpec {
         name: "blit",
         path: "runtime/shaders/blit.slang",
-        entry_points: &["vs_main", "fs_main"],
+        entry_points: VS_FS,
         define_sets: NO_DEFINES,
     },
     ShaderSpec {
         name: "entity_index",
         path: "std-assets/shaders/entity_index.slang",
-        entry_points: &["vs_main", "fs_main"],
+        entry_points: VS_FS,
         define_sets: NO_DEFINES,
     },
     ShaderSpec {
         name: "opaque_color",
         path: "std-assets/shaders/opaque_color.slang",
-        entry_points: &["vs_main", "fs_main"],
+        entry_points: VS_FS,
         define_sets: NO_DEFINES,
     },
     ShaderSpec {
         name: "opaque_textured",
         path: "std-assets/shaders/opaque_textured.slang",
-        entry_points: &["vs_main", "fs_main"],
+        entry_points: VS_FS,
         define_sets: NO_DEFINES,
     },
 ];
@@ -105,37 +115,58 @@ fn defines_label(defines: &[(&str, &str)]) -> String {
 /// key so emission is deterministic.
 type BakedTable = BTreeMap<u64, (String, String)>;
 
-/// Compile every registered permutation into a key -> (wgsl, name) table and
-/// capture the Slang build tag they were baked with. Shared by `bake` (writes
-/// the file) and `check` (compares against the committed file), so both produce
-/// byte-identical output from the same compile.
-fn bake_table() -> Result<(BakedTable, String), String> {
+/// shader-set key -> (rendered `&[BakedGroup]` literal, human-readable name),
+/// ordered by key. One entry per (spec × define set) — the material shader SET,
+/// not a single WGSL permutation.
+type ReflectionTable = BTreeMap<u64, (String, String)>;
+
+/// Everything a bake produces: the WGSL table, the binding-layout reflection
+/// table, and the Slang build tag.
+struct Baked {
+    wgsl: BakedTable,
+    reflection: ReflectionTable,
+    slang_tag: String,
+}
+
+/// Compile every registered permutation to WGSL, reflect each material shader
+/// set's binding layouts, and capture the Slang build tag. Shared by `bake`
+/// (writes the file) and `check` (compares against the committed file), so both
+/// produce byte-identical output from the same compile.
+fn bake_table() -> Result<Baked, String> {
     let root = workspace_root();
 
-    // key -> (wgsl, name), BTreeMap so emission is sorted by key.
-    let mut table: BakedTable = BTreeMap::new();
+    // BTreeMaps so emission is sorted by key.
+    let mut wgsl: BakedTable = BTreeMap::new();
+    let mut reflection: ReflectionTable = BTreeMap::new();
     let mut slang_tag: Option<String> = None;
+
+    // Fresh compiler + library modules per reflect/compile, mirroring the runtime
+    // (graphics `compile_to_wgsl` / `create_material`), so baked output matches
+    // what native produces live.
+    let fresh_compiler = |slang_tag: &mut Option<String>| -> Result<SlangCompiler, String> {
+        let compiler = SlangCompiler::new()
+            .map_err(|e| format!("SlangCompiler::new (set SLANG_DIR?): {e:?}"))?;
+        if slang_tag.is_none() {
+            *slang_tag = Some(compiler.build_tag().to_string());
+        }
+        compiler
+            .write_library_modules(&ShaderLibrary::standard_slang())
+            .map_err(|e| format!("write_library_modules: {e:?}"))?;
+        Ok(compiler)
+    };
 
     for spec in REGISTRY {
         let full = root.join(spec.path);
         let source =
             std::fs::read_to_string(&full).map_err(|e| format!("read {}: {e}", full.display()))?;
 
-        for &entry in spec.entry_points {
-            for defines in spec.define_sets {
-                // Fresh compiler + library modules per compile, mirroring the
-                // runtime (graphics `compile_to_wgsl`), so baked WGSL matches
-                // what native produces live.
-                let compiler = SlangCompiler::new()
-                    .map_err(|e| format!("SlangCompiler::new (set SLANG_DIR?): {e:?}"))?;
-                if slang_tag.is_none() {
-                    slang_tag = Some(compiler.build_tag().to_string());
-                }
-                compiler
-                    .write_library_modules(&ShaderLibrary::standard_slang())
-                    .map_err(|e| format!("write_library_modules: {e:?}"))?;
+        for defines in spec.define_sets {
+            let defines: &[(&str, &str)] = defines;
 
-                let wgsl = compiler
+            // One WGSL output per entry point.
+            for &(entry, _stage) in spec.entry_points {
+                let compiler = fresh_compiler(&mut slang_tag)?;
+                let compiled = compiler
                     .compile_to_wgsl(&source, entry, &[], defines)
                     .map_err(|e| {
                         format!(
@@ -148,22 +179,88 @@ fn bake_table() -> Result<(BakedTable, String), String> {
 
                 let key = baked::shader_key(&source, entry, defines);
                 let name = format!("{} / {} / {}", spec.name, entry, defines_label(defines));
-
-                if let Some((_, prev)) = table.get(&key) {
+                if let Some((_, prev)) = wgsl.get(&key) {
                     return Err(format!(
-                        "key collision {key:#018x}: '{name}' vs '{prev}' — two permutations \
+                        "WGSL key collision {key:#018x}: '{name}' vs '{prev}' — two permutations \
                          hashed identically (bug in the registry or shader_key)"
                     ));
                 }
-                table.insert(key, (wgsl, name));
+                wgsl.insert(key, (compiled, name));
             }
+
+            // One reflection entry per (spec × define set): the whole shader SET
+            // reflected together, exactly as `create_material` reflects it.
+            let set: Vec<baked::ShaderSetInput<'_>> = spec
+                .entry_points
+                .iter()
+                .map(|&(entry, stage)| (source.as_str(), entry, stage, defines))
+                .collect();
+            let compiler = fresh_compiler(&mut slang_tag)?;
+            let (layouts, rates) = compiler.reflect_all_bindings(&set).map_err(|e| {
+                format!("reflect {} / {}: {e:?}", spec.name, defines_label(defines))
+            })?;
+
+            let key = baked::shader_set_key(&set);
+            let name = format!("{} / {}", spec.name, defines_label(defines));
+            if let Some((_, prev)) = reflection.get(&key) {
+                return Err(format!(
+                    "reflection key collision {key:#018x}: '{name}' vs '{prev}' — two shader sets \
+                     hashed identically (bug in the registry or shader_set_key)"
+                ));
+            }
+            reflection.insert(key, (render_groups(&layouts, &rates), name));
         }
     }
 
     // "unknown" only if the registry is empty (no compile ran) — a real bake
     // always sets it. Kept explicit so `--check` never panics on an empty table.
     let slang_tag = slang_tag.unwrap_or_else(|| "unknown".to_string());
-    Ok((table, slang_tag))
+    Ok(Baked {
+        wgsl,
+        reflection,
+        slang_tag,
+    })
+}
+
+/// Render an `Option<String>` as a Rust `Option<&'static str>` literal.
+fn render_opt_str(o: &Option<String>) -> String {
+    match o {
+        Some(x) => format!("Some({x:?})"),
+        None => "None".to_string(),
+    }
+}
+
+/// Render reflected binding layouts + update rates as a `&[BakedGroup]` literal
+/// (fully-qualified paths so the generated file compiles inside the graphics
+/// crate). rustfmt normalizes the spacing afterwards, so this stays compact.
+fn render_groups(
+    layouts: &[redlilium_graphics::BindingLayout],
+    rates: &[Option<redlilium_graphics::UpdateRate>],
+) -> String {
+    let mut s = String::from("&[");
+    for (layout, rate) in layouts.iter().zip(rates) {
+        let rate_lit = match rate {
+            Some(r) => format!("Some(crate::materials::UpdateRate::{r:?})"),
+            None => "None".to_string(),
+        };
+        s.push_str(&format!(
+            "crate::shader::baked::BakedGroup {{ rate: {}, label: {}, entries: &[",
+            rate_lit,
+            render_opt_str(&layout.label),
+        ));
+        for e in &layout.entries {
+            s.push_str(&format!(
+                "crate::shader::baked::BakedEntry {{ binding: {}, ty: crate::materials::BindingType::{:?}, vis: {}, label: {} }},",
+                e.binding,
+                e.binding_type,
+                e.visibility.bits(),
+                render_opt_str(&e.label),
+            ));
+        }
+        s.push_str("] },");
+    }
+    s.push(']');
+    s
 }
 
 fn baked_dest() -> PathBuf {
@@ -206,14 +303,15 @@ fn rustfmt(src: &str) -> Result<String, String> {
 }
 
 fn bake_shaders() -> Result<(), String> {
-    let (table, slang_tag) = bake_table()?;
-    let out = rustfmt(&render_generated(&table, &slang_tag))?;
+    let baked = bake_table()?;
+    let out = rustfmt(&render_generated(&baked))?;
     let dest = baked_dest();
     std::fs::write(&dest, out).map_err(|e| format!("write {}: {e}", dest.display()))?;
     eprintln!(
-        "baked {} shader permutations (slang {}) -> {}",
-        table.len(),
-        slang_tag,
+        "baked {} WGSL permutations + {} reflection sets (slang {}) -> {}",
+        baked.wgsl.len(),
+        baked.reflection.len(),
+        baked.slang_tag,
         dest.display()
     );
     Ok(())
@@ -224,17 +322,18 @@ fn bake_shaders() -> Result<(), String> {
 /// the working tree clean. Exits nonzero (via `Err`) if they differ, with a
 /// message that distinguishes a Slang-version drift from real source edits.
 fn check_shaders() -> Result<(), String> {
-    let (table, slang_tag) = bake_table()?;
-    let expected = rustfmt(&render_generated(&table, &slang_tag))?;
+    let baked = bake_table()?;
+    let expected = rustfmt(&render_generated(&baked))?;
     let dest = baked_dest();
     let actual =
         std::fs::read_to_string(&dest).map_err(|e| format!("read {}: {e}", dest.display()))?;
 
     if actual == expected {
         eprintln!(
-            "baked shaders are up to date ({} permutations, slang {})",
-            table.len(),
-            slang_tag
+            "baked shaders are up to date ({} WGSL + {} reflection sets, slang {})",
+            baked.wgsl.len(),
+            baked.reflection.len(),
+            baked.slang_tag
         );
         return Ok(());
     }
@@ -242,11 +341,12 @@ fn check_shaders() -> Result<(), String> {
     // Diagnose: a Slang upgrade reformats/renames WGSL wholesale, so lead with
     // that rather than an opaque byte-diff if the committed tag differs.
     match committed_slang_tag(&actual) {
-        Some(committed) if committed != slang_tag => Err(format!(
+        Some(committed) if committed != baked.slang_tag => Err(format!(
             "baked_generated.rs is stale: it was baked with slang '{committed}', but your slang \
              reports '{slang_tag}'. Slang's WGSL emission is not stable across versions — align \
              your Slang SDK with the pinned one, or rebake with `cargo run -p xtask -- \
-             bake-shaders` and review the diff."
+             bake-shaders` and review the diff.",
+            slang_tag = baked.slang_tag,
         )),
         _ => Err(
             "baked_generated.rs is out of date with the shader sources — rebake with \
@@ -265,7 +365,7 @@ fn committed_slang_tag(file: &str) -> Option<String> {
     Some(line[start..end].to_string())
 }
 
-fn render_generated(table: &BakedTable, slang_tag: &str) -> String {
+fn render_generated(baked: &Baked) -> String {
     let mut s = String::new();
     s.push_str(
         "//! @generated by `xtask bake-shaders` — DO NOT EDIT BY HAND.\n\
@@ -275,7 +375,9 @@ fn render_generated(table: &BakedTable, slang_tag: &str) -> String {
          //! fails the build. Entries are sorted by key for a stable, review-friendly diff.\n\
          //!\n\
          //! `BAKED_WGSL`: key -> compiled WGSL. `BAKED_NAMES`: key -> `shader / entry /\n\
-         //! defines` (diagnostics on a miss). Both sorted ascending by key for binary search.\n\n",
+         //! defines` (diagnostics on a miss). `BAKED_REFLECTION`: shader-set key -> baked\n\
+         //! binding-layout reflection (the runtime uses it on wasm, where Slang can't run).\n\
+         //! All sorted ascending by key for binary search.\n\n",
     );
 
     s.push_str(&format!(
@@ -283,20 +385,28 @@ fn render_generated(table: &BakedTable, slang_tag: &str) -> String {
          /// this first, so a compiler upgrade reads as an explicit version message rather than\n\
          /// an opaque WGSL byte-diff. Not referenced by the runtime.\n\
          #[allow(dead_code)]\n\
-         pub static BAKED_SLANG_TAG: &str = {slang_tag:?};\n\n"
+         pub static BAKED_SLANG_TAG: &str = {:?};\n\n",
+        baked.slang_tag
     ));
 
     s.push_str("/// key -> compiled WGSL, sorted ascending by key.\n");
     s.push_str("pub static BAKED_WGSL: &[(u64, &str)] = &[\n");
-    for (key, (wgsl, _)) in table {
+    for (key, (wgsl, _)) in &baked.wgsl {
         s.push_str(&format!("    ({key:#018x}, {wgsl:?}),\n"));
     }
     s.push_str("];\n\n");
 
     s.push_str("/// key -> human-readable `shader / entry / defines`, sorted ascending by key.\n");
     s.push_str("pub static BAKED_NAMES: &[(u64, &str)] = &[\n");
-    for (key, (_, name)) in table {
+    for (key, (_, name)) in &baked.wgsl {
         s.push_str(&format!("    ({key:#018x}, {name:?}),\n"));
+    }
+    s.push_str("];\n\n");
+
+    s.push_str("/// shader-set key -> baked binding-layout reflection, sorted ascending by key.\n");
+    s.push_str("pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[\n");
+    for (key, (groups, _)) in &baked.reflection {
+        s.push_str(&format!("    ({key:#018x}, {groups}),\n"));
     }
     s.push_str("];\n");
     s

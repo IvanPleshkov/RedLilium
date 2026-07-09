@@ -13,6 +13,10 @@
 //! reported loudly with the shader's name via [`name_for_key`] — never a silent
 //! wrong/stale shader.
 
+use crate::materials::{
+    BindingLayout, BindingLayoutEntry, BindingType, ShaderStage, ShaderStageFlags, UpdateRate,
+};
+
 #[path = "baked_generated.rs"]
 mod baked_generated;
 
@@ -89,6 +93,105 @@ pub fn name_for_key(
         .binary_search_by_key(&key, |(k, _)| *k)
         .ok()
         .map(|i| baked_generated::BAKED_NAMES[i].1)
+}
+
+/// Stage discriminator for [`shader_set_key`], so two stages that share an
+/// entry-point name cannot collide in the folded key.
+fn stage_tag(stage: ShaderStage) -> u8 {
+    match stage {
+        ShaderStage::Vertex => 0,
+        ShaderStage::Fragment => 1,
+        ShaderStage::Compute => 2,
+    }
+}
+
+/// One shader in a set for [`shader_set_key`]: `(source, entry_point, stage,
+/// defines)` — the same shape as `ShaderReflectInput`, but defined here so it is
+/// available on wasm (where the Slang compiler module is absent).
+pub type ShaderSetInput<'a> = (&'a str, &'a str, ShaderStage, &'a [(&'a str, &'a str)]);
+
+/// Stable key for a baked **reflection** entry — a material's whole shader SET
+/// (all stages together), not a single WGSL permutation (#33).
+///
+/// `reflect_all_bindings` merges the stages order-independently, so this folds
+/// the per-shader [`shader_key`]s after sorting: the key is independent of the
+/// order the caller lists the shaders in. `xtask bake-shaders` and
+/// [`GraphicsDevice::create_material`](crate::GraphicsDevice::create_material)
+/// must compute it identically, or the wasm lookup misses.
+pub fn shader_set_key(shaders: &[ShaderSetInput<'_>]) -> u64 {
+    let mut subs: Vec<(u8, u64)> = shaders
+        .iter()
+        .map(|(src, entry, stage, defs)| (stage_tag(*stage), shader_key(src, entry, defs)))
+        .collect();
+    subs.sort_unstable();
+
+    let mut buf = Vec::with_capacity(subs.len() * 9);
+    for (tag, key) in subs {
+        buf.push(tag);
+        buf.extend_from_slice(&key.to_le_bytes());
+    }
+    fnv1a(&buf)
+}
+
+/// One binding entry in a baked group — the `'static` form of
+/// [`BindingLayoutEntry`], emitted by `xtask bake-shaders`.
+pub struct BakedEntry {
+    /// Binding index within the group.
+    pub binding: u32,
+    /// Resource type expected at this binding.
+    pub ty: BindingType,
+    /// [`ShaderStageFlags`] bits (stage visibility).
+    pub vis: u32,
+    /// Optional debug label.
+    pub label: Option<&'static str>,
+}
+
+/// One binding group in a baked reflection — the `'static` form of
+/// [`BindingLayout`] plus its [`UpdateRate`] (parallel to the layout, exactly as
+/// native `reflect_all_bindings` returns them).
+pub struct BakedGroup {
+    /// Update-frequency class of the whole set (`None` for legacy sets).
+    pub rate: Option<UpdateRate>,
+    /// Optional debug label.
+    pub label: Option<&'static str>,
+    /// Binding entries in this group.
+    pub entries: &'static [BakedEntry],
+}
+
+/// Look up baked binding-layout reflection for a shader set (keyed by
+/// [`shader_set_key`]).
+///
+/// Returns the densified per-group layouts and their update rates exactly as
+/// native `reflect_all_bindings` produced them at bake time — **post-densify,
+/// pre-reclassification** (the Dynamic/External→`DynamicUniformBuffer` step and
+/// the legacy `dynamic_uniforms` step run afterward, in `create_material`, on
+/// both native and wasm so they can't drift). `None` means the set was never
+/// baked; the caller must fail loudly (there is no runtime Slang on wasm).
+pub fn lookup_reflection(key: u64) -> Option<(Vec<BindingLayout>, Vec<Option<UpdateRate>>)> {
+    let groups = baked_generated::BAKED_REFLECTION
+        .binary_search_by_key(&key, |(k, _)| *k)
+        .ok()
+        .map(|i| baked_generated::BAKED_REFLECTION[i].1)?;
+
+    let mut layouts = Vec::with_capacity(groups.len());
+    let mut rates = Vec::with_capacity(groups.len());
+    for g in groups {
+        layouts.push(BindingLayout {
+            entries: g
+                .entries
+                .iter()
+                .map(|e| BindingLayoutEntry {
+                    binding: e.binding,
+                    binding_type: e.ty,
+                    visibility: ShaderStageFlags::from_bits_truncate(e.vis),
+                    label: e.label.map(str::to_string),
+                })
+                .collect(),
+            label: g.label.map(str::to_string),
+        });
+        rates.push(g.rate);
+    }
+    Some((layouts, rates))
 }
 
 #[cfg(test)]

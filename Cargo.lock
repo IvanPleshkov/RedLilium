@@ -4304,6 +4304,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "web-time",
  "winit",
 ]
 
@@ -4450,6 +4451,7 @@ dependencies = [
  "shader-slang",
  "static_assertions",
  "tracy-client",
+ "web-time",
  "wgpu",
  "winit",
 ]

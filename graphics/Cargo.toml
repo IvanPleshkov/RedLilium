@@ -21,6 +21,9 @@ static_assertions.workspace = true
 winit.workspace = true
 raw-window-handle = "0.6"
 bytemuck.workspace = true
+# Portable clock: std `Instant::now()` panics on wasm (ResizeManager debounce,
+# fence-wait timeouts). `web-time` uses perf.now there, re-exports std on native.
+web-time = { workspace = true }
 
 # Shader parsing and composition
 naga.workspace = true

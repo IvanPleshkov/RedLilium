@@ -37,6 +37,8 @@
 </head>
 <body>
     <div id="loading">Loading RedLilium Engine...</div>
+    <!-- winit attaches the WebGPU surface to this canvas (#33, with_canvas). -->
+    <canvas id="redlilium-canvas"></canvas>
 
     <script type="module">
         import init from './pkg/redlilium_demos.js';

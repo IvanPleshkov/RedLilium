@@ -166,7 +166,7 @@ impl Fence {
     ) -> Result<bool, crate::error::GraphicsError> {
         match &self.inner {
             FenceInner::Dummy { signaled } => {
-                let start = std::time::Instant::now();
+                let start = web_time::Instant::now();
                 while !signaled.load(Ordering::Acquire) {
                     if start.elapsed() >= timeout {
                         return Ok(false);

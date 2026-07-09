@@ -285,6 +285,23 @@ impl TextureFormat {
         )
     }
 
+    /// The sRGB variant of this 8-bit surface format, if one exists.
+    ///
+    /// Used for WebGPU surface negotiation (#33): the browser only offers the
+    /// non-sRGB canvas formats (`bgra8unorm`/`rgba8unorm`) in its surface
+    /// capabilities, but rendering linear color into a plain UNORM view skips the
+    /// hardware sRGB encode and darkens the image. Mapping the preferred surface
+    /// format to its sRGB variant (exposed as a texture *view* format) restores
+    /// the encode. Already-sRGB formats return themselves; formats with no sRGB
+    /// counterpart return `None`.
+    pub fn srgb_variant(&self) -> Option<Self> {
+        match self {
+            Self::Rgba8Unorm | Self::Rgba8UnormSrgb => Some(Self::Rgba8UnormSrgb),
+            Self::Bgra8Unorm | Self::Bgra8UnormSrgb => Some(Self::Bgra8UnormSrgb),
+            _ => None,
+        }
+    }
+
     /// Returns true if this is an HDR (High Dynamic Range) format.
     ///
     /// HDR formats have higher precision or wider color gamut than standard 8-bit formats.

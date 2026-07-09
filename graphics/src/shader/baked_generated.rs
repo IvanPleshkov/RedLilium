@@ -5,7 +5,9 @@
 //! fails the build. Entries are sorted by key for a stable, review-friendly diff.
 //!
 //! `BAKED_WGSL`: key -> compiled WGSL. `BAKED_NAMES`: key -> `shader / entry /
-//! defines` (diagnostics on a miss). Both sorted ascending by key for binary search.
+//! defines` (diagnostics on a miss). `BAKED_REFLECTION`: shader-set key -> baked
+//! binding-layout reflection (the runtime uses it on wasm, where Slang can't run).
+//! All sorted ascending by key for binary search.
 
 /// Slang build tag this table was baked with. `xtask bake-shaders --check` compares
 /// this first, so a compiler upgrade reads as an explicit version message rather than
@@ -89,4 +91,225 @@ pub static BAKED_NAMES: &[(u64, &str)] = &[
     (0xc4177992cbbe437d, "egui / vs_main / [HDR_OUTPUT]"),
     (0xda322d2dbf33dcba, "opaque_color / vs_main / []"),
     (0xf4e3835078a67db0, "opaque_textured / vs_main / []"),
+];
+
+/// shader-set key -> baked binding-layout reflection, sorted ascending by key.
+pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
+    (
+        0x000d5471914924a3,
+        &[
+            crate::shader::baked::BakedGroup {
+                rate: None,
+                label: None,
+                entries: &[crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 3,
+                    label: Some("EguiUniforms"),
+                }],
+            },
+            crate::shader::baked::BakedGroup {
+                rate: None,
+                label: None,
+                entries: &[
+                    crate::shader::baked::BakedEntry {
+                        binding: 0,
+                        ty: crate::materials::BindingType::Texture,
+                        vis: 3,
+                        label: Some("egui_texture"),
+                    },
+                    crate::shader::baked::BakedEntry {
+                        binding: 1,
+                        ty: crate::materials::BindingType::Sampler,
+                        vis: 3,
+                        label: Some("egui_sampler"),
+                    },
+                ],
+            },
+        ],
+    ),
+    (
+        0x069f0d3bf543b5f8,
+        &[
+            crate::shader::baked::BakedGroup {
+                rate: Some(crate::materials::UpdateRate::External),
+                label: None,
+                entries: &[crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 3,
+                    label: Some("gCamera"),
+                }],
+            },
+            crate::shader::baked::BakedGroup {
+                rate: Some(crate::materials::UpdateRate::Dynamic),
+                label: None,
+                entries: &[crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 3,
+                    label: Some("gModel"),
+                }],
+            },
+            crate::shader::baked::BakedGroup {
+                rate: Some(crate::materials::UpdateRate::Static),
+                label: None,
+                entries: &[crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 3,
+                    label: Some("gMaterial"),
+                }],
+            },
+        ],
+    ),
+    (
+        0x1dc475f1d547ce5d,
+        &[
+            crate::shader::baked::BakedGroup {
+                rate: Some(crate::materials::UpdateRate::External),
+                label: None,
+                entries: &[crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 3,
+                    label: Some("gCamera"),
+                }],
+            },
+            crate::shader::baked::BakedGroup {
+                rate: Some(crate::materials::UpdateRate::Dynamic),
+                label: None,
+                entries: &[crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 3,
+                    label: Some("gModel"),
+                }],
+            },
+            crate::shader::baked::BakedGroup {
+                rate: Some(crate::materials::UpdateRate::Static),
+                label: None,
+                entries: &[
+                    crate::shader::baked::BakedEntry {
+                        binding: 0,
+                        ty: crate::materials::BindingType::UniformBuffer,
+                        vis: 3,
+                        label: Some("gMaterial"),
+                    },
+                    crate::shader::baked::BakedEntry {
+                        binding: 1,
+                        ty: crate::materials::BindingType::Texture,
+                        vis: 3,
+                        label: Some("base_texture"),
+                    },
+                    crate::shader::baked::BakedEntry {
+                        binding: 2,
+                        ty: crate::materials::BindingType::Sampler,
+                        vis: 3,
+                        label: Some("base_texture_sampler"),
+                    },
+                ],
+            },
+        ],
+    ),
+    (
+        0x25fc58a7ad7fcce5,
+        &[
+            crate::shader::baked::BakedGroup {
+                rate: None,
+                label: None,
+                entries: &[crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 3,
+                    label: Some("EguiUniforms"),
+                }],
+            },
+            crate::shader::baked::BakedGroup {
+                rate: None,
+                label: None,
+                entries: &[
+                    crate::shader::baked::BakedEntry {
+                        binding: 0,
+                        ty: crate::materials::BindingType::Texture,
+                        vis: 3,
+                        label: Some("egui_texture"),
+                    },
+                    crate::shader::baked::BakedEntry {
+                        binding: 1,
+                        ty: crate::materials::BindingType::Sampler,
+                        vis: 3,
+                        label: Some("egui_sampler"),
+                    },
+                ],
+            },
+        ],
+    ),
+    (
+        0x84b171e387aa4216,
+        &[crate::shader::baked::BakedGroup {
+            rate: None,
+            label: None,
+            entries: &[crate::shader::baked::BakedEntry {
+                binding: 0,
+                ty: crate::materials::BindingType::UniformBuffer,
+                vis: 3,
+                label: Some("Uniforms"),
+            }],
+        }],
+    ),
+    (
+        0xa6496ad1621e74d3,
+        &[
+            crate::shader::baked::BakedGroup {
+                rate: None,
+                label: None,
+                entries: &[crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 3,
+                    label: Some("EguiUniforms"),
+                }],
+            },
+            crate::shader::baked::BakedGroup {
+                rate: None,
+                label: None,
+                entries: &[
+                    crate::shader::baked::BakedEntry {
+                        binding: 0,
+                        ty: crate::materials::BindingType::Texture,
+                        vis: 3,
+                        label: Some("egui_texture"),
+                    },
+                    crate::shader::baked::BakedEntry {
+                        binding: 1,
+                        ty: crate::materials::BindingType::Sampler,
+                        vis: 3,
+                        label: Some("egui_sampler"),
+                    },
+                ],
+            },
+        ],
+    ),
+    (
+        0xb5f0b28536d6c2da,
+        &[crate::shader::baked::BakedGroup {
+            rate: None,
+            label: None,
+            entries: &[
+                crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::Texture,
+                    vis: 3,
+                    label: Some("source_texture"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 1,
+                    ty: crate::materials::BindingType::Sampler,
+                    vis: 3,
+                    label: Some("source_sampler"),
+                },
+            ],
+        }],
+    ),
 ];

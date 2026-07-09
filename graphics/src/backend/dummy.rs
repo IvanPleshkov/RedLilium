@@ -85,7 +85,7 @@ impl DummyBackend {
     ) -> Result<bool, GraphicsError> {
         match fence {
             GpuFence::Dummy { signaled } => {
-                let start = std::time::Instant::now();
+                let start = web_time::Instant::now();
                 while !signaled.load(Ordering::Acquire) {
                     if start.elapsed() >= timeout {
                         return Ok(false);

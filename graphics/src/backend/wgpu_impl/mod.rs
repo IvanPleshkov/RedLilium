@@ -90,14 +90,98 @@ impl WgpuBackend {
         Self::with_params(&crate::instance::InstanceParameters::default())
     }
 
-    /// Create a new wgpu backend with custom parameters.
+    /// Create a new wgpu backend with custom parameters (blocking).
+    ///
+    /// Native path: drives `request_adapter`/`request_device` to completion with
+    /// `pollster::block_on`. That cannot make progress on the single browser
+    /// thread, so on wasm this returns an error instead of hanging — the web path
+    /// builds the backend through [`with_params_async`](Self::with_params_async)
+    /// (#33).
     pub fn with_params(
         params: &crate::instance::InstanceParameters,
     ) -> Result<Self, GraphicsError> {
-        // Determine which wgpu backends to enable
+        let instance = Self::build_instance(params);
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = instance;
+            Err(GraphicsError::ResourceCreationFailed(
+                "synchronous wgpu backend creation is unavailable on wasm (block_on cannot \
+                 progress on the browser thread); use with_params_async (#33)"
+                    .to_string(),
+            ))
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut adapter = None;
+            for pref in Self::ADAPTER_POWER_PREFERENCES {
+                match pollster::block_on(instance.request_adapter(&Self::adapter_options(pref))) {
+                    Ok(a) => {
+                        adapter = Some(a);
+                        break;
+                    }
+                    Err(e) => log::warn!("request_adapter({pref:?}) found no adapter: {e}"),
+                }
+            }
+            let adapter = adapter.ok_or_else(|| {
+                GraphicsError::ResourceCreationFailed(
+                    "No compatible GPU adapter (tried high-performance and default power \
+                     preference)"
+                        .to_string(),
+                )
+            })?;
+            let (device, queue) =
+                pollster::block_on(adapter.request_device(&Self::device_descriptor(&adapter)))
+                    .map_err(|e| {
+                        GraphicsError::ResourceCreationFailed(format!(
+                            "Device creation failed: {e}"
+                        ))
+                    })?;
+            Ok(Self::assemble(instance, adapter, device, queue))
+        }
+    }
+
+    /// Create a new wgpu backend, awaiting the adapter/device requests.
+    ///
+    /// The browser path (#33): `request_adapter`/`request_device` resolve as JS
+    /// promises driven by the event loop, so the caller must be inside an async
+    /// task (`wasm_bindgen_futures::spawn_local`) and must never block on it.
+    /// Also correct on native (the futures resolve immediately).
+    pub async fn with_params_async(
+        params: &crate::instance::InstanceParameters,
+    ) -> Result<Self, GraphicsError> {
+        let instance = Self::build_instance(params);
+        let mut adapter = None;
+        for pref in Self::ADAPTER_POWER_PREFERENCES {
+            match instance.request_adapter(&Self::adapter_options(pref)).await {
+                Ok(a) => {
+                    adapter = Some(a);
+                    break;
+                }
+                Err(e) => log::warn!("request_adapter({pref:?}) found no adapter: {e}"),
+            }
+        }
+        let adapter = adapter.ok_or_else(|| {
+            GraphicsError::ResourceCreationFailed(
+                "No compatible GPU adapter (tried high-performance and default power preference)"
+                    .to_string(),
+            )
+        })?;
+        let (device, queue) = adapter
+            .request_device(&Self::device_descriptor(&adapter))
+            .await
+            .map_err(|e| {
+                GraphicsError::ResourceCreationFailed(format!("Device creation failed: {e}"))
+            })?;
+        Ok(Self::assemble(instance, adapter, device, queue))
+    }
+
+    /// Build the `wgpu::Instance` from engine params. Shared by the blocking and
+    /// async constructors.
+    fn build_instance(params: &crate::instance::InstanceParameters) -> wgpu::Instance {
         let backends = params.wgpu_backend.to_wgpu_backends();
 
-        // Configure instance flags based on validation/debug settings
         let mut flags = wgpu::InstanceFlags::default();
         if params.validation {
             flags |= wgpu::InstanceFlags::VALIDATION;
@@ -107,37 +191,37 @@ impl WgpuBackend {
             flags |= wgpu::InstanceFlags::DEBUG;
         }
 
-        // Create instance with configured backends
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends,
             flags,
             backend_options: wgpu::BackendOptions::default(),
             memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-        });
-
-        // Request adapter
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        }))
-        .map_err(|e| {
-            GraphicsError::ResourceCreationFailed(format!("No compatible GPU adapter: {e}"))
-        })?;
-
-        log::info!("wgpu adapter: {:?}", adapter.get_info());
-
-        // Request device
-        let (device, queue) = Self::request_device(&adapter)?;
-
-        Ok(Self {
-            instance,
-            adapter,
-            device: Arc::new(device),
-            queue: Arc::new(queue),
-            bind_group_layout_cache: parking_lot::Mutex::new(HashMap::new()),
         })
     }
+
+    /// Adapter request options for the given power preference (no surface hint —
+    /// on WebGPU the single adapter presents to the canvas; compatibility is
+    /// verified later in
+    /// [`ensure_compatible_with_surface`](Self::ensure_compatible_with_surface)).
+    fn adapter_options(
+        power_preference: wgpu::PowerPreference,
+    ) -> wgpu::RequestAdapterOptions<'static, 'static> {
+        wgpu::RequestAdapterOptions {
+            power_preference,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }
+    }
+
+    /// Power preferences to try, in order. We prefer the discrete GPU, but on
+    /// some setups (notably dual-GPU laptops where the high-performance GPU is
+    /// powered down, and browsers generally) `HighPerformance` returns no
+    /// adapter while the default preference does — so fall back rather than fail
+    /// (#33).
+    const ADAPTER_POWER_PREFERENCES: [wgpu::PowerPreference; 2] = [
+        wgpu::PowerPreference::HighPerformance,
+        wgpu::PowerPreference::None,
+    ];
 
     /// Features requested opportunistically when the adapter supports them:
     /// compressed texture formats (BC/ETC2/ASTC) so `create_texture` with
@@ -163,37 +247,54 @@ impl WgpuBackend {
         .fold(wgpu::Features::empty(), |acc, f| acc | f)
     }
 
-    /// Request a device from `adapter` with the engine's feature set and an
-    /// uncaptured-error handler installed.
+    /// Device descriptor with the engine's opportunistic feature set and
+    /// WebGPU-safe limits raised to the adapter's actual resolution caps.
     ///
-    /// Without a handler every uncaptured wgpu validation error aborts the
-    /// process; routing them to the log makes a bad draw degrade (missing
-    /// output + error message) instead of killing the app.
-    fn request_device(
-        adapter: &wgpu::Adapter,
-    ) -> Result<(wgpu::Device, wgpu::Queue), GraphicsError> {
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+    /// `Limits::default()` are the WebGPU spec-guaranteed defaults — satisfiable
+    /// on any WebGPU adapter (unlike the native defaults that exceeded WebGL
+    /// limits, WG-C2). `using_resolution` raises the texture/buffer size caps to
+    /// what this adapter actually reports, so a HiDPI canvas or large viewport
+    /// isn't clamped to the 2048 floor.
+    fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> {
+        wgpu::DeviceDescriptor {
             label: Some("RedLilium Device"),
             required_features: Self::optional_features(adapter),
-            // `Limits::default()` are the WebGPU spec-guaranteed defaults —
-            // satisfiable on any WebGPU adapter (unlike the native defaults that
-            // exceeded WebGL limits, WG-C2). `using_resolution` raises the
-            // texture/buffer size caps to what this adapter actually reports, so
-            // a HiDPI canvas or large viewport isn't clamped to the 2048 floor.
             required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
             memory_hints: wgpu::MemoryHints::default(),
             experimental_features: wgpu::ExperimentalFeatures::default(),
             trace: wgpu::Trace::Off,
-        }))
-        .map_err(|e| {
-            GraphicsError::ResourceCreationFailed(format!("Device creation failed: {e}"))
-        })?;
+        }
+    }
 
+    /// Install the uncaptured-error handler on a device.
+    ///
+    /// Without a handler every uncaptured wgpu validation error aborts the
+    /// process; routing them to the log makes a bad draw degrade (missing
+    /// output + error message) instead of killing the app.
+    fn install_error_handler(device: &wgpu::Device) {
         device.on_uncaptured_error(std::sync::Arc::new(|error| {
             log::error!("wgpu uncaptured error: {error}");
         }));
+    }
 
-        Ok((device, queue))
+    /// Assemble the backend from a freshly created adapter/device/queue, logging
+    /// the adapter and installing the uncaptured-error handler. Shared by the
+    /// blocking and async constructors.
+    fn assemble(
+        instance: wgpu::Instance,
+        adapter: wgpu::Adapter,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+    ) -> Self {
+        log::info!("wgpu adapter: {:?}", adapter.get_info());
+        Self::install_error_handler(&device);
+        Self {
+            instance,
+            adapter,
+            device: Arc::new(device),
+            queue: Arc::new(queue),
+            bind_group_layout_cache: parking_lot::Mutex::new(HashMap::new()),
+        }
     }
 
     /// Get the wgpu instance.
@@ -233,7 +334,17 @@ impl WgpuBackend {
         if self.adapter.is_surface_supported(surface) {
             return Ok(true);
         }
+        self.reacquire_for_surface(surface)
+    }
 
+    /// Re-request a surface-compatible adapter+device (native). The blocking
+    /// re-request is impossible on wasm, so the wasm variant below errors instead
+    /// — a split by platform keeps `block_on` out of the wasm build path (#33).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn reacquire_for_surface(
+        &mut self,
+        surface: &wgpu::Surface<'_>,
+    ) -> Result<bool, GraphicsError> {
         log::info!(
             "Current adapter '{}' not compatible with surface, requesting new adapter",
             self.adapter.get_info().name
@@ -258,7 +369,12 @@ impl WgpuBackend {
         );
 
         // Request device from the new adapter
-        let (new_device, new_queue) = Self::request_device(&new_adapter)?;
+        let (new_device, new_queue) =
+            pollster::block_on(new_adapter.request_device(&Self::device_descriptor(&new_adapter)))
+                .map_err(|e| {
+                    GraphicsError::ResourceCreationFailed(format!("Device creation failed: {e}"))
+                })?;
+        Self::install_error_handler(&new_device);
 
         // Update the backend with new adapter and device.
         // Note: Pipelines are now owned by Materials (GpuPipeline),
@@ -273,6 +389,21 @@ impl WgpuBackend {
         self.bind_group_layout_cache.lock().clear();
 
         Ok(true)
+    }
+
+    /// wasm variant: a synchronous re-request can't progress on the browser
+    /// thread. Unreachable in practice on WebGPU (the sole adapter presents to
+    /// the canvas), so surface a clean error rather than hang (#33).
+    #[cfg(target_arch = "wasm32")]
+    fn reacquire_for_surface(
+        &mut self,
+        _surface: &wgpu::Surface<'_>,
+    ) -> Result<bool, GraphicsError> {
+        Err(GraphicsError::ResourceCreationFailed(
+            "current WebGPU adapter is not compatible with the canvas surface, and a \
+             synchronous re-request is impossible on wasm"
+                .to_string(),
+        ))
     }
 
     /// Get the backend name.

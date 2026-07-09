@@ -589,7 +589,7 @@ impl FramePipeline {
     /// `Ok(true)` if GPU is idle, `Ok(false)` if the timeout elapsed, `Err`
     /// on device loss or fence-wait failure.
     pub fn wait_idle_timeout(&self, timeout: Duration) -> Result<bool, GraphicsError> {
-        let start = std::time::Instant::now();
+        let start = web_time::Instant::now();
 
         for fence in self.frame_fences.iter().flatten() {
             let elapsed = start.elapsed();
