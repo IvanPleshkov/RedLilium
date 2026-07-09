@@ -269,26 +269,29 @@ test_clippy() {
     fi
 }
 
-# Check baked shaders are fresh (#33). The offline slang->WGSL bake
+# Check baked shaders are fresh (#33). The offline slang->WGSL + reflection bake
 # (graphics/src/shader/baked_generated.rs) can only be produced where the native
-# Slang compiler is available (SLANG_DIR). When it is, re-bake into memory and
-# byte-compare against the committed file (never writing it), so a forgotten
-# rebake fails preflight. When SLANG_DIR is unset (e.g. a dev without the SDK, or
-# a wasm-only checkout) skip with a warning, mirroring the wasm-pack skip above.
+# Slang compiler is available, which needs the pinned SDK and the xtask `slang`
+# feature. When the SDK is present, re-bake into memory and byte-compare against
+# the committed file (never writing it), so a forgotten rebake fails preflight.
+# When it is absent (a dev without the SDK, or a wasm-only checkout) skip with a
+# warning, mirroring the wasm-pack skip above. The SDK is the repo-local `.slang`
+# (scripts/fetch-slang.sh) unless $SLANG_DIR overrides it.
 test_shader_bake_check() {
-    if [ -z "$SLANG_DIR" ]; then
-        print_skip "Baked shader staleness check (SLANG_DIR not set)"
+    local slang_dir="${SLANG_DIR:-.slang}"
+    if [ ! -e "$slang_dir/lib" ]; then
+        print_skip "Baked shader staleness check (Slang SDK not found — run scripts/fetch-slang.sh)"
         ((SKIPPED++))
         return
     fi
 
     print_header "Checking Baked Shaders Are Fresh (WASM)"
 
-    if cargo run -q -p xtask -- bake-shaders --check 2>&1; then
+    if cargo run -q -p xtask --features slang -- bake-shaders --check 2>&1; then
         print_success "Baked shaders match their sources"
         ((PASSED++))
     else
-        print_error "Baked shaders are stale — run: cargo run -p xtask -- bake-shaders"
+        print_error "Baked shaders are stale — run: cargo run -p xtask --features slang -- bake-shaders"
         ((FAILED++))
     fi
 }

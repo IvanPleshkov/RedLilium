@@ -1,9 +1,47 @@
-# Slang shader compiler configuration.
-# SLANG_DIR tells shader-slang-sys build script where to find headers and libs.
-
+# Slang shader compiler configuration (only used when the `slang-shaders` /
+# `slang` feature is enabled; a default build links no Slang and ignores this).
+#
+# SLANG_DIR points shader-slang-sys at the repo-local SDK. Provision it with
+# `scripts/fetch-slang.sh` (downloads the pinned release into `.slang/`, which is
+# gitignored). `relative = true` resolves it against the workspace root so builds
+# from a subdirectory still find it.
 [env]
 SLANG_DIR = { value = ".slang", relative = true }
 
+# Runtime rpath so `cargo run` finds libslang.dylib without DYLD_LIBRARY_PATH.
+# Machine-INDEPENDENT: `@loader_path`/`$ORIGIN` are resolved by the dynamic loader
+# relative to the executable, not a committed absolute path. Two depths cover the
+# two places cargo puts binaries: `target/<profile>/<bin>` (../../) and
+# `target/<profile>/deps/<bin>` for tests/examples (../../../). A missing
+# `.slang/lib` (SDK not provisioned, default build) is simply ignored by the
+# loader. NOTE: assumes the default target dir; a custom CARGO_TARGET_DIR outside
+# the workspace needs its own rpath (or DYLD_LIBRARY_PATH).
 [target.aarch64-apple-darwin]
-rustflags = ["-C", "link-arg=-Wl,-rpath,/Users/pleshkov/github/vibeengine/.slang/lib"]
-rustdocflags = ["-C", "link-arg=-Wl,-rpath,/Users/pleshkov/github/vibeengine/.slang/lib"]
+rustflags = [
+    "-C", "link-arg=-Wl,-rpath,@loader_path/../../.slang/lib",
+    "-C", "link-arg=-Wl,-rpath,@loader_path/../../../.slang/lib",
+]
+rustdocflags = [
+    "-C", "link-arg=-Wl,-rpath,@loader_path/../../.slang/lib",
+    "-C", "link-arg=-Wl,-rpath,@loader_path/../../../.slang/lib",
+]
+
+[target.x86_64-apple-darwin]
+rustflags = [
+    "-C", "link-arg=-Wl,-rpath,@loader_path/../../.slang/lib",
+    "-C", "link-arg=-Wl,-rpath,@loader_path/../../../.slang/lib",
+]
+rustdocflags = [
+    "-C", "link-arg=-Wl,-rpath,@loader_path/../../.slang/lib",
+    "-C", "link-arg=-Wl,-rpath,@loader_path/../../../.slang/lib",
+]
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = [
+    "-C", "link-arg=-Wl,-rpath,$ORIGIN/../../.slang/lib",
+    "-C", "link-arg=-Wl,-rpath,$ORIGIN/../../../.slang/lib",
+]
+rustdocflags = [
+    "-C", "link-arg=-Wl,-rpath,$ORIGIN/../../.slang/lib",
+    "-C", "link-arg=-Wl,-rpath,$ORIGIN/../../../.slang/lib",
+]

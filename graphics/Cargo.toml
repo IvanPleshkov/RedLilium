@@ -6,7 +6,13 @@ license.workspace = true
 description = "RedLilium engine graphics"
 
 [features]
-default = ["dummy", "wgpu-backend", "vulkan-backend", "slang-shaders"]
+# `slang-shaders` is deliberately NOT default: the native Slang compiler is a
+# large prebuilt SDK (needs SLANG_DIR) and is only needed to author/hot-reload
+# shaders. A default build compiles nothing against Slang and uses the offline
+# baked WGSL + reflection table (`shader::baked`), so a fresh clone builds with
+# no SDK. Turn it on (editor `slang-shaders`, xtask `slang`) to compile at
+# runtime. See docs and `scripts/fetch-slang.sh`.
+default = ["dummy", "wgpu-backend", "vulkan-backend"]
 dummy = []
 wgpu-backend = ["dep:wgpu", "dep:pollster"]
 vulkan-backend = ["dep:ash", "dep:ash-window", "dep:gpu-allocator"]

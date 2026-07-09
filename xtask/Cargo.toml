@@ -10,11 +10,17 @@ publish = false
 name = "xtask"
 path = "src/main.rs"
 
+[features]
+default = []
+# Pulls in the native Slang compiler for `bake-shaders`. OFF by default so
+# `cargo build --workspace` (preflight, fresh clones) needs no Slang SDK; the
+# whole `bake` module is gated on it. Enable with `--features slang`.
+slang = ["redlilium-graphics/slang-shaders"]
+
 [dependencies]
-# Native-only tooling: uses the Slang compiler (needs SLANG_DIR) to bake WGSL,
-# and the shared `shader::baked` key function so keys match the runtime.
+# Native-only tooling. `shader::baked` (key functions, table types) is always
+# available; the Slang compiler itself is pulled in only by the `slang` feature.
 redlilium-graphics = { path = "../graphics", default-features = false, features = [
-    "slang-shaders",
     "dummy",
     "wgpu-backend",
 ] }

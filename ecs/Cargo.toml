@@ -27,6 +27,10 @@ rendering = [
 ]
 serialize-ron = ["dep:ron"]
 serialize-bincode = ["dep:bincode"]
+# Runtime Slang compilation (needs the Slang SDK). Off by default; only the
+# `std_shaders_reflect` test — which reflects real Slang — requires it. Enable
+# with `cargo test -p redlilium-ecs --features "rendering slang-shaders"`.
+slang-shaders = ["redlilium-graphics/slang-shaders"]
 
 [dependencies]
 redlilium-core = { path = "../core" }

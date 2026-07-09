@@ -495,7 +495,8 @@ impl WgpuBackend {
                         GraphicsError::ShaderCompilationFailed(format!(
                             "no baked WGSL for a Slang shader (entry '{}', defines {:?}); Slang \
                              cannot compile at runtime on this target — add it to the xtask \
-                             registry and run `cargo run -p xtask -- bake-shaders`, then rebuild",
+                             registry and run `cargo run -p xtask --features slang -- \
+                             bake-shaders`, then rebuild",
                             shader.entry_point, shader.defines
                         ))
                     })

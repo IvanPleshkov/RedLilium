@@ -338,6 +338,11 @@ impl PipelineManager {
         language: ShaderSourceLanguage,
         defines: &[(String, String)],
     ) -> Result<(vk::ShaderModule, String), GraphicsError> {
+        // `defines` feeds only the Slang compile path; without that feature the
+        // Slang arm is a hard error and the parameter is otherwise unused.
+        #[cfg(not(feature = "slang-shaders"))]
+        let _ = &defines;
+
         let (spv, actual_entry) = match language {
             ShaderSourceLanguage::Wgsl => {
                 let spv = self.compile_wgsl_to_spirv(source, stage, entry_point)?;
@@ -1005,6 +1010,9 @@ fn spirv_instructions(spirv: &[u32]) -> impl Iterator<Item = (u32, &[u32])> {
 /// Vulkan pipeline can use the correct `pName`. Matching by execution model matters
 /// for modules holding several entry points (e.g. vertex+fragment compiled together):
 /// taking the first `OpEntryPoint` would return the wrong name for the second stage.
+// Only the Slang compile path calls this at runtime; without that feature it is
+// exercised solely by unit tests, so the lib target sees it as dead.
+#[cfg_attr(not(feature = "slang-shaders"), allow(dead_code))]
 fn spirv_entry_point_name(spirv: &[u32], stage: ShaderStage) -> Option<String> {
     const OP_ENTRY_POINT: u32 = 15;
     // SPIR-V ExecutionModel values.

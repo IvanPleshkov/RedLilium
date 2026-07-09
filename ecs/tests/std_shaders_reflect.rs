@@ -4,7 +4,10 @@
 //! the canonical order camera (external) / model (dynamic) / material
 //! (static) — which is exactly how `ForwardRender` assembles the bind groups.
 
-#![cfg(feature = "rendering")]
+// Needs runtime Slang reflection, so it is gated on `slang-shaders` (default off,
+// no SDK required for a normal build). Run:
+//   cargo test -p redlilium-ecs --features "rendering slang-shaders"
+#![cfg(all(feature = "rendering", feature = "slang-shaders"))]
 
 use redlilium_graphics::UpdateRate;
 use redlilium_graphics::shader::{ShaderReflectInput, SlangCompiler};

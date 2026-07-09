@@ -6,6 +6,15 @@ license.workspace = true
 repository.workspace = true
 description = "Editor application for RedLilium Engine"
 
+[features]
+default = []
+# Compile Slang at runtime for shader authoring / hot-reload. OFF by default so
+# a plain `cargo run -p redlilium-editor` needs no Slang SDK and renders from the
+# baked shader table; turn it on to edit `.slang` live:
+#   cargo run -p redlilium-editor --features slang-shaders
+# Needs the SDK (scripts/fetch-slang.sh).
+slang-shaders = ["redlilium-graphics/slang-shaders"]
+
 [dependencies]
 redlilium-core = { path = "../core" }
 redlilium-ecs = { path = "../ecs", features = ["rendering", "serialize-ron"] }
