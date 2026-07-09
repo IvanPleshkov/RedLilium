@@ -267,19 +267,24 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
 
     // Capture snapshot and play_start_tick when transitioning to Playing.
     if to == PlayState::Playing {
-        // Save world snapshot for restore on Stop
-        let snapshot = world.serialize_world().ok();
-        if !world.has_resource::<PlaySnapshot>() {
-            world.insert_resource(PlaySnapshot(snapshot));
-        } else {
-            *world.resource_mut::<PlaySnapshot>() = PlaySnapshot(snapshot);
-        }
+        // Only capture snapshot on initial Play (from Stopped).
+        // On Resume (from Paused), keep the original snapshot so Stop can restore
+        // pre-pause edits. Check if this is first play or a resume by checking
+        // if snapshot already exists.
+        let is_first_play = !world.has_resource::<PlaySnapshot>();
 
-        let tick = world.current_tick();
-        if !world.has_resource::<PlayStartTick>() {
+        if is_first_play {
+            let snapshot = world.serialize_world().ok();
+            world.insert_resource(PlaySnapshot(snapshot));
+            log::debug!("Play: captured initial snapshot");
+
+            let tick = world.current_tick();
             world.insert_resource(PlayStartTick(tick));
         } else {
-            *world.resource_mut::<PlayStartTick>() = PlayStartTick(tick);
+            log::debug!(
+                "Resume: keeping original snapshot and play_start_tick \
+                 (pre-pause edits will be restored on Stop)"
+            );
         }
         world.resource_mut::<crate::GameTime>().reset();
 
@@ -423,7 +428,14 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
                         // Restore all components for this entity from snapshot.
                         for snap_component in &snap_entity.components {
                             match world.deserialize_component_by_name(entity, snap_component) {
-                                Ok(()) => {}
+                                Ok(()) => {
+                                    log::debug!(
+                                        "Restored component {} on entity {:?}, data={:?}",
+                                        snap_component.type_name,
+                                        entity,
+                                        snap_component.data
+                                    );
+                                }
                                 Err(e) => {
                                     log::warn!(
                                         "Failed to restore component {} on entity {:?}: {}",
@@ -434,6 +446,13 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
                                 }
                             }
                         }
+                    } else {
+                        log::debug!(
+                            "Skipping restore for entity {:?} (world_tick {} >= play_start_tick {})",
+                            entity,
+                            world_tick,
+                            play_start_tick
+                        );
                     }
                 }
             }
