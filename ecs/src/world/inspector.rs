@@ -184,11 +184,6 @@ impl World {
         entity: Entity,
         serialized: &crate::serialize::SerializedComponent,
     ) -> Result<(), crate::serialize::DeserializeError> {
-        log::debug!(
-            "deserialize_component_by_name: entity={:?}, component={}",
-            entity,
-            serialized.type_name
-        );
         let deser_fn = self
             .meta_by_name(serialized.type_name.as_str())
             .map(|m| m.deserialize_fn)
@@ -197,22 +192,7 @@ impl World {
             })?;
         let mut ctx = crate::serialize::DeserializeContext::new(self);
         ctx.set_current_component(&serialized.type_name);
-        let result = deser_fn(entity, &serialized.data, &mut ctx);
-        if result.is_ok() {
-            log::debug!(
-                "  → deserialization succeeded for entity {:?}.{}",
-                entity,
-                serialized.type_name
-            );
-        } else {
-            log::warn!(
-                "  → deserialization FAILED for entity {:?}.{}: {:?}",
-                entity,
-                serialized.type_name,
-                result
-            );
-        }
-        result
+        deser_fn(entity, &serialized.data, &mut ctx)
     }
 
     /// Collects all entity references from a component by name on an entity.

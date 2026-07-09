@@ -428,14 +428,7 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
                         // Restore all components for this entity from snapshot.
                         for snap_component in &snap_entity.components {
                             match world.deserialize_component_by_name(entity, snap_component) {
-                                Ok(()) => {
-                                    log::debug!(
-                                        "Restored component {} on entity {:?}, data={:?}",
-                                        snap_component.type_name,
-                                        entity,
-                                        snap_component.data
-                                    );
-                                }
+                                Ok(()) => {}
                                 Err(e) => {
                                     log::warn!(
                                         "Failed to restore component {} on entity {:?}: {}",
@@ -446,13 +439,6 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
                                 }
                             }
                         }
-                    } else {
-                        log::debug!(
-                            "Skipping restore for entity {:?} (world_tick {} >= play_start_tick {})",
-                            entity,
-                            world_tick,
-                            play_start_tick
-                        );
                     }
                 }
             }
