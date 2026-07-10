@@ -302,8 +302,6 @@ impl WgpuBackend {
             })
             .collect();
 
-        let depth_format = descriptor.depth_format.map(convert_texture_format);
-
         // Build vertex buffer layouts
         let vertex_buffer_layouts: Vec<wgpu::VertexBufferLayout> = layout
             .buffers
@@ -337,9 +335,19 @@ impl WgpuBackend {
                 primitive: wgpu::PrimitiveState {
                     topology: convert_topology(descriptor.topology),
                     strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: None,
-                    polygon_mode: match descriptor.polygon_mode {
+                    // wgpu is the engine's reference winding convention, so the
+                    // logical front-face maps through identity (the Vulkan
+                    // backend inverts instead; see materials::FrontFace, #39).
+                    front_face: match descriptor.raster.front_face {
+                        crate::materials::FrontFace::Ccw => wgpu::FrontFace::Ccw,
+                        crate::materials::FrontFace::Cw => wgpu::FrontFace::Cw,
+                    },
+                    cull_mode: match descriptor.raster.cull_mode {
+                        crate::materials::CullMode::None => None,
+                        crate::materials::CullMode::Front => Some(wgpu::Face::Front),
+                        crate::materials::CullMode::Back => Some(wgpu::Face::Back),
+                    },
+                    polygon_mode: match descriptor.raster.polygon_mode {
                         crate::materials::PolygonMode::Fill => wgpu::PolygonMode::Fill,
                         // Wireframe needs POLYGON_MODE_LINE, which WebGPU lacks
                         // (WG-C2). Requesting `Line` on a device without it is a
@@ -364,16 +372,19 @@ impl WgpuBackend {
                     unclipped_depth: false,
                     conservative: false,
                 },
-                depth_stencil: depth_format.map(|format| wgpu::DepthStencilState {
-                    format,
+                depth_stencil: descriptor.depth.map(|depth| wgpu::DepthStencilState {
+                    format: convert_texture_format(depth.format),
                     // False for a pipeline that tests against a read-only depth
                     // attachment (e.g. sampling the depth it tests against, #60).
-                    depth_write_enabled: descriptor.depth_write,
-                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    depth_write_enabled: depth.write,
+                    depth_compare: convert_compare_function(depth.compare),
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),
-                multisample: wgpu::MultisampleState::default(),
+                multisample: wgpu::MultisampleState {
+                    count: descriptor.sample_count,
+                    ..Default::default()
+                },
                 multiview_mask: None,
                 cache: None,
             });

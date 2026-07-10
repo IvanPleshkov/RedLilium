@@ -1483,10 +1483,10 @@ impl VulkanBackend {
             descriptor.topology,
             pipeline_layout,
             &descriptor.color_formats,
-            descriptor.depth_format,
-            descriptor.depth_write,
+            descriptor.depth,
             descriptor.blend_state.as_ref(),
-            descriptor.polygon_mode,
+            descriptor.raster,
+            descriptor.sample_count,
             &self.dynamic_rendering,
         )?;
 
