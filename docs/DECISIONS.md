@@ -1243,3 +1243,56 @@ slot after the slot's fence.
   `RingBuffer` or `MAP_WRITE`)
 - ⚠️ Belt chunks hold memory at the high-water mark of a frame's uploads;
   oversized chunks are destroyed on retirement to bound growth
+
+---
+
+## ADR-025: Editor/Game Schedule Separation via Run Conditions
+
+**Date**: 2026-07-10
+**Status**: Accepted
+**Resolves**: #67, prerequisite for #45
+
+### Context
+
+Editor and game systems previously shared the same schedule objects (Update, FixedUpdate, PostUpdate, Render). This caused:
+
+1. Editor systems (DrawGrid, UpdateFreeFlyCamera) to conflict with game systems during Play
+2. Change-detection reset on Play/Pause to affect both editor and game systems indiscriminately, breaking undo/redo boundaries
+3. When game plugins load (#45), they'll add systems to shared schedules, creating unmaintainable mixing
+4. Pause would freeze infrastructure systems (transforms, asset loading), breaking hot-reload during pause edits
+
+### Decision
+
+Implement single-flag activation model with run conditions to gate systems:
+
+1. **Single `game_active` flag on Schedules** (not per-container)
+   - Default: `true` (ensures standalone runtime works without PlayControl)
+   - Set to `true` on Play, `false` on Stop
+   - Pause freezes game systems (ticks reset) but keeps infrastructure active
+
+2. **FixedUpdate skipped conditionally**
+   - Only execute accumulator loop when `game_active` is true
+   - Prevents catch-up burst after long pauses via `reset_fixed_accumulator()`
+
+3. **Run conditions gate individual systems**
+   - `GameActiveCondition`: system runs only during Play/Pause (game active)
+   - `NotGameActiveCondition`: system runs only during Stopped (editor active)
+   - Applied to editor-only systems: DrawGrid, DrawSelectionAabb, UpdateFreeFlyCamera
+   - Infrastructure (transforms, asset pipeline, render) always active
+
+4. **State transition semantics**
+   - **Play** (Stopped → Playing): `set_game_active(true)`, reset game ticks to 0
+   - **Pause** (Playing → Paused): reset game ticks to current_tick (freeze game, let infrastructure run)
+   - **Resume** (Paused → Playing): no extra reset (game ticks still frozen, resume continues)
+   - **Stop** (Playing/Paused → Stopped): `set_game_active(false)`, `reset_fixed_accumulator()`
+
+### Consequences
+
+- ✅ Editor systems cleanly separated from game (no conflicts during Play)
+- ✅ Change-detection reset only affects game schedules (undo/redo boundaries fixed)
+- ✅ Infrastructure (transforms, assets) continues during Pause (hot-reload works, edits propagate)
+- ✅ Foundation for game plugin loading (#45) — plugins add to shared schedules, conditions gate them
+- ✅ No split of Render or PreUpdate (edges/system_result reads are container-scoped; avoiding complexity)
+- ✅ Backward compatible: standalone runtime defaults `game_active=true`, needs no changes
+- ⚠️ Run conditions must be applied correctly; systems added without conditions during Pause may freeze
+- ⚠️ TypeId-based schedule identity doesn't cross dylib boundary — must be resolved before #45 ships plugins
