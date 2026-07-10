@@ -51,6 +51,27 @@ pub struct PlayModeTransition {
 #[derive(Debug, Clone, Copy)]
 pub struct PlayStartTick(pub u64);
 
+/// Snapshot of the world captured at Play transition.
+///
+/// When transitioning from Stopped to Playing, the entire world (all entities
+/// and opted-in resources) is serialized and stored. On Stop, the world is
+/// cleared (game entities removed) and this snapshot is restored, discarding
+/// all changes made during play (including edits in Pause mode).
+pub struct PlaySnapshot(pub Option<crate::serialize::SerializedWorld>);
+
+impl PlaySnapshot {
+    /// Create an empty snapshot.
+    pub fn new() -> Self {
+        Self(None)
+    }
+}
+
+impl Default for PlaySnapshot {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Game loop execution state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PlayState {
@@ -244,22 +265,36 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
         handler(world, transition);
     }
 
-    // Capture play_start_tick and reset game-schedule last_runs when transitioning to Playing.
+    // Capture snapshot and play_start_tick when transitioning to Playing.
     if to == PlayState::Playing {
-        let tick = world.current_tick();
-        if !world.has_resource::<PlayStartTick>() {
+        // Only capture snapshot on initial Play (from Stopped).
+        // On Resume (from Paused), keep the original snapshot so Stop can restore
+        // pre-pause edits. Check if this is first play or a resume by checking
+        // if snapshot already exists.
+        let is_first_play = !world.has_resource::<PlaySnapshot>();
+
+        if is_first_play {
+            let snapshot = world.serialize_world().ok();
+            world.insert_resource(PlaySnapshot(snapshot));
+            log::debug!("Play: captured initial snapshot");
+
+            let tick = world.current_tick();
             world.insert_resource(PlayStartTick(tick));
         } else {
-            *world.resource_mut::<PlayStartTick>() = PlayStartTick(tick);
+            log::debug!(
+                "Resume: keeping original snapshot and play_start_tick \
+                 (pre-pause edits will be restored on Stop)"
+            );
         }
         world.resource_mut::<crate::GameTime>().reset();
 
         // Reset game schedules' last_run to 0 so first Update sees all components as changed.
         // This ensures proper change detection after snapshot restore.
         if world.has_resource::<crate::Schedules>() {
-            world
-                .resource_mut::<crate::Schedules>()
-                .reset_game_schedule_last_runs(0);
+            let mut schedules = world.resource_mut::<crate::Schedules>();
+            schedules.reset_game_schedule_last_runs(0);
+            // Activate game schedules now that we're transitioning to Playing.
+            schedules.set_game_active(true);
         }
 
         // Validate: forbid game entities (non-EDITOR) parented under EditorOnly parents.
@@ -324,7 +359,8 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
         }
     }
 
-    // Clean up play-spawned entities when transitioning to Stopped.
+    // Restore world from snapshot when transitioning to Stopped.
+    // This discards all changes made during play/pause, including hot-edits.
     if to == PlayState::Stopped {
         let play_start_tick = if world.has_resource::<PlayStartTick>() {
             world.resource::<PlayStartTick>().0
@@ -332,6 +368,7 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
             0
         };
 
+        // Despawn all game entities (those created or spawned during play).
         let entities_to_despawn: Vec<Entity> = world
             .iter_entities()
             .filter(|entity| {
@@ -344,6 +381,75 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
 
         for entity in entities_to_despawn {
             world.despawn(entity);
+        }
+
+        // Show all hidden-in-play entities (editor entities and their children) at Stop transition.
+        // These were hidden when Play started, and need to be visible again for editing.
+        let root_hidden_entities: Vec<Entity> = world
+            .iter_entities()
+            .filter(|entity| {
+                let flags = world.get_entity_flags(*entity);
+                let is_hidden = flags & Entity::HIDDEN_IN_PLAY != 0;
+
+                // Check if parent is also hidden
+                let parent_is_hidden = if let Some(parent) = world.get::<Parent>(*entity) {
+                    let parent_flags = world.get_entity_flags(parent.0);
+                    parent_flags & Entity::HIDDEN_IN_PLAY != 0
+                } else {
+                    false
+                };
+
+                is_hidden && !parent_is_hidden
+            })
+            .collect();
+        for entity in root_hidden_entities {
+            show_in_play(world, entity);
+        }
+
+        // Restore all pre-existing entities from snapshot (undoes any component edits made during pause).
+        // This includes both editor entities and game entities that existed before Play started.
+        if let Some(snapshot) = world
+            .has_resource::<PlaySnapshot>()
+            .then(|| world.resource::<PlaySnapshot>().0.clone())
+            .flatten()
+        {
+            // For each entity in snapshot, restore its components if it still exists in the current world.
+            for snap_entity in snapshot.entities.iter() {
+                // Use both entity_index and entity_spawn_tick to uniquely identify the entity.
+                // This ensures we restore the correct entity even if entity indices have shifted.
+                let entity =
+                    crate::Entity::new(snap_entity.entity_index, snap_entity.entity_spawn_tick);
+
+                // Check if this exact entity still exists in the world.
+                if world.is_alive(entity) {
+                    let world_tick = world.get_entity_world_tick(entity);
+                    let should_restore = world_tick < play_start_tick;
+
+                    if should_restore {
+                        // Restore all components for this entity from snapshot.
+                        for snap_component in &snap_entity.components {
+                            match world.deserialize_component_by_name(entity, snap_component) {
+                                Ok(()) => {}
+                                Err(e) => {
+                                    log::warn!(
+                                        "Failed to restore component {} on entity {:?}: {}",
+                                        snap_component.type_name,
+                                        entity,
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Deactivate game schedules and reset accumulator to prevent catch-up burst on next Play.
+        if world.has_resource::<crate::Schedules>() {
+            let mut schedules = world.resource_mut::<crate::Schedules>();
+            schedules.set_game_active(false);
+            schedules.reset_fixed_accumulator();
         }
 
         // Clear any panic state when stopping.

@@ -1,4 +1,4 @@
-pub(crate) mod condition;
+pub mod condition;
 pub(crate) mod container;
 pub(crate) mod context;
 pub mod diagnostics;

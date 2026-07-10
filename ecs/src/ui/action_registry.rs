@@ -208,6 +208,28 @@ impl ActionRegistry {
                 },
             );
         }
+
+        // Play mode control actions (EditActions that mutate PlayControl resource)
+        r.register(
+            "play",
+            "() — transition to Playing (or resume from Paused)",
+            |_world, _params| Ok(RegisteredAction::plain(PlayModeAction::Play)),
+        );
+        r.register(
+            "pause",
+            "() — pause the game (only from Playing state)",
+            |_world, _params| Ok(RegisteredAction::plain(PlayModeAction::Pause)),
+        );
+        r.register(
+            "resume",
+            "() — resume from Paused (alias for play)",
+            |_world, _params| Ok(RegisteredAction::plain(PlayModeAction::Resume)),
+        );
+        r.register(
+            "stop",
+            "() — stop the game and restore snapshot",
+            |_world, _params| Ok(RegisteredAction::plain(PlayModeAction::Stop)),
+        );
         r
     }
 
@@ -291,4 +313,47 @@ fn opt_entity(world: &World, params: &ron::Value, key: &str) -> Result<Option<En
 
 fn req_entity(world: &World, params: &ron::Value, key: &str) -> Result<Entity, String> {
     opt_entity(world, params, key)?.ok_or_else(|| format!("missing '{key}'"))
+}
+
+// --- Play mode actions (PlayControl control) ------------------------------------
+
+/// No-op EditAction that mutates PlayControl resource when applied.
+/// These don't follow the usual undo/redo pattern (play/stop is stateful).
+#[derive(Debug)]
+enum PlayModeAction {
+    Play,
+    Pause,
+    Resume,
+    Stop,
+}
+
+impl EditAction<World> for PlayModeAction {
+    fn apply(&mut self, world: &mut World) -> redlilium_core::abstract_editor::EditActionResult {
+        use crate::PlayControl;
+        if !world.has_resource::<PlayControl>() {
+            return Ok(());
+        }
+        let mut ctrl = world.resource_mut::<PlayControl>();
+        match self {
+            PlayModeAction::Play => ctrl.play(),
+            PlayModeAction::Pause => ctrl.pause(),
+            PlayModeAction::Resume => ctrl.resume(),
+            PlayModeAction::Stop => ctrl.stop(),
+        }
+        Ok(())
+    }
+
+    fn undo(&mut self, _world: &mut World) -> redlilium_core::abstract_editor::EditActionResult {
+        // Play mode transitions don't undo (they're state, not data edits)
+        Ok(())
+    }
+
+    fn description(&self) -> &str {
+        match self {
+            PlayModeAction::Play => "Play",
+            PlayModeAction::Pause => "Pause",
+            PlayModeAction::Resume => "Resume",
+            PlayModeAction::Stop => "Stop",
+        }
+    }
 }

@@ -7,11 +7,11 @@ use redlilium_ecs::sync::RwLock;
 
 use redlilium_ecs::{
     AssetGpuFlush, AssetPump, Component, FlushUploads, ForwardRender, FrameRing, GameTime,
-    HotReload, ManagePlayModeTransitions, MaterialInstanceLoad, MeshLoad, PlayControl,
-    PlayModeAwareRegistry, PlayStartTick, PostUpdate, PreUpdate, RealTime, Render, RenderSchedule,
-    Resource, ScenePass, ScheduleLabel, Schedules, System, SystemsContainer, UnloadStrategy,
-    UpdateCameraMatrices, UpdateGlobalTransforms, WindowInput, World,
-    register_rendering_components, register_std_components,
+    HotReload, ManagePlayModeTransitions, MaterialInstanceLoad, MaterialInstanceManager, MeshLoad,
+    MeshManager, PlayControl, PlayModeAwareRegistry, PlayStartTick, PostUpdate, PreUpdate,
+    RealTime, Render, RenderSchedule, Resource, ScenePass, ScheduleLabel, Schedules, System,
+    SystemsContainer, TextureManager, UnloadStrategy, UpdateCameraMatrices, UpdateGlobalTransforms,
+    WindowInput, World, register_rendering_components, register_std_components,
 };
 
 use crate::EngineContext;
@@ -66,7 +66,19 @@ impl App {
 
         // Play/Pause/Resume/Stop state machine for editor integration.
         world.insert_resource(PlayControl::default());
-        world.insert_resource(PlayModeAwareRegistry::default());
+        let mut registry = PlayModeAwareRegistry::default();
+        // Register asset managers as PlayModeAware so they bump generation on Stop
+        // to force re-scan of unresolved refs after snapshot restore.
+        if world.has_resource::<MeshManager>() {
+            registry.register::<MeshManager>();
+        }
+        if world.has_resource::<MaterialInstanceManager>() {
+            registry.register::<MaterialInstanceManager>();
+        }
+        if world.has_resource::<TextureManager>() {
+            registry.register::<TextureManager>();
+        }
+        world.insert_resource(registry);
         world.insert_resource(PlayStartTick(0));
 
         let mut schedules = Schedules::new();

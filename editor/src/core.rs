@@ -18,11 +18,12 @@ use redlilium_debug_drawer::DebugDrawer;
 use redlilium_ecs::{
     AssetGpuFlush, AssetPump, Camera, DebugRender, DrawGrid, DrawSelectionAabb, EguiRender, Entity,
     FlushUploads, ForwardRender, FrameRing, FreeFlyCamera, GameTime, GlobalTransform, GridConfig,
-    HotReload, ManagePlayModeTransitions, MaterialInstanceLoad, MaterialInstanceSource,
-    MeshGenerator, MeshLoad, MeshRenderer, MeshSource, Name, PlayControl, PlayModeAwareRegistry,
-    PlayStartTick, PostUpdate, PreUpdate, Primitive, RealTime, Render, RenderSchedule, ScenePass,
-    Schedules, Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera,
-    UpdateGlobalTransforms, Visibility, WindowInput, World, register_std_components,
+    HotReload, ManagePlayModeTransitions, MaterialInstanceLoad, MaterialInstanceManager,
+    MaterialInstanceSource, MeshGenerator, MeshLoad, MeshManager, MeshRenderer, MeshSource, Name,
+    PlayControl, PlayModeAwareRegistry, PlayStartTick, PostUpdate, PreUpdate, Primitive, RealTime,
+    Render, RenderSchedule, ScenePass, Schedules, TextureManager, Transform, Update,
+    UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms, Visibility, WindowInput,
+    World, register_std_components,
 };
 use redlilium_runtime::EngineContext;
 
@@ -195,7 +196,19 @@ pub fn create_editor_world(
 
     // Play/Pause/Resume/Stop state machine for game code.
     world.insert_resource(PlayControl::default());
-    world.insert_resource(PlayModeAwareRegistry::default());
+    let mut registry = PlayModeAwareRegistry::default();
+    // Register asset managers as PlayModeAware so they bump generation on Stop
+    // to force re-scan of unresolved refs after snapshot restore.
+    if world.has_resource::<MeshManager>() {
+        registry.register::<MeshManager>();
+    }
+    if world.has_resource::<MaterialInstanceManager>() {
+        registry.register::<MaterialInstanceManager>();
+    }
+    if world.has_resource::<TextureManager>() {
+        registry.register::<TextureManager>();
+    }
+    world.insert_resource(registry);
     world.insert_resource(PlayStartTick(0));
 
     // Insert debug drawing resources
@@ -334,10 +347,22 @@ pub fn create_editor_world(
     // Update: read-only editor systems (debug grid, future interaction systems).
     // Systems here cannot mutate the world directly — they must push actions
     // through the ActionQueue resource.
+    // Condition: these only run when the game is NOT active.
+    schedules
+        .get_mut::<Update>()
+        .add_condition(redlilium_ecs::NotGameActiveCondition);
     schedules.get_mut::<Update>().add(DrawGrid);
     schedules
         .get_mut::<Update>()
+        .add_edge::<redlilium_ecs::NotGameActiveCondition, DrawGrid>()
+        .expect("No cycle");
+    schedules
+        .get_mut::<Update>()
         .add(DrawSelectionAabb::default());
+    schedules
+        .get_mut::<Update>()
+        .add_edge::<redlilium_ecs::NotGameActiveCondition, DrawSelectionAabb>()
+        .expect("No cycle");
     schedules.get_mut::<Update>().set_read_only(true);
 
     // Render schedule: flush uploads -> render the forward scene -> overlay
@@ -381,7 +406,15 @@ pub fn create_editor_world(
     // PostUpdate: camera input -> transform propagation -> camera matrices.
     // Camera movement is viewport navigation, not a scene mutation, so it
     // lives in the non-read-only PostUpdate schedule.
+    // UpdateFreeFlyCamera is editor-only: condition gates it out during Play.
+    schedules
+        .get_mut::<PostUpdate>()
+        .add_condition(redlilium_ecs::NotGameActiveCondition);
     schedules.get_mut::<PostUpdate>().add(UpdateFreeFlyCamera);
+    schedules
+        .get_mut::<PostUpdate>()
+        .add_edge::<redlilium_ecs::NotGameActiveCondition, UpdateFreeFlyCamera>()
+        .expect("No cycle");
     schedules
         .get_mut::<PostUpdate>()
         .add(UpdateGlobalTransforms);
