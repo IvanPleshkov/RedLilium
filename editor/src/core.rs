@@ -347,10 +347,22 @@ pub fn create_editor_world(
     // Update: read-only editor systems (debug grid, future interaction systems).
     // Systems here cannot mutate the world directly — they must push actions
     // through the ActionQueue resource.
+    // Condition: these only run when the game is NOT active.
+    schedules
+        .get_mut::<Update>()
+        .add_condition(redlilium_ecs::NotGameActiveCondition);
     schedules.get_mut::<Update>().add(DrawGrid);
     schedules
         .get_mut::<Update>()
+        .add_edge::<redlilium_ecs::NotGameActiveCondition, DrawGrid>()
+        .expect("No cycle");
+    schedules
+        .get_mut::<Update>()
         .add(DrawSelectionAabb::default());
+    schedules
+        .get_mut::<Update>()
+        .add_edge::<redlilium_ecs::NotGameActiveCondition, DrawSelectionAabb>()
+        .expect("No cycle");
     schedules.get_mut::<Update>().set_read_only(true);
 
     // Render schedule: flush uploads -> render the forward scene -> overlay
@@ -394,7 +406,15 @@ pub fn create_editor_world(
     // PostUpdate: camera input -> transform propagation -> camera matrices.
     // Camera movement is viewport navigation, not a scene mutation, so it
     // lives in the non-read-only PostUpdate schedule.
+    // UpdateFreeFlyCamera is editor-only: condition gates it out during Play.
+    schedules
+        .get_mut::<PostUpdate>()
+        .add_condition(redlilium_ecs::NotGameActiveCondition);
     schedules.get_mut::<PostUpdate>().add(UpdateFreeFlyCamera);
+    schedules
+        .get_mut::<PostUpdate>()
+        .add_edge::<redlilium_ecs::NotGameActiveCondition, UpdateFreeFlyCamera>()
+        .expect("No cycle");
     schedules
         .get_mut::<PostUpdate>()
         .add(UpdateGlobalTransforms);

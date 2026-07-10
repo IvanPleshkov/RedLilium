@@ -72,7 +72,7 @@ mod sparse_set;
 #[allow(clippy::module_inception)]
 pub mod std;
 pub mod sync;
-mod system;
+pub mod system;
 pub mod type_identity;
 pub mod ui;
 mod world;
@@ -122,6 +122,7 @@ pub use query::{
 pub use runner::{EcsRunner, EcsRunnerSingleThread, ShutdownError};
 pub use system::ParConfig;
 pub use system::SystemContext;
+pub use system::condition::{GameActiveCondition, NotGameActiveCondition};
 pub use system::{
     AccessConflict, AmbiguityInfo, RunDiagnostics, RunReport, RunResult, SystemTiming, TimingReport,
 };

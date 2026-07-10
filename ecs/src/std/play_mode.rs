@@ -291,9 +291,10 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
         // Reset game schedules' last_run to 0 so first Update sees all components as changed.
         // This ensures proper change detection after snapshot restore.
         if world.has_resource::<crate::Schedules>() {
-            world
-                .resource_mut::<crate::Schedules>()
-                .reset_game_schedule_last_runs(0);
+            let mut schedules = world.resource_mut::<crate::Schedules>();
+            schedules.reset_game_schedule_last_runs(0);
+            // Activate game schedules now that we're transitioning to Playing.
+            schedules.set_game_active(true);
         }
 
         // Validate: forbid game entities (non-EDITOR) parented under EditorOnly parents.
@@ -442,6 +443,13 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
                     }
                 }
             }
+        }
+
+        // Deactivate game schedules and reset accumulator to prevent catch-up burst on next Play.
+        if world.has_resource::<crate::Schedules>() {
+            let mut schedules = world.resource_mut::<crate::Schedules>();
+            schedules.set_game_active(false);
+            schedules.reset_fixed_accumulator();
         }
 
         // Clear any panic state when stopping.

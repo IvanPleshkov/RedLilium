@@ -260,6 +260,10 @@ pub struct Schedules {
     fixed_accumulator: f64,
     max_fixed_steps: u32,
     startup_done: bool,
+    /// Whether game schedules (FixedUpdate, Update, PostUpdate) are active.
+    /// Default: true (for standalone runtime without PlayControl).
+    /// Set to false by editor at init, true on Play, false on Stop.
+    game_active: bool,
 }
 
 impl Schedules {
@@ -271,6 +275,7 @@ impl Schedules {
     ///
     /// Fixed timestep defaults to 1/60 seconds. Change with
     /// [`set_fixed_timestep()`](Schedules::set_fixed_timestep).
+    /// Game schedules are active by default (for standalone runtime).
     pub fn new() -> Self {
         Self {
             schedules: HashMap::new(),
@@ -279,6 +284,7 @@ impl Schedules {
             fixed_accumulator: 0.0,
             max_fixed_steps: Self::DEFAULT_MAX_FIXED_STEPS,
             startup_done: false,
+            game_active: true,
         }
     }
 
@@ -389,6 +395,24 @@ impl Schedules {
         }
     }
 
+    /// Activates or deactivates game schedules (FixedUpdate, Update, PostUpdate).
+    /// When false, FixedUpdate is skipped in run_frame; other schedules still run
+    /// but systems can filter via run conditions.
+    pub fn set_game_active(&mut self, active: bool) {
+        self.game_active = active;
+    }
+
+    /// Returns whether game schedules are currently active.
+    pub fn is_game_active(&self) -> bool {
+        self.game_active
+    }
+
+    /// Resets the fixed-timestep accumulator to 0.
+    /// Call this on Stop to prevent catch-up burst iterations on the next Play.
+    pub fn reset_fixed_accumulator(&mut self) {
+        self.fixed_accumulator = 0.0;
+    }
+
     /// Runs the [`Startup`] schedule once.
     ///
     /// Subsequent calls are no-ops. Call this before your main loop.
@@ -456,45 +480,47 @@ impl Schedules {
         // 4. Check state transitions and run OnExit / OnEnter
         self.run_state_transitions(world, runner);
 
-        // 5. FixedUpdate accumulator. Debt is clamped so a long stall runs at
-        //    most `max_fixed_steps` catch-up iterations instead of spiraling
-        //    (each over-budget frame adding more debt than it retires).
-        self.fixed_accumulator += delta_time;
-        let max_debt = self.fixed_timestep * self.max_fixed_steps as f64;
-        if self.fixed_accumulator > max_debt {
-            self.fixed_accumulator = max_debt;
-        }
-        if let Some(schedule) = self.schedules.get(&ScheduleId::of::<FixedUpdate>()) {
-            while self.fixed_accumulator >= self.fixed_timestep {
-                // Set effective delta to fixed timestep
-                world.resource_mut::<Time>().delta = self.fixed_timestep;
-                let errors = runner.run(world, schedule);
-                for err in errors {
-                    error!("System error in FixedUpdate: {}", err);
-                    // If currently Playing, pause and record panic
-                    if world.has_resource::<PlayControl>() {
-                        let play_control = world.resource::<PlayControl>();
-                        if play_control.state() == PlayState::Playing {
-                            drop(play_control);
-                            let tick = world.current_tick();
-                            let SystemError::Panicked { system, message } = err;
-                            let panic_info = PanicInfo {
-                                message,
-                                system,
-                                schedule: "FixedUpdate".to_string(),
-                                tick,
-                            };
-                            world.resource_mut::<PlayControl>().set_panic(panic_info);
-                            world.resource_mut::<PlayControl>().pause();
+        // 5. FixedUpdate accumulator (only if game_active). Debt is clamped so a
+        //    long stall runs at most `max_fixed_steps` catch-up iterations
+        //    instead of spiraling (each over-budget frame adding more debt than it retires).
+        if self.game_active {
+            self.fixed_accumulator += delta_time;
+            let max_debt = self.fixed_timestep * self.max_fixed_steps as f64;
+            if self.fixed_accumulator > max_debt {
+                self.fixed_accumulator = max_debt;
+            }
+            if let Some(schedule) = self.schedules.get(&ScheduleId::of::<FixedUpdate>()) {
+                while self.fixed_accumulator >= self.fixed_timestep {
+                    // Set effective delta to fixed timestep
+                    world.resource_mut::<Time>().delta = self.fixed_timestep;
+                    let errors = runner.run(world, schedule);
+                    for err in errors {
+                        error!("System error in FixedUpdate: {}", err);
+                        // If currently Playing, pause and record panic
+                        if world.has_resource::<PlayControl>() {
+                            let play_control = world.resource::<PlayControl>();
+                            if play_control.state() == PlayState::Playing {
+                                drop(play_control);
+                                let tick = world.current_tick();
+                                let SystemError::Panicked { system, message } = err;
+                                let panic_info = PanicInfo {
+                                    message,
+                                    system,
+                                    schedule: "FixedUpdate".to_string(),
+                                    tick,
+                                };
+                                world.resource_mut::<PlayControl>().set_panic(panic_info);
+                                world.resource_mut::<PlayControl>().pause();
+                            }
                         }
                     }
+                    self.fixed_accumulator -= self.fixed_timestep;
                 }
-                self.fixed_accumulator -= self.fixed_timestep;
+            } else {
+                // No FixedUpdate schedule registered — just drain accumulator
+                // to prevent unbounded growth.
+                self.fixed_accumulator %= self.fixed_timestep;
             }
-        } else {
-            // No FixedUpdate schedule registered — just drain accumulator
-            // to prevent unbounded growth.
-            self.fixed_accumulator %= self.fixed_timestep;
         }
 
         // Restore effective delta to frame delta
@@ -1141,5 +1167,74 @@ mod tests {
             control.panic_info().is_none(),
             "Panic while stopped should not set panic info"
         );
+    }
+
+    #[test]
+    fn game_active_flag_skip_fixed_update() {
+        let counter = Arc::new(AtomicU32::new(0));
+        let mut world = World::new();
+        let mut schedules = Schedules::new();
+        let runner = EcsRunner::single_thread();
+
+        schedules
+            .get_mut::<FixedUpdate>()
+            .add(IncrementSystem(counter.clone()));
+
+        // Run with game_active = false
+        schedules.set_game_active(false);
+        schedules.run_frame(&mut world, &runner, 1.0 / 60.0);
+
+        // Verify: FixedUpdate didn't run (counter = 0)
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+
+        // Run with game_active = true
+        schedules.set_game_active(true);
+        schedules.run_frame(&mut world, &runner, 1.0 / 60.0);
+
+        // Verify: FixedUpdate ran (counter = 1)
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn game_active_flag_check() {
+        let mut schedules = Schedules::new();
+
+        // Default: game_active = true
+        assert!(schedules.is_game_active());
+
+        // Set to false
+        schedules.set_game_active(false);
+        assert!(!schedules.is_game_active());
+
+        // Set back to true
+        schedules.set_game_active(true);
+        assert!(schedules.is_game_active());
+    }
+
+    #[test]
+    fn reset_fixed_accumulator_prevents_burst() {
+        let counter = Arc::new(AtomicU32::new(0));
+        let mut world = World::new();
+        let mut schedules = Schedules::new();
+        let runner = EcsRunner::single_thread();
+
+        schedules.set_fixed_timestep(0.25);
+        schedules
+            .get_mut::<FixedUpdate>()
+            .add(IncrementSystem(counter.clone()));
+
+        // Simulate long pause: accumulate 0.5 (2 steps worth)
+        schedules.fixed_accumulator = 0.5;
+
+        // Reset accumulator on Stop
+        schedules.reset_fixed_accumulator();
+        assert_eq!(schedules.fixed_accumulator, 0.0);
+
+        // Next frame should run exactly 1 step, not burst
+        schedules.set_game_active(true);
+        schedules.run_frame(&mut world, &runner, 0.25);
+
+        // Verify: only 1 FixedUpdate iteration, not 2+ from catch-up
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 }
