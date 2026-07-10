@@ -172,6 +172,48 @@ cargo fmt --all
 cargo check --workspace
 ```
 
+## HARD RULES for Code Quality
+
+These are non-negotiable invariants that affect architecture and code review:
+
+### 1. Editor EditAction Invariant
+**UI code must NEVER mutate World/resources directly.** Every edit (component change, asset update, hierarchy edit) goes through:
+1. Create an `EditAction<World>` 
+2. Push to `ActionQueue<World>`
+3. Drained once per frame into `EditActionHistory`
+4. Undo/redo works automatically
+
+This is a red line enforced in code review. One direct `resource_mut()` write from UI breaks undo/redo silently. Asset-record edits must feed `ChangedAssets` + `DirtyMounts` in **both** apply AND undo.
+
+**See:** `ecs/src/ui/component_inspector.rs` for pattern.
+
+### 2. GPU Upload Through Frame Graph Only
+**Phase 0 is DONE.** All GPU resource data uploads go through the per-frame `RenderGraph` via `TransferPass` operations. The following methods **do not exist** and must never be re-added to `GraphicsDevice`:
+- `write_buffer`, `read_buffer`, `write_texture`, `create_mesh_from_cpu`, `create_texture_from_cpu`
+
+When something needs data on/off the GPU and the sanctioned APIs feel inconvenient, **solve it by routing through the frame graph**, NOT by adding direct methods. The friction is intentional.
+
+**Sanctioned APIs:** `device.create_mesh_deferred()`, `TransferOperation::write_buffer()`, `RingBuffer` for per-frame data, manager `flush_uploads()`.
+
+**See:** `docs/ASSETS.md` (rev 3).
+
+## Cost & Discipline
+
+### Fable (Metered Tier) — Expert Review Only
+Fable 5 is **expensive per-token**. Use only for hard architectural judgment calls — never for code generation, research, or fact-checking.
+
+**Reserved use:** Design review, adversarial soundness checks, hidden-assumption spotting, cross-dylib ABI vetting.
+
+**What NOT to do:** Mechanism research (read source code yourself), general exploration (web search first), task implementation (use Opus/Sonnet or main context).
+
+**Explicit user authorization required** — you cannot spawn Fable autonomously.
+
+### Task Tracking — GitHub Issues Only
+- Tasks live in **GitHub Issues** (`IvanPleshkov/RedLilium`), never in markdown files
+- Delegate CRUD to `gh-tasks` agent (haiku); you write issue bodies, it runs `gh`
+- Reference issues in commits: `#N`; `Closes #N` auto-closes on push
+- No TODO/roadmap .md files
+
 ## File Locations Reference
 
 | Purpose | Location |
