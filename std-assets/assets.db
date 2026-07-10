@@ -55,7 +55,7 @@
             guid: ("51a876a8-d871-500c-82ab-971629df8fdb"),
             path: "meshes/sphere.rmesh",
             kind: "mesh",
-            source_hash: 1526483484880769824,
+            source_hash: 15900360474394966532,
             settings: None,
             references: {
                 "layout": ("994670d7-d68d-5d80-8c4c-085610f8f6ad"),
