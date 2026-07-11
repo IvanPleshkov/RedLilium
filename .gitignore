@@ -18,8 +18,9 @@ Thumbs.db
 # WASM build output
 demos/web/pkg/
 
-# Slang SDK (local installation)
-.slang/
+# Slang SDK — provisioned locally by scripts/fetch-slang.sh (a real dir), or a
+# dev symlink to an existing SDK. No trailing slash so both forms are ignored.
+.slang
 
 # Environment
 .env

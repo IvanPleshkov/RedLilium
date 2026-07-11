@@ -26,7 +26,7 @@ on Linux/macOS, the canonical invocation is:
 
 ```bash
 cargo fmt --all
-CARGO_INCREMENTAL=0 bash scripts/test-all.sh --skip-web
+CARGO_INCREMENTAL=0 bash scripts/test-all.sh
 git diff --stat -- std-assets/assets.db project-assets/assets.db   # must be empty
 ```
 
@@ -34,8 +34,11 @@ Load-bearing gotchas (getting any wrong wastes a run):
 
 - **`bash` prefix**, not `./scripts/test-all.sh` — the script must be invoked
   through `bash`.
-- **`--skip-web`** — `wasm-pack` is not installed here; without it the web
-  build step fails spuriously.
+- **The web build is self-healing** — with `wasm-pack` present it runs the full
+  packaging; without it, it falls back to a `cargo build --target
+  wasm32-unknown-unknown` compile check. So `--skip-web` is now just a speed
+  flag, not a requirement. (Baking needs the Slang SDK — `scripts/fetch-slang.sh`
+  — else the bake staleness check self-skips.)
 - **`CARGO_INCREMENTAL=0`** — avoids incremental artifacts skewing the run.
 - **Asset DBs must stay clean** — `std-assets/assets.db` and
   `project-assets/assets.db` must not change as a side effect of unrelated

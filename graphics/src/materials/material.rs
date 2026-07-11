@@ -14,6 +14,7 @@ use crate::mesh::VertexLayout;
 use crate::types::TextureFormat;
 pub use redlilium_core::material::PolygonMode;
 use redlilium_core::mesh::PrimitiveTopology;
+pub use redlilium_core::sampler::CompareFunction;
 
 use super::bindings::BindingLayout;
 
@@ -238,6 +239,87 @@ impl BlendState {
     }
 }
 
+/// Which triangle faces are culled (not rasterized).
+///
+/// Faces are classified front/back by their winding relative to
+/// [`FrontFace`]. `None` (the engine default) draws both — required for
+/// double-sided materials and safe for content authored without a consistent
+/// winding (#39).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum CullMode {
+    /// Draw both faces (no culling).
+    #[default]
+    None,
+    /// Cull front-facing triangles.
+    Front,
+    /// Cull back-facing triangles.
+    Back,
+}
+
+/// The winding order that defines a **front**-facing triangle, in the engine's
+/// logical (app-facing) convention: counter-clockwise, matching glTF, OpenGL and
+/// a right-handed math convention (#39).
+///
+/// This is normalized at the API boundary: each backend maps it to its physical
+/// convention. The wgpu backend passes it through; the Vulkan backend **inverts**
+/// it, because its negative-viewport-height Y-flip (matching wgpu/OpenGL screen
+/// space) reverses screen-space winding. Defining winding once, logically, is
+/// what lets culling be enabled without the two backends diverging (XB-M4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum FrontFace {
+    /// Counter-clockwise winding is front-facing (engine default).
+    #[default]
+    Ccw,
+    /// Clockwise winding is front-facing.
+    Cw,
+}
+
+/// Rasterizer state grouped for a material's pipeline (#39): winding-based
+/// culling plus fill/wireframe mode. Defaults reproduce the engine's historical
+/// hardcodes (no culling, CCW-front, filled polygons), so adding it changes
+/// nothing until a material opts in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct RasterState {
+    /// Which faces to cull.
+    pub cull_mode: CullMode,
+    /// Winding that defines a front face (logical/app-facing).
+    pub front_face: FrontFace,
+    /// Fill or wireframe.
+    pub polygon_mode: PolygonMode,
+}
+
+/// Depth-attachment state grouped for a material's pipeline (#39). Present
+/// (`Some`) exactly when the material renders into a pass with a depth
+/// attachment; the whole struct is `None` otherwise (mirroring wgpu's
+/// `Option<DepthStencilState>`).
+///
+/// Shaped to grow: stencil and depth-bias are out of scope for #39 but will land
+/// here (bias with shadows) without another migration. `compare` is exposed so
+/// reverse-Z (`GreaterEqual`) becomes expressible — flipping the *engine*
+/// convention (projection + clear) is a separate change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DepthState {
+    /// Depth attachment format.
+    pub format: TextureFormat,
+    /// Depth comparison function (default `LessEqual`; `GreaterEqual` for reverse-Z).
+    pub compare: CompareFunction,
+    /// Whether the pipeline writes depth. `false` for testing against a
+    /// **read-only** depth attachment (e.g. sampling the depth it tests
+    /// against, #60) — writing to a read-only attachment is invalid.
+    pub write: bool,
+}
+
+impl DepthState {
+    /// A depth attachment with the engine's default test (`LessEqual`, writes on).
+    pub fn new(format: TextureFormat) -> Self {
+        Self {
+            format,
+            compare: CompareFunction::LessEqual,
+            write: true,
+        }
+    }
+}
+
 /// Descriptor for creating a material.
 #[derive(Debug, Clone)]
 pub struct MaterialDescriptor {
@@ -259,21 +341,23 @@ pub struct MaterialDescriptor {
     /// Primitive topology (how vertices are assembled into primitives).
     pub topology: PrimitiveTopology,
 
-    /// Polygon rasterization mode (fill or wireframe).
-    pub polygon_mode: PolygonMode,
+    /// Rasterizer state: winding-based culling, front-face convention, and
+    /// fill/wireframe mode (#39). Defaults reproduce the historical hardcodes.
+    pub raster: RasterState,
 
     /// Color attachment formats for the render pass.
     pub color_formats: Vec<TextureFormat>,
 
-    /// Depth attachment format, if any.
-    pub depth_format: Option<TextureFormat>,
+    /// Depth attachment state (format + compare + write), or `None` when the
+    /// material renders into a pass with no depth attachment (#39). Must be
+    /// `Some` iff the target pass has a depth attachment, and its `format` must
+    /// match — validated at pass-encode time.
+    pub depth: Option<DepthState>,
 
-    /// Whether the pipeline writes depth (default `true`). Set `false` for a
-    /// pipeline that only depth-tests against a **read-only** depth attachment
-    /// (writing depth to a read-only attachment is invalid) — e.g. a pass that
-    /// samples the same depth texture it tests against (#60). No effect unless
-    /// `depth_format` is set.
-    pub depth_write: bool,
+    /// MSAA sample count of the target attachments this pipeline renders into
+    /// (default `1` = no MSAA). Must match the pass's attachment sample count —
+    /// validated at pass-encode time (#39, XB-L6).
+    pub sample_count: u32,
 
     /// `(group, binding)` pairs whose reflected `UniformBuffer` should be made a
     /// [`DynamicUniformBuffer`](crate::BindingType::DynamicUniformBuffer) (bound
@@ -298,10 +382,10 @@ impl Default for MaterialDescriptor {
             vertex_layout: Arc::new(VertexLayout::new()),
             blend_state: None,
             topology: PrimitiveTopology::TriangleList,
-            polygon_mode: PolygonMode::Fill,
+            raster: RasterState::default(),
             color_formats: Vec::new(),
-            depth_format: None,
-            depth_write: true,
+            depth: None,
+            sample_count: 1,
             dynamic_uniforms: Vec::new(),
             set_update_rates: Vec::new(),
             label: None,
@@ -345,9 +429,27 @@ impl MaterialDescriptor {
         self
     }
 
-    /// Set the polygon rasterization mode.
+    /// Set the polygon rasterization mode (fill or wireframe).
     pub fn with_polygon_mode(mut self, mode: PolygonMode) -> Self {
-        self.polygon_mode = mode;
+        self.raster.polygon_mode = mode;
+        self
+    }
+
+    /// Set which faces are culled (default [`CullMode::None`]).
+    pub fn with_cull_mode(mut self, cull_mode: CullMode) -> Self {
+        self.raster.cull_mode = cull_mode;
+        self
+    }
+
+    /// Set the winding that defines a front face (default [`FrontFace::Ccw`]).
+    pub fn with_front_face(mut self, front_face: FrontFace) -> Self {
+        self.raster.front_face = front_face;
+        self
+    }
+
+    /// Replace the whole rasterizer state at once.
+    pub fn with_raster(mut self, raster: RasterState) -> Self {
+        self.raster = raster;
         self
     }
 
@@ -357,7 +459,6 @@ impl MaterialDescriptor {
         self
     }
 
-    /// Set the depth attachment format.
     /// Mark a reflected uniform binding `(group, binding)` as a dynamic uniform
     /// (bound once, offset supplied per draw). Applied after reflection.
     pub fn with_dynamic_uniform(mut self, group: u32, binding: u32) -> Self {
@@ -365,16 +466,46 @@ impl MaterialDescriptor {
         self
     }
 
+    /// Set the depth attachment format (creating the [`DepthState`] with the
+    /// default `LessEqual`/write-on test, or updating the format if already set).
     pub fn with_depth_format(mut self, format: TextureFormat) -> Self {
-        self.depth_format = Some(format);
+        match &mut self.depth {
+            Some(d) => d.format = format,
+            None => self.depth = Some(DepthState::new(format)),
+        }
+        self
+    }
+
+    /// Replace the whole depth state (format + compare + write) at once, or clear
+    /// it with `None` (no depth attachment).
+    pub fn with_depth(mut self, depth: Option<DepthState>) -> Self {
+        self.depth = depth;
+        self
+    }
+
+    /// Set the depth comparison function (e.g. `GreaterEqual` for reverse-Z). No
+    /// effect unless a depth format is set (call [`with_depth_format`](Self::with_depth_format) first).
+    pub fn with_depth_compare(mut self, compare: CompareFunction) -> Self {
+        if let Some(d) = &mut self.depth {
+            d.compare = compare;
+        }
         self
     }
 
     /// Set whether the pipeline writes depth (default `true`). Use `false` for a
-    /// pipeline that depth-tests against a read-only depth attachment (see
-    /// [`depth_write`](Self::depth_write)).
+    /// pipeline that depth-tests against a read-only depth attachment (#60). No
+    /// effect unless a depth format is set (call [`with_depth_format`](Self::with_depth_format) first).
     pub fn with_depth_write(mut self, write: bool) -> Self {
-        self.depth_write = write;
+        if let Some(d) = &mut self.depth {
+            d.write = write;
+        }
+        self
+    }
+
+    /// Set the MSAA sample count (default `1`). Must match the target pass's
+    /// attachment sample count.
+    pub fn with_sample_count(mut self, sample_count: u32) -> Self {
+        self.sample_count = sample_count;
         self
     }
 
@@ -480,7 +611,12 @@ impl Material {
 
     /// Get the polygon rasterization mode.
     pub fn polygon_mode(&self) -> PolygonMode {
-        self.descriptor.polygon_mode
+        self.descriptor.raster.polygon_mode
+    }
+
+    /// Get the rasterizer state (culling, front-face, polygon mode).
+    pub fn raster(&self) -> RasterState {
+        self.descriptor.raster
     }
 
     /// Get the color attachment formats.
@@ -488,9 +624,19 @@ impl Material {
         &self.descriptor.color_formats
     }
 
-    /// Get the depth attachment format.
+    /// Get the depth attachment state, if any.
+    pub fn depth(&self) -> Option<DepthState> {
+        self.descriptor.depth
+    }
+
+    /// Get the depth attachment format, if any.
     pub fn depth_format(&self) -> Option<TextureFormat> {
-        self.descriptor.depth_format
+        self.descriptor.depth.map(|d| d.format)
+    }
+
+    /// Get the MSAA sample count.
+    pub fn sample_count(&self) -> u32 {
+        self.descriptor.sample_count
     }
 }
 

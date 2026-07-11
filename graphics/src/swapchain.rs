@@ -167,14 +167,25 @@ impl Surface {
 
     /// Get the preferred texture format for this surface.
     ///
-    /// Prefers sRGB formats (e.g. `Bgra8UnormSrgb`) when available so that
-    /// shaders can output linear values and the hardware applies the
-    /// linear-to-sRGB conversion automatically. Falls back to the first
-    /// supported format if no sRGB variant is available.
+    /// Prefers sRGB formats (e.g. `Bgra8UnormSrgb`) so shaders output linear
+    /// values and the hardware applies the linear→sRGB encode automatically.
+    ///
+    /// WebGPU only lists the non-sRGB canvas formats in its capabilities, so when
+    /// no sRGB format is directly supported we return the sRGB *variant* of the
+    /// first format (#33). The backend then configures the canvas with the base
+    /// format and exposes this sRGB format as a texture *view* — the render path
+    /// (pipelines, blit target) targets the sRGB format either way, and the
+    /// hardware encode is preserved. Falls back to the first format only when no
+    /// sRGB variant exists.
     pub fn preferred_format(&self) -> TextureFormat {
         let formats = self.supported_formats();
-        // Prefer sRGB so both Vulkan and wgpu get consistent gamma handling
+        // Prefer sRGB so both Vulkan and wgpu get consistent gamma handling.
         if let Some(&srgb) = formats.iter().find(|f| f.is_srgb()) {
+            return srgb;
+        }
+        // No direct sRGB format (WebGPU): upgrade the first format to its sRGB
+        // variant, exposed later as a surface view format.
+        if let Some(srgb) = formats.first().and_then(|f| f.srgb_variant()) {
             return srgb;
         }
         formats
@@ -254,10 +265,19 @@ impl Surface {
             ));
         }
 
-        if !self.supported_formats().contains(&config.format) {
+        // Accept a format that is supported directly, OR whose sRGB form we can
+        // expose as a texture view over a supported non-sRGB base. WebGPU only
+        // lists the base canvas formats but renders correctly through an sRGB
+        // view (#33) — the backend's `configure_surface` sets that up.
+        let supported = self.supported_formats();
+        let format_ok = supported.contains(&config.format)
+            || supported
+                .iter()
+                .any(|f| f.srgb_variant() == Some(config.format));
+        if !format_ok {
             return Err(GraphicsError::InvalidParameter(format!(
-                "unsupported surface format: {:?}",
-                config.format
+                "unsupported surface format: {:?}; supported: {:?}",
+                config.format, supported
             )));
         }
 
@@ -352,8 +372,10 @@ impl Surface {
             current
         };
 
-        // Acquire the backend-specific surface texture
-        let gpu_texture = self.acquire_gpu_texture()?;
+        // Acquire the backend-specific surface texture. The view is created as
+        // the engine render format (`config.format`) — sRGB over a non-sRGB
+        // WebGPU canvas, or the surface format itself on native (#33).
+        let gpu_texture = self.acquire_gpu_texture(config.format)?;
 
         Ok(SurfaceTexture {
             device,
@@ -367,9 +389,14 @@ impl Surface {
         })
     }
 
-    /// Acquire the backend-specific surface texture.
-    fn acquire_gpu_texture(&self) -> Result<GpuSurfaceTexture, GraphicsError> {
-        self.gpu_surface.acquire_texture(&self.instance.backend())
+    /// Acquire the backend-specific surface texture, creating its view as
+    /// `view_format` (the engine render format for this frame).
+    fn acquire_gpu_texture(
+        &self,
+        view_format: TextureFormat,
+    ) -> Result<GpuSurfaceTexture, GraphicsError> {
+        self.gpu_surface
+            .acquire_texture(&self.instance.backend(), view_format)
     }
 }
 

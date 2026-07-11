@@ -136,8 +136,8 @@ pub use system::{
     run_read_only_exclusive_system_blocking, run_system_blocking, run_system_once,
 };
 pub use system::{
-    FixedUpdate, PostUpdate, PreUpdate, Render, ScheduleId, ScheduleLabel, Schedules, Startup,
-    Time, Update,
+    FixedUpdate, GameActive, PostUpdate, PreUpdate, Render, ScheduleId, ScheduleLabel, Schedules,
+    Startup, Time, Update,
 };
 pub use system::{
     ForEach, ForEachAccess, ForEachSystem, FunctionSystem, IntoSystem, ParForEach,
@@ -172,7 +172,9 @@ pub use self::std::time::{GameTime, RealTime};
 #[cfg(feature = "rendering")]
 pub use self::std::assets::{AssetGpuFlush, AssetPump};
 // Remote-control transport (line-based TCP on the IO runtime; docs/REMOTE.md).
-#[cfg(feature = "rendering")]
+// Native-only: the transport is a `tokio::net::TcpListener`, which has no wasm
+// equivalent (a browser editor channel would be a WebSocket — a separate task).
+#[cfg(all(feature = "rendering", not(target_arch = "wasm32")))]
 pub use self::std::remote::{RemoteLine, RemoteServe, RemoteTransport};
 // Rendering asset loaders + their sharing managers (feature-gated).
 #[cfg(feature = "rendering")]

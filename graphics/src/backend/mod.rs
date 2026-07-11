@@ -306,10 +306,19 @@ pub enum GpuFence {
         signaled: std::sync::atomic::AtomicBool,
     },
     /// wgpu backend - binary fence emulated over submission indices.
+    ///
+    /// `state` is `Arc<Mutex>` (not a plain `Mutex`) so the `queue
+    /// .on_submitted_work_done` callback registered at submit can hold a clone
+    /// and flip it to `Signaled` when the GPU finishes — the only completion
+    /// signal available on wasm, where `device.poll` cannot block (#33).
+    /// `generation` mints a fresh id per submit; the callback only signals if
+    /// the state still carries its generation, so a late callback for a slot
+    /// fence that has since been re-submitted is a no-op (ABA guard).
     #[cfg(feature = "wgpu-backend")]
     Wgpu {
         device: Arc<wgpu::Device>,
-        state: std::sync::Mutex<WgpuFenceState>,
+        state: Arc<std::sync::Mutex<WgpuFenceState>>,
+        generation: Arc<std::sync::atomic::AtomicU64>,
     },
     /// Vulkan backend - true GPU fence via `vkFence`.
     #[cfg(feature = "vulkan-backend")]
@@ -354,8 +363,13 @@ pub enum WgpuFenceState {
     Unsignaled,
     /// Created signaled (or trivially complete); polls as signaled.
     Signaled,
-    /// Tied to a queue submission; polls/waits resolve via `device.poll`.
-    Submitted(wgpu::SubmissionIndex),
+    /// Tied to a queue submission. Native waits/polls resolve via
+    /// `device.poll(index)`; on all targets the `on_submitted_work_done`
+    /// callback flips this to `Signaled` when its `generation` matches.
+    Submitted {
+        index: wgpu::SubmissionIndex,
+        generation: u64,
+    },
 }
 
 /// Handle to an acquired surface texture for presentation.
@@ -732,17 +746,23 @@ impl GpuSurface {
 
     /// Acquire the next texture from the swapchain.
     ///
+    /// `view_format` is the engine's render format for the frame — the format the
+    /// acquired texture *view* is created as. On WebGPU this is the sRGB view over
+    /// a non-sRGB canvas (#33); on native it equals the surface format. Ignored by
+    /// backends whose view format is fixed at swapchain creation (Vulkan).
+    ///
     /// Returns a backend-specific surface texture for rendering.
     pub fn acquire_texture(
         &self,
         backend: &GpuBackend,
+        view_format: crate::types::TextureFormat,
     ) -> Result<GpuSurfaceTexture, GraphicsError> {
         match (self, backend) {
             (Self::Dummy, _) => Ok(GpuSurfaceTexture::Dummy),
 
             #[cfg(feature = "wgpu-backend")]
             (Self::Wgpu { surface }, GpuBackend::Wgpu(_)) => {
-                let result = wgpu_impl::swapchain::acquire_surface_texture(surface)?;
+                let result = wgpu_impl::swapchain::acquire_surface_texture(surface, view_format)?;
                 Ok(GpuSurfaceTexture::Wgpu {
                     texture: result.texture,
                     view: result.view,
@@ -1202,6 +1222,38 @@ impl GpuBackend {
         }
     }
 
+    /// Non-blocking readback: begin mapping `buffer[offset..offset+size]` and,
+    /// when the map resolves, copy it into `dst` and clear `map_pending`.
+    ///
+    /// This is the wasm-safe readback: on wgpu the copy happens in the
+    /// `map_async` completion callback (a browser thread cannot block for the
+    /// map, #33); native backends fill `dst` synchronously (the caller drains
+    /// after the frame fence, so the GPU is already done). Fire-and-forget:
+    /// failures are logged and `map_pending` is always cleared so the buffer
+    /// isn't wedged as permanently in-flight.
+    pub fn read_buffer_async(
+        &self,
+        buffer: &GpuBuffer,
+        offset: u64,
+        size: u64,
+        dst: Arc<std::sync::Mutex<Vec<u8>>>,
+        map_pending: Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        match self {
+            Self::Dummy(backend) => {
+                backend.read_buffer_async(buffer, offset, size, dst, map_pending)
+            }
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(backend) => {
+                backend.read_buffer_async(buffer, offset, size, dst, map_pending)
+            }
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => {
+                backend.read_buffer_async(buffer, offset, size, dst, map_pending)
+            }
+        }
+    }
+
     /// Write tightly-packed data covering mip 0 of every layer of a texture.
     ///
     /// **Blocking convenience path** for tools and one-time setup: the
@@ -1440,6 +1492,39 @@ pub fn create_backend_with_params(
                 ))
             }
         }
+    }
+}
+
+/// Async variant of [`create_backend_with_params`] for targets that cannot block
+/// on device creation (wasm/WebGPU, #33). Covers the Dummy and wgpu backends; the
+/// native Vulkan backend keeps its blocking constructor (it is never used on the
+/// async/web path).
+#[cfg(feature = "wgpu-backend")]
+pub async fn create_backend_with_params_async(
+    params: &crate::instance::InstanceParameters,
+) -> Result<GpuBackend, GraphicsError> {
+    use crate::instance::BackendType;
+
+    match params.backend {
+        BackendType::Dummy => {
+            log::info!("Using dummy backend (requested)");
+            Ok(GpuBackend::Dummy(dummy::DummyBackend::new()))
+        }
+        BackendType::Auto | BackendType::Wgpu => {
+            let backend = wgpu_impl::WgpuBackend::with_params_async(params).await?;
+            log::info!("Using wgpu backend (async)");
+            Ok(GpuBackend::Wgpu(backend))
+        }
+        #[cfg(feature = "vulkan-backend")]
+        BackendType::Vulkan => {
+            let backend = vulkan::VulkanBackend::with_params(params)?;
+            log::info!("Using Vulkan backend (requested)");
+            Ok(GpuBackend::Vulkan(backend))
+        }
+        #[cfg(not(feature = "vulkan-backend"))]
+        BackendType::Vulkan => Err(GraphicsError::ResourceCreationFailed(
+            "Vulkan backend requested but vulkan-backend feature is not enabled".to_string(),
+        )),
     }
 }
 

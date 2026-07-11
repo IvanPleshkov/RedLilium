@@ -75,13 +75,17 @@ pub fn generate_sphere(radius: f32, segments: u32, rings: u32) -> CpuMesh {
             let current = ring * (segments + 1) + segment;
             let next = current + segments + 1;
 
+            // CCW winding when viewed from outside (front-facing under the
+            // engine's CCW convention), so back-face culling keeps the visible
+            // near hemisphere. The naive `current, next, current+1` order winds
+            // CW here and would be culled inside-out (#39).
             indices.push(current);
-            indices.push(next);
             indices.push(current + 1);
+            indices.push(next);
 
             indices.push(current + 1);
-            indices.push(next);
             indices.push(next + 1);
+            indices.push(next);
         }
     }
 

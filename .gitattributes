@@ -1,0 +1,9 @@
+# Shader sources are hashed to look up offline-baked WGSL on wasm (#33). A CRLF
+# checkout (Windows, core.autocrlf) would change the hash and miss the bake, so
+# pin them to LF. The runtime/bake also normalize line endings as belt-and-braces.
+*.slang text eol=lf
+*.wgsl text eol=lf
+
+# The offline-baked WGSL table is written with LF and byte-compared by
+# `xtask bake-shaders --check`; a CRLF checkout would false-fail that gate.
+graphics/src/shader/baked_generated.rs text eol=lf

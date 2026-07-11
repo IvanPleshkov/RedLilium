@@ -16,7 +16,8 @@ pub mod hierarchy;
 ))]
 pub mod physics;
 pub mod play_mode;
-#[cfg(feature = "rendering")]
+// Native-only: TCP-based remote-control transport (tokio); no wasm equivalent.
+#[cfg(all(feature = "rendering", not(target_arch = "wasm32")))]
 pub mod remote;
 #[cfg(feature = "rendering")]
 pub mod rendering;

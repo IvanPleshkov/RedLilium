@@ -42,6 +42,7 @@ SKIP_WEB=false
 SKIP_TESTS=false
 SKIP_CLIPPY=false
 VERBOSE=false
+WASM_PACK_AVAILABLE=true
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -128,15 +129,19 @@ check_tools() {
         rustup component add clippy
     fi
 
-    # Check wasm-pack (only if web build is not skipped)
+    # Check wasm-pack (only if web build is not skipped). Its absence is NOT a
+    # failure and does not skip the web check — test_web_build falls back to a
+    # plain `cargo build --target wasm32-unknown-unknown`, which needs only the
+    # rustup target. wasm-pack additionally exercises wasm-bindgen + wasm-opt
+    # packaging, so we prefer it when present.
     if [ "$SKIP_WEB" = false ]; then
         if command -v wasm-pack &> /dev/null; then
             WASM_PACK_VERSION=$(wasm-pack --version)
             print_success "wasm-pack found: $WASM_PACK_VERSION"
         else
-            print_error "wasm-pack not found. Install: https://rustwasm.github.io/wasm-pack/installer/"
-            print_warning "Skipping web build tests"
-            SKIP_WEB=true
+            WASM_PACK_AVAILABLE=false
+            print_warning "wasm-pack not found — web check will compile-only via cargo."
+            print_warning "For full packaging: https://rustwasm.github.io/wasm-pack/installer/"
         fi
     fi
 }
@@ -172,7 +177,14 @@ test_native_build() {
     fi
 }
 
-# Test web build
+# Test web build.
+#
+# Prefers `wasm-pack` (full pipeline: cargo wasm build + wasm-bindgen + wasm-opt
+# packaging into demos/web/pkg, which is gitignored). When wasm-pack is absent,
+# falls back to a plain `cargo build --target wasm32-unknown-unknown` of the
+# demos lib — this still catches the common regression (something that does not
+# compile for wasm) using only the rustup target, so `--skip-web` is a speed
+# flag, not a requirement. Only truly skips if the wasm32 target is also missing.
 test_web_build() {
     if [ "$SKIP_WEB" = true ]; then
         print_skip "Web build (--skip-web)"
@@ -182,28 +194,36 @@ test_web_build() {
 
     print_header "Testing Web Build (WASM)"
 
-    # Get script directory and project root
+    local SCRIPT_DIR PROJECT_ROOT
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
-    if [ "$VERBOSE" = true ]; then
-        if wasm-pack build "$PROJECT_ROOT/demos" --target web --out-dir web/pkg; then
-            print_success "Web build succeeded"
-            ((PASSED++))
-        else
-            print_error "Web build failed"
-            ((FAILED++))
-            return 1
-        fi
-    else
+    if [ "$WASM_PACK_AVAILABLE" = true ]; then
         if wasm-pack build "$PROJECT_ROOT/demos" --target web --out-dir web/pkg 2>&1; then
-            print_success "Web build succeeded"
+            print_success "Web build succeeded (wasm-pack: full packaging)"
             ((PASSED++))
         else
             print_error "Web build failed"
             ((FAILED++))
             return 1
         fi
+        return
+    fi
+
+    # Fallback: no wasm-pack. Verify the demos lib at least compiles for wasm.
+    if ! rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown; then
+        print_skip "Web build (no wasm-pack and wasm32 target missing — rustup target add wasm32-unknown-unknown)"
+        ((SKIPPED++))
+        return
+    fi
+
+    if cargo build --target wasm32-unknown-unknown -p redlilium-demos --lib 2>&1; then
+        print_success "Web build succeeded (cargo compile-only — install wasm-pack for packaging)"
+        ((PASSED++))
+    else
+        print_error "Web build failed (wasm32 compile)"
+        ((FAILED++))
+        return 1
     fi
 }
 
@@ -269,6 +289,33 @@ test_clippy() {
     fi
 }
 
+# Check baked shaders are fresh (#33). The offline slang->WGSL + reflection bake
+# (graphics/src/shader/baked_generated.rs) can only be produced where the native
+# Slang compiler is available, which needs the pinned SDK and the xtask `slang`
+# feature. When the SDK is present, re-bake into memory and byte-compare against
+# the committed file (never writing it), so a forgotten rebake fails preflight.
+# When it is absent (a dev without the SDK, or a wasm-only checkout) skip with a
+# warning, mirroring the wasm-pack skip above. The SDK is the repo-local `.slang`
+# (scripts/fetch-slang.sh) unless $SLANG_DIR overrides it.
+test_shader_bake_check() {
+    local slang_dir="${SLANG_DIR:-.slang}"
+    if [ ! -e "$slang_dir/lib" ]; then
+        print_skip "Baked shader staleness check (Slang SDK not found — run scripts/fetch-slang.sh)"
+        ((SKIPPED++))
+        return
+    fi
+
+    print_header "Checking Baked Shaders Are Fresh (WASM)"
+
+    if cargo run -q -p xtask --features slang -- bake-shaders --check 2>&1; then
+        print_success "Baked shaders match their sources"
+        ((PASSED++))
+    else
+        print_error "Baked shaders are stale — run: cargo run -p xtask --features slang -- bake-shaders"
+        ((FAILED++))
+    fi
+}
+
 # Print summary
 print_summary() {
     print_header "Test Summary"
@@ -297,6 +344,7 @@ main() {
     # Run all tests, collecting results
     test_native_build || true
     test_web_build || true
+    test_shader_bake_check || true
     test_unit_tests || true
     test_clippy || true
 

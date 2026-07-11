@@ -302,8 +302,6 @@ impl WgpuBackend {
             })
             .collect();
 
-        let depth_format = descriptor.depth_format.map(convert_texture_format);
-
         // Build vertex buffer layouts
         let vertex_buffer_layouts: Vec<wgpu::VertexBufferLayout> = layout
             .buffers
@@ -337,25 +335,56 @@ impl WgpuBackend {
                 primitive: wgpu::PrimitiveState {
                     topology: convert_topology(descriptor.topology),
                     strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: None,
-                    polygon_mode: match descriptor.polygon_mode {
+                    // wgpu is the engine's reference winding convention, so the
+                    // logical front-face maps through identity (the Vulkan
+                    // backend inverts instead; see materials::FrontFace, #39).
+                    front_face: match descriptor.raster.front_face {
+                        crate::materials::FrontFace::Ccw => wgpu::FrontFace::Ccw,
+                        crate::materials::FrontFace::Cw => wgpu::FrontFace::Cw,
+                    },
+                    cull_mode: match descriptor.raster.cull_mode {
+                        crate::materials::CullMode::None => None,
+                        crate::materials::CullMode::Front => Some(wgpu::Face::Front),
+                        crate::materials::CullMode::Back => Some(wgpu::Face::Back),
+                    },
+                    polygon_mode: match descriptor.raster.polygon_mode {
                         crate::materials::PolygonMode::Fill => wgpu::PolygonMode::Fill,
-                        crate::materials::PolygonMode::Line => wgpu::PolygonMode::Line,
+                        // Wireframe needs POLYGON_MODE_LINE, which WebGPU lacks
+                        // (WG-C2). Requesting `Line` on a device without it is a
+                        // validation error, so degrade to `Fill` at runtime when
+                        // the capability is absent rather than crashing on web.
+                        crate::materials::PolygonMode::Line
+                            if self
+                                .device
+                                .features()
+                                .contains(wgpu::Features::POLYGON_MODE_LINE) =>
+                        {
+                            wgpu::PolygonMode::Line
+                        }
+                        crate::materials::PolygonMode::Line => {
+                            log::warn!(
+                                "wireframe (PolygonMode::Line) unsupported on this device; \
+                                 falling back to Fill"
+                            );
+                            wgpu::PolygonMode::Fill
+                        }
                     },
                     unclipped_depth: false,
                     conservative: false,
                 },
-                depth_stencil: depth_format.map(|format| wgpu::DepthStencilState {
-                    format,
+                depth_stencil: descriptor.depth.map(|depth| wgpu::DepthStencilState {
+                    format: convert_texture_format(depth.format),
                     // False for a pipeline that tests against a read-only depth
                     // attachment (e.g. sampling the depth it tests against, #60).
-                    depth_write_enabled: descriptor.depth_write,
-                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    depth_write_enabled: depth.write,
+                    depth_compare: convert_compare_function(depth.compare),
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),
-                multisample: wgpu::MultisampleState::default(),
+                multisample: wgpu::MultisampleState {
+                    count: descriptor.sample_count,
+                    ..Default::default()
+                },
                 multiview_mask: None,
                 cache: None,
             });
@@ -459,10 +488,30 @@ impl WgpuBackend {
                     .collect();
                 compiler.compile_to_wgsl(source_str, &shader.entry_point, &[], &defines)
             }
+            // Without the Slang compiler (wasm has no native Slang lib, #33, or
+            // any `--no-default-features` native build), serve the WGSL baked
+            // offline by `xtask bake-shaders`. A miss fails loudly and names the
+            // permutation, so a forgotten rebake is obvious rather than a silent
+            // gray screen.
             #[cfg(not(feature = "slang-shaders"))]
-            ShaderSourceLanguage::Slang => Err(GraphicsError::FeatureNotSupported(
-                "Slang shaders require the 'slang-shaders' feature".into(),
-            )),
+            ShaderSourceLanguage::Slang => {
+                let defines: Vec<(&str, &str)> = shader
+                    .defines
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect();
+                crate::shader::baked::lookup(source_str, &shader.entry_point, &defines)
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        GraphicsError::ShaderCompilationFailed(format!(
+                            "no baked WGSL for a Slang shader (entry '{}', defines {:?}); Slang \
+                             cannot compile at runtime on this target — add it to the xtask \
+                             registry and run `cargo run -p xtask --features slang -- \
+                             bake-shaders`, then rebuild",
+                            shader.entry_point, shader.defines
+                        ))
+                    })
+            }
         }
     }
 
@@ -475,15 +524,18 @@ impl WgpuBackend {
     pub fn create_fence(&self, signaled: bool) -> Result<GpuFence, GraphicsError> {
         Ok(GpuFence::Wgpu {
             device: self.device.clone(),
-            state: Mutex::new(if signaled {
+            state: std::sync::Arc::new(Mutex::new(if signaled {
                 crate::backend::WgpuFenceState::Signaled
             } else {
                 crate::backend::WgpuFenceState::Unsignaled
-            }),
+            })),
+            generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
-    /// Wait for a fence to be signaled.
+    /// Wait for a fence to be signaled (blocking; native only — a browser thread
+    /// cannot block, so wasm drives completion through the submit callback and
+    /// polls [`is_fence_signaled`] instead).
     ///
     /// Bounded by a 10 s timeout; timeout and poll failures are returned as
     /// errors so callers never mistake a hung GPU for completed work.
@@ -491,13 +543,10 @@ impl WgpuBackend {
     /// nothing will ever signal it (Vulkan would stall the full timeout).
     pub fn wait_fence(&self, fence: &GpuFence) -> Result<(), GraphicsError> {
         use crate::backend::WgpuFenceState;
-        let GpuFence::Wgpu { device, state } = fence else {
+        let GpuFence::Wgpu { device, state, .. } = fence else {
             return Ok(());
         };
-        let current = state
-            .lock()
-            .map_err(|_| GraphicsError::Internal("wgpu fence mutex poisoned".into()))?
-            .clone();
+        let current = lock_fence_state(state).clone();
         match current {
             WgpuFenceState::Signaled => Ok(()),
             WgpuFenceState::Unsignaled => Err(GraphicsError::Timeout(
@@ -505,9 +554,9 @@ impl WgpuBackend {
                  it can never be signaled"
                     .into(),
             )),
-            WgpuFenceState::Submitted(idx) => {
+            WgpuFenceState::Submitted { index, .. } => {
                 match device.poll(wgpu::PollType::Wait {
-                    submission_index: Some(idx),
+                    submission_index: Some(index),
                     timeout: Some(std::time::Duration::from_secs(10)),
                 }) {
                     Ok(status) if status.wait_finished() => Ok(()),
@@ -535,36 +584,26 @@ impl WgpuBackend {
     /// later wait on the same slot returns immediately instead of re-polling a
     /// submission index that will never signal (the #46 wedge).
     fn abandon_wgpu_fence(state: &std::sync::Mutex<crate::backend::WgpuFenceState>) {
-        if let Ok(mut guard) = state.lock() {
-            *guard = crate::backend::WgpuFenceState::Signaled;
-        }
+        *lock_fence_state(state) = crate::backend::WgpuFenceState::Signaled;
     }
 
-    /// Check if a fence is signaled (non-blocking).
+    /// Check if a fence is signaled (non-blocking) — the wasm-safe readiness
+    /// check the frame loop polls each tick.
     ///
-    /// `Unsignaled` fences poll as unsignaled (matching Vulkan) until
-    /// `execute_graph` ties a submission to them.
+    /// Polls the device FIRST (driving `on_submitted_work_done` callbacks, which
+    /// flip `Submitted`→`Signaled`) and only THEN reads the state. Doing it in
+    /// this order matters: `device.poll` runs those callbacks, and they lock the
+    /// same non-reentrant `state` mutex — reading state while holding the lock
+    /// across `poll` would self-deadlock. On wasm `poll` is a no-op and the
+    /// callback fires from the event loop instead; reading the state still works.
     pub fn is_fence_signaled(&self, fence: &GpuFence) -> bool {
         use crate::backend::WgpuFenceState;
-        let GpuFence::Wgpu { device, state } = fence else {
+        let GpuFence::Wgpu { device, state, .. } = fence else {
             return false; // Not a wgpu fence
         };
-
-        let Ok(guard) = state.lock() else {
-            return false; // Lock failed, assume not signaled (conservative)
-        };
-
-        match &*guard {
-            WgpuFenceState::Signaled => true,
-            WgpuFenceState::Unsignaled => false,
-            // Poll without blocking to check completion status.
-            // Note: wgpu's non-blocking poll checks if ALL queue work is done,
-            // not a specific submission. This is conservative but correct.
-            WgpuFenceState::Submitted(_) => match device.poll(wgpu::PollType::Poll) {
-                Ok(status) => status.is_queue_empty(),
-                Err(_) => false, // Poll failed, assume not signaled
-            },
-        }
+        // Drive callbacks without holding the state lock (see doc note).
+        let _ = device.poll(wgpu::PollType::Poll);
+        matches!(&*lock_fence_state(state), WgpuFenceState::Signaled)
     }
 
     /// Wait for a fence to be signaled with a timeout.
@@ -578,24 +617,21 @@ impl WgpuBackend {
         timeout: std::time::Duration,
     ) -> Result<bool, GraphicsError> {
         use crate::backend::WgpuFenceState;
-        let GpuFence::Wgpu { device, state } = fence else {
+        let GpuFence::Wgpu { device, state, .. } = fence else {
             return Ok(false);
         };
-        let current = state
-            .lock()
-            .map_err(|_| GraphicsError::Internal("wgpu fence mutex poisoned".into()))?
-            .clone();
+        let current = lock_fence_state(state).clone();
         match current {
             WgpuFenceState::Signaled => Ok(true),
             // Nothing will ever signal it — report "not yet" immediately
             // instead of sleeping out the timeout.
             WgpuFenceState::Unsignaled => Ok(false),
-            WgpuFenceState::Submitted(idx) => {
+            WgpuFenceState::Submitted { index, .. } => {
                 // `wait_finished()` is true for both QueueEmpty and WaitSucceeded;
                 // `is_queue_empty()` would report a spurious timeout whenever other
                 // submissions are still in flight.
                 match device.poll(wgpu::PollType::Wait {
-                    submission_index: Some(idx),
+                    submission_index: Some(index),
                     timeout: Some(timeout),
                 }) {
                     Ok(status) => Ok(status.wait_finished()),
@@ -733,63 +769,151 @@ impl WgpuBackend {
         offset: u64,
         size: u64,
     ) -> Result<Vec<u8>, GraphicsError> {
-        let GpuBuffer::Wgpu(wgpu_buffer) = buffer else {
+        // Blocking read (poll + recv) would deadlock the single browser thread.
+        // Nothing should reach here on wasm — the readback drain uses
+        // `read_buffer_async` — so fail loud rather than hang the tab (#33).
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (buffer, offset, size);
             return Err(GraphicsError::Internal(
-                "read_buffer called with non-wgpu buffer".to_string(),
+                "blocking read_buffer is unavailable on wasm; readback must go through \
+                 read_buffer_async (map_async) — a browser thread cannot block for the map"
+                    .into(),
             ));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let GpuBuffer::Wgpu(wgpu_buffer) = buffer else {
+                return Err(GraphicsError::Internal(
+                    "read_buffer called with non-wgpu buffer".to_string(),
+                ));
+            };
+            if size == 0 {
+                return Ok(Vec::new());
+            }
+            if offset
+                .checked_add(size)
+                .is_none_or(|end| end > wgpu_buffer.size())
+            {
+                return Err(GraphicsError::InvalidParameter(format!(
+                    "read_buffer range at offset {offset} ({size} bytes) exceeds buffer size {}",
+                    wgpu_buffer.size()
+                )));
+            }
+            // Check MAP_READ up front rather than letting `map_async` fail: a
+            // failed map is a device validation error (logged by the uncaptured
+            // handler) on every call, and the old staging-copy fallback then
+            // panicked in `get_mapped_range`. Require a readback buffer instead —
+            // matching the Vulkan backend, which also does not stage here.
+            if !wgpu_buffer.usage().contains(wgpu::BufferUsages::MAP_READ) {
+                return Err(GraphicsError::InvalidParameter(
+                    "read_buffer on a buffer without MAP_READ; copy device-local data to a \
+                 readback buffer via TransferOperation::ReadbackBuffer first"
+                        .to_string(),
+                ));
+            }
+
+            let slice = wgpu_buffer.slice(offset..offset + size);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |result| {
+                let _ = tx.send(result);
+            });
+            // Drive the map callback. The caller guarantees GPU completion
+            // (post-fence), so this returns promptly.
+            if let Err(e) = self.device.poll(wgpu::PollType::wait_indefinitely()) {
+                return Err(GraphicsError::Internal(format!(
+                    "device poll failed during read_buffer map: {e}"
+                )));
+            }
+            match rx.recv() {
+                Ok(Ok(())) => {
+                    // `get_mapped_range()` borrows the mapping; `.to_vec()` copies
+                    // it out and drops the view before `unmap()`.
+                    let data = slice.get_mapped_range().to_vec();
+                    wgpu_buffer.unmap();
+                    Ok(data)
+                }
+                Ok(Err(e)) => Err(GraphicsError::Internal(format!(
+                    "read_buffer map_async failed: {e}"
+                ))),
+                Err(_) => Err(GraphicsError::Internal(
+                    "read_buffer map callback was dropped".to_string(),
+                )),
+            }
+        }
+    }
+
+    /// Non-blocking readback: map `buffer[offset..offset+size]` and, in the
+    /// `map_async` completion callback, copy it into `dst` and clear
+    /// `map_pending`. The callback fires when the GPU finishes the map — on
+    /// native when `device.poll` runs it, on wasm from the browser event loop
+    /// (the only way to read back without blocking the thread, #33).
+    ///
+    /// Fire-and-forget: on any failure it logs and still clears `map_pending`,
+    /// so the buffer isn't wedged as permanently in-flight; poll `dst` for the
+    /// result (it stays whatever it was until the callback fills it).
+    pub fn read_buffer_async(
+        &self,
+        buffer: &GpuBuffer,
+        offset: u64,
+        size: u64,
+        dst: std::sync::Arc<Mutex<Vec<u8>>>,
+        map_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        use std::sync::atomic::Ordering;
+
+        let GpuBuffer::Wgpu(wgpu_buffer) = buffer else {
+            log::error!("read_buffer_async called with non-wgpu buffer");
+            map_pending.store(false, Ordering::Release);
+            return;
         };
         if size == 0 {
-            return Ok(Vec::new());
+            *dst.lock().unwrap_or_else(|e| e.into_inner()) = Vec::new();
+            map_pending.store(false, Ordering::Release);
+            return;
         }
         if offset
             .checked_add(size)
             .is_none_or(|end| end > wgpu_buffer.size())
         {
-            return Err(GraphicsError::InvalidParameter(format!(
-                "read_buffer range at offset {offset} ({size} bytes) exceeds buffer size {}",
+            log::error!(
+                "read_buffer_async range at offset {offset} ({size} bytes) exceeds buffer size {}",
                 wgpu_buffer.size()
-            )));
+            );
+            map_pending.store(false, Ordering::Release);
+            return;
         }
-        // Check MAP_READ up front rather than letting `map_async` fail: a
-        // failed map is a device validation error (logged by the uncaptured
-        // handler) on every call, and the old staging-copy fallback then
-        // panicked in `get_mapped_range`. Require a readback buffer instead —
-        // matching the Vulkan backend, which also does not stage here.
         if !wgpu_buffer.usage().contains(wgpu::BufferUsages::MAP_READ) {
-            return Err(GraphicsError::InvalidParameter(
-                "read_buffer on a buffer without MAP_READ; copy device-local data to a \
-                 readback buffer via TransferOperation::ReadbackBuffer first"
-                    .to_string(),
-            ));
+            log::error!(
+                "read_buffer_async on a buffer without MAP_READ; copy device-local data to a \
+                 readback buffer first"
+            );
+            map_pending.store(false, Ordering::Release);
+            return;
         }
 
-        let slice = wgpu_buffer.slice(offset..offset + size);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = tx.send(result);
-        });
-        // Drive the map callback. The caller guarantees GPU completion
-        // (post-fence), so this returns promptly.
-        if let Err(e) = self.device.poll(wgpu::PollType::wait_indefinitely()) {
-            return Err(GraphicsError::Internal(format!(
-                "device poll failed during read_buffer map: {e}"
-            )));
-        }
-        match rx.recv() {
-            Ok(Ok(())) => {
-                // `get_mapped_range()` borrows the mapping; `.to_vec()` copies
-                // it out and drops the view before `unmap()`.
-                let data = slice.get_mapped_range().to_vec();
-                wgpu_buffer.unmap();
-                Ok(data)
-            }
-            Ok(Err(e)) => Err(GraphicsError::Internal(format!(
-                "read_buffer map_async failed: {e}"
-            ))),
-            Err(_) => Err(GraphicsError::Internal(
-                "read_buffer map callback was dropped".to_string(),
-            )),
-        }
+        // `wgpu::Buffer` is Arc-backed: cheap clones all handle the same GPU
+        // buffer. One clone keeps it mapped/alive across the pending callback.
+        let buf_cb = wgpu_buffer.clone();
+        wgpu_buffer
+            .slice(offset..offset + size)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                match result {
+                    Ok(()) => {
+                        // Order matters (Fable): copy out, drop the borrowing
+                        // view, THEN unmap, then publish, then clear the flag
+                        // last so the map-pending window fully covers unmap.
+                        let data = buf_cb
+                            .slice(offset..offset + size)
+                            .get_mapped_range()
+                            .to_vec();
+                        buf_cb.unmap();
+                        *dst.lock().unwrap_or_else(|e| e.into_inner()) = data;
+                    }
+                    Err(e) => log::error!("read_buffer_async map failed: {e}"),
+                }
+                map_pending.store(false, Ordering::Release);
+            });
     }
 }
 
@@ -883,4 +1007,16 @@ fn build_wgpu_bind_group_entries(
         });
     }
     Ok(out)
+}
+
+/// Lock the wgpu fence state, recovering from a poisoned mutex instead of
+/// panicking. The critical sections are tiny (a match + assign), but a panic
+/// while the lock is held would otherwise wedge every later `.lock()` — on wasm
+/// a poisoned unwrap in the submit callback means a permanently dead tab.
+fn lock_fence_state(
+    state: &std::sync::Mutex<crate::backend::WgpuFenceState>,
+) -> std::sync::MutexGuard<'_, crate::backend::WgpuFenceState> {
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }

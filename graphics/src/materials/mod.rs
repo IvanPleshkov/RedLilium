@@ -21,6 +21,7 @@ pub use instance::{
     SampledDepthLayout,
 };
 pub use material::{
-    BlendComponent, BlendFactor, BlendOperation, BlendState, Material, MaterialDescriptor,
-    PolygonMode, ShaderSource, ShaderSourceLanguage, ShaderStage,
+    BlendComponent, BlendFactor, BlendOperation, BlendState, CompareFunction, CullMode, DepthState,
+    FrontFace, Material, MaterialDescriptor, PolygonMode, RasterState, ShaderSource,
+    ShaderSourceLanguage, ShaderStage,
 };

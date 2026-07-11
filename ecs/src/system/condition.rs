@@ -114,9 +114,9 @@ impl crate::system::System for GameActiveCondition {
         &'a self,
         ctx: &'a crate::system::SystemContext<'a>,
     ) -> Result<Self::Result, crate::system::SystemError> {
-        ctx.lock::<(crate::query::Res<super::schedule::Schedules>,)>()
-            .execute(|(schedules,)| {
-                if schedules.is_game_active() {
+        ctx.lock::<(crate::query::Res<super::schedule::GameActive>,)>()
+            .execute(|(game_active,)| {
+                if game_active.0 {
                     Ok(Condition::True(()))
                 } else {
                     Ok(Condition::False)
@@ -136,9 +136,9 @@ impl crate::system::System for NotGameActiveCondition {
         &'a self,
         ctx: &'a crate::system::SystemContext<'a>,
     ) -> Result<Self::Result, crate::system::SystemError> {
-        ctx.lock::<(crate::query::Res<super::schedule::Schedules>,)>()
-            .execute(|(schedules,)| {
-                if !schedules.is_game_active() {
+        ctx.lock::<(crate::query::Res<super::schedule::GameActive>,)>()
+            .execute(|(game_active,)| {
+                if !game_active.0 {
                     Ok(Condition::True(()))
                 } else {
                     Ok(Condition::False)

@@ -18,8 +18,8 @@ use std::sync::Arc;
 use redlilium_assets::Guid;
 use redlilium_core::mesh::VertexLayout;
 use redlilium_graphics::{
-    GraphicsDevice, GraphicsError, Material, MaterialDescriptor, ShaderSource, ShaderStage,
-    TextureFormat,
+    CullMode, GraphicsDevice, GraphicsError, Material, MaterialDescriptor, ShaderSource,
+    ShaderStage, TextureFormat,
 };
 
 use crate::std::rendering::loaders::Shader;
@@ -142,6 +142,12 @@ impl PipelineCache {
                 .with_vertex_layout(Arc::clone(layout))
                 .with_color_format(color)
                 .with_depth_format(depth)
+                // Cull back faces (#39): closed meshes shade ~half as many
+                // fragments. Meshes use the engine's CCW-front convention
+                // (glTF), normalized per backend. Double-sided materials would
+                // need `CullMode::None`, but `double_sided` is not yet plumbed
+                // into the material-asset path — a follow-up.
+                .with_cull_mode(CullMode::Back)
                 // Which set is dynamic/static/external is self-describing: the
                 // shader's [UpdateRate] blocks classify each set through
                 // reflection (Decision 7) — no hardcoded set indices here.

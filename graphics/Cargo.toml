@@ -6,7 +6,13 @@ license.workspace = true
 description = "RedLilium engine graphics"
 
 [features]
-default = ["dummy", "wgpu-backend", "vulkan-backend", "slang-shaders"]
+# `slang-shaders` is deliberately NOT default: the native Slang compiler is a
+# large prebuilt SDK (needs SLANG_DIR) and is only needed to author/hot-reload
+# shaders. A default build compiles nothing against Slang and uses the offline
+# baked WGSL + reflection table (`shader::baked`), so a fresh clone builds with
+# no SDK. Turn it on (editor `slang-shaders`, xtask `slang`) to compile at
+# runtime. See docs and `scripts/fetch-slang.sh`.
+default = ["dummy", "wgpu-backend", "vulkan-backend"]
 dummy = []
 wgpu-backend = ["dep:wgpu", "dep:pollster"]
 vulkan-backend = ["dep:ash", "dep:ash-window", "dep:gpu-allocator"]
@@ -21,28 +27,46 @@ static_assertions.workspace = true
 winit.workspace = true
 raw-window-handle = "0.6"
 bytemuck.workspace = true
+# Portable clock: std `Instant::now()` panics on wasm (ResizeManager debounce,
+# fence-wait timeouts). `web-time` uses perf.now there, re-exports std on native.
+web-time = { workspace = true }
 
 # Shader parsing and composition
 naga.workspace = true
-shader-slang = { workspace = true, optional = true }
 
 # UI
 egui.workspace = true
 
-# Clipboard (desktop only, not available on WASM)
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-arboard = "3"
-
-# Optional GPU backend dependencies
+# Portable GPU backend dependencies (available on wasm32 too — the wgpu backend
+# exists FOR the web target, #33).
 wgpu = { workspace = true, optional = true }
-ash = { workspace = true, optional = true }
-ash-window = { version = "0.13", optional = true }
-gpu-allocator = { workspace = true, optional = true }
 parking_lot = { workspace = true }
 pollster = { workspace = true, optional = true }
 
 # Profiling (optional)
 tracy-client = { workspace = true, optional = true }
+
+# Native-only dependencies. The Vulkan backend (ash*/gpu-allocator) and the
+# Slang compiler (shader-slang → native C++ lib via shader-slang-sys build.rs)
+# cannot build on wasm32, so they live here. The matching `vulkan-backend` /
+# `slang-shaders` features must NOT be enabled on wasm (dependents select
+# portable features per-target); on wasm, slang shaders are pre-baked to WGSL.
+# Clipboard (arboard) is likewise desktop-only.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+arboard = "3"
+ash = { workspace = true, optional = true }
+ash-window = { version = "0.13", optional = true }
+gpu-allocator = { workspace = true, optional = true }
+shader-slang = { workspace = true, optional = true }
+
+# On wasm32 wgpu's resource types are `!Send + !Sync` unless this shim feature
+# is enabled; this crate's API leans on Send/Sync auto-traits (hence
+# `recursion_limit = 256`), so without it the wasm build is a wall of
+# trait-bound errors. Sound because the browser build is single-threaded.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { workspace = true, optional = true, features = [
+    "fragile-send-sync-non-atomic-wasm",
+] }
 
 [dev-dependencies]
 rstest.workspace = true

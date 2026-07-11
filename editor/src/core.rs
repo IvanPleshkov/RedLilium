@@ -338,6 +338,10 @@ pub fn create_editor_world(
 
     // --- Setup schedules ---
     let mut schedules = Schedules::new();
+    // The editor opens in editor mode (PlayState::Stopped): game schedules are
+    // inactive, so editor-only systems (grid, gizmos) run. Play/Stop transitions
+    // flip this via the GameActive resource (#67).
+    schedules.set_game_active(false);
 
     // PreUpdate: manage Play/Pause/Resume/Stop state transitions.
     schedules

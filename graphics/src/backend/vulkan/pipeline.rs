@@ -16,7 +16,7 @@ use crate::mesh::VertexAttributeFormat;
 use crate::types::TextureFormat;
 use redlilium_core::mesh::{PrimitiveTopology, VertexLayout};
 
-use super::conversion::{convert_blend_state, convert_texture_format};
+use super::conversion::{convert_blend_state, convert_compare_function, convert_texture_format};
 
 /// Number of descriptor sets each individual descriptor pool can hand out
 /// before a new pool is appended to the chain.
@@ -338,6 +338,11 @@ impl PipelineManager {
         language: ShaderSourceLanguage,
         defines: &[(String, String)],
     ) -> Result<(vk::ShaderModule, String), GraphicsError> {
+        // `defines` feeds only the Slang compile path; without that feature the
+        // Slang arm is a hard error and the parameter is otherwise unused.
+        #[cfg(not(feature = "slang-shaders"))]
+        let _ = &defines;
+
         let (spv, actual_entry) = match language {
             ShaderSourceLanguage::Wgsl => {
                 let spv = self.compile_wgsl_to_spirv(source, stage, entry_point)?;
@@ -589,12 +594,19 @@ impl PipelineManager {
         topology: PrimitiveTopology,
         pipeline_layout: vk::PipelineLayout,
         color_formats: &[TextureFormat],
-        depth_format: Option<TextureFormat>,
-        depth_write: bool,
+        depth: Option<crate::materials::DepthState>,
         blend_state: Option<&crate::materials::BlendState>,
-        polygon_mode: crate::materials::PolygonMode,
+        raster: crate::materials::RasterState,
+        sample_count: u32,
         _dynamic_rendering: &ash::khr::dynamic_rendering::Device,
     ) -> Result<vk::Pipeline, GraphicsError> {
+        // Derived once from the optional depth state; used by both the depth-
+        // stencil state and the dynamic-rendering attachment formats below.
+        let depth_format = depth.map(|d| d.format);
+        let depth_write = depth.map(|d| d.write).unwrap_or(true);
+        let depth_compare = depth
+            .map(|d| d.compare)
+            .unwrap_or(crate::materials::CompareFunction::LessEqual);
         let vertex_entry_c = CString::new(vertex_entry).map_err(|e| {
             GraphicsError::InvalidParameter(format!(
                 "Invalid vertex entry point name (contains null byte): {}",
@@ -686,25 +698,29 @@ impl PipelineManager {
         let rasterization_state = vk::PipelineRasterizationStateCreateInfo::default()
             .depth_clamp_enable(false)
             .rasterizer_discard_enable(false)
-            .polygon_mode(match polygon_mode {
+            .polygon_mode(match raster.polygon_mode {
                 crate::materials::PolygonMode::Fill => vk::PolygonMode::FILL,
                 crate::materials::PolygonMode::Line => vk::PolygonMode::LINE,
             })
             .line_width(1.0)
-            .cull_mode(vk::CullModeFlags::NONE)
-            .front_face(vk::FrontFace::CLOCKWISE)
+            .cull_mode(vk_cull_mode(raster.cull_mode))
+            // Inverted from the logical winding: the negative-viewport-height
+            // Y-flip (vulkan/mod.rs) reverses screen-space winding, so logical
+            // CCW-front becomes physical CW here. Applied unconditionally (even
+            // when culling is off) so `@front_facing` matches wgpu (#39, XB-M4).
+            .front_face(vk_front_face(raster.front_face))
             .depth_bias_enable(false);
 
         let multisample_state = vk::PipelineMultisampleStateCreateInfo::default()
             .sample_shading_enable(false)
-            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+            .rasterization_samples(vk_sample_count(sample_count));
 
         let depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo::default()
             .depth_test_enable(depth_format.is_some())
             // Writing depth to a read-only depth attachment is invalid; a pass
-            // that samples the depth it tests against sets `depth_write=false`.
+            // that samples the depth it tests against sets `depth.write=false`.
             .depth_write_enable(depth_format.is_some() && depth_write)
-            .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
+            .depth_compare_op(convert_compare_function(depth_compare))
             .depth_bounds_test_enable(false)
             .stencil_test_enable(false);
 
@@ -1004,7 +1020,44 @@ fn spirv_instructions(spirv: &[u32]) -> impl Iterator<Item = (u32, &[u32])> {
 /// preserving the original function name. This function reads the actual name so the
 /// Vulkan pipeline can use the correct `pName`. Matching by execution model matters
 /// for modules holding several entry points (e.g. vertex+fragment compiled together):
+/// Map logical [`CullMode`](crate::materials::CullMode) to Vulkan cull flags.
+fn vk_cull_mode(mode: crate::materials::CullMode) -> vk::CullModeFlags {
+    match mode {
+        crate::materials::CullMode::None => vk::CullModeFlags::NONE,
+        crate::materials::CullMode::Front => vk::CullModeFlags::FRONT,
+        crate::materials::CullMode::Back => vk::CullModeFlags::BACK,
+    }
+}
+
+/// Map the engine's logical front-face convention to Vulkan's physical one,
+/// **inverting** it: the backend renders with a negative-viewport-height Y-flip
+/// (to match wgpu/OpenGL screen space, see `vulkan/mod.rs`), which reverses
+/// screen-space triangle winding. So logical CCW-front becomes physical
+/// `CLOCKWISE` and vice-versa. Centralizing this here is what keeps culling
+/// consistent with the wgpu backend once enabled (#39, XB-M4).
+fn vk_front_face(front_face: crate::materials::FrontFace) -> vk::FrontFace {
+    match front_face {
+        crate::materials::FrontFace::Ccw => vk::FrontFace::CLOCKWISE,
+        crate::materials::FrontFace::Cw => vk::FrontFace::COUNTER_CLOCKWISE,
+    }
+}
+
+/// Map an MSAA sample count to Vulkan sample flags. Counts outside {1,2,4,8,16}
+/// fall back to a single sample (matched by the pass-encode validation, #39).
+fn vk_sample_count(count: u32) -> vk::SampleCountFlags {
+    match count {
+        2 => vk::SampleCountFlags::TYPE_2,
+        4 => vk::SampleCountFlags::TYPE_4,
+        8 => vk::SampleCountFlags::TYPE_8,
+        16 => vk::SampleCountFlags::TYPE_16,
+        _ => vk::SampleCountFlags::TYPE_1,
+    }
+}
+
 /// taking the first `OpEntryPoint` would return the wrong name for the second stage.
+// Only the Slang compile path calls this at runtime; without that feature it is
+// exercised solely by unit tests, so the lib target sees it as dead.
+#[cfg_attr(not(feature = "slang-shaders"), allow(dead_code))]
 fn spirv_entry_point_name(spirv: &[u32], stage: ShaderStage) -> Option<String> {
     const OP_ENTRY_POINT: u32 = 15;
     // SPIR-V ExecutionModel values.

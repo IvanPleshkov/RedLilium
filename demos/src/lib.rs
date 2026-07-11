@@ -165,6 +165,17 @@ fn spawn_mesh(
     }
 }
 
+/// Browser entry point (#33): boot the runtime with the [`SpinDemo`] plugin.
+/// `wasm-bindgen(start)` invokes this when the wasm module initialises; it kicks
+/// off async device creation and hands control to the winit `spawn_app` loop
+/// (never blocking the browser thread). Native binaries use the `window_demo`
+/// bin instead.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(start)]
+pub fn start() {
+    redlilium_runtime::run(redlilium_runtime::GameConfig::default(), SpinDemo);
+}
+
 // Export the two ADR-020 game symbols so this cdylib can be loaded and
 // warm-restart-reloaded by the editor (#45).
 //

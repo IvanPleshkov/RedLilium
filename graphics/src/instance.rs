@@ -81,8 +81,11 @@ impl WgpuBackendType {
             Self::Auto => wgpu::Backends::VULKAN,
             #[cfg(target_os = "windows")]
             Self::Auto => wgpu::Backends::DX12,
+            // Web target is WebGPU-only (#33): the wgpu backend exists for the
+            // browser, and WebGL2 has no compute and caps limits well below a
+            // HiDPI canvas. Auto on wasm selects WebGPU, not GL (the WG-L7 bug).
             #[cfg(target_arch = "wasm32")]
-            Self::Auto => wgpu::Backends::GL,
+            Self::Auto => wgpu::Backends::BROWSER_WEBGPU,
             // Fallback for other platforms
             #[cfg(not(any(
                 target_os = "macos",
@@ -109,7 +112,7 @@ impl WgpuBackendType {
             Self::Gl => wgpu::Backends::GL,
 
             #[cfg(target_arch = "wasm32")]
-            Self::WebGpu => wgpu::Backends::GL,
+            Self::WebGpu => wgpu::Backends::BROWSER_WEBGPU,
         }
     }
 }
@@ -272,6 +275,31 @@ impl GraphicsInstance {
 
         // Create the GPU backend based on parameters
         let backend = backend::create_backend_with_params(&params)?;
+        Ok(Self::from_backend(backend))
+    }
+
+    /// Create a graphics instance, awaiting device creation.
+    ///
+    /// The browser entry point (#33): on wasm the wgpu adapter/device requests
+    /// are JS promises that only resolve while the event loop runs, so instance
+    /// creation cannot block. Call this from an async task
+    /// (`wasm_bindgen_futures::spawn_local`) before starting the window loop.
+    /// Equivalent to [`with_parameters`](Self::with_parameters) on native.
+    #[cfg(feature = "wgpu-backend")]
+    pub async fn with_parameters_async(
+        params: InstanceParameters,
+    ) -> Result<Arc<Self>, GraphicsError> {
+        log::info!(
+            "Creating GraphicsInstance (async) with params: {:?}",
+            params
+        );
+        let backend = backend::create_backend_with_params_async(&params).await?;
+        Ok(Self::from_backend(backend))
+    }
+
+    /// Wrap a created backend in a reference-counted instance with its weak
+    /// self-reference wired up. Shared by the blocking and async constructors.
+    fn from_backend(backend: backend::GpuBackend) -> Arc<Self> {
         log::info!("Using GPU backend: {}", backend.name());
 
         let instance = Arc::new(Self {
@@ -285,7 +313,7 @@ impl GraphicsInstance {
             *self_ref = Arc::downgrade(&instance);
         }
 
-        Ok(instance)
+        instance
     }
 
     /// Get the GPU backend for reading (internal use only).

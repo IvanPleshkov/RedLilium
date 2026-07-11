@@ -28,16 +28,27 @@ pub fn configure_surface(
 
     let caps = surface.get_capabilities(backend.adapter());
 
-    // The requested format must be supported exactly — all pipelines are
-    // compiled against it, so substituting another format would mismatch
-    // every render pass.
-    let format = convert_texture_format(config.format);
-    if !caps.formats.contains(&format) {
-        return Err(GraphicsError::InvalidParameter(format!(
-            "surface does not support format {:?}; supported: {:?}",
-            config.format, caps.formats
-        )));
-    }
+    // `config.format` is the engine's *render/view* format (sRGB where possible;
+    // pipelines and the present blit target it). Surfaces that offer it directly
+    // (native Vulkan/Metal/DX) configure the canvas with it and need no extra
+    // view formats. WebGPU only exposes the non-sRGB base canvas format, so the
+    // canvas is configured with the base and the sRGB form is added as a texture
+    // *view* format — the acquired view is then created as sRGB so the hardware
+    // encode still runs (#33).
+    let requested = convert_texture_format(config.format);
+    let (canvas_format, view_formats) = if caps.formats.contains(&requested) {
+        (requested, vec![])
+    } else {
+        let base = requested.remove_srgb_suffix();
+        if requested != base && caps.formats.contains(&base) {
+            (base, vec![requested])
+        } else {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "surface does not support format {:?} (nor its non-sRGB base); supported: {:?}",
+                config.format, caps.formats
+            )));
+        }
+    };
 
     // Unsupported present mode falls back to FIFO (always available) with a
     // warning — matching the Vulkan backend, where the same fallback applies.
@@ -71,20 +82,21 @@ pub fn configure_surface(
 
     let wgpu_config = wgpu::SurfaceConfiguration {
         usage,
-        format,
+        format: canvas_format,
         width: config.width,
         height: config.height,
         present_mode,
         alpha_mode,
-        view_formats: vec![],
+        view_formats,
         desired_maximum_frame_latency: config.frames_in_flight as u32,
     };
     surface.configure(backend.device(), &wgpu_config);
     log::info!(
-        "Configured wgpu surface: {}x{} {:?} {:?}",
+        "Configured wgpu surface: {}x{} canvas={:?} view={:?} {:?}",
         config.width,
         config.height,
-        format,
+        canvas_format,
+        requested,
         present_mode
     );
     Ok(())
@@ -97,6 +109,7 @@ pub fn configure_surface(
 /// frame", `OutOfMemory` is fatal.
 pub fn acquire_surface_texture(
     surface: &wgpu::Surface<'static>,
+    view_format: crate::types::TextureFormat,
 ) -> Result<WgpuSurfaceAcquireResult, GraphicsError> {
     let surface_texture = surface.get_current_texture().map_err(|e| match e {
         wgpu::SurfaceError::Outdated => GraphicsError::SurfaceOutdated,
@@ -110,9 +123,16 @@ pub fn acquire_surface_texture(
         }
     })?;
 
+    // Create the view with the engine's render format. On native this equals the
+    // canvas texture format; on WebGPU the canvas is a non-sRGB base format and
+    // this sRGB view (declared in the surface's `view_formats`) restores the
+    // hardware linear→sRGB encode (#33).
     let view = surface_texture
         .texture
-        .create_view(&wgpu::TextureViewDescriptor::default());
+        .create_view(&wgpu::TextureViewDescriptor {
+            format: Some(convert_texture_format(view_format)),
+            ..Default::default()
+        });
 
     let surface_view = SurfaceTextureView {
         view: Arc::new(view),
