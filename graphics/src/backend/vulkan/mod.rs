@@ -237,6 +237,14 @@ pub struct VulkanBackend {
     /// to the pool in [`advance_frame`](Self::advance_frame) once the slot's
     /// fence has signalled, so the GPU is guaranteed to be done with them.
     staging_belt: Mutex<staging::StagingBelt>,
+    /// Timeline semaphore for the graphics queue: every `execute_graph`
+    /// submit signals the next monotonically increasing value on it. Frame
+    /// fences are (this semaphore, value) pairs — see [`GpuFence::Vulkan`].
+    /// One timeline per queue; a second queue (#47) gets its own.
+    queue_timeline: vk::Semaphore,
+    /// Next timeline value to signal (starts at 1; the semaphore's counter
+    /// starts at 0, so a fence carrying value 0 reads as already signaled).
+    timeline_next: AtomicU64,
 }
 
 impl std::fmt::Debug for VulkanBackend {
@@ -298,6 +306,21 @@ impl VulkanBackend {
                 *pool = command::create_command_pool(&device, graphics_queue_family, false)?;
             }
             pools
+        };
+
+        // The graphics queue's timeline semaphore (initial counter 0). Every
+        // render-graph submit signals its next value; frame fences wait on it.
+        let queue_timeline = {
+            let mut type_info = vk::SemaphoreTypeCreateInfo::default()
+                .semaphore_type(vk::SemaphoreType::TIMELINE)
+                .initial_value(0);
+            let info = vk::SemaphoreCreateInfo::default().push_next(&mut type_info);
+            unsafe { device.create_semaphore(&info, None) }.map_err(|e| {
+                GraphicsError::InitializationFailed(format!(
+                    "Failed to create queue timeline semaphore: {:?}",
+                    e
+                ))
+            })?
         };
 
         // Load dynamic rendering extension
@@ -376,6 +399,8 @@ impl VulkanBackend {
             depth24_stencil8_format,
             encoder_scratch: Mutex::new(VulkanEncoderScratch::default()),
             staging_belt: Mutex::new(staging::StagingBelt::default()),
+            queue_timeline,
+            timeline_next: AtomicU64::new(1),
         })
     }
 
@@ -812,6 +837,11 @@ impl Drop for VulkanBackend {
                 self.device.destroy_command_pool(pool, None);
             }
             self.device.destroy_command_pool(self.command_pool, None);
+
+            // Destroy the queue timeline semaphore. Outstanding `GpuFence`s
+            // cannot exist here: each holds an `Arc<GraphicsInstance>` that
+            // keeps this backend alive (#50).
+            self.device.destroy_semaphore(self.queue_timeline, None);
 
             // Destroy the staging belt (the device_wait_idle above
             // guarantees the GPU is done with every chunk).
@@ -1548,22 +1578,16 @@ impl VulkanBackend {
     }
 
     /// Create a fence for CPU-GPU synchronization.
+    ///
+    /// A "fence" is a wait value on the queue's timeline semaphore — no
+    /// Vulkan object is created. `signaled` picks the initial value: `0`
+    /// (the counter starts at 0, so trivially satisfied) or `u64::MAX`
+    /// (never satisfied until `execute_graph` stamps a real submit value).
     pub fn create_fence(&self, signaled: bool) -> Result<GpuFence, GraphicsError> {
-        let flags = if signaled {
-            vk::FenceCreateFlags::SIGNALED
-        } else {
-            vk::FenceCreateFlags::empty()
-        };
-
-        let fence_info = vk::FenceCreateInfo::default().flags(flags);
-
-        let fence = unsafe { self.device.create_fence(&fence_info, None) }.map_err(|e| {
-            GraphicsError::ResourceCreationFailed(format!("Failed to create fence: {:?}", e))
-        })?;
-
         Ok(GpuFence::Vulkan {
             device: self.device.clone(),
-            fence,
+            semaphore: self.queue_timeline,
+            value: AtomicU64::new(if signaled { 0 } else { u64::MAX }),
         })
     }
 
@@ -1573,9 +1597,19 @@ impl VulkanBackend {
     /// or GPU lockups. Timeout and device loss are returned as errors — the
     /// caller must not recycle resources guarded by this fence in that case.
     pub fn wait_fence(&self, fence: &GpuFence) -> Result<(), GraphicsError> {
-        if let GpuFence::Vulkan { device, fence, .. } = fence {
+        if let GpuFence::Vulkan {
+            device,
+            semaphore,
+            value,
+        } = fence
+        {
+            let semaphores = [*semaphore];
+            let values = [value.load(Ordering::Acquire)];
+            let wait_info = vk::SemaphoreWaitInfo::default()
+                .semaphores(&semaphores)
+                .values(&values);
             unsafe {
-                match device.wait_for_fences(&[*fence], true, FENCE_WAIT_TIMEOUT_NS) {
+                match device.wait_semaphores(&wait_info, FENCE_WAIT_TIMEOUT_NS) {
                     Ok(()) => Ok(()),
                     Err(vk::Result::TIMEOUT) => Err(GraphicsError::Timeout(
                         "fence wait timed out after 10 s; GPU may be hung".into(),
@@ -1593,12 +1627,15 @@ impl VulkanBackend {
     }
 
     /// Check if a fence is signaled (non-blocking).
-    ///
-    /// `get_fence_status` returns `Ok(false)` for `VK_NOT_READY`, so the
-    /// success of the call alone does NOT mean the fence is signaled.
     pub fn is_fence_signaled(&self, fence: &GpuFence) -> bool {
-        if let GpuFence::Vulkan { device, fence, .. } = fence {
-            matches!(unsafe { device.get_fence_status(*fence) }, Ok(true))
+        if let GpuFence::Vulkan {
+            device,
+            semaphore,
+            value,
+        } = fence
+        {
+            unsafe { device.get_semaphore_counter_value(*semaphore) }
+                .is_ok_and(|counter| counter >= value.load(Ordering::Acquire))
         } else {
             false
         }
@@ -1613,11 +1650,20 @@ impl VulkanBackend {
         fence: &GpuFence,
         timeout: std::time::Duration,
     ) -> Result<bool, GraphicsError> {
-        if let GpuFence::Vulkan { device, fence, .. } = fence {
-            // Convert Duration to nanoseconds for Vulkan
+        if let GpuFence::Vulkan {
+            device,
+            semaphore,
+            value,
+        } = fence
+        {
+            let semaphores = [*semaphore];
+            let values = [value.load(Ordering::Acquire)];
+            let wait_info = vk::SemaphoreWaitInfo::default()
+                .semaphores(&semaphores)
+                .values(&values);
             let timeout_ns = timeout.as_nanos() as u64;
             unsafe {
-                match device.wait_for_fences(&[*fence], true, timeout_ns) {
+                match device.wait_semaphores(&wait_info, timeout_ns) {
                     Ok(()) => Ok(true),
                     Err(vk::Result::TIMEOUT) => Ok(false),
                     Err(vk::Result::ERROR_DEVICE_LOST) => Err(GraphicsError::DeviceLost),
@@ -1645,23 +1691,27 @@ impl VulkanBackend {
     /// This always returns immediately after `vkQueueSubmit` — it does **not**
     /// block on GPU completion in either case.
     ///
-    /// - If `signal_fence` is provided: the submission signals that fence; the
-    ///   caller waits/polls it. Command buffers are queued for deferred freeing
-    ///   after the GPU finishes (per frame-in-flight slot).
-    /// - If `signal_fence` is `None`: submitted with a null fence. GPU lifetime
-    ///   of referenced resources is still guaranteed because the `RenderGraph`
-    ///   holds `Arc`s to them until the slot's frame fence is waited in
+    /// Every submit signals the queue timeline semaphore's next value.
+    ///
+    /// - If `signal_fence` is provided: the submit's timeline value is stamped
+    ///   into it, so the caller's waits/polls resolve against this submission.
+    /// - If `signal_fence` is `None`: the value is signaled but recorded
+    ///   nowhere. GPU lifetime of referenced resources is still guaranteed
+    ///   because the `RenderGraph` holds `Arc`s to them until the slot's frame
+    ///   fences are waited in
     ///   [`FramePipeline::begin_frame`](crate::pipeline::FramePipeline::begin_frame).
     ///
     /// INVARIANT: every graph — any number per frame — is executed as one
     /// submit on the single graphics queue. There are NO cross-graph GPU
-    /// semaphores — the only semaphores are the swapchain acquire/present
-    /// handshake below. Ordering between graphs (within a frame and across
-    /// frames) is provided entirely by the persistent barrier trackers
-    /// (`layout_tracker`, `buffer_tracker`), whose `vkCmdPipelineBarrier`s
-    /// synchronize across submissions *because they are on one queue in
-    /// submission order*. Adding a second queue would break this silently
-    /// (pipeline barriers do not cross queues) — see #47 before doing that.
+    /// semaphores: the timeline signal below is CPU-GPU completion tracking
+    /// (no submit waits on it — that arrives with #47 phase 3), and the only
+    /// other semaphores are the swapchain acquire/present handshake. Ordering
+    /// between graphs (within a frame and across frames) is provided entirely
+    /// by the persistent barrier trackers (`layout_tracker`, `buffer_tracker`),
+    /// whose `vkCmdPipelineBarrier`s synchronize across submissions *because
+    /// they are on one queue in submission order*. Adding a second queue would
+    /// break this silently (pipeline barriers do not cross queues) — see #47
+    /// before doing that.
     pub fn execute_graph(
         &self,
         graph: &RenderGraph,
@@ -1737,46 +1787,52 @@ impl VulkanBackend {
         } else {
             None
         };
-        let (vk_wait_semaphores, vk_signal_semaphores) = match swapchain_pair {
-            Some((image_available, image_render_finished)) => {
-                ([image_available], [image_render_finished])
-            }
-            None => ([vk::Semaphore::null()], [vk::Semaphore::null()]),
+        // Every submit signals the queue timeline's next value (in addition to
+        // the binary `image_render_finished` when this graph writes the
+        // swapchain). The value is stamped into `signal_fence` on success, so
+        // the frontend `Fence` waits on (timeline, value). Values allocated
+        // for failed submits leave a gap in the signal sequence, which is fine:
+        // a later submit's higher signal satisfies any wait on the gap value.
+        let timeline_value = self.timeline_next.fetch_add(1, Ordering::Relaxed);
+        let (vk_signal_semaphores, signal_values, signal_count) = match swapchain_pair {
+            Some((_, image_render_finished)) => (
+                [image_render_finished, self.queue_timeline],
+                [0, timeline_value], // binary semaphore's value is ignored
+                2,
+            ),
+            None => (
+                [self.queue_timeline, vk::Semaphore::null()],
+                [timeline_value, 0],
+                1,
+            ),
         };
+        let vk_wait_semaphores = [swapchain_pair
+            .map(|(image_available, _)| image_available)
+            .unwrap_or(vk::Semaphore::null())];
+        let wait_values = [0u64];
         let wait_stage_masks = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-        let sem_count = usize::from(swapchain_pair.is_some());
+        let wait_count = usize::from(swapchain_pair.is_some());
 
-        // Get fence to signal
-        let fence = signal_fence.and_then(|f| {
-            if let GpuFence::Vulkan { fence, .. } = f {
-                // Reset fence before use
-                unsafe {
-                    let _ = self.device.reset_fences(&[*fence]);
-                }
-                Some(*fence)
-            } else {
-                None
-            }
-        });
-
-        // Submit command buffer with semaphores and fence
+        // Submit the command buffer with the semaphores
         {
             profile_scope!("queue_submit");
-            let mut submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
+            let mut timeline_info = vk::TimelineSemaphoreSubmitInfo::default()
+                .wait_semaphore_values(&wait_values[..wait_count])
+                .signal_semaphore_values(&signal_values[..signal_count]);
+            let mut submit_info = vk::SubmitInfo::default()
+                .command_buffers(&command_buffers)
+                .signal_semaphores(&vk_signal_semaphores[..signal_count])
+                .push_next(&mut timeline_info);
 
-            if sem_count > 0 {
+            if wait_count > 0 {
                 submit_info = submit_info
-                    .wait_semaphores(&vk_wait_semaphores[..sem_count])
-                    .wait_dst_stage_mask(&wait_stage_masks[..sem_count])
-                    .signal_semaphores(&vk_signal_semaphores[..sem_count]);
+                    .wait_semaphores(&vk_wait_semaphores[..wait_count])
+                    .wait_dst_stage_mask(&wait_stage_masks[..wait_count]);
             }
 
             let submit_result = unsafe {
-                self.device.queue_submit(
-                    self.graphics_queue,
-                    &[submit_info],
-                    fence.unwrap_or(vk::Fence::null()),
-                )
+                self.device
+                    .queue_submit(self.graphics_queue, &[submit_info], vk::Fence::null())
             };
             if let Err(e) = submit_result {
                 // Nothing was enqueued: hand the swapchain semaphore pair back
@@ -1792,6 +1848,12 @@ impl VulkanBackend {
                     )),
                 });
             }
+        }
+
+        // Submit enqueued: this fence is now satisfied exactly when the queue
+        // timeline reaches this submit's value.
+        if let Some(GpuFence::Vulkan { value, .. }) = signal_fence {
+            value.store(timeline_value, Ordering::Release);
         }
 
         // No per-buffer freeing: the slot's pool is reset wholesale in

@@ -280,10 +280,13 @@ impl std::fmt::Debug for GpuBindingGroup {
 ///
 /// Fences are implemented differently across backends due to API constraints:
 ///
-/// ## Vulkan (`vk::Fence`)
-/// True GPU fence with binary signaled/unsignaled state. The GPU signals the fence
-/// when command buffer execution completes. CPU can wait or poll the fence status.
-/// This provides precise synchronization and supports multiple frames in flight.
+/// ## Vulkan (timeline semaphore value)
+/// A `(semaphore, value)` pair on the backend's per-queue timeline semaphore:
+/// each `execute_graph` submit signals the next monotonically increasing value
+/// and stamps it into the fence it was given. The CPU waits or polls via
+/// `vkWaitSemaphores` / `vkGetSemaphoreCounterValue`. One primitive serves
+/// host waits, cross-queue GPU waits (#47), and resource retirement — and no
+/// per-fence Vulkan object is created or destroyed.
 ///
 /// ## wgpu ([`WgpuFenceState`])
 /// wgpu abstracts over multiple backends (Vulkan, Metal, DX12, WebGPU) and doesn't
@@ -320,11 +323,20 @@ pub enum GpuFence {
         state: Arc<std::sync::Mutex<WgpuFenceState>>,
         generation: Arc<std::sync::atomic::AtomicU64>,
     },
-    /// Vulkan backend - true GPU fence via `vkFence`.
+    /// Vulkan backend - a wait value on the queue's timeline semaphore.
     #[cfg(feature = "vulkan-backend")]
     Vulkan {
         device: ash::Device,
-        fence: vk::Fence,
+        /// The backend's shared graphics-queue timeline semaphore. NOT owned:
+        /// the backend destroys it at teardown; the fence merely references
+        /// it (each `Fence` holds an `Arc<GraphicsInstance>` that keeps the
+        /// backend alive, #50).
+        semaphore: vk::Semaphore,
+        /// Timeline value this fence is satisfied at. `0` = trivially
+        /// signaled (the counter starts at 0); `u64::MAX` = never (created
+        /// unsignaled and not yet tied to a submit); otherwise stamped by
+        /// `execute_graph` when the submit is enqueued.
+        value: std::sync::atomic::AtomicU64,
     },
 }
 
@@ -341,9 +353,9 @@ impl std::fmt::Debug for GpuFence {
                 .field("state", state)
                 .finish_non_exhaustive(),
             #[cfg(feature = "vulkan-backend")]
-            Self::Vulkan { fence, .. } => f
+            Self::Vulkan { value, .. } => f
                 .debug_struct("GpuFence::Vulkan")
-                .field("fence", fence)
+                .field("value", value)
                 .finish_non_exhaustive(),
         }
     }
@@ -889,15 +901,6 @@ impl Drop for GpuSampler {
     fn drop(&mut self) {
         if let GpuSampler::Vulkan { device, sampler } = self {
             unsafe { device.destroy_sampler(*sampler, None) };
-        }
-    }
-}
-
-#[cfg(feature = "vulkan-backend")]
-impl Drop for GpuFence {
-    fn drop(&mut self) {
-        if let GpuFence::Vulkan { device, fence } = self {
-            unsafe { device.destroy_fence(*fence, None) };
         }
     }
 }

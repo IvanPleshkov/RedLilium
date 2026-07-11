@@ -204,11 +204,23 @@ impl TestContext {
     /// Uses [`FramePipeline`] and [`FrameSchedule`] internally for proper
     /// graph execution through the frame scheduling system.
     pub fn execute_graph(&self, graph: RenderGraph) {
+        self.execute_graphs(vec![graph]);
+    }
+
+    /// Execute several render graphs within ONE frame, each as its own queue
+    /// submit, and wait for completion.
+    ///
+    /// Exercises the multi-submit frame model (#47 phase 1): ordering between
+    /// the graphs is submission order, and resources shared across them are
+    /// synchronized by the backend's cross-submit barriers.
+    #[allow(dead_code)]
+    pub fn execute_graphs(&self, graphs: Vec<RenderGraph>) {
         let mut pipeline = self.pipeline.borrow_mut();
         let mut schedule = pipeline.begin_frame().expect("begin_frame failed");
 
-        // Render the single graph - this actually executes on the GPU
-        schedule.render(graph);
+        for graph in graphs {
+            schedule.submit(graph);
+        }
 
         // End the frame and wait for completion
         pipeline.end_frame(schedule);

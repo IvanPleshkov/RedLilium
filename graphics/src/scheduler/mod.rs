@@ -282,9 +282,9 @@ impl FrameSchedule {
 
         // Fence signalled by this submit. Any failure below (fence creation,
         // compile, submit) means no GPU work is in flight for THIS submit, so
-        // its fence must read as signaled — a GPU fence that was reset but
-        // never submitted would stall every subsequent `begin_frame` until
-        // its wait times out. Earlier submits' fences are unaffected.
+        // its fence must read as signaled — the CPU fence guarantees that
+        // regardless of backend fence semantics. Earlier submits' fences are
+        // unaffected.
         let mut fence = match Fence::new_gpu(Arc::clone(self.device.instance())) {
             Ok(fence) => fence,
             Err(e) => {

@@ -135,12 +135,20 @@ pub fn create_logical_device(
     let mut vulkan11_features =
         vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
 
+    // timelineSemaphore: the queue timeline that backs frame fences and (with
+    // multi-queue, #47) cross-queue waits. Mandatory on every Vulkan 1.2
+    // device (our minimum API version, incl. MoltenVK), but must still be
+    // explicitly enabled.
+    let mut vulkan12_features =
+        vk::PhysicalDeviceVulkan12Features::default().timeline_semaphore(true);
+
     let create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_create_infos)
         .enabled_extension_names(&device_extensions)
         .enabled_features(&features)
         .push_next(&mut dynamic_rendering_features)
-        .push_next(&mut vulkan11_features);
+        .push_next(&mut vulkan11_features)
+        .push_next(&mut vulkan12_features);
 
     let device =
         unsafe { instance.create_device(physical_device, &create_info, None) }.map_err(|e| {

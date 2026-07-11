@@ -291,6 +291,72 @@ fn test_render_clear_color(#[case] backend: Backend) {
     );
 }
 
+/// Test two graphs submitted in one frame with a cross-graph dependency
+/// (#47 phase 1/2).
+///
+/// Graph A renders (clears) into a texture; graph B — a separate queue
+/// submit — copies that texture into a readback buffer. This verifies:
+/// 1. Multiple submits per frame execute and complete (per-submit timeline
+///    fences all wait correctly).
+/// 2. The persistent trackers synchronize the texture across submits: B's
+///    copy needs a layout transition + barrier against A's color write,
+///    emitted in B's command buffer with A's write as the source scope —
+///    valid only because both submits share the queue in submission order.
+#[rstest]
+#[case::dummy(Backend::Dummy)]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_multi_submit_cross_graph_dependency(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new(backend) else {
+        eprintln!("Backend {:?} not available, skipping", backend);
+        return;
+    };
+
+    const WIDTH: u32 = 32;
+    const HEIGHT: u32 = 32;
+    const CLEAR_COLOR: [f32; 4] = [0.75, 0.25, 0.5, 1.0];
+
+    let render_target = ctx.create_render_target(WIDTH, HEIGHT);
+    let readback_size = readback_buffer_size(WIDTH, HEIGHT, 4);
+    let readback = ctx.create_readback_buffer(readback_size);
+
+    // Graph A: render (clear) into the texture.
+    let mut graph_a = RenderGraph::new();
+    graph_a.add_graphics_pass(create_simple_render_pass(
+        "multi_submit_render",
+        render_target.clone(),
+        CLEAR_COLOR,
+    ));
+
+    // Graph B: copy the texture to the readback buffer. No explicit
+    // dependency on A — ordering comes from submission order alone.
+    let mut graph_b = RenderGraph::new();
+    let mut copy_pass = TransferPass::new("multi_submit_readback".into());
+    copy_pass.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::readback_texture_whole(render_target, readback.clone()),
+    ));
+    graph_b.add_transfer_pass(copy_pass);
+
+    // One frame, two submits.
+    ctx.execute_graphs(vec![graph_a, graph_b]);
+
+    // Skip pixel verification on the dummy backend (it doesn't render).
+    if backend == Backend::Dummy {
+        return;
+    }
+
+    let data = ctx.read_buffer(&readback, readback_size);
+
+    let expected = ExpectedPixel::from_float(0.75, 0.25, 0.5, 1.0);
+    let center_pixel = get_pixel(&data, WIDTH, WIDTH / 2, HEIGHT / 2);
+    assert!(
+        verify_pixel(&data, WIDTH, WIDTH / 2, HEIGHT / 2, expected, 2),
+        "Cross-submit copied pixel should be {:?}, but got {:?}",
+        expected,
+        center_pixel
+    );
+}
+
 // ============================================================================
 // Depth Buffer Tests
 // ============================================================================
