@@ -268,28 +268,43 @@ impl PlayControl {
             self.pending = Some(PlayState::Stopped);
         }
     }
-
-    /// Process pending transition and emit events (called by ManagePlayModeTransitions).
-    /// Returns (from_state, to_state) if a transition occurred, None otherwise.
-    fn consume_transition(&mut self) -> Option<(PlayState, PlayState)> {
-        if let Some(new_state) = self.pending.take() {
-            let old_state = self.current;
-            self.current = new_state;
-            Some((old_state, new_state))
-        } else {
-            None
-        }
-    }
 }
 
 /// Apply transition events and hooks to resources.
 fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
+    // === VALIDATION PHASE: Check all preconditions before any state mutations ===
+    // If any check fails, return early without consuming pending or mutating PlayControl.
+
+    if to == PlayState::Playing {
+        // Validate hierarchy: no game entities under editor parents.
+        // Panics if invalid, leaving world in clean pre-transition state.
+        validate_no_game_under_editor(world);
+
+        // Capture snapshot: check if serialization succeeds.
+        let is_first_play = from == PlayState::Stopped;
+        if is_first_play {
+            let snapshot = world.serialize_world().ok();
+            if snapshot.is_none() {
+                log::error!("Failed to capture world snapshot at Play transition — aborting Play");
+                // Leave pending intact; transition not consumed.
+                return; // Veto: do not proceed to commitment phase
+            }
+        }
+    }
+
+    // === COMMITMENT PHASE: All checks passed; mutations are now safe ===
     let transition = PlayModeTransition { from, to };
 
-    // Validate hierarchy BEFORE any mutations, event dispatch, or hook dispatch.
-    // This ensures if validation fails, the world is in a clean pre-transition state.
-    if to == PlayState::Playing {
-        validate_no_game_under_editor(world);
+    // Consume the pending transition (update PlayControl.current).
+    {
+        let mut control = world.resource_mut::<PlayControl>();
+        if control.pending == Some(to) {
+            control.current = to;
+            control.pending.take();
+        } else {
+            // State changed since we peeked; bail.
+            return;
+        }
     }
 
     // Emit transition event for PlayModeAware subscribers.
@@ -323,14 +338,7 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
 
         if is_first_play {
             let snapshot = world.serialize_world().ok();
-            if snapshot.is_none() {
-                log::error!("Failed to capture world snapshot at Play transition — aborting Play");
-                // Revert the state transition: put it back to Stopped
-                if world.has_resource::<PlayControl>() {
-                    world.resource_mut::<PlayControl>().current = PlayState::Stopped;
-                }
-                return; // Veto the transition
-            }
+            // We validated this above; should never be None here.
             world.insert_resource(PlaySnapshot(snapshot));
             log::debug!("Play: captured initial snapshot");
 
@@ -635,13 +643,16 @@ impl crate::ExclusiveSystem for ManagePlayModeTransitions {
     type Result = ();
 
     fn run(&mut self, world: &mut World) -> Result<(), SystemError> {
-        // Check for and apply any pending state transitions.
+        // Peek at pending transition without consuming yet.
+        // We'll consume only after validation+snapshot succeeds.
         let transition = {
-            let mut control = world.resource_mut::<PlayControl>();
-            control.consume_transition()
+            let control = world.resource::<PlayControl>();
+            control.pending.map(|to| (control.current, to))
         };
 
         if let Some((from, to)) = transition {
+            // apply_transition_hooks will consume the transition and update PlayControl.current
+            // only if validation + capture succeed. On failure, pending is left intact.
             apply_transition_hooks(world, from, to);
         }
 
