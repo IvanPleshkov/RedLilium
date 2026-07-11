@@ -656,21 +656,6 @@ impl VulkanBackend {
     }
 }
 
-/// Returns whether any pass in the graph renders to the swapchain (surface)
-/// image. Such a graph's submit must be synchronized against acquire/present.
-fn graph_writes_swapchain(graph: &RenderGraph) -> bool {
-    graph.passes().iter().any(|pass| {
-        pass.as_graphics()
-            .and_then(|g| g.render_targets())
-            .is_some_and(|targets| {
-                targets
-                    .color_attachments
-                    .iter()
-                    .any(|attachment| matches!(attachment.target, RenderTarget::Surface { .. }))
-            })
-    })
-}
-
 /// Aspect mask for whole-image operations, derived from the format.
 ///
 /// Depth formats must not be addressed with `COLOR` (invalid usage);
@@ -1668,15 +1653,15 @@ impl VulkanBackend {
     ///   holds `Arc`s to them until the slot's frame fence is waited in
     ///   [`FramePipeline::begin_frame`](crate::pipeline::FramePipeline::begin_frame).
     ///
-    /// INVARIANT: exactly one graph is executed per frame, as one submit on the
-    /// single graphics queue. There are NO cross-graph GPU semaphores — the
-    /// only semaphores are the swapchain acquire/present handshake below.
-    /// Ordering between consecutive frames' graphs is provided entirely by the
-    /// persistent barrier trackers (`layout_tracker`, `buffer_tracker`), whose
-    /// `vkCmdPipelineBarrier`s synchronize across submissions *because they are
-    /// on one queue in submission order*. Adding a second queue or a second
-    /// per-frame submit would break this silently (pipeline barriers do not
-    /// cross queues) — see #47 before doing either.
+    /// INVARIANT: every graph — any number per frame — is executed as one
+    /// submit on the single graphics queue. There are NO cross-graph GPU
+    /// semaphores — the only semaphores are the swapchain acquire/present
+    /// handshake below. Ordering between graphs (within a frame and across
+    /// frames) is provided entirely by the persistent barrier trackers
+    /// (`layout_tracker`, `buffer_tracker`), whose `vkCmdPipelineBarrier`s
+    /// synchronize across submissions *because they are on one queue in
+    /// submission order*. Adding a second queue would break this silently
+    /// (pipeline barriers do not cross queues) — see #47 before doing that.
     pub fn execute_graph(
         &self,
         graph: &RenderGraph,
@@ -1736,16 +1721,18 @@ impl VulkanBackend {
             GraphicsError::Internal(format!("Failed to end command buffer: {:?}", e))
         })?;
 
-        // One render graph per frame: the only synchronization is the swapchain
-        // acquire/render-finished handshake below. There is no cross-graph
-        // semaphore ordering (a single submit per frame) — at most one
-        // wait/signal pair, held in fixed-size arrays (no per-frame Vecs).
+        // The only GPU semaphores are the swapchain acquire/render-finished
+        // handshake below; cross-graph ordering is submission order on the one
+        // queue. The pair exists once per frame and is consumed (`take`) by
+        // the single swapchain-writing graph — the scheduler enforces at most
+        // one such graph per frame — so at most one wait/signal pair, held in
+        // fixed-size arrays (no per-submit Vecs).
         //
         // If this graph writes the acquired swapchain image, this submit must
         // wait on `image_available` (so it does not write the image before the
         // presentation engine releases it) and signal `image_render_finished`
         // (so present transitions/presents only after rendering completes).
-        let swapchain_pair = if graph_writes_swapchain(graph) {
+        let swapchain_pair = if graph.writes_swapchain() {
             self.take_swapchain_render_sync()
         } else {
             None

@@ -453,11 +453,12 @@ impl TextureId {
 /// tracked here).
 ///
 /// INVARIANT (single queue): this CPU-side map, updated in pass-record order,
-/// matches GPU execution order only because submits are serialized on the one
-/// graphics queue with per-frame fences. The emitted layout-transition
-/// barriers synchronize across submissions within that queue; they do not
-/// cross queues. A second queue would need semaphores + queue-family ownership
-/// transfers — see #47 (this tracker has no queue-ownership concept).
+/// matches GPU execution order only because every submit — any number per
+/// frame — goes to the one graphics queue in submission order. The emitted
+/// layout-transition barriers synchronize across submissions within that
+/// queue (which is what makes multi-graph frames correct); they do not cross
+/// queues. A second queue would need semaphores + queue-ownership tracking —
+/// see #47 (this tracker has no queue-ownership concept).
 ///
 /// Keeping layouts across frames is what lets **persistent / history textures**
 /// (temporal AA, accumulation, motion blur) retain their contents: their first

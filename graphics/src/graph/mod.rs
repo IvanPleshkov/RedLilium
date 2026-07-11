@@ -227,6 +227,24 @@ impl RenderGraph {
         self.passes.len()
     }
 
+    /// Whether any pass renders to the swapchain (surface) image.
+    ///
+    /// At most one such graph may be submitted per frame: its submit is
+    /// synchronized against the per-frame acquire/present semaphore pair
+    /// (enforced in [`FrameSchedule::submit`](crate::scheduler::FrameSchedule::submit)).
+    pub fn writes_swapchain(&self) -> bool {
+        self.passes.iter().any(|pass| {
+            pass.as_graphics()
+                .and_then(|g| g.render_targets())
+                .is_some_and(|targets| {
+                    targets
+                        .color_attachments
+                        .iter()
+                        .any(|attachment| matches!(attachment.target, RenderTarget::Surface { .. }))
+                })
+        })
+    }
+
     /// Get all dependency edges in the graph.
     ///
     /// Each edge is `(dependent, dependency)` meaning the dependent pass

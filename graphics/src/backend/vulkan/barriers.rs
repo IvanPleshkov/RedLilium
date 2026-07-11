@@ -62,12 +62,13 @@ struct BufferAccessState {
 ///
 /// INVARIANT (single queue): correctness relies on every tracked access being
 /// on the one graphics queue. A `vkCmdPipelineBarrier` synchronizes across
-/// submissions only *within a queue*, so a write recorded in frame N is a
-/// valid source scope for a read in frame N+1 only because both submits are on
-/// that queue in submission order. This tracker has no concept of queue
-/// ownership: a second queue (async compute) would need semaphores +
-/// ownership transfers instead, and adding one without that would silently
-/// drop synchronization. See #47 before introducing a second queue.
+/// submissions only *within a queue*, so a write recorded in one submit is a
+/// valid source scope for a read in a later submit — whether that is the next
+/// graph of the same frame or a graph of the next frame — only because all
+/// submits are on that queue in submission order. This tracker has no concept
+/// of queue ownership: a second queue (async compute) would need semaphores +
+/// queue-ownership tracking instead, and adding one without that would
+/// silently drop synchronization. See #47 before introducing a second queue.
 ///
 /// Keyed by the raw `vk::Buffer` handle. Unlike texture layouts, stale state
 /// after handle reuse is benign: it can only produce an unnecessary or
