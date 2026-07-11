@@ -1450,4 +1450,59 @@ mod tests {
         assert!(!set.membership().contains(1));
         assert!(set.membership().contains(2));
     }
+
+    // ---- Query mask tests ----
+
+    #[test]
+    fn default_mask_includes_hidden_in_play() {
+        // Verify that DEFAULT_GAME_QUERY_EXCLUDE_MASK includes HIDDEN_IN_PLAY
+        assert_eq!(
+            Entity::DEFAULT_GAME_QUERY_EXCLUDE_MASK,
+            Entity::DISABLED | Entity::STATIC | Entity::EDITOR | Entity::HIDDEN_IN_PLAY
+        );
+    }
+
+    #[test]
+    fn infrastructure_mask_excludes_hidden_in_play() {
+        // Verify that INFRASTRUCTURE_QUERY_EXCLUDE_MASK includes HIDDEN_IN_PLAY but not EDITOR
+        assert_eq!(
+            Entity::INFRASTRUCTURE_QUERY_EXCLUDE_MASK,
+            Entity::DISABLED | Entity::HIDDEN_IN_PLAY
+        );
+        // Should NOT include EDITOR or STATIC
+        assert_eq!(
+            Entity::INFRASTRUCTURE_QUERY_EXCLUDE_MASK & Entity::EDITOR,
+            0
+        );
+        assert_eq!(
+            Entity::INFRASTRUCTURE_QUERY_EXCLUDE_MASK & Entity::STATIC,
+            0
+        );
+    }
+
+    #[test]
+    fn ref_default_mask_is_game_exclude_mask() {
+        // Verify that Ref uses the game exclude mask by default
+        let entities = Entities::new();
+        let storage = ComponentStorage::new::<u32>();
+        let lock = crate::sync::RwLock::new(storage);
+        let ref_guard = Ref::<u32>::new(&lock, &entities);
+        assert_eq!(
+            ref_guard.exclude_mask,
+            Entity::DEFAULT_GAME_QUERY_EXCLUDE_MASK
+        );
+    }
+
+    #[test]
+    fn ref_mut_default_mask_is_game_exclude_mask() {
+        // Verify that RefMut uses the game exclude mask by default
+        let entities = Entities::new();
+        let storage = ComponentStorage::new::<u32>();
+        let lock = crate::sync::RwLock::new(storage);
+        let ref_mut_guard = RefMut::<u32>::new(&lock, &entities, 0);
+        assert_eq!(
+            ref_mut_guard.exclude_mask,
+            Entity::DEFAULT_GAME_QUERY_EXCLUDE_MASK
+        );
+    }
 }

@@ -2020,3 +2020,70 @@ fn insert_bundle_replaces_and_rolls_back() {
         Some(&Position { x: 1.0, y: 2.0 })
     );
 }
+
+// ---- Entity visibility mask tests ----
+
+#[test]
+fn is_excluded_from_game_checks_disabled() {
+    let mut world = World::new();
+    let entity = world.spawn();
+
+    assert!(!world.is_excluded_from_game(entity));
+
+    world.set_entity_flags(entity, Entity::DISABLED);
+    assert!(world.is_excluded_from_game(entity));
+}
+
+#[test]
+fn is_excluded_from_game_checks_static() {
+    let mut world = World::new();
+    let entity = world.spawn();
+
+    assert!(!world.is_excluded_from_game(entity));
+
+    world.set_entity_flags(entity, Entity::STATIC);
+    assert!(world.is_excluded_from_game(entity));
+}
+
+#[test]
+fn is_excluded_from_game_checks_editor() {
+    let mut world = World::new();
+    let entity = world.spawn();
+
+    assert!(!world.is_excluded_from_game(entity));
+
+    world.set_entity_flags(entity, Entity::EDITOR);
+    assert!(world.is_excluded_from_game(entity));
+}
+
+#[test]
+fn is_excluded_from_game_checks_hidden_in_play() {
+    let mut world = World::new();
+    let entity = world.spawn();
+
+    assert!(!world.is_excluded_from_game(entity));
+
+    world.set_entity_flags(entity, Entity::HIDDEN_IN_PLAY);
+    assert!(world.is_excluded_from_game(entity));
+}
+
+#[test]
+fn is_excluded_from_game_checks_all_masks() {
+    let mut world = World::new();
+    let e_disabled = world.spawn();
+    let e_static = world.spawn();
+    let e_editor = world.spawn();
+    let e_hidden = world.spawn();
+    let e_normal = world.spawn();
+
+    world.set_entity_flags(e_disabled, Entity::DISABLED);
+    world.set_entity_flags(e_static, Entity::STATIC);
+    world.set_entity_flags(e_editor, Entity::EDITOR);
+    world.set_entity_flags(e_hidden, Entity::HIDDEN_IN_PLAY);
+
+    assert!(world.is_excluded_from_game(e_disabled));
+    assert!(world.is_excluded_from_game(e_static));
+    assert!(world.is_excluded_from_game(e_editor));
+    assert!(world.is_excluded_from_game(e_hidden));
+    assert!(!world.is_excluded_from_game(e_normal));
+}
