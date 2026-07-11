@@ -687,12 +687,12 @@ pub struct Ref<'a, T: 'static> {
 }
 
 impl<'a, T: 'static> Ref<'a, T> {
-    /// Default exclude mask: skip disabled, static, and editor entities.
-    const DEFAULT_MASK: u32 = Entity::DISABLED | Entity::STATIC | Entity::EDITOR;
+    /// Default exclude mask: skip disabled, static, editor, and hidden-in-play entities.
+    const DEFAULT_MASK: u32 = Entity::DEFAULT_GAME_QUERY_EXCLUDE_MASK;
 
     /// Creates a new shared borrow guard, acquiring the storage's read lock.
     ///
-    /// Uses the default exclude mask (`DISABLED | STATIC | EDITOR`).
+    /// Uses the default exclude mask (`DISABLED | STATIC | EDITOR | HIDDEN_IN_PLAY`).
     pub(crate) fn new(
         lock: &'a crate::sync::RwLock<ComponentStorage>,
         entities: &'a Entities,
@@ -900,12 +900,12 @@ pub struct RefMut<'a, T: 'static> {
 }
 
 impl<'a, T: 'static> RefMut<'a, T> {
-    /// Default exclude mask: skip disabled, static, and editor entities.
-    const DEFAULT_MASK: u32 = Entity::DISABLED | Entity::STATIC | Entity::EDITOR;
+    /// Default exclude mask: skip disabled, static, editor, and hidden-in-play entities.
+    const DEFAULT_MASK: u32 = Entity::DEFAULT_GAME_QUERY_EXCLUDE_MASK;
 
     /// Creates a new exclusive borrow guard, acquiring the storage's write lock.
     ///
-    /// Uses the default exclude mask (`DISABLED | STATIC | EDITOR`).
+    /// Uses the default exclude mask (`DISABLED | STATIC | EDITOR | HIDDEN_IN_PLAY`).
     pub(crate) fn new(
         lock: &'a crate::sync::RwLock<ComponentStorage>,
         entities: &'a Entities,

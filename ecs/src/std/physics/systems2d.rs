@@ -83,7 +83,7 @@ impl crate::ExclusiveSystem for SyncPhysicsBodies2D {
                 .keys()
                 .filter(|e| {
                     !world.is_alive(**e)
-                        || world.is_disabled(**e)
+                        || world.is_excluded_from_game(**e)
                         || world
                             .get::<crate::std::physics::components2d::RigidBody2D>(**e)
                             .is_none()
@@ -150,7 +150,9 @@ impl crate::ExclusiveSystem for SyncPhysicsBodies2D {
             let physics = world.resource::<PhysicsWorld2D>();
             world
                 .iter_entities()
-                .filter(|e| !physics.entity_to_body.contains_key(e) && !world.is_disabled(*e))
+                .filter(|e| {
+                    !physics.entity_to_body.contains_key(e) && !world.is_excluded_from_game(*e)
+                })
                 .filter_map(|entity| {
                     let body = world
                         .get::<crate::std::physics::components2d::RigidBody2D>(entity)?
@@ -215,7 +217,7 @@ impl crate::ExclusiveSystem for SyncPhysicsJoints2D {
                 .keys()
                 .filter(|e| {
                     !world.is_alive(**e)
-                        || world.is_disabled(**e)
+                        || world.is_excluded_from_game(**e)
                         || world
                             .get::<crate::std::physics::components2d::ImpulseJoint2D>(**e)
                             .is_none()
@@ -248,7 +250,9 @@ impl crate::ExclusiveSystem for SyncPhysicsJoints2D {
             let physics = world.resource::<PhysicsWorld2D>();
             world
                 .iter_entities()
-                .filter(|e| !physics.entity_to_joint.contains_key(e) && !world.is_disabled(*e))
+                .filter(|e| {
+                    !physics.entity_to_joint.contains_key(e) && !world.is_excluded_from_game(*e)
+                })
                 .filter_map(|entity| {
                     let joint = world
                         .get::<crate::std::physics::components2d::ImpulseJoint2D>(entity)?

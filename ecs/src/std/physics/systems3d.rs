@@ -83,7 +83,7 @@ impl crate::ExclusiveSystem for SyncPhysicsBodies3D {
             world.insert_resource(PhysicsWorld3D::default());
         }
 
-        // Phase 1: Find stale bodies (entity dead, disabled, or lost RigidBody3D component)
+        // Phase 1: Find stale bodies (entity dead, excluded from game, or lost RigidBody3D component)
         let stale: Vec<crate::Entity> = {
             let physics = world.resource::<PhysicsWorld3D>();
             physics
@@ -91,7 +91,7 @@ impl crate::ExclusiveSystem for SyncPhysicsBodies3D {
                 .keys()
                 .filter(|e| {
                     !world.is_alive(**e)
-                        || world.is_disabled(**e)
+                        || world.is_excluded_from_game(**e)
                         || world.get::<super::components3d::RigidBody3D>(**e).is_none()
                 })
                 .copied()
@@ -156,7 +156,9 @@ impl crate::ExclusiveSystem for SyncPhysicsBodies3D {
             let physics = world.resource::<PhysicsWorld3D>();
             world
                 .iter_entities()
-                .filter(|e| !physics.entity_to_body.contains_key(e) && !world.is_disabled(*e))
+                .filter(|e| {
+                    !physics.entity_to_body.contains_key(e) && !world.is_excluded_from_game(*e)
+                })
                 .filter_map(|entity| {
                     let body = world
                         .get::<super::components3d::RigidBody3D>(entity)?
@@ -213,7 +215,7 @@ impl crate::ExclusiveSystem for SyncPhysicsJoints3D {
             return Ok(());
         }
 
-        // Phase 1: Find stale joints (entity dead, disabled, or lost ImpulseJoint3D component)
+        // Phase 1: Find stale joints (entity dead, excluded from game, or lost ImpulseJoint3D component)
         let stale: Vec<crate::Entity> = {
             let physics = world.resource::<PhysicsWorld3D>();
             physics
@@ -221,7 +223,7 @@ impl crate::ExclusiveSystem for SyncPhysicsJoints3D {
                 .keys()
                 .filter(|e| {
                     !world.is_alive(**e)
-                        || world.is_disabled(**e)
+                        || world.is_excluded_from_game(**e)
                         || world
                             .get::<super::components3d::ImpulseJoint3D>(**e)
                             .is_none()
@@ -246,12 +248,14 @@ impl crate::ExclusiveSystem for SyncPhysicsJoints3D {
             }
         }
 
-        // Phase 2: Find new joints (not in mapping, not disabled)
+        // Phase 2: Find new joints (not in mapping, not excluded from game)
         let new_joints: Vec<(crate::Entity, super::components3d::ImpulseJoint3D)> = {
             let physics = world.resource::<PhysicsWorld3D>();
             world
                 .iter_entities()
-                .filter(|e| !physics.entity_to_joint.contains_key(e) && !world.is_disabled(*e))
+                .filter(|e| {
+                    !physics.entity_to_joint.contains_key(e) && !world.is_excluded_from_game(*e)
+                })
                 .filter_map(|entity| {
                     let joint = world
                         .get::<super::components3d::ImpulseJoint3D>(entity)?
@@ -315,13 +319,13 @@ impl crate::System for SyncPhysicsBodiesSystem3D {
             )>()
             .execute(|(mut physics, bodies, colliders, transforms)| {
                 // Remove stale: entity dead (full-identity check, so a recycled
-                // slot does not keep the old body), disabled, or lost RigidBody3D.
+                // slot does not keep the old body), excluded from game, or lost RigidBody3D.
                 let stale: Vec<crate::Entity> = physics
                     .entity_to_body
                     .keys()
                     .filter(|e| {
                         !ctx.world().is_alive(**e)
-                            || ctx.world().is_disabled(**e)
+                            || ctx.world().is_excluded_from_game(**e)
                             || bodies.get(e.index()).is_none()
                     })
                     .copied()
@@ -407,7 +411,7 @@ impl crate::System for SyncPhysicsJointsSystem3D {
                     .keys()
                     .filter(|e| {
                         !ctx.world().is_alive(**e)
-                            || ctx.world().is_disabled(**e)
+                            || ctx.world().is_excluded_from_game(**e)
                             || joints.get(e.index()).is_none()
                     })
                     .copied()

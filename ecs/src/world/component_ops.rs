@@ -629,6 +629,18 @@ impl World {
         self.entities.get_flags(entity.index()) & Entity::EDITOR != 0
     }
 
+    /// Returns whether the given entity is excluded from game systems.
+    ///
+    /// An entity is excluded if it matches the default game query exclude mask:
+    /// disabled, static, editor, or hidden-in-play.
+    ///
+    /// Use this in side-table invalidation predicates (e.g., physics bodies, asset residents)
+    /// to ensure they stay in sync with default query visibility.
+    pub fn is_excluded_from_game(&self, entity: Entity) -> bool {
+        let flags = self.get_entity_flags(entity);
+        flags & Entity::DEFAULT_GAME_QUERY_EXCLUDE_MASK != 0
+    }
+
     /// Returns the current flags for an entity.
     pub fn get_entity_flags(&self, entity: Entity) -> u32 {
         self.entities.get_flags(entity.index())

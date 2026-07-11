@@ -118,9 +118,9 @@ impl World {
 
     /// Gets shared read access including static entities.
     ///
-    /// Like [`read`](World::read), but only excludes disabled entities —
-    /// static entities are included. Use this in systems that need to
-    /// observe all active entities (e.g., rendering, physics broadphase).
+    /// Like [`read`](World::read), but only excludes disabled and hidden-in-play entities —
+    /// static and editor entities are included. Use this in systems that need to
+    /// observe engine infrastructure (e.g., transforms, asset loading, hotreload).
     pub fn read_all<T: 'static>(&self) -> Result<Ref<'_, T>, WorldError> {
         let storage =
             self.components
@@ -131,7 +131,7 @@ impl World {
         Ok(Ref::new_with_mask(
             storage,
             self.entities(),
-            Entity::DISABLED,
+            Entity::INFRASTRUCTURE_QUERY_EXCLUDE_MASK,
         ))
     }
 
@@ -142,7 +142,7 @@ impl World {
         Some(Ref::new_with_mask(
             storage,
             self.entities(),
-            Entity::DISABLED,
+            Entity::INFRASTRUCTURE_QUERY_EXCLUDE_MASK,
         ))
     }
 
@@ -184,7 +184,7 @@ impl World {
         Ok(RefMut::new_with_mask(
             storage,
             self.entities(),
-            Entity::DISABLED,
+            Entity::INFRASTRUCTURE_QUERY_EXCLUDE_MASK,
             tick,
         ))
     }
@@ -196,7 +196,7 @@ impl World {
         Some(RefMut::new_with_mask(
             storage,
             self.entities(),
-            Entity::DISABLED,
+            Entity::INFRASTRUCTURE_QUERY_EXCLUDE_MASK,
             self.current_tick(),
         ))
     }
@@ -291,7 +291,7 @@ impl World {
         Ok(Ref::new_unlocked_with_mask(
             storage,
             self.entities(),
-            Entity::DISABLED,
+            Entity::INFRASTRUCTURE_QUERY_EXCLUDE_MASK,
         ))
     }
 
@@ -310,7 +310,7 @@ impl World {
         Ok(RefMut::new_unlocked_with_mask(
             lock.data_ptr(),
             self.entities(),
-            Entity::DISABLED,
+            Entity::INFRASTRUCTURE_QUERY_EXCLUDE_MASK,
             tick,
         ))
     }
