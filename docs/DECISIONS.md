@@ -1365,3 +1365,115 @@ Note: At Play transition, editor entities receive HIDDEN_IN_PLAY flag (set); at 
 - #63: Entity classification and default filters (depends on this)
 - #45: Plugin loading (masks enable safe ABI-stable visibility)
 
+---
+
+## ADR-024: Resource Lifecycle Management — Hybrid Hook + Event Model
+
+**Date**: 2026-07-12
+**Status**: Accepted
+**Relates to**: #65, #45
+
+### Context
+
+Game resources (Score, RNG, Audio, Physics) need coordinated state changes across Play/Pause/Resume/Stop transitions. Two competing requirements:
+
+1. **Engine-internal needs**: Deterministic, transactional ordering; ability to veto transitions (e.g., snapshot capture failure).
+2. **Game-facing needs**: Decoupled from registry; safe for plugins; no function pointers across dylib boundary.
+
+Previous attempts failed:
+- Pure hooks: game systems couldn't react (schedule gating during Stop blocks all listeners).
+- Pure events: no veto path (failed snapshot commit = partial transition).
+
+### Decision
+
+Implement **hybrid hook + event model**:
+
+**PlayModeAwareRegistry** (hooks, engine-internal):
+- Deterministic dispatch order (registration order)
+- Called before event emission; can veto transition
+- Snapshot capture/restore happen at hook layer
+- Used for engine infrastructure (PhysicsWorld pause flag, asset manager cleanup)
+
+**PlayModeTransition** events (game-facing):
+- Emitted after hooks complete + snapshot captured + state committed
+- Double-buffered; observable by systems in PostUpdate and later schedules
+- Game systems subscribe via `EventCursor<PlayModeTransition>`
+- Safe for plugins: no registry access needed; events are serialized data, not function pointers
+
+### Execution Model
+
+```
+ManagePlayModeTransitions (exclusive system, PreUpdate):
+  1. Validation phase (snapshot capture dry-run, hierarchy checks)
+  2. Commitment phase (write state, emit event, dispatch hooks)
+  3. Hide/show entities, despawn game entities
+  
+Same frame (PostUpdate+): game systems read events via EventCursor
+```
+
+### API Contracts
+
+**SnapshotResource** + **PlayModeAware** interop:
+- `on_play_start()`: called before snapshot capture. Resets state to seed (e.g., RNG).
+- `on_pause()` / `on_resume()`: called before hooks complete. Freeze/thaw non-snapshotted state (e.g., Physics).
+- `on_stop()`: called before snapshot resources are restored. Best left empty; snapshot restore overwrites all state.
+- **Rule**: For resources that are both `SnapshotResource + PlayModeAware`, the snapshot restore is the reset; don't also mutate in `on_stop()`.
+
+**Pause-mode edits**:
+- Edits during Pause are inspection-only; Stop restores exact pre-play state.
+- Rationale: snapshot restore is destructive (overwrites all components + SnapshotResources). Preserving edits requires differential snapshots (complex, error-prone).
+
+**Stop event visibility**:
+- Game systems gate off on `GameActive=false` during Stop.
+- Stop transition emits event in PreUpdate, but gated-off systems don't see it (they don't run that frame).
+- **Contract**: Stop cleanup is engine-mediated only. Game systems react to Play/Pause/Resume, not Stop.
+- Corollary: plugins cannot observe Stop events. They must unload cleanly via explicit engine sequence (not event-driven).
+
+### Consequences
+
+- ✅ Transactional safety: validation before any mutation; failed snapshot veto doesn't leave world in half-state.
+- ✅ Deterministic: hook dispatch order is registration order; snapshot capture/restore happen together.
+- ✅ Plugin-safe: game systems can't accidentally register function pointers; events are data.
+- ✅ Pause-mode editing works as expected: Stop reverts to known good state.
+- ✅ Deferred work for plugins (#45): plugins will implement `on_play_start()` for initialization; Stop cleanup delegated to engine (warm-reload sequence).
+- ⚠️ Stop event not observable by game systems — requires discipline in plugin architecture (Stop = engine-mediated, not event-driven).
+- ⚠️ Snapshot restore is all-or-nothing: if snapshot capture fails, Stop aborts and world reverts (safety + visibility trade-off).
+- ⚠️ Pause edits discarded: design assumption that Pause is inspection-only. Future work (differential snapshots) could change this.
+
+### Related Examples
+
+- `GameScore` (SnapshotResource, no hooks) — pure state capture/restore.
+- `GameRNG` (SnapshotResource + PlayModeAware) — deterministic seeding on Play.
+- `PhysicsWorld3D/2D` (PlayModeAware, no SnapshotResource by default) — pause flag toggled by hooks.
+- `GameObserverSystem` (event listener) — game reaction pattern, safe for extension.
+
+### Migration Path for #45 (Plugin Loading)
+
+When game plugins load:
+1. Plugin calls `world.insert_play_mode_aware::<MyResource>()` to register hooks.
+2. On Play: hooks fire; plugin initializes (e.g., RNG seed, asset load).
+3. On Pause/Resume: plugin can react if needed (e.g., pause audio).
+4. On Stop: engine unloads plugin dylib cleanly; plugin is not observed.
+
+Plugins must NOT:
+- Call `PlayModeAwareRegistry::register()` directly (dylib function pointer hazard).
+- Rely on observing Stop events (gated-off systems).
+- Store game state across unload (rely on SnapshotResource for persistence).
+
+### Design Rationale
+
+**Why hooks fire before event emission?**
+Allows veto path. If snapshot capture fails, hooks haven't fired yet; no need to revert. If event fires first, hook failure leaves event-driven state stale.
+
+**Why Stop events are gated-off?**
+Simplifies plugin unload: engine stops all game systems (natural gate-off), unloads dylib, cleans up resources. If plugins could observe Stop, they'd need async cleanup (complex). "Stop = engine-mediated only" is simpler and safer.
+
+**Why Pause edits are inspection-only?**
+Preserving edits requires tracking which components changed during Pause vs pre-play, then merging them into the restored snapshot. This is complex (differential snapshots) and error-prone. "Pause is inspection; Stop reverts" is simpler and matches user expectation (undo button).
+
+### Related Issues
+
+- #67: Schedule separation (Stop gate-off depends on game_active flag)
+- #45: Plugin loading (hooks + events replace hand-rolled plugin initialization)
+- #70: Snapshot reliability (restore tests cover round-trip fidelity)
+
