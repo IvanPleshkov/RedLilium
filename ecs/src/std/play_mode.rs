@@ -215,6 +215,12 @@ impl PlayControl {
         self.current
     }
 
+    /// Pending transition target, if any. Used to detect Stop transitions
+    /// for plugin cleanup callbacks.
+    pub fn pending(&self) -> Option<PlayState> {
+        self.pending
+    }
+
     /// Get panic info if a panic is currently blocking resume.
     pub fn panic_info(&self) -> Option<&PanicInfo> {
         self.panicked.as_ref()

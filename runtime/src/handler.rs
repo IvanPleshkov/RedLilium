@@ -27,15 +27,18 @@ struct GameState {
     /// Current size of the main camera's render target.
     target_size: (u32, u32),
     color_format: TextureFormat,
+    /// Plugin registry for lifecycle cleanup (on_stop, on_unload).
+    /// Host-owned to enforce drop order: plugin drops before dylib unload.
+    plugins: Vec<Box<dyn crate::Plugin>>,
 }
 
-pub(crate) struct RuntimeHandler<P: Plugin> {
+pub(crate) struct RuntimeHandler<P: Plugin + 'static> {
     config: GameConfig,
     plugin: Option<P>,
     state: Option<GameState>,
 }
 
-impl<P: Plugin> RuntimeHandler<P> {
+impl<P: Plugin + 'static> RuntimeHandler<P> {
     pub(crate) fn new(config: GameConfig, plugin: P) -> Self {
         Self {
             config,
@@ -45,7 +48,7 @@ impl<P: Plugin> RuntimeHandler<P> {
     }
 }
 
-impl<P: Plugin> AppHandler for RuntimeHandler<P> {
+impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
     fn on_init(&mut self, ctx: &mut AppContext) {
         let engine = EngineContext::new(ctx.device().clone(), &self.config.mounts);
         // First boot: register the game's types, then populate the initial scene.
@@ -62,6 +65,11 @@ impl<P: Plugin> AppHandler for RuntimeHandler<P> {
 
         let blit = PresentBlit::new(ctx.device(), ctx.surface_format());
         let window_input = app.window_input();
+
+        // Collect plugin for lifecycle callbacks (on_stop, on_unload).
+        // Host-owned registry to enforce drop order.
+        let plugins = vec![Box::new(plugin) as Box<dyn crate::Plugin>];
+
         self.state = Some(GameState {
             _engine: engine,
             app,
@@ -70,6 +78,7 @@ impl<P: Plugin> AppHandler for RuntimeHandler<P> {
             blit,
             target_size: (0, 0),
             color_format: ctx.surface_format(),
+            plugins,
         });
     }
 
@@ -82,6 +91,39 @@ impl<P: Plugin> AppHandler for RuntimeHandler<P> {
             input.window_width = ctx.width() as f32;
             input.window_height = ctx.height() as f32;
         }
+
+        // Phase 2: Plugin Stop cleanup (before transition applies).
+        // Check if a Stop transition is pending; if so, run all plugins' on_stop
+        // callbacks while the game world is still live.
+        let should_stop = {
+            let world = state.app.world();
+            if world.has_resource::<redlilium_ecs::PlayControl>() {
+                world
+                    .resource::<redlilium_ecs::PlayControl>()
+                    .pending()
+                    == Some(redlilium_ecs::PlayState::Stopped)
+            } else {
+                false
+            }
+        };
+
+        if should_stop {
+            for plugin in &state.plugins {
+                // Catch panics in plugin cleanup; one plugin's error shouldn't
+                // block others from running their cleanup.
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    plugin.on_stop(&mut state.app)
+                })) {
+                    Ok(()) => {}
+                    Err(_payload) => {
+                        log::error!("plugin.on_stop panicked; continuing to next plugin");
+                        // Payload is dropped here, inside the closure's scope, before
+                        // any unwinding might propagate.
+                    }
+                }
+            }
+        }
+
         let (world, schedules) = state.app.parts_mut();
         schedules.run_frame(world, &state.runner, ctx.delta_time() as f64);
         true
