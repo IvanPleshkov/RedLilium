@@ -246,6 +246,12 @@ impl PlayControl {
 fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
     let transition = PlayModeTransition { from, to };
 
+    // Validate hierarchy BEFORE any mutations, event dispatch, or hook dispatch.
+    // This ensures if validation fails, the world is in a clean pre-transition state.
+    if to == PlayState::Playing {
+        validate_no_game_under_editor(world);
+    }
+
     // Emit transition event for PlayModeAware subscribers.
     if !world.has_resource::<crate::Events<PlayModeTransition>>() {
         world.add_event::<PlayModeTransition>();
@@ -269,12 +275,19 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
     if to == PlayState::Playing {
         // Only capture snapshot on initial Play (from Stopped).
         // On Resume (from Paused), keep the original snapshot so Stop can restore
-        // pre-pause edits. Check if this is first play or a resume by checking
-        // if snapshot already exists.
-        let is_first_play = !world.has_resource::<PlaySnapshot>();
+        // pre-pause edits.
+        let is_first_play = from == PlayState::Stopped;
 
         if is_first_play {
             let snapshot = world.serialize_world().ok();
+            if snapshot.is_none() {
+                log::error!("Failed to capture world snapshot at Play transition — aborting Play");
+                // Revert the state transition: put it back to Stopped
+                if world.has_resource::<PlayControl>() {
+                    world.resource_mut::<PlayControl>().current = PlayState::Stopped;
+                }
+                return; // Veto the transition
+            }
             world.insert_resource(PlaySnapshot(snapshot));
             log::debug!("Play: captured initial snapshot");
 
@@ -286,7 +299,11 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
                  (pre-pause edits will be restored on Stop)"
             );
         }
-        world.resource_mut::<crate::GameTime>().reset();
+
+        // Only reset GameTime on initial Play (from Stopped), not on Resume (from Paused)
+        if is_first_play {
+            world.resource_mut::<crate::GameTime>().reset();
+        }
 
         // Activate game schedules now that we're transitioning to Playing — game
         // systems run, editor-only systems (grid, gizmos) gate off (#67).
@@ -300,9 +317,6 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
                 .resource_mut::<crate::Schedules>()
                 .reset_game_schedule_last_runs(0);
         }
-
-        // Validate: forbid game entities (non-EDITOR) parented under EditorOnly parents.
-        validate_no_game_under_editor(world);
 
         // Hide all root editor-only entities (and their children recursively) at Play transition.
         // Only hide those without an editor parent to avoid double-processing.
@@ -464,6 +478,15 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
         // Clear any panic state when stopping.
         if world.has_resource::<PlayControl>() {
             world.resource_mut::<PlayControl>().clear_panic();
+        }
+
+        // Remove snapshot and play_start_tick to prevent stale resources from affecting
+        // subsequent Play→Stop cycles (prevents data-loss bug: second session reusing first snapshot).
+        if world.has_resource::<PlaySnapshot>() {
+            world.remove_resource::<PlaySnapshot>();
+        }
+        if world.has_resource::<PlayStartTick>() {
+            world.remove_resource::<PlayStartTick>();
         }
     }
 }
@@ -1479,5 +1502,143 @@ mod tests {
 
         // Both should be handled (completed one was already done, pending one was cancelled)
         assert_eq!(pool.pending_count(), 0);
+    }
+
+    #[test]
+    fn two_play_stop_cycles_snapshot_freshness() {
+        use crate::Component;
+
+        #[derive(Component, Debug, Clone, Copy, PartialEq)]
+        struct Counter(u32);
+
+        let mut world = World::new();
+        world.register_component::<Counter>();
+        world.insert_resource(PlayControl::default());
+        world.insert_resource(PlayModeAwareRegistry::default());
+        world.insert_resource(crate::GameTime::default());
+
+        // Create entity with counter before first play
+        let entity = world.spawn();
+        world.insert(entity, Counter(1)).unwrap();
+        world.advance_tick();
+
+        let mut system = ManagePlayModeTransitions;
+
+        // --- FIRST PLAY/STOP CYCLE ---
+
+        // Transition to Playing (session 1)
+        let mut control = world.resource_mut::<PlayControl>();
+        control.play();
+        drop(control);
+        system.run(&mut world).unwrap();
+        let play_start_tick_1 = world.resource::<PlayStartTick>().0;
+
+        // Verify snapshot was captured
+        assert!(world.has_resource::<PlaySnapshot>());
+        assert!(
+            world.resource::<PlaySnapshot>().0.is_some(),
+            "First play should capture snapshot"
+        );
+
+        // Transition to Stopped without editing (snapshot restore not needed yet)
+        let mut control = world.resource_mut::<PlayControl>();
+        control.stop();
+        drop(control);
+        system.run(&mut world).unwrap();
+
+        // Verify snapshot and play_start_tick were cleared (B1 fix)
+        assert!(
+            !world.has_resource::<PlaySnapshot>(),
+            "Snapshot should be removed after Stop to prevent stale data"
+        );
+        assert!(
+            !world.has_resource::<PlayStartTick>(),
+            "PlayStartTick should be removed after Stop"
+        );
+
+        // --- SECOND PLAY/STOP CYCLE (tests B1 fix) ---
+        world.advance_tick();
+
+        // User edits entity in edit mode between sessions
+        world.insert(entity, Counter(200)).unwrap();
+        world.advance_tick();
+
+        // Transition to Playing (session 2)
+        let mut control = world.resource_mut::<PlayControl>();
+        control.play();
+        drop(control);
+        system.run(&mut world).unwrap();
+        let play_start_tick_2 = world.resource::<PlayStartTick>().0;
+
+        // Verify snapshot is fresh (different from first session)
+        assert!(
+            play_start_tick_2 != play_start_tick_1,
+            "Second Play should have different play_start_tick than first"
+        );
+
+        // Verify entity has fresh value from edit mode (not stale value from first play)
+        let counter_at_play_2 = world.get::<Counter>(entity).unwrap().0;
+        assert_eq!(
+            counter_at_play_2, 200,
+            "Second Play should see fresh snapshot with value 200, not stale value from first session"
+        );
+
+        // Transition to Stopped
+        let mut control = world.resource_mut::<PlayControl>();
+        control.stop();
+        drop(control);
+        system.run(&mut world).unwrap();
+
+        // Verify stale resources were again cleared
+        assert!(
+            !world.has_resource::<PlaySnapshot>(),
+            "Snapshot should be removed after second Stop"
+        );
+        assert!(
+            !world.has_resource::<PlayStartTick>(),
+            "PlayStartTick should be removed after second Stop"
+        );
+    }
+
+    #[test]
+    fn game_time_not_reset_on_resume() {
+        use crate::GameTime;
+
+        let mut world = World::new();
+        world.insert_resource(PlayControl::default());
+        world.insert_resource(PlayModeAwareRegistry::default());
+        world.insert_resource(GameTime::new());
+
+        let mut system = ManagePlayModeTransitions;
+
+        // Transition to Playing
+        let mut control = world.resource_mut::<PlayControl>();
+        control.play();
+        drop(control);
+        system.run(&mut world).unwrap();
+
+        // Simulate some game time passing
+        world.resource_mut::<GameTime>().tick(0.016, 1.0);
+        let elapsed_after_play = world.resource::<GameTime>().elapsed();
+        assert!(elapsed_after_play > 0.0);
+
+        // Transition to Paused
+        let mut control = world.resource_mut::<PlayControl>();
+        control.pause();
+        drop(control);
+        system.run(&mut world).unwrap();
+
+        // Transition back to Playing (Resume)
+        let mut control = world.resource_mut::<PlayControl>();
+        control.resume();
+        drop(control);
+        system.run(&mut world).unwrap();
+
+        // Verify GameTime.elapsed() was NOT reset on Resume (B2 fix)
+        let elapsed_after_resume = world.resource::<GameTime>().elapsed();
+        assert_eq!(
+            elapsed_after_resume, elapsed_after_play,
+            "GameTime.elapsed() should NOT be reset on Resume; should preserve pause time"
+        );
     }
 }
