@@ -4363,6 +4363,7 @@ dependencies = [
  "redlilium-ecs",
  "redlilium-graphics",
  "redlilium-runtime",
+ "serde",
  "ureq",
  "wasm-bindgen",
  "wasm-bindgen-futures",

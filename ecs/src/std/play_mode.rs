@@ -514,6 +514,16 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
             }
         }
 
+        // Restore SnapshotResource'ов (Score, RNG state, etc.) to pre-play values.
+        if let Some(snapshot) = world
+            .has_resource::<PlaySnapshot>()
+            .then(|| world.resource::<PlaySnapshot>().0.clone())
+            .flatten()
+        {
+            let _ = world.restore_snapshot_resources(&snapshot.resources)
+                .inspect_err(|e| log::warn!("Failed to restore snapshot resources: {}", e));
+        }
+
         // Deactivate game schedules — editor-only systems (grid, gizmos) gate
         // back on (#67).
         world.insert_resource(crate::GameActive(false));

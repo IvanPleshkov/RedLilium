@@ -15,6 +15,9 @@
 //! warm-restart-reload it (#45).
 #![recursion_limit = "256"]
 
+pub mod resources;
+pub mod systems;
+
 use std::f32::consts::{FRAC_PI_4, TAU};
 
 use redlilium_assets::Guid;
