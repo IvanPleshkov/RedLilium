@@ -520,7 +520,8 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
             .then(|| world.resource::<PlaySnapshot>().0.clone())
             .flatten()
         {
-            let _ = world.restore_snapshot_resources(&snapshot.resources)
+            let _ = world
+                .restore_snapshot_resources(&snapshot.resources)
                 .inspect_err(|e| log::warn!("Failed to restore snapshot resources: {}", e));
         }
 

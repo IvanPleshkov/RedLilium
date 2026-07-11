@@ -41,10 +41,7 @@ impl System for GameObserverSystem {
                             log::info!("Game resumed from pause");
                         }
                         (_, PlayState::Stopped) => {
-                            log::info!(
-                                "Game stopped (transition from {:?})",
-                                transition.from
-                            );
+                            log::info!("Game stopped (transition from {:?})", transition.from);
                         }
                         _ => {}
                     }
