@@ -8,6 +8,7 @@ use super::components::Parent;
 use super::hierarchy::{hide_in_play, show_in_play};
 use crate::{Entity, PlayModeAware, SystemError, World};
 use redlilium_core::compute::CancellationToken;
+use std::any::TypeId;
 use std::collections::BTreeMap;
 
 /// Validates that no game entities (non-EDITOR) are parented under editor-only entities.
@@ -83,12 +84,17 @@ pub enum PlayState {
     Paused,
 }
 
-type PlayModeHookHandler = std::sync::Arc<dyn Fn(&mut World, PlayModeTransition) + Send + Sync>;
+type PlayModeHookFn = std::sync::Arc<dyn Fn(&mut World, PlayModeTransition) + Send + Sync>;
+
+struct PlayModeHookHandler {
+    type_id: TypeId,
+    handler: PlayModeHookFn,
+}
 
 /// Registry of PlayModeAware resources, in registration order (for deterministic hook dispatch).
 ///
 /// Insert this into the world to enable PlayModeAware lifecycle hook dispatch.
-/// Resources that implement PlayModeAware should be registered via [`register_play_mode_aware`].
+/// Resources that implement PlayModeAware should be registered via [`insert_play_mode_aware`].
 pub struct PlayModeAwareRegistry {
     handlers: Vec<PlayModeHookHandler>,
 }
@@ -103,9 +109,20 @@ impl PlayModeAwareRegistry {
 
     /// Register a PlayModeAware resource type. Must be called for each PlayModeAware resource
     /// type **after** inserting it into the world for the hooks to be dispatched.
+    ///
+    /// This is idempotent: calling register twice on the same type is a no-op (uses TypeId for dedup).
+    /// Prefer `world.insert_play_mode_aware::<T>()` to combine insert+register atomically.
     pub fn register<T: PlayModeAware + 'static>(&mut self) {
-        self.handlers.push(std::sync::Arc::new(
-            |world: &mut World, transition: PlayModeTransition| {
+        let type_id = TypeId::of::<T>();
+
+        // Idempotent: don't push if already registered
+        if self.handlers.iter().any(|h| h.type_id == type_id) {
+            return;
+        }
+
+        self.handlers.push(PlayModeHookHandler {
+            type_id,
+            handler: std::sync::Arc::new(|world: &mut World, transition: PlayModeTransition| {
                 if !world.has_resource::<T>() {
                     return;
                 }
@@ -120,14 +137,37 @@ impl PlayModeAwareRegistry {
 
                 let mut resource = world.resource_mut::<T>();
                 hook(&mut *resource);
-            },
-        ));
+            }),
+        });
     }
 }
 
 impl Default for PlayModeAwareRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Extension trait for World to support PlayModeAware resource insertion.
+pub trait PlayModeAwareExt {
+    /// Insert a PlayModeAware resource and ensure its hooks are registered.
+    ///
+    /// This combines insert + register atomically, preventing silent registration failures.
+    /// Safe to call multiple times (idempotent via TypeId dedup).
+    fn insert_play_mode_aware<T: PlayModeAware + 'static>(&mut self, resource: T);
+}
+
+impl PlayModeAwareExt for World {
+    fn insert_play_mode_aware<T: PlayModeAware + 'static>(&mut self, resource: T) {
+        self.insert_resource(resource);
+
+        // Get-or-insert registry
+        if !self.has_resource::<PlayModeAwareRegistry>() {
+            self.insert_resource(PlayModeAwareRegistry::new());
+        }
+
+        // Register (now idempotent via TypeId check in register method)
+        self.resource_mut::<PlayModeAwareRegistry>().register::<T>();
     }
 }
 
@@ -261,14 +301,17 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
         .send(transition);
 
     // Dispatch PlayModeAware lifecycle hooks (if registry exists).
-    let handlers = if world.has_resource::<PlayModeAwareRegistry>() {
-        world.resource::<PlayModeAwareRegistry>().handlers.clone()
-    } else {
-        Vec::new()
-    };
-    // Registry borrow is now dropped; we can call handlers with mutable world access.
-    for handler in handlers {
-        handler(world, transition);
+    if world.has_resource::<PlayModeAwareRegistry>() {
+        let handlers: Vec<_> = world
+            .resource::<PlayModeAwareRegistry>()
+            .handlers
+            .iter()
+            .map(|h| h.handler.clone())
+            .collect();
+        // Registry borrow is now dropped; we can call handlers with mutable world access.
+        for handler in handlers {
+            handler(world, transition);
+        }
     }
 
     // Capture snapshot and play_start_tick when transitioning to Playing.
@@ -1639,6 +1682,54 @@ mod tests {
         assert_eq!(
             elapsed_after_resume, elapsed_after_play,
             "GameTime.elapsed() should NOT be reset on Resume; should preserve pause time"
+        );
+    }
+
+    #[test]
+    fn register_is_idempotent_via_type_id_dedup() {
+        // Test Phase 1: register() is now idempotent (TypeId dedup prevents double-push)
+
+        #[derive(Clone)]
+        struct TestResource;
+
+        impl PlayModeAware for TestResource {}
+
+        let mut registry = PlayModeAwareRegistry::new();
+
+        // First register
+        registry.register::<TestResource>();
+        assert_eq!(
+            registry.handlers.len(),
+            1,
+            "First register should add 1 handler"
+        );
+
+        // Second register should be no-op (TypeId dedup)
+        registry.register::<TestResource>();
+        assert_eq!(
+            registry.handlers.len(),
+            1,
+            "Duplicate register should be no-op due to TypeId check"
+        );
+
+        // Register different type
+        #[derive(Clone)]
+        struct OtherResource;
+        impl PlayModeAware for OtherResource {}
+
+        registry.register::<OtherResource>();
+        assert_eq!(
+            registry.handlers.len(),
+            2,
+            "Different type should add new handler"
+        );
+
+        // Register OtherResource again - should still be no-op
+        registry.register::<OtherResource>();
+        assert_eq!(
+            registry.handlers.len(),
+            2,
+            "Second OtherResource register should be no-op"
         );
     }
 }
