@@ -8,6 +8,12 @@
 //! needed (that changes with a second queue — see #47). Cross-frame CPU/GPU
 //! overlap is provided by the frames-in-flight machinery in the pipeline.
 //!
+//! Dependency edges between the frame's graphs are still **derived
+//! automatically** from their declared resource usage (the `deps` module,
+//! #47 phase 3): today they are observability (submission order already
+//! provides them), with multi-queue they become the source of cross-queue
+//! waits. There is deliberately no manual dependency API.
+//!
 //! # Architecture
 //!
 //! `FrameSchedule` is the middle layer of the rendering architecture:
@@ -48,8 +54,10 @@
 //! pipeline.end_frame(schedule);
 //! ```
 
+mod deps;
 mod sync;
 
+use deps::GraphUsage;
 pub use sync::{Fence, FenceStatus};
 
 use std::sync::Arc;
@@ -123,6 +131,16 @@ pub struct FrameSchedule {
     /// The graphs executed this frame, kept for recycling in end_frame. Their
     /// `Arc` references keep GPU resources alive until the slot's fence wait.
     submitted_graphs: Vec<RenderGraph>,
+    /// Aggregated resource usage of each submitted graph, index-aligned with
+    /// `submitted_graphs`/`fences` (empty usage for graphs that failed to
+    /// compile). Source data for cross-graph dependency derivation.
+    submitted_usages: Vec<GraphUsage>,
+    /// Dependency edges `(from, to)` derived from overlapping resource usage:
+    /// the `to` submit accesses a resource the earlier `from` submit wrote
+    /// (or writes one it read). On the single graphics queue these are
+    /// satisfied by submission order and change nothing at runtime; phase 4
+    /// of #47 turns cross-queue edges into timeline-semaphore waits.
+    derived_edges: Vec<(SubmitHandle, SubmitHandle)>,
     /// Whether a swapchain-writing graph has already been submitted this
     /// frame. The acquire/present semaphore pair exists once per frame, so a
     /// second swapchain writer would silently miss synchronization.
@@ -156,6 +174,8 @@ impl FrameSchedule {
             ring_buffer,
             graph_pool,
             submitted_graphs: Vec::new(),
+            submitted_usages: Vec::new(),
+            derived_edges: Vec::new(),
             swapchain_writer_submitted: false,
         }
     }
@@ -301,10 +321,15 @@ impl FrameSchedule {
         #[cfg(debug_assertions)]
         debug_assert_pipeline_state_matches_targets(&graph);
 
+        // Aggregated usage of this graph, for cross-graph dependency
+        // derivation (empty if compilation fails — no GPU work, no edges).
+        let mut usage = GraphUsage::default();
+
         match graph.compile(RenderGraphCompilationMode::Strict) {
             Ok(_) => {
                 profile_scope!("execute_graph");
                 let compiled = graph.compiled().unwrap();
+                usage = GraphUsage::from_compiled(compiled);
                 let backend = self.device.instance().backend();
                 if let Err(e) = backend.execute_graph(&graph, compiled, fence.gpu_fence()) {
                     log::error!("Failed to execute frame graph: {e}");
@@ -317,10 +342,34 @@ impl FrameSchedule {
             }
         }
 
+        // Derive dependency edges against every earlier submit of this frame.
+        // On the single graphics queue the edges are already satisfied by
+        // submission order; phase 4 of #47 turns cross-queue edges into
+        // timeline waits here.
+        for (index, prev) in self.submitted_usages.iter().enumerate() {
+            if prev.conflicts_with(&usage) {
+                self.derived_edges.push((SubmitHandle { index }, handle));
+            }
+        }
+        self.submitted_usages.push(usage);
+
         // Keep the graph for recycling at end of frame.
         self.submitted_graphs.push(graph);
         self.fences.push(fence);
         handle
+    }
+
+    /// Dependency edges `(from, to)` derived this frame from overlapping
+    /// resource usage: the `to` submit reads or overwrites something the
+    /// earlier `from` submit wrote (or writes something it read).
+    ///
+    /// Derivation is fully automatic — there is no way to declare an edge by
+    /// hand (#47 design decision). On the single graphics queue every edge is
+    /// satisfied by submission order, so this is currently observability for
+    /// tests and diagnostics; with a second queue (#47 phase 4) cross-queue
+    /// edges become timeline-semaphore waits.
+    pub fn derived_dependencies(&self) -> &[(SubmitHandle, SubmitHandle)] {
+        &self.derived_edges
     }
 
     /// Submit the graph for execution — equivalent to [`submit`](Self::submit).
@@ -574,5 +623,107 @@ mod tests {
     fn take_fences_without_submit_panics() {
         let mut schedule = make_test_schedule();
         schedule.take_fences(); // Panics
+    }
+
+    /// A graph with a single whole-buffer copy pass (`src` read, `dst` write).
+    fn make_copy_graph(
+        name: &str,
+        src: std::sync::Arc<crate::resources::Buffer>,
+        dst: std::sync::Arc<crate::resources::Buffer>,
+    ) -> RenderGraph {
+        use crate::graph::{TransferConfig, TransferOperation, TransferPass};
+
+        let mut pass = TransferPass::new(name.into());
+        pass.set_transfer_config(
+            TransferConfig::new().with_operation(TransferOperation::copy_buffer_whole(src, dst)),
+        );
+        let mut graph = RenderGraph::new();
+        graph.add_transfer_pass(pass);
+        graph
+    }
+
+    fn make_test_buffer(
+        device: &Arc<crate::device::GraphicsDevice>,
+    ) -> std::sync::Arc<crate::resources::Buffer> {
+        use crate::types::{BufferDescriptor, BufferUsage};
+        device
+            .create_buffer(&BufferDescriptor::new(
+                256,
+                BufferUsage::COPY_SRC | BufferUsage::COPY_DST,
+            ))
+            .unwrap()
+    }
+
+    #[test]
+    fn derives_edge_from_cross_graph_hazard() {
+        let instance = GraphicsInstance::new().unwrap();
+        let device = instance.create_device().unwrap();
+        let mut schedule = FrameSchedule::new(Arc::clone(&device), 0, None, Vec::new());
+
+        let x = make_test_buffer(&device);
+        let y = make_test_buffer(&device);
+        let z = make_test_buffer(&device);
+
+        // Graph A writes Y (copy X -> Y); graph B reads Y (copy Y -> Z): RAW.
+        let a = schedule.submit(make_copy_graph("a", x, Arc::clone(&y)));
+        let b = schedule.submit(make_copy_graph("b", y, z));
+
+        assert_eq!(schedule.derived_dependencies(), &[(a, b)]);
+        schedule.take_fences();
+    }
+
+    #[test]
+    fn no_edge_between_disjoint_graphs() {
+        let instance = GraphicsInstance::new().unwrap();
+        let device = instance.create_device().unwrap();
+        let mut schedule = FrameSchedule::new(Arc::clone(&device), 0, None, Vec::new());
+
+        let a_src = make_test_buffer(&device);
+        let a_dst = make_test_buffer(&device);
+        let b_src = make_test_buffer(&device);
+        let b_dst = make_test_buffer(&device);
+
+        schedule.submit(make_copy_graph("a", a_src, a_dst));
+        schedule.submit(make_copy_graph("b", b_src, b_dst));
+
+        assert!(schedule.derived_dependencies().is_empty());
+        schedule.take_fences();
+    }
+
+    #[test]
+    fn shared_read_only_source_derives_no_edge() {
+        let instance = GraphicsInstance::new().unwrap();
+        let device = instance.create_device().unwrap();
+        let mut schedule = FrameSchedule::new(Arc::clone(&device), 0, None, Vec::new());
+
+        // Both graphs read the same source (read-after-read): no hazard.
+        let src = make_test_buffer(&device);
+        let a_dst = make_test_buffer(&device);
+        let b_dst = make_test_buffer(&device);
+
+        schedule.submit(make_copy_graph("a", Arc::clone(&src), a_dst));
+        schedule.submit(make_copy_graph("b", src, b_dst));
+
+        assert!(schedule.derived_dependencies().is_empty());
+        schedule.take_fences();
+    }
+
+    #[test]
+    fn edges_derive_against_every_earlier_conflicting_submit() {
+        let instance = GraphicsInstance::new().unwrap();
+        let device = instance.create_device().unwrap();
+        let mut schedule = FrameSchedule::new(Arc::clone(&device), 0, None, Vec::new());
+
+        let x = make_test_buffer(&device);
+        let y = make_test_buffer(&device);
+        let z = make_test_buffer(&device);
+
+        // A writes Y; B writes Y (WAW with A); C reads Y (RAW with A and B).
+        let a = schedule.submit(make_copy_graph("a", Arc::clone(&x), Arc::clone(&y)));
+        let b = schedule.submit(make_copy_graph("b", x, Arc::clone(&y)));
+        let c = schedule.submit(make_copy_graph("c", y, z));
+
+        assert_eq!(schedule.derived_dependencies(), &[(a, b), (a, c), (b, c)]);
+        schedule.take_fences();
     }
 }
