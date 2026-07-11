@@ -211,6 +211,23 @@ impl Default for Time {
 }
 
 // ---------------------------------------------------------------------------
+// GameActive resource
+// ---------------------------------------------------------------------------
+
+/// World-visible mirror of [`Schedules::is_game_active`] (#67).
+///
+/// `Schedules` is driven **externally** (the app owns it and calls
+/// [`run_frame`](Schedules::run_frame)), so it is not a world resource and
+/// systems cannot read its `game_active` flag directly. `run_frame` publishes
+/// this resource each frame (from the field, before any schedule runs) and reads
+/// it back afterwards, so play-mode systems can flip it — see
+/// [`GameActiveCondition`](crate::system::condition::GameActiveCondition) /
+/// [`NotGameActiveCondition`](crate::system::condition::NotGameActiveCondition),
+/// which gate game vs. editor systems on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GameActive(pub bool);
+
+// ---------------------------------------------------------------------------
 // State checker (type-erased)
 // ---------------------------------------------------------------------------
 
@@ -462,6 +479,12 @@ impl Schedules {
             time.fixed_delta = self.fixed_timestep;
         }
 
+        // Publish game_active into the world so run conditions can read it (#67).
+        // PreUpdate play-mode transitions may flip it below; FixedUpdate and the
+        // gated conditions then observe the change this same frame, and it is
+        // synced back to the field at the end of run_frame.
+        world.insert_resource(GameActive(self.game_active));
+
         // 2. Swap reactive trigger buffers and advance event queues exactly
         //    once per frame. Doing this per runner.run would make Triggers<M>
         //    visibility and Events<T> lifetime depend on how many schedules
@@ -480,10 +503,12 @@ impl Schedules {
         // 4. Check state transitions and run OnExit / OnEnter
         self.run_state_transitions(world, runner);
 
-        // 5. FixedUpdate accumulator (only if game_active). Debt is clamped so a
-        //    long stall runs at most `max_fixed_steps` catch-up iterations
-        //    instead of spiraling (each over-budget frame adding more debt than it retires).
-        if self.game_active {
+        // 5. FixedUpdate accumulator (only if game_active). Read the world mirror
+        //    so a PreUpdate play-mode transition (above) takes effect this frame.
+        //    Debt is clamped so a long stall runs at most `max_fixed_steps`
+        //    catch-up iterations instead of spiraling (each over-budget frame
+        //    adding more debt than it retires).
+        if world.resource::<GameActive>().0 {
             self.fixed_accumulator += delta_time;
             let max_debt = self.fixed_timestep * self.max_fixed_steps as f64;
             if self.fixed_accumulator > max_debt {
@@ -558,6 +583,11 @@ impl Schedules {
                 error!("System error in PostUpdate: {}", err);
             }
         }
+
+        // Sync the world mirror back to the field so a play-mode transition this
+        // frame persists (the field seeds next frame's publish, and external
+        // readers / tests see it via `is_game_active`).
+        self.game_active = world.resource::<GameActive>().0;
 
         // 8. Advance the change-detection tick. Systems already get their own
         //    per-run ticks inside the runner; this bump is for out-of-band

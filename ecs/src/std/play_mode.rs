@@ -288,13 +288,17 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
         }
         world.resource_mut::<crate::GameTime>().reset();
 
-        // Reset game schedules' last_run to 0 so first Update sees all components as changed.
-        // This ensures proper change detection after snapshot restore.
+        // Activate game schedules now that we're transitioning to Playing — game
+        // systems run, editor-only systems (grid, gizmos) gate off (#67).
+        world.insert_resource(crate::GameActive(true));
+        // Resetting game schedules' last_run to 0 (so the first Update after a
+        // snapshot restore sees every component as changed) needs the externally
+        // driven `Schedules` struct, which is not a world resource in the app —
+        // a remaining #67 gap; harmless no-op until Schedules is world-hosted.
         if world.has_resource::<crate::Schedules>() {
-            let mut schedules = world.resource_mut::<crate::Schedules>();
-            schedules.reset_game_schedule_last_runs(0);
-            // Activate game schedules now that we're transitioning to Playing.
-            schedules.set_game_active(true);
+            world
+                .resource_mut::<crate::Schedules>()
+                .reset_game_schedule_last_runs(0);
         }
 
         // Validate: forbid game entities (non-EDITOR) parented under EditorOnly parents.
@@ -445,11 +449,16 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
             }
         }
 
-        // Deactivate game schedules and reset accumulator to prevent catch-up burst on next Play.
+        // Deactivate game schedules — editor-only systems (grid, gizmos) gate
+        // back on (#67).
+        world.insert_resource(crate::GameActive(false));
+        // Resetting the fixed-timestep accumulator (to avoid a catch-up burst on
+        // the next Play) needs the externally driven `Schedules` struct, not a
+        // world resource — a remaining #67 gap; harmless no-op until hosted.
         if world.has_resource::<crate::Schedules>() {
-            let mut schedules = world.resource_mut::<crate::Schedules>();
-            schedules.set_game_active(false);
-            schedules.reset_fixed_accumulator();
+            world
+                .resource_mut::<crate::Schedules>()
+                .reset_fixed_accumulator();
         }
 
         // Clear any panic state when stopping.
