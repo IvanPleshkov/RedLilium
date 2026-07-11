@@ -636,6 +636,14 @@ impl World {
     ///
     /// Use this in side-table invalidation predicates (e.g., physics bodies, asset residents)
     /// to ensure they stay in sync with default query visibility.
+    ///
+    /// # Editor UI and Hidden Entities
+    ///
+    /// Editor entities are hidden during Play (HIDDEN_IN_PLAY flag set) and unhidden
+    /// during Pause/Stop. Normal inspector queries automatically see the correct state:
+    /// during Play, hidden entities aren't accessible; during Pause, they're visible.
+    /// Future: if direct inspection of hidden entities is needed, use `_unfiltered`
+    /// query accessors (not yet exposed in public API).
     pub fn is_excluded_from_game(&self, entity: Entity) -> bool {
         let flags = self.get_entity_flags(entity);
         flags & Entity::DEFAULT_GAME_QUERY_EXCLUDE_MASK != 0

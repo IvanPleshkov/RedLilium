@@ -65,6 +65,32 @@ Key design decisions:
 - **Sparse set storage**: Simple, fast enough for thousands of entities, easy to implement
 - **Priority scheduling**: Critical (must finish this frame), High (should finish), Low (fills gaps)
 
+#### Entity Visibility and Query Filtering
+
+RedLilium uses flag-based exclusion masks to control which entities are visible to queries in different contexts:
+
+**Entity flags** (bit fields on Entity struct):
+- **DISABLED** (bit 0): Entity is manually disabled; children marked INHERITED_DISABLED (bit 1)
+- **STATIC** (bit 2): Entity is static (rarely-changing); children marked INHERITED_STATIC (bit 3)
+- **EDITOR** (bit 4): Entity is editor-only (grid, gizmos, camera); children marked INHERITED_EDITOR (bit 5)
+- **HIDDEN_IN_PLAY** (bit 6): Entity is hidden during Play mode; children marked INHERITED_HIDDEN_IN_PLAY (bit 7)
+
+**Query visibility**:
+- **Default game queries** (Read<T>, Write<T>, Ref<T>, RefMut<T>): Exclude `DISABLED | STATIC | EDITOR | HIDDEN_IN_PLAY`
+  - Used by game systems to ensure they only see game entities
+- **Infrastructure queries** (ReadAll<T>, WriteAll<T>): Exclude only `DISABLED | HIDDEN_IN_PLAY`
+  - Used by engine systems (transforms, asset loading, rendering) that must see editor and static entities
+- **Unfiltered queries** (`_unfiltered` accessors): No automatic exclusion
+  - Used by editor UI and special inspection code
+
+**Play state transitions manage visibility**:
+- **At Play**: Editor entities receive HIDDEN_IN_PLAY flag (hidden)
+- **At Pause**: Editor entities have HIDDEN_IN_PLAY cleared (shown, allowing inspection)
+- **At Resume**: Flag remains cleared (game resumes, editor entities stay visible during pause)
+- **At Stop**: All flags and state restored from snapshot
+
+For details on the design rationale, see [ADR-026: Default Query Masks and Entity Visibility](DECISIONS.md#adr-026-default-query-masks-and-entity-visibility).
+
 ### redlilium-graphics
 
 Custom rendering engine built around an abstract render graph:

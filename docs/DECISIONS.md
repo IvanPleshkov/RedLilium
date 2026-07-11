@@ -1296,3 +1296,72 @@ Implement single-flag activation model with run conditions to gate systems:
 - ✅ Backward compatible: standalone runtime defaults `game_active=true`, needs no changes
 - ⚠️ Run conditions must be applied correctly; systems added without conditions during Pause may freeze
 - ⚠️ TypeId-based schedule identity doesn't cross dylib boundary — must be resolved before #45 ships plugins
+
+---
+
+## ADR-026: Default Query Masks and Entity Visibility
+
+**Date**: 2026-07-10
+**Status**: Accepted
+
+### Context
+
+Entity visibility (enabled/disabled, editor-only, hidden during play) must be correctly enforced across:
+- Query iteration (Ref<T>, Read<T>, Write<T>)
+- Point lookups (get(), contains())
+- Side-table invalidation (physics bodies, asset residents)
+- Editor inspection during different play states
+
+Without systematic enforcement, queries and side-table checks diverge: a system might miss an entity that should be excluded, leading to stale references or incorrect state.
+
+### Decision
+
+Use flag-based exclusion masks in the query guard layer:
+
+**Default exclude masks:**
+- `DEFAULT_GAME_QUERY_EXCLUDE_MASK = DISABLED | STATIC | EDITOR | HIDDEN_IN_PLAY`
+  - Used by Ref, RefMut, Read, Write for normal system queries
+  - Excludes entities not relevant to game logic
+  
+- `INFRASTRUCTURE_QUERY_EXCLUDE_MASK = DISABLED | HIDDEN_IN_PLAY`
+  - Used by ReadAll, WriteAll for engine-wide readers (asset systems, transforms, rendering)
+  - Allows static and editor entities (but not hidden-in-play) to remain visible
+
+**Query filtering:**
+- Point lookups (get, contains) respect the mask of their accessor type
+- Iteration automatically filters via mask in query guards
+- Mask is checked per entity with `entity_flags & mask`
+
+**Side-table synchronization:**
+- Systems using side-tables (physics bodies, asset residents) must validate entries against the same mask as the query that populated them
+- Added `World::is_excluded_from_game(entity)` helper to check the default game mask
+- Invalidation predicates use this helper: `.filter(|e| !world.is_excluded_from_game(*e))`
+
+**Entity visibility matrix during different play states:**
+
+| State | Disabled | Static | Editor | HiddenInPlay | Visible |
+|-------|----------|--------|--------|--------------|---------|
+| Stopped | ✗ | ✓ | ✓ | ✗ | Normal query sees: enabled, static, editor, not-hidden |
+| Playing | ✗ | ✗ | ✗ | ✗ | Normal query sees: game entities only; ReadAll sees: static, editor |
+| Paused | ✗ | ✗ | ✗ | ✓ | Normal query sees: game entities; editor entities shown via flag clear |
+
+Note: At Play transition, editor entities receive HIDDEN_IN_PLAY flag (set); at Pause, flag clears (show).
+
+### Consequences
+
+- ✅ Query visibility is systematic and enforced at guard layer
+- ✅ Side-table invalidation stays in sync with queries (physics bodies don't outlive hidden entities)
+- ✅ Mask-based filtering crosses dylib boundary (u32 flags are ABI-stable, unlike TypeId)
+- ✅ Editor UI remains responsive: during Play, hidden entities aren't visible (correct); during Pause, editor entities are shown again
+- ✅ Infrastructure systems (transforms, assets) continue during Pause, independent of game visibility
+- ✅ Game plugins automatically inherit mask filtering (no special handling needed)
+- ⚠️ Mask is unconditional: never add `game_active` conditional inside query iteration (factoring is: flags are rewritten by state transitions, masks are constant)
+- ⚠️ Future expansions: entity bits 0–15 reserved for engine; 16+ available for plugins
+- ⚠️ Editor UI requiring direct inspection of hidden entities would need `_unfiltered` query accessors (not yet exposed publicly; future enhancement)
+
+### Related Issues
+
+- #67: Schedule separation (complements this decision)
+- #63: Entity classification and default filters (depends on this)
+- #45: Plugin loading (masks enable safe ABI-stable visibility)
+
