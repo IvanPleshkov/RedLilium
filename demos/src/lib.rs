@@ -62,6 +62,22 @@ impl System for SpinSystem {
     }
 }
 
+/// Panics exactly once, on its first run — raised inside the game cdylib's
+/// image. Enabled by `REDLILIUM_DEMO_PANIC=1`; the reload harness uses it to
+/// verify cross-image panic containment (#57). Subsequent frames run clean.
+#[derive(Default)]
+pub struct PanicOnce(std::sync::atomic::AtomicBool);
+
+impl System for PanicOnce {
+    type Result = ();
+    fn run<'a>(&'a self, _ctx: &'a SystemContext<'a>) -> Result<(), redlilium_ecs::SystemError> {
+        if !self.0.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            panic!("deliberate game-module panic (#57 containment verification)");
+        }
+        Ok(())
+    }
+}
+
 /// The demo game plugin: a ring of spinning cubes, a ground plane, a sphere,
 /// and a free-fly camera. `build` registers types/systems; `spawn_scene`
 /// populates the initial scene (skipped on reload — the scene comes from a
@@ -70,8 +86,18 @@ pub struct SpinDemo;
 
 impl Plugin for SpinDemo {
     fn build(&self, app: &mut App) {
+        // Routed through the host's logger via the load-time handoff (#56);
+        // without it this line would vanish into the cdylib's own
+        // never-initialized `log` static. The reload harness asserts it.
+        log::info!("SpinDemo::build (game log via host logger handoff)");
         app.register_component::<Spin>();
         app.add_system::<Update, _>(SpinSystem);
+        // #57 verification hook: an env-gated system that panics (once)
+        // *inside this cdylib's image*, so the reload harness can prove the
+        // host's per-system catch_unwind contains a cross-image panic.
+        if std::env::var("REDLILIUM_DEMO_PANIC").is_ok() {
+            app.add_system::<Update, _>(PanicOnce::default());
+        }
         // Viewport navigation: the std free-fly camera, ordered before the
         // transform propagation the runtime installed.
         app.add_system::<PostUpdate, _>(UpdateFreeFlyCamera);

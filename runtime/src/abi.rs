@@ -267,15 +267,18 @@ impl GameModule {
     ///   tables → lost wakeups / deadlock under contention. **Mitigated by #45
     ///   Track 1:** the ECS uses [`crate::sync`] instead, which forwards to
     ///   `std::sync` (cross-image safe by construction).
-    /// - **Split panic bookkeeping.** A panic raised in the cdylib image and
-    ///   caught here (the `catch_unwind` below, or any unwind through host
-    ///   frames) touches two libstd panic counters → `thread::panicking()` can
-    ///   misreport afterward. **Verification (#57):** System panics are wrapped
-    ///   in `catch_unwind` by the multi-threaded runner (see
-    ///   `ecs/src/runner/multi/mod.rs`), converting a game system panic into
-    ///   `SystemError::Panicked` without terminating the host. The cross-image
-    ///   panic-counter duplication does not cause host termination or abort
-    ///   under normal play-mode operation.
+    /// - **Cross-image panics are NOT catchable.** **Verified empirically
+    ///   (#57, reload harness):** a panic raised inside the cdylib image
+    ///   **aborts the host** when it reaches a host-side `catch_unwind`:
+    ///   libstd stamps every panic payload with the address of a per-image
+    ///   canary static, a catch in the other image detects the mismatch, and
+    ///   std deliberately aborts with "Rust cannot catch foreign exceptions".
+    ///   The runners' per-system `catch_unwind` therefore contains only
+    ///   *same-image* panics (statically linked plugins, host systems); the
+    ///   editor's panic→pause quarantine does not protect dylib game code
+    ///   today. The fix direction is an in-image catch shim monomorphized
+    ///   into the game image (follow-up issue); until it lands the harness
+    ///   pins the abort behavior as a regression check.
     #[cfg(not(target_arch = "wasm32"))]
     pub unsafe fn load(path: impl AsRef<std::ffi::OsStr>) -> Result<Self, GameModuleError> {
         unsafe {
