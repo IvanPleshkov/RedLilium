@@ -110,42 +110,37 @@ fn main() {
     let _ = std::fs::remove_file(&fresh_path);
     println!("OK: warm reload preserved the scene");
 
-    // --- #57: cross-image panic behavior (verified via a subprocess) ---
-    // EMPIRICAL FINDING: a panic raised inside the game cdylib's image CANNOT
-    // be caught by the host's catch_unwind. Each image embeds its own libstd;
-    // std stamps every panic payload with the address of a per-image canary
-    // static, and a catch in the *other* image detects the mismatch and
-    // deliberately aborts: "Rust cannot catch foreign exceptions". So the
-    // runner's per-system containment holds only for same-image panics; a
-    // game-cdylib panic today terminates the host (see abi.rs docs and the
-    // in-image-shield follow-up issue).
-    //
-    // The child process runs the panic phase and must abort with exactly that
-    // diagnostic — pinning the current behavior so the follow-up fix flips
-    // this assertion to "exit 0, panic contained".
+    // --- #57/#84: cross-image panic containment (verified via a subprocess) ---
+    // A panic raised inside the game cdylib cannot cross into a host-side
+    // catch_unwind (per-image libstd canary → "Rust cannot catch foreign
+    // exceptions" abort). The in-image shield (#84) catches it in the
+    // blanket `Dyn*System::run_boxed` impls — monomorphized into the game
+    // image — and hands the host a plain `Err(SystemError::Panicked)`. The
+    // child process runs the panic phase and must now exit cleanly; before
+    // the shield this same child died with the foreign-exception abort.
     let child = std::process::Command::new(std::env::current_exe().expect("self path"))
         .arg(&path)
         .arg("--panic-child")
         .output()
         .expect("spawn panic-phase child");
+    let stdout = String::from_utf8_lossy(&child.stdout);
     let stderr = String::from_utf8_lossy(&child.stderr);
     assert!(
-        !child.status.success(),
-        "cross-image panic is expected to abort the host today (see #57); \
-         if this now exits cleanly, the in-image shield landed — flip this check"
+        child.status.success(),
+        "the in-image shield (#84) must contain a game-cdylib panic; child died:\n{stderr}"
     );
     assert!(
-        stderr.contains("cannot catch foreign exceptions"),
-        "expected the std foreign-exception abort, got:\n{stderr}"
+        stdout.contains("panic-child: contained"),
+        "child must reach the clean-exit path, got:\n{stdout}"
     );
-    println!("OK: cross-image panic behavior pinned (abort, not containment) (#57)");
+    println!("OK: game-cdylib panic contained by the in-image shield (#57/#84)");
 
     println!("OK: all harness phases passed");
 }
 
-/// The #57 panic phase, run in a child process (it aborts today, by std
-/// design — see main). Boots the module with `REDLILIUM_DEMO_PANIC=1` so the
-/// game's `PanicOnce` system panics inside the cdylib image on frame 1.
+/// The #57/#84 panic phase, run in a child process. Boots the module with
+/// `REDLILIUM_DEMO_PANIC=1` so the game's `PanicOnce` system panics inside
+/// the cdylib image on frame 1; the in-image shield must contain it.
 fn run_panic_child(path: &str, engine: &EngineContext) -> ! {
     // SAFETY: single-threaded at this point — no concurrent env access.
     unsafe { std::env::set_var("REDLILIUM_DEMO_PANIC", "1") };
@@ -155,12 +150,12 @@ fn run_panic_child(path: &str, engine: &EngineContext) -> ! {
     let (mut world, mut schedules) = app3.into_parts();
 
     let runner = EcsRunner::multi_thread(2);
-    // PanicOnce fires inside the cdylib image here. Today this aborts the
-    // process before the calls below run; once the in-image shield lands it
-    // will be contained and the clean-exit path takes over.
+    // PanicOnce fires inside the cdylib image here; the in-image shield
+    // (#84) converts it to SystemError::Panicked before it can cross the
+    // boundary as an unwind.
     schedules.run_frame(&mut world, &runner, 1.0 / 60.0);
 
-    // Containment path (future): next frame clean, host bookkeeping sane.
+    // Containment: next frame clean, host bookkeeping sane.
     schedules.run_frame(&mut world, &runner, 1.0 / 60.0);
     assert!(!std::thread::panicking());
     drop(world);

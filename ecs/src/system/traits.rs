@@ -154,7 +154,18 @@ impl<S: System> DynSystem for S {
         &'a self,
         ctx: &'a SystemContext<'a>,
     ) -> Result<Box<dyn Any + Send + Sync>, SystemError> {
-        let result = self.run(ctx)?;
+        // In-image panic shield (#84). This generic impl monomorphizes into
+        // the crate that registers the system — for a game cdylib's systems
+        // that is the *cdylib's own image*, so the catch below runs against
+        // the same libstd copy that raised the panic. Without it, a panic
+        // crossing into the host's catch_unwind is a "foreign exception" (a
+        // per-image canary static mismatch) and std aborts the process. The
+        // panic crosses the image boundary as a plain `Err` value instead.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run(ctx)))
+            .map_err(|payload| SystemError::Panicked {
+                system: std::any::type_name::<S>().to_string(),
+                message: panic_payload_to_string(&*payload),
+            })??;
         Ok(Box::new(result) as Box<dyn Any + Send + Sync>)
     }
 
@@ -229,7 +240,12 @@ pub(crate) trait DynExclusiveSystem: Send + Sync {
 
 impl<S: ExclusiveSystem> DynExclusiveSystem for S {
     fn run_boxed(&mut self, world: &mut World) -> Result<Box<dyn Any + Send + Sync>, SystemError> {
-        let result = self.run(world)?;
+        // In-image panic shield (#84) — see `DynSystem::run_boxed`.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run(world)))
+            .map_err(|payload| SystemError::Panicked {
+            system: std::any::type_name::<S>().to_string(),
+            message: panic_payload_to_string(&*payload),
+        })??;
         Ok(Box::new(result) as Box<dyn Any + Send + Sync>)
     }
 
@@ -292,7 +308,12 @@ pub(crate) trait DynReadOnlyExclusiveSystem: Send + Sync {
 
 impl<S: ReadOnlyExclusiveSystem> DynReadOnlyExclusiveSystem for S {
     fn run_boxed(&self, world: &World) -> Result<Box<dyn Any + Send + Sync>, SystemError> {
-        let result = self.run(world)?;
+        // In-image panic shield (#84) — see `DynSystem::run_boxed`.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run(world)))
+            .map_err(|payload| SystemError::Panicked {
+            system: std::any::type_name::<S>().to_string(),
+            message: panic_payload_to_string(&*payload),
+        })??;
         Ok(Box::new(result) as Box<dyn Any + Send + Sync>)
     }
 
