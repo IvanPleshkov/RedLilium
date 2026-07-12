@@ -1,0 +1,18 @@
+[package]
+name = "redlilium-gizmo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Interactive transform gizmo for RedLilium Engine"
+
+[dependencies]
+redlilium-core = { path = "../core" }
+# Portable graphics on wasm; native re-enables Vulkan/Slang below.
+redlilium-graphics = { path = "../graphics", default-features = false, features = [
+    "dummy",
+    "wgpu-backend",
+] }
+bytemuck = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+redlilium-graphics = { path = "../graphics" }

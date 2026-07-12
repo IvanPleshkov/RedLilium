@@ -4430,6 +4430,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "redlilium-gizmo"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "redlilium-core",
+ "redlilium-graphics",
+]
+
+[[package]]
 name = "redlilium-graphics"
 version = "0.1.0"
 dependencies = [
