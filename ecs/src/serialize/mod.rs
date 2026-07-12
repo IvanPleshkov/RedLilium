@@ -42,7 +42,8 @@ pub use format::Format;
 #[cfg(feature = "serialize-ron")]
 pub use natural::{find_entity, natural_to_value, parse_entity_spec, value_to_natural};
 pub use prefab_io::{
-    SerializedComponent, SerializedEntity, SerializedPrefab, SerializedResource, SerializedWorld,
+    SchemaHash, SerializedComponent, SerializedEntity, SerializedPrefab, SerializedResource,
+    SerializedWorld, SnapshotMetadata,
 };
 pub use value::Value;
 

@@ -73,6 +73,7 @@ impl World {
         storage.meta = Some(ComponentMeta {
             name: T::NAME,
             schema_version: T::SCHEMA_VERSION,
+            schema_hash: T::schema_hash(),
             has_fn: |world, entity| world.get::<T>(entity).is_some(),
             inspect_fn: |world, entity, ui| {
                 let comp = world.get::<T>(entity)?;
@@ -149,6 +150,7 @@ impl World {
         storage.meta = Some(ComponentMeta {
             name: T::NAME,
             schema_version: T::SCHEMA_VERSION,
+            schema_hash: T::schema_hash(),
             has_fn: |world, entity| world.get::<T>(entity).is_some(),
             inspect_fn: |world, entity, ui| {
                 let comp = world.get::<T>(entity)?;

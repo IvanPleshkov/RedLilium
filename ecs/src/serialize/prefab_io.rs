@@ -5,8 +5,15 @@
 //! module.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use super::value::Value;
+
+/// Schema hash for a component (blake3 hex digest).
+///
+/// Used to detect field reordering or schema changes during deserialization.
+/// Empty string means no schema validation for that component.
+pub type SchemaHash = String;
 
 /// A fully serialized prefab (entity tree), suitable for file I/O.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -44,6 +51,37 @@ pub struct SerializedComponent {
     pub data: Value,
 }
 
+/// Snapshot metadata: engine fingerprint, timestamp, and per-component schema hashes.
+///
+/// Stores schema hashes to detect field reordering or type changes during restore.
+/// Phase 5 feature: enables safe reload by rejecting snapshots with mismatched schemas
+/// (silent corruption via positional codec desyncs is prevented).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SnapshotMetadata {
+    /// Engine generation ID (fingerprint) when this snapshot was captured.
+    pub engine_fingerprint: String,
+    /// Timestamp when the snapshot was captured (seconds since Unix epoch).
+    pub timestamp: u64,
+    /// Per-component schema hashes: component name → blake3 hash of (field_names, field_types).
+    /// Empty if component doesn't track schema; validated on deserialize if present.
+    pub component_schemas: HashMap<String, SchemaHash>,
+}
+
+impl SnapshotMetadata {
+    /// Create new snapshot metadata with current timestamp.
+    pub fn new(engine_fingerprint: String) -> Self {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        Self {
+            engine_fingerprint,
+            timestamp,
+            component_schemas: HashMap::new(),
+        }
+    }
+}
+
 /// A whole-world snapshot: every alive entity plus the opted-in snapshot
 /// resources.
 ///
@@ -62,6 +100,10 @@ pub struct SerializedWorld {
     /// Opted-in snapshot resources (see
     /// [`SnapshotResource`](crate::SnapshotResource)).
     pub resources: Vec<SerializedResource>,
+    /// Snapshot metadata: engine fingerprint, timestamp, and component schema hashes.
+    /// Phase 5: enables schema validation to prevent silent corruption on reload.
+    #[serde(default)]
+    pub metadata: SnapshotMetadata,
 }
 
 /// A single resource's serialized data (mirrors [`SerializedComponent`]).

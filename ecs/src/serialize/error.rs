@@ -79,6 +79,13 @@ pub enum DeserializeError {
         index: u32,
         spawn_tick: u64,
     },
+    /// Phase 5: Component schema hash mismatch detected (field reordering or type change).
+    /// The snapshot was captured with a different component layout than the current code.
+    SchemaMismatch {
+        component: String,
+        expected: String, // current schema hash
+        found: String,    // snapshot schema hash
+    },
 }
 
 impl fmt::Display for DeserializeError {
@@ -119,6 +126,18 @@ impl fmt::Display for DeserializeError {
                     f,
                     "entity reference in field '{field}' ({index}@{spawn_tick}) points outside \
                      the deserialized set and cannot be remapped"
+                )
+            }
+            Self::SchemaMismatch {
+                component,
+                expected,
+                found,
+            } => {
+                write!(
+                    f,
+                    "schema mismatch for component '{component}': expected hash {expected}, \
+                     found {found}. Component fields may have been reordered or modified. \
+                     Re-capture snapshot or reload plugin."
                 )
             }
         }

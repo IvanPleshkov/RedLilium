@@ -129,6 +129,10 @@ pub(crate) struct ComponentMeta {
     pub name: &'static str,
     /// The schema version of this component type (from `Component::SCHEMA_VERSION`).
     pub schema_version: u32,
+    /// The deterministic schema hash (from `Component::schema_hash()`).
+    /// Phase 5: used to detect field reordering or type changes during restore.
+    /// Empty string means no schema validation for this component.
+    pub schema_hash: String,
     /// Check if an entity has this component.
     pub has_fn: fn(&World, Entity) -> bool,
     /// Render the component's inspector UI with an immutable world reference.

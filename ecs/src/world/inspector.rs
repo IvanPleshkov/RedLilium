@@ -598,9 +598,29 @@ impl World {
         // 4. Capture opted-in snapshot resources.
         let resources = self.capture_snapshot_resources()?;
 
+        // 5. Phase 5: Build schema metadata (component hashes for validation on restore).
+        let mut component_schemas = std::collections::HashMap::new();
+        for meta in self.iter_meta() {
+            if !meta.schema_hash.is_empty() {
+                component_schemas.insert(meta.name.to_string(), meta.schema_hash.clone());
+            }
+        }
+        // Phase 5: TODO - track actual engine fingerprint for reload validation
+        // For now, use empty string; will be populated when generation_registry API is exposed
+        let engine_fingerprint = String::new();
+        let metadata = crate::serialize::SnapshotMetadata {
+            engine_fingerprint,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            component_schemas,
+        };
+
         Ok(crate::serialize::SerializedWorld {
             entities: serialized_entities,
             resources,
+            metadata,
         })
     }
 

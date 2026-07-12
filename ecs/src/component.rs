@@ -137,6 +137,19 @@ pub trait Component: Clone + Send + Sync + 'static {
         None
     }
 
+    /// Compute a deterministic schema hash for this component type.
+    ///
+    /// Phase 5 feature: used to detect field reordering or type changes during
+    /// snapshot restore. The hash should be computed from the component's field
+    /// names and types (e.g., blake3("translation:Vec3|rotation:Quat|scale:Vec3")).
+    ///
+    /// The default implementation returns an empty string (no schema validation).
+    /// Components that implement serialization should override this to return
+    /// a hash of their field structure, enabling safe reload detection.
+    fn schema_hash() -> String {
+        String::new()
+    }
+
     /// Serialize this component's fields into a [`Value`](crate::serialize::Value).
     ///
     /// The `#[derive(Component)]` macro generates this automatically using
