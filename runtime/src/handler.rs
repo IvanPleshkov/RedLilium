@@ -6,8 +6,8 @@ use redlilium_ecs::sync::RwLock;
 
 use redlilium_app::{AppContext, AppHandler, DrawContext, input::map_winit_key};
 use redlilium_ecs::{
-    Camera, CameraOutput, CameraTarget, EcsRunner, MainViewport, Render, RenderSchedule, ScenePass,
-    WindowInput, World,
+    Camera, CameraOutput, CameraTarget, EcsRunner, MainViewport, OutputFormat, Render,
+    RenderSchedule, ScenePass, WindowInput, World,
 };
 use redlilium_graphics::FrameSchedule;
 use winit::event::{KeyEvent, MouseButton};
@@ -23,6 +23,8 @@ struct GameState {
     runner: EcsRunner,
     window_input: Arc<RwLock<WindowInput>>,
     blit: PresentBlit,
+    /// Primary-camera output format, derived from the surface's color space.
+    output_format: OutputFormat,
     /// Plugin module: owns plugin(s) + dylib library handle.
     /// Field order is load-bearing: app drops first, module drops last.
     /// This ensures plugin drop glue runs while dylib is still mapped (ADR-020, #45).
@@ -74,6 +76,7 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
             runner,
             window_input,
             blit,
+            output_format: OutputFormat::matching_surface(ctx.surface_format()),
             module,
         });
     }
@@ -135,7 +138,7 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
         let clear = self.config.clear_color;
         let (world, schedules) = state.app.parts_mut();
 
-        ensure_camera_output(world, width, height, clear);
+        ensure_camera_output(world, width, height, clear, state.output_format);
 
         // Render bracket: hand the frame graph to the ECS `Render` schedule,
         // take it back, then composite the scene onto the swapchain.
@@ -292,7 +295,13 @@ impl<P: Plugin + 'static> RuntimeHandler<P> {
 /// camera a `CameraOutput::screen()` spec when the game didn't author one.
 /// The GPU textures themselves are created by the `EnsureCameraTargets`
 /// system inside the Render schedule — no host-side texture management.
-fn ensure_camera_output(world: &mut World, width: u32, height: u32, clear_color: [f32; 4]) {
+fn ensure_camera_output(
+    world: &mut World,
+    width: u32,
+    height: u32,
+    clear_color: [f32; 4],
+    format: OutputFormat,
+) {
     world.insert_resource(MainViewport::new(width.max(1), height.max(1)));
 
     let camera = {
@@ -308,7 +317,12 @@ fn ensure_camera_output(world: &mut World, width: u32, height: u32, clear_color:
         return;
     };
     if world.get::<CameraOutput>(camera).is_none() {
-        let _ = world.insert(camera, CameraOutput::screen().with_clear_color(clear_color));
+        let _ = world.insert(
+            camera,
+            CameraOutput::screen()
+                .with_clear_color(clear_color)
+                .with_format(format),
+        );
     }
 }
 
@@ -351,6 +365,7 @@ mod tests {
                 runner,
                 window_input,
                 blit,
+                output_format: OutputFormat::default(),
                 module,
             }),
         }

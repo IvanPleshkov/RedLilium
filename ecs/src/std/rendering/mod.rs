@@ -47,7 +47,7 @@ pub use asset_drag::{AssetDragPayload, asset_drop_target};
 pub use asset_inspect::{NewAssetSpec, new_asset_spec};
 pub use asset_inspect::{inspect_asset_settings, reference_accepted_kind};
 pub use components::{
-    CameraOutput, CameraTarget, CameraTargetSpec, MeshRenderer, Primitive, SizePolicy,
+    CameraOutput, CameraTarget, CameraTargetSpec, MeshRenderer, OutputFormat, Primitive, SizePolicy,
 };
 #[cfg(feature = "rendering")]
 pub use loaders::{

@@ -41,8 +41,8 @@ pub struct ScenePass(pub Option<PassHandle>);
 /// ([`TextureManager::publish_virtual`]) so materials can sample them.
 ///
 /// Cameras **without** `CameraOutput` are untouched — their targets stay
-/// host-managed (the editor's scene view). Runs as an exclusive barrier (it
-/// inserts components), ordered before [`ForwardRender`].
+/// host-managed. Runs as an exclusive barrier (it inserts components),
+/// ordered before [`ForwardRender`].
 #[derive(Default)]
 pub struct EnsureCameraTargets;
 
@@ -66,6 +66,7 @@ impl ExclusiveSystem for EnsureCameraTargets {
                 width: u32,
                 height: u32,
                 clear: [f32; 4],
+                format: TextureFormat,
                 publish: Option<redlilium_assets::Guid>,
             },
             /// Textures are fine; only the clear color changed.
@@ -107,10 +108,13 @@ impl ExclusiveSystem for EnsureCameraTargets {
                     SizePolicy::Fixed(w, h) => (w, h),
                 };
                 let (width, height) = (width.max(1), height.max(1));
+                let format = out.format.color_format();
 
                 match world.get::<CameraTarget>(entity) {
                     Some(target)
-                        if target.color.width() == width && target.color.height() == height =>
+                        if target.color.width() == width
+                            && target.color.height() == height
+                            && target.color.format() == format =>
                     {
                         if target.clear_color != out.clear_color {
                             work.push(Work::Reclear {
@@ -124,6 +128,7 @@ impl ExclusiveSystem for EnsureCameraTargets {
                         width,
                         height,
                         clear: out.clear_color,
+                        format,
                         publish,
                     }),
                 }
@@ -149,6 +154,7 @@ impl ExclusiveSystem for EnsureCameraTargets {
                     width,
                     height,
                     clear,
+                    format,
                     publish,
                 } => {
                     // Engine-standard formats (see CameraOutput docs). The
@@ -160,7 +166,7 @@ impl ExclusiveSystem for EnsureCameraTargets {
                         &TextureDescriptor::new_2d(
                             width,
                             height,
-                            TextureFormat::Rgba8Unorm,
+                            format,
                             TextureUsage::RENDER_ATTACHMENT
                                 | TextureUsage::TEXTURE_BINDING
                                 | TextureUsage::COPY_SRC,

@@ -13,7 +13,8 @@
 //!   system whenever it disagrees with the spec.
 //!
 //! Cameras **without** `CameraOutput` are left alone — their `CameraTarget`
-//! (if any) is host-managed (the editor's scene view does this today).
+//! (if any) is host-managed; every in-tree camera (runtime primary, editor
+//! scene view) now authors a spec.
 
 use redlilium_assets::Guid;
 
@@ -48,18 +49,59 @@ pub enum CameraTargetSpec {
     },
 }
 
+/// Color format of a camera's output — a small *curated* set (the authored
+/// choices that exist), deliberately not a mirror of
+/// [`TextureFormat`](redlilium_graphics::TextureFormat) (which carries no
+/// serde, and most of which makes no sense as a camera output). Same approach
+/// as shader variant axes (#6): serialize the intent, map to graphics types
+/// at the edge. Depth is always `Depth32Float`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum OutputFormat {
+    /// Linear 8-bit (`Rgba8Unorm`).
+    #[default]
+    Standard,
+    /// sRGB-encoded 8-bit (`Bgra8UnormSrgb`) — for outputs displayed 1:1 on
+    /// an sRGB surface (the editor's scene panel, the runtime blit).
+    Srgb,
+    /// Linear half-float (`Rgba16Float`) — HDR chains.
+    Hdr,
+}
+
+impl OutputFormat {
+    /// The graphics color format this output renders into.
+    pub fn color_format(self) -> redlilium_graphics::TextureFormat {
+        use redlilium_graphics::TextureFormat;
+        match self {
+            Self::Standard => TextureFormat::Rgba8Unorm,
+            Self::Srgb => TextureFormat::Bgra8UnormSrgb,
+            Self::Hdr => TextureFormat::Rgba16Float,
+        }
+    }
+
+    /// The output that matches a surface's color space — hosts derive the
+    /// primary camera's format from the swapchain so the scene is stored in
+    /// the space the compositor expects.
+    pub fn matching_surface(surface: redlilium_graphics::TextureFormat) -> Self {
+        if surface.is_hdr() {
+            Self::Hdr
+        } else if surface.is_srgb() {
+            Self::Srgb
+        } else {
+            Self::Standard
+        }
+    }
+}
+
 /// Serializable camera output spec — see the module docs. Attach next to a
 /// [`Camera`](crate::Camera) to opt the entity into system-managed targets.
-///
-/// Formats are engine-standard for now (`Rgba8Unorm` color +
-/// `Depth32Float` depth); a per-camera format choice is a future extension
-/// with its own trade-offs (serialization of formats, HDR chains).
-#[derive(Debug, Clone, crate::Component)]
+#[derive(Debug, Clone, PartialEq, crate::Component)]
 pub struct CameraOutput {
     /// What surface to render to.
     pub target: CameraTargetSpec,
     /// Clear color (RGBA) applied at the start of the camera's pass.
     pub clear_color: [f32; 4],
+    /// Color format of the target (depth is always `Depth32Float`).
+    pub format: OutputFormat,
 }
 
 impl Default for CameraOutput {
@@ -74,6 +116,7 @@ impl CameraOutput {
         Self {
             target: CameraTargetSpec::Screen,
             clear_color: [0.0, 0.0, 0.0, 1.0],
+            format: OutputFormat::Standard,
         }
     }
 
@@ -83,12 +126,19 @@ impl CameraOutput {
         Self {
             target: CameraTargetSpec::Offscreen { size, output },
             clear_color: [0.0, 0.0, 0.0, 1.0],
+            format: OutputFormat::Standard,
         }
     }
 
     /// Set the clear color.
     pub fn with_clear_color(mut self, clear_color: [f32; 4]) -> Self {
         self.clear_color = clear_color;
+        self
+    }
+
+    /// Set the output color format.
+    pub fn with_format(mut self, format: OutputFormat) -> Self {
+        self.format = format;
         self
     }
 }

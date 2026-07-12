@@ -965,21 +965,28 @@ impl AppHandler for Editor {
         // ForwardRender system renders into this frame's CameraTarget with the
         // meshes already uploaded.
 
-        // Size the off-screen scene target to the SceneView panel (last frame's
-        // physical rect) and make sure egui has a texture id for this frame's
-        // image. The scene pass below fills this texture; egui samples it (the
-        // egui pass depends on the scene pass).
+        // Sync the scene camera's CameraOutput spec to the SceneView panel
+        // (last frame's physical rect); the GPU target is derived by the
+        // EnsureCameraTargets system inside the Render schedule (ADR-029).
+        // The egui image id points at the current derived texture — on the
+        // very first frame (no target yet) the panel simply shows next frame,
+        // and a resize shows the previous-size texture for one frame (the
+        // panel-rect feedback already lags a frame the same way).
         if let (Some(scene_view), Some(ew)) = (self.scene_view.as_mut(), self.world.as_mut()) {
             let (w, h) = self
                 .scene_view_rect_phys
                 .map_or((256, 256), |[_, _, w, h]| (w as u32, h as u32));
-            let color = scene_view.ensure_camera_target(&mut ew.world, ew.editor_camera, w, h);
-            // The `ensure_camera_target` mutable-world borrow has ended; access the
-            // egui controller resource to (re)register the scene texture.
-            let mut egui = ew.world.resource_mut::<EguiController>();
-            match self.scene_texture_id {
-                Some(id) => egui.update_user_texture(id, color),
-                None => self.scene_texture_id = Some(egui.register_user_texture(color)),
+            scene_view.sync_camera_output(&mut ew.world, ew.editor_camera, w, h);
+            let color = ew
+                .world
+                .get::<redlilium_ecs::CameraTarget>(ew.editor_camera)
+                .map(|t| t.color.clone());
+            if let Some(color) = color {
+                let mut egui = ew.world.resource_mut::<EguiController>();
+                match self.scene_texture_id {
+                    Some(id) => egui.update_user_texture(id, color),
+                    None => self.scene_texture_id = Some(egui.register_user_texture(color)),
+                }
             }
         }
 

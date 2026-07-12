@@ -413,6 +413,11 @@ pub fn build_editor_schedules(egui: bool) -> Schedules {
     // debug pass reads the forward pass handle through system_result).
     schedules.get_mut::<Render>().add(FlushUploads);
     schedules.get_mut::<Render>().add(AssetGpuFlush);
+    // Derives the scene camera's CameraTarget from its CameraOutput spec
+    // (ADR-029) before the forward pass consumes it.
+    schedules
+        .get_mut::<Render>()
+        .add_exclusive(redlilium_ecs::EnsureCameraTargets);
     schedules.get_mut::<Render>().add(ForwardRender::default());
     schedules.get_mut::<Render>().add(DebugRender);
     // Both FlushUploads and AssetGpuFlush use raw RenderSchedule access, so
@@ -431,6 +436,10 @@ pub fn build_editor_schedules(egui: bool) -> Schedules {
         .get_mut::<Render>()
         .add_edge::<AssetGpuFlush, ForwardRender>()
         .expect("AssetGpuFlush -> ForwardRender edge");
+    schedules
+        .get_mut::<Render>()
+        .add_edge::<redlilium_ecs::EnsureCameraTargets, ForwardRender>()
+        .expect("EnsureCameraTargets -> ForwardRender edge");
     schedules
         .get_mut::<Render>()
         .add_edge::<ForwardRender, DebugRender>()
