@@ -1477,3 +1477,133 @@ Preserving edits requires tracking which components changed during Pause vs pre-
 - #45: Plugin loading (hooks + events replace hand-rolled plugin initialization)
 - #70: Snapshot reliability (restore tests cover round-trip fidelity)
 
+
+---
+
+## ADR-027: Device Capability Model — Tier Ladder for Renderer Architecture, Capabilities for Orthogonal Axes
+
+**Date**: 2026-07-12
+**Status**: Accepted
+
+### Context
+
+Device and instance creation hardcoded desktop-dev-machine assumptions (#38):
+features and extensions enabled without querying support, unclamped
+anisotropy/sample counts, an engine-level `DeviceCapabilities` that was made up
+rather than queried, no headless/Wayland path, no API-version negotiation.
+Beyond fixing the hardcodes, the engine needs a durable answer to "how does
+renderer code decide what to run on this GPU?" — advanced features (bindless,
+ray tracing, mesh shaders) are planned, and a flat pile of boolean feature
+flags combinatorially explodes the paths that must be authored and tested.
+
+### Decision
+
+A two-axis model, mirroring what D3D12 (feature levels + `CheckFeatureSupport`),
+Metal (GPU families + queries), Unreal (SM tiers + `GRHISupports*`), and
+Vulkan Profiles all converged on:
+
+1. **`DeviceTier` — an ordered ladder naming renderer architectures.** Each
+   tier includes everything below it. A feature belongs in a tier **only if
+   the renderer has a distinct code path built on it** (bindless material
+   binding, GPU-driven submission, ray-traced lighting). The device's tier is
+   detected once at device creation; devices below `Baseline` fail creation
+   with a named-feature error. A new tier may be added **only together with
+   the render path that stands on it** — a tier without a consumer is
+   premature hardware classification.
+
+2. **`DeviceCapabilities` — orthogonal queried facts.** Everything whose
+   consequence is a clamp or a local fallback of a single pipeline/asset
+   choice: max anisotropy, supported sample counts, size limits, wireframe
+   support, async compute availability. Filled honestly from adapter queries
+   by every backend (including Dummy, which reports what it pretends to
+   support); read-only outside the backend. Use-sites clamp/validate against
+   it — no downstream hardcodes.
+
+**Litmus test**: "different render path" → tier; "clamp or local fallback" →
+capability. Texture compression formats are neither — they are an asset-bake
+axis (BC on desktop, ASTC/ETC2 on mobile/web); runtime only answers "is this
+format supported".
+
+There is deliberately **no user-facing feature-request API** (wgpu-style
+requested features): all rendering flows through the render graph, the engine
+knows its own requirements, and capabilities are exposed read-only — the same
+philosophy as #47's "no manual sync mode".
+
+### Consequences
+
+- ✅ Bounded test matrix: N tiers of render paths instead of 2^k flag combos
+- ✅ Missing optional features degrade (wireframe off, anisotropy clamped)
+  instead of failing `vkCreateDevice`
+- ✅ Engine-level validation agrees with what the backend actually granted
+- ✅ Ladder is ready for bindless/RT tiers without restructuring
+- ⚠️ `Baseline` is the only tier until a second render path exists; the enum
+  carries one variant for now
+- ⚠️ Tier detection must stay in sync with each tier's actual feature set —
+  centralized per backend in one place
+
+### Related Issues
+
+- #38: device/instance hardcodes (implementation)
+- #47: async compute queue availability is a capability, not a tier
+
+---
+
+## ADR-028: Adapter Selection — Declared Policy, Stable Identity, Restart Semantics
+
+**Date**: 2026-07-12
+**Status**: Accepted
+
+### Context
+
+The backend commits to one physical device at instance creation, but the
+selection logic was policy-free: hardcoded "discrete beats integrated"
+scoring, no user override, `enumerate_adapters` a stub, and
+`create_device_with_adapter(index)` inviting selection by enumeration index —
+which changes with driver updates, eGPU hotplug, and enumeration order.
+Multi-GPU machines (hybrid laptops, workstations with compute accelerators)
+need a deliberate answer.
+
+### Decision
+
+Adapter choice is a **declared policy, resolved by the backend** — following
+DXGI's `EnumAdapterByGpuPreference` and WebGPU's `request_adapter` rather than
+Vulkan's raw "app enumerates and picks":
+
+- `AdapterPreference { Auto, HighPerformance, LowPower, Explicit(AdapterId) }`
+  on `InstanceParameters`. **`Auto` = `HighPerformance`, always** — no
+  context-dependent defaults (an editor silently choosing a different GPU
+  than the game would make capabilities differ between them). `LowPower` is
+  a deliberate opt-in at graphics initialization.
+- **Selection happens once, at instance creation; changing it requires a
+  restart.** Device handles pervade every resource; live GPU migration is a
+  browser-tier problem we refuse.
+- **Explicit selection is by stable identity** (`AdapterId`: PCI
+  `vendor:device` or name substring), never by index. Settings persist the
+  id; `AdapterInfo::id()` provides it. An explicitly requested adapter that
+  is absent fails loudly — never a silent fallback.
+- **`REDLILIUM_ADAPTER` env var** overrides everything (CI, multi-GPU dev
+  machines, support).
+- Filtering precedes scoring (ADR-027): baseline tier, then presentability —
+  display-less compute accelerators are excluded via the surfaceless
+  platform queries (`vkGetPhysicalDeviceWin32PresentationSupportKHR`; other
+  platforms have no surfaceless query and presume presentable). Scoring:
+  preferred device type always wins, device-local memory as tiebreaker,
+  software renderers never beat hardware.
+- `enumerate_adapters` exists for UI listing (editor settings page), not for
+  selection. On WebGPU there is no enumeration — `Explicit` degrades to a
+  power hint with a warning.
+
+### Consequences
+
+- ✅ Deterministic default: same GPU for editor and game
+- ✅ Persisted choices survive driver updates and hotplug (stable ids)
+- ✅ Compute-only accelerators can no longer win selection and die at the
+  first window (Windows; other platforms rely on compositor routing)
+- ✅ One env var turns any machine into a targeted test box
+- ⚠️ No live adapter switching; settings UI must say "requires restart"
+- ⚠️ No multi-adapter rendering — by the ADR-027 litmus, no mechanism
+  without a consuming render path
+
+### Related Issues
+
+- #38: device/instance hardcodes (XB-L3: adapter enumeration stub)

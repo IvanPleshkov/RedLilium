@@ -73,6 +73,15 @@ use crate::scheduler::{Fence, FrameSchedule};
 use crate::types::BufferUsage;
 use redlilium_core::profiling::{frame_mark, profile_scope};
 
+/// Upper bound on frames in flight, engine-wide.
+///
+/// Backends size fixed per-slot GPU state (command pools, staging) to this
+/// bound, so a [`FramePipeline`] (and a
+/// [`SurfaceConfiguration`](crate::swapchain::SurfaceConfiguration)) must not
+/// exceed it — enforced at creation (VK-M9): one frame too many would recycle
+/// a slot whose command buffers the GPU is still executing.
+pub const MAX_FRAMES_IN_FLIGHT: usize = 3;
+
 /// Manages multiple frames in flight for CPU-GPU parallelism.
 ///
 /// `FramePipeline` coordinates the overlap between CPU frame preparation and
@@ -164,13 +173,20 @@ impl FramePipeline {
     ///
     /// * `device` - The graphics device for executing graphs.
     /// * `frames_in_flight` - Number of frames that can be in flight simultaneously.
-    ///   Typically 2 or 3. Must be at least 1.
+    ///   Typically 2 or 3. Must be in `1..=MAX_FRAMES_IN_FLIGHT`.
     ///
     /// # Panics
     ///
-    /// Panics if `frames_in_flight` is 0.
+    /// Panics if `frames_in_flight` is 0 or exceeds [`MAX_FRAMES_IN_FLIGHT`].
     pub(crate) fn new(device: Arc<GraphicsDevice>, frames_in_flight: usize) -> Self {
         assert!(frames_in_flight > 0, "frames_in_flight must be at least 1");
+        assert!(
+            frames_in_flight <= MAX_FRAMES_IN_FLIGHT,
+            "frames_in_flight ({frames_in_flight}) exceeds MAX_FRAMES_IN_FLIGHT \
+             ({MAX_FRAMES_IN_FLIGHT}): backends size per-slot GPU state (command \
+             pools, staging) to that bound, and an extra in-flight frame would \
+             recycle a slot the GPU is still executing"
+        );
 
         Self {
             device,
@@ -743,6 +759,21 @@ mod tests {
         assert_eq!(pipeline.frames_in_flight(), 2);
         assert_eq!(pipeline.current_slot(), 0);
         assert_eq!(pipeline.frame_count(), 0);
+    }
+
+    /// VK-M9: backends size per-slot GPU state to MAX_FRAMES_IN_FLIGHT — an
+    /// extra in-flight frame would recycle a slot the GPU is still executing,
+    /// so creation must refuse it loudly.
+    #[test]
+    #[should_panic(expected = "exceeds MAX_FRAMES_IN_FLIGHT")]
+    fn test_frames_in_flight_above_max_panics() {
+        let _ = make_test_pipeline(MAX_FRAMES_IN_FLIGHT + 1);
+    }
+
+    #[test]
+    fn test_frames_in_flight_at_max_is_accepted() {
+        let pipeline = make_test_pipeline(MAX_FRAMES_IN_FLIGHT);
+        assert_eq!(pipeline.frames_in_flight(), MAX_FRAMES_IN_FLIGHT);
     }
 
     #[test]

@@ -83,7 +83,7 @@ pub mod swapchain;
 pub mod types;
 
 // Re-export main types for convenience
-pub use device::{DeviceCapabilities, GraphicsDevice};
+pub use device::{DeviceCapabilities, DeviceTier, GraphicsDevice};
 pub use error::GraphicsError;
 pub use graph::{
     BufferCopyRegion, BufferTextureCopyRegion, BufferTextureLayout, ColorAttachment, CompiledGraph,
@@ -94,7 +94,8 @@ pub use graph::{
     resource_usage::{PassResourceUsage, TextureAccessMode, TextureUsageDecl},
 };
 pub use instance::{
-    AdapterInfo, AdapterType, BackendType, GraphicsInstance, InstanceParameters, WgpuBackendType,
+    AdapterId, AdapterInfo, AdapterPreference, AdapterType, BackendType, GraphicsInstance,
+    InstanceParameters, WgpuBackendType,
 };
 pub use materials::{
     BindingGroup, BindingGroupDescriptor, BindingLayout, BindingLayoutEntry, BindingType,
@@ -108,7 +109,7 @@ pub use mesh::{
     VertexAttributeFormat, VertexAttributeSemantic, VertexBufferLayout, VertexLayout,
     VertexStepMode,
 };
-pub use pipeline::FramePipeline;
+pub use pipeline::{FramePipeline, MAX_FRAMES_IN_FLIGHT};
 pub use resize::{ResizeEvent, ResizeManager, ResizeStrategy};
 pub use resources::{Buffer, RingAllocation, RingBuffer, Sampler, Texture};
 pub use scheduler::{Fence, FenceStatus, FrameSchedule, SubmitHandle};

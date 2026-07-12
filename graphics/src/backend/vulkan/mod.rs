@@ -33,7 +33,13 @@ use redlilium_core::profiling::profile_scope;
 use super::{GpuBuffer, GpuFence, GpuSampler, GpuTexture};
 
 /// Maximum number of frames in flight for per-slot resource tracking.
-pub const MAX_FRAMES_IN_FLIGHT: usize = 3;
+///
+/// The engine-wide bound lives in [`crate::pipeline`]; this backend sizes its
+/// per-slot arrays (command pools, staging) to it, which is why exceeding it
+/// is enforced at [`FramePipeline`](crate::pipeline::FramePipeline) creation
+/// (VK-M9) — a fourth in-flight frame would reset a pool whose command
+/// buffers are still executing.
+pub use crate::pipeline::MAX_FRAMES_IN_FLIGHT;
 
 /// Upper bound for every CPU-side GPU wait (fences, swapchain acquire).
 ///
@@ -250,6 +256,14 @@ pub struct VulkanBackend {
     /// `None` is the first-class single-queue mode: everything runs on the
     /// graphics queue exactly as before.
     async_compute: Option<AsyncComputeQueue>,
+    /// Capabilities queried from the selected physical device at creation
+    /// (ADR-027) — the single source of truth downstream clamps against.
+    device_caps: crate::device::DeviceCapabilities,
+    /// Name/vendor/type of the selected physical device.
+    adapter_info: crate::instance::AdapterInfo,
+    /// Whether the instance has surface extensions (false = headless loader;
+    /// surface creation fails early instead of calling null fn pointers).
+    surface_support: bool,
 }
 
 /// The async compute queue and its submission state (#47 phase 4).
@@ -294,17 +308,30 @@ impl VulkanBackend {
         let validation_enabled = params.validation;
 
         // Create instance with validation layers
-        let (instance, debug_messenger, debug_utils) =
-            instance::create_instance(&entry, validation_enabled)?;
+        let created = instance::create_instance(&entry, validation_enabled)?;
+        let instance = created.instance;
+        let debug_messenger = created.debug_messenger;
+        let debug_utils = created.debug_utils;
+        let surface_support = created.surface_support;
 
-        // Select physical device
-        let physical_device = device::select_physical_device(&instance)?;
+        // Select physical device (filter-then-score against the baseline
+        // tier under the adapter preference; a headless instance cannot
+        // require the swapchain extension).
+        let selected =
+            device::select_physical_device(&entry, &instance, surface_support, &params.adapter)?;
+        let physical_device = selected.physical_device;
 
         // Plan queues (graphics + async compute when available) and create
         // the logical device.
         let queue_plan = device::plan_queues(&instance, physical_device)?;
         let graphics_queue_family = queue_plan.graphics_family;
-        let device = device::create_logical_device(&instance, physical_device, &queue_plan)?;
+        let device =
+            device::create_logical_device(&instance, &selected, &queue_plan, surface_support)?;
+
+        // Everything downstream clamps/validates against these (ADR-027).
+        let device_caps = device::device_capabilities(&instance, &selected, &queue_plan);
+        let adapter_info = device::adapter_info(&selected);
+        log::info!("Device capabilities: {device_caps:?}");
 
         let graphics_queue = unsafe { device.get_device_queue(graphics_queue_family, 0) };
 
@@ -425,11 +452,11 @@ impl VulkanBackend {
         // Create pipeline manager for shader compilation and graphics pipelines.
         // Device properties identify the on-disk pipeline cache's owner
         // (vendor/device/cacheUUID header validation).
-        let device_properties = unsafe { instance.get_physical_device_properties(physical_device) };
         let pipeline_manager = pipeline::PipelineManager::new(
             device.clone(),
             depth24_stencil8_format,
-            &device_properties,
+            &selected.properties,
+            device_caps.wireframe,
         )?;
 
         log::info!(
@@ -465,7 +492,26 @@ impl VulkanBackend {
             queue_timeline,
             timeline_next: AtomicU64::new(1),
             async_compute,
+            device_caps,
+            adapter_info,
+            surface_support,
         })
+    }
+
+    /// Capabilities queried at backend creation (ADR-027).
+    pub fn capabilities(&self) -> crate::device::DeviceCapabilities {
+        self.device_caps
+    }
+
+    /// Info about the selected physical device.
+    pub fn adapter_info(&self) -> crate::instance::AdapterInfo {
+        self.adapter_info.clone()
+    }
+
+    /// Whether the instance was created with surface extensions (false on a
+    /// headless loader — offscreen rendering only).
+    pub fn surface_support(&self) -> bool {
+        self.surface_support
     }
 
     /// Queue family indices for CONCURRENT sharing, or `None` when EXCLUSIVE
@@ -767,6 +813,27 @@ impl VulkanBackend {
             ))
         })
     }
+}
+
+/// Validate a requested MSAA sample count against the device's queried
+/// support and convert it to Vulkan flags (VK-M12: an unsupported count is an
+/// error, not a silent downgrade to 1 sample that would break rendering when
+/// the pipeline's sample state disagrees with the attachment's).
+fn sample_count_flags(
+    count: u32,
+    caps: &crate::device::DeviceCapabilities,
+) -> Result<vk::SampleCountFlags, GraphicsError> {
+    if count == 1 {
+        return Ok(vk::SampleCountFlags::TYPE_1);
+    }
+    if !caps.supports_sample_count(count) {
+        return Err(GraphicsError::InvalidParameter(format!(
+            "sample count {count} not supported by this device (supported mask: {:#x})",
+            caps.sample_count_mask
+        )));
+    }
+    // VkSampleCountFlagBits values equal the counts themselves.
+    Ok(vk::SampleCountFlags::from_raw(count))
 }
 
 /// Aspect mask for whole-image operations, derived from the format.
@@ -1165,13 +1232,10 @@ impl VulkanBackend {
             .extent(extent)
             .mip_levels(descriptor.mip_level_count)
             .array_layers(array_layers)
-            .samples(match descriptor.sample_count {
-                1 => vk::SampleCountFlags::TYPE_1,
-                2 => vk::SampleCountFlags::TYPE_2,
-                4 => vk::SampleCountFlags::TYPE_4,
-                8 => vk::SampleCountFlags::TYPE_8,
-                _ => vk::SampleCountFlags::TYPE_1,
-            })
+            .samples(sample_count_flags(
+                descriptor.sample_count,
+                &self.device_caps,
+            )?)
             .tiling(vk::ImageTiling::OPTIMAL)
             .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
@@ -1294,8 +1358,18 @@ impl VulkanBackend {
             .address_mode_v(convert_address_mode(descriptor.address_mode_v))
             .address_mode_w(convert_address_mode(descriptor.address_mode_w))
             .mip_lod_bias(0.0)
-            .anisotropy_enable(descriptor.anisotropy_clamp > 1)
-            .max_anisotropy(descriptor.anisotropy_clamp as f32)
+            // Clamp to the queried device limit; on devices without the
+            // samplerAnisotropy feature the cap is 1 and this disables
+            // anisotropy entirely instead of tripping validation (VK-M12).
+            .anisotropy_enable(
+                descriptor.anisotropy_clamp > 1 && self.device_caps.max_sampler_anisotropy > 1,
+            )
+            .max_anisotropy(
+                descriptor
+                    .anisotropy_clamp
+                    .min(self.device_caps.max_sampler_anisotropy)
+                    .max(1) as f32,
+            )
             .compare_enable(descriptor.compare.is_some())
             .compare_op(
                 descriptor

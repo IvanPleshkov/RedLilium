@@ -27,6 +27,33 @@ impl DummyBackend {
         "Dummy Backend"
     }
 
+    /// What the dummy backend *pretends* to support (ADR-027). It enforces
+    /// none of it — these values exist so engine-level validation behaves
+    /// like a typical desktop device in tests.
+    pub fn capabilities(&self) -> crate::device::DeviceCapabilities {
+        crate::device::DeviceCapabilities {
+            tier: crate::device::DeviceTier::Baseline,
+            max_texture_dimension: 16384,
+            max_buffer_size: 1 << 30, // 1 GB
+            max_sampler_anisotropy: 16,
+            sample_count_mask: 1 | 2 | 4 | 8,
+            wireframe: true,
+            async_compute: false,
+            compute_shaders: true,
+        }
+    }
+
+    /// Adapter info for the dummy backend.
+    pub fn adapter_info(&self) -> crate::instance::AdapterInfo {
+        crate::instance::AdapterInfo {
+            name: "Dummy Adapter".to_string(),
+            vendor: "RedLilium".to_string(),
+            device_type: crate::instance::AdapterType::Software,
+            vendor_id: 0,
+            device_id: 0,
+        }
+    }
+
     /// Create a buffer resource.
     pub fn create_buffer(
         &self,

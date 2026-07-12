@@ -117,6 +117,75 @@ impl WgpuBackendType {
     }
 }
 
+/// Stable identity of an adapter for explicit selection (ADR-028).
+///
+/// Never an enumeration index: indices change with driver updates, eGPU
+/// hotplug, and enumeration order. PCI ids survive all of those; a name
+/// substring is the human-friendly fallback (config files, env override).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdapterId {
+    /// PCI `vendor:device` pair (hex in the textual form, e.g. `1002:744c`).
+    Pci { vendor_id: u32, device_id: u32 },
+    /// Case-insensitive substring of the adapter name (e.g. `radeon`).
+    NameContains(String),
+}
+
+impl AdapterId {
+    /// Parse the textual form used by config values and `REDLILIUM_ADAPTER`:
+    /// `vvvv:dddd` (hex PCI ids) or any other string as a name substring.
+    pub fn parse(s: &str) -> Self {
+        if let Some((v, d)) = s.split_once(':')
+            && let (Ok(vendor_id), Ok(device_id)) = (
+                u32::from_str_radix(v.trim_start_matches("0x"), 16),
+                u32::from_str_radix(d.trim_start_matches("0x"), 16),
+            )
+        {
+            return Self::Pci {
+                vendor_id,
+                device_id,
+            };
+        }
+        Self::NameContains(s.to_string())
+    }
+
+    /// Whether an adapter with these ids/name matches this identity.
+    pub fn matches(&self, vendor_id: u32, device_id: u32, name: &str) -> bool {
+        match self {
+            Self::Pci {
+                vendor_id: v,
+                device_id: d,
+            } => *v == vendor_id && *d == device_id,
+            Self::NameContains(needle) => name.to_lowercase().contains(&needle.to_lowercase()),
+        }
+    }
+}
+
+/// Which adapter to select at instance creation (ADR-028).
+///
+/// A declared *policy*, not an index — the backend resolves it against
+/// whatever the machine actually has. Selection happens once, at instance
+/// creation; changing it requires recreating the instance (in practice: an
+/// application restart), which is the industry-standard contract.
+///
+/// The `REDLILIUM_ADAPTER` environment variable (PCI `vvvv:dddd` or a name
+/// substring) overrides whatever the application configured — for CI,
+/// multi-GPU dev machines, and support scenarios.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum AdapterPreference {
+    /// Same as [`HighPerformance`](Self::HighPerformance) — the default:
+    /// predictable capabilities everywhere, no editor-vs-game GPU split.
+    #[default]
+    Auto,
+    /// Prefer the discrete GPU.
+    HighPerformance,
+    /// Prefer the integrated GPU (battery life over throughput). A deliberate
+    /// opt-in at graphics initialization, never chosen automatically.
+    LowPower,
+    /// Exactly this adapter; instance creation fails loudly if it is absent
+    /// or below the baseline tier (ADR-027).
+    Explicit(AdapterId),
+}
+
 /// Configuration parameters for creating a graphics instance.
 ///
 /// Use the builder pattern to configure the instance:
@@ -140,6 +209,8 @@ pub struct InstanceParameters {
     pub validation: bool,
     /// Enable debug mode (additional logging, debug names).
     pub debug: bool,
+    /// Which adapter to select (ADR-028). Overridden by `REDLILIUM_ADAPTER`.
+    pub adapter: AdapterPreference,
 }
 
 impl InstanceParameters {
@@ -176,6 +247,28 @@ impl InstanceParameters {
         self.debug = debug;
         self
     }
+
+    /// Set the adapter selection policy (ADR-028).
+    pub fn with_adapter_preference(mut self, adapter: AdapterPreference) -> Self {
+        self.adapter = adapter;
+        self
+    }
+
+    /// Apply the `REDLILIUM_ADAPTER` environment override, if set.
+    ///
+    /// Called by instance creation so the override works regardless of how
+    /// the application built its parameters.
+    fn with_env_adapter_override(mut self) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(value) = std::env::var("REDLILIUM_ADAPTER")
+            && !value.is_empty()
+        {
+            let id = AdapterId::parse(&value);
+            log::info!("Adapter override via REDLILIUM_ADAPTER: {value} -> {id:?}");
+            self.adapter = AdapterPreference::Explicit(id);
+        }
+        self
+    }
 }
 
 /// Information about a graphics adapter.
@@ -187,6 +280,25 @@ pub struct AdapterInfo {
     pub vendor: String,
     /// Device type (discrete, integrated, etc.).
     pub device_type: AdapterType,
+    /// PCI vendor id (0 when the backend has none, e.g. dummy).
+    pub vendor_id: u32,
+    /// PCI device id (0 when the backend has none, e.g. dummy).
+    pub device_id: u32,
+}
+
+impl AdapterInfo {
+    /// The stable identity of this adapter for [`AdapterPreference::Explicit`]
+    /// (persist this in settings, not an enumeration index).
+    pub fn id(&self) -> AdapterId {
+        if self.vendor_id != 0 || self.device_id != 0 {
+            AdapterId::Pci {
+                vendor_id: self.vendor_id,
+                device_id: self.device_id,
+            }
+        } else {
+            AdapterId::NameContains(self.name.clone())
+        }
+    }
 }
 
 /// Type of graphics adapter.
@@ -200,6 +312,22 @@ pub enum AdapterType {
     Software,
     /// Unknown adapter type.
     Unknown,
+}
+
+/// Human-readable vendor name for a PCI vendor id, used by backends when
+/// filling [`AdapterInfo`]. Unknown ids format as `vendor 0x….`.
+pub(crate) fn vendor_name(id: u32) -> String {
+    match id {
+        0x1002 => "AMD".to_string(),
+        0x10DE => "NVIDIA".to_string(),
+        0x8086 => "Intel".to_string(),
+        0x106B => "Apple".to_string(),
+        0x13B5 => "ARM".to_string(),
+        0x5143 => "Qualcomm".to_string(),
+        0x1010 => "Imagination".to_string(),
+        0x10005 => "Mesa".to_string(),
+        _ => format!("vendor {id:#06x}"),
+    }
 }
 
 /// The graphics instance manages devices and adapters.
@@ -271,6 +399,7 @@ impl GraphicsInstance {
     /// let instance = GraphicsInstance::with_parameters(params)?;
     /// ```
     pub fn with_parameters(params: InstanceParameters) -> Result<Arc<Self>, GraphicsError> {
+        let params = params.with_env_adapter_override();
         log::info!("Creating GraphicsInstance with params: {:?}", params);
 
         // Create the GPU backend based on parameters
@@ -289,6 +418,7 @@ impl GraphicsInstance {
     pub async fn with_parameters_async(
         params: InstanceParameters,
     ) -> Result<Arc<Self>, GraphicsError> {
+        let params = params.with_env_adapter_override();
         log::info!(
             "Creating GraphicsInstance (async) with params: {:?}",
             params
@@ -333,15 +463,12 @@ impl GraphicsInstance {
 
     /// Enumerate available graphics adapters.
     ///
-    /// Returns information about all available graphics adapters on the system.
-    #[cfg(feature = "dummy")]
+    /// Returns the adapter the backend was created on. The backend commits to
+    /// one physical device at instance creation, so today this is always a
+    /// single-element list with honest name/vendor/type — full multi-GPU
+    /// enumeration and selection is future work (#38 / XB-L3).
     pub fn enumerate_adapters(&self) -> Vec<AdapterInfo> {
-        // Dummy implementation returns a single software adapter
-        vec![AdapterInfo {
-            name: "Dummy Adapter".to_string(),
-            vendor: "RedLilium".to_string(),
-            device_type: AdapterType::Software,
-        }]
+        vec![self.backend().adapter_info()]
     }
 
     /// Create a graphics device.
@@ -510,11 +637,85 @@ mod tests {
         assert!(!adapters.is_empty());
     }
 
+    /// ADR-028: the textual adapter identity — PCI pair when it parses as
+    /// `hex:hex`, name substring otherwise.
+    #[test]
+    fn test_adapter_id_parse() {
+        assert_eq!(
+            AdapterId::parse("1002:744c"),
+            AdapterId::Pci {
+                vendor_id: 0x1002,
+                device_id: 0x744c
+            }
+        );
+        assert_eq!(
+            AdapterId::parse("0x10de:0x2684"),
+            AdapterId::Pci {
+                vendor_id: 0x10de,
+                device_id: 0x2684
+            }
+        );
+        assert_eq!(
+            AdapterId::parse("Radeon"),
+            AdapterId::NameContains("Radeon".to_string())
+        );
+        // A colon with non-hex parts is a name, not a broken PCI id.
+        assert_eq!(
+            AdapterId::parse("weird:name"),
+            AdapterId::NameContains("weird:name".to_string())
+        );
+    }
+
+    #[test]
+    fn test_adapter_id_matches() {
+        let pci = AdapterId::parse("1002:744c");
+        assert!(pci.matches(0x1002, 0x744c, "whatever"));
+        assert!(!pci.matches(0x1002, 0x744d, "whatever"));
+
+        let name = AdapterId::parse("radeon");
+        assert!(name.matches(0, 0, "AMD Radeon RX 9070 XT"));
+        assert!(!name.matches(0, 0, "NVIDIA GeForce RTX 4090"));
+    }
+
+    /// `AdapterInfo::id()` prefers the stable PCI pair; falls back to the
+    /// name only when the backend reports no ids (dummy).
+    #[test]
+    fn test_adapter_info_id() {
+        let real = AdapterInfo {
+            name: "Some GPU".to_string(),
+            vendor: "AMD".to_string(),
+            device_type: AdapterType::Discrete,
+            vendor_id: 0x1002,
+            device_id: 0x744c,
+        };
+        assert_eq!(
+            real.id(),
+            AdapterId::Pci {
+                vendor_id: 0x1002,
+                device_id: 0x744c
+            }
+        );
+
+        let dummy = AdapterInfo {
+            name: "Dummy Adapter".to_string(),
+            vendor: "RedLilium".to_string(),
+            device_type: AdapterType::Software,
+            vendor_id: 0,
+            device_id: 0,
+        };
+        assert_eq!(
+            dummy.id(),
+            AdapterId::NameContains("Dummy Adapter".to_string())
+        );
+    }
+
     #[test]
     fn test_create_device() {
         let instance = GraphicsInstance::new().unwrap();
         let device = instance.create_device().unwrap();
-        assert_eq!(device.name(), "Dummy Adapter");
+        // The device carries the real adapter's name (XB-L3), which matches
+        // whatever `enumerate_adapters` honestly reports.
+        assert_eq!(device.name(), instance.enumerate_adapters()[0].name);
         assert_eq!(instance.device_count(), 1);
     }
 
