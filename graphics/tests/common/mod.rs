@@ -126,6 +126,9 @@ impl TestContext {
     }
 
     fn with_validation(backend: Backend, validation: bool) -> Option<Self> {
+        // Surface backend logs (queue plan, validation warnings) under RUST_LOG.
+        let _ = env_logger::builder().is_test(true).try_init();
+
         if !backend.is_available() {
             return None;
         }

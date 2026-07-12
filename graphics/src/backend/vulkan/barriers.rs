@@ -324,6 +324,58 @@ impl BarrierBatch {
         new_layout: TextureLayout,
         aspect_mask: vk::ImageAspectFlags,
     ) {
+        self.add_image_barrier_with_src_scope(
+            id,
+            image,
+            old_layout,
+            new_layout,
+            aspect_mask,
+            old_layout.src_stage(),
+            old_layout.src_access_mask(),
+        );
+    }
+
+    /// Add an image layout transition whose previous access ran on a
+    /// DIFFERENT queue and is ordered by a tracker-emitted timeline wait
+    /// (#47 phase 4).
+    ///
+    /// The wait (all-commands destination scope) already made the other
+    /// queue's access available and visible here, so the transition's source
+    /// scope is empty on this queue: `TOP_OF_PIPE` and no access mask. Using
+    /// the previous layout's own scopes instead would name stages of the
+    /// OTHER queue, which may not exist on this queue's family — e.g.
+    /// `COLOR_ATTACHMENT_OUTPUT` on a dedicated compute family
+    /// (VUID-vkCmdPipelineBarrier-srcStageMask-06461).
+    pub fn add_image_barrier_cross_queue(
+        &mut self,
+        id: TextureId,
+        image: vk::Image,
+        old_layout: TextureLayout,
+        new_layout: TextureLayout,
+        aspect_mask: vk::ImageAspectFlags,
+    ) {
+        self.add_image_barrier_with_src_scope(
+            id,
+            image,
+            old_layout,
+            new_layout,
+            aspect_mask,
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::AccessFlags::empty(),
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_image_barrier_with_src_scope(
+        &mut self,
+        id: TextureId,
+        image: vk::Image,
+        old_layout: TextureLayout,
+        new_layout: TextureLayout,
+        aspect_mask: vk::ImageAspectFlags,
+        src_stage: vk::PipelineStageFlags,
+        src_access: vk::AccessFlags,
+    ) {
         // Same read-only layout: no hazard, nothing to do.
         if old_layout == new_layout && !new_layout.is_write() {
             return;
@@ -333,7 +385,7 @@ impl BarrierBatch {
             std::collections::hash_map::Entry::Occupied(mut occupied) => {
                 let info = occupied.get_mut();
                 info.new_layout = new_layout.to_vk();
-                info.src_access_mask |= old_layout.src_access_mask();
+                info.src_access_mask |= src_access;
                 info.dst_access_mask |= new_layout.dst_access_mask();
             }
             std::collections::hash_map::Entry::Vacant(vacant) => {
@@ -341,13 +393,13 @@ impl BarrierBatch {
                     image,
                     old_layout: old_layout.to_vk(),
                     new_layout: new_layout.to_vk(),
-                    src_access_mask: old_layout.src_access_mask(),
+                    src_access_mask: src_access,
                     dst_access_mask: new_layout.dst_access_mask(),
                     aspect_mask,
                 });
             }
         }
-        self.src_stage_mask |= old_layout.src_stage();
+        self.src_stage_mask |= src_stage;
         self.dst_stage_mask |= new_layout.dst_stage();
     }
 

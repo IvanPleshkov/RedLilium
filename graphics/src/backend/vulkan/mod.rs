@@ -2005,6 +2005,14 @@ impl VulkanBackend {
             GraphicsError::Internal(format!("Failed to end command buffer: {:?}", e))
         })?;
 
+        if !waits.is_empty() {
+            log::debug!(
+                "submit {timeline_value} on {queue_id:?} waits: graphics={:?} async={:?}",
+                waits.get(QueueId::Graphics),
+                waits.get(QueueId::AsyncCompute),
+            );
+        }
+
         // The binary semaphores are the swapchain acquire/render-finished
         // handshake below (graphics queue only — a swapchain writer is never
         // routed async). The pair exists once per frame and is consumed
@@ -2161,7 +2169,7 @@ impl VulkanBackend {
             // destruction would otherwise alias a stale tracked layout).
             let texture_id = TextureId::from_raw(*id);
             let required_layout = decl.access.to_layout();
-            let current_layout =
+            let (current_layout, cross_queue_write) =
                 tracker.request_access(texture_id, required_layout, queue, submit_value, waits);
 
             // Determine aspect mask based on access mode and format
@@ -2182,18 +2190,28 @@ impl VulkanBackend {
 
             // Add barrier if layout change is needed (`request_access`
             // already updated the tracked layout and recorded queue
-            // ownership). For a cross-queue transition the barrier's source
-            // scope refers to stages of THIS queue — where nothing touched
-            // the image — which is exactly right: availability of the other
-            // queue's writes comes from the timeline wait recorded in
-            // `waits`, and the transition itself is ordered after that wait.
-            batch.add_image_barrier(
-                texture_id,
-                *image,
-                current_layout,
-                required_layout,
-                aspect_mask,
-            );
+            // ownership). When the previous write came from the OTHER queue
+            // its availability comes from the timeline wait recorded in
+            // `waits`, so the transition uses an empty source scope on this
+            // queue — the previous layout's own stages may not even exist on
+            // this queue's family (VUID 06461, caught on RDNA4 in #82).
+            if cross_queue_write {
+                batch.add_image_barrier_cross_queue(
+                    texture_id,
+                    *image,
+                    current_layout,
+                    required_layout,
+                    aspect_mask,
+                );
+            } else {
+                batch.add_image_barrier(
+                    texture_id,
+                    *image,
+                    current_layout,
+                    required_layout,
+                    aspect_mask,
+                );
+            }
         }
 
         // Generate buffer barriers from per-buffer last-access tracking: the
