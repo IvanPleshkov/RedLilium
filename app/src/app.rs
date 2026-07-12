@@ -582,12 +582,21 @@ where
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
             // Create window
-            let mut window_attributes = Window::default_attributes()
-                .with_title(self.args.window_title())
-                .with_inner_size(winit::dpi::LogicalSize::new(
-                    self.args.window_width(),
-                    self.args.window_height(),
-                ));
+            let mut window_attributes =
+                Window::default_attributes().with_title(self.args.window_title());
+            // On web the page owns the canvas layout: an explicit inner_size makes winit
+            // PIN the canvas CSS size (it stops tracking the container), so an embedded
+            // canvas (e.g. a VSCode webview panel) renders at a fixed 1280×720 patch that
+            // ignores the panel's real shape and resizes. Without it, winit follows the
+            // page CSS via its ResizeObserver and reports honest `Resized` events.
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                window_attributes =
+                    window_attributes.with_inner_size(winit::dpi::LogicalSize::new(
+                        self.args.window_width(),
+                        self.args.window_height(),
+                    ));
+            }
 
             // Apply custom titlebar
             if self.args.custom_titlebar() {
