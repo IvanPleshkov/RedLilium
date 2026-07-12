@@ -98,9 +98,7 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
         let should_stop = {
             let world = state.app.world();
             if world.has_resource::<redlilium_ecs::PlayControl>() {
-                world
-                    .resource::<redlilium_ecs::PlayControl>()
-                    .pending()
+                world.resource::<redlilium_ecs::PlayControl>().pending()
                     == Some(redlilium_ecs::PlayState::Stopped)
             } else {
                 false
@@ -217,6 +215,75 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
         if let Some(state) = self.state.as_ref() {
             state.window_input.write().on_scroll(delta_x, delta_y);
         }
+    }
+}
+
+impl<P: Plugin + 'static> RuntimeHandler<P> {
+    /// Phase 3: Prepare for warm-restart reload. Sequence:
+    /// 1. Loop plugins: call on_unload(&mut app) with panic catching
+    /// 2. Capture scene snapshot
+    /// 3. Drop app (triggers World drop, clears PlayTasks, cancels task tokens)
+    /// 4. Quiesce ComputePool until all tasks complete (timeout: 5s)
+    ///
+    /// Returns the captured snapshot. Caller then unloads dylib and reloads.
+    #[allow(dead_code)] // Will be called when reload is requested via remote
+    fn prepare_for_reload(
+        &mut self,
+    ) -> Result<redlilium_ecs::serialize::SerializedWorld, redlilium_ecs::serialize::SerializeError>
+    {
+        let Some(state) = self.state.as_mut() else {
+            return Err(redlilium_ecs::serialize::SerializeError::FormatError(
+                "reload called without active game state".to_string(),
+            ));
+        };
+
+        // Phase 3a: Plugin unload cleanup (before World drop)
+        for plugin in &state.plugins {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                plugin.on_unload(&mut state.app)
+            })) {
+                Ok(()) => {}
+                Err(_payload) => {
+                    log::error!("plugin.on_unload panicked; continuing to next plugin");
+                }
+            }
+        }
+
+        // Phase 3b: Capture snapshot (while World is still live)
+        let snapshot = state.app.capture()?;
+
+        // Phase 3c: Drop app (World drop triggers PlayTasks cleanup + token cancellation)
+        // NOTE: This is a placeholder for the actual implementation. In the real reload flow,
+        // the app would be dropped here explicitly before proceeding to quiesce. For now,
+        // the app lives in state and will be dropped when state is dropped.
+
+        // Phase 3d: Task quiescence (block until all tasks complete or timeout)
+        // After World drop, tokens are cancelled. Now quiesce the pool to wait
+        // for tasks to actually finish before we unload dylib.
+        use std::time::Duration;
+        match &state.runner {
+            redlilium_ecs::EcsRunner::SingleThread(r) => {
+                let elapsed = r.compute().quiesce(Duration::from_secs(5));
+                if elapsed >= Duration::from_secs(5) {
+                    log::warn!(
+                        "Task quiescence timeout: some plugin tasks may still be executing. \
+                         Unloading dylib now risks UB if tasks try to jump back into unloaded code."
+                    );
+                }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            redlilium_ecs::EcsRunner::MultiThread(r) => {
+                let elapsed = r.compute().quiesce(Duration::from_secs(5));
+                if elapsed >= Duration::from_secs(5) {
+                    log::warn!(
+                        "Task quiescence timeout: some plugin tasks may still be executing. \
+                         Unloading dylib now risks UB if tasks try to jump back into unloaded code."
+                    );
+                }
+            }
+        }
+
+        Ok(snapshot)
     }
 }
 
