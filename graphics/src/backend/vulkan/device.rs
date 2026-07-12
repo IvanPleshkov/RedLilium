@@ -1,17 +1,191 @@
 //! Vulkan physical and logical device management.
+//!
+//! Selection is filter-then-score (ADR-027): devices that cannot run the
+//! baseline tier are excluded with a logged reason *before* scoring, so the
+//! highest-scored device is always one that `vkCreateDevice` will accept —
+//! the previous "score first, fail later" shape could pick a device that
+//! failed creation while a lesser device would have worked (VK-L8).
 
+use std::collections::HashSet;
 use std::ffi::CStr;
 
 use ash::vk;
 
 use crate::error::GraphicsError;
 
-/// Select the best physical device for rendering.
+/// Features the engine uses when present, degrading gracefully when absent
+/// (ADR-027 capabilities, not tier requirements).
+#[derive(Debug, Clone, Copy)]
+pub struct OptionalFeatures {
+    /// Anisotropic filtering; without it samplers are created isotropic.
+    pub sampler_anisotropy: bool,
+    /// Wireframe (`PolygonMode::Line`) pipelines; without it line mode
+    /// downgrades to fill.
+    pub fill_mode_non_solid: bool,
+}
+
+/// The physical device chosen by [`select_physical_device`] plus everything
+/// queried about it during selection.
+pub struct SelectedDevice {
+    pub physical_device: vk::PhysicalDevice,
+    pub properties: vk::PhysicalDeviceProperties,
+    pub optional: OptionalFeatures,
+    /// Whether the device lists `VK_KHR_portability_subset` (it must then be
+    /// enabled at logical-device creation, per spec).
+    pub portability_subset: bool,
+}
+
+/// Why a physical device cannot run the baseline tier.
 ///
-/// Prefers discrete GPUs over integrated GPUs.
-pub fn select_physical_device(
+/// Returned per-device during filtering; every named gap is logged so a
+/// selection failure on exotic hardware is diagnosable from the log alone.
+fn baseline_gaps(
     instance: &ash::Instance,
-) -> Result<vk::PhysicalDevice, GraphicsError> {
+    device: vk::PhysicalDevice,
+    require_swapchain: bool,
+    extensions: &HashSet<Vec<u8>>,
+) -> Vec<&'static str> {
+    let mut gaps = Vec::new();
+
+    let properties = unsafe { instance.get_physical_device_properties(device) };
+    if properties.api_version < vk::make_api_version(0, 1, 2, 0) {
+        gaps.push("Vulkan 1.2");
+    }
+
+    let queue_families = unsafe { instance.get_physical_device_queue_family_properties(device) };
+    if !queue_families
+        .iter()
+        .any(|f| f.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+    {
+        gaps.push("graphics queue family");
+    }
+
+    let has_ext = |name: &CStr| extensions.contains(name.to_bytes());
+    if require_swapchain && !has_ext(ash::khr::swapchain::NAME) {
+        gaps.push("VK_KHR_swapchain");
+    }
+    if !has_ext(ash::khr::dynamic_rendering::NAME) {
+        gaps.push("VK_KHR_dynamic_rendering");
+    }
+
+    // Feature queries: the baseline tier needs dynamicRendering,
+    // timelineSemaphore, and shaderDrawParameters (SV_InstanceID compiles to
+    // SPIR-V DrawParameters).
+    let mut vulkan11 = vk::PhysicalDeviceVulkan11Features::default();
+    let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default();
+    let mut dynamic_rendering = vk::PhysicalDeviceDynamicRenderingFeatures::default();
+    let mut features2 = vk::PhysicalDeviceFeatures2::default()
+        .push_next(&mut vulkan11)
+        .push_next(&mut vulkan12)
+        .push_next(&mut dynamic_rendering);
+    unsafe { instance.get_physical_device_features2(device, &mut features2) };
+
+    if dynamic_rendering.dynamic_rendering == vk::FALSE {
+        gaps.push("dynamicRendering feature");
+    }
+    if vulkan12.timeline_semaphore == vk::FALSE {
+        gaps.push("timelineSemaphore feature");
+    }
+    if vulkan11.shader_draw_parameters == vk::FALSE {
+        gaps.push("shaderDrawParameters feature");
+    }
+
+    gaps
+}
+
+/// Score a baseline-capable device under the given preference (ADR-028).
+///
+/// Pure so it is unit-testable without a Vulkan instance. Ordering
+/// guarantees, in priority order:
+/// - the preferred device type (discrete for high-performance, integrated
+///   for low-power) always beats the other — the type gap (2000) exceeds any
+///   possible memory (max 640) + resolution (max ~32) contribution;
+/// - a software device (CPU/llvmpipe) never beats real hardware;
+/// - among same-type devices, more device-local memory wins.
+fn score_device(
+    properties: &vk::PhysicalDeviceProperties,
+    device_local_bytes: u64,
+    preference: &crate::instance::AdapterPreference,
+) -> u32 {
+    use crate::instance::AdapterPreference;
+    let low_power = matches!(preference, AdapterPreference::LowPower);
+    let type_score = match properties.device_type {
+        vk::PhysicalDeviceType::DISCRETE_GPU => {
+            if low_power {
+                1000
+            } else {
+                3000
+            }
+        }
+        vk::PhysicalDeviceType::INTEGRATED_GPU => {
+            if low_power {
+                3000
+            } else {
+                1000
+            }
+        }
+        vk::PhysicalDeviceType::VIRTUAL_GPU => 200,
+        vk::PhysicalDeviceType::CPU => 0,
+        _ => 100,
+    };
+    let memory_score = ((device_local_bytes >> 30).min(64) as u32) * 10;
+    type_score + memory_score + properties.limits.max_image_dimension2_d / 1024
+}
+
+/// Size of the largest device-local memory heap.
+fn device_local_heap_bytes(memory: &vk::PhysicalDeviceMemoryProperties) -> u64 {
+    memory
+        .memory_heaps
+        .iter()
+        .take(memory.memory_heap_count as usize)
+        .filter(|h| h.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
+        .map(|h| h.size)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Whether any queue family of the device can present on this platform.
+///
+/// Uses the surfaceless per-platform presentation-support queries, so
+/// display-less compute accelerators (Tesla-class cards) are filtered out
+/// *before* a window exists (ADR-028). Only Windows has a query that needs
+/// no display connection; on other platforms every baseline device is
+/// presumed presentable (compositors route across GPUs there anyway).
+fn can_present(
+    entry: &ash::Entry,
+    instance: &ash::Instance,
+    device: vk::PhysicalDevice,
+    queue_family_count: u32,
+) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let loader = ash::khr::win32_surface::Instance::new(entry, instance);
+        (0..queue_family_count).any(|family| unsafe {
+            loader.get_physical_device_win32_presentation_support(device, family)
+        })
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (entry, instance, device, queue_family_count);
+        true
+    }
+}
+
+/// Select the best physical device that can run the baseline tier.
+///
+/// Filter (baseline tier, presentability, explicit-id match) then score
+/// (ADR-028 preference policy) — the highest-scored survivor is always a
+/// device that `vkCreateDevice` will accept.
+///
+/// `require_swapchain` mirrors the instance's surface support: a headless
+/// instance cannot enable `VK_KHR_swapchain` (it depends on `VK_KHR_surface`),
+/// so it must not be required of the device either.
+pub fn select_physical_device(
+    entry: &ash::Entry,
+    instance: &ash::Instance,
+    require_swapchain: bool,
+    preference: &crate::instance::AdapterPreference,
+) -> Result<SelectedDevice, GraphicsError> {
     let devices = unsafe { instance.enumerate_physical_devices() }.map_err(|e| {
         GraphicsError::InitializationFailed(format!(
             "Failed to enumerate physical devices: {:?}",
@@ -25,49 +199,126 @@ pub fn select_physical_device(
         ));
     }
 
-    // Score and select best device
-    let mut best_device = None;
-    let mut best_score = 0;
+    let explicit_id = match preference {
+        crate::instance::AdapterPreference::Explicit(id) => Some(id),
+        _ => None,
+    };
+
+    let mut best: Option<(u32, SelectedDevice)> = None;
+    // Baseline-capable devices that an explicit id did NOT match, named in
+    // the error so a typo in REDLILIUM_ADAPTER is diagnosable immediately.
+    let mut rejected_by_id: Vec<String> = Vec::new();
 
     for device in devices {
         let properties = unsafe { instance.get_physical_device_properties(device) };
-        let features = unsafe { instance.get_physical_device_features(device) };
+        let device_name = unsafe { CStr::from_ptr(properties.device_name.as_ptr()) };
 
-        // Check for required features
-        if features.sampler_anisotropy == vk::FALSE {
+        let extensions = device_extension_set(instance, device)?;
+
+        // Filter: below-baseline devices never reach scoring.
+        let gaps = baseline_gaps(instance, device, require_swapchain, &extensions);
+        if !gaps.is_empty() {
+            log::info!(
+                "Skipping GPU {:?}: missing {} (below baseline tier)",
+                device_name,
+                gaps.join(", ")
+            );
             continue;
         }
 
-        // Score the device
-        let mut score = 0;
-
-        // Prefer discrete GPUs
-        if properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU {
-            score += 1000;
-        } else if properties.device_type == vk::PhysicalDeviceType::INTEGRATED_GPU {
-            score += 100;
+        // Filter: a device that can never present is useless to a windowed
+        // instance, regardless of its score.
+        let queue_family_count =
+            unsafe { instance.get_physical_device_queue_family_properties(device) }.len() as u32;
+        if require_swapchain && !can_present(entry, instance, device, queue_family_count) {
+            log::info!(
+                "Skipping GPU {:?}: no presentation-capable queue family",
+                device_name
+            );
+            continue;
         }
 
-        // Add score based on max texture size
-        score += properties.limits.max_image_dimension2_d / 1024;
-
-        if score > best_score {
-            best_score = score;
-            best_device = Some(device);
+        // Filter: explicit adapter identity (ADR-028).
+        if let Some(id) = explicit_id
+            && !id.matches(
+                properties.vendor_id,
+                properties.device_id,
+                &device_name.to_string_lossy(),
+            )
+        {
+            rejected_by_id.push(format!(
+                "{} ({:04x}:{:04x})",
+                device_name.to_string_lossy(),
+                properties.vendor_id,
+                properties.device_id
+            ));
+            continue;
         }
 
-        // Log device info
-        let device_name = unsafe { CStr::from_ptr(properties.device_name.as_ptr()) };
+        let memory = unsafe { instance.get_physical_device_memory_properties(device) };
+        let score = score_device(&properties, device_local_heap_bytes(&memory), preference);
+
         log::info!(
             "Found GPU: {:?} (type: {:?}, score: {})",
             device_name,
             properties.device_type,
             score
         );
+
+        if best.as_ref().is_none_or(|(s, _)| score > *s) {
+            let features = unsafe { instance.get_physical_device_features(device) };
+            best = Some((
+                score,
+                SelectedDevice {
+                    physical_device: device,
+                    properties,
+                    optional: OptionalFeatures {
+                        sampler_anisotropy: features.sampler_anisotropy == vk::TRUE,
+                        fill_mode_non_solid: features.fill_mode_non_solid == vk::TRUE,
+                    },
+                    portability_subset: extensions.contains(b"VK_KHR_portability_subset".as_ref()),
+                },
+            ));
+        }
     }
 
-    best_device
-        .ok_or_else(|| GraphicsError::InitializationFailed("No suitable GPU found".to_string()))
+    best.map(|(_, selected)| selected).ok_or_else(|| {
+        if let Some(id) = explicit_id {
+            GraphicsError::InitializationFailed(format!(
+                "Requested adapter {:?} not found among baseline-capable devices \
+                 [{}] (check REDLILIUM_ADAPTER / adapter preference)",
+                id,
+                rejected_by_id.join(", ")
+            ))
+        } else {
+            GraphicsError::InitializationFailed(
+                "No GPU meets the baseline tier (Vulkan 1.2, dynamic rendering, \
+                 timeline semaphores, shaderDrawParameters); see log for per-device gaps"
+                    .to_string(),
+            )
+        }
+    })
+}
+
+/// All extensions the device offers, as byte strings.
+fn device_extension_set(
+    instance: &ash::Instance,
+    device: vk::PhysicalDevice,
+) -> Result<HashSet<Vec<u8>>, GraphicsError> {
+    let props = unsafe { instance.enumerate_device_extension_properties(device) }.map_err(|e| {
+        GraphicsError::InitializationFailed(format!(
+            "Failed to enumerate device extensions: {:?}",
+            e
+        ))
+    })?;
+    Ok(props
+        .iter()
+        .map(|p| {
+            unsafe { CStr::from_ptr(p.extension_name.as_ptr()) }
+                .to_bytes()
+                .to_vec()
+        })
+        .collect())
 }
 
 /// The queues to create on the logical device.
@@ -135,11 +386,17 @@ pub fn plan_queues(
     })
 }
 
-/// Create a logical device with required features and extensions.
+/// Create a logical device from a selected physical device.
+///
+/// Baseline-tier requirements are enabled unconditionally — selection already
+/// verified them. Optional features are enabled only when the device reported
+/// them (VK-M10): a GPU without `fillModeNonSolid` loses wireframe pipelines
+/// instead of failing `vkCreateDevice` with `ERROR_FEATURE_NOT_PRESENT`.
 pub fn create_logical_device(
     instance: &ash::Instance,
-    physical_device: vk::PhysicalDevice,
+    selected: &SelectedDevice,
     plan: &QueuePlan,
+    enable_swapchain: bool,
 ) -> Result<ash::Device, GraphicsError> {
     // Two priority slots so a same-family plan can create two queues from
     // one create-info; a different-family plan uses one slot per info.
@@ -163,28 +420,21 @@ pub fn create_logical_device(
         None => {}
     }
 
-    // Required device extensions
-    #[allow(unused_mut)]
-    let mut device_extensions = vec![
-        ash::khr::swapchain::NAME.as_ptr(),
-        ash::khr::dynamic_rendering::NAME.as_ptr(),
-    ];
-
-    // On macOS with MoltenVK, we need VK_KHR_portability_subset
-    #[cfg(target_os = "macos")]
-    {
-        // Check if portability subset is supported and required
-        if device_supports_extension(instance, physical_device, "VK_KHR_portability_subset") {
-            device_extensions.push(c"VK_KHR_portability_subset".as_ptr());
-        }
+    // Baseline-tier extensions (verified present during selection).
+    let mut device_extensions = vec![ash::khr::dynamic_rendering::NAME.as_ptr()];
+    if enable_swapchain {
+        device_extensions.push(ash::khr::swapchain::NAME.as_ptr());
+    }
+    // The spec requires enabling portability_subset whenever the device
+    // lists it (MoltenVK).
+    if selected.portability_subset {
+        device_extensions.push(c"VK_KHR_portability_subset".as_ptr());
     }
 
-    // Enable required features:
-    // - sampler_anisotropy: anisotropic texture filtering.
-    // - fill_mode_non_solid: wireframe (PolygonMode::Line) pipelines.
+    // Optional features, enabled only where supported.
     let features = vk::PhysicalDeviceFeatures::default()
-        .sampler_anisotropy(true)
-        .fill_mode_non_solid(true);
+        .sampler_anisotropy(selected.optional.sampler_anisotropy)
+        .fill_mode_non_solid(selected.optional.fill_mode_non_solid);
 
     // Enable dynamic rendering via extension features (works on Vulkan 1.2 with extension)
     // This is compatible with MoltenVK which only supports Vulkan 1.2
@@ -197,9 +447,7 @@ pub fn create_logical_device(
         vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
 
     // timelineSemaphore: the queue timeline that backs frame fences and (with
-    // multi-queue, #47) cross-queue waits. Mandatory on every Vulkan 1.2
-    // device (our minimum API version, incl. MoltenVK), but must still be
-    // explicitly enabled.
+    // multi-queue, #47) cross-queue waits.
     let mut vulkan12_features =
         vk::PhysicalDeviceVulkan12Features::default().timeline_semaphore(true);
 
@@ -211,35 +459,158 @@ pub fn create_logical_device(
         .push_next(&mut vulkan11_features)
         .push_next(&mut vulkan12_features);
 
-    let device =
-        unsafe { instance.create_device(physical_device, &create_info, None) }.map_err(|e| {
+    let device = unsafe { instance.create_device(selected.physical_device, &create_info, None) }
+        .map_err(|e| {
             GraphicsError::InitializationFailed(format!("Failed to create logical device: {:?}", e))
         })?;
 
     Ok(device)
 }
 
-/// Check if a physical device supports a specific extension.
-#[cfg(target_os = "macos")]
-fn device_supports_extension(
+/// Assemble the engine-facing capabilities from everything queried about the
+/// device (ADR-027). The single source of truth downstream clamps against —
+/// nothing here is fabricated.
+pub fn device_capabilities(
     instance: &ash::Instance,
-    physical_device: vk::PhysicalDevice,
-    extension_name: &str,
-) -> bool {
-    let extensions =
-        match unsafe { instance.enumerate_device_extension_properties(physical_device) } {
-            Ok(ext) => ext,
-            Err(_) => return false,
-        };
+    selected: &SelectedDevice,
+    plan: &QueuePlan,
+) -> crate::device::DeviceCapabilities {
+    let limits = &selected.properties.limits;
 
-    for ext in extensions {
-        let name = unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) };
-        if let Ok(name_str) = name.to_str()
-            && name_str == extension_name
-        {
-            return true;
+    // Largest device-local heap: the only honest creation-size bound Vulkan
+    // gives for plain buffers (there is no core "max buffer size" limit).
+    let memory =
+        unsafe { instance.get_physical_device_memory_properties(selected.physical_device) };
+    let max_buffer_size = match device_local_heap_bytes(&memory) {
+        0 => 1 << 30,
+        bytes => bytes,
+    };
+
+    crate::device::DeviceCapabilities {
+        // Selection passing the baseline filter IS the tier detection today;
+        // higher rungs (bindless, ray tracing) will extend this when their
+        // render paths exist (ADR-027).
+        tier: crate::device::DeviceTier::Baseline,
+        max_texture_dimension: limits.max_image_dimension2_d,
+        max_buffer_size,
+        max_sampler_anisotropy: if selected.optional.sampler_anisotropy {
+            limits.max_sampler_anisotropy as u16
+        } else {
+            1
+        },
+        // VkSampleCountFlagBits values are the counts themselves, matching
+        // the mask encoding of `DeviceCapabilities::sample_count_mask`.
+        sample_count_mask: (limits.framebuffer_color_sample_counts
+            & limits.framebuffer_depth_sample_counts)
+            .as_raw(),
+        wireframe: selected.optional.fill_mode_non_solid,
+        async_compute: plan.async_compute.is_some(),
+        compute_shaders: true,
+    }
+}
+
+/// Engine-facing adapter info for the selected device.
+pub fn adapter_info(selected: &SelectedDevice) -> crate::instance::AdapterInfo {
+    let name = unsafe { CStr::from_ptr(selected.properties.device_name.as_ptr()) }
+        .to_string_lossy()
+        .into_owned();
+    let device_type = match selected.properties.device_type {
+        vk::PhysicalDeviceType::DISCRETE_GPU => crate::instance::AdapterType::Discrete,
+        vk::PhysicalDeviceType::INTEGRATED_GPU => crate::instance::AdapterType::Integrated,
+        vk::PhysicalDeviceType::CPU => crate::instance::AdapterType::Software,
+        _ => crate::instance::AdapterType::Unknown,
+    };
+    crate::instance::AdapterInfo {
+        name,
+        vendor: crate::instance::vendor_name(selected.properties.vendor_id),
+        device_type,
+        vendor_id: selected.properties.vendor_id,
+        device_id: selected.properties.device_id,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::instance::AdapterPreference;
+
+    const GIB: u64 = 1 << 30;
+
+    fn props(device_type: vk::PhysicalDeviceType, max_dim: u32) -> vk::PhysicalDeviceProperties {
+        vk::PhysicalDeviceProperties {
+            device_type,
+            limits: vk::PhysicalDeviceLimits {
+                max_image_dimension2_d: max_dim,
+                ..Default::default()
+            },
+            ..Default::default()
         }
     }
 
-    false
+    /// ADR-028: under the default policy the discrete GPU always beats the
+    /// integrated one, no matter how much memory the iGPU claims (UMA iGPUs
+    /// report the whole system RAM as device-local).
+    #[test]
+    fn high_performance_discrete_beats_integrated() {
+        let discrete = score_device(
+            &props(vk::PhysicalDeviceType::DISCRETE_GPU, 16384),
+            8 * GIB,
+            &AdapterPreference::Auto,
+        );
+        let integrated = score_device(
+            &props(vk::PhysicalDeviceType::INTEGRATED_GPU, 16384),
+            128 * GIB,
+            &AdapterPreference::Auto,
+        );
+        assert!(discrete > integrated);
+    }
+
+    /// ADR-028: LowPower inverts the type ranking.
+    #[test]
+    fn low_power_integrated_beats_discrete() {
+        let discrete = score_device(
+            &props(vk::PhysicalDeviceType::DISCRETE_GPU, 16384),
+            128 * GIB,
+            &AdapterPreference::LowPower,
+        );
+        let integrated = score_device(
+            &props(vk::PhysicalDeviceType::INTEGRATED_GPU, 16384),
+            8 * GIB,
+            &AdapterPreference::LowPower,
+        );
+        assert!(integrated > discrete);
+    }
+
+    /// A software renderer (llvmpipe) must never beat real hardware, even
+    /// with a huge host-memory "device-local" heap and max limits.
+    #[test]
+    fn software_never_beats_hardware() {
+        let llvmpipe = score_device(
+            &props(vk::PhysicalDeviceType::CPU, 16384),
+            256 * GIB,
+            &AdapterPreference::Auto,
+        );
+        let integrated = score_device(
+            &props(vk::PhysicalDeviceType::INTEGRATED_GPU, 4096),
+            GIB,
+            &AdapterPreference::Auto,
+        );
+        assert!(integrated > llvmpipe);
+    }
+
+    /// Same type: more device-local memory wins.
+    #[test]
+    fn memory_breaks_ties_within_type() {
+        let small = score_device(
+            &props(vk::PhysicalDeviceType::DISCRETE_GPU, 16384),
+            8 * GIB,
+            &AdapterPreference::HighPerformance,
+        );
+        let large = score_device(
+            &props(vk::PhysicalDeviceType::DISCRETE_GPU, 16384),
+            24 * GIB,
+            &AdapterPreference::HighPerformance,
+        );
+        assert!(large > small);
+    }
 }

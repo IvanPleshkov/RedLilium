@@ -1,5 +1,9 @@
 // Deferred Rendering - Resolve/Lighting Pass
 // Reads G-buffer and applies IBL lighting to produce final image.
+//
+// HDR_OUTPUT gates the tonemap: off for a linear-HDR target, on for an
+// sRGB/LDR target. Selected by the demo from its surface format.
+//#pragma variant_system HDR_OUTPUT
 
 import math;
 import brdf;

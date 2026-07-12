@@ -114,23 +114,28 @@ impl WgpuBackend {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let mut adapter = None;
-            for pref in Self::ADAPTER_POWER_PREFERENCES {
-                match pollster::block_on(instance.request_adapter(&Self::adapter_options(pref))) {
-                    Ok(a) => {
-                        adapter = Some(a);
-                        break;
+            let adapter = if let Some(explicit) = Self::explicit_adapter(&instance, params)? {
+                explicit
+            } else {
+                let mut adapter = None;
+                for pref in Self::power_preferences(&params.adapter) {
+                    match pollster::block_on(instance.request_adapter(&Self::adapter_options(pref)))
+                    {
+                        Ok(a) => {
+                            adapter = Some(a);
+                            break;
+                        }
+                        Err(e) => log::warn!("request_adapter({pref:?}) found no adapter: {e}"),
                     }
-                    Err(e) => log::warn!("request_adapter({pref:?}) found no adapter: {e}"),
                 }
-            }
-            let adapter = adapter.ok_or_else(|| {
-                GraphicsError::ResourceCreationFailed(
-                    "No compatible GPU adapter (tried high-performance and default power \
-                     preference)"
-                        .to_string(),
-                )
-            })?;
+                adapter.ok_or_else(|| {
+                    GraphicsError::ResourceCreationFailed(
+                        "No compatible GPU adapter (tried the preferred and default power \
+                         preference)"
+                            .to_string(),
+                    )
+                })?
+            };
             let (device, queue) =
                 pollster::block_on(adapter.request_device(&Self::device_descriptor(&adapter)))
                     .map_err(|e| {
@@ -152,22 +157,47 @@ impl WgpuBackend {
         params: &crate::instance::InstanceParameters,
     ) -> Result<Self, GraphicsError> {
         let instance = Self::build_instance(params);
-        let mut adapter = None;
-        for pref in Self::ADAPTER_POWER_PREFERENCES {
-            match instance.request_adapter(&Self::adapter_options(pref)).await {
-                Ok(a) => {
-                    adapter = Some(a);
-                    break;
-                }
-                Err(e) => log::warn!("request_adapter({pref:?}) found no adapter: {e}"),
+
+        // Explicit adapter identity: resolvable by enumeration on native
+        // only. WebGPU has no adapter enumeration (the browser decides), so
+        // Explicit degrades to the default power-preference path with a
+        // warning (ADR-028).
+        #[cfg(not(target_arch = "wasm32"))]
+        let explicit = Self::explicit_adapter(&instance, params)?;
+        #[cfg(target_arch = "wasm32")]
+        let explicit: Option<wgpu::Adapter> = {
+            if matches!(
+                params.adapter,
+                crate::instance::AdapterPreference::Explicit(_)
+            ) {
+                log::warn!(
+                    "AdapterPreference::Explicit is not supported on WebGPU \
+                     (no adapter enumeration in the browser); using the default adapter"
+                );
             }
-        }
-        let adapter = adapter.ok_or_else(|| {
-            GraphicsError::ResourceCreationFailed(
-                "No compatible GPU adapter (tried high-performance and default power preference)"
-                    .to_string(),
-            )
-        })?;
+            None
+        };
+
+        let adapter = if let Some(explicit) = explicit {
+            explicit
+        } else {
+            let mut adapter = None;
+            for pref in Self::power_preferences(&params.adapter) {
+                match instance.request_adapter(&Self::adapter_options(pref)).await {
+                    Ok(a) => {
+                        adapter = Some(a);
+                        break;
+                    }
+                    Err(e) => log::warn!("request_adapter({pref:?}) found no adapter: {e}"),
+                }
+            }
+            adapter.ok_or_else(|| {
+                GraphicsError::ResourceCreationFailed(
+                    "No compatible GPU adapter (tried the preferred and default power preference)"
+                        .to_string(),
+                )
+            })?
+        };
         let (device, queue) = adapter
             .request_device(&Self::device_descriptor(&adapter))
             .await
@@ -213,15 +243,58 @@ impl WgpuBackend {
         }
     }
 
-    /// Power preferences to try, in order. We prefer the discrete GPU, but on
-    /// some setups (notably dual-GPU laptops where the high-performance GPU is
-    /// powered down, and browsers generally) `HighPerformance` returns no
-    /// adapter while the default preference does — so fall back rather than fail
-    /// (#33).
-    const ADAPTER_POWER_PREFERENCES: [wgpu::PowerPreference; 2] = [
-        wgpu::PowerPreference::HighPerformance,
-        wgpu::PowerPreference::None,
-    ];
+    /// Power preferences to try, in order, for the given adapter policy
+    /// (ADR-028). The preferred setting first; `None` as a fallback because
+    /// on some setups (notably dual-GPU laptops where the high-performance
+    /// GPU is powered down, and browsers generally) a specific preference
+    /// returns no adapter while the default does (#33).
+    fn power_preferences(
+        preference: &crate::instance::AdapterPreference,
+    ) -> [wgpu::PowerPreference; 2] {
+        use crate::instance::AdapterPreference;
+        let preferred = match preference {
+            AdapterPreference::LowPower => wgpu::PowerPreference::LowPower,
+            // Explicit is resolved by enumeration before this is consulted;
+            // reaching here means enumeration was unavailable (web).
+            AdapterPreference::Auto
+            | AdapterPreference::HighPerformance
+            | AdapterPreference::Explicit(_) => wgpu::PowerPreference::HighPerformance,
+        };
+        [preferred, wgpu::PowerPreference::None]
+    }
+
+    /// Resolve an [`AdapterPreference::Explicit`] identity by enumerating
+    /// adapters (native only). `Ok(None)` when the policy is not Explicit;
+    /// an error when it is Explicit and nothing matches — an explicitly
+    /// requested adapter must never silently degrade (ADR-028).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn explicit_adapter(
+        instance: &wgpu::Instance,
+        params: &crate::instance::InstanceParameters,
+    ) -> Result<Option<wgpu::Adapter>, GraphicsError> {
+        let crate::instance::AdapterPreference::Explicit(id) = &params.adapter else {
+            return Ok(None);
+        };
+        let candidates =
+            pollster::block_on(instance.enumerate_adapters(params.wgpu_backend.to_wgpu_backends()));
+        let mut names = Vec::new();
+        for adapter in candidates {
+            let info = adapter.get_info();
+            if id.matches(info.vendor, info.device, &info.name) {
+                log::info!("Explicit adapter matched: {} ({id:?})", info.name);
+                return Ok(Some(adapter));
+            }
+            names.push(format!(
+                "{} ({:04x}:{:04x})",
+                info.name, info.vendor, info.device
+            ));
+        }
+        Err(GraphicsError::InitializationFailed(format!(
+            "Requested adapter {id:?} not found among [{}] \
+             (check REDLILIUM_ADAPTER / adapter preference)",
+            names.join(", ")
+        )))
+    }
 
     /// Features requested opportunistically when the adapter supports them:
     /// compressed texture formats (BC/ETC2/ASTC) so `create_texture` with
@@ -409,6 +482,52 @@ impl WgpuBackend {
     /// Get the backend name.
     pub fn name(&self) -> &'static str {
         "wgpu Backend"
+    }
+
+    /// Capabilities from the *granted* device limits and features (ADR-027)
+    /// — what `request_device` actually returned, not what the engine wishes
+    /// for. This is what makes engine-level validation agree with wgpu's own:
+    /// a texture that passes `create_texture` validation here cannot trip a
+    /// wgpu limit later (XB-M7).
+    pub fn capabilities(&self) -> crate::device::DeviceCapabilities {
+        let limits = self.device.limits();
+        let features = self.device.features();
+        let downlevel = self.adapter.get_downlevel_capabilities();
+        crate::device::DeviceCapabilities {
+            tier: crate::device::DeviceTier::Baseline,
+            max_texture_dimension: limits.max_texture_dimension_2d,
+            max_buffer_size: limits.max_buffer_size,
+            // WebGPU validates anisotropy in [1, 16] and clamps to hardware
+            // internally; there is no per-adapter query to be more precise.
+            max_sampler_anisotropy: 16,
+            // WebGPU guarantees exactly 1x and 4x for renderable formats.
+            sample_count_mask: 1 | 4,
+            wireframe: features.contains(wgpu::Features::POLYGON_MODE_LINE),
+            async_compute: false,
+            compute_shaders: downlevel
+                .flags
+                .contains(wgpu::DownlevelFlags::COMPUTE_SHADERS),
+        }
+    }
+
+    /// Adapter info from the wgpu adapter.
+    pub fn adapter_info(&self) -> crate::instance::AdapterInfo {
+        let info = self.adapter.get_info();
+        let device_type = match info.device_type {
+            wgpu::DeviceType::DiscreteGpu => crate::instance::AdapterType::Discrete,
+            wgpu::DeviceType::IntegratedGpu => crate::instance::AdapterType::Integrated,
+            wgpu::DeviceType::Cpu => crate::instance::AdapterType::Software,
+            wgpu::DeviceType::VirtualGpu | wgpu::DeviceType::Other => {
+                crate::instance::AdapterType::Unknown
+            }
+        };
+        crate::instance::AdapterInfo {
+            name: info.name,
+            vendor: crate::instance::vendor_name(info.vendor),
+            device_type,
+            vendor_id: info.vendor,
+            device_id: info.device,
+        }
     }
 
     /// Execute a compiled render graph.

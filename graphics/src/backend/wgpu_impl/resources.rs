@@ -179,7 +179,10 @@ impl WgpuBackend {
             lod_min_clamp: descriptor.lod_min_clamp,
             lod_max_clamp: descriptor.lod_max_clamp,
             compare: descriptor.compare.map(convert_compare_function),
-            anisotropy_clamp: descriptor.anisotropy_clamp,
+            // WebGPU validates anisotropy in [1, 16] (and clamps to hardware
+            // internally); clamp instead of letting an out-of-range request
+            // become a validation error (VK-M12's wgpu analog).
+            anisotropy_clamp: descriptor.anisotropy_clamp.clamp(1, 16),
             border_color: None,
         });
 

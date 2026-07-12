@@ -17,30 +17,57 @@ use crate::types::{
 };
 use redlilium_core::profiling::profile_scope;
 
-/// Capabilities of a graphics device.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DeviceCapabilities {
-    /// Maximum texture dimension.
-    pub max_texture_dimension: u32,
-    /// Maximum buffer size.
-    pub max_buffer_size: u64,
-    /// Whether compute shaders are supported.
-    pub compute_shaders: bool,
-    /// Whether ray tracing is supported.
-    pub ray_tracing: bool,
-    /// Whether mesh shaders are supported.
-    pub mesh_shaders: bool,
+/// Renderer-architecture tier of a device (ADR-027).
+///
+/// An ordered ladder: each tier includes everything below it. A tier names a
+/// renderer architecture — a feature set the renderer builds a *distinct code
+/// path* on — not a bag of individual capabilities. Orthogonal facts whose
+/// consequence is a clamp or a local fallback (anisotropy, sample counts,
+/// wireframe, async compute) live in [`DeviceCapabilities`] instead.
+///
+/// A new tier is added only together with the render path that stands on it
+/// (e.g. bindless materials, ray-traced lighting). Devices below `Baseline`
+/// fail device creation with a named-feature error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DeviceTier {
+    /// The floor every render path assumes: dynamic rendering, timeline
+    /// semaphores, `shaderDrawParameters` (instance-id in shaders).
+    Baseline,
 }
 
-impl Default for DeviceCapabilities {
-    fn default() -> Self {
-        Self {
-            max_texture_dimension: 16384,
-            max_buffer_size: 1 << 30, // 1 GB
-            compute_shaders: true,
-            ray_tracing: false,
-            mesh_shaders: false,
-        }
+/// Capabilities of a graphics device (ADR-027).
+///
+/// Filled from real adapter queries by every backend at device creation —
+/// never fabricated — and read-only afterwards. Use-sites clamp or validate
+/// against these values instead of hardcoding limits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DeviceCapabilities {
+    /// Renderer-architecture tier (see [`DeviceTier`]).
+    pub tier: DeviceTier,
+    /// Maximum texture dimension the backend accepts.
+    pub max_texture_dimension: u32,
+    /// Maximum buffer size the backend accepts.
+    pub max_buffer_size: u64,
+    /// Maximum sampler anisotropy; `1` when anisotropic filtering is
+    /// unsupported. Sampler creation clamps to this.
+    pub max_sampler_anisotropy: u16,
+    /// Bitmask of supported MSAA sample counts for render attachments
+    /// (bit `n` set means a sample count of `n` is supported, matching
+    /// Vulkan's `VkSampleCountFlagBits` encoding — bit 1 = 1x, bit 4 = 4x…).
+    pub sample_count_mask: u32,
+    /// Whether wireframe rasterization (`PolygonMode::Line`) is available.
+    /// When false, pipelines downgrade line mode to fill.
+    pub wireframe: bool,
+    /// Whether the device has a distinct async compute queue (#47).
+    pub async_compute: bool,
+    /// Whether compute shaders are supported (false on WebGL downlevel).
+    pub compute_shaders: bool,
+}
+
+impl DeviceCapabilities {
+    /// Whether MSAA render attachments with `count` samples are supported.
+    pub fn supports_sample_count(&self, count: u32) -> bool {
+        count.is_power_of_two() && (self.sample_count_mask & count) != 0
     }
 }
 
@@ -82,10 +109,11 @@ pub struct GraphicsDevice {
 impl GraphicsDevice {
     /// Create a new graphics device (called by GraphicsInstance).
     pub(crate) fn new(instance: Arc<GraphicsInstance>, name: String) -> Self {
+        let capabilities = instance.backend().capabilities();
         Self {
             instance,
             name,
-            capabilities: DeviceCapabilities::default(),
+            capabilities,
             buffers: RwLock::new(Vec::new()),
             textures: RwLock::new(Vec::new()),
             samplers: RwLock::new(Vec::new()),
@@ -178,6 +206,17 @@ impl GraphicsDevice {
             return Err(GraphicsError::InvalidParameter(
                 "texture dimensions cannot be zero".to_string(),
             ));
+        }
+
+        if descriptor.sample_count > 1
+            && !self
+                .capabilities
+                .supports_sample_count(descriptor.sample_count)
+        {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "sample count {} not supported by this device (supported mask: {:#x})",
+                descriptor.sample_count, self.capabilities.sample_count_mask
+            )));
         }
 
         // Create the GPU texture via backend
@@ -315,6 +354,11 @@ impl GraphicsDevice {
         descriptor: &MaterialDescriptor,
     ) -> Result<Arc<Material>, GraphicsError> {
         profile_scope!("create_material");
+
+        // Resolve the shader variant (#6) into per-stage defines first, so
+        // reflection, baked lookups and pipeline compilation below all see
+        // the same effective defines.
+        let descriptor = &descriptor.resolve_variant()?;
 
         // Auto-reflect binding layouts from Slang shaders when none are specified
         #[cfg(feature = "slang-shaders")]
@@ -866,10 +910,44 @@ mod tests {
         instance.create_device().unwrap()
     }
 
+    /// The device is named after the real adapter (XB-L3) — "Dummy Adapter"
+    /// only when the dummy backend was actually selected.
     #[test]
     fn test_device_name() {
         let device = create_test_device();
-        assert_eq!(device.name(), "Dummy Adapter");
+        assert!(!device.name().is_empty());
+    }
+
+    /// ADR-027: capabilities come from the backend, not fabricated defaults.
+    #[test]
+    fn test_capabilities_come_from_backend() {
+        let device = create_test_device();
+        let caps = device.capabilities();
+        assert_eq!(caps.tier, DeviceTier::Baseline);
+        assert!(caps.supports_sample_count(1));
+        assert!(caps.supports_sample_count(4));
+        assert!(!caps.supports_sample_count(16));
+        // Not a power of two → never supported, regardless of the mask.
+        assert!(!caps.supports_sample_count(3));
+    }
+
+    /// VK-M12 (engine side): a sample count outside the queried mask is
+    /// rejected at validation, not silently downgraded by a backend.
+    #[test]
+    fn test_create_texture_unsupported_sample_count() {
+        let device = create_test_device();
+        let mut descriptor = TextureDescriptor::new_2d(
+            256,
+            256,
+            TextureFormat::Rgba8Unorm,
+            TextureUsage::RENDER_ATTACHMENT,
+        );
+        descriptor.sample_count = 16;
+        let result = device.create_texture(&descriptor);
+        assert!(result.is_err());
+
+        descriptor.sample_count = 4;
+        assert!(device.create_texture(&descriptor).is_ok());
     }
 
     #[test]

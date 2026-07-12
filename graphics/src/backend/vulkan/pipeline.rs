@@ -161,6 +161,11 @@ pub struct PipelineManager {
     /// destroyed in [`Self::destroy`]. `GpuPipeline::Vulkan` holds copies for
     /// encoding but must NOT destroy them (see its `Drop` impl).
     ds_layout_cache: parking_lot::Mutex<HashMap<DsLayoutKey, vk::DescriptorSetLayout>>,
+    /// Whether `fillModeNonSolid` was enabled on the device. When false,
+    /// `PolygonMode::Line` downgrades to fill with a warning instead of
+    /// tripping validation — mirroring the wgpu backend's handling of a
+    /// missing `POLYGON_MODE_LINE` (ADR-027 capability, VK-M10).
+    wireframe_supported: bool,
     /// Whether resources have been explicitly destroyed.
     destroyed: bool,
 }
@@ -176,6 +181,7 @@ impl PipelineManager {
         device: ash::Device,
         depth24_stencil8_format: vk::Format,
         device_properties: &vk::PhysicalDeviceProperties,
+        wireframe_supported: bool,
     ) -> Result<Self, GraphicsError> {
         let pool_sizes = vec![
             vk::DescriptorPoolSize {
@@ -230,6 +236,7 @@ impl PipelineManager {
             pipeline_cache_path,
             pipeline_cache_dirty: std::sync::atomic::AtomicBool::new(false),
             ds_layout_cache: parking_lot::Mutex::new(HashMap::new()),
+            wireframe_supported,
             destroyed: false,
         })
     }
@@ -338,11 +345,6 @@ impl PipelineManager {
         language: ShaderSourceLanguage,
         defines: &[(String, String)],
     ) -> Result<(vk::ShaderModule, String), GraphicsError> {
-        // `defines` feeds only the Slang compile path; without that feature the
-        // Slang arm is a hard error and the parameter is otherwise unused.
-        #[cfg(not(feature = "slang-shaders"))]
-        let _ = &defines;
-
         let (spv, actual_entry) = match language {
             ShaderSourceLanguage::Wgsl => {
                 let spv = self.compile_wgsl_to_spirv(source, stage, entry_point)?;
@@ -355,11 +357,34 @@ impl PipelineManager {
                     spirv_entry_point_name(&spv, stage).unwrap_or_else(|| entry_point.to_string());
                 (spv, actual)
             }
+            // Without the Slang compiler, serve the WGSL baked offline by
+            // `xtask bake-shaders` and lower it through the regular WGSL→SPIR-V
+            // path — mirroring the wgpu backend, so the default (Slang-off)
+            // build runs every baked shader variant (#6) on Vulkan too. Slang's
+            // WGSL emission keeps entry-point names, so the source name is the
+            // module name. A miss fails loudly and names the permutation.
             #[cfg(not(feature = "slang-shaders"))]
             ShaderSourceLanguage::Slang => {
-                return Err(GraphicsError::FeatureNotSupported(
-                    "Slang shaders require the 'slang-shaders' feature".into(),
-                ));
+                let source_str = std::str::from_utf8(source).map_err(|e| {
+                    GraphicsError::ShaderCompilationFailed(format!(
+                        "Slang source is not valid UTF-8: {e}"
+                    ))
+                })?;
+                let defines: Vec<(&str, &str)> = defines
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect();
+                let wgsl = crate::shader::baked::lookup(source_str, entry_point, &defines)
+                    .ok_or_else(|| {
+                        GraphicsError::ShaderCompilationFailed(format!(
+                            "no baked WGSL for a Slang shader (entry '{entry_point}', defines \
+                             {defines:?}); Slang cannot compile at runtime without the \
+                             'slang-shaders' feature — add it to the xtask registry and run \
+                             `cargo run -p xtask --features slang -- bake-shaders`, then rebuild",
+                        ))
+                    })?;
+                let spv = self.compile_wgsl_to_spirv(wgsl.as_bytes(), stage, entry_point)?;
+                (spv, entry_point.to_string())
             }
         };
 
@@ -700,7 +725,16 @@ impl PipelineManager {
             .rasterizer_discard_enable(false)
             .polygon_mode(match raster.polygon_mode {
                 crate::materials::PolygonMode::Fill => vk::PolygonMode::FILL,
-                crate::materials::PolygonMode::Line => vk::PolygonMode::LINE,
+                crate::materials::PolygonMode::Line if self.wireframe_supported => {
+                    vk::PolygonMode::LINE
+                }
+                crate::materials::PolygonMode::Line => {
+                    log::warn!(
+                        "PolygonMode::Line requested but fillModeNonSolid is \
+                         unavailable on this device; rendering filled"
+                    );
+                    vk::PolygonMode::FILL
+                }
             })
             .line_width(1.0)
             .cull_mode(vk_cull_mode(raster.cull_mode))
