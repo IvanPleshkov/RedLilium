@@ -1420,3 +1420,133 @@ fn test_depth_co_use_read_only_attachment(#[case] backend: Backend) {
         );
     }
 }
+
+/// Shader variants end-to-end (#6, Decision 5): the shader declares its axes
+/// (`//#pragma variant_system` in egui.slang), the caller builds a validated
+/// `VariantKey`, and `create_material` resolves it into per-stage defines that
+/// hit the *per-variant* baked WGSL + reflection entries (this build has no
+/// runtime Slang). One material per real color-space combo must come up on
+/// every backend.
+#[rstest]
+#[case::dummy(Backend::Dummy)]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_shader_variant_selection_end_to_end(#[case] backend: Backend) {
+    use redlilium_graphics::shader::EGUI_SHADER_SOURCE;
+    use redlilium_graphics::{
+        ShaderStage, ShaderVariantSpace, VertexAttribute, VertexAttributeFormat,
+        VertexAttributeSemantic, VertexBufferLayout, VertexLayout,
+    };
+
+    let Some(ctx) = TestContext::new(backend) else {
+        eprintln!("Backend {:?} not available, skipping", backend);
+        return;
+    };
+
+    let space = ShaderVariantSpace::parse(EGUI_SHADER_SOURCE).expect("egui variant pragmas");
+    assert_eq!(space.axes().len(), 2, "egui declares two system axes");
+
+    // The egui vertex layout (matches the shader's vs_main inputs).
+    let vertex_layout = Arc::new(
+        VertexLayout::new()
+            .with_buffer(VertexBufferLayout::new(32))
+            .with_attribute(VertexAttribute {
+                semantic: VertexAttributeSemantic::Position,
+                format: VertexAttributeFormat::Float2,
+                offset: 0,
+                buffer_index: 0,
+            })
+            .with_attribute(VertexAttribute {
+                semantic: VertexAttributeSemantic::TexCoord0,
+                format: VertexAttributeFormat::Float2,
+                offset: 8,
+                buffer_index: 0,
+            })
+            .with_attribute(VertexAttribute {
+                semantic: VertexAttributeSemantic::Color,
+                format: VertexAttributeFormat::Float4,
+                offset: 16,
+                buffer_index: 0,
+            }),
+    );
+
+    // One color-space combo egui runs with: (hdr, srgb, target format,
+    // expected resolved defines on every stage).
+    struct Combo {
+        hdr: bool,
+        srgb: bool,
+        format: TextureFormat,
+        expected_defines: &'static [(&'static str, &'static str)],
+    }
+    // The three real combos.
+    let combos = [
+        Combo {
+            hdr: false,
+            srgb: false,
+            format: TextureFormat::Bgra8Unorm,
+            expected_defines: &[],
+        },
+        Combo {
+            hdr: true,
+            srgb: false,
+            format: TextureFormat::Rgba16Float,
+            expected_defines: &[("HDR_OUTPUT", "")],
+        },
+        Combo {
+            hdr: false,
+            srgb: true,
+            format: TextureFormat::Bgra8UnormSrgb,
+            expected_defines: &[("SRGB_FRAMEBUFFER", "")],
+        },
+    ];
+
+    for combo in combos {
+        let variant = space
+            .select()
+            .system("HDR_OUTPUT", combo.hdr)
+            .system("SRGB_FRAMEBUFFER", combo.srgb)
+            .build()
+            .expect("variant key");
+
+        let material = ctx
+            .device
+            .create_material(
+                &MaterialDescriptor::new()
+                    .with_shader(ShaderSource::slang(
+                        ShaderStage::Vertex,
+                        EGUI_SHADER_SOURCE.as_bytes().to_vec(),
+                        "vs_main",
+                        Vec::new(),
+                    ))
+                    .with_shader(ShaderSource::slang(
+                        ShaderStage::Fragment,
+                        EGUI_SHADER_SOURCE.as_bytes().to_vec(),
+                        "fs_main",
+                        Vec::new(),
+                    ))
+                    .with_variant(variant.clone())
+                    .with_vertex_layout(vertex_layout.clone())
+                    .with_color_format(combo.format)
+                    .with_dynamic_uniform(0, 0)
+                    .with_label(format!("egui_variant_{variant}")),
+            )
+            .unwrap_or_else(|e| panic!("variant {variant} failed on {backend:?}: {e:?}"));
+
+        // The stored descriptor carries the resolved per-stage defines.
+        for shader in material.shaders() {
+            let got: Vec<(&str, &str)> = shader
+                .defines
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            assert_eq!(
+                got, combo.expected_defines,
+                "resolved defines for {variant}"
+            );
+        }
+    }
+
+    // A typo'd axis fails at key-build time — the whole point of declaring
+    // the space.
+    assert!(space.select().system("HDR_OUTPU", true).build().is_err());
+}

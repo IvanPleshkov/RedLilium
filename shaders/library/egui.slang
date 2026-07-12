@@ -4,11 +4,14 @@
 //
 // Based on egui-wgpu's shader approach for proper alpha blending.
 //
-// Defines:
+// Variant axes (#6, Decision 5) — selected by the renderer from the surface
+// format, hence variant_system (no defaults; the call site must decide):
 //   HDR_OUTPUT        - Outputs linear-space values for HDR surfaces (Rgba16Float etc.)
 //   SRGB_FRAMEBUFFER  - Outputs linear-space values for sRGB surfaces (Bgra8UnormSrgb)
 //                       where hardware applies the linear->sRGB conversion automatically
-//   (default)         - Outputs gamma-space values for non-sRGB SDR surfaces (Bgra8Unorm)
+//   (both off)        - Outputs gamma-space values for non-sRGB SDR surfaces (Bgra8Unorm)
+//#pragma variant_system HDR_OUTPUT
+//#pragma variant_system SRGB_FRAMEBUFFER
 
 // =============================================================================
 // Uniforms and Textures

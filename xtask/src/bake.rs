@@ -23,13 +23,16 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use redlilium_graphics::ShaderStage;
-use redlilium_graphics::shader::{ShaderLibrary, SlangCompiler, baked};
+use redlilium_graphics::shader::{ShaderLibrary, ShaderVariantSpace, SlangCompiler, baked};
 
-/// One shader source and the exact `(entry_point, stage, defines)` permutations
-/// the runtime compiles it with. This registry is the reviewed source of truth —
-/// permutations cannot be auto-discovered offline, so a new define-gated variant
-/// must be added here or it will miss loudly at runtime on wasm (both the WGSL
-/// and the binding-layout reflection).
+/// One shader source and the entry points the runtime compiles it with. The
+/// registry lists the *shaders*; their define permutations are no longer
+/// hand-written — each shader declares its variant space with
+/// `//#pragma variant` / `//#pragma variant_system` lines in the source
+/// (#6, Decision 5), and the bake enumerates the full cartesian product via
+/// [`ShaderVariantSpace::enumerate_all`]. A shader missing from this registry
+/// still misses loudly at runtime on wasm (both the WGSL and the
+/// binding-layout reflection); a *variant* can no longer be forgotten.
 struct ShaderSpec {
     /// Human name for diagnostics.
     name: &'static str,
@@ -37,21 +40,10 @@ struct ShaderSpec {
     /// the runtime hashes — verbatim `include_str!`/embedded VFS content).
     path: &'static str,
     /// Entry points to bake with their stage. Each becomes its own WGSL output;
-    /// together (per define set) they form one material shader SET whose binding
+    /// together (per variant) they form one material shader SET whose binding
     /// reflection is baked under [`baked::shader_set_key`].
     entry_points: &'static [(&'static str, ShaderStage)],
-    /// Define sets; one WGSL output per (entry_point × define set) and one
-    /// reflection entry per (spec × define set).
-    define_sets: &'static [&'static [(&'static str, &'static str)]],
 }
-
-const NO_DEFINES: &[&[(&str, &str)]] = &[&[]];
-// egui varies on the surface color space (see egui/renderer.rs): HDR, sRGB, or
-// neither (linear non-sRGB). Bake all three.
-const EGUI_DEFINES: &[&[(&str, &str)]] = &[&[], &[("HDR_OUTPUT", "")], &[("SRGB_FRAMEBUFFER", "")]];
-// The deferred resolve pass `#ifdef HDR_OUTPUT`s its tonemap; the demo may run
-// against either a linear-HDR or an sRGB/LDR target, so bake both.
-const HDR_DEFINES: &[&[(&str, &str)]] = &[&[], &[("HDR_OUTPUT", "")]];
 
 const VS_FS: &[(&str, ShaderStage)] = &[
     ("vs_main", ShaderStage::Vertex),
@@ -63,31 +55,26 @@ const REGISTRY: &[ShaderSpec] = &[
         name: "egui",
         path: "shaders/library/egui.slang",
         entry_points: VS_FS,
-        define_sets: EGUI_DEFINES,
     },
     ShaderSpec {
         name: "blit",
         path: "runtime/shaders/blit.slang",
         entry_points: VS_FS,
-        define_sets: NO_DEFINES,
     },
     ShaderSpec {
         name: "entity_index",
         path: "std-assets/shaders/entity_index.slang",
         entry_points: VS_FS,
-        define_sets: NO_DEFINES,
     },
     ShaderSpec {
         name: "opaque_color",
         path: "std-assets/shaders/opaque_color.slang",
         entry_points: VS_FS,
-        define_sets: NO_DEFINES,
     },
     ShaderSpec {
         name: "opaque_textured",
         path: "std-assets/shaders/opaque_textured.slang",
         entry_points: VS_FS,
-        define_sets: NO_DEFINES,
     },
     // Debug-draw lines/shapes — used by the editor's gizmos (debug_drawer), so it
     // must be baked or the default (Slang-off) editor build misses at runtime.
@@ -95,26 +82,22 @@ const REGISTRY: &[ShaderSpec] = &[
         name: "debug_draw",
         path: "shaders/standard/debug_draw.slang",
         entry_points: VS_FS,
-        define_sets: NO_DEFINES,
     },
     // Demo shaders — baked so the demos render on the default Slang-off build too.
     ShaderSpec {
         name: "skybox",
         path: "demos/shaders/skybox.slang",
         entry_points: VS_FS,
-        define_sets: NO_DEFINES,
     },
     ShaderSpec {
         name: "deferred_gbuffer",
         path: "demos/shaders/deferred_gbuffer.slang",
         entry_points: VS_FS,
-        define_sets: NO_DEFINES,
     },
     ShaderSpec {
         name: "deferred_resolve",
         path: "demos/shaders/deferred_resolve.slang",
         entry_points: VS_FS,
-        define_sets: HDR_DEFINES,
     },
 ];
 
@@ -193,8 +176,22 @@ fn bake_table() -> Result<Baked, String> {
         let source =
             std::fs::read_to_string(&full).map_err(|e| format!("read {}: {e}", full.display()))?;
 
-        for defines in spec.define_sets {
-            let defines: &[(&str, &str)] = defines;
+        // The shader's declared variant space (#6) drives the permutations:
+        // full cartesian product, capped by MAX_VARIANTS_PER_SHADER. A shader
+        // with no `//#pragma variant` lines yields exactly the empty set.
+        let space = ShaderVariantSpace::parse(&source)
+            .map_err(|e| format!("variant pragmas of {}: {e}", spec.name))?;
+        let variants = space
+            .enumerate_all()
+            .map_err(|e| format!("variant space of {}: {e}", spec.name))?;
+
+        for variant in &variants {
+            let defines_owned: Vec<(&str, &str)> = variant
+                .defines()
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            let defines: &[(&str, &str)] = &defines_owned;
 
             // One WGSL output per entry point.
             for &(entry, _stage) in spec.entry_points {

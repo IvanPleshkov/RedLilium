@@ -19,18 +19,21 @@ use redlilium_assets::Guid;
 use redlilium_core::mesh::VertexLayout;
 use redlilium_graphics::{
     CullMode, GraphicsDevice, GraphicsError, Material, MaterialDescriptor, ShaderSource,
-    ShaderStage, TextureFormat,
+    ShaderStage, TextureFormat, VariantKey,
 };
 
 use crate::std::rendering::loaders::Shader;
 
-/// Cache key: the shader asset, the (shared, interned) vertex layout by pointer
-/// identity, and the render target formats. Layouts are interned by the
+/// Cache key: the shader asset, its variant selection (#6, Decision 5), the
+/// (shared, interned) vertex layout by pointer identity, and the render target
+/// formats — Decision 4's full formula `(shader + defines + layout + state +
+/// formats)`. Layouts are interned by the
 /// [`VertexLayoutManager`](super::VertexLayoutManager), so pointer identity is
 /// content identity — which is also what the renderer batches on.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct PipelineKey {
     shader: Guid,
+    variant: VariantKey,
     layout: usize,
     color: TextureFormat,
     depth: Option<TextureFormat>,
@@ -71,12 +74,14 @@ impl PipelineCache {
         &mut self,
         shader_guid: Guid,
         shader: &Arc<Shader>,
+        variant: &VariantKey,
         layout: &Arc<VertexLayout>,
         color: TextureFormat,
         depth: TextureFormat,
     ) -> Result<Arc<Material>, GraphicsError> {
         let key = PipelineKey {
             shader: shader_guid,
+            variant: variant.clone(),
             layout: Arc::as_ptr(layout) as usize,
             color,
             depth: Some(depth),
@@ -90,7 +95,7 @@ impl PipelineCache {
             if entry.broken == Some(Arc::as_ptr(shader) as usize) {
                 return Ok(Arc::clone(&entry.material));
             }
-            match Self::build(&self.device, shader, layout, color, depth) {
+            match Self::build(&self.device, shader, variant, layout, color, depth) {
                 Ok(material) => {
                     entry.shader = Arc::clone(shader);
                     entry.material = Arc::clone(&material);
@@ -105,7 +110,7 @@ impl PipelineCache {
             }
         }
 
-        let material = Self::build(&self.device, shader, layout, color, depth)?;
+        let material = Self::build(&self.device, shader, variant, layout, color, depth)?;
         self.cache.insert(
             key,
             PipelineEntry {
@@ -117,10 +122,11 @@ impl PipelineCache {
         Ok(material)
     }
 
-    /// Compile the pipeline for this shader source + layout + formats.
+    /// Compile the pipeline for this shader source + variant + layout + formats.
     fn build(
         device: &Arc<GraphicsDevice>,
         shader: &Arc<Shader>,
+        variant: &VariantKey,
         layout: &Arc<VertexLayout>,
         color: TextureFormat,
         depth: TextureFormat,
@@ -139,6 +145,7 @@ impl PipelineCache {
                     "fs_main",
                     vec![],
                 ))
+                .with_variant(variant.clone())
                 .with_vertex_layout(Arc::clone(layout))
                 .with_color_format(color)
                 .with_depth_format(depth)

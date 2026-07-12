@@ -355,6 +355,11 @@ impl GraphicsDevice {
     ) -> Result<Arc<Material>, GraphicsError> {
         profile_scope!("create_material");
 
+        // Resolve the shader variant (#6) into per-stage defines first, so
+        // reflection, baked lookups and pipeline compilation below all see
+        // the same effective defines.
+        let descriptor = &descriptor.resolve_variant()?;
+
         // Auto-reflect binding layouts from Slang shaders when none are specified
         #[cfg(feature = "slang-shaders")]
         let descriptor = &{

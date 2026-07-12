@@ -345,11 +345,6 @@ impl PipelineManager {
         language: ShaderSourceLanguage,
         defines: &[(String, String)],
     ) -> Result<(vk::ShaderModule, String), GraphicsError> {
-        // `defines` feeds only the Slang compile path; without that feature the
-        // Slang arm is a hard error and the parameter is otherwise unused.
-        #[cfg(not(feature = "slang-shaders"))]
-        let _ = &defines;
-
         let (spv, actual_entry) = match language {
             ShaderSourceLanguage::Wgsl => {
                 let spv = self.compile_wgsl_to_spirv(source, stage, entry_point)?;
@@ -362,11 +357,34 @@ impl PipelineManager {
                     spirv_entry_point_name(&spv, stage).unwrap_or_else(|| entry_point.to_string());
                 (spv, actual)
             }
+            // Without the Slang compiler, serve the WGSL baked offline by
+            // `xtask bake-shaders` and lower it through the regular WGSL→SPIR-V
+            // path — mirroring the wgpu backend, so the default (Slang-off)
+            // build runs every baked shader variant (#6) on Vulkan too. Slang's
+            // WGSL emission keeps entry-point names, so the source name is the
+            // module name. A miss fails loudly and names the permutation.
             #[cfg(not(feature = "slang-shaders"))]
             ShaderSourceLanguage::Slang => {
-                return Err(GraphicsError::FeatureNotSupported(
-                    "Slang shaders require the 'slang-shaders' feature".into(),
-                ));
+                let source_str = std::str::from_utf8(source).map_err(|e| {
+                    GraphicsError::ShaderCompilationFailed(format!(
+                        "Slang source is not valid UTF-8: {e}"
+                    ))
+                })?;
+                let defines: Vec<(&str, &str)> = defines
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect();
+                let wgsl = crate::shader::baked::lookup(source_str, entry_point, &defines)
+                    .ok_or_else(|| {
+                        GraphicsError::ShaderCompilationFailed(format!(
+                            "no baked WGSL for a Slang shader (entry '{entry_point}', defines \
+                             {defines:?}); Slang cannot compile at runtime without the \
+                             'slang-shaders' feature — add it to the xtask registry and run \
+                             `cargo run -p xtask --features slang -- bake-shaders`, then rebuild",
+                        ))
+                    })?;
+                let spv = self.compile_wgsl_to_spirv(wgsl.as_bytes(), stage, entry_point)?;
+                (spv, entry_point.to_string())
             }
         };
 

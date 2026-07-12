@@ -128,6 +128,17 @@ from pipeline build). It does **not** own define *selection*. Defines are declar
 by the shader and selected jointly by the material (features) and the render
 pipeline (everything else).
 
+**Implemented (#6)** in `graphics/src/shader/variants.rs`: the shader declares
+its space with `//#pragma variant NAME [values…] [default V]` (material-selected,
+has a default) and `//#pragma variant_system NAME [values…]` (pipeline-selected,
+deliberately default-free — every call site sets it explicitly).
+`ShaderVariantSpace::parse` → `.select().feature(…).system(…).build()` →
+`VariantKey` → `MaterialDescriptor::with_variant`; typos and missing system axes
+fail at key-build time. The offline bake enumerates each shader's full cartesian
+product from the same pragmas (capped at `MAX_VARIANTS_PER_SHADER = 64`), so a
+variant can no longer be forgotten in the registry. Bool axes emit value-less
+`#ifdef` defines when on and nothing when off; enum axes always emit `NAME=value`.
+
 ## Decision 6 — keep the Material / MaterialInstance split
 
 Mirrors the graphics types (`Material` pipeline + `MaterialInstance` bindings) and
