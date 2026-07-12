@@ -96,6 +96,13 @@ impl App {
             post.add_exclusive(MeshLoad::default());
             post.add(MaterialInstanceLoad);
             post.add(AssetPump);
+            // Total order for the raw-access asset pipeline, after the camera
+            // chain (#54 — see the matching edges in editor/src/core.rs).
+            post.add_edge::<UpdateCameraMatrices, HotReload>()
+                .expect("no cycle");
+            post.add_edge::<HotReload, MeshLoad>().expect("no cycle");
+            post.add_edge::<MeshLoad, MaterialInstanceLoad>()
+                .expect("no cycle");
             post.add_edge::<HotReload, MaterialInstanceLoad>()
                 .expect("no cycle");
             post.add_edge::<MaterialInstanceLoad, AssetPump>()

@@ -356,8 +356,9 @@ impl World {
                     }
                 }
                 // Main-thread resources are single-threaded (no lock); pure
-                // filter markers borrow no storage.
-                AccessKind::MainThreadResource | AccessKind::Filter => None,
+                // filter markers borrow no storage. RawWorld is a diagnostic
+                // marker (#54), never part of a lock request.
+                AccessKind::MainThreadResource | AccessKind::Filter | AccessKind::RawWorld => None,
             })
             .collect()
     }

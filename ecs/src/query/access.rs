@@ -36,6 +36,11 @@ pub enum AccessKind {
     /// Pure filter marker that borrows no storage (`Or`/`Any` combinators).
     /// Carries a unique marker `TypeId`.
     Filter,
+    /// Undeclared whole-world access via `SystemContext::raw_world()` (#54).
+    /// Recorded so the ambiguity detector treats the system as conflicting
+    /// with every unordered peer — raw systems bypass declared locking, so
+    /// the scheduler cannot see what they actually touch.
+    RawWorld,
 }
 
 /// Identifies the storage an access refers to, for deduplication and conflict
@@ -48,6 +53,7 @@ enum StorageClass {
     Resource,
     MainThreadResource,
     Marker,
+    RawWorld,
 }
 
 impl AccessKind {
@@ -57,6 +63,7 @@ impl AccessKind {
             AccessKind::Resource => StorageClass::Resource,
             AccessKind::MainThreadResource => StorageClass::MainThreadResource,
             AccessKind::Filter => StorageClass::Marker,
+            AccessKind::RawWorld => StorageClass::RawWorld,
         }
     }
 }
@@ -104,6 +111,15 @@ impl AccessInfo {
             type_id,
             is_write: false,
             kind: AccessKind::ComponentFilter,
+        }
+    }
+
+    /// Undeclared whole-world access (see [`AccessKind::RawWorld`]).
+    pub(crate) fn raw_world() -> Self {
+        Self {
+            type_id: TypeId::of::<crate::World>(),
+            is_write: true,
+            kind: AccessKind::RawWorld,
         }
     }
 

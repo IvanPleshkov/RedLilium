@@ -484,8 +484,24 @@ pub fn build_editor_schedules(egui: bool) -> Schedules {
         .add(redlilium_ecs::RemoteServe);
     schedules.get_mut::<PostUpdate>().add(MaterialInstanceLoad);
     schedules.get_mut::<PostUpdate>().add(AssetPump);
-    // Serialize asset pipeline (HotReload -> MaterialInstanceLoad -> AssetPump)
-    // to avoid manager lock contention.
+    // The asset systems reach the world raw (`ctx.raw_world()`), so the
+    // scheduler cannot see their true footprint — the ambiguity detector
+    // (#54) treats them as owning the whole world. Give the schedule a total
+    // order: camera chain first, then the asset pipeline as a chain, then
+    // the remote pump. `core::tests::editor_schedules_have_no_ambiguities`
+    // enforces this stays complete.
+    schedules
+        .get_mut::<PostUpdate>()
+        .add_edge::<UpdateCameraMatrices, HotReload>()
+        .expect("UpdateCameraMatrices -> HotReload edge");
+    schedules
+        .get_mut::<PostUpdate>()
+        .add_edge::<HotReload, MeshLoad>()
+        .expect("HotReload -> MeshLoad edge");
+    schedules
+        .get_mut::<PostUpdate>()
+        .add_edge::<MeshLoad, MaterialInstanceLoad>()
+        .expect("MeshLoad -> MaterialInstanceLoad edge");
     schedules
         .get_mut::<PostUpdate>()
         .add_edge::<HotReload, MaterialInstanceLoad>()
@@ -498,6 +514,10 @@ pub fn build_editor_schedules(egui: bool) -> Schedules {
         .get_mut::<PostUpdate>()
         .add_edge::<MeshLoad, AssetPump>()
         .expect("MeshLoad -> AssetPump edge");
+    schedules
+        .get_mut::<PostUpdate>()
+        .add_edge::<AssetPump, redlilium_ecs::RemoteServe>()
+        .expect("AssetPump -> RemoteServe edge");
 
     // All per-draw uniforms (group 0 transforms, group 1 material props) are
     // written into the scene-view rings in `on_draw`, so there are no
@@ -539,4 +559,62 @@ pub fn unique_asset_path(world: &World, source: &str, dir: &str, ext: &str) -> S
                 .then_some(path)
         })
         .expect("infinite range yields a free name")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scene_view::SceneViewState;
+    use redlilium_ecs::{EcsRunner, RunDiagnostics};
+    use redlilium_graphics::{GraphicsInstance, TextureFormat};
+    use redlilium_vfs::Vfs;
+
+    /// #54: the ambiguity detector — now able to see raw `ctx.world()`
+    /// access — must report ZERO ambiguities on the editor's CPU schedules.
+    /// Every raw-access system is either an exclusive barrier (#52) or
+    /// ordered by explicit edges (#53); a warning here is a real regression
+    /// (a new system missing its dependency edge), which is exactly what
+    /// this test is for.
+    #[test]
+    fn editor_schedules_have_no_ambiguities() {
+        let instance = GraphicsInstance::new().expect("graphics instance");
+        let device = instance.create_device().expect("graphics device");
+        let engine = redlilium_runtime::EngineContext::with_vfs(device.clone(), Vfs::new());
+        let mut scene_view = SceneViewState::new(device, TextureFormat::Bgra8UnormSrgb);
+
+        let mut ew = create_editor_world(
+            &EditorWorldParams {
+                remote: false,
+                egui: false,
+            },
+            &engine,
+            &mut scene_view,
+            1.0,
+        );
+
+        let runner = EcsRunner::single_thread();
+        let diagnostics = RunDiagnostics {
+            detect_ambiguities: true,
+            ..Default::default()
+        };
+
+        // The CPU schedules that run under the MT runner every frame. Render
+        // is exercised separately by the shells (it needs GPU-backed
+        // resources like DebugDrawerRenderer that the shells insert).
+        let containers = [
+            ("PreUpdate", ew.schedules.get::<PreUpdate>()),
+            ("Update", ew.schedules.get::<Update>()),
+            ("PostUpdate", ew.schedules.get::<PostUpdate>()),
+        ];
+        for (name, container) in containers {
+            let Some(container) = container else { continue };
+            let result = runner.run_with(&mut ew.world, container, &diagnostics);
+            let ambiguities = result.report.ambiguities.expect("requested");
+            assert!(
+                ambiguities.is_empty(),
+                "editor {name} schedule has unordered conflicting systems \
+                 (add a dependency edge or an exclusive barrier):\n{ambiguities:#?}"
+            );
+        }
+    }
 }
