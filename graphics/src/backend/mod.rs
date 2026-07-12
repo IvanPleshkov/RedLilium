@@ -1004,6 +1004,29 @@ impl GpuBackend {
         }
     }
 
+    /// Capabilities of the adapter this backend was created on, from real
+    /// queries at backend creation (ADR-027) — never fabricated defaults.
+    pub fn capabilities(&self) -> crate::device::DeviceCapabilities {
+        match self {
+            Self::Dummy(backend) => backend.capabilities(),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(backend) => backend.capabilities(),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => backend.capabilities(),
+        }
+    }
+
+    /// Information about the adapter this backend was created on.
+    pub fn adapter_info(&self) -> crate::instance::AdapterInfo {
+        match self {
+            Self::Dummy(backend) => backend.adapter_info(),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(backend) => backend.adapter_info(),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => backend.adapter_info(),
+        }
+    }
+
     /// Create a buffer resource.
     pub fn create_buffer(&self, descriptor: &BufferDescriptor) -> Result<GpuBuffer, GraphicsError> {
         match self {
@@ -1329,6 +1352,16 @@ impl GpuBackend {
 
             #[cfg(feature = "vulkan-backend")]
             Self::Vulkan(vulkan_backend) => {
+                // A headless instance has no surface extensions enabled;
+                // fail with a clear message instead of calling unloaded
+                // surface entry points.
+                if !vulkan_backend.surface_support() {
+                    return Err(GraphicsError::ResourceCreationFailed(
+                        "Vulkan instance has no surface support (headless loader); \
+                         cannot create a window surface"
+                            .to_string(),
+                    ));
+                }
                 // Create Vulkan surface from window
                 let display_handle = window.display_handle().map_err(|e| {
                     GraphicsError::ResourceCreationFailed(format!(

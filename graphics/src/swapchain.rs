@@ -105,9 +105,16 @@ impl SurfaceConfiguration {
 
     /// Set the number of frames in flight.
     ///
-    /// Must be at least 1. Defaults to 2.
+    /// Must be in `1..=MAX_FRAMES_IN_FLIGHT`
+    /// (see [`crate::pipeline::MAX_FRAMES_IN_FLIGHT`]). Defaults to 2.
     pub fn with_frames_in_flight(mut self, frames_in_flight: usize) -> Self {
         assert!(frames_in_flight > 0, "frames_in_flight must be at least 1");
+        assert!(
+            frames_in_flight <= crate::pipeline::MAX_FRAMES_IN_FLIGHT,
+            "frames_in_flight ({frames_in_flight}) exceeds MAX_FRAMES_IN_FLIGHT \
+             ({})",
+            crate::pipeline::MAX_FRAMES_IN_FLIGHT
+        );
         self.frames_in_flight = frames_in_flight;
         self
     }
@@ -544,5 +551,14 @@ mod tests {
         assert_eq!(config.format, TextureFormat::Bgra8Unorm);
         assert_eq!(config.present_mode, PresentMode::Fifo);
         assert_eq!(config.frames_in_flight, 2);
+    }
+
+    /// VK-M9: the surface config feeds the pipeline's frames-in-flight, so
+    /// the same MAX_FRAMES_IN_FLIGHT bound applies at this entry point too.
+    #[test]
+    #[should_panic(expected = "exceeds MAX_FRAMES_IN_FLIGHT")]
+    fn test_frames_in_flight_above_max_panics() {
+        let _ = SurfaceConfiguration::new(800, 600)
+            .with_frames_in_flight(crate::pipeline::MAX_FRAMES_IN_FLIGHT + 1);
     }
 }

@@ -34,10 +34,11 @@ pub fn create_debug_messenger(
     debug_utils: &ash::ext::debug_utils::Instance,
 ) -> Result<vk::DebugUtilsMessengerEXT, GraphicsError> {
     let create_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
+        // No INFO: loader/driver info chatter drowns real findings on every
+        // validation run (VK-L11); errors and warnings are what we act on.
         .message_severity(
             vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
-                | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING
-                | vk::DebugUtilsMessageSeverityFlagsEXT::INFO,
+                | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING,
         )
         .message_type(
             vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
@@ -80,11 +81,16 @@ unsafe extern "system" fn debug_callback(
         }
     };
 
-    let type_str = match message_type {
-        vk::DebugUtilsMessageTypeFlagsEXT::GENERAL => "General",
-        vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION => "Validation",
-        vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE => "Performance",
-        _ => "Unknown",
+    // `message_type` is a bitmask and may combine flags; exact-equality
+    // matching mislabeled combined types as "Unknown" (VK-L11).
+    let type_str = if message_type.contains(vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION) {
+        "Validation"
+    } else if message_type.contains(vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE) {
+        "Performance"
+    } else if message_type.contains(vk::DebugUtilsMessageTypeFlagsEXT::GENERAL) {
+        "General"
+    } else {
+        "Unknown"
     };
 
     match message_severity {

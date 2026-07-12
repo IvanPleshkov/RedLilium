@@ -161,6 +161,11 @@ pub struct PipelineManager {
     /// destroyed in [`Self::destroy`]. `GpuPipeline::Vulkan` holds copies for
     /// encoding but must NOT destroy them (see its `Drop` impl).
     ds_layout_cache: parking_lot::Mutex<HashMap<DsLayoutKey, vk::DescriptorSetLayout>>,
+    /// Whether `fillModeNonSolid` was enabled on the device. When false,
+    /// `PolygonMode::Line` downgrades to fill with a warning instead of
+    /// tripping validation — mirroring the wgpu backend's handling of a
+    /// missing `POLYGON_MODE_LINE` (ADR-027 capability, VK-M10).
+    wireframe_supported: bool,
     /// Whether resources have been explicitly destroyed.
     destroyed: bool,
 }
@@ -176,6 +181,7 @@ impl PipelineManager {
         device: ash::Device,
         depth24_stencil8_format: vk::Format,
         device_properties: &vk::PhysicalDeviceProperties,
+        wireframe_supported: bool,
     ) -> Result<Self, GraphicsError> {
         let pool_sizes = vec![
             vk::DescriptorPoolSize {
@@ -230,6 +236,7 @@ impl PipelineManager {
             pipeline_cache_path,
             pipeline_cache_dirty: std::sync::atomic::AtomicBool::new(false),
             ds_layout_cache: parking_lot::Mutex::new(HashMap::new()),
+            wireframe_supported,
             destroyed: false,
         })
     }
@@ -700,7 +707,16 @@ impl PipelineManager {
             .rasterizer_discard_enable(false)
             .polygon_mode(match raster.polygon_mode {
                 crate::materials::PolygonMode::Fill => vk::PolygonMode::FILL,
-                crate::materials::PolygonMode::Line => vk::PolygonMode::LINE,
+                crate::materials::PolygonMode::Line if self.wireframe_supported => {
+                    vk::PolygonMode::LINE
+                }
+                crate::materials::PolygonMode::Line => {
+                    log::warn!(
+                        "PolygonMode::Line requested but fillModeNonSolid is \
+                         unavailable on this device; rendering filled"
+                    );
+                    vk::PolygonMode::FILL
+                }
             })
             .line_width(1.0)
             .cull_mode(vk_cull_mode(raster.cull_mode))
