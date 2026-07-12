@@ -126,6 +126,36 @@ impl App {
         }
     }
 
+    /// Wrap an existing `(World, Schedules)` pair in an [`App`] **without**
+    /// running any of [`new`](Self::new)'s setup — no default systems, no
+    /// resource inserts. For hosts (the editor) that own a fully configured
+    /// world and only need the `App` surface to run
+    /// [`Plugin::build`](crate::Plugin::build)/[`spawn_scene`](crate::Plugin::spawn_scene)
+    /// against it. Recover the parts with [`into_parts`](Self::into_parts).
+    ///
+    /// `window_input` must be the handle to the `WindowInput` resource already
+    /// inside `world` (see the field note on [`App`]); `aspect` feeds
+    /// [`initial_aspect`](Self::initial_aspect).
+    pub fn from_parts(
+        world: World,
+        schedules: Schedules,
+        window_input: Arc<RwLock<WindowInput>>,
+        aspect: f32,
+    ) -> Self {
+        Self {
+            world,
+            schedules,
+            window_input,
+            aspect,
+        }
+    }
+
+    /// Take the world and schedules back out of an [`App`] built with
+    /// [`from_parts`](Self::from_parts).
+    pub fn into_parts(self) -> (World, Schedules) {
+        (self.world, self.schedules)
+    }
+
     /// The game world.
     pub fn world(&self) -> &World {
         &self.world

@@ -52,6 +52,9 @@ pub struct Editor {
     // (see `on_resume`); `None` until then. The engine is single-world by
     // design — one scene is resident at a time.
     world: Option<EditorWorld>,
+    /// Hosted game module (#58). Declared after `world` so it drops after it:
+    /// the mapped game image must outlive every world its plugin touched.
+    game_host: Option<crate::game_host::GameHost>,
     runner: EcsRunner,
     /// Persistent engine state (GPU managers, asset DB/processor) — outlives
     /// any world (ADR-020). Created with the graphics device in `on_init`.
@@ -151,6 +154,7 @@ impl Editor {
 
         Self {
             world: None,
+            game_host: None,
             // Single-threaded for now. Switching to the multi-threaded runner
             // Multi-threaded runner enabled after Track 2 MT-hardening (#45).
             runner: EcsRunner::multi_thread(
@@ -411,6 +415,18 @@ impl AppHandler for Editor {
         let runner = &self.runner;
         let ew = self.world.as_mut().unwrap();
         ew.schedules.run_startup(&mut ew.world, runner);
+
+        // Host a game module if requested (#58).
+        if let Ok(path) = std::env::var("REDLILIUM_GAME") {
+            let engine = self.engine.as_ref().expect("engine created above");
+            // SAFETY: the operator points this at a game cdylib built in the
+            // same `cargo build` as this editor (fingerprint-gated; see
+            // GameModule::load).
+            match unsafe { crate::game_host::GameHost::load(&path, engine, ew, aspect) } {
+                Ok(host) => self.game_host = Some(host),
+                Err(e) => log::error!("failed to load game module '{path}': {e}"),
+            }
+        }
 
         // Create native menu after the event loop / NSApplication is initialized
         #[cfg(target_os = "macos")]
@@ -677,6 +693,50 @@ impl AppHandler for Editor {
                         &ew.world,
                         "scene view is not visible",
                     ),
+                }
+            }
+        }
+
+        // Execute a queued game-module reload between frames (#58): it
+        // replaces the whole EditorWorld, so it cannot run inside dispatch.
+        if let Some(rc) = &mut self.remote
+            && rc.take_reload()
+        {
+            match (&mut self.game_host, self.world.take()) {
+                (Some(host), Some(old)) => {
+                    let engine = self.engine.as_ref().expect("engine outlives worlds");
+                    let scene_view = self.scene_view.as_mut().expect("scene view present");
+                    let opts = crate::game_host::ReloadOptions {
+                        params: EditorWorldParams {
+                            remote: self.remote.is_some(),
+                            egui: true,
+                        },
+                        aspect: scene_view.aspect_ratio(),
+                    };
+                    let (fresh, result) = crate::game_host::reload_game(
+                        host,
+                        old,
+                        engine,
+                        scene_view,
+                        &self.runner,
+                        &opts,
+                        crate::game_host::swap_from_disk,
+                    );
+                    self.world = Some(fresh);
+                    self.last_selection = Vec::new();
+                    match result {
+                        Ok(()) => log::info!("game module reloaded (scene restored)"),
+                        Err(e) => log::error!("game reload failed: {e}"),
+                    }
+                }
+                (host, old) => {
+                    self.world = old;
+                    if host.is_none() {
+                        log::error!(
+                            "reload_game: no game module hosted \
+                             (launch with REDLILIUM_GAME=<cdylib>)"
+                        );
+                    }
                 }
             }
         }

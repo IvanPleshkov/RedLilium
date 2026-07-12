@@ -61,9 +61,15 @@ pub(crate) struct PendingTrigger {
 /// Stored inside [`World`]. Observers are registered during setup and
 /// triggered during mutations (insert/remove/despawn). Pending triggers
 /// are flushed by the runner after command application.
+///
+/// Each handler is stamped with the [`SourceId`](crate::type_identity::SourceId)
+/// that was current at registration, so a game-module unload can purge the
+/// closures whose code lives in the module's image (see
+/// [`World::purge_source`](crate::World::purge_source)).
 pub(crate) struct Observers {
-    /// Observer handlers keyed by trigger marker TypeId.
-    handlers: HashMap<TypeId, Vec<ObserverFn>>,
+    /// Observer handlers keyed by trigger marker TypeId, each stamped with
+    /// its registration source.
+    handlers: HashMap<TypeId, Vec<(crate::type_identity::SourceId, ObserverFn)>>,
     /// Queued triggers waiting to be flushed.
     pending: Vec<PendingTrigger>,
     /// Maps component `TypeId` → `OnRemove<T>` trigger `TypeId`.
@@ -88,9 +94,11 @@ impl Observers {
         }
     }
 
-    /// Registers an observer for `OnAdd<T>`.
+    /// Registers an observer for `OnAdd<T>`, stamped with its registration
+    /// source (the world's `current_source` at call time).
     pub fn add_on_add<T: 'static>(
         &mut self,
+        source: crate::type_identity::SourceId,
         handler: impl Fn(&mut World, Entity) + Send + Sync + 'static,
     ) {
         let key = TypeId::of::<OnAdd<T>>();
@@ -98,12 +106,14 @@ impl Observers {
         self.handlers
             .entry(key)
             .or_default()
-            .push(Box::new(handler));
+            .push((source, Box::new(handler)));
     }
 
-    /// Registers an observer for `OnInsert<T>`.
+    /// Registers an observer for `OnInsert<T>`, stamped with its registration
+    /// source.
     pub fn add_on_insert<T: 'static>(
         &mut self,
+        source: crate::type_identity::SourceId,
         handler: impl Fn(&mut World, Entity) + Send + Sync + 'static,
     ) {
         let key = TypeId::of::<OnInsert<T>>();
@@ -111,13 +121,14 @@ impl Observers {
         self.handlers
             .entry(key)
             .or_default()
-            .push(Box::new(handler));
+            .push((source, Box::new(handler)));
     }
 
     /// Registers an observer for `OnRemove<T>`, also recording the
     /// component→trigger mapping needed for untyped despawn iteration.
     pub fn add_on_remove<T: 'static>(
         &mut self,
+        source: crate::type_identity::SourceId,
         handler: impl Fn(&mut World, Entity) + Send + Sync + 'static,
     ) {
         let key = TypeId::of::<OnRemove<T>>();
@@ -126,7 +137,25 @@ impl Observers {
         self.handlers
             .entry(key)
             .or_default()
-            .push(Box::new(handler));
+            .push((source, Box::new(handler)));
+    }
+
+    /// Drops every handler registered under `source` (a game-module unload:
+    /// their closures' code lives in the module's image). Trigger keys whose
+    /// handler list empties are unregistered entirely.
+    pub fn purge_source(&mut self, source: crate::type_identity::SourceId) {
+        let mut emptied: Vec<TypeId> = Vec::new();
+        for (key, fns) in self.handlers.iter_mut() {
+            fns.retain(|(s, _)| *s != source);
+            if fns.is_empty() {
+                emptied.push(*key);
+            }
+        }
+        for key in emptied {
+            self.handlers.remove(&key);
+            self.registered_keys.remove(&key);
+            self.remove_trigger_keys.retain(|_, v| *v != key);
+        }
     }
 
     /// Pushes a trigger for a known marker TypeId.
@@ -197,7 +226,7 @@ pub(crate) unsafe fn flush(world_ptr: *mut World) {
 
         for trigger in &triggers {
             if let Some(fns) = handlers.get(&trigger.observer_key) {
-                for f in fns {
+                for (_, f) in fns {
                     // SAFETY: `handlers` was moved out of the world, and no
                     // other borrow through `world_ptr` is live here, so this
                     // `&mut World` is unique. Handlers may push new triggers

@@ -11,6 +11,7 @@ mod core;
 mod dock;
 mod editor;
 mod fs_watcher;
+mod game_host;
 mod headless;
 mod history_panel;
 mod log_capture;
