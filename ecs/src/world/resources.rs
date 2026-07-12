@@ -239,10 +239,19 @@ impl World {
 
     /// Returns the current world tick.
     ///
-    /// The tick advances once per executed system inside a runner (see
+    /// The tick is a **change-detection sequence number**, not a clock: it
+    /// advances once per executed system inside a runner (see
     /// [`next_tick`](World::next_tick)) plus at explicit barriers
-    /// ([`advance_tick`](World::advance_tick)), and is used for change
-    /// detection.
+    /// ([`advance_tick`](World::advance_tick)). It is fully independent of
+    /// `RealTime`/`GameTime` — pausing or scaling game time never touches it.
+    ///
+    /// INVARIANT: the tick doubles as the **entity generation counter**.
+    /// Entities are identified as `(index, spawn_tick)`; snapshot restore
+    /// matches entities by that pair, and the Stop transition compares entity
+    /// world ticks against `PlayStartTick` to separate pre-play entities from
+    /// play-spawned ones. Because identity hangs off it, the tick must stay
+    /// monotonic for the lifetime of the `World` — never reset or rewind it,
+    /// however tempting a "fresh ticks on Play" cleanup may look.
     pub fn current_tick(&self) -> u64 {
         self.tick.load(std::sync::atomic::Ordering::Relaxed)
     }

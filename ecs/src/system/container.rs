@@ -724,14 +724,6 @@ impl SystemsContainer {
         self.last_runs[idx].store(tick, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Resets all systems' last_run to a given tick.
-    /// Used to implement sleeping-schedule tick maintenance (e.g., on Pause).
-    pub(crate) fn reset_all_last_runs(&self, tick: u64) {
-        for i in 0..self.last_runs.len() {
-            self.last_runs[i].store(tick, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-
     pub(crate) fn check_conditions(
         &self,
         idx: usize,
