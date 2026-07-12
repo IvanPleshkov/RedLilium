@@ -647,6 +647,32 @@ impl World {
         &mut self,
         snapshot: &crate::serialize::SerializedWorld,
     ) -> Result<Vec<Entity>, crate::serialize::DeserializeError> {
+        // 0. Phase 6: Validate component schema hashes (detect field reordering)
+        // before deserializing any components. Build a map of component name → schema_hash.
+        let schema_hashes: HashMap<&str, &str> = self
+            .iter_meta()
+            .map(|m| (m.name, m.schema_hash.as_str()))
+            .collect();
+
+        // Check each component in the snapshot against the current schema hash.
+        // If a hash is stored and doesn't match, reject the snapshot (prevent silent corruption).
+        for entity_record in &snapshot.entities {
+            for component_data in &entity_record.components {
+                let component_name = component_data.type_name.as_str();
+                if let Some(&current_hash) = schema_hashes.get(component_name)
+                    && let Some(stored_hash) =
+                        snapshot.metadata.component_schemas.get(component_name)
+                    && current_hash != stored_hash.as_str()
+                {
+                    return Err(crate::serialize::DeserializeError::SchemaMismatch {
+                        component: component_name.to_string(),
+                        expected: current_hash.to_string(),
+                        found: stored_hash.clone(),
+                    });
+                }
+            }
+        }
+
         // 1. Spawn one fresh entity per serialized entity.
         let new_entities: Vec<Entity> = snapshot.entities.iter().map(|_| self.spawn()).collect();
 
