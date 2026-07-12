@@ -2169,3 +2169,121 @@ fn schema_hash_consistent_across_serialize() {
         .get("TestComponentWithHash");
     assert_eq!(hash1, hash2);
 }
+
+// Phase 6, Step 3: Field reorder detection test
+// Simulates the scenario where component schema changes (e.g. field reordering)
+// and verify that deserialize catches it with SchemaMismatch error.
+
+#[derive(Clone, Debug)]
+struct ReorderedFieldComponent;
+
+impl crate::Component for ReorderedFieldComponent {
+    const NAME: &'static str = "ReorderedFieldComponent";
+
+    // Version 1: hash representing fields [a, b, c]
+    fn schema_hash() -> String {
+        "field_order_v1_abc".to_string()
+    }
+
+    fn inspect_ui(
+        &self,
+        _ui: &mut egui::Ui,
+        _world: &crate::World,
+        _entity: crate::Entity,
+    ) -> crate::InspectResult {
+        None
+    }
+
+    fn serialize_component(
+        &self,
+        _ctx: &mut crate::serialize::SerializeContext<'_>,
+    ) -> Result<crate::serialize::Value, crate::serialize::SerializeError> {
+        Ok(crate::serialize::Value::Null)
+    }
+
+    fn deserialize_component(
+        _ctx: &mut crate::serialize::DeserializeContext<'_>,
+    ) -> Result<Self, crate::serialize::DeserializeError> {
+        Ok(ReorderedFieldComponent)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ReorderedFieldComponentV2;
+
+impl crate::Component for ReorderedFieldComponentV2 {
+    const NAME: &'static str = "ReorderedFieldComponent";
+
+    // Version 2: DIFFERENT hash (fields reordered: [b, c, a])
+    fn schema_hash() -> String {
+        "field_order_v2_bca".to_string()
+    }
+
+    fn inspect_ui(
+        &self,
+        _ui: &mut egui::Ui,
+        _world: &crate::World,
+        _entity: crate::Entity,
+    ) -> crate::InspectResult {
+        None
+    }
+
+    fn serialize_component(
+        &self,
+        _ctx: &mut crate::serialize::SerializeContext<'_>,
+    ) -> Result<crate::serialize::Value, crate::serialize::SerializeError> {
+        Ok(crate::serialize::Value::Null)
+    }
+
+    fn deserialize_component(
+        _ctx: &mut crate::serialize::DeserializeContext<'_>,
+    ) -> Result<Self, crate::serialize::DeserializeError> {
+        Ok(ReorderedFieldComponentV2)
+    }
+}
+
+#[test]
+fn schema_mismatch_on_field_reorder_detected() {
+    // Setup: Snapshot with ReorderedFieldComponent (version 1 hash)
+    let mut world1 = World::new();
+    world1.register_inspector::<ReorderedFieldComponent>();
+    let entity = world1.spawn();
+    world1.insert(entity, ReorderedFieldComponent).unwrap();
+
+    let snapshot = world1.serialize_world().expect("serialize");
+    assert!(
+        snapshot
+            .metadata
+            .component_schemas
+            .contains_key("ReorderedFieldComponent")
+    );
+
+    // Verify: snapshot has v1 hash
+    let stored_hash = snapshot
+        .metadata
+        .component_schemas
+        .get("ReorderedFieldComponent")
+        .unwrap();
+    assert_eq!(stored_hash, "field_order_v1_abc");
+
+    // Act: Try to restore to world with ReorderedFieldComponentV2 (different hash)
+    let mut world2 = World::new();
+    world2.register_inspector::<ReorderedFieldComponentV2>();
+
+    let result = world2.deserialize_world_into(&snapshot);
+
+    // Assert: Schema mismatch error (not silent corruption)
+    match result {
+        Err(crate::serialize::DeserializeError::SchemaMismatch {
+            component,
+            expected,
+            found,
+        }) => {
+            assert_eq!(component, "ReorderedFieldComponent");
+            assert_eq!(expected, "field_order_v2_bca");
+            assert_eq!(found, "field_order_v1_abc");
+        }
+        Ok(_) => panic!("Expected SchemaMismatch error, got success"),
+        Err(e) => panic!("Expected SchemaMismatch, got {:?}", e),
+    }
+}
