@@ -87,9 +87,11 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
     {
         let _guards = {
             redlilium_core::profile_scope!("ecs: lock acquire");
-            self.ctx.world().acquire_sorted(&A::access_infos())
+            self.ctx
+                .world_for_lock_plumbing()
+                .acquire_sorted(&A::access_infos())
         };
-        let items = A::fetch_unlocked(self.ctx.world(), self.ctx.ticks());
+        let items = A::fetch_unlocked(self.ctx.world_for_lock_plumbing(), self.ctx.ticks());
         f(items)
     }
 
@@ -101,7 +103,7 @@ impl<'a, A: AccessSet> LockRequest<'a, A> {
     {
         match self.ctx.dispatcher() {
             Some(dispatcher) => {
-                let world = self.ctx.world();
+                let world = self.ctx.world_for_lock_plumbing();
                 let ticks = self.ctx.ticks();
                 let (result_tx, result_rx) = mpsc::sync_channel::<R>(1);
 

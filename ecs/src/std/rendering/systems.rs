@@ -40,7 +40,7 @@ pub struct FlushUploads;
 impl System for FlushUploads {
     type Result = ();
     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<Self::Result, SystemError> {
-        let world = ctx.world();
+        let world = ctx.raw_world();
         let mut schedule = world.resource_mut::<RenderSchedule>();
         let Some(graph) = schedule.graph_mut() else {
             return Ok(()); // no frame graph bound (not in the render bracket)
@@ -118,7 +118,7 @@ impl System for ForwardRender {
     /// via [`SystemContext::system_result`](crate::SystemContext::system_result)).
     type Result = Option<PassHandle>;
     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<Self::Result, SystemError> {
-        let world = ctx.world();
+        let world = ctx.raw_world();
         if !world.has_resource::<RenderSchedule>()
             || !world.has_resource::<FrameRing>()
             || !world.has_resource::<ScenePass>()
@@ -340,7 +340,7 @@ pub struct DebugRender;
 impl System for DebugRender {
     type Result = ();
     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<Self::Result, SystemError> {
-        let world = ctx.world();
+        let world = ctx.raw_world();
         // The forward pass we order after (its handle comes from system_result).
         let Some(scene_handle) = *ctx.system_result::<ForwardRender>() else {
             return Ok(());
@@ -415,7 +415,7 @@ pub struct EguiRender;
 impl System for EguiRender {
     type Result = ();
     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<Self::Result, SystemError> {
-        let world = ctx.world();
+        let world = ctx.raw_world();
         if !world.has_resource::<EguiController>()
             || !world.has_resource::<FrameTarget>()
             || !world.has_resource::<RenderSchedule>()
@@ -588,7 +588,7 @@ pub struct MaterialInstanceLoad;
 impl System for MaterialInstanceLoad {
     type Result = ();
     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<Self::Result, SystemError> {
-        let world = ctx.world();
+        let world = ctx.raw_world();
         if !world.has_resource::<MaterialInstanceManager>()
             || !world.has_resource::<MaterialAssetManager>()
             || !world.has_resource::<ShaderManager>()
@@ -631,7 +631,7 @@ pub struct HotReload;
 impl System for HotReload {
     type Result = ();
     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<Self::Result, SystemError> {
-        let world = ctx.world();
+        let world = ctx.raw_world();
         if !world.has_resource::<super::ChangedAssets>() || !world.has_resource::<AssetDb>() {
             return Ok(());
         }

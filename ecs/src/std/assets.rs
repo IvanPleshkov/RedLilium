@@ -28,7 +28,7 @@ pub struct AssetPump;
 impl System for AssetPump {
     type Result = ();
     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<Self::Result, SystemError> {
-        let world = ctx.world();
+        let world = ctx.raw_world();
         if !world.has_resource::<AssetProcessor>() {
             return Ok(());
         }
@@ -69,7 +69,7 @@ pub struct AssetGpuFlush;
 impl System for AssetGpuFlush {
     type Result = ();
     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<Self::Result, SystemError> {
-        let world = ctx.world();
+        let world = ctx.raw_world();
         if !world.has_resource::<AssetProcessor>() || !world.has_resource::<RenderSchedule>() {
             return Ok(());
         }
