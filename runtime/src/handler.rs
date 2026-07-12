@@ -238,6 +238,17 @@ impl<P: Plugin + 'static> RuntimeHandler<P> {
         &mut self,
     ) -> Result<redlilium_ecs::serialize::SerializedWorld, redlilium_ecs::serialize::SerializeError>
     {
+        self.prepare_for_reload_with_timeout(std::time::Duration::from_secs(5))
+    }
+
+    /// [`prepare_for_reload`](Self::prepare_for_reload) with an explicit
+    /// quiescence timeout — the production path uses 5s; tests use a short
+    /// timeout to exercise the abort branch without a 5-second stall.
+    fn prepare_for_reload_with_timeout(
+        &mut self,
+        quiesce_timeout: std::time::Duration,
+    ) -> Result<redlilium_ecs::serialize::SerializedWorld, redlilium_ecs::serialize::SerializeError>
+    {
         let Some(state) = self.state.as_mut() else {
             return Err(redlilium_ecs::serialize::SerializeError::FormatError(
                 "reload called without active game state".to_string(),
@@ -269,20 +280,18 @@ impl<P: Plugin + 'static> RuntimeHandler<P> {
         // Phase 3d: Task quiescence (block until all tasks complete or timeout)
         // CRITICAL: Only NOW, after World drop cancels tokens, do tasks finish.
         // Before World drop, long-lived tasks may legitimately still be running.
-        use std::time::Duration;
         let quiesce_result = match &state.runner {
-            redlilium_ecs::EcsRunner::SingleThread(r) => {
-                r.compute().quiesce(Duration::from_secs(5))
-            }
+            redlilium_ecs::EcsRunner::SingleThread(r) => r.compute().quiesce(quiesce_timeout),
             #[cfg(not(target_arch = "wasm32"))]
-            redlilium_ecs::EcsRunner::MultiThread(r) => r.compute().quiesce(Duration::from_secs(5)),
+            redlilium_ecs::EcsRunner::MultiThread(r) => r.compute().quiesce(quiesce_timeout),
         };
 
-        if quiesce_result >= Duration::from_secs(5) {
+        if quiesce_result >= quiesce_timeout {
             log::error!(
-                "Task quiescence timeout: some plugin tasks still executing after 5s. \
+                "Task quiescence timeout: some plugin tasks still executing after {:?}. \
                  Unloading dylib now would cause UB (tasks jump into unmapped memory). \
-                 ABORTING RELOAD and leaking dylib (bounded memory leak vs process UB)."
+                 ABORTING RELOAD and leaking dylib (bounded memory leak vs process UB).",
+                quiesce_timeout
             );
             return Err(redlilium_ecs::serialize::SerializeError::FormatError(
                 "Task quiescence timeout — reload aborted to prevent UB".to_string(),
@@ -347,4 +356,108 @@ fn ensure_camera_target(
         .expect("failed to create game camera depth target");
     let _ = world.insert(camera, CameraTarget::new(color, depth, clear_color));
     *size = (width, height);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{App, EngineContext, GameConfig, Plugin};
+    use redlilium_graphics::GraphicsInstance;
+    use redlilium_vfs::Vfs;
+    use std::time::Duration;
+
+    /// Minimal no-op plugin — the test exercises the reload sequencing, not
+    /// game logic.
+    struct NoopPlugin;
+    impl Plugin for NoopPlugin {
+        fn build(&self, _app: &mut App) {}
+    }
+
+    /// Builds a `RuntimeHandler` with a live `GameState`, bypassing `on_init`
+    /// (which needs a real window loop). Mirrors `on_init`'s wiring:
+    /// engine → boot → runner/module, headless device, no swapchain.
+    fn test_handler() -> RuntimeHandler<NoopPlugin> {
+        let instance = GraphicsInstance::new().expect("graphics instance");
+        let device = instance.create_device().expect("graphics device");
+        let engine = EngineContext::with_vfs(device.clone(), Vfs::new());
+
+        let plugin = NoopPlugin;
+        let app = App::boot(&engine, &plugin, 1.0);
+        let runner = EcsRunner::single_thread();
+        let window_input = app.window_input();
+        let blit = PresentBlit::new(&device, TextureFormat::Rgba8Unorm);
+        let module = crate::GameModule::from_static(Box::new(plugin) as Box<dyn crate::Plugin>);
+
+        RuntimeHandler {
+            config: GameConfig::default(),
+            plugin: None,
+            state: Some(GameState {
+                _engine: engine,
+                app,
+                runner,
+                window_input,
+                blit,
+                target_size: (0, 0),
+                color_format: TextureFormat::Rgba8Unorm,
+                module,
+            }),
+        }
+    }
+
+    /// #81 (deferred #45 Phase 6, Step 5): a task that never finishes must
+    /// make `prepare_for_reload` abort with a timeout error instead of
+    /// letting the caller proceed to unmap the dylib under a live task.
+    #[test]
+    fn reload_aborts_on_task_quiescence_timeout() {
+        let mut handler = test_handler();
+
+        // A task that ignores cancellation and never completes — the worst
+        // case for unload safety. Keep the handle alive so nothing reaps it.
+        let _stuck = {
+            let state = handler.state.as_ref().unwrap();
+            state
+                .runner
+                .compute()
+                .spawn(redlilium_ecs::Priority::Low, |_ctx| {
+                    std::future::pending::<()>()
+                })
+        };
+
+        let result = handler.prepare_for_reload_with_timeout(Duration::from_millis(100));
+
+        // Abort, with the timeout named in the error.
+        match result {
+            Err(redlilium_ecs::serialize::SerializeError::FormatError(msg)) => {
+                assert!(
+                    msg.contains("quiescence timeout"),
+                    "error must name the quiescence timeout, got: {msg}"
+                );
+            }
+            Ok(_) => panic!("reload must abort when a task is still running"),
+            Err(e) => panic!("expected FormatError with timeout message, got: {e:?}"),
+        }
+
+        // Fail closed: the module (and with it the dylib handle) must remain
+        // loaded — the caller never gets a snapshot to proceed with.
+        let state = handler.state.as_ref().unwrap();
+        assert_eq!(
+            state.module.plugins().len(),
+            1,
+            "module must stay loaded after an aborted reload"
+        );
+    }
+
+    /// The happy path with the same short timeout: no live tasks → quiesce
+    /// returns immediately and the snapshot comes back.
+    #[test]
+    fn reload_succeeds_when_tasks_are_quiet() {
+        let mut handler = test_handler();
+
+        let result = handler.prepare_for_reload_with_timeout(Duration::from_millis(100));
+        assert!(
+            result.is_ok(),
+            "reload must proceed when no tasks are pending: {:?}",
+            result.err()
+        );
+    }
 }
