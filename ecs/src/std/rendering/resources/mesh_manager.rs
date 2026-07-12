@@ -46,15 +46,29 @@ impl MeshManager {
     }
 
     /// Ensure `source` is loading (idempotent; no-op if resident, in flight, or
-    /// failed). The sync system calls this for unresolved refs.
+    /// failed). The sync system calls this for unresolved refs. External sources
+    /// are publish-only (`insert_external`) — a ref naming one that was never
+    /// published just stays unresolved.
     pub fn request(&mut self, source: &MeshSource) {
-        if self.cache.get(source).is_some()
+        if matches!(source, MeshSource::External(_))
+            || self.cache.get(source).is_some()
             || self.pending.contains_key(source)
             || self.cache.is_failed(source)
         {
             return;
         }
         self.pending.insert(source.clone(), None);
+    }
+
+    /// Publish a runtime-built mesh under `source` (normally
+    /// [`MeshSource::External`]), making it resident immediately: `get` serves it,
+    /// unresolved refs resolve against it, and re-publishing the same source
+    /// hot-swaps every referencing component through the stale-ref scan in
+    /// `MeshLoad`. The host/tool integration point — e.g. a preview viewer
+    /// streaming procedurally generated meshes in at runtime.
+    pub fn insert_external(&mut self, source: MeshSource, mesh: Arc<Mesh>) {
+        self.pending.remove(&source);
+        self.cache.publish(source, mesh);
     }
 
     /// The resident mesh for `source`, if loaded.
@@ -131,6 +145,10 @@ impl MeshManager {
                     MeshSource::Generated(generator) => {
                         layout_mgr.intern((*generator.layout()).clone())
                     }
+                    // Publish-only; `request` filters these out, so a pending entry
+                    // can't exist. Skip defensively rather than panic in a loop that
+                    // hot-reload also drives.
+                    MeshSource::External(_) => continue,
                 };
                 *request = Some(processor.request::<MeshLoader>(db, source.clone(), layout));
             }

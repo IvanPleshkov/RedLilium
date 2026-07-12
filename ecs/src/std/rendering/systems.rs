@@ -152,14 +152,18 @@ impl ExclusiveSystem for EnsureCameraTargets {
                     publish,
                 } => {
                     // Engine-standard formats (see CameraOutput docs). The
-                    // color target is sampleable: the host composites it, and
-                    // offscreen outputs are consumed as virtual textures.
+                    // color target is sampleable (the host composites it,
+                    // offscreen outputs are consumed as virtual textures) and
+                    // copyable (screenshots / readbacks — same flags as the
+                    // editor's scene-view target).
                     let color = device.create_texture(
                         &TextureDescriptor::new_2d(
                             width,
                             height,
                             TextureFormat::Rgba8Unorm,
-                            TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
+                            TextureUsage::RENDER_ATTACHMENT
+                                | TextureUsage::TEXTURE_BINDING
+                                | TextureUsage::COPY_SRC,
                         )
                         .with_label("camera_color"),
                     );

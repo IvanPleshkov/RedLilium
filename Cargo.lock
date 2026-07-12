@@ -4380,6 +4380,7 @@ dependencies = [
  "criterion",
  "ecs-macro",
  "egui",
+ "env_logger",
  "fixedbitset",
  "image",
  "log",
