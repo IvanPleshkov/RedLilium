@@ -6,11 +6,10 @@ use redlilium_ecs::sync::RwLock;
 
 use redlilium_app::{AppContext, AppHandler, DrawContext, input::map_winit_key};
 use redlilium_ecs::{
-    Camera, CameraTarget, EcsRunner, Render, RenderSchedule, ScenePass, WindowInput, World,
+    Camera, CameraOutput, CameraTarget, EcsRunner, MainViewport, Render, RenderSchedule, ScenePass,
+    WindowInput, World,
 };
-use redlilium_graphics::{
-    FrameSchedule, GraphicsDevice, TextureDescriptor, TextureFormat, TextureUsage,
-};
+use redlilium_graphics::FrameSchedule;
 use winit::event::{KeyEvent, MouseButton};
 
 use crate::blit::PresentBlit;
@@ -24,9 +23,6 @@ struct GameState {
     runner: EcsRunner,
     window_input: Arc<RwLock<WindowInput>>,
     blit: PresentBlit,
-    /// Current size of the main camera's render target.
-    target_size: (u32, u32),
-    color_format: TextureFormat,
     /// Plugin module: owns plugin(s) + dylib library handle.
     /// Field order is load-bearing: app drops first, module drops last.
     /// This ensures plugin drop glue runs while dylib is still mapped (ADR-020, #45).
@@ -78,8 +74,6 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
             runner,
             window_input,
             blit,
-            target_size: (0, 0),
-            color_format: ctx.surface_format(),
             module,
         });
     }
@@ -138,19 +132,10 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
         };
 
         let (width, height) = (ctx.width(), ctx.height());
-        let device = ctx.device().clone();
         let clear = self.config.clear_color;
         let (world, schedules) = state.app.parts_mut();
 
-        ensure_camera_target(
-            world,
-            &device,
-            width,
-            height,
-            state.color_format,
-            &mut state.target_size,
-            clear,
-        );
+        ensure_camera_output(world, width, height, clear);
 
         // Render bracket: hand the frame graph to the ECS `Render` schedule,
         // take it back, then composite the scene onto the swapchain.
@@ -302,19 +287,14 @@ impl<P: Plugin + 'static> RuntimeHandler<P> {
     }
 }
 
-/// Ensure the first camera has a [`CameraTarget`] sized to the window,
-/// recreating the color/depth textures on resize.
-fn ensure_camera_target(
-    world: &mut World,
-    device: &Arc<GraphicsDevice>,
-    width: u32,
-    height: u32,
-    color_format: TextureFormat,
-    size: &mut (u32, u32),
-    clear_color: [f32; 4],
-) {
-    let width = width.max(1);
-    let height = height.max(1);
+/// Feed the ECS side what it needs to derive the primary camera's target
+/// (ADR-029): publish the window size as [`MainViewport`] and give the first
+/// camera a `CameraOutput::screen()` spec when the game didn't author one.
+/// The GPU textures themselves are created by the `EnsureCameraTargets`
+/// system inside the Render schedule — no host-side texture management.
+fn ensure_camera_output(world: &mut World, width: u32, height: u32, clear_color: [f32; 4]) {
+    world.insert_resource(MainViewport::new(width.max(1), height.max(1)));
+
     let camera = {
         let Ok(cameras) = world.read_all::<Camera>() else {
             return;
@@ -327,35 +307,9 @@ fn ensure_camera_target(
     let Some(camera) = camera else {
         return;
     };
-    let stale = (width, height) != *size || world.get::<CameraTarget>(camera).is_none();
-    if !stale {
-        return;
+    if world.get::<CameraOutput>(camera).is_none() {
+        let _ = world.insert(camera, CameraOutput::screen().with_clear_color(clear_color));
     }
-
-    let color = device
-        .create_texture(
-            &TextureDescriptor::new_2d(
-                width,
-                height,
-                color_format,
-                TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
-            )
-            .with_label("game_camera_color"),
-        )
-        .expect("failed to create game camera color target");
-    let depth = device
-        .create_texture(
-            &TextureDescriptor::new_2d(
-                width,
-                height,
-                TextureFormat::Depth32Float,
-                TextureUsage::RENDER_ATTACHMENT,
-            )
-            .with_label("game_camera_depth"),
-        )
-        .expect("failed to create game camera depth target");
-    let _ = world.insert(camera, CameraTarget::new(color, depth, clear_color));
-    *size = (width, height);
 }
 
 #[cfg(test)]
@@ -385,7 +339,7 @@ mod tests {
         let app = App::boot(&engine, &plugin, 1.0);
         let runner = EcsRunner::single_thread();
         let window_input = app.window_input();
-        let blit = PresentBlit::new(&device, TextureFormat::Rgba8Unorm);
+        let blit = PresentBlit::new(&device, redlilium_graphics::TextureFormat::Rgba8Unorm);
         let module = crate::GameModule::from_static(Box::new(plugin) as Box<dyn crate::Plugin>);
 
         RuntimeHandler {
@@ -397,8 +351,6 @@ mod tests {
                 runner,
                 window_input,
                 blit,
-                target_size: (0, 0),
-                color_format: TextureFormat::Rgba8Unorm,
                 module,
             }),
         }

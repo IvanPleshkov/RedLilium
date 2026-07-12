@@ -46,7 +46,9 @@ pub use asset_drag::{AssetDragPayload, asset_drop_target};
 #[cfg(feature = "rendering")]
 pub use asset_inspect::{NewAssetSpec, new_asset_spec};
 pub use asset_inspect::{inspect_asset_settings, reference_accepted_kind};
-pub use components::{CameraTarget, MeshRenderer, Primitive};
+pub use components::{
+    CameraOutput, CameraTarget, CameraTargetSpec, MeshRenderer, Primitive, SizePolicy,
+};
 #[cfg(feature = "rendering")]
 pub use loaders::{
     MaterialData, MaterialInstanceData, MaterialInstanceLoader, MaterialInstanceSource,
@@ -61,14 +63,14 @@ pub use resources::{
     ChangedAssets, MaterialAssetManager, MaterialInstanceManager, PipelineCache, ResolvedInstance,
     ResolvedMaterial, ResolvedTexture, ShaderManager, VertexLayoutManager,
 };
-pub use resources::{FrameRing, MeshManager, RenderSchedule, TextureManager};
+pub use resources::{FrameRing, MainViewport, MeshManager, RenderSchedule, TextureManager};
 #[cfg(feature = "rendering")]
 pub use shading::{PropDef, PropValue, ShadingModel, ShadingRegistry, pack_props, texture_props};
 #[cfg(feature = "rendering")]
 pub use systems::HotReload;
 pub use systems::{
-    DebugRender, EguiRender, FlushUploads, ForwardRender, FrameTarget, MaterialInstanceLoad,
-    MeshLoad, ScenePass,
+    DebugRender, EguiRender, EnsureCameraTargets, FlushUploads, ForwardRender, FrameTarget,
+    MaterialInstanceLoad, MeshLoad, ScenePass,
 };
 
 use crate::World;
@@ -79,5 +81,8 @@ use crate::World;
 /// to enable rendering support.
 pub fn register_rendering_components(world: &mut World) {
     world.register_inspector::<MeshRenderer>();
+    // Serializable spec (ADR-029); its derived CameraTarget below is
+    // runtime-only storage.
+    world.register_inspector::<CameraOutput>();
     world.register_component::<CameraTarget>();
 }

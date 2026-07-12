@@ -20,9 +20,9 @@ use crate::system::SystemError;
 use crate::{DebugDrawer, DebugDrawerRenderer, ExclusiveSystem, System, SystemContext, World};
 
 use super::{
-    CameraTarget, FrameRing, MaterialAssetManager, MaterialInstanceManager, MeshManager,
-    MeshRenderer, PipelineCache, RenderSchedule, ShaderManager, ShadingRegistry, TextureManager,
-    VertexLayoutManager, shaders,
+    CameraOutput, CameraTarget, CameraTargetSpec, FrameRing, MainViewport, MaterialAssetManager,
+    MaterialInstanceManager, MeshManager, MeshRenderer, PipelineCache, RenderSchedule,
+    ShaderManager, ShadingRegistry, SizePolicy, TextureManager, VertexLayoutManager, shaders,
 };
 
 /// Holds the forward scene pass's graph handle so other passes (an egui overlay,
@@ -30,6 +30,173 @@ use super::{
 /// `None` if it produced no pass).
 #[derive(Default)]
 pub struct ScenePass(pub Option<PassHandle>);
+
+/// Derives each camera's GPU render target from its serializable
+/// [`CameraOutput`] spec (ADR-029, #74).
+///
+/// For every entity with `Camera + CameraOutput`, (re)creates the runtime-only
+/// [`CameraTarget`] whenever it disagrees with the spec (missing, wrong size,
+/// or stale clear color), and publishes `Offscreen { output: Some(guid) }`
+/// color textures as virtual texture assets
+/// ([`TextureManager::publish_virtual`]) so materials can sample them.
+///
+/// Cameras **without** `CameraOutput` are untouched — their targets stay
+/// host-managed (the editor's scene view). Runs as an exclusive barrier (it
+/// inserts components), ordered before [`ForwardRender`].
+#[derive(Default)]
+pub struct EnsureCameraTargets;
+
+impl ExclusiveSystem for EnsureCameraTargets {
+    type Result = ();
+    fn run(&mut self, world: &mut World) -> Result<Self::Result, SystemError> {
+        use redlilium_graphics::{TextureDescriptor, TextureFormat, TextureUsage};
+
+        if !world.has_resource::<TextureManager>() {
+            return Ok(());
+        }
+        let viewport = world
+            .has_resource::<MainViewport>()
+            .then(|| *world.resource::<MainViewport>());
+
+        /// One camera whose derived target disagrees with its spec.
+        enum Work {
+            /// (Re)create the textures at this size.
+            Recreate {
+                entity: crate::Entity,
+                width: u32,
+                height: u32,
+                clear: [f32; 4],
+                publish: Option<redlilium_assets::Guid>,
+            },
+            /// Textures are fine; only the clear color changed.
+            Reclear {
+                entity: crate::Entity,
+                clear: [f32; 4],
+            },
+        }
+
+        // Phase 1: diff specs against derived targets under read borrows.
+        let mut work: Vec<Work> = Vec::new();
+        {
+            let Ok(outputs) = world.read_all::<CameraOutput>() else {
+                return Ok(());
+            };
+            for (idx, out) in outputs.iter() {
+                let Some(entity) = world.entity_at_index(idx) else {
+                    continue;
+                };
+                if world.get::<Camera>(entity).is_none() {
+                    continue;
+                }
+                let (size, publish) = match &out.target {
+                    CameraTargetSpec::Screen => (SizePolicy::Viewport, None),
+                    CameraTargetSpec::Offscreen { size, output } => (*size, *output),
+                };
+                let (width, height) = match size {
+                    SizePolicy::Viewport => {
+                        let Some(v) = viewport else { continue };
+                        (v.width, v.height)
+                    }
+                    SizePolicy::ViewportScale(scale) => {
+                        let Some(v) = viewport else { continue };
+                        (
+                            (v.width as f32 * scale) as u32,
+                            (v.height as f32 * scale) as u32,
+                        )
+                    }
+                    SizePolicy::Fixed(w, h) => (w, h),
+                };
+                let (width, height) = (width.max(1), height.max(1));
+
+                match world.get::<CameraTarget>(entity) {
+                    Some(target)
+                        if target.color.width() == width && target.color.height() == height =>
+                    {
+                        if target.clear_color != out.clear_color {
+                            work.push(Work::Reclear {
+                                entity,
+                                clear: out.clear_color,
+                            });
+                        }
+                    }
+                    _ => work.push(Work::Recreate {
+                        entity,
+                        width,
+                        height,
+                        clear: out.clear_color,
+                        publish,
+                    }),
+                }
+            }
+        }
+        if work.is_empty() {
+            return Ok(());
+        }
+
+        // Phase 2: create textures and update components.
+        let device = world.resource::<TextureManager>().device().clone();
+        for item in work {
+            match item {
+                Work::Reclear { entity, clear } => {
+                    if let Some(target) = world.get::<CameraTarget>(entity) {
+                        let updated =
+                            CameraTarget::new(target.color.clone(), target.depth.clone(), clear);
+                        let _ = world.insert(entity, updated);
+                    }
+                }
+                Work::Recreate {
+                    entity,
+                    width,
+                    height,
+                    clear,
+                    publish,
+                } => {
+                    // Engine-standard formats (see CameraOutput docs). The
+                    // color target is sampleable: the host composites it, and
+                    // offscreen outputs are consumed as virtual textures.
+                    let color = device.create_texture(
+                        &TextureDescriptor::new_2d(
+                            width,
+                            height,
+                            TextureFormat::Rgba8Unorm,
+                            TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
+                        )
+                        .with_label("camera_color"),
+                    );
+                    let depth = device.create_texture(
+                        &TextureDescriptor::new_2d(
+                            width,
+                            height,
+                            TextureFormat::Depth32Float,
+                            TextureUsage::RENDER_ATTACHMENT,
+                        )
+                        .with_label("camera_depth"),
+                    );
+                    let (color, depth) = match (color, depth) {
+                        (Ok(c), Ok(d)) => (c, d),
+                        (c, d) => {
+                            log::warn!(
+                                "EnsureCameraTargets: target creation failed \
+                                 ({width}x{height}): {:?}",
+                                c.err().or(d.err())
+                            );
+                            continue;
+                        }
+                    };
+                    if let Some(guid) = publish
+                        && let Err(e) = world
+                            .resource_mut::<TextureManager>()
+                            .publish_virtual(guid, color.clone())
+                    {
+                        log::warn!("EnsureCameraTargets: publish_virtual({guid:?}) failed: {e}");
+                    }
+                    let _ = world.insert(entity, CameraTarget::new(color, depth, clear));
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Flushes the GPU-upload managers' pending transfers into the frame graph
 /// (deferred, graph-ordered — never a synchronous write). Passes that read the
@@ -128,39 +295,54 @@ impl System for ForwardRender {
         }
         world.resource_mut::<ScenePass>().0 = None;
 
-        // View-projection from the camera; color/depth from its CameraTarget.
-        let Some(vp) = world.read_all::<Camera>().ok().and_then(|c| {
-            c.iter()
-                .next()
-                .map(|(_, cam)| mat4_to_cols_array_2d(&cam.view_projection()))
-        }) else {
-            return Ok(None);
+        // Every entity with a Camera AND a CameraTarget renders (ADR-029):
+        // one pass per camera into its own target. Offscreen cameras are
+        // emitted first, the primary (screen) camera last — so ScenePass, the
+        // handle overlays (debug lines, egui) attach to, is the last writer
+        // of the surface the host composites. Cross-camera ordering by
+        // resource use (a camera sampling another's output) is derived by the
+        // graph compiler automatically.
+        struct CameraView {
+            vp: [[f32; 4]; 4],
+            color: Arc<redlilium_graphics::Texture>,
+            depth: Arc<redlilium_graphics::Texture>,
+            clear: [f32; 4],
+            primary: bool,
+        }
+        let mut cameras: Vec<CameraView> = {
+            let (Ok(cams), Ok(targets)) =
+                (world.read_all::<Camera>(), world.read_all::<CameraTarget>())
+            else {
+                return Ok(None);
+            };
+            let outputs = world.read_all::<CameraOutput>().ok();
+            targets
+                .iter()
+                .filter_map(|(idx, target)| {
+                    let cam = cams.get(idx)?;
+                    // Primary = renders the surface the host composites: a
+                    // Screen spec, or a host-managed target (no spec at all —
+                    // the editor's scene view).
+                    let primary = outputs
+                        .as_ref()
+                        .and_then(|o| o.get(idx))
+                        .is_none_or(|out| matches!(out.target, CameraTargetSpec::Screen));
+                    Some(CameraView {
+                        vp: mat4_to_cols_array_2d(&cam.view_projection()),
+                        color: target.color.clone(),
+                        depth: target.depth.clone(),
+                        clear: target.clear_color,
+                        primary,
+                    })
+                })
+                .collect()
         };
-        let Some((color, depth, clear)) = world.read_all::<CameraTarget>().ok().and_then(|t| {
-            t.iter().next().map(|(_, target)| {
-                (
-                    target.color.clone(),
-                    target.depth.clone(),
-                    target.clear_color,
-                )
-            })
-        }) else {
+        if cameras.is_empty() {
             return Ok(None);
-        };
-        let color_fmt = color.format();
-        let depth_fmt = depth.format();
+        }
+        cameras.sort_by_key(|view| view.primary);
 
-        let mut pass = GraphicsPass::new("scene_view".into());
-        pass.set_render_targets(
-            RenderTargetConfig::new()
-                .with_color(
-                    ColorAttachment::from_texture(color)
-                        .with_clear_color(clear[0], clear[1], clear[2], clear[3]),
-                )
-                .with_depth_stencil(
-                    DepthStencilAttachment::from_texture(depth).with_clear_depth(1.0),
-                ),
-        );
+        let mut passes: Vec<(bool, GraphicsPass)> = Vec::with_capacity(cameras.len());
 
         // Fill the ring + emit draws (scoped so the guards drop before we touch
         // the graph resource).
@@ -182,12 +364,6 @@ impl System for ForwardRender {
             //   dynamic offset selects the entity's slot;
             // - static: the instance's material props group, built once by the
             //   instance manager.
-            let camera = shaders::CameraUniforms {
-                view_projection: vp,
-            };
-            // The camera set is `external` (a dynamic uniform now): bind offset 0,
-            // supply this view's ring offset per draw.
-            let camera_off = ring.push(bytemuck::bytes_of(&camera));
             let ring_buffer: Arc<Buffer> = ring.buffer().clone();
             let camera_size = std::mem::size_of::<shaders::CameraUniforms>() as u64;
             let model_size = std::mem::size_of::<shaders::ModelUniforms>() as u64;
@@ -195,138 +371,183 @@ impl System for ForwardRender {
                 .binding_cache
                 .lock()
                 .expect("forward binding cache poisoned");
-            for (idx, renderer) in renderers.iter() {
-                if let Some(vis) = visibilities.get(idx)
-                    && !vis.is_visible()
-                {
-                    continue;
-                }
-                let model = globals
-                    .get(idx)
-                    .map(|g| mat4_to_cols_array_2d(&g.0))
-                    .unwrap_or_else(|| mat4_to_cols_array_2d(&Mat4::identity()));
-                let model_off = ring.push(bytemuck::bytes_of(&shaders::ModelUniforms { model }));
-                for primitive in &renderer.primitives {
-                    // The mesh and the material instance load asynchronously — skip
-                    // until both are resident.
-                    let (Some(mesh), Some(instance)) = (primitive.mesh(), primitive.material())
-                    else {
-                        continue;
-                    };
-                    // Specialize the pipeline for this shader + variant + the
-                    // mesh's vertex layout + the target formats (built once,
-                    // then cached). The empty variant until material assets
-                    // declare feature flags (Decision 5's material half).
-                    let Ok(pipeline) = pipelines.get_or_build(
-                        instance.shader_guid,
-                        &instance.shader,
-                        &redlilium_graphics::VariantKey::empty(),
-                        mesh.layout(),
-                        color_fmt,
-                        depth_fmt,
-                    ) else {
-                        continue;
-                    };
-                    // Assemble the sets in declaration order by their rates.
-                    let rates = pipeline.set_update_rates().to_vec();
-                    if rates.iter().all(Option::is_none) {
-                        log::debug!(
-                            "shader {:?} declares no rate-classified sets; skipping draw",
-                            instance.shader_guid
-                        );
+            for view in &cameras {
+                let camera = shaders::CameraUniforms {
+                    view_projection: view.vp,
+                };
+                // The camera set is `external` (a dynamic uniform now): bind offset 0,
+                // supply this view's ring offset per draw.
+                let camera_off = ring.push(bytemuck::bytes_of(&camera));
+                let color_fmt = view.color.format();
+                let depth_fmt = view.depth.format();
+                let mut pass = GraphicsPass::new(
+                    if view.primary {
+                        "scene_view"
+                    } else {
+                        "camera_view"
+                    }
+                    .into(),
+                );
+                pass.set_render_targets(
+                    RenderTargetConfig::new()
+                        .with_color(
+                            ColorAttachment::from_texture(view.color.clone()).with_clear_color(
+                                view.clear[0],
+                                view.clear[1],
+                                view.clear[2],
+                                view.clear[3],
+                            ),
+                        )
+                        .with_depth_stencil(
+                            DepthStencilAttachment::from_texture(view.depth.clone())
+                                .with_clear_depth(1.0),
+                        ),
+                );
+                for (idx, renderer) in renderers.iter() {
+                    if let Some(vis) = visibilities.get(idx)
+                        && !vis.is_visible()
+                    {
                         continue;
                     }
-                    let device = pipeline.device();
-                    let mut gfx_instance = MaterialInstance::new(Arc::clone(&pipeline));
-                    let mut offsets: Vec<Vec<u32>> = Vec::with_capacity(rates.len());
-                    // Assemble one binding group per set, all frame-invariant and
-                    // cached (see the type-level doc). A creation failure skips the
-                    // draw rather than the whole frame.
-                    let mut assembled = true;
-                    for (set_idx, rate) in rates.iter().enumerate() {
-                        use redlilium_graphics::UpdateRate;
-                        let Some(layout) = pipeline.binding_layouts().get(set_idx) else {
-                            // A rate-classified set with no reflected layout is a
-                            // reflection bug; skip the draw to avoid a bad bind.
-                            assembled = false;
-                            break;
+                    let model = globals
+                        .get(idx)
+                        .map(|g| mat4_to_cols_array_2d(&g.0))
+                        .unwrap_or_else(|| mat4_to_cols_array_2d(&Mat4::identity()));
+                    let model_off =
+                        ring.push(bytemuck::bytes_of(&shaders::ModelUniforms { model }));
+                    for primitive in &renderer.primitives {
+                        // The mesh and the material instance load asynchronously — skip
+                        // until both are resident.
+                        let (Some(mesh), Some(instance)) = (primitive.mesh(), primitive.material())
+                        else {
+                            continue;
                         };
-                        let group = match rate {
-                            Some(UpdateRate::External) => ForwardBindingCache::get_or_create(
-                                &mut cache.camera,
-                                device,
-                                layout,
-                                || {
-                                    BindingGroupDescriptor::new().with_buffer_range(
-                                        0,
-                                        ring_buffer.clone(),
-                                        0,
-                                        camera_size,
-                                    )
-                                },
-                            ),
-                            Some(UpdateRate::Dynamic) => ForwardBindingCache::get_or_create(
-                                &mut cache.model,
-                                device,
-                                layout,
-                                || {
-                                    BindingGroupDescriptor::new().with_buffer_range(
-                                        0,
-                                        ring_buffer.clone(),
-                                        0,
-                                        model_size,
-                                    )
-                                },
-                            ),
-                            Some(UpdateRate::Static) => {
-                                instance.props_group(device, Arc::clone(layout))
-                            }
-                            None => ForwardBindingCache::get_or_create(
-                                &mut cache.empty,
-                                device,
-                                layout,
-                                BindingGroupDescriptor::new,
-                            ),
+                        // Specialize the pipeline for this shader + variant + the
+                        // mesh's vertex layout + the target formats (built once,
+                        // then cached). The empty variant until material assets
+                        // declare feature flags (Decision 5's material half).
+                        let Ok(pipeline) = pipelines.get_or_build(
+                            instance.shader_guid,
+                            &instance.shader,
+                            &redlilium_graphics::VariantKey::empty(),
+                            mesh.layout(),
+                            color_fmt,
+                            depth_fmt,
+                        ) else {
+                            continue;
                         };
-                        let group = match group {
-                            Ok(g) => g,
-                            Err(e) => {
-                                log::warn!("forward render: failed to build binding group: {e}");
+                        // Assemble the sets in declaration order by their rates.
+                        let rates = pipeline.set_update_rates().to_vec();
+                        if rates.iter().all(Option::is_none) {
+                            log::debug!(
+                                "shader {:?} declares no rate-classified sets; skipping draw",
+                                instance.shader_guid
+                            );
+                            continue;
+                        }
+                        let device = pipeline.device();
+                        let mut gfx_instance = MaterialInstance::new(Arc::clone(&pipeline));
+                        let mut offsets: Vec<Vec<u32>> = Vec::with_capacity(rates.len());
+                        // Assemble one binding group per set, all frame-invariant and
+                        // cached (see the type-level doc). A creation failure skips the
+                        // draw rather than the whole frame.
+                        let mut assembled = true;
+                        for (set_idx, rate) in rates.iter().enumerate() {
+                            use redlilium_graphics::UpdateRate;
+                            let Some(layout) = pipeline.binding_layouts().get(set_idx) else {
+                                // A rate-classified set with no reflected layout is a
+                                // reflection bug; skip the draw to avoid a bad bind.
                                 assembled = false;
                                 break;
-                            }
-                        };
-                        gfx_instance = gfx_instance.with_binding_group(group);
-                        // External + Dynamic sets bind at offset 0 and select their
-                        // slot via a per-draw dynamic offset.
-                        offsets.push(match rate {
-                            Some(UpdateRate::External) => vec![camera_off],
-                            Some(UpdateRate::Dynamic) => vec![model_off],
-                            _ => Vec::new(),
-                        });
+                            };
+                            let group = match rate {
+                                Some(UpdateRate::External) => ForwardBindingCache::get_or_create(
+                                    &mut cache.camera,
+                                    device,
+                                    layout,
+                                    || {
+                                        BindingGroupDescriptor::new().with_buffer_range(
+                                            0,
+                                            ring_buffer.clone(),
+                                            0,
+                                            camera_size,
+                                        )
+                                    },
+                                ),
+                                Some(UpdateRate::Dynamic) => ForwardBindingCache::get_or_create(
+                                    &mut cache.model,
+                                    device,
+                                    layout,
+                                    || {
+                                        BindingGroupDescriptor::new().with_buffer_range(
+                                            0,
+                                            ring_buffer.clone(),
+                                            0,
+                                            model_size,
+                                        )
+                                    },
+                                ),
+                                Some(UpdateRate::Static) => {
+                                    instance.props_group(device, Arc::clone(layout))
+                                }
+                                None => ForwardBindingCache::get_or_create(
+                                    &mut cache.empty,
+                                    device,
+                                    layout,
+                                    BindingGroupDescriptor::new,
+                                ),
+                            };
+                            let group = match group {
+                                Ok(g) => g,
+                                Err(e) => {
+                                    log::warn!(
+                                        "forward render: failed to build binding group: {e}"
+                                    );
+                                    assembled = false;
+                                    break;
+                                }
+                            };
+                            gfx_instance = gfx_instance.with_binding_group(group);
+                            // External + Dynamic sets bind at offset 0 and select their
+                            // slot via a per-draw dynamic offset.
+                            offsets.push(match rate {
+                                Some(UpdateRate::External) => vec![camera_off],
+                                Some(UpdateRate::Dynamic) => vec![model_off],
+                                _ => Vec::new(),
+                            });
+                        }
+                        if !assembled {
+                            continue;
+                        }
+                        pass.add_draw_command(
+                            DrawCommand::new(mesh, Arc::new(gfx_instance))
+                                .with_dynamic_offsets(offsets),
+                        );
                     }
-                    if !assembled {
-                        continue;
-                    }
-                    pass.add_draw_command(
-                        DrawCommand::new(mesh, Arc::new(gfx_instance))
-                            .with_dynamic_offsets(offsets),
-                    );
                 }
+                passes.push((view.primary, pass));
             }
         }
 
-        // Add to the frame graph and record the handle.
-        let handle = {
+        // Add every camera's pass to the frame graph; ScenePass (and this
+        // system's result) is the primary camera's pass — the one overlays
+        // attach to and the host composites.
+        let mut primary_handle = None;
+        {
             let mut schedule = world.resource_mut::<RenderSchedule>();
-            schedule
-                .graph_mut()
-                .map(|graph| graph.add_graphics_pass(pass))
-        };
-        if let Some(handle) = handle {
+            if let Some(graph) = schedule.graph_mut() {
+                for (primary, pass) in passes {
+                    let handle = graph.add_graphics_pass(pass);
+                    if primary || primary_handle.is_none() {
+                        primary_handle = Some(handle);
+                    }
+                }
+            }
+        }
+        if let Some(handle) = primary_handle {
             world.resource_mut::<ScenePass>().0 = Some(handle);
         }
-        Ok(handle)
+        Ok(primary_handle)
     }
 }
 
@@ -672,5 +893,163 @@ impl System for HotReload {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod camera_target_tests {
+    use super::*;
+    use crate::std::rendering::loaders::TextureSource;
+
+    fn world_with_texture_manager() -> World {
+        let instance = redlilium_graphics::GraphicsInstance::new().expect("graphics instance");
+        let device = instance.create_device().expect("device");
+        let mut world = World::new();
+        world.register_component::<Camera>();
+        world.register_component::<CameraOutput>();
+        world.register_component::<CameraTarget>();
+        world.insert_resource(TextureManager::new(device));
+        world
+    }
+
+    fn run(world: &mut World) {
+        EnsureCameraTargets
+            .run(world)
+            .expect("EnsureCameraTargets runs");
+    }
+
+    /// ADR-029: a Screen spec derives a viewport-sized CameraTarget, and a
+    /// viewport change re-derives it at the new size.
+    #[test]
+    fn screen_target_follows_main_viewport() {
+        let mut world = world_with_texture_manager();
+        world.insert_resource(MainViewport::new(64, 32));
+        let camera = world.spawn();
+        world
+            .insert(camera, Camera::perspective(1.0, 2.0, 0.1, 100.0))
+            .unwrap();
+        world.insert(camera, CameraOutput::screen()).unwrap();
+
+        run(&mut world);
+        {
+            let target = world.get::<CameraTarget>(camera).expect("target derived");
+            assert_eq!((target.color.width(), target.color.height()), (64, 32));
+            assert_eq!((target.depth.width(), target.depth.height()), (64, 32));
+        }
+
+        // Steady state: same spec + same viewport → same textures (no churn).
+        let before = world
+            .get::<CameraTarget>(camera)
+            .map(|t| Arc::as_ptr(&t.color))
+            .unwrap();
+        run(&mut world);
+        let after = world
+            .get::<CameraTarget>(camera)
+            .map(|t| Arc::as_ptr(&t.color))
+            .unwrap();
+        assert_eq!(before, after, "unchanged spec must not recreate textures");
+
+        // Resize re-derives.
+        world.insert_resource(MainViewport::new(128, 128));
+        run(&mut world);
+        let target = world
+            .get::<CameraTarget>(camera)
+            .expect("target re-derived");
+        assert_eq!((target.color.width(), target.color.height()), (128, 128));
+    }
+
+    /// A clear-color edit updates the derived target without recreating the
+    /// GPU textures.
+    #[test]
+    fn clear_color_edit_keeps_textures() {
+        let mut world = world_with_texture_manager();
+        world.insert_resource(MainViewport::new(16, 16));
+        let camera = world.spawn();
+        world
+            .insert(camera, Camera::perspective(1.0, 1.0, 0.1, 100.0))
+            .unwrap();
+        world.insert(camera, CameraOutput::screen()).unwrap();
+        run(&mut world);
+        let before = world
+            .get::<CameraTarget>(camera)
+            .map(|t| Arc::as_ptr(&t.color))
+            .unwrap();
+
+        world
+            .insert(
+                camera,
+                CameraOutput::screen().with_clear_color([1.0, 0.0, 0.0, 1.0]),
+            )
+            .unwrap();
+        run(&mut world);
+        let target = world.get::<CameraTarget>(camera).unwrap();
+        assert_eq!(target.clear_color, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(Arc::as_ptr(&target.color), before, "textures reused");
+    }
+
+    /// An Offscreen spec with an `output` guid publishes the color texture as
+    /// a virtual texture asset (resolvable via `TextureSource::Virtual`), and
+    /// a resize re-publishes the new texture.
+    #[test]
+    fn offscreen_output_publishes_virtual_texture() {
+        let mut world = world_with_texture_manager();
+        let guid = redlilium_assets::Guid::stable("test/mirror_output");
+        let camera = world.spawn();
+        world
+            .insert(camera, Camera::perspective(1.0, 1.0, 0.1, 100.0))
+            .unwrap();
+        world
+            .insert(
+                camera,
+                CameraOutput::offscreen(SizePolicy::Fixed(32, 32), Some(guid)),
+            )
+            .unwrap();
+
+        // No MainViewport needed for Fixed sizing.
+        run(&mut world);
+        let color = world
+            .get::<CameraTarget>(camera)
+            .map(|t| t.color.clone())
+            .expect("offscreen target derived");
+        {
+            let textures = world.resource::<TextureManager>();
+            let resolved = textures
+                .get(&TextureSource::Virtual(guid))
+                .expect("virtual texture published");
+            assert!(Arc::ptr_eq(&resolved.texture, &color));
+        }
+        let gen_before = world.resource::<TextureManager>().generation();
+
+        // Resize → new texture published under the same identity.
+        world
+            .insert(
+                camera,
+                CameraOutput::offscreen(SizePolicy::Fixed(64, 64), Some(guid)),
+            )
+            .unwrap();
+        run(&mut world);
+        let textures = world.resource::<TextureManager>();
+        let resolved = textures
+            .get(&TextureSource::Virtual(guid))
+            .expect("still published");
+        assert_eq!(resolved.texture.width(), 64);
+        assert!(
+            textures.generation() > gen_before,
+            "re-publish must bump the generation so AssetRef holders re-resolve"
+        );
+    }
+
+    /// Cameras without a CameraOutput spec are host-managed: the system must
+    /// leave them alone (the editor's scene view relies on this).
+    #[test]
+    fn cameras_without_spec_are_untouched() {
+        let mut world = world_with_texture_manager();
+        world.insert_resource(MainViewport::new(16, 16));
+        let camera = world.spawn();
+        world
+            .insert(camera, Camera::perspective(1.0, 1.0, 0.1, 100.0))
+            .unwrap();
+        run(&mut world);
+        assert!(world.get::<CameraTarget>(camera).is_none());
     }
 }

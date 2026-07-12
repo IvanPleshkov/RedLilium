@@ -423,6 +423,7 @@ mod render_assets {
                             "solid".to_owned()
                         }
                         TextureSource::File(guid) => format!("{guid:?}"),
+                        TextureSource::Virtual(guid) => format!("virtual {guid:?}"),
                     };
                     if let Some(guid) = super::super::asset_drop_target(
                         ui,
