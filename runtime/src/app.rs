@@ -386,4 +386,34 @@ mod tests {
             "MeshManager Arc identity preserved across reload"
         );
     }
+
+    /// Phase 6, Step 4: Verify that capture() includes snapshot metadata
+    /// with component schema hashes. This integration test confirms the
+    /// end-to-end infrastructure is in place for schema validation.
+    /// (Unit tests in ecs verify components with custom schema_hash values.)
+    #[test]
+    fn snapshot_capture_includes_metadata() {
+        let engine = test_engine();
+        let plugin = BlipPlugin;
+
+        let mut app = App::new(&engine, 1.0);
+        plugin.build(&mut app);
+        plugin.spawn_scene(&mut app);
+
+        // Capture the scene
+        let snapshot = app.capture().unwrap();
+
+        // Verify: metadata exists and has valid timestamp set
+        assert!(
+            snapshot.metadata.timestamp > 0,
+            "snapshot metadata should have valid timestamp"
+        );
+
+        // Verify: metadata contains component_schemas map (structure present,
+        // even if empty when no components override schema_hash).
+        // Blip doesn't override schema_hash, so we can't check specific hashes here;
+        // that's tested in ecs unit tests (schema_hash_stored_in_snapshot_metadata).
+        // This integration test confirms the capture → metadata flow works.
+        let _schemas = &snapshot.metadata.component_schemas;
+    }
 }
