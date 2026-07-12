@@ -3,9 +3,14 @@
 //! **RealTime** advances every frame, unaffected by Play/Pause. Use it for
 //! UI animations, profiling, and editor-side logic.
 //!
-//! **GameTime** is pauseable and supports slow-motion. It is zeroed when Play
-//! starts and consumed by game logic. Use the [`GameTime::tick`] method to
-//! advance it by a scaled delta.
+//! **GameTime** is pauseable and supports slow-motion via
+//! [`set_scale`](GameTime::set_scale). It is zeroed when Play starts and
+//! consumed by game logic.
+//!
+//! Both clocks are advanced by `Schedules::run_frame` each frame: `RealTime`
+//! unconditionally, `GameTime` only while the game simulates (`GameActive`
+//! and not `Paused`). Neither clock touches the world's change-detection
+//! tick — they are plain time resources.
 
 /// Real (wall-clock) time that always advances, regardless of Play/Pause.
 ///
@@ -52,47 +57,58 @@ impl Default for RealTime {
 
 /// Game time that can be paused and slowed.
 ///
-/// GameTime starts at 0 when Play begins. Use [`tick`](GameTime::tick) to
-/// advance it by a scaled delta (0.0 for paused, 0.5 for half-speed, etc.).
+/// GameTime starts at 0 when Play begins. `Schedules::run_frame` advances it
+/// every frame the game simulates, using the clock's own
+/// [`scale`](GameTime::scale) (set 0.5 for half-speed slow-mo, etc.); Pause
+/// freezes it by ticking with an effective scale of 0.
 #[derive(Debug, Clone, Copy)]
 pub struct GameTime {
     elapsed: f64,
     delta: f64,
-    /// Fractional accumulator to prevent slow-motion drift at speeds like 0.5× or 0.25×.
-    /// Accumulated deltas are applied to elapsed when the fractional part exceeds the precision threshold.
-    fractional: f64,
+    /// Time multiplier applied by `run_frame` while the game simulates
+    /// (1.0 = normal, 0.5 = half-speed). Pause overrides it to 0.
+    scale: f64,
+    /// Kahan compensation term: carries the low-order bits lost when a small
+    /// scaled delta is added to a large `elapsed`, so long slow-mo sessions
+    /// accumulate no summation drift.
+    compensation: f64,
 }
 
 impl GameTime {
-    /// Create a new GameTime at 0.
+    /// Create a new GameTime at 0, normal speed.
     pub fn new() -> Self {
         Self {
             elapsed: 0.0,
             delta: 0.0,
-            fractional: 0.0,
+            scale: 1.0,
+            compensation: 0.0,
         }
     }
 
     /// Advance game time by a scaled delta.
     ///
     /// `dt` is the frame delta (e.g., 1/60 for a 60fps frame).
-    /// `scale` is the time multiplier (0.0 = paused, 1.0 = normal, 0.5 = half-speed).
+    /// `scale` is the effective multiplier for this tick (0.0 = frozen,
+    /// 1.0 = normal, 0.5 = half-speed). `Schedules::run_frame` passes
+    /// [`self.scale`](GameTime::scale) while the game simulates and 0 while
+    /// paused.
     ///
-    /// Uses a fractional accumulator to prevent slow-motion drift at speeds like 0.5× or 0.25×.
-    /// Accumulated fractional time is applied when it reaches sufficient precision.
+    /// Uses Kahan compensated summation so tiny scaled deltas added to a
+    /// large `elapsed` do not lose precision over long sessions.
     pub fn tick(&mut self, dt: f64, scale: f64) {
         let scaled_delta = dt * scale;
         self.delta = scaled_delta;
 
-        // Accumulate fractional time to prevent drift at low speeds
-        self.fractional += scaled_delta;
-
-        // Apply accumulated time when fractional part is significant (> 1 microsecond)
-        let threshold = 0.000001;
-        if self.fractional >= threshold || self.fractional <= -threshold {
-            self.elapsed += self.fractional;
-            self.fractional = 0.0;
+        // A frozen tick must leave `elapsed` bit-identical — don't let it
+        // flush the pending compensation remainder.
+        if scaled_delta == 0.0 {
+            return;
         }
+
+        let y = scaled_delta - self.compensation;
+        let t = self.elapsed + y;
+        self.compensation = (t - self.elapsed) - y;
+        self.elapsed = t;
     }
 
     /// Frame delta (game time advanced this frame).
@@ -105,11 +121,23 @@ impl GameTime {
         self.elapsed
     }
 
-    /// Reset to 0 when Play starts.
+    /// The configured time multiplier (1.0 = normal speed).
+    pub fn scale(&self) -> f64 {
+        self.scale
+    }
+
+    /// Set the time multiplier for slow-mo / fast-forward (1.0 = normal).
+    /// Applied by `run_frame` on every simulated frame; Pause overrides it
+    /// to 0 without touching this value.
+    pub fn set_scale(&mut self, scale: f64) {
+        self.scale = scale;
+    }
+
+    /// Reset to 0 when Play starts. Keeps the configured scale.
     pub fn reset(&mut self) {
         self.elapsed = 0.0;
         self.delta = 0.0;
-        self.fractional = 0.0;
+        self.compensation = 0.0;
     }
 }
 
@@ -177,6 +205,54 @@ mod tests {
         gt.reset();
         assert!((gt.elapsed()).abs() < f64::EPSILON);
         assert!((gt.delta()).abs() < f64::EPSILON);
+    }
+
+    /// #67: Kahan summation keeps a long slow-mo session drift-free at the
+    /// precision level, not merely "under a microsecond per frame". 10k
+    /// frames at 0.25× must match n·dt·scale to within ~1e-12.
+    #[test]
+    fn game_time_no_drift_over_long_slow_mo_session() {
+        let mut gt = GameTime::new();
+        let dt = 1.0 / 60.0;
+        let scale = 0.25;
+        let n = 10_000;
+
+        for _ in 0..n {
+            gt.tick(dt, scale);
+        }
+
+        let expected = n as f64 * dt * scale;
+        let drift = (gt.elapsed() - expected).abs();
+        assert!(
+            drift < 1e-12,
+            "compensated summation drifted by {drift} over {n} slow-mo frames"
+        );
+    }
+
+    #[test]
+    fn game_time_scale_survives_reset() {
+        let mut gt = GameTime::new();
+        assert_eq!(gt.scale(), 1.0);
+        gt.set_scale(0.5);
+        gt.tick(0.016, gt.scale());
+        gt.reset();
+        assert_eq!(gt.elapsed(), 0.0);
+        assert_eq!(gt.scale(), 0.5, "reset must keep the configured scale");
+    }
+
+    #[test]
+    fn game_time_frozen_tick_is_bit_identical() {
+        let mut gt = GameTime::new();
+        // Accrue a non-trivial compensation remainder first.
+        for _ in 0..1000 {
+            gt.tick(1.0 / 60.0, 0.25);
+        }
+        let frozen = gt.elapsed();
+        for _ in 0..100 {
+            gt.tick(1.0 / 60.0, 0.0);
+        }
+        assert_eq!(gt.elapsed(), frozen, "frozen ticks must not move elapsed");
+        assert_eq!(gt.delta(), 0.0);
     }
 
     #[test]

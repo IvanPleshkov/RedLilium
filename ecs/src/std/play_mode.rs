@@ -364,16 +364,17 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
 
         // Activate game schedules now that we're transitioning to Playing — game
         // systems run, editor-only systems (grid, gizmos) gate off (#67).
+        //
+        // No `last_run` surgery is needed on this transition (or any other):
+        // the runner records a system's `last_run` only after a *real* run, so
+        // a condition-skipped system's `last_run` stays frozen while it is
+        // dormant. Game systems that have never run hold `last_run = 0` and
+        // see the whole world as Added/Changed on their first Update; editor
+        // systems that gate off during play keep their pre-play `last_run`
+        // and catch up on every play-time change exactly once when they wake.
+        // A per-schedule reset here would clobber that — Update/PostUpdate
+        // host both families, gated per-system, not per-schedule.
         world.insert_resource(crate::GameActive(true));
-        // Resetting game schedules' last_run to 0 (so the first Update after a
-        // snapshot restore sees every component as changed) needs the externally
-        // driven `Schedules` struct, which is not a world resource in the app —
-        // a remaining #67 gap; harmless no-op until Schedules is world-hosted.
-        if world.has_resource::<crate::Schedules>() {
-            world
-                .resource_mut::<crate::Schedules>()
-                .reset_game_schedule_last_runs(0);
-        }
 
         // Hide all root editor-only entities (and their children recursively) at Play transition.
         // Only hide those without an editor parent to avoid double-processing.
@@ -399,15 +400,14 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
         }
     }
 
-    // Reset game-schedule last_runs when transitioning to Paused.
-    // This "freezes" the game: Changed<T> queries will see no changes until resumed.
     if to == PlayState::Paused {
-        let tick = world.current_tick();
-        if world.has_resource::<crate::Schedules>() {
-            world
-                .resource_mut::<crate::Schedules>()
-                .reset_game_schedule_last_runs(tick);
-        }
+        // No `last_run` reset on Pause. `GameActive` stays true while paused —
+        // game systems keep running (the freeze is time-based: `GameTime`
+        // advances with zero delta), so their `last_run` advances normally and
+        // `Changed<T>` shows them only genuinely new writes, e.g. pause-time
+        // hot-edits. Editor systems gated on `NotGameActiveCondition` stay
+        // dormant with a frozen `last_run` and catch up at Stop. A per-schedule
+        // reset here would clobber both (#67).
 
         // Show all hidden-in-play entities (editor entities and their children) at Pause transition.
         // This allows inspection and selection during pause.
@@ -437,25 +437,38 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
     // Restore world from snapshot when transitioning to Stopped.
     // This discards all changes made during play/pause, including hot-edits.
     if to == PlayState::Stopped {
-        let play_start_tick = if world.has_resource::<PlayStartTick>() {
-            world.resource::<PlayStartTick>().0
-        } else {
-            0
-        };
+        // PlayStartTick is the boundary between "existed before Play" (restore
+        // from snapshot) and "spawned during play" (despawn). It must be
+        // present — Play always inserts it. Substituting a default (0) here
+        // would classify every non-editor entity as play-spawned and silently
+        // wipe the whole scene, so if it is missing we skip the despawn and
+        // component-restore passes entirely: a dirty-but-intact scene is
+        // recoverable, a deleted one is not.
+        let play_start_tick = world
+            .has_resource::<PlayStartTick>()
+            .then(|| world.resource::<PlayStartTick>().0);
+        if play_start_tick.is_none() {
+            log::error!(
+                "Stop transition without PlayStartTick (invariant violation) — \
+                 skipping entity despawn/restore to avoid wiping the scene"
+            );
+        }
 
         // Despawn all game entities (those created or spawned during play).
-        let entities_to_despawn: Vec<Entity> = world
-            .iter_entities()
-            .filter(|entity| {
-                let world_tick = world.get_entity_world_tick(*entity);
-                let flags = world.get_entity_flags(*entity);
-                let is_editor = flags & Entity::EDITOR != 0;
-                world_tick >= play_start_tick && !is_editor
-            })
-            .collect();
+        if let Some(play_start_tick) = play_start_tick {
+            let entities_to_despawn: Vec<Entity> = world
+                .iter_entities()
+                .filter(|entity| {
+                    let world_tick = world.get_entity_world_tick(*entity);
+                    let flags = world.get_entity_flags(*entity);
+                    let is_editor = flags & Entity::EDITOR != 0;
+                    world_tick >= play_start_tick && !is_editor
+                })
+                .collect();
 
-        for entity in entities_to_despawn {
-            world.despawn(entity);
+            for entity in entities_to_despawn {
+                world.despawn(entity);
+            }
         }
 
         // Show all hidden-in-play entities (editor entities and their children) at Stop transition.
@@ -483,11 +496,14 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
 
         // Restore all pre-existing entities from snapshot (undoes any component edits made during pause).
         // This includes both editor entities and game entities that existed before Play started.
-        if let Some(snapshot) = world
-            .has_resource::<PlaySnapshot>()
-            .then(|| world.resource::<PlaySnapshot>().0.clone())
-            .flatten()
-        {
+        // Gated on PlayStartTick like the despawn pass above (see the invariant note there).
+        if let (Some(play_start_tick), Some(snapshot)) = (
+            play_start_tick,
+            world
+                .has_resource::<PlaySnapshot>()
+                .then(|| world.resource::<PlaySnapshot>().0.clone())
+                .flatten(),
+        ) {
             // For each entity in snapshot, restore its components if it still exists in the current world.
             for snap_entity in snapshot.entities.iter() {
                 // Use both entity_index and entity_spawn_tick to uniquely identify the entity.
@@ -503,6 +519,23 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
                     if should_restore {
                         // Restore all components for this entity from snapshot.
                         for snap_component in &snap_entity.components {
+                            // Diff before restoring: writing a component stamps
+                            // a fresh change tick, so blindly rewriting every
+                            // component would fire Changed<T> for the entire
+                            // scene on Stop (transform propagation, GPU
+                            // re-uploads, inspector refresh — all at once).
+                            // Skipping value-identical components keeps the
+                            // post-Stop change set minimal and honest. A
+                            // serialize failure or representation mismatch
+                            // falls through to the restore — never the other
+                            // way around.
+                            if let Ok(Some(live)) =
+                                world.serialize_component_by_name(entity, &snap_component.type_name)
+                                && live.data == snap_component.data
+                                && live.schema_version == snap_component.schema_version
+                            {
+                                continue;
+                            }
                             match world.deserialize_component_by_name(entity, snap_component) {
                                 Ok(()) => {}
                                 Err(e) => {
@@ -532,16 +565,10 @@ fn apply_transition_hooks(world: &mut World, from: PlayState, to: PlayState) {
         }
 
         // Deactivate game schedules — editor-only systems (grid, gizmos) gate
-        // back on (#67).
+        // back on (#67). Residual fixed-step debt is dropped by `run_frame`
+        // itself on the next inactive→active edge, so no access to the
+        // externally driven `Schedules` struct is needed here.
         world.insert_resource(crate::GameActive(false));
-        // Resetting the fixed-timestep accumulator (to avoid a catch-up burst on
-        // the next Play) needs the externally driven `Schedules` struct, not a
-        // world resource — a remaining #67 gap; harmless no-op until hosted.
-        if world.has_resource::<crate::Schedules>() {
-            world
-                .resource_mut::<crate::Schedules>()
-                .reset_fixed_accumulator();
-        }
 
         // Clear any panic state when stopping.
         if world.has_resource::<PlayControl>() {
@@ -782,6 +809,48 @@ mod tests {
         // Verify pre-play entity survived, play-spawned entity was deleted
         assert!(world.is_alive(pre_play));
         assert!(!world.is_alive(during_play));
+    }
+
+    /// #67: a Stop transition that finds `PlayStartTick` missing (invariant
+    /// violation — Play always inserts it) must skip the despawn/restore pass
+    /// instead of substituting 0, which would classify every non-editor
+    /// entity as play-spawned and silently wipe the whole scene.
+    #[test]
+    fn stop_without_play_start_tick_preserves_scene() {
+        let mut world = World::new();
+        world.insert_resource(PlayControl::default());
+        world.insert_resource(PlayModeAwareRegistry::default());
+        world.insert_resource(crate::GameTime::default());
+
+        let pre_play = world.spawn();
+        world.advance_tick();
+
+        let mut system = ManagePlayModeTransitions;
+
+        let mut control = world.resource_mut::<PlayControl>();
+        control.play();
+        drop(control);
+        system.run(&mut world).unwrap();
+        assert_eq!(world.resource::<PlayControl>().state(), PlayState::Playing);
+
+        let during_play = world.spawn();
+
+        // Simulate the invariant violation: PlayStartTick lost mid-play.
+        world.remove_resource::<PlayStartTick>();
+
+        let mut control = world.resource_mut::<PlayControl>();
+        control.stop();
+        drop(control);
+        system.run(&mut world).unwrap();
+        assert_eq!(world.resource::<PlayControl>().state(), PlayState::Stopped);
+
+        // A dirty-but-intact scene is recoverable, a wiped one is not: both
+        // entities must survive the skipped cleanup.
+        assert!(world.is_alive(pre_play), "pre-play entity must survive");
+        assert!(
+            world.is_alive(during_play),
+            "play-spawned entity must survive the skipped despawn pass"
+        );
     }
 
     #[test]
