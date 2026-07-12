@@ -2087,3 +2087,85 @@ fn is_excluded_from_game_checks_all_masks() {
     assert!(world.is_excluded_from_game(e_hidden));
     assert!(!world.is_excluded_from_game(e_normal));
 }
+
+// Phase 6: Schema hash validation tests
+
+#[derive(Clone, Debug)]
+struct TestComponentWithHash;
+
+impl crate::Component for TestComponentWithHash {
+    const NAME: &'static str = "TestComponentWithHash";
+
+    fn schema_hash() -> String {
+        "test_schema_hash_v1".to_string()
+    }
+
+    fn inspect_ui(
+        &self,
+        _ui: &mut egui::Ui,
+        _world: &crate::World,
+        _entity: crate::Entity,
+    ) -> crate::InspectResult {
+        None
+    }
+
+    fn serialize_component(
+        &self,
+        _ctx: &mut crate::serialize::SerializeContext<'_>,
+    ) -> Result<crate::serialize::Value, crate::serialize::SerializeError> {
+        Ok(crate::serialize::Value::Null)
+    }
+
+    fn deserialize_component(
+        _ctx: &mut crate::serialize::DeserializeContext<'_>,
+    ) -> Result<Self, crate::serialize::DeserializeError> {
+        Ok(TestComponentWithHash)
+    }
+}
+
+#[test]
+fn schema_hash_stored_in_snapshot_metadata() {
+    let mut world = World::new();
+    world.register_inspector::<TestComponentWithHash>();
+    let entity = world.spawn();
+    world.insert(entity, TestComponentWithHash).unwrap();
+
+    let snapshot = world.serialize_world().expect("serialize world");
+
+    // Verify: metadata contains schema hash for TestComponentWithHash
+    assert!(
+        snapshot
+            .metadata
+            .component_schemas
+            .contains_key("TestComponentWithHash")
+    );
+    let hash = snapshot
+        .metadata
+        .component_schemas
+        .get("TestComponentWithHash")
+        .unwrap();
+    assert_eq!(hash, "test_schema_hash_v1");
+}
+
+#[test]
+fn schema_hash_consistent_across_serialize() {
+    let mut world = World::new();
+    world.register_inspector::<TestComponentWithHash>();
+    let entity = world.spawn();
+    world.insert(entity, TestComponentWithHash).unwrap();
+
+    // Serialize twice
+    let snap1 = world.serialize_world().expect("serialize 1");
+    let snap2 = world.serialize_world().expect("serialize 2");
+
+    // Verify: same hash both times
+    let hash1 = snap1
+        .metadata
+        .component_schemas
+        .get("TestComponentWithHash");
+    let hash2 = snap2
+        .metadata
+        .component_schemas
+        .get("TestComponentWithHash");
+    assert_eq!(hash1, hash2);
+}
