@@ -370,6 +370,14 @@ pub struct MaterialDescriptor {
     /// systems to decide how each set is bound (Decision 7).
     pub set_update_rates: Vec<Option<super::UpdateRate>>,
 
+    /// Shader variant selection (#6, Decision 5). Applied by `create_material`
+    /// to **every Slang stage at once** — the stages of one material are one
+    /// module and must compile with identical defines (per-stage `defines` on
+    /// [`ShaderSource`] allow them to drift, which is always a bug). Build it
+    /// with [`ShaderVariantSpace::select`](crate::shader::ShaderVariantSpace::select)
+    /// so typos and missing system axes fail at key-build time.
+    pub variant: Option<crate::shader::VariantKey>,
+
     /// Optional label for debugging.
     pub label: Option<String>,
 }
@@ -388,6 +396,7 @@ impl Default for MaterialDescriptor {
             sample_count: 1,
             dynamic_uniforms: Vec::new(),
             set_update_rates: Vec::new(),
+            variant: None,
             label: None,
         }
     }
@@ -403,6 +412,63 @@ impl MaterialDescriptor {
     pub fn with_shader(mut self, shader: ShaderSource) -> Self {
         self.shaders.push(shader);
         self
+    }
+
+    /// Select the shader variant (#6, Decision 5) — the defines every Slang
+    /// stage of this material compiles with. Order-independent with
+    /// [`with_shader`](Self::with_shader): the key is applied to the stages
+    /// inside `create_material`, not here.
+    pub fn with_variant(mut self, variant: crate::shader::VariantKey) -> Self {
+        self.variant = Some(variant);
+        self
+    }
+
+    /// Resolve [`variant`](Self::variant) into per-stage defines: a clone of
+    /// this descriptor whose Slang [`ShaderSource::defines`] carry the
+    /// variant's defines merged with any ad-hoc per-stage ones.
+    ///
+    /// Errors when the variant names a define a stage already sets ad-hoc
+    /// (split ownership means no overlap — a silent override in either
+    /// direction would hide a real conflict), and when a variant is set on a
+    /// material with no Slang stages (WGSL has no preprocessor; the variant
+    /// would be silently ignored).
+    pub fn resolve_variant(&self) -> Result<Self, crate::error::GraphicsError> {
+        let Some(variant) = &self.variant else {
+            return Ok(self.clone());
+        };
+        let mut desc = self.clone();
+        if variant.is_empty() {
+            return Ok(desc);
+        }
+
+        let mut applied = false;
+        for shader in &mut desc.shaders {
+            if shader.language != ShaderSourceLanguage::Slang {
+                continue;
+            }
+            for (name, value) in variant.defines() {
+                if shader.defines.iter().any(|(n, _)| n == name) {
+                    return Err(crate::error::GraphicsError::InvalidParameter(format!(
+                        "material {:?}: variant define {name:?} is also set ad-hoc on the \
+                         {:?} stage — a define is owned either by the variant key or by the \
+                         stage, never both",
+                        self.label, shader.stage,
+                    )));
+                }
+                shader.defines.push((name.clone(), value.clone()));
+            }
+            shader.defines.sort();
+            applied = true;
+        }
+
+        if !applied {
+            return Err(crate::error::GraphicsError::InvalidParameter(format!(
+                "material {:?}: a shader variant is set but there are no Slang stages to \
+                 apply it to (WGSL has no preprocessor)",
+                self.label,
+            )));
+        }
+        Ok(desc)
     }
 
     /// Add a binding layout.

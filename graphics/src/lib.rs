@@ -113,7 +113,9 @@ pub use pipeline::{FramePipeline, MAX_FRAMES_IN_FLIGHT};
 pub use resize::{ResizeEvent, ResizeManager, ResizeStrategy};
 pub use resources::{Buffer, RingAllocation, RingBuffer, Sampler, Texture};
 pub use scheduler::{Fence, FenceStatus, FrameSchedule, SubmitHandle};
-pub use shader::ShaderLibrary;
+pub use shader::{
+    ShaderLibrary, ShaderVariantSpace, VariantError, VariantKey, VariantSelector, VariantValue,
+};
 pub use swapchain::{PresentMode, Surface, SurfaceConfiguration, SurfaceTexture};
 pub use types::{
     AddressMode, BufferDescriptor, BufferUsage, ClearValue, CompareFunction, CpuSampler,

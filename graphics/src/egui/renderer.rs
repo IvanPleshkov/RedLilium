@@ -140,13 +140,19 @@ impl EguiRenderer {
                 .with_label("egui_vertex_layout"),
         );
 
-        // Pass surface-type defines so the shader handles color space correctly
-        let mut defines = Vec::new();
-        if surface_format.is_hdr() {
-            defines.push(("HDR_OUTPUT".to_string(), String::new()));
-        } else if surface_format.is_srgb() {
-            defines.push(("SRGB_FRAMEBUFFER".to_string(), String::new()));
-        }
+        // Select the color-space variant from the surface format (#6): the
+        // shader declares the axes (`//#pragma variant_system` in egui.slang),
+        // the renderer — the system side of Decision 5's split — sets them.
+        let variant = crate::shader::ShaderVariantSpace::parse(EGUI_SHADER_SOURCE)
+            .expect("egui.slang variant pragmas")
+            .select()
+            .system("HDR_OUTPUT", surface_format.is_hdr())
+            .system(
+                "SRGB_FRAMEBUFFER",
+                !surface_format.is_hdr() && surface_format.is_srgb(),
+            )
+            .build()
+            .expect("egui variant selection");
 
         // Create material using Slang shader source
         let material = device
@@ -156,14 +162,15 @@ impl EguiRenderer {
                         ShaderStage::Vertex,
                         EGUI_SHADER_SOURCE.as_bytes().to_vec(),
                         "vs_main",
-                        defines.clone(),
+                        Vec::new(),
                     ))
                     .with_shader(ShaderSource::slang(
                         ShaderStage::Fragment,
                         EGUI_SHADER_SOURCE.as_bytes().to_vec(),
                         "fs_main",
-                        defines,
+                        Vec::new(),
                     ))
+                    .with_variant(variant)
                     .with_vertex_layout(vertex_layout.clone())
                     .with_blend_state(crate::materials::BlendState::premultiplied_alpha())
                     .with_color_format(surface_format)

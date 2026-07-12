@@ -56,14 +56,18 @@ impl ResolvePass {
         )
         .expect("Failed to create resolve uniform ring");
 
-        // Build Slang defines based on HDR mode
-        let defines = if hdr_active {
-            log::info!("Compiling resolve shader with HDR_OUTPUT define");
-            vec![("HDR_OUTPUT".to_string(), String::new())]
-        } else {
-            log::info!("Compiling resolve shader for SDR output");
-            vec![]
-        };
+        // Select the HDR variant (#6): the shader declares the axis
+        // (`//#pragma variant_system HDR_OUTPUT`), the pass sets it.
+        log::info!(
+            "Compiling resolve shader ({} output)",
+            if hdr_active { "HDR" } else { "SDR" }
+        );
+        let variant = redlilium_graphics::ShaderVariantSpace::parse(RESOLVE_SHADER_SLANG)
+            .expect("deferred_resolve.slang variant pragmas")
+            .select()
+            .system("HDR_OUTPUT", hdr_active)
+            .build()
+            .expect("resolve variant selection");
 
         // Create resolve material using Slang shader. Binding 0 (uniforms, group
         // 0) is a per-draw dynamic offset.
@@ -74,14 +78,15 @@ impl ResolvePass {
                         ShaderStage::Vertex,
                         RESOLVE_SHADER_SLANG.as_bytes().to_vec(),
                         "vs_main",
-                        defines.clone(),
+                        Vec::new(),
                     ))
                     .with_shader(ShaderSource::slang(
                         ShaderStage::Fragment,
                         RESOLVE_SHADER_SLANG.as_bytes().to_vec(),
                         "fs_main",
-                        defines,
+                        Vec::new(),
                     ))
+                    .with_variant(variant)
                     .with_color_format(surface_format)
                     .with_dynamic_uniform(0, 0)
                     .with_label("resolve_material"),
