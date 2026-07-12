@@ -98,6 +98,14 @@ impl MeshGenerator {
 pub enum MeshSource {
     File(Guid),
     Generated(MeshGenerator),
+    /// A runtime-built mesh published straight into the [`MeshManager`] by host/tool
+    /// code (`MeshManager::insert_external`) — never loaded from disk or generated.
+    /// The id is the publisher's slot namespace (e.g. a preview viewer's submesh
+    /// index); republishing the same id hot-swaps every referencing component
+    /// through the normal stale-ref patching in `MeshLoad`.
+    ///
+    /// [`MeshManager`]: crate::MeshManager
+    External(u64),
 }
 
 // A dropped/bare guid references the file-backed variant.
@@ -111,7 +119,7 @@ impl AssetSource for MeshSource {
     fn file_guid(&self) -> Option<Guid> {
         match self {
             Self::File(guid) => Some(*guid),
-            Self::Generated(_) => None,
+            Self::Generated(_) | Self::External(_) => None,
         }
     }
 }
@@ -151,6 +159,11 @@ impl AssetLoader for MeshLoader {
                     }));
                 }
                 stages.push(Box::new(DeserializeMeshStage));
+            }
+            // Externals are published, never loaded — the manager rejects them before
+            // a pipeline is ever built (`MeshManager::request` is a no-op for them).
+            MeshSource::External(_) => {
+                unreachable!("MeshSource::External never enters the load pipeline")
             }
         }
         stages.push(Box::new(UploadMeshStage {

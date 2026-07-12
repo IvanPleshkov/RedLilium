@@ -6,12 +6,13 @@ use log::debug;
 use redlilium_ecs::sync::RwLock;
 
 use redlilium_ecs::{
-    AssetGpuFlush, AssetPump, Component, FlushUploads, ForwardRender, FrameRing, GameTime,
-    HotReload, ManagePlayModeTransitions, MaterialInstanceLoad, MaterialInstanceManager, MeshLoad,
-    MeshManager, PlayControl, PlayModeAwareRegistry, PlayStartTick, PostUpdate, PreUpdate,
-    RealTime, Render, RenderSchedule, Resource, ScenePass, ScheduleLabel, Schedules, System,
-    SystemsContainer, TextureManager, UnloadStrategy, UpdateCameraMatrices, UpdateGlobalTransforms,
-    WindowInput, World, register_rendering_components, register_std_components,
+    AssetGpuFlush, AssetPump, Component, EnsureCameraTargets, FlushUploads, ForwardRender,
+    FrameRing, GameTime, HotReload, ManagePlayModeTransitions, MaterialInstanceLoad,
+    MaterialInstanceManager, MeshLoad, MeshManager, PlayControl, PlayModeAwareRegistry,
+    PlayStartTick, PostUpdate, PreUpdate, RealTime, Render, RenderSchedule, Resource, ScenePass,
+    ScheduleLabel, Schedules, System, SystemsContainer, TextureManager, UnloadStrategy,
+    UpdateCameraMatrices, UpdateGlobalTransforms, WindowInput, World,
+    register_rendering_components, register_std_components,
 };
 
 use crate::EngineContext;
@@ -106,6 +107,9 @@ impl App {
             let render = schedules.get_mut::<Render>();
             render.add(FlushUploads);
             render.add(AssetGpuFlush);
+            // Derives CameraTargets from CameraOutput specs (ADR-029) before
+            // the forward pass consumes them.
+            render.add_exclusive(EnsureCameraTargets);
             render.add(ForwardRender::default());
             render
                 .add_edge::<FlushUploads, AssetGpuFlush>()
@@ -115,6 +119,9 @@ impl App {
                 .expect("no cycle");
             render
                 .add_edge::<AssetGpuFlush, ForwardRender>()
+                .expect("no cycle");
+            render
+                .add_edge::<EnsureCameraTargets, ForwardRender>()
                 .expect("no cycle");
         }
 

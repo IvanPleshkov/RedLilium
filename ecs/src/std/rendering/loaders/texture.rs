@@ -25,12 +25,18 @@ use std::sync::Arc;
 
 /// Identity of a texture asset. `File` resolves an image file from `guid` via
 /// the DB; `Solid` is a 1×1 constant color (always linear — normal-map and
-/// factor defaults must not be sRGB-decoded). Serialized in material
+/// factor defaults must not be sRGB-decoded); `Virtual` is a texture whose
+/// GPU resource is *published* at runtime by an engine system rather than
+/// loaded — e.g. a camera's offscreen output (ADR-029). Serialized in material
 /// properties and component `AssetRef`s.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TextureSource {
     File(Guid),
     Solid([u8; 4]),
+    /// Provided via `TextureManager::publish_virtual`, never via the loader.
+    /// Until the producing system publishes it, the source stays unresolved
+    /// (consumers keep waiting exactly like for a still-loading file).
+    Virtual(Guid),
 }
 
 impl TextureSource {
@@ -52,7 +58,7 @@ impl AssetSource for TextureSource {
     fn file_guid(&self) -> Option<Guid> {
         match self {
             Self::File(guid) => Some(*guid),
-            Self::Solid(_) => None,
+            Self::Solid(_) | Self::Virtual(_) => None,
         }
     }
 }
@@ -149,6 +155,13 @@ impl AssetLoader for TextureLoader {
             }
             TextureSource::Solid(rgba) => {
                 stages.push(Box::new(MakeSolidStage { rgba: *rgba }));
+            }
+            // Virtual textures are published by their producing system, never
+            // loaded; the manager filters them out before requesting. An empty
+            // pipeline (below) fails the request loudly if one slips through.
+            TextureSource::Virtual(guid) => {
+                log::error!("virtual texture {guid:?} reached the loader; it must be published");
+                return Vec::new();
             }
         }
         stages.push(Box::new(UploadTextureStage {

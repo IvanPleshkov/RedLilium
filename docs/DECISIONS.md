@@ -1607,3 +1607,72 @@ Vulkan's raw "app enumerates and picks":
 ### Related Issues
 
 - #38: device/instance hardcodes (XB-L3: adapter enumeration stub)
+
+---
+
+## ADR-029: Camera Graphics Stack — Serializable Spec, Derived Target, Virtual Texture Assets
+
+**Date**: 2026-07-12
+**Status**: Accepted
+
+### Context
+
+Render-to-texture with a per-camera setup was impossible: the camera's GPU
+target (`CameraTarget`, holding `Arc<Texture>`) was created by host code
+(duplicated between the runtime and the editor), only the first camera
+rendered, and nothing could reference a camera's output. The naive fix — a
+component owning the GPU target — dead-ends on serialization: GPU resources
+cannot live in scene assets.
+
+### Decision
+
+Split the camera's graphics stack the way Unity (`RenderTexture` asset),
+Unreal (`TextureRenderTarget2D`), and Bevy (`RenderTarget::Image(Handle)`)
+all do — **serialize the intent, derive the resource, reference by stable
+identity**:
+
+1. **`CameraOutput` — the serializable spec** (plain data): `Screen` (main
+   viewport, composited by the host) or `Offscreen { size, output }` with
+   `SizePolicy::{Viewport, ViewportScale, Fixed}`, plus the clear color.
+   Formats are engine-standard (`Rgba8Unorm` + `Depth32Float`) until a
+   consumer needs per-camera formats.
+2. **`CameraTarget` — the runtime-only derived cache** (unchanged type,
+   `#[skip_serialization]`), now owned by the **`EnsureCameraTargets`**
+   system (Render schedule, before `ForwardRender`): it re-derives targets
+   whenever they disagree with the spec. Host-side `ensure_camera_target`
+   code is deleted; the host only publishes `MainViewport` and (runtime)
+   defaults the first camera to `CameraOutput::screen()`. Cameras **without**
+   a spec stay host-managed — the editor's scene view keeps its own path
+   until migrated.
+3. **Virtual texture assets** — `TextureSource::Virtual(Guid)` +
+   `TextureManager::publish_virtual`: an asset whose GPU texture is
+   *published* by an engine system instead of loaded. An offscreen camera
+   with `output: Some(guid)` publishes its color target under that identity;
+   materials sample it like any texture (mirrors, minimaps, portals).
+   Precedent: `TextureSource::Solid`, `MeshSource::Generated` (non-file
+   sources are an established concept). Republish on resize bumps the
+   resident generation, so `AssetRef` holders re-resolve automatically.
+4. **`ForwardRender` iterates all cameras** — one pass per
+   `Camera + CameraTarget` entity, offscreen passes emitted first, the
+   primary (Screen or host-managed) camera last. **Cross-camera ordering is
+   never declared**: a camera sampling another's output is ordered by the
+   render graph's automatic resource-dependency derivation (#47) — no
+   Unity-style camera depth/priority knobs.
+
+### Consequences
+
+- ✅ Render-to-texture is authorable scene data (component + GUID reference)
+- ✅ One implementation of target sizing instead of two host copies
+- ✅ Serialization dead-end resolved without GPU handles in assets
+- ✅ Camera ordering falls out of the frame graph for free
+- ⚠️ Editor scene view still host-managed (follow-up migration)
+- ⚠️ Per-camera render *paths* (quality variants via #6 system axes,
+  deferred tiers per ADR-027) are declared but not yet implemented —
+  `CameraOutput` is the natural home for that knob when its consumer exists
+
+### Related Issues
+
+- #74: framework hoist reframed (the frame driver shrinks; camera stack ADR)
+- #47: automatic graph ordering makes multi-camera safe
+- #6: per-camera quality = system variant axes (future)
+- #2: scene save/load consumes the serializable spec

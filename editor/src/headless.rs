@@ -271,7 +271,7 @@ fn tick(
         }
     };
     let mut graph = schedule.acquire_graph();
-    scene_view.ensure_camera_target(&mut ew.world, ew.editor_camera, width, height);
+    scene_view.sync_camera_output(&mut ew.world, ew.editor_camera, width, height);
     ew.world.resource_mut::<RenderSchedule>().set(graph);
     ew.schedules.run_schedule::<Render>(&mut ew.world, runner);
     graph = ew

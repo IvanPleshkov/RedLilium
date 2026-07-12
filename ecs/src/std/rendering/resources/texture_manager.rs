@@ -77,12 +77,51 @@ impl TextureManager {
         {
             return;
         }
+        // Virtual textures are published by their producing system (ADR-029),
+        // never loaded — an unpublished one simply stays unresolved, exactly
+        // like a still-loading file, until the producer publishes it.
+        if matches!(source, TextureSource::Virtual(_)) {
+            return;
+        }
         self.demanded.push(source.clone());
+    }
+
+    /// Publish a runtime-produced texture as the virtual asset `guid`
+    /// (ADR-029) — e.g. a camera's offscreen color output. Consumers resolve
+    /// it through `TextureSource::Virtual(guid)` like any other texture.
+    ///
+    /// Re-publishing (a resized target) replaces the resident entry and bumps
+    /// the generation, so `AssetRef` holders re-resolve to the new texture.
+    pub fn publish_virtual(
+        &mut self,
+        guid: redlilium_assets::Guid,
+        texture: Arc<Texture>,
+    ) -> Result<(), redlilium_graphics::GraphicsError> {
+        // Camera outputs are linear render targets: sample linearly, clamp at
+        // the edges, no sRGB decode (the data is not an encoded image).
+        use redlilium_core::sampler::{AddressMode, FilterMode};
+        let settings = TextureSettings {
+            srgb: false,
+            filter: FilterMode::Linear,
+            address: AddressMode::ClampToEdge,
+            anisotropy: 1,
+        };
+        let sampler = self.intern_sampler(&settings)?;
+        let source = TextureSource::Virtual(guid);
+        self.cache.invalidate(&source);
+        self.cache
+            .publish(source, Arc::new(ResolvedTexture { texture, sampler }));
+        Ok(())
     }
 
     /// The resolved texture for `source`, if loaded.
     pub fn get(&self, source: &TextureSource) -> Option<&Arc<ResolvedTexture>> {
         self.cache.get(source)
+    }
+
+    /// The graphics device textures are created on (shared engine-wide).
+    pub fn device(&self) -> &Arc<GraphicsDevice> {
+        &self.device
     }
 
     /// Whether `source` failed to load (latched until invalidated).

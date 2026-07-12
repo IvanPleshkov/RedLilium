@@ -67,6 +67,7 @@ wasm-bindgen-futures = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+env_logger = { workspace = true }
 serde = { workspace = true }
 
 [[bench]]
