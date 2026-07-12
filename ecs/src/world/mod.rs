@@ -132,6 +132,10 @@ fn deserialize_component_fn<T: Component>(
     Ok(())
 }
 
+/// A monomorphized world-update fn stamped with its registration source
+/// (purgeable on game-module unload).
+type StampedWorldFn = (crate::type_identity::SourceId, fn(&mut World));
+
 /// An independent ECS world containing entities, components, and resources.
 ///
 /// Each World is fully self-contained. Multiple worlds can coexist
@@ -180,10 +184,13 @@ pub struct World {
     /// [`crate::observer::flush`] can re-borrow it through a raw world
     /// pointer instead of holding `&mut Observers` across handler calls.
     pub(crate) observers: Observers,
-    /// Monomorphized swap functions for each registered `Triggers<M>` resource.
-    trigger_swap_fns: Vec<fn(&mut World)>,
-    /// Monomorphized update functions for each registered `Events<T>` resource.
-    event_update_fns: Vec<fn(&mut World)>,
+    /// Monomorphized swap functions for each registered `Triggers<M>` resource,
+    /// stamped with the registration source so a game-module unload can purge
+    /// fns whose monomorphized code lives in the module's image.
+    trigger_swap_fns: Vec<StampedWorldFn>,
+    /// Monomorphized update functions for each registered `Events<T>` resource,
+    /// stamped with the registration source (see `trigger_swap_fns`).
+    event_update_fns: Vec<StampedWorldFn>,
     /// Type-erased capture/restore hooks for resources that opt into
     /// whole-world snapshots, keyed by `SnapshotResource::NAME` (sorted for
     /// deterministic capture order).
@@ -397,6 +404,71 @@ impl World {
         f(&mut *scope.world)
     }
 
+    /// Removes **everything** this world holds that was registered under
+    /// `source`: component storages (their drop glue runs here), name-index
+    /// entries, resources, event/trigger update fns, observers, snapshot
+    /// hooks, and migrations. The complement of
+    /// [`with_registration_source`](World::with_registration_source) — a
+    /// game-module unload calls this to sever every pointer into the module's
+    /// image before the dylib unmaps.
+    ///
+    /// **Caller contract:** the module that registered `source` must still be
+    /// mapped — storage/resource drop glue and closure destructors run inside
+    /// this call. Entities are untouched: components of purged types simply
+    /// vanish from them; despawning game-spawned entities is the caller's
+    /// separate concern (they are data, not code, and are safe to keep).
+    ///
+    /// Systems in externally driven `Schedules` are **not** covered — the
+    /// caller must drop or rebuild those separately (they live outside the
+    /// world by design).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `source` is [`SourceId::HOST`](crate::SourceId::HOST) — the
+    /// host's registrations are the world's own substrate.
+    pub fn purge_source(&mut self, source: crate::type_identity::SourceId) {
+        assert_ne!(
+            source,
+            crate::type_identity::SourceId::HOST,
+            "purge_source(HOST) would strip the world's own registrations"
+        );
+
+        // Component storages: dropping the lock runs the storage's drop glue
+        // (per-component destructors monomorphized in the source's image), so
+        // this must happen while the module is mapped.
+        let type_ids: Vec<TypeId> = self
+            .type_sources
+            .iter()
+            .filter(|(_, s)| **s == source)
+            .map(|(t, _)| *t)
+            .collect();
+        for tid in &type_ids {
+            self.components.remove(tid);
+        }
+        self.name_index.retain(|_, tid| !type_ids.contains(tid));
+
+        // Resources recorded under the source (drop glue runs here too).
+        self.resources.remove_by_source(source);
+
+        // Monomorphized fn pointers and boxed closures from the source image.
+        self.event_update_fns.retain(|(s, _)| *s != source);
+        self.trigger_swap_fns.retain(|(s, _)| *s != source);
+        self.observers.purge_source(source);
+        self.snapshot_resources.retain(|_, e| e.source != source);
+        self.migration_registry.purge_source(source);
+
+        // Identity bookkeeping: forget the purged types and release this
+        // world's hold on the generation in the shared registry.
+        for tid in &type_ids {
+            self.type_sources.remove(tid);
+        }
+        if self.worlds_generations.remove(&source.0).is_some() {
+            let _ = self.with_generation_registry_mut(|reg| {
+                reg.decrement_registration_count(source.0);
+            });
+        }
+    }
+
     /// The [`QualifiedTypeId`](crate::QualifiedTypeId) for `T` if it has been
     /// registered (as a component or resource), resolving `source` via the
     /// registration metadata. Returns `None` for never-registered types.
@@ -481,7 +553,8 @@ impl World {
         type_name: &'static str,
         migration: crate::migration::ComponentMigrationFn,
     ) {
-        self.migration_registry.register(type_name, migration);
+        self.migration_registry
+            .register_from(self.current_source, type_name, migration);
     }
 
     // ---- Component lock helpers ----

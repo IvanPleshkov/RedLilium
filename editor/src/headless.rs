@@ -83,6 +83,9 @@ pub fn run() {
     // Persistent engine state + the startup mount scan (ADR-020).
     let engine = redlilium_runtime::EngineContext::with_vfs(device.clone(), vfs.clone());
     crate::core::scan_local_mounts(&engine, &local_mounts);
+    // Declared before `ew` so it drops after it — the mapped game image must
+    // outlive every world its plugin touched (ADR-020, #58).
+    let mut game_host: Option<crate::game_host::GameHost> = None;
     let mut ew = create_editor_world(
         &EditorWorldParams {
             remote: true,
@@ -98,6 +101,17 @@ pub fn run() {
         Some(TextureFormat::Depth32Float),
     ));
     ew.schedules.run_startup(&mut ew.world, &runner);
+
+    let aspect = width as f32 / height as f32;
+    if let Ok(path) = std::env::var("REDLILIUM_GAME") {
+        // SAFETY: the operator points this at a game cdylib built in the same
+        // `cargo build` as this editor (the fingerprint gate enforces engine
+        // parity; the same-build contract is documented on GameModule::load).
+        match unsafe { crate::game_host::GameHost::load(&path, &engine, &mut ew, aspect) } {
+            Ok(host) => game_host = Some(host),
+            Err(e) => log::error!("failed to load game module '{path}': {e}"),
+        }
+    }
 
     let mut pipeline = device.create_pipeline(2);
     let mut rc = RemoteCommands::default();
@@ -131,6 +145,37 @@ pub fn run() {
             height,
         );
         shutdown = outcome.shutdown;
+
+        if rc.take_reload() {
+            match game_host.as_mut() {
+                None => log::error!(
+                    "reload_game: no game module hosted (launch with REDLILIUM_GAME=<cdylib>)"
+                ),
+                Some(host) => {
+                    let opts = crate::game_host::ReloadOptions {
+                        params: EditorWorldParams {
+                            remote: true,
+                            egui: false,
+                        },
+                        aspect,
+                    };
+                    let (fresh, result) = crate::game_host::reload_game(
+                        host,
+                        ew,
+                        &engine,
+                        &mut scene_view,
+                        &runner,
+                        &opts,
+                        crate::game_host::swap_from_disk,
+                    );
+                    ew = fresh;
+                    match result {
+                        Ok(()) => log::info!("game module reloaded (scene restored)"),
+                        Err(e) => log::error!("game reload failed: {e}"),
+                    }
+                }
+            }
+        }
 
         if outcome.rendered {
             render_failures = 0;

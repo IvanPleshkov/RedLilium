@@ -366,4 +366,82 @@ mod tests {
         let after_count = shared_registry.read().registration_count(0);
         assert_eq!(initial_count, after_count); // count should not increase
     }
+
+    // ---- purge_source: the unload complement of with_registration_source ----
+
+    /// Everything registered under a generation vanishes on purge; HOST
+    /// registrations are untouched. Covers components (storage + name index),
+    /// resources, events, observers, and migrations in one pass.
+    #[test]
+    fn purge_source_removes_generation_registrations() {
+        use crate::Component;
+
+        #[derive(Clone, crate::Component)]
+        struct GameComp {
+            _v: u32,
+        }
+        struct GameRes(#[allow(dead_code)] u32);
+        struct GameEvent;
+
+        let mut world = World::new();
+        world.register_component::<Marker>(); // HOST component
+        world.insert_resource(Score(1)); // HOST resource
+
+        let generation = SourceId(9);
+        world.with_registration_source(generation, |w| {
+            w.register_inspector::<GameComp>();
+            w.insert_resource(GameRes(7));
+            w.add_event::<GameEvent>();
+            w.observe_add::<GameComp>(|_, _| {});
+            w.register_component_migration(GameComp::NAME, Box::new(|_, _, _| None));
+        });
+
+        // A live entity carrying the game component.
+        let entity = world.spawn();
+        world.insert(entity, GameComp { _v: 1 }).unwrap();
+        assert!(world.get::<GameComp>(entity).is_some());
+
+        world.purge_source(generation);
+
+        // Game registrations are gone...
+        assert_eq!(world.qualified_type_id_of::<GameComp>(), None);
+        assert!(!world.has_resource::<GameRes>());
+        assert!(!world.has_resource::<crate::Events<GameEvent>>());
+        assert!(world.migration_registry.get(GameComp::NAME).is_none());
+        // ...the entity survives, just without the purged component...
+        assert!(world.is_alive(entity));
+        assert!(world.get::<GameComp>(entity).is_none());
+        // ...and HOST registrations are untouched.
+        assert_eq!(
+            world.qualified_type_id_of::<Marker>(),
+            Some(QualifiedTypeId::host::<Marker>())
+        );
+        assert!(world.has_resource::<Score>());
+    }
+
+    /// Purging must not fire the purged types' event/trigger update fns
+    /// afterward — update_events over a purged generation is a no-op, not a
+    /// call into a stale fn pointer.
+    #[test]
+    fn purge_source_severs_update_fns() {
+        struct GameEvent;
+
+        let mut world = World::new();
+        let generation = SourceId(11);
+        world.with_registration_source(generation, |w| {
+            w.add_event::<GameEvent>();
+        });
+        world.purge_source(generation);
+        // The Events resource is gone; a surviving update fn would panic on
+        // resource_mut. This must be a clean no-op.
+        world.update_events();
+        world.update_triggers();
+    }
+
+    #[test]
+    #[should_panic(expected = "purge_source(HOST)")]
+    fn purge_source_refuses_host() {
+        let mut world = World::new();
+        world.purge_source(SourceId::HOST);
+    }
 }

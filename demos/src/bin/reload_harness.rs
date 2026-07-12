@@ -48,10 +48,11 @@ fn main() {
     // fully owned data, safe to hold across the unload.
     drop(module);
 
-    // Load the "rebuilt" module from a unique temp copy, modeling the editor
-    // reload flow (a genuinely different image, sidestepping dyld path caching).
-    let fresh_path = copy_to_temp(&path);
-    let module2 = unsafe { GameModule::load(&fresh_path) }.expect("reload game module");
+    // Load the "rebuilt" module from a unique temp copy — the same loader the
+    // editor reload uses (#59): a genuinely different image, sidestepping
+    // dlopen path-keying and dyld caching.
+    let (module2, fresh_path) =
+        unsafe { GameModule::load_fresh_copy(&path) }.expect("reload game module");
     let reloaded = App::reload(&engine, module2.plugin(), 1.0, &snapshot).expect("reload");
     let after = reloaded.world().iter_entities().count();
     println!("reloaded: {after} entities (build + restored snapshot, spawn_scene skipped)");
@@ -65,18 +66,4 @@ fn main() {
     drop(module2);
     let _ = std::fs::remove_file(&fresh_path);
     println!("OK: warm reload preserved the scene");
-}
-
-/// Copy the cdylib to a unique temp path so the second load maps a fresh image.
-fn copy_to_temp(src: &str) -> std::path::PathBuf {
-    let stem = std::path::Path::new(src)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("game");
-    let dst = std::env::temp_dir().join(format!(
-        "redlilium_reload_{}_{stem}.dylib",
-        std::process::id()
-    ));
-    std::fs::copy(src, &dst).expect("copy cdylib to temp");
-    dst
 }

@@ -54,7 +54,10 @@ pub type ComponentMigrationFn =
 /// the right migration in the current world.
 #[derive(Default)]
 pub struct MigrationRegistry {
-    migrations: HashMap<&'static str, ComponentMigrationFn>,
+    /// Migration fns keyed by component name, each stamped with the
+    /// registration source so a game-module unload can purge closures whose
+    /// code lives in the module's image.
+    migrations: HashMap<&'static str, (crate::type_identity::SourceId, ComponentMigrationFn)>,
 }
 
 impl MigrationRegistry {
@@ -65,14 +68,31 @@ impl MigrationRegistry {
         }
     }
 
-    /// Registers a migration function for a component type by name.
+    /// Registers a migration function for a component type by name, under
+    /// the host source. Use [`register_from`](Self::register_from) to stamp a
+    /// game-module generation.
     pub fn register(&mut self, type_name: &'static str, migration: ComponentMigrationFn) {
-        self.migrations.insert(type_name, migration);
+        self.register_from(crate::type_identity::SourceId::HOST, type_name, migration);
+    }
+
+    /// Registers a migration stamped with an explicit registration source.
+    pub fn register_from(
+        &mut self,
+        source: crate::type_identity::SourceId,
+        type_name: &'static str,
+        migration: ComponentMigrationFn,
+    ) {
+        self.migrations.insert(type_name, (source, migration));
     }
 
     /// Looks up a migration for a component type by name.
     pub fn get(&self, type_name: &str) -> Option<&ComponentMigrationFn> {
-        self.migrations.get(type_name)
+        self.migrations.get(type_name).map(|(_, f)| f)
+    }
+
+    /// Drops every migration registered under `source` (game-module unload).
+    pub fn purge_source(&mut self, source: crate::type_identity::SourceId) {
+        self.migrations.retain(|_, (s, _)| *s != source);
     }
 
     /// Attempts to apply a migration to a serialized value.
@@ -88,7 +108,7 @@ impl MigrationRegistry {
     ) -> Option<Value> {
         self.migrations
             .get(type_name)
-            .and_then(|f| f(value, from_schema, to_schema))
+            .and_then(|(_, f)| f(value, from_schema, to_schema))
     }
 }
 
