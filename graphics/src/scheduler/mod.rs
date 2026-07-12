@@ -1,18 +1,22 @@
 //! Per-frame render-graph execution.
 //!
 //! Each frame builds and submits **one or more** render graphs, each as its
-//! own queue submit on the single graphics queue. Ordering between graphs is
-//! submission order: the backend's persistent barrier trackers emit
-//! `vkCmdPipelineBarrier`s that synchronize across submits on one queue
-//! exactly as they do across frames, so no cross-graph GPU semaphores are
-//! needed (that changes with a second queue — see #47). Cross-frame CPU/GPU
-//! overlap is provided by the frames-in-flight machinery in the pipeline.
+//! own queue submit. Graphs run on the graphics queue unless they opt into
+//! async compute routing ([`RenderGraph::set_prefer_async_compute`]) — an
+//! explicit placement hint, honored only for compute/transfer-only graphs on
+//! devices that expose a second queue; otherwise everything runs on the
+//! graphics queue, the first-class fallback. Ordering is always automatic:
+//! same-queue hazards become pipeline barriers from the backend's persistent
+//! trackers (valid across submits within one queue, exactly as across
+//! frames), cross-queue hazards become timeline-semaphore waits emitted at
+//! submit (#47 phase 4). Cross-frame CPU/GPU overlap is provided by the
+//! frames-in-flight machinery in the pipeline.
 //!
-//! Dependency edges between the frame's graphs are still **derived
-//! automatically** from their declared resource usage (the `deps` module,
-//! #47 phase 3): today they are observability (submission order already
-//! provides them), with multi-queue they become the source of cross-queue
-//! waits. There is deliberately no manual dependency API.
+//! Dependency edges between the frame's graphs are additionally **derived
+//! automatically** at graph granularity from their declared resource usage
+//! (the `deps` module, #47 phase 3) and exposed for diagnostics via
+//! [`FrameSchedule::derived_dependencies`]. There is deliberately no manual
+//! dependency API.
 //!
 //! # Architecture
 //!
@@ -281,11 +285,11 @@ impl FrameSchedule {
     pub fn submit(&mut self, mut graph: RenderGraph) -> SubmitHandle {
         profile_scope!("submit_graph");
 
-        // INVARIANT: all submits go to the single graphics queue, in
-        // submission order. Cross-graph and cross-frame synchronization both
-        // rest on the persistent barrier trackers, whose pipeline barriers
-        // only work across submits *within one queue*. A second queue needs
-        // semaphores + queue-ownership tracking first — see #47.
+        // Ordering: same-queue submits execute in submission order and are
+        // synchronized by the trackers' pipeline barriers; a graph routed to
+        // the async compute queue (an explicit opt-in hint, honored only for
+        // compute/transfer-only graphs on devices that have the queue) is
+        // synchronized by tracker-emitted timeline waits (#47 phase 4).
         if graph.writes_swapchain() {
             assert!(
                 !self.swapchain_writer_submitted,
@@ -342,10 +346,11 @@ impl FrameSchedule {
             }
         }
 
-        // Derive dependency edges against every earlier submit of this frame.
-        // On the single graphics queue the edges are already satisfied by
-        // submission order; phase 4 of #47 turns cross-queue edges into
-        // timeline waits here.
+        // Derive dependency edges against every earlier submit of this frame
+        // (diagnostics/tests). Correctness does not rest on these: same-queue
+        // edges are satisfied by submission order, and cross-queue hazards
+        // are resolved by the backend trackers' timeline waits — which also
+        // cover cross-FRAME hazards this per-frame view cannot see.
         for (index, prev) in self.submitted_usages.iter().enumerate() {
             if prev.conflicts_with(&usage) {
                 self.derived_edges.push((SubmitHandle { index }, handle));
@@ -364,10 +369,11 @@ impl FrameSchedule {
     /// earlier `from` submit wrote (or writes something it read).
     ///
     /// Derivation is fully automatic — there is no way to declare an edge by
-    /// hand (#47 design decision). On the single graphics queue every edge is
-    /// satisfied by submission order, so this is currently observability for
-    /// tests and diagnostics; with a second queue (#47 phase 4) cross-queue
-    /// edges become timeline-semaphore waits.
+    /// hand (#47 design decision). The edges are observability for tests and
+    /// diagnostics: same-queue edges are satisfied by submission order, and
+    /// cross-queue hazards are enforced by the backend trackers' timeline
+    /// waits (which additionally cover cross-frame hazards outside this
+    /// per-frame view).
     pub fn derived_dependencies(&self) -> &[(SubmitHandle, SubmitHandle)] {
         &self.derived_edges
     }

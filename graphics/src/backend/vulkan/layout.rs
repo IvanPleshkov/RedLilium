@@ -452,13 +452,13 @@ impl TextureId {
 /// (the swapchain image is handled separately by the present path and is not
 /// tracked here).
 ///
-/// INVARIANT (single queue): this CPU-side map, updated in pass-record order,
-/// matches GPU execution order only because every submit — any number per
-/// frame — goes to the one graphics queue in submission order. The emitted
-/// layout-transition barriers synchronize across submissions within that
-/// queue (which is what makes multi-graph frames correct); they do not cross
-/// queues. A second queue would need semaphores + queue-ownership tracking —
-/// see #47 (this tracker has no queue-ownership concept).
+/// INVARIANT (queue ownership): this CPU-side map, updated in pass-record
+/// order, matches GPU execution order because same-queue submits execute in
+/// submission order and cross-queue accesses are ordered by the timeline
+/// waits the tracker emits (see [`request_access`](TextureLayoutTracker::request_access)
+/// and #47): the wait guarantees the previous queue's access — and its layout
+/// state — completed before this queue's transition executes. Every access
+/// MUST be reported with the correct `QueueId`.
 ///
 /// Keeping layouts across frames is what lets **persistent / history textures**
 /// (temporal AA, accumulation, motion blur) retain their contents: their first
@@ -476,10 +476,33 @@ impl TextureId {
 /// of growing with every texture ever created.
 #[derive(Debug)]
 pub struct TextureLayoutTracker {
-    /// Current layout of each tracked texture, by stable id.
-    layouts: HashMap<TextureId, TextureLayout>,
+    /// Tracked state of each texture, by stable id.
+    layouts: HashMap<TextureId, TrackedTexture>,
     /// Usage graph cache for sharing.
     usage_graph_cache: TextureUsageGraphCache,
+}
+
+/// Per-texture tracked state: the actual GPU-side layout plus queue-ownership
+/// bookkeeping for cross-queue synchronization (#47 phase 4).
+#[derive(Debug, Clone, Copy)]
+struct TrackedTexture {
+    /// Current Vulkan image layout.
+    layout: TextureLayout,
+    /// Queue and submit timeline value of the last write access.
+    last_write_submit: Option<(super::barriers::QueueId, u64)>,
+    /// Highest submit timeline value that read this texture since the last
+    /// write, per queue (a cross-queue write waits on these).
+    read_submits: [Option<u64>; super::barriers::QUEUE_COUNT],
+}
+
+impl Default for TrackedTexture {
+    fn default() -> Self {
+        Self {
+            layout: TextureLayout::Undefined,
+            last_write_submit: None,
+            read_submits: [None; super::barriers::QUEUE_COUNT],
+        }
+    }
 }
 
 impl Default for TextureLayoutTracker {
@@ -506,13 +529,65 @@ impl TextureLayoutTracker {
     pub fn get_layout(&self, id: TextureId) -> TextureLayout {
         self.layouts
             .get(&id)
-            .copied()
-            .unwrap_or(TextureLayout::Undefined)
+            .map_or(TextureLayout::Undefined, |t| t.layout)
     }
 
-    /// Update the tracked layout after a transition.
+    /// Update the tracked layout after a transition, leaving queue-ownership
+    /// state untouched. Prefer [`request_access`](Self::request_access) for
+    /// pass encoding — this is for paths that manage their own submit-level
+    /// synchronization (tests, swapchain handling).
     pub fn set_layout(&mut self, id: TextureId, layout: TextureLayout) {
-        self.layouts.insert(id, layout);
+        self.layouts.entry(id).or_default().layout = layout;
+    }
+
+    /// Record an access to a texture from a submit on `queue` with timeline
+    /// value `submit_value`, requiring `layout`.
+    ///
+    /// Returns the texture's previous layout (the transition source for the
+    /// barrier batch) and updates the tracked layout. Cross-queue hazards —
+    /// the last write came from another queue, or this is a write and other
+    /// queues have read since the last write — are pushed into `waits` as
+    /// timeline waits; performed with an all-commands scope they make the
+    /// prior access available and visible here, so the caller's layout
+    /// transition barrier needs no cross-queue source scope.
+    pub fn request_access(
+        &mut self,
+        id: TextureId,
+        layout: TextureLayout,
+        queue: super::barriers::QueueId,
+        submit_value: u64,
+        waits: &mut super::barriers::SubmitWaits,
+    ) -> TextureLayout {
+        let state = self.layouts.entry(id).or_default();
+        let is_write = layout.is_write();
+
+        if let Some((write_queue, write_value)) = state.last_write_submit
+            && write_queue != queue
+        {
+            waits.add(write_queue, write_value);
+        }
+
+        if is_write {
+            for (queue_index, read) in state.read_submits.iter().enumerate() {
+                if let Some(read_value) = read
+                    && queue_index != queue as usize
+                {
+                    let read_queue = if queue_index == super::barriers::QueueId::Graphics as usize {
+                        super::barriers::QueueId::Graphics
+                    } else {
+                        super::barriers::QueueId::AsyncCompute
+                    };
+                    waits.add(read_queue, *read_value);
+                }
+            }
+            state.last_write_submit = Some((queue, submit_value));
+            state.read_submits = [None; super::barriers::QUEUE_COUNT];
+        } else {
+            let slot = &mut state.read_submits[queue as usize];
+            *slot = Some(slot.map_or(submit_value, |v| v.max(submit_value)));
+        }
+
+        std::mem::replace(&mut state.layout, layout)
     }
 
     /// Remove a destroyed texture's entry (called from the retirement drain
@@ -524,7 +599,104 @@ impl TextureLayoutTracker {
 
 #[cfg(test)]
 mod tests {
+    use super::super::barriers::{QueueId, SubmitWaits};
     use super::*;
+
+    #[test]
+    fn request_access_same_queue_emits_no_waits() {
+        let mut tracker = TextureLayoutTracker::new();
+        let id = TextureId::from_raw(1);
+        let mut waits = SubmitWaits::default();
+
+        // Write then read on the graphics queue: layout transitions returned,
+        // no cross-queue waits.
+        let old = tracker.request_access(
+            id,
+            TextureLayout::ColorAttachment,
+            QueueId::Graphics,
+            1,
+            &mut waits,
+        );
+        assert_eq!(old, TextureLayout::Undefined);
+        let old = tracker.request_access(
+            id,
+            TextureLayout::ShaderReadOnly,
+            QueueId::Graphics,
+            2,
+            &mut waits,
+        );
+        assert_eq!(old, TextureLayout::ColorAttachment);
+        assert!(waits.is_empty());
+        assert_eq!(tracker.get_layout(id), TextureLayout::ShaderReadOnly);
+    }
+
+    #[test]
+    fn request_access_cross_queue_read_waits_on_writer() {
+        let mut tracker = TextureLayoutTracker::new();
+        let id = TextureId::from_raw(1);
+
+        // Graphics renders to the texture at timeline value 4.
+        let mut waits = SubmitWaits::default();
+        tracker.request_access(
+            id,
+            TextureLayout::ColorAttachment,
+            QueueId::Graphics,
+            4,
+            &mut waits,
+        );
+        assert!(waits.is_empty());
+
+        // Async compute samples it: wait on graphics value 4, transition
+        // source is the real previous layout.
+        let mut waits = SubmitWaits::default();
+        let old = tracker.request_access(
+            id,
+            TextureLayout::ShaderReadOnly,
+            QueueId::AsyncCompute,
+            2,
+            &mut waits,
+        );
+        assert_eq!(old, TextureLayout::ColorAttachment);
+        assert_eq!(waits.get(QueueId::Graphics), Some(4));
+    }
+
+    #[test]
+    fn request_access_cross_queue_write_waits_on_readers() {
+        let mut tracker = TextureLayoutTracker::new();
+        let id = TextureId::from_raw(1);
+
+        // Async compute writes (value 1), graphics reads (value 6), then
+        // async compute writes again: WAR — must wait graphics value 6.
+        let mut waits = SubmitWaits::default();
+        tracker.request_access(
+            id,
+            TextureLayout::General,
+            QueueId::AsyncCompute,
+            1,
+            &mut waits,
+        );
+        let mut waits = SubmitWaits::default();
+        tracker.request_access(
+            id,
+            TextureLayout::ShaderReadOnly,
+            QueueId::Graphics,
+            6,
+            &mut waits,
+        );
+        assert_eq!(waits.get(QueueId::AsyncCompute), Some(1));
+
+        let mut waits = SubmitWaits::default();
+        tracker.request_access(
+            id,
+            TextureLayout::General,
+            QueueId::AsyncCompute,
+            2,
+            &mut waits,
+        );
+        assert_eq!(waits.get(QueueId::Graphics), Some(6));
+        // Its own previous write needs no wait (same queue).
+        assert_eq!(waits.get(QueueId::AsyncCompute), None);
+    }
 
     #[test]
     fn test_texture_layout_to_vk() {

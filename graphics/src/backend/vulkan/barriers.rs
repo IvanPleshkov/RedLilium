@@ -12,6 +12,48 @@ use ash::vk::Handle;
 use super::layout::{TextureId, TextureLayout};
 use crate::graph::resource_usage::BufferAccessMode;
 
+/// Identifies a queue for cross-queue synchronization tracking (#47 phase 4).
+///
+/// Also used as an index into per-queue tracker arrays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueId {
+    /// The graphics queue (always present).
+    Graphics = 0,
+    /// The async compute queue (present only when the device exposes one).
+    AsyncCompute = 1,
+}
+
+/// Number of queues a resource can be tracked across.
+pub const QUEUE_COUNT: usize = 2;
+
+/// Timeline-semaphore waits a submit must perform before it executes,
+/// accumulated by the trackers while barriers are generated.
+///
+/// At most one wait per source queue: timeline waits are monotonic, so the
+/// maximum value subsumes all smaller ones.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SubmitWaits {
+    values: [Option<u64>; QUEUE_COUNT],
+}
+
+impl SubmitWaits {
+    /// Require this submit to wait until `queue`'s timeline reaches `value`.
+    pub fn add(&mut self, queue: QueueId, value: u64) {
+        let slot = &mut self.values[queue as usize];
+        *slot = Some(slot.map_or(value, |v| v.max(value)));
+    }
+
+    /// The wait value required on `queue`'s timeline, if any.
+    pub fn get(&self, queue: QueueId) -> Option<u64> {
+        self.values[queue as usize]
+    }
+
+    /// Whether no waits were accumulated.
+    pub fn is_empty(&self) -> bool {
+        self.values.iter().all(Option::is_none)
+    }
+}
+
 /// Unique identifier for a Vulkan buffer within the barrier batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BufferId(u64);
@@ -40,19 +82,38 @@ impl BufferId {
 /// has already been made visible to, so repeated readers don't re-emit
 /// barriers (VK-P7) and writers get a precise source scope instead of a
 /// hardcoded `TRANSFER` guess (VK-C3).
+///
+/// # Queue ownership (#47 phase 4)
+///
+/// The write additionally records which queue performed it and that submit's
+/// timeline value, and reads record the highest submit value per queue. An
+/// access from a different queue than the last writer emits a **submit-level
+/// timeline wait** instead of a pipeline barrier (which cannot cross queues):
+/// the semaphore wait, performed with an all-commands destination scope,
+/// makes the write available *and* visible on the waiting queue, so no
+/// additional barrier is needed there. The stage/access/visibility fields
+/// remain meaningful only on the writing queue itself.
 #[derive(Debug, Default, Clone, Copy)]
 struct BufferAccessState {
     /// Pipeline stages of the last tracked write.
     last_write_stage: vk::PipelineStageFlags,
     /// Access mask of the last tracked write.
     last_write_access: vk::AccessFlags,
-    /// Read stages the last write has been made visible to (via a barrier).
+    /// Queue and submit timeline value of the last tracked write.
+    last_write_submit: Option<(QueueId, u64)>,
+    /// Read stages the last write has been made visible to (via a barrier)
+    /// **on the writing queue**. On other queues visibility comes from the
+    /// semaphore wait itself.
     visible_stages: vk::PipelineStageFlags,
     /// Read access types the last write has been made visible to.
     visible_access: vk::AccessFlags,
-    /// All read stages seen since the last write (for write-after-read
-    /// execution dependencies).
+    /// All read stages seen since the last write **on the writing queue**
+    /// (for same-queue write-after-read execution dependencies). Cross-queue
+    /// reads are recorded in `read_submits` instead.
     reads_since_write: vk::PipelineStageFlags,
+    /// Highest submit timeline value that read this buffer since the last
+    /// write, per queue (write-after-read across queues waits on these).
+    read_submits: [Option<u64>; QUEUE_COUNT],
 }
 
 /// Tracks the last access to every buffer used by render graphs, mirroring
@@ -60,15 +121,15 @@ struct BufferAccessState {
 ///
 /// The tracker is global and persists across frames.
 ///
-/// INVARIANT (single queue): correctness relies on every tracked access being
-/// on the one graphics queue. A `vkCmdPipelineBarrier` synchronizes across
+/// INVARIANT (queue ownership): a `vkCmdPipelineBarrier` synchronizes across
 /// submissions only *within a queue*, so a write recorded in one submit is a
-/// valid source scope for a read in a later submit — whether that is the next
-/// graph of the same frame or a graph of the next frame — only because all
-/// submits are on that queue in submission order. This tracker has no concept
-/// of queue ownership: a second queue (async compute) would need semaphores +
-/// queue-ownership tracking instead, and adding one without that would
-/// silently drop synchronization. See #47 before introducing a second queue.
+/// valid source scope for a later access only when both submits are on the
+/// same queue in submission order. The tracker therefore records which queue
+/// performed each write (and read) and resolves cross-queue hazards with
+/// submit-level timeline waits instead of barriers — see
+/// [`request_access`](BufferAccessTracker::request_access) and #47. Every
+/// access MUST be reported with the correct `QueueId`; reporting an async
+/// submit as graphics (or vice versa) silently drops synchronization.
 ///
 /// Keyed by the raw `vk::Buffer` handle. Unlike texture layouts, stale state
 /// after handle reuse is benign: it can only produce an unnecessary or
@@ -90,34 +151,88 @@ impl BufferAccessTracker {
     /// Record an access and return the source scope for a barrier, if one is
     /// needed before it.
     ///
-    /// Returns `Some((src_stage, src_access))` when a barrier must be placed
-    /// before the pass performing `access`, or `None` when the access is
-    /// already synchronized (first GPU use, host-written buffers, or a read
-    /// scope the last write is already visible to).
+    /// `queue` and `submit_value` identify the submit performing the access;
+    /// cross-queue hazards are pushed into `waits` as timeline waits instead
+    /// of barriers (see [`BufferAccessState`]).
+    ///
+    /// Returns `Some((src_stage, src_access))` when a pipeline barrier must be
+    /// placed before the pass performing `access`, or `None` when the access
+    /// is already synchronized (first GPU use, host-written buffers, a read
+    /// scope the last write is already visible to, or a hazard covered by an
+    /// emitted cross-queue wait).
     pub fn request_access(
         &mut self,
         id: BufferId,
         access: BufferAccessMode,
+        queue: QueueId,
+        submit_value: u64,
+        waits: &mut SubmitWaits,
     ) -> Option<(vk::PipelineStageFlags, vk::AccessFlags)> {
         let state = self.states.entry(id).or_default();
         let stage = access.dst_stage();
         let access_mask = access.dst_access_mask();
 
+        // Whether the last write came from another queue: its hazard is
+        // resolved by a timeline wait, and its stage/access scopes are
+        // meaningless on this queue.
+        let cross_queue_write = match state.last_write_submit {
+            Some((write_queue, write_value)) if write_queue != queue => {
+                waits.add(write_queue, write_value);
+                true
+            }
+            _ => false,
+        };
+
         if access.is_write() {
-            // Writes must wait for the previous write (WAW) and for all reads
-            // issued since it (WAR — execution dependency only, so reads
-            // contribute no source access mask).
-            let src_stage = state.last_write_stage | state.reads_since_write;
-            let src_access = state.last_write_access;
+            // Cross-queue reads since the last write: WAR resolved by waits.
+            for (queue_index, read) in state.read_submits.iter().enumerate() {
+                if let Some(read_value) = read
+                    && queue_index != queue as usize
+                {
+                    let read_queue = if queue_index == QueueId::Graphics as usize {
+                        QueueId::Graphics
+                    } else {
+                        QueueId::AsyncCompute
+                    };
+                    waits.add(read_queue, *read_value);
+                }
+            }
+
+            // Same-queue WAW/WAR: barrier from the previous write's scope and
+            // the reads issued since it (execution dependency only, so reads
+            // contribute no source access mask). Skipped when the previous
+            // write was cross-queue — the wait already covers it, and its
+            // scopes belong to the other queue.
+            let (src_stage, src_access) = if cross_queue_write {
+                (vk::PipelineStageFlags::empty(), vk::AccessFlags::empty())
+            } else {
+                (
+                    state.last_write_stage | state.reads_since_write,
+                    state.last_write_access,
+                )
+            };
 
             *state = BufferAccessState {
                 last_write_stage: stage,
                 last_write_access: access_mask,
+                last_write_submit: Some((queue, submit_value)),
                 ..Default::default()
             };
 
             (!src_stage.is_empty()).then_some((src_stage, src_access))
         } else {
+            state.read_submits[queue as usize] = Some(
+                state.read_submits[queue as usize].map_or(submit_value, |v| v.max(submit_value)),
+            );
+
+            if cross_queue_write {
+                // The timeline wait (all-commands scope) makes the write both
+                // available and visible on this queue: no barrier. Same-queue
+                // WAR tracking (`reads_since_write`) stays untouched — it
+                // belongs to the writing queue.
+                return None;
+            }
+
             state.reads_since_write |= stage;
 
             if state.last_write_access.is_empty() {
@@ -588,6 +703,23 @@ mod tests {
 
     // Buffer access tracker tests (VK-C3 / VK-P7)
 
+    /// Same-queue access on the graphics queue; asserts no cross-queue wait
+    /// is emitted (single-queue behavior must be byte-for-byte what it was
+    /// before queue ownership existed).
+    fn gfx_access(
+        tracker: &mut BufferAccessTracker,
+        id: BufferId,
+        access: BufferAccessMode,
+    ) -> Option<(vk::PipelineStageFlags, vk::AccessFlags)> {
+        let mut waits = SubmitWaits::default();
+        let result = tracker.request_access(id, access, QueueId::Graphics, 1, &mut waits);
+        assert!(
+            waits.is_empty(),
+            "same-queue access must not emit cross-queue waits"
+        );
+        result
+    }
+
     #[test]
     fn tracker_first_read_needs_no_barrier() {
         let mut tracker = BufferAccessTracker::new();
@@ -595,11 +727,11 @@ mod tests {
 
         // Host-written (or never-written) buffer: reads need no barrier.
         assert_eq!(
-            tracker.request_access(id, BufferAccessMode::VertexBuffer),
+            gfx_access(&mut tracker, id, BufferAccessMode::VertexBuffer),
             None
         );
         assert_eq!(
-            tracker.request_access(id, BufferAccessMode::UniformRead),
+            gfx_access(&mut tracker, id, BufferAccessMode::UniformRead),
             None
         );
     }
@@ -611,14 +743,13 @@ mod tests {
 
         // First write: nothing earlier to synchronize against.
         assert_eq!(
-            tracker.request_access(id, BufferAccessMode::StorageReadWrite),
+            gfx_access(&mut tracker, id, BufferAccessMode::StorageReadWrite),
             None
         );
 
         // Read after the compute write: src scope must be the shader write —
         // the old hardcoded TRANSFER source would miss it entirely (VK-C3).
-        let (src_stage, src_access) = tracker
-            .request_access(id, BufferAccessMode::VertexBuffer)
+        let (src_stage, src_access) = gfx_access(&mut tracker, id, BufferAccessMode::VertexBuffer)
             .expect("read after write needs a barrier");
         assert!(src_stage.contains(vk::PipelineStageFlags::COMPUTE_SHADER));
         assert!(src_access.contains(vk::AccessFlags::SHADER_WRITE));
@@ -629,24 +760,16 @@ mod tests {
         let mut tracker = BufferAccessTracker::new();
         let id = BufferId::from_raw(1);
 
-        tracker.request_access(id, BufferAccessMode::TransferWrite);
-        assert!(
-            tracker
-                .request_access(id, BufferAccessMode::VertexBuffer)
-                .is_some()
-        );
+        gfx_access(&mut tracker, id, BufferAccessMode::TransferWrite);
+        assert!(gfx_access(&mut tracker, id, BufferAccessMode::VertexBuffer).is_some());
         // Same read scope again (next pass, next frame): already visible,
         // no redundant barrier (VK-P7).
         assert_eq!(
-            tracker.request_access(id, BufferAccessMode::VertexBuffer),
+            gfx_access(&mut tracker, id, BufferAccessMode::VertexBuffer),
             None
         );
         // A *different* read scope still needs its own visibility.
-        assert!(
-            tracker
-                .request_access(id, BufferAccessMode::IndirectRead)
-                .is_some()
-        );
+        assert!(gfx_access(&mut tracker, id, BufferAccessMode::IndirectRead).is_some());
     }
 
     #[test]
@@ -654,11 +777,10 @@ mod tests {
         let mut tracker = BufferAccessTracker::new();
         let id = BufferId::from_raw(1);
 
-        tracker.request_access(id, BufferAccessMode::VertexBuffer);
+        gfx_access(&mut tracker, id, BufferAccessMode::VertexBuffer);
         // Write after read: needs an execution dependency on the read stage,
         // with no source access (reads make nothing available).
-        let (src_stage, src_access) = tracker
-            .request_access(id, BufferAccessMode::TransferWrite)
+        let (src_stage, src_access) = gfx_access(&mut tracker, id, BufferAccessMode::TransferWrite)
             .expect("write after read needs a barrier");
         assert!(src_stage.contains(vk::PipelineStageFlags::VERTEX_INPUT));
         assert_eq!(src_access, vk::AccessFlags::empty());
@@ -669,19 +791,143 @@ mod tests {
         let mut tracker = BufferAccessTracker::new();
         let id = BufferId::from_raw(1);
 
-        tracker.request_access(id, BufferAccessMode::TransferWrite);
-        let (src_stage, src_access) = tracker
-            .request_access(id, BufferAccessMode::StorageWrite)
+        gfx_access(&mut tracker, id, BufferAccessMode::TransferWrite);
+        let (src_stage, src_access) = gfx_access(&mut tracker, id, BufferAccessMode::StorageWrite)
             .expect("write after write needs a barrier");
         assert!(src_stage.contains(vk::PipelineStageFlags::TRANSFER));
         assert!(src_access.contains(vk::AccessFlags::TRANSFER_WRITE));
 
         // And a read now synchronizes against the SECOND write.
-        let (src_stage, src_access) = tracker
-            .request_access(id, BufferAccessMode::UniformRead)
+        let (src_stage, src_access) = gfx_access(&mut tracker, id, BufferAccessMode::UniformRead)
             .expect("read after write needs a barrier");
         assert!(src_stage.contains(vk::PipelineStageFlags::COMPUTE_SHADER));
         assert!(src_access.contains(vk::AccessFlags::SHADER_WRITE));
+    }
+
+    // Cross-queue tracker tests (#47 phase 4)
+
+    #[test]
+    fn tracker_cross_queue_read_waits_instead_of_barrier() {
+        let mut tracker = BufferAccessTracker::new();
+        let id = BufferId::from_raw(1);
+
+        // Async compute writes at timeline value 5.
+        let mut waits = SubmitWaits::default();
+        tracker.request_access(
+            id,
+            BufferAccessMode::StorageWrite,
+            QueueId::AsyncCompute,
+            5,
+            &mut waits,
+        );
+        assert!(waits.is_empty());
+
+        // Graphics reads: no pipeline barrier (the timeline wait covers both
+        // availability and visibility), but a wait on compute's value 5.
+        let mut waits = SubmitWaits::default();
+        let barrier = tracker.request_access(
+            id,
+            BufferAccessMode::VertexBuffer,
+            QueueId::Graphics,
+            9,
+            &mut waits,
+        );
+        assert_eq!(barrier, None);
+        assert_eq!(waits.get(QueueId::AsyncCompute), Some(5));
+        assert_eq!(waits.get(QueueId::Graphics), None);
+    }
+
+    #[test]
+    fn tracker_cross_queue_write_after_read_waits_on_readers() {
+        let mut tracker = BufferAccessTracker::new();
+        let id = BufferId::from_raw(1);
+
+        // Graphics reads the (host-written) buffer in submits 3 and 7.
+        let mut waits = SubmitWaits::default();
+        tracker.request_access(
+            id,
+            BufferAccessMode::VertexBuffer,
+            QueueId::Graphics,
+            3,
+            &mut waits,
+        );
+        tracker.request_access(
+            id,
+            BufferAccessMode::UniformRead,
+            QueueId::Graphics,
+            7,
+            &mut waits,
+        );
+        assert!(waits.is_empty());
+
+        // Async compute writes: WAR across queues — must wait graphics
+        // reaching the highest reading submit (7).
+        let mut waits = SubmitWaits::default();
+        tracker.request_access(
+            id,
+            BufferAccessMode::StorageWrite,
+            QueueId::AsyncCompute,
+            2,
+            &mut waits,
+        );
+        assert_eq!(waits.get(QueueId::Graphics), Some(7));
+    }
+
+    #[test]
+    fn tracker_same_queue_after_cross_queue_write_still_gets_barrier() {
+        let mut tracker = BufferAccessTracker::new();
+        let id = BufferId::from_raw(1);
+        let mut waits = SubmitWaits::default();
+
+        // Graphics writes (value 1), async compute overwrites (value 2, gets
+        // a wait), then async compute reads its OWN write: that read needs a
+        // normal same-queue barrier — the earlier cross-queue wait must not
+        // have poisoned same-queue visibility tracking.
+        tracker.request_access(
+            id,
+            BufferAccessMode::TransferWrite,
+            QueueId::Graphics,
+            1,
+            &mut waits,
+        );
+        let mut waits = SubmitWaits::default();
+        let barrier = tracker.request_access(
+            id,
+            BufferAccessMode::StorageWrite,
+            QueueId::AsyncCompute,
+            2,
+            &mut waits,
+        );
+        // Cross-queue WAW: wait emitted, no barrier (scopes belong to the
+        // graphics queue).
+        assert_eq!(waits.get(QueueId::Graphics), Some(1));
+        assert_eq!(barrier, None);
+
+        let mut waits = SubmitWaits::default();
+        let barrier = tracker
+            .request_access(
+                id,
+                BufferAccessMode::UniformRead,
+                QueueId::AsyncCompute,
+                3,
+                &mut waits,
+            )
+            .expect("same-queue read after write needs a barrier");
+        assert!(waits.is_empty());
+        assert!(barrier.0.contains(vk::PipelineStageFlags::COMPUTE_SHADER));
+        assert!(barrier.1.contains(vk::AccessFlags::SHADER_WRITE));
+    }
+
+    #[test]
+    fn submit_waits_keep_max_value_per_queue() {
+        let mut waits = SubmitWaits::default();
+        assert!(waits.is_empty());
+        waits.add(QueueId::Graphics, 4);
+        waits.add(QueueId::Graphics, 9);
+        waits.add(QueueId::Graphics, 6);
+        assert_eq!(waits.get(QueueId::Graphics), Some(9));
+        assert_eq!(waits.get(QueueId::AsyncCompute), None);
+        assert!(!waits.is_empty());
     }
 
     #[test]

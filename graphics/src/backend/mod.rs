@@ -323,17 +323,19 @@ pub enum GpuFence {
         state: Arc<std::sync::Mutex<WgpuFenceState>>,
         generation: Arc<std::sync::atomic::AtomicU64>,
     },
-    /// Vulkan backend - a wait value on the queue's timeline semaphore.
+    /// Vulkan backend - a wait value on a queue's timeline semaphore.
     #[cfg(feature = "vulkan-backend")]
     Vulkan {
         device: ash::Device,
-        /// The backend's shared graphics-queue timeline semaphore. NOT owned:
-        /// the backend destroys it at teardown; the fence merely references
-        /// it (each `Fence` holds an `Arc<GraphicsInstance>` that keeps the
-        /// backend alive, #50).
-        semaphore: vk::Semaphore,
+        /// Raw handle of the backend's per-queue timeline semaphore. NOT
+        /// owned: the backend destroys it at teardown; the fence merely
+        /// references it (each `Fence` holds an `Arc<GraphicsInstance>` that
+        /// keeps the backend alive, #50). Stored as the raw `u64` so
+        /// `execute_graph` can re-stamp it atomically — which queue a graph
+        /// lands on (graphics or async compute, #47) is only known at submit.
+        semaphore: std::sync::atomic::AtomicU64,
         /// Timeline value this fence is satisfied at. `0` = trivially
-        /// signaled (the counter starts at 0); `u64::MAX` = never (created
+        /// signaled (every counter starts at 0); `u64::MAX` = never (created
         /// unsignaled and not yet tied to a submit); otherwise stamped by
         /// `execute_graph` when the submit is enqueued.
         value: std::sync::atomic::AtomicU64,

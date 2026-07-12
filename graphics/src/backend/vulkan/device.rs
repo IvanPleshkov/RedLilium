@@ -70,37 +70,98 @@ pub fn select_physical_device(
         .ok_or_else(|| GraphicsError::InitializationFailed("No suitable GPU found".to_string()))
 }
 
-/// Find a queue family that supports graphics operations.
-pub fn find_graphics_queue_family(
+/// The queues to create on the logical device.
+///
+/// Planned before device creation from the physical device's queue families:
+/// the graphics queue (always), plus an async compute queue when the hardware
+/// exposes one (#47 phase 4). A dedicated compute-capable family is preferred
+/// (real overlap on most discrete GPUs); a second queue in the graphics
+/// family is the fallback; otherwise there is no async queue and everything
+/// runs on the graphics queue — a first-class, fully supported mode
+/// (MoltenVK's default configuration, for one, exposes a single queue).
+#[derive(Debug, Clone, Copy)]
+pub struct QueuePlan {
+    /// Queue family of the graphics queue (queue index 0 within it).
+    pub graphics_family: u32,
+    /// `(family, queue index)` of the async compute queue, if available.
+    pub async_compute: Option<(u32, u32)>,
+}
+
+/// Plan which queues to create on the device.
+pub fn plan_queues(
     instance: &ash::Instance,
     physical_device: vk::PhysicalDevice,
-) -> Result<u32, GraphicsError> {
+) -> Result<QueuePlan, GraphicsError> {
     let queue_families =
         unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
 
-    for (index, family) in queue_families.iter().enumerate() {
-        if family.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
-            return Ok(index as u32);
+    let graphics_family = queue_families
+        .iter()
+        .position(|family| family.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+        .ok_or_else(|| {
+            GraphicsError::InitializationFailed("No graphics queue family found".to_string())
+        })? as u32;
+
+    // Prefer a dedicated compute family; fall back to a second queue in the
+    // graphics family.
+    let dedicated_compute = queue_families.iter().enumerate().find(|(_, family)| {
+        family.queue_flags.contains(vk::QueueFlags::COMPUTE)
+            && !family.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+            && family.queue_count > 0
+    });
+    let async_compute = match dedicated_compute {
+        Some((family, _)) => Some((family as u32, 0)),
+        None if queue_families[graphics_family as usize].queue_count > 1 => {
+            Some((graphics_family, 1))
         }
+        None => None,
+    };
+
+    match async_compute {
+        Some((family, index)) => log::info!(
+            "Async compute queue planned: family {family}, queue {index}{}",
+            if family == graphics_family {
+                " (graphics family)"
+            } else {
+                " (dedicated family)"
+            }
+        ),
+        None => log::info!("No async compute queue available; single-queue mode"),
     }
 
-    Err(GraphicsError::InitializationFailed(
-        "No graphics queue family found".to_string(),
-    ))
+    Ok(QueuePlan {
+        graphics_family,
+        async_compute,
+    })
 }
 
 /// Create a logical device with required features and extensions.
 pub fn create_logical_device(
     instance: &ash::Instance,
     physical_device: vk::PhysicalDevice,
-    graphics_queue_family: u32,
+    plan: &QueuePlan,
 ) -> Result<ash::Device, GraphicsError> {
-    let queue_priorities = [1.0f32];
-    let queue_create_info = vk::DeviceQueueCreateInfo::default()
-        .queue_family_index(graphics_queue_family)
-        .queue_priorities(&queue_priorities);
-
-    let queue_create_infos = [queue_create_info];
+    // Two priority slots so a same-family plan can create two queues from
+    // one create-info; a different-family plan uses one slot per info.
+    let queue_priorities = [1.0f32, 1.0f32];
+    let mut queue_create_infos = vec![
+        vk::DeviceQueueCreateInfo::default()
+            .queue_family_index(plan.graphics_family)
+            .queue_priorities(&queue_priorities[..1]),
+    ];
+    match plan.async_compute {
+        Some((family, _)) if family == plan.graphics_family => {
+            queue_create_infos[0] = queue_create_infos[0].queue_priorities(&queue_priorities[..2]);
+        }
+        Some((family, _)) => {
+            queue_create_infos.push(
+                vk::DeviceQueueCreateInfo::default()
+                    .queue_family_index(family)
+                    .queue_priorities(&queue_priorities[..1]),
+            );
+        }
+        None => {}
+    }
 
     // Required device extensions
     #[allow(unused_mut)]

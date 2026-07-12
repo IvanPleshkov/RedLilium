@@ -133,11 +133,13 @@ The rendering system is organized in four layers, from low-level to high-level:
 ├─────────────────────────────────────────────────────────────────────────┤
 │                          FrameSchedule                                  │
 │  Submits the frame's render graphs (one queue submit per graph, any     │
-│  number per frame). Ordering between graphs is submission order on the  │
-│  single graphics queue — the persistent barrier trackers synchronize    │
-│  shared resources across submits, so there are no cross-graph GPU       │
-│  semaphores (that changes with a second queue, #47). At most one graph  │
-│  per frame may write the swapchain.                                     │
+│  number per frame). Graphs run on the graphics queue unless they opt    │
+│  into async compute routing (set_prefer_async_compute — honored only    │
+│  for compute/transfer-only graphs on devices with a second queue).      │
+│  Ordering is automatic: same-queue hazards become tracker-emitted       │
+│  pipeline barriers (submission order), cross-queue hazards become       │
+│  timeline-semaphore waits (#47). At most one graph per frame may write  │
+│  the swapchain.                                                         │
 │                                                                         │
 │  Responsibilities:                                                      │
 │  - Compile and submit each graph to the GPU (submit)                    │
@@ -169,8 +171,9 @@ Different synchronization primitives are used at different levels:
 | Level | Primitive | Purpose |
 |-------|-----------|---------|
 | Pass → Pass | Barriers | Resource state transitions within a graph |
-| Graph → Graph | Submission order (single queue) | Barriers from the persistent trackers cross submits; semaphores arrive with multi-queue (#47) |
-| Frame → Frame | Fences | CPU-GPU sync across frames (one per submit) |
+| Graph → Graph (same queue) | Submission order | Barriers from the persistent trackers are valid across submits within a queue |
+| Graph → Graph (cross-queue) | Timeline-semaphore waits | Emitted automatically by the queue-ownership trackers; resources are CONCURRENT-shared, no ownership transfers (#47) |
+| Frame → Frame | Fences (timeline values) | CPU-GPU sync across frames (one per submit) |
 
 ### Automatic Texture Layout Tracking (Vulkan Backend)
 

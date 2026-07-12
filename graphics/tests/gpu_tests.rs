@@ -357,6 +357,66 @@ fn test_multi_submit_cross_graph_dependency(#[case] backend: Backend) {
     );
 }
 
+/// Test the async compute routing opt-in (#47 phase 4).
+///
+/// Graph A renders (clears) into a texture on the graphics queue; graph B —
+/// flagged `prefer_async_compute` — copies it to a readback buffer. On
+/// devices with an async compute queue B runs there, and the cross-queue RAW
+/// hazard on the texture must be resolved by a tracker-emitted timeline wait
+/// (plus CONCURRENT-shared resources). On single-queue devices (MoltenVK
+/// default, wgpu, dummy) the hint is ignored and B runs on the graphics
+/// queue — the first-class fallback. Either way the copied pixels must match.
+#[rstest]
+#[case::dummy(Backend::Dummy)]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_async_compute_opt_in_cross_queue_dependency(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new(backend) else {
+        eprintln!("Backend {:?} not available, skipping", backend);
+        return;
+    };
+
+    const WIDTH: u32 = 32;
+    const HEIGHT: u32 = 32;
+    const CLEAR_COLOR: [f32; 4] = [0.5, 0.75, 0.25, 1.0];
+
+    let render_target = ctx.create_render_target(WIDTH, HEIGHT);
+    let readback_size = readback_buffer_size(WIDTH, HEIGHT, 4);
+    let readback = ctx.create_readback_buffer(readback_size);
+
+    let mut graph_a = RenderGraph::new();
+    graph_a.add_graphics_pass(create_simple_render_pass(
+        "async_optin_render",
+        render_target.clone(),
+        CLEAR_COLOR,
+    ));
+
+    let mut graph_b = RenderGraph::new();
+    graph_b.set_prefer_async_compute(true);
+    let mut copy_pass = TransferPass::new("async_optin_readback".into());
+    copy_pass.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::readback_texture_whole(render_target, readback.clone()),
+    ));
+    graph_b.add_transfer_pass(copy_pass);
+
+    ctx.execute_graphs(vec![graph_a, graph_b]);
+
+    if backend == Backend::Dummy {
+        return; // dummy doesn't render; routing/execution not panicking is the test
+    }
+
+    let data = ctx.read_buffer(&readback, readback_size);
+
+    let expected = ExpectedPixel::from_float(0.5, 0.75, 0.25, 1.0);
+    let center_pixel = get_pixel(&data, WIDTH, WIDTH / 2, HEIGHT / 2);
+    assert!(
+        verify_pixel(&data, WIDTH, WIDTH / 2, HEIGHT / 2, expected, 2),
+        "Pixel copied by the (possibly async-routed) graph should be {:?}, but got {:?}",
+        expected,
+        center_pixel
+    );
+}
+
 // ============================================================================
 // Depth Buffer Tests
 // ============================================================================

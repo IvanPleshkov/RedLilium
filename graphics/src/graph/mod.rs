@@ -117,6 +117,9 @@ pub struct RenderGraph {
     /// Cached compiled result. Uses [`Pooled`] to preserve allocation
     /// across invalidations instead of deallocating with `Option<T>`.
     compiled: Pooled<CompiledGraph>,
+    /// Routing hint: prefer the async compute queue (#47 phase 4). See
+    /// [`set_prefer_async_compute`](Self::set_prefer_async_compute).
+    prefer_async_compute: bool,
 }
 
 impl RenderGraph {
@@ -127,6 +130,7 @@ impl RenderGraph {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
+            prefer_async_compute: false,
             passes: Vec::new(),
             edges: Vec::new(),
             compiled: Pooled::default(),
@@ -227,6 +231,32 @@ impl RenderGraph {
         self.passes.len()
     }
 
+    /// Whether the graph contains any graphics (raster) pass.
+    ///
+    /// Graphs with graphics passes can only run on the graphics queue;
+    /// compute/transfer-only graphs are eligible for async compute routing.
+    pub fn has_graphics_passes(&self) -> bool {
+        self.passes.iter().any(|pass| pass.as_graphics().is_some())
+    }
+
+    /// Request routing this graph to the async compute queue (#47 phase 4).
+    ///
+    /// An explicit opt-in **hint**: it is honored only when the device
+    /// actually exposes an async compute queue AND the graph contains no
+    /// graphics passes — otherwise the graph runs on the graphics queue
+    /// exactly as if the hint were unset (the first-class single-queue
+    /// fallback). Placement is deliberately explicit while *ordering* stays
+    /// automatic: cross-queue synchronization is derived from resource usage
+    /// by the trackers, never declared by hand.
+    pub fn set_prefer_async_compute(&mut self, prefer: bool) {
+        self.prefer_async_compute = prefer;
+    }
+
+    /// Whether this graph requests async compute routing.
+    pub fn prefer_async_compute(&self) -> bool {
+        self.prefer_async_compute
+    }
+
     /// Whether any pass renders to the swapchain (surface) image.
     ///
     /// At most one such graph may be submitted per frame: its submit is
@@ -302,6 +332,7 @@ impl Poolable for RenderGraph {
         self.passes.clear();
         self.edges.clear();
         self.compiled.release();
+        self.prefer_async_compute = false;
     }
 }
 

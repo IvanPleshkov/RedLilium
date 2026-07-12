@@ -55,9 +55,25 @@ pub(crate) struct StagingBelt {
     in_use: [Vec<StagingChunk>; MAX_FRAMES_IN_FLIGHT],
     /// Retired chunks ready for reuse.
     free: Vec<StagingChunk>,
+    /// Queue families for CONCURRENT chunk creation, when the device has an
+    /// async compute queue in a distinct family (#47 phase 4): a transfer
+    /// graph routed there reads staging chunks on that queue, so chunks must
+    /// be shareable. `None` = EXCLUSIVE (single family). Set once at backend
+    /// init, before any chunk exists.
+    concurrent_families: Option<[u32; 2]>,
 }
 
 impl StagingBelt {
+    /// Set the queue families for CONCURRENT chunk creation. Must be called
+    /// before the first `write` (chunks created earlier would be EXCLUSIVE).
+    pub fn set_concurrent_families(&mut self, families: Option<[u32; 2]>) {
+        debug_assert!(
+            self.free.is_empty() && self.in_use.iter().all(Vec::is_empty),
+            "set_concurrent_families must run before any chunk is created"
+        );
+        self.concurrent_families = families;
+    }
+
     /// Copy `bytes` into belt memory owned by `slot`.
     ///
     /// Returns the staging buffer and the offset the caller must copy from.
@@ -117,10 +133,15 @@ impl StagingBelt {
         }
 
         let capacity = need.max(STAGING_CHUNK_SIZE);
-        let buffer_info = vk::BufferCreateInfo::default()
+        let mut buffer_info = vk::BufferCreateInfo::default()
             .size(capacity)
             .usage(vk::BufferUsageFlags::TRANSFER_SRC)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        if let Some(families) = &self.concurrent_families {
+            buffer_info = buffer_info
+                .sharing_mode(vk::SharingMode::CONCURRENT)
+                .queue_family_indices(families);
+        }
         let buffer = unsafe { device.create_buffer(&buffer_info, None) }.map_err(|e| {
             GraphicsError::ResourceCreationFailed(format!(
                 "Failed to create staging belt chunk: {e:?}"
