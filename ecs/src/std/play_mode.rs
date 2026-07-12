@@ -1207,9 +1207,12 @@ mod tests {
         );
     }
 
+    /// #68: reparenting under an editor entity *absorbs* the subtree into
+    /// the editor class (INHERITED_EDITOR propagates, same as `mark_editor`),
+    /// so the game-under-editor state is unrepresentable through the
+    /// hierarchy API — Play proceeds, and the child is editor-owned.
     #[test]
-    #[should_panic(expected = "cannot be parented under editor-only")]
-    fn play_rejects_game_under_editor() {
+    fn reparent_under_editor_absorbs_child_into_editor_class() {
         use crate::{mark_editor, set_parent};
 
         let mut world = World::new();
@@ -1220,14 +1223,50 @@ mod tests {
         world.insert_resource(PlayStartTick(0));
         world.insert_resource(crate::GameTime::default());
 
-        // Create editor parent and game child
         let editor_parent = world.spawn();
         let game_child = world.spawn();
-
         mark_editor(&mut world, editor_parent);
         set_parent(&mut world, game_child, editor_parent);
 
-        // Transition to Playing should panic
+        let flags = world.get_entity_flags(game_child);
+        assert_ne!(
+            flags & Entity::EDITOR,
+            0,
+            "child absorbed into editor class"
+        );
+        assert_ne!(flags & Entity::INHERITED_EDITOR, 0, "inherited, not manual");
+
+        // Play succeeds: there is no game-under-editor state to reject.
+        let mut control = world.resource_mut::<PlayControl>();
+        control.play();
+        drop(control);
+        let mut system = ManagePlayModeTransitions;
+        system.run(&mut world).unwrap();
+        assert_eq!(world.resource::<PlayControl>().state(), PlayState::Playing);
+    }
+
+    /// The Play-time validator still guards the invariant against direct
+    /// flag surgery that bypasses the hierarchy API.
+    #[test]
+    #[should_panic(expected = "cannot be parented under editor-only")]
+    fn play_rejects_game_under_editor() {
+        use crate::set_parent;
+
+        let mut world = World::new();
+        world.register_component::<Parent>();
+        world.register_component::<crate::Children>();
+        world.insert_resource(PlayControl::default());
+        world.insert_resource(PlayModeAwareRegistry::default());
+        world.insert_resource(PlayStartTick(0));
+        world.insert_resource(crate::GameTime::default());
+
+        let editor_parent = world.spawn();
+        let game_child = world.spawn();
+        set_parent(&mut world, game_child, editor_parent);
+        // Bypass the hierarchy API: flag the parent EDITOR directly, without
+        // the propagation `mark_editor`/`set_parent` would perform.
+        world.set_entity_flags(editor_parent, Entity::EDITOR);
+
         let mut control = world.resource_mut::<PlayControl>();
         control.play();
         drop(control);
