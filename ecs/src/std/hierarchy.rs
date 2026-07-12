@@ -109,6 +109,11 @@ pub fn set_parent(world: &mut World, entity: Entity, parent: Entity) {
     // The entity's world transform changed even though its local Transform did
     // not — dirty it so propagation recomputes the moved subtree.
     mark_transform_changed(world, entity);
+
+    // Re-derive the subtree's inherited flags from the new parent (#68): a
+    // node moved under a disabled/static/editor/hidden parent inherits its
+    // effective state, and one moved out from under it sheds it.
+    refresh_inherited_flags(world, entity);
 }
 
 /// Removes the parent relationship from `entity`.
@@ -129,6 +134,74 @@ pub fn remove_parent(world: &mut World, entity: Entity) {
     // The entity's world transform now equals its local Transform; dirty it so
     // propagation recomputes the (now-unparented) subtree.
     mark_transform_changed(world, entity);
+
+    // A root has no parent to inherit from — shed inherited flags (#68).
+    refresh_node_inherited(world, entity, 0);
+}
+
+/// The four flag families that propagate down the hierarchy: the manual flag
+/// and its inherited counterpart. `set_parent`/`remove_parent` re-derive
+/// these; the dedicated walkers (`disable_recursive`, `hide_in_play`, ...)
+/// propagate in-place flag changes.
+const INHERITED_FLAG_FAMILIES: [(u32, u32); 4] = [
+    (Entity::DISABLED, Entity::INHERITED_DISABLED),
+    (Entity::STATIC, Entity::INHERITED_STATIC),
+    (Entity::EDITOR, Entity::INHERITED_EDITOR),
+    (Entity::HIDDEN_IN_PLAY, Entity::INHERITED_HIDDEN_IN_PLAY),
+];
+
+/// Re-derives `entity`'s (and, where affected, its subtree's) inherited
+/// flags from its current parent's effective flags. Manual flags (set
+/// without the inherited bit) are the user's intent and are never touched —
+/// a manually disabled node stays disabled wherever it moves, and its
+/// subtree keeps deriving from it.
+pub fn refresh_inherited_flags(world: &mut World, entity: Entity) {
+    let parent_flags = world
+        .get::<Parent>(entity)
+        .map(|p| p.0)
+        .map(|p| world.get_entity_flags(p))
+        .unwrap_or(0);
+    refresh_node_inherited(world, entity, parent_flags);
+}
+
+fn refresh_node_inherited(world: &mut World, entity: Entity, parent_flags: u32) {
+    let flags = world.get_entity_flags(entity);
+    let mut set_mask = 0u32;
+    let mut clear_mask = 0u32;
+    for (flag, inherited) in INHERITED_FLAG_FAMILIES {
+        let manual = flags & flag != 0 && flags & inherited == 0;
+        if manual {
+            // User intent: the node (and the derivation below it) stands.
+            continue;
+        }
+        // Parent's *effective* state: manual or inherited both propagate.
+        let should_inherit = parent_flags & flag != 0;
+        let has_inherited = flags & inherited != 0;
+        if should_inherit && !has_inherited {
+            set_mask |= flag | inherited;
+        } else if !should_inherit && has_inherited {
+            clear_mask |= flag | inherited;
+        }
+    }
+    if set_mask == 0 && clear_mask == 0 {
+        // Nothing changed at this node — its subtree already derives from an
+        // unchanged effective state (prior consistency), so stop here.
+        return;
+    }
+    if set_mask != 0 {
+        world.set_entity_flags(entity, set_mask);
+    }
+    if clear_mask != 0 {
+        world.clear_entity_flags(entity, clear_mask);
+    }
+    let new_flags = world.get_entity_flags(entity);
+    let child_entities = world
+        .get::<Children>(entity)
+        .map(|c| c.0.clone())
+        .unwrap_or_default();
+    for child in child_entities {
+        refresh_node_inherited(world, child, new_flags);
+    }
 }
 
 /// Despawns an entity and all its descendants recursively.
@@ -197,9 +270,16 @@ fn disable_subtree(world: &mut World, entity: Entity) {
 ///
 /// Descendants that were manually disabled (have `DISABLED` without
 /// `INHERITED_DISABLED`) are left alone — their subtrees are not traversed.
+///
+/// Enabling a node inside a disabled subtree clears only the node's *manual*
+/// intent: the final state re-derives from the parent, so the node stays
+/// effectively disabled until its ancestor is enabled (#68).
 pub fn enable(world: &mut World, entity: Entity) {
     world.clear_entity_flags(entity, Entity::DISABLED | Entity::INHERITED_DISABLED);
     enable_subtree(world, entity);
+    // Re-derive from the parent: under a disabled ancestor the subtree
+    // returns to inherited-disabled instead of becoming a hole in it.
+    refresh_inherited_flags(world, entity);
 }
 
 fn enable_subtree(world: &mut World, entity: Entity) {
@@ -387,6 +467,9 @@ pub fn show_in_play(world: &mut World, entity: Entity) {
         Entity::HIDDEN_IN_PLAY | Entity::INHERITED_HIDDEN_IN_PLAY,
     );
     show_in_play_subtree(world, entity);
+    // Re-derive from the parent (see `enable`): showing a node inside a
+    // hidden subtree must not punch a visible hole in it (#68).
+    refresh_inherited_flags(world, entity);
 }
 
 fn show_in_play_subtree(world: &mut World, entity: Entity) {
@@ -817,5 +900,177 @@ mod tests {
 
         assert!(!world.is_alive(parent));
         assert!(!world.is_alive(child));
+    }
+
+    // ---- #68: inherited-flag propagation on reparenting ----
+
+    #[test]
+    fn reparent_under_disabled_parent_inherits() {
+        let mut world = World::new();
+        register_hierarchy(&mut world);
+        let parent = world.spawn();
+        let child = world.spawn();
+        let grandchild = world.spawn();
+        set_parent(&mut world, grandchild, child);
+
+        disable(&mut world, parent);
+        set_parent(&mut world, child, parent);
+
+        for e in [child, grandchild] {
+            let flags = world.get_entity_flags(e);
+            assert_ne!(flags & Entity::DISABLED, 0, "{e} inherits DISABLED");
+            assert_ne!(
+                flags & Entity::INHERITED_DISABLED,
+                0,
+                "{e} marked as inherited, not manual"
+            );
+        }
+    }
+
+    #[test]
+    fn reparent_out_sheds_inherited_flags() {
+        let mut world = World::new();
+        register_hierarchy(&mut world);
+        let parent = world.spawn();
+        let other = world.spawn();
+        let child = world.spawn();
+        let grandchild = world.spawn();
+        set_parent(&mut world, grandchild, child);
+
+        hide_in_play(&mut world, parent);
+        set_parent(&mut world, child, parent);
+        assert_ne!(
+            world.get_entity_flags(grandchild) & Entity::HIDDEN_IN_PLAY,
+            0
+        );
+
+        // Move the subtree under a clean parent: inherited state sheds.
+        set_parent(&mut world, child, other);
+        for e in [child, grandchild] {
+            assert_eq!(
+                world.get_entity_flags(e)
+                    & (Entity::HIDDEN_IN_PLAY | Entity::INHERITED_HIDDEN_IN_PLAY),
+                0,
+                "{e} sheds inherited hidden-in-play"
+            );
+        }
+    }
+
+    #[test]
+    fn remove_parent_sheds_inherited_flags() {
+        let mut world = World::new();
+        register_hierarchy(&mut world);
+        let parent = world.spawn();
+        let child = world.spawn();
+        disable(&mut world, parent);
+        set_parent(&mut world, child, parent);
+        assert_ne!(world.get_entity_flags(child) & Entity::DISABLED, 0);
+
+        remove_parent(&mut world, child);
+        assert_eq!(
+            world.get_entity_flags(child) & (Entity::DISABLED | Entity::INHERITED_DISABLED),
+            0,
+            "orphaned entity sheds inherited flags"
+        );
+    }
+
+    /// The #68 acceptance scenario: a manually flagged node keeps the user's
+    /// intent wherever it moves — an editor gizmo stays EDITOR under a game
+    /// parent, a manually disabled node stays disabled under a clean parent.
+    #[test]
+    fn manual_flags_survive_reparenting() {
+        let mut world = World::new();
+        register_hierarchy(&mut world);
+        let game_parent = world.spawn();
+        let gizmo = world.spawn();
+        crate::mark_editor(&mut world, gizmo);
+        let disabled = world.spawn();
+        disable(&mut world, disabled);
+
+        set_parent(&mut world, gizmo, game_parent);
+        let flags = world.get_entity_flags(gizmo);
+        assert_ne!(flags & Entity::EDITOR, 0, "gizmo keeps manual EDITOR");
+        assert_eq!(flags & Entity::INHERITED_EDITOR, 0, "still manual");
+
+        set_parent(&mut world, disabled, game_parent);
+        let flags = world.get_entity_flags(disabled);
+        assert_ne!(flags & Entity::DISABLED, 0, "manual DISABLED survives");
+        assert_eq!(flags & Entity::INHERITED_DISABLED, 0);
+    }
+
+    /// #71 property test: random hierarchies mutated by random reparent /
+    /// flag operations always settle to the inherited-flag fixed point —
+    /// every node's inherited bits equal the derivation from its parent's
+    /// effective flags, and manual bits are never disturbed. Seeded LCG so
+    /// failures reproduce.
+    #[test]
+    fn random_hierarchy_inherited_flags_reach_fixed_point() {
+        let mut rng_state: u64 = 0x5EED_CAFE_F00D_0001;
+        let mut rng = move || {
+            rng_state = rng_state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (rng_state >> 33) as usize
+        };
+
+        for _round in 0..20 {
+            let mut world = World::new();
+            register_hierarchy(&mut world);
+            let n = 12;
+            let entities: Vec<Entity> = (0..n).map(|_| world.spawn()).collect();
+
+            // Random forest (parent strictly earlier -> acyclic), random flags.
+            for i in 1..n {
+                if rng() % 4 != 0 {
+                    let p = entities[rng() % i];
+                    set_parent(&mut world, entities[i], p);
+                }
+            }
+            // Random mutations: manual flag walkers + reparenting.
+            for _ in 0..30 {
+                let e = entities[rng() % n];
+                match rng() % 6 {
+                    0 => disable(&mut world, e),
+                    1 => enable(&mut world, e),
+                    2 => hide_in_play(&mut world, e),
+                    3 => show_in_play(&mut world, e),
+                    4 => {
+                        let p = entities[rng() % n];
+                        if e != p && !is_ancestor_of(&world, e, p) {
+                            set_parent(&mut world, e, p);
+                        }
+                    }
+                    _ => remove_parent(&mut world, e),
+                }
+            }
+
+            // Fixed point: every node's inherited bits derive exactly from
+            // its parent's effective flags.
+            for &e in &entities {
+                let flags = world.get_entity_flags(e);
+                let parent_flags = world
+                    .get::<Parent>(e)
+                    .map(|p| world.get_entity_flags(p.0))
+                    .unwrap_or(0);
+                for (flag, inherited) in super::INHERITED_FLAG_FAMILIES {
+                    let manual = flags & flag != 0 && flags & inherited == 0;
+                    if manual {
+                        continue;
+                    }
+                    let expect = parent_flags & flag != 0;
+                    let actual = flags & inherited != 0;
+                    assert_eq!(
+                        actual, expect,
+                        "{e}: inherited bit for flag {flag:#x} diverged from \
+                         parent derivation (flags {flags:#x}, parent {parent_flags:#x})"
+                    );
+                    assert_eq!(
+                        flags & flag != 0,
+                        expect,
+                        "{e}: flag {flag:#x} inconsistent with inherited bit"
+                    );
+                }
+            }
+        }
     }
 }

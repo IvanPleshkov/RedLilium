@@ -223,6 +223,16 @@ pub(crate) fn analyze_ambiguities(
     let participates =
         |i: usize| !systems.is_virtual(i) && (systems.is_exclusive(i) || !normalized[i].is_empty());
 
+    // A system that reached the world through `ctx.raw_world()` (#54) has
+    // undeclared access — for conflict purposes it owns the whole world,
+    // exactly like an exclusive system.
+    let is_raw = |i: usize| {
+        normalized[i]
+            .iter()
+            .any(|a| matches!(a.kind, crate::query::access::AccessKind::RawWorld))
+    };
+    let owns_world = |i: usize| systems.is_exclusive(i) || is_raw(i);
+
     for i in 0..n {
         if !participates(i) {
             continue;
@@ -242,19 +252,25 @@ pub(crate) fn analyze_ambiguities(
                 continue; // ordered — not ambiguous
             }
 
-            // Find conflicting accesses. An exclusive system conflicts with
-            // every access of the other system (it owns the whole world).
-            let conflicts = if systems.is_exclusive(i) && systems.is_exclusive(j) {
-                // Both own &mut World; unordered order is still observable.
+            // Find conflicting accesses. An exclusive or raw-access system
+            // conflicts with every access of the other system (it owns the
+            // whole world — declared via `&mut World` or undeclared via
+            // `ctx.raw_world()`, #54).
+            let conflicts = if owns_world(i) && owns_world(j) {
+                // Both own the world; unordered order is still observable.
                 vec![AccessConflict {
                     type_id: std::any::TypeId::of::<World>(),
-                    type_name: "<&mut World>",
+                    type_name: if is_raw(i) || is_raw(j) {
+                        "<raw ctx.world()>"
+                    } else {
+                        "<&mut World>"
+                    },
                     a_writes: true,
                     b_writes: true,
                 }]
-            } else if systems.is_exclusive(i) {
+            } else if owns_world(i) {
                 exclusive_conflicts(&normalized[j], true, world)
-            } else if systems.is_exclusive(j) {
+            } else if owns_world(j) {
                 exclusive_conflicts(&normalized[i], false, world)
             } else {
                 find_conflicts(&normalized[i], &normalized[j], world)
@@ -282,6 +298,7 @@ fn exclusive_conflicts(
 ) -> Vec<AccessConflict> {
     other
         .iter()
+        .filter(|info| !matches!(info.kind, crate::query::access::AccessKind::RawWorld))
         .map(|info| AccessConflict {
             type_id: info.type_id,
             type_name: world
@@ -527,5 +544,119 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].len(), 1);
         assert_eq!(records[1].len(), 1);
+    }
+
+    /// #54: a system reaching the world via `ctx.raw_world()` (undeclared
+    /// access) must be flagged against any unordered peer.
+    struct RawSystem;
+    impl System for RawSystem {
+        type Result = ();
+        fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), crate::system::SystemError> {
+            let _world = ctx.raw_world();
+            Ok(())
+        }
+    }
+
+    /// Registry-only queries (`ctx.is_alive`) are sound in a parallel batch
+    /// and deliberately unrecorded.
+    struct RegistryOnlySystem;
+    impl System for RegistryOnlySystem {
+        type Result = ();
+        fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), crate::system::SystemError> {
+            let _ = ctx.is_alive(crate::Entity::DANGLING);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn raw_world_access_flagged_against_unordered_peer() {
+        use crate::runner::EcsRunnerSingleThread;
+        use crate::system::SystemsContainer;
+
+        let mut world = World::new();
+        world.register_component::<Position>();
+        let e = world.spawn();
+        world.insert(e, Position { _x: 0.0 }).unwrap();
+
+        let mut container = SystemsContainer::new();
+        container.add(RawSystem);
+        container.add(SystemA);
+        // No edges — the raw system's access is undeclared, so the detector
+        // must assume it conflicts with SystemA's Position write.
+
+        let runner = EcsRunnerSingleThread::new();
+        let result = runner.run_with(
+            &mut world,
+            &container,
+            &RunDiagnostics {
+                detect_ambiguities: true,
+                ..Default::default()
+            },
+        );
+
+        let ambiguities = result.report.ambiguities.unwrap();
+        assert_eq!(
+            ambiguities.len(),
+            1,
+            "undeclared raw access must be flagged (#54): {ambiguities:?}"
+        );
+    }
+
+    #[test]
+    fn raw_world_access_clean_when_ordered() {
+        use crate::runner::EcsRunnerSingleThread;
+        use crate::system::SystemsContainer;
+
+        let mut world = World::new();
+        world.register_component::<Position>();
+        let e = world.spawn();
+        world.insert(e, Position { _x: 0.0 }).unwrap();
+
+        let mut container = SystemsContainer::new();
+        container.add(RawSystem);
+        container.add(SystemA);
+        container.add_edge::<RawSystem, SystemA>().unwrap();
+
+        let runner = EcsRunnerSingleThread::new();
+        let result = runner.run_with(
+            &mut world,
+            &container,
+            &RunDiagnostics {
+                detect_ambiguities: true,
+                ..Default::default()
+            },
+        );
+
+        assert!(result.report.ambiguities.unwrap().is_empty());
+    }
+
+    #[test]
+    fn registry_queries_are_not_flagged() {
+        use crate::runner::EcsRunnerSingleThread;
+        use crate::system::SystemsContainer;
+
+        let mut world = World::new();
+        world.register_component::<Position>();
+        let e = world.spawn();
+        world.insert(e, Position { _x: 0.0 }).unwrap();
+
+        let mut container = SystemsContainer::new();
+        container.add(RegistryOnlySystem);
+        container.add(SystemA);
+        // No edges — registry reads (is_alive) are sound in a parallel batch
+        // (structural mutation defers to command flush) and must not be
+        // treated as world access.
+
+        let runner = EcsRunnerSingleThread::new();
+        let result = runner.run_with(
+            &mut world,
+            &container,
+            &RunDiagnostics {
+                detect_ambiguities: true,
+                ..Default::default()
+            },
+        );
+
+        assert!(result.report.ambiguities.unwrap().is_empty());
     }
 }

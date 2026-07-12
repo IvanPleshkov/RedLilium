@@ -127,7 +127,7 @@ pub struct RemoteServe;
 impl System for RemoteServe {
     type Result = ();
     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<Self::Result, SystemError> {
-        let world = ctx.world();
+        let world = ctx.raw_world();
         if !world.has_resource::<RemoteTransport>() {
             return Ok(());
         }

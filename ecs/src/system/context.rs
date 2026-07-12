@@ -556,9 +556,57 @@ impl<'a> SystemContext<'a> {
         self.commands.spawn_with(bundle);
     }
 
-    /// Returns a reference to the world.
-    pub(crate) fn world(&self) -> &'a World {
+    /// The world handle for the `ctx.lock()` plumbing (`query::lock_request`).
+    ///
+    /// Deliberately awkward to name: this accessor records nothing, so any
+    /// *system* reaching the world through it is invisible to the ambiguity
+    /// detector. Systems that genuinely need undeclared whole-world access
+    /// must call [`raw_world`](Self::raw_world) (recorded, #54); systems that
+    /// only need entity-registry queries use [`is_alive`](Self::is_alive) /
+    /// [`is_excluded_from_game`](Self::is_excluded_from_game).
+    pub(crate) fn world_for_lock_plumbing(&self) -> &'a World {
         self.world
+    }
+
+    /// Undeclared whole-world access for engine-internal systems (render
+    /// graph, asset pipeline, remote serve) whose access pattern cannot be
+    /// expressed through `ctx.lock()`.
+    ///
+    /// Recorded as [`AccessKind::RawWorld`](crate::query::access::AccessKind)
+    /// when ambiguity detection is on: the detector then treats this system
+    /// as conflicting with **every** unordered peer, so a missing dependency
+    /// edge shows up as a warning instead of a silent MT data race (#54).
+    /// Zero cost when detection is off.
+    pub(crate) fn raw_world(&self) -> &'a World {
+        self.record_access(&[crate::query::access::AccessInfo::raw_world()]);
+        self.world
+    }
+
+    /// Whether `entity` is alive.
+    ///
+    /// Reads the **entity registry only** (no component-storage locks), so it
+    /// is safe to call from any system during a parallel batch: structural
+    /// mutation (spawn/despawn) is deferred to the command flush between
+    /// batches, so the registry is stable while systems run. Deliberately not
+    /// recorded as world access (#54).
+    pub fn is_alive(&self, entity: Entity) -> bool {
+        self.world.is_alive(entity)
+    }
+
+    /// Whether `entity` is excluded from game logic (disabled or editor-only).
+    ///
+    /// Registry/flag read only — same parallel-batch soundness contract as
+    /// [`is_alive`](Self::is_alive).
+    pub fn is_excluded_from_game(&self, entity: Entity) -> bool {
+        self.world.is_excluded_from_game(entity)
+    }
+
+    /// Whether `entity` carries the DISABLED flag.
+    ///
+    /// Registry/flag read only — same parallel-batch soundness contract as
+    /// [`is_alive`](Self::is_alive).
+    pub fn is_disabled(&self, entity: Entity) -> bool {
+        self.world.is_disabled(entity)
     }
 }
 

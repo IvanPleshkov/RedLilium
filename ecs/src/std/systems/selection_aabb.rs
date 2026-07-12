@@ -54,7 +54,7 @@ impl crate::System for DrawSelectionAabb {
                     return;
                 }
 
-                let world = ctx.world();
+                let world = ctx.raw_world();
                 let mut draw_ctx = drawer.context();
 
                 match self.mode {

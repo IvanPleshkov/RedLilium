@@ -35,7 +35,7 @@ impl crate::System for UpdateGlobalTransforms {
                     &children_storage,
                     &parents,
                     &changed,
-                    &|e| ctx.world().is_alive(e),
+                    &|e| ctx.is_alive(e),
                 );
             },
         );

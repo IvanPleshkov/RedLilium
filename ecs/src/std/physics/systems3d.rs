@@ -324,8 +324,8 @@ impl crate::System for SyncPhysicsBodiesSystem3D {
                     .entity_to_body
                     .keys()
                     .filter(|e| {
-                        !ctx.world().is_alive(**e)
-                            || ctx.world().is_excluded_from_game(**e)
+                        !ctx.is_alive(**e)
+                            || ctx.is_excluded_from_game(**e)
                             || bodies.get(e.index()).is_none()
                     })
                     .copied()
@@ -410,8 +410,8 @@ impl crate::System for SyncPhysicsJointsSystem3D {
                     .entity_to_joint
                     .keys()
                     .filter(|e| {
-                        !ctx.world().is_alive(**e)
-                            || ctx.world().is_excluded_from_game(**e)
+                        !ctx.is_alive(**e)
+                            || ctx.is_excluded_from_game(**e)
                             || joints.get(e.index()).is_none()
                     })
                     .copied()

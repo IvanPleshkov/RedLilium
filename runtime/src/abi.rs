@@ -267,15 +267,22 @@ impl GameModule {
     ///   tables → lost wakeups / deadlock under contention. **Mitigated by #45
     ///   Track 1:** the ECS uses [`crate::sync`] instead, which forwards to
     ///   `std::sync` (cross-image safe by construction).
-    /// - **Split panic bookkeeping.** A panic raised in the cdylib image and
-    ///   caught here (the `catch_unwind` below, or any unwind through host
-    ///   frames) touches two libstd panic counters → `thread::panicking()` can
-    ///   misreport afterward. **Verification (#57):** System panics are wrapped
-    ///   in `catch_unwind` by the multi-threaded runner (see
-    ///   `ecs/src/runner/multi/mod.rs`), converting a game system panic into
-    ///   `SystemError::Panicked` without terminating the host. The cross-image
-    ///   panic-counter duplication does not cause host termination or abort
-    ///   under normal play-mode operation.
+    /// - **Cross-image panics are not catchable — shielded in-image
+    ///   instead.** A panic cannot unwind across the image boundary: libstd
+    ///   stamps every payload with the address of a per-image canary static,
+    ///   and a `catch_unwind` in the *other* image detects the mismatch and
+    ///   aborts ("Rust cannot catch foreign exceptions"; verified
+    ///   empirically, #57). The engine therefore catches **inside the image
+    ///   that raised the panic**: the blanket `Dyn*System::run_boxed` impls
+    ///   (`ecs/src/system/traits.rs`, #84) wrap every system run in a
+    ///   `catch_unwind` that monomorphizes into the crate registering the
+    ///   system — for game systems, the cdylib's own image — and hand the
+    ///   host a plain `Err(SystemError::Panicked)` value. The reload harness
+    ///   verifies containment against a real cdylib (`--panic-child` must
+    ///   exit cleanly). Caveat: only *systems* are shielded; other
+    ///   game-planted callbacks (observers, deserialize fns, PlayModeAware
+    ///   hooks, command closures) still abort on panic — keep them
+    ///   panic-free.
     #[cfg(not(target_arch = "wasm32"))]
     pub unsafe fn load(path: impl AsRef<std::ffi::OsStr>) -> Result<Self, GameModuleError> {
         unsafe {
