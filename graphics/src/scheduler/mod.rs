@@ -1,9 +1,22 @@
 //! Per-frame render-graph execution.
 //!
-//! Each frame builds and submits **exactly one** render graph. Cross-frame
-//! CPU/GPU overlap is provided by the frames-in-flight machinery in the
-//! pipeline, so there are no cross-graph dependencies or GPU semaphores —
-//! multi-pass work lives inside the single graph and is ordered by the compiler.
+//! Each frame builds and submits **one or more** render graphs, each as its
+//! own queue submit. Graphs run on the graphics queue unless they opt into
+//! async compute routing ([`RenderGraph::set_prefer_async_compute`]) — an
+//! explicit placement hint, honored only for compute/transfer-only graphs on
+//! devices that expose a second queue; otherwise everything runs on the
+//! graphics queue, the first-class fallback. Ordering is always automatic:
+//! same-queue hazards become pipeline barriers from the backend's persistent
+//! trackers (valid across submits within one queue, exactly as across
+//! frames), cross-queue hazards become timeline-semaphore waits emitted at
+//! submit (#47 phase 4). Cross-frame CPU/GPU overlap is provided by the
+//! frames-in-flight machinery in the pipeline.
+//!
+//! Dependency edges between the frame's graphs are additionally **derived
+//! automatically** at graph granularity from their declared resource usage
+//! (the `deps` module, #47 phase 3) and exposed for diagnostics via
+//! [`FrameSchedule::derived_dependencies`]. There is deliberately no manual
+//! dependency API.
 //!
 //! # Architecture
 //!
@@ -12,7 +25,7 @@
 //! | Layer | Type | Purpose |
 //! |-------|------|---------|
 //! | Pipeline | [`FramePipeline`](crate::pipeline::FramePipeline) | Multiple frames in flight |
-//! | **Schedule** | [`FrameSchedule`] | Executes the frame's single graph (this module) |
+//! | **Schedule** | [`FrameSchedule`] | Submits the frame's graphs (this module) |
 //! | Graph | [`RenderGraph`](crate::graph::RenderGraph) | Passes + their dependencies |
 //! | Pass | [`GraphicsPass`](crate::graph::GraphicsPass), etc. | Single GPU operation |
 //!
@@ -20,7 +33,8 @@
 //!
 //! # Module Contents
 //!
-//! - [`FrameSchedule`] - Executes the single render graph for one frame
+//! - [`FrameSchedule`] - Submits the frame's render graphs
+//! - [`SubmitHandle`] - Identifies one submitted graph within a frame
 //! - [`Fence`] - CPU-GPU synchronization for frame completion
 //!
 //! # Example
@@ -29,18 +43,25 @@
 //! // FrameSchedule is created by FramePipeline::begin_frame()
 //! let mut schedule = pipeline.begin_frame();
 //!
-//! // Build the frame's single graph (it may contain many passes).
-//! let mut graph = schedule.acquire_graph();
-//! graph.add_graphics_pass(shadow_pass);
-//! graph.add_graphics_pass(main_pass);
+//! // An independent offscreen pre-pass, submitted on its own...
+//! let mut prepass = schedule.acquire_graph();
+//! prepass.add_graphics_pass(shadow_pass);
+//! schedule.submit(prepass);
 //!
-//! // Execute it (signals the frame fence), then hand back to the pipeline.
-//! schedule.render(graph);
+//! // ...then the main graph (at most one graph per frame may write the
+//! // swapchain). Ordering is submission order; shared resources are
+//! // synchronized automatically by the barrier trackers.
+//! let mut main = schedule.acquire_graph();
+//! main.add_graphics_pass(main_pass);
+//! schedule.submit(main);
+//!
 //! pipeline.end_frame(schedule);
 //! ```
 
+mod deps;
 mod sync;
 
+use deps::GraphUsage;
 pub use sync::{Fence, FenceStatus};
 
 use std::sync::Arc;
@@ -50,6 +71,25 @@ use crate::graph::{RenderGraph, RenderGraphCompilationMode};
 use crate::resources::{RingAllocation, RingBuffer};
 use redlilium_core::profiling::profile_scope;
 
+/// Identifies one graph submitted to a [`FrameSchedule`] within a frame.
+///
+/// Handles are only meaningful within the frame they were issued for; they
+/// carry the submission index (0 for the first `submit` of the frame, 1 for
+/// the second, ...). Ordering between submits is submission order — there is
+/// no dependency API, and none is planned: cross-graph dependencies are
+/// derived automatically from resource usage (#47).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SubmitHandle {
+    index: usize,
+}
+
+impl SubmitHandle {
+    /// Zero-based submission index within the frame.
+    pub fn index(&self) -> usize {
+        self.index
+    }
+}
+
 /// Frame schedule for streaming graph submission.
 ///
 /// Allows submitting render graphs immediately as they're built,
@@ -58,10 +98,10 @@ use redlilium_core::profiling::profile_scope;
 ///
 /// # Async Behavior
 ///
-/// With GPU-backed fences, `present()` and `finish()` return immediately
-/// after submitting work to the GPU. The fence tracks when the GPU actually
-/// completes, enabling true async rendering where the CPU can build the
-/// next frame while the GPU renders the current one.
+/// With GPU-backed fences, [`submit`](Self::submit) returns immediately
+/// after handing the work to the GPU. The per-submit fences track when the
+/// GPU actually completes, enabling true async rendering where the CPU can
+/// build the next frame while the GPU renders the current one.
 ///
 /// # Creation
 ///
@@ -74,30 +114,41 @@ use redlilium_core::profiling::profile_scope;
 /// // Each frame:
 /// let mut schedule = pipeline.begin_frame();
 ///
-/// // Submit graphs as they're ready
-/// let a = schedule.submit("graph_a", graph_a, &[]);
-/// let b = schedule.submit("graph_b", graph_b, &[a]);
+/// // Submit graphs as they're ready (ordering = submission order).
+/// schedule.submit(prepass_graph);
+/// schedule.submit(main_graph); // at most one graph writes the swapchain
 ///
-/// // Present to screen (returns immediately - GPU works async)
-/// schedule.present("present", final_graph, &[b]);
-///
-/// // Return schedule to pipeline (stores fence for later waiting)
+/// // Return schedule to pipeline (stores fences for later waiting)
 /// pipeline.end_frame(schedule);
 /// ```
 pub struct FrameSchedule {
-    /// Device for executing the graph.
+    /// Device for executing the graphs.
     device: Arc<GraphicsDevice>,
-    /// Fence signaled when this frame's single submit completes (set by `render`).
-    fence: Option<Fence>,
+    /// One fence per submit, signaled when that submit completes.
+    fences: Vec<Fence>,
     /// The frame slot index (for per-frame resource management).
     frame_slot: usize,
     /// Ring buffer for this frame (if configured in FramePipeline).
     ring_buffer: Option<RingBuffer>,
     /// Pool of reusable render graphs (moved from FramePipeline each frame).
     graph_pool: Vec<RenderGraph>,
-    /// The graph executed this frame, kept for recycling in end_frame. Its `Arc`
-    /// references keep GPU resources alive until the slot's fence wait.
+    /// The graphs executed this frame, kept for recycling in end_frame. Their
+    /// `Arc` references keep GPU resources alive until the slot's fence wait.
     submitted_graphs: Vec<RenderGraph>,
+    /// Aggregated resource usage of each submitted graph, index-aligned with
+    /// `submitted_graphs`/`fences` (empty usage for graphs that failed to
+    /// compile). Source data for cross-graph dependency derivation.
+    submitted_usages: Vec<GraphUsage>,
+    /// Dependency edges `(from, to)` derived from overlapping resource usage:
+    /// the `to` submit accesses a resource the earlier `from` submit wrote
+    /// (or writes one it read). On the single graphics queue these are
+    /// satisfied by submission order and change nothing at runtime; phase 4
+    /// of #47 turns cross-queue edges into timeline-semaphore waits.
+    derived_edges: Vec<(SubmitHandle, SubmitHandle)>,
+    /// Whether a swapchain-writing graph has already been submitted this
+    /// frame. The acquire/present semaphore pair exists once per frame, so a
+    /// second swapchain writer would silently miss synchronization.
+    swapchain_writer_submitted: bool,
 }
 
 impl std::fmt::Debug for FrameSchedule {
@@ -105,7 +156,7 @@ impl std::fmt::Debug for FrameSchedule {
         f.debug_struct("FrameSchedule")
             .field("device", &self.device.name())
             .field("frame_slot", &self.frame_slot)
-            .field("fence", &self.fence)
+            .field("fences", &self.fences)
             .finish()
     }
 }
@@ -122,11 +173,14 @@ impl FrameSchedule {
     ) -> Self {
         Self {
             device,
-            fence: None,
+            fences: Vec::new(),
             frame_slot,
             ring_buffer,
             graph_pool,
             submitted_graphs: Vec::new(),
+            submitted_usages: Vec::new(),
+            derived_edges: Vec::new(),
+            swapchain_writer_submitted: false,
         }
     }
 
@@ -205,46 +259,63 @@ impl FrameSchedule {
         std::mem::take(&mut self.submitted_graphs)
     }
 
-    /// Execute the frame's single render graph and signal the frame fence.
+    /// Submit a render graph for execution as its own queue submit.
     ///
-    /// Exactly **one** render graph is submitted per frame. Cross-frame CPU/GPU
-    /// overlap is provided by the frames-in-flight machinery in the pipeline, so
-    /// there are no cross-graph dependencies or semaphores. The created fence is
-    /// signalled when this submit completes; the pipeline waits on it before
-    /// recycling the slot. The graph is kept for recycling — its `Arc`
-    /// references keep GPU resources alive until that fence wait.
+    /// May be called any number of times per frame; graphs execute in
+    /// submission order on the single graphics queue. Resources shared
+    /// between graphs are synchronized automatically: the backend's
+    /// persistent barrier trackers emit pipeline barriers that are valid
+    /// across submits on one queue, exactly as across frames. There are no
+    /// cross-graph GPU semaphores (that changes with a second queue, #47).
     ///
-    /// Takes ownership of the graph for pooling. Must be called exactly once,
+    /// A fence per submit is signalled on completion; the pipeline waits on
+    /// all of them before recycling the slot. The graph is kept for
+    /// recycling — its `Arc` references keep GPU resources alive until that
+    /// wait.
+    ///
+    /// Takes ownership of the graph for pooling. Must be called at least once
     /// before [`FramePipeline::end_frame`](crate::pipeline::FramePipeline::end_frame).
     ///
     /// # Panics
     ///
-    /// Panics if called more than once on the same schedule.
-    pub fn render(&mut self, mut graph: RenderGraph) {
-        profile_scope!("render_graph");
+    /// Panics if a swapchain-writing graph was already submitted this frame:
+    /// the acquire/present semaphore pair exists once per frame, so a second
+    /// swapchain writer would run unsynchronized against the presentation
+    /// engine. Route all swapchain-writing passes into one graph.
+    pub fn submit(&mut self, mut graph: RenderGraph) -> SubmitHandle {
+        profile_scope!("submit_graph");
 
-        // INVARIANT: exactly one graph per frame → one submit → one fence.
-        // The whole cross-frame synchronization model depends on this (the
-        // backend's persistent barrier trackers assume single-queue
-        // submission order; there are no cross-graph semaphores). Supporting
-        // multiple in-flight graphs per frame is tracked in #47.
-        assert!(
-            self.fence.is_none(),
-            "render() has already been called on this schedule (one graph per frame; see #47)"
-        );
+        // Ordering: same-queue submits execute in submission order and are
+        // synchronized by the trackers' pipeline barriers; a graph routed to
+        // the async compute queue (an explicit opt-in hint, honored only for
+        // compute/transfer-only graphs on devices that have the queue) is
+        // synchronized by tracker-emitted timeline waits (#47 phase 4).
+        if graph.writes_swapchain() {
+            assert!(
+                !self.swapchain_writer_submitted,
+                "a swapchain-writing graph was already submitted this frame — the \
+                 acquire/present handshake supports exactly one swapchain writer per frame \
+                 (put all swapchain passes in one graph; see #47)"
+            );
+            self.swapchain_writer_submitted = true;
+        }
 
-        // Fence signalled by this frame's single submit. Any failure below
-        // (fence creation, compile, submit) means NO GPU work is in flight for
-        // this frame, so the slot fence must read as signaled — a GPU fence
-        // that was reset but never submitted would stall every subsequent
-        // `begin_frame` until its wait times out.
+        let handle = SubmitHandle {
+            index: self.fences.len(),
+        };
+
+        // Fence signalled by this submit. Any failure below (fence creation,
+        // compile, submit) means no GPU work is in flight for THIS submit, so
+        // its fence must read as signaled — the CPU fence guarantees that
+        // regardless of backend fence semantics. Earlier submits' fences are
+        // unaffected.
         let mut fence = match Fence::new_gpu(Arc::clone(self.device.instance())) {
             Ok(fence) => fence,
             Err(e) => {
-                log::error!("Failed to create frame fence, skipping submit: {e}");
+                log::error!("Failed to create submit fence, skipping submit: {e}");
                 self.submitted_graphs.push(graph);
-                self.fence = Some(Fence::new_signaled());
-                return;
+                self.fences.push(Fence::new_signaled());
+                return handle;
             }
         };
 
@@ -254,10 +325,15 @@ impl FrameSchedule {
         #[cfg(debug_assertions)]
         debug_assert_pipeline_state_matches_targets(&graph);
 
+        // Aggregated usage of this graph, for cross-graph dependency
+        // derivation (empty if compilation fails — no GPU work, no edges).
+        let mut usage = GraphUsage::default();
+
         match graph.compile(RenderGraphCompilationMode::Strict) {
             Ok(_) => {
                 profile_scope!("execute_graph");
                 let compiled = graph.compiled().unwrap();
+                usage = GraphUsage::from_compiled(compiled);
                 let backend = self.device.instance().backend();
                 if let Err(e) = backend.execute_graph(&graph, compiled, fence.gpu_fence()) {
                     log::error!("Failed to execute frame graph: {e}");
@@ -270,22 +346,59 @@ impl FrameSchedule {
             }
         }
 
+        // Derive dependency edges against every earlier submit of this frame
+        // (diagnostics/tests). Correctness does not rest on these: same-queue
+        // edges are satisfied by submission order, and cross-queue hazards
+        // are resolved by the backend trackers' timeline waits — which also
+        // cover cross-FRAME hazards this per-frame view cannot see.
+        for (index, prev) in self.submitted_usages.iter().enumerate() {
+            if prev.conflicts_with(&usage) {
+                self.derived_edges.push((SubmitHandle { index }, handle));
+            }
+        }
+        self.submitted_usages.push(usage);
+
         // Keep the graph for recycling at end of frame.
         self.submitted_graphs.push(graph);
-        self.fence = Some(fence);
+        self.fences.push(fence);
+        handle
     }
 
-    /// Extract the fence from this schedule.
+    /// Dependency edges `(from, to)` derived this frame from overlapping
+    /// resource usage: the `to` submit reads or overwrites something the
+    /// earlier `from` submit wrote (or writes something it read).
+    ///
+    /// Derivation is fully automatic — there is no way to declare an edge by
+    /// hand (#47 design decision). The edges are observability for tests and
+    /// diagnostics: same-queue edges are satisfied by submission order, and
+    /// cross-queue hazards are enforced by the backend trackers' timeline
+    /// waits (which additionally cover cross-frame hazards outside this
+    /// per-frame view).
+    pub fn derived_dependencies(&self) -> &[(SubmitHandle, SubmitHandle)] {
+        &self.derived_edges
+    }
+
+    /// Submit the graph for execution — equivalent to [`submit`](Self::submit).
+    ///
+    /// Retained for callers from the one-graph-per-frame era; new code should
+    /// call `submit` directly.
+    pub fn render(&mut self, graph: RenderGraph) {
+        self.submit(graph);
+    }
+
+    /// Extract the per-submit fences from this schedule.
     ///
     /// This is called internally by [`FramePipeline::end_frame`](crate::pipeline::FramePipeline::end_frame).
     ///
     /// # Panics
     ///
-    /// Panics if [`render`](Self::render) was not called.
-    pub(crate) fn take_fence(&mut self) -> Fence {
-        self.fence
-            .take()
-            .expect("render() must be called before end_frame()")
+    /// Panics if [`submit`](Self::submit) was never called.
+    pub(crate) fn take_fences(&mut self) -> Vec<Fence> {
+        assert!(
+            !self.fences.is_empty(),
+            "submit() must be called at least once before end_frame()"
+        );
+        std::mem::take(&mut self.fences)
     }
 }
 
@@ -417,43 +530,206 @@ mod tests {
         FrameSchedule::new(device, 0, None, Vec::new())
     }
 
-    #[test]
-    fn render_signals_fence() {
-        let mut schedule = make_test_schedule();
-        schedule.render(make_test_graph("main"));
+    /// A graph whose single pass renders to the swapchain surface.
+    fn make_surface_graph(name: &str) -> RenderGraph {
+        use crate::graph::{ColorAttachment, RenderTarget, RenderTargetConfig};
+        use crate::types::TextureFormat;
 
-        let fence = schedule.take_fence();
-        fence.wait().unwrap();
-        assert_eq!(fence.status(), FenceStatus::Signaled);
+        let target = RenderTarget::Surface {
+            format: TextureFormat::Bgra8UnormSrgb,
+            width: 4,
+            height: 4,
+            #[cfg(feature = "wgpu-backend")]
+            view: None,
+            #[cfg(feature = "vulkan-backend")]
+            vulkan_view: None,
+        };
+        let mut pass = GraphicsPass::new(name.into());
+        pass.set_render_targets(RenderTargetConfig::new().with_color(ColorAttachment::new(target)));
+        let mut graph = RenderGraph::new();
+        graph.add_graphics_pass(pass);
+        graph
     }
 
     #[test]
-    fn render_multi_pass_single_graph() {
-        // One graph per frame may still carry many passes; ordering/barriers are
+    fn submit_signals_fence() {
+        let mut schedule = make_test_schedule();
+        let handle = schedule.submit(make_test_graph("main"));
+        assert_eq!(handle.index(), 0);
+
+        let fences = schedule.take_fences();
+        assert_eq!(fences.len(), 1);
+        fences[0].wait().unwrap();
+        assert_eq!(fences[0].status(), FenceStatus::Signaled);
+    }
+
+    #[test]
+    fn submit_multi_pass_single_graph() {
+        // One graph may carry many passes; ordering/barriers within it are
         // the compiler's job. Just verify it executes and signals.
         let mut schedule = make_test_schedule();
         let mut graph = RenderGraph::new();
         graph.add_graphics_pass(GraphicsPass::new("shadow".into()));
         graph.add_graphics_pass(GraphicsPass::new("main".into()));
-        schedule.render(graph);
+        schedule.submit(graph);
 
-        let fence = schedule.take_fence();
-        fence.wait().unwrap();
-        assert_eq!(fence.status(), FenceStatus::Signaled);
+        let fences = schedule.take_fences();
+        assert_eq!(fences.len(), 1);
+        fences[0].wait().unwrap();
     }
 
     #[test]
-    #[should_panic(expected = "render() has already been called")]
-    fn double_render_panics() {
+    fn submit_multiple_graphs_signals_all_fences() {
+        // Multiple graphs per frame, each its own submit on the single queue.
+        // Ordering is submission order; every submit gets its own fence.
+        let mut schedule = make_test_schedule();
+        let a = schedule.submit(make_test_graph("prepass"));
+        let b = schedule.submit(make_test_graph("main"));
+        assert_eq!(a.index(), 0);
+        assert_eq!(b.index(), 1);
+
+        let fences = schedule.take_fences();
+        assert_eq!(fences.len(), 2);
+        for fence in &fences {
+            fence.wait().unwrap();
+            assert_eq!(fence.status(), FenceStatus::Signaled);
+        }
+    }
+
+    #[test]
+    fn render_is_submit_alias() {
+        // render() survives as a thin wrapper; calling it twice is now two
+        // submits, not a panic.
         let mut schedule = make_test_schedule();
         schedule.render(make_test_graph("a"));
-        schedule.render(make_test_graph("b")); // Panics
+        schedule.render(make_test_graph("b"));
+
+        assert_eq!(schedule.take_fences().len(), 2);
     }
 
     #[test]
-    #[should_panic(expected = "render() must be called before end_frame()")]
-    fn take_fence_without_render_panics() {
+    fn one_swapchain_writer_is_accepted() {
         let mut schedule = make_test_schedule();
-        schedule.take_fence(); // Panics
+        schedule.submit(make_test_graph("offscreen"));
+        schedule.submit(make_surface_graph("present"));
+
+        assert_eq!(schedule.take_fences().len(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "swapchain-writing graph was already submitted")]
+    fn second_swapchain_writer_panics() {
+        let mut schedule = make_test_schedule();
+        schedule.submit(make_surface_graph("present_a"));
+        schedule.submit(make_surface_graph("present_b")); // Panics
+    }
+
+    #[test]
+    #[should_panic(expected = "submit() must be called at least once before end_frame()")]
+    fn take_fences_without_submit_panics() {
+        let mut schedule = make_test_schedule();
+        schedule.take_fences(); // Panics
+    }
+
+    /// A graph with a single whole-buffer copy pass (`src` read, `dst` write).
+    fn make_copy_graph(
+        name: &str,
+        src: std::sync::Arc<crate::resources::Buffer>,
+        dst: std::sync::Arc<crate::resources::Buffer>,
+    ) -> RenderGraph {
+        use crate::graph::{TransferConfig, TransferOperation, TransferPass};
+
+        let mut pass = TransferPass::new(name.into());
+        pass.set_transfer_config(
+            TransferConfig::new().with_operation(TransferOperation::copy_buffer_whole(src, dst)),
+        );
+        let mut graph = RenderGraph::new();
+        graph.add_transfer_pass(pass);
+        graph
+    }
+
+    fn make_test_buffer(
+        device: &Arc<crate::device::GraphicsDevice>,
+    ) -> std::sync::Arc<crate::resources::Buffer> {
+        use crate::types::{BufferDescriptor, BufferUsage};
+        device
+            .create_buffer(&BufferDescriptor::new(
+                256,
+                BufferUsage::COPY_SRC | BufferUsage::COPY_DST,
+            ))
+            .unwrap()
+    }
+
+    #[test]
+    fn derives_edge_from_cross_graph_hazard() {
+        let instance = GraphicsInstance::new().unwrap();
+        let device = instance.create_device().unwrap();
+        let mut schedule = FrameSchedule::new(Arc::clone(&device), 0, None, Vec::new());
+
+        let x = make_test_buffer(&device);
+        let y = make_test_buffer(&device);
+        let z = make_test_buffer(&device);
+
+        // Graph A writes Y (copy X -> Y); graph B reads Y (copy Y -> Z): RAW.
+        let a = schedule.submit(make_copy_graph("a", x, Arc::clone(&y)));
+        let b = schedule.submit(make_copy_graph("b", y, z));
+
+        assert_eq!(schedule.derived_dependencies(), &[(a, b)]);
+        schedule.take_fences();
+    }
+
+    #[test]
+    fn no_edge_between_disjoint_graphs() {
+        let instance = GraphicsInstance::new().unwrap();
+        let device = instance.create_device().unwrap();
+        let mut schedule = FrameSchedule::new(Arc::clone(&device), 0, None, Vec::new());
+
+        let a_src = make_test_buffer(&device);
+        let a_dst = make_test_buffer(&device);
+        let b_src = make_test_buffer(&device);
+        let b_dst = make_test_buffer(&device);
+
+        schedule.submit(make_copy_graph("a", a_src, a_dst));
+        schedule.submit(make_copy_graph("b", b_src, b_dst));
+
+        assert!(schedule.derived_dependencies().is_empty());
+        schedule.take_fences();
+    }
+
+    #[test]
+    fn shared_read_only_source_derives_no_edge() {
+        let instance = GraphicsInstance::new().unwrap();
+        let device = instance.create_device().unwrap();
+        let mut schedule = FrameSchedule::new(Arc::clone(&device), 0, None, Vec::new());
+
+        // Both graphs read the same source (read-after-read): no hazard.
+        let src = make_test_buffer(&device);
+        let a_dst = make_test_buffer(&device);
+        let b_dst = make_test_buffer(&device);
+
+        schedule.submit(make_copy_graph("a", Arc::clone(&src), a_dst));
+        schedule.submit(make_copy_graph("b", src, b_dst));
+
+        assert!(schedule.derived_dependencies().is_empty());
+        schedule.take_fences();
+    }
+
+    #[test]
+    fn edges_derive_against_every_earlier_conflicting_submit() {
+        let instance = GraphicsInstance::new().unwrap();
+        let device = instance.create_device().unwrap();
+        let mut schedule = FrameSchedule::new(Arc::clone(&device), 0, None, Vec::new());
+
+        let x = make_test_buffer(&device);
+        let y = make_test_buffer(&device);
+        let z = make_test_buffer(&device);
+
+        // A writes Y; B writes Y (WAW with A); C reads Y (RAW with A and B).
+        let a = schedule.submit(make_copy_graph("a", Arc::clone(&x), Arc::clone(&y)));
+        let b = schedule.submit(make_copy_graph("b", x, Arc::clone(&y)));
+        let c = schedule.submit(make_copy_graph("c", y, z));
+
+        assert_eq!(schedule.derived_dependencies(), &[(a, b), (a, c), (b, c)]);
+        schedule.take_fences();
     }
 }

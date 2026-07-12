@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use ash::vk;
+use ash::vk::Handle as _;
 use gpu_allocator::vulkan::Allocator;
 use parking_lot::Mutex;
 
@@ -61,7 +62,7 @@ pub struct RetiredTrackerHandles {
     pub buffers: Vec<u64>,
 }
 
-use self::barriers::{BarrierBatch, BufferAccessTracker, BufferId};
+use self::barriers::{BarrierBatch, BufferAccessTracker, BufferId, QueueId, SubmitWaits};
 use self::layout::TextureId;
 
 /// Scratch buffers reused across draw commands to avoid per-draw heap allocations.
@@ -237,6 +238,36 @@ pub struct VulkanBackend {
     /// to the pool in [`advance_frame`](Self::advance_frame) once the slot's
     /// fence has signalled, so the GPU is guaranteed to be done with them.
     staging_belt: Mutex<staging::StagingBelt>,
+    /// Timeline semaphore for the graphics queue: every `execute_graph`
+    /// submit signals the next monotonically increasing value on it. Frame
+    /// fences are (this semaphore, value) pairs — see [`GpuFence::Vulkan`].
+    /// One timeline per queue; the async compute queue has its own.
+    queue_timeline: vk::Semaphore,
+    /// Next timeline value to signal (starts at 1; the semaphore's counter
+    /// starts at 0, so a fence carrying value 0 reads as already signaled).
+    timeline_next: AtomicU64,
+    /// The async compute queue, when the device exposes one (#47 phase 4).
+    /// `None` is the first-class single-queue mode: everything runs on the
+    /// graphics queue exactly as before.
+    async_compute: Option<AsyncComputeQueue>,
+}
+
+/// The async compute queue and its submission state (#47 phase 4).
+struct AsyncComputeQueue {
+    /// The queue itself.
+    queue: vk::Queue,
+    /// Its queue family (may equal the graphics family — second queue in the
+    /// same family; CONCURRENT sharing is then unnecessary but cross-queue
+    /// semaphores still are).
+    family: u32,
+    /// This queue's timeline semaphore (mirrors `queue_timeline`).
+    timeline: vk::Semaphore,
+    /// Next timeline value to signal on `timeline`.
+    timeline_next: AtomicU64,
+    /// Per-frame-slot command pools, bulk-reset in `advance_frame` alongside
+    /// the graphics ones (the same slot-fence waits guarantee this queue's
+    /// submits finished — the pipeline waits ALL of a slot's fences).
+    command_pools: [vk::CommandPool; MAX_FRAMES_IN_FLIGHT],
 }
 
 impl std::fmt::Debug for VulkanBackend {
@@ -269,12 +300,11 @@ impl VulkanBackend {
         // Select physical device
         let physical_device = device::select_physical_device(&instance)?;
 
-        // Find graphics queue family
-        let graphics_queue_family = device::find_graphics_queue_family(&instance, physical_device)?;
-
-        // Create logical device and queue
-        let device =
-            device::create_logical_device(&instance, physical_device, graphics_queue_family)?;
+        // Plan queues (graphics + async compute when available) and create
+        // the logical device.
+        let queue_plan = device::plan_queues(&instance, physical_device)?;
+        let graphics_queue_family = queue_plan.graphics_family;
+        let device = device::create_logical_device(&instance, physical_device, &queue_plan)?;
 
         let graphics_queue = unsafe { device.get_device_queue(graphics_queue_family, 0) };
 
@@ -298,6 +328,62 @@ impl VulkanBackend {
                 *pool = command::create_command_pool(&device, graphics_queue_family, false)?;
             }
             pools
+        };
+
+        // Per-queue timeline semaphores (initial counter 0). Every
+        // render-graph submit signals its queue's next value; frame fences
+        // wait on them.
+        let create_timeline = |device: &ash::Device| -> Result<vk::Semaphore, GraphicsError> {
+            let mut type_info = vk::SemaphoreTypeCreateInfo::default()
+                .semaphore_type(vk::SemaphoreType::TIMELINE)
+                .initial_value(0);
+            let info = vk::SemaphoreCreateInfo::default().push_next(&mut type_info);
+            unsafe { device.create_semaphore(&info, None) }.map_err(|e| {
+                GraphicsError::InitializationFailed(format!(
+                    "Failed to create queue timeline semaphore: {:?}",
+                    e
+                ))
+            })
+        };
+        let queue_timeline = create_timeline(&device)?;
+
+        // The async compute queue, when planned: its own timeline and
+        // per-slot command pools (a command pool is tied to one family and
+        // one recording thread's pools must not be shared across queues'
+        // submit streams anyway).
+        let async_compute = match queue_plan.async_compute {
+            Some((family, index)) => {
+                let queue = unsafe { device.get_device_queue(family, index) };
+                let timeline = create_timeline(&device)?;
+                let command_pools = {
+                    let mut pools = [vk::CommandPool::null(); MAX_FRAMES_IN_FLIGHT];
+                    for pool in &mut pools {
+                        *pool = command::create_command_pool(&device, family, false)?;
+                    }
+                    pools
+                };
+                Some(AsyncComputeQueue {
+                    queue,
+                    family,
+                    timeline,
+                    timeline_next: AtomicU64::new(1),
+                    command_pools,
+                })
+            }
+            None => None,
+        };
+
+        // Staging chunks must be CONCURRENT-shareable when transfer graphs
+        // can be routed to a distinct-family async compute queue.
+        let staging_belt = {
+            let mut belt = staging::StagingBelt::default();
+            belt.set_concurrent_families(
+                async_compute
+                    .as_ref()
+                    .filter(|ac| ac.family != graphics_queue_family)
+                    .map(|ac| [graphics_queue_family, ac.family]),
+            );
+            belt
         };
 
         // Load dynamic rendering extension
@@ -375,8 +461,27 @@ impl VulkanBackend {
             pipeline_manager,
             depth24_stencil8_format,
             encoder_scratch: Mutex::new(VulkanEncoderScratch::default()),
-            staging_belt: Mutex::new(staging::StagingBelt::default()),
+            staging_belt: Mutex::new(staging_belt),
+            queue_timeline,
+            timeline_next: AtomicU64::new(1),
+            async_compute,
         })
+    }
+
+    /// Queue family indices for CONCURRENT sharing, or `None` when EXCLUSIVE
+    /// suffices (no async compute queue, or it lives in the graphics family —
+    /// sharing modes only matter across *families*).
+    ///
+    /// With a distinct compute family, buffers and images are created
+    /// CONCURRENT across both families so cross-queue access needs no
+    /// queue-family ownership transfers — timeline semaphores alone carry the
+    /// synchronization (#47 design decision; EXCLUSIVE + QFOT is a possible
+    /// later optimization if profiling shows compression loss matters).
+    fn concurrent_families(&self) -> Option<[u32; 2]> {
+        self.async_compute
+            .as_ref()
+            .filter(|ac| ac.family != self.graphics_queue_family)
+            .map(|ac| [self.graphics_queue_family, ac.family])
     }
 
     /// Convert an engine texture format to the Vulkan format this device
@@ -514,13 +619,21 @@ impl VulkanBackend {
         let current = self.current_slot.load(Ordering::Relaxed);
         let oldest = (current + 1) % MAX_FRAMES_IN_FLIGHT;
 
-        // Reset the oldest slot's frame command pool, freeing all its command
-        // buffers at once. Safe: the slot's fence has been waited (GPU done).
+        // Reset the oldest slot's frame command pools (graphics and, when
+        // present, async compute), freeing all their command buffers at once.
+        // Safe: ALL of the slot's fences have been waited (GPU done on both
+        // queues).
         unsafe {
             let _ = self.device.reset_command_pool(
                 self.frame_command_pools[oldest],
                 vk::CommandPoolResetFlags::empty(),
             );
+            if let Some(async_compute) = &self.async_compute {
+                let _ = self.device.reset_command_pool(
+                    async_compute.command_pools[oldest],
+                    vk::CommandPoolResetFlags::empty(),
+                );
+            }
         }
 
         // Advance to next slot
@@ -654,21 +767,6 @@ impl VulkanBackend {
             ))
         })
     }
-}
-
-/// Returns whether any pass in the graph renders to the swapchain (surface)
-/// image. Such a graph's submit must be synchronized against acquire/present.
-fn graph_writes_swapchain(graph: &RenderGraph) -> bool {
-    graph.passes().iter().any(|pass| {
-        pass.as_graphics()
-            .and_then(|g| g.render_targets())
-            .is_some_and(|targets| {
-                targets
-                    .color_attachments
-                    .iter()
-                    .any(|attachment| matches!(attachment.target, RenderTarget::Surface { .. }))
-            })
-    })
 }
 
 /// Aspect mask for whole-image operations, derived from the format.
@@ -828,6 +926,19 @@ impl Drop for VulkanBackend {
             }
             self.device.destroy_command_pool(self.command_pool, None);
 
+            // Destroy the queue timeline semaphores. Outstanding `GpuFence`s
+            // cannot exist here: each holds an `Arc<GraphicsInstance>` that
+            // keeps this backend alive (#50).
+            self.device.destroy_semaphore(self.queue_timeline, None);
+
+            // Async compute queue resources, if present.
+            if let Some(async_compute) = &self.async_compute {
+                for &pool in &async_compute.command_pools {
+                    self.device.destroy_command_pool(pool, None);
+                }
+                self.device.destroy_semaphore(async_compute.timeline, None);
+            }
+
             // Destroy the staging belt (the device_wait_idle above
             // guarantees the GPU is done with every chunk).
             self.staging_belt
@@ -903,11 +1014,18 @@ impl VulkanBackend {
             "RING/MAP_WRITE buffer must be host-visible (see ADR-021); got GpuOnly"
         );
 
-        // Create buffer
-        let buffer_info = vk::BufferCreateInfo::default()
+        // Create buffer. CONCURRENT across graphics + async compute families
+        // when the latter exists (see `concurrent_families`).
+        let mut buffer_info = vk::BufferCreateInfo::default()
             .size(descriptor.size)
             .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let concurrent_families = self.concurrent_families();
+        if let Some(families) = &concurrent_families {
+            buffer_info = buffer_info
+                .sharing_mode(vk::SharingMode::CONCURRENT)
+                .queue_family_indices(families);
+        }
 
         let buffer = unsafe { self.device.create_buffer(&buffer_info, None) }.map_err(|e| {
             GraphicsError::ResourceCreationFailed(format!("Failed to create buffer: {:?}", e))
@@ -1038,8 +1156,9 @@ impl VulkanBackend {
             ),
         };
 
-        // Create image
-        let image_info = vk::ImageCreateInfo::default()
+        // Create image. CONCURRENT across graphics + async compute families
+        // when the latter exists (see `concurrent_families`).
+        let mut image_info = vk::ImageCreateInfo::default()
             .flags(flags)
             .image_type(image_type)
             .format(format)
@@ -1057,6 +1176,12 @@ impl VulkanBackend {
             .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
+        let concurrent_families = self.concurrent_families();
+        if let Some(families) = &concurrent_families {
+            image_info = image_info
+                .sharing_mode(vk::SharingMode::CONCURRENT)
+                .queue_family_indices(families);
+        }
 
         let image = unsafe { self.device.create_image(&image_info, None) }.map_err(|e| {
             GraphicsError::ResourceCreationFailed(format!("Failed to create image: {:?}", e))
@@ -1563,22 +1688,18 @@ impl VulkanBackend {
     }
 
     /// Create a fence for CPU-GPU synchronization.
+    ///
+    /// A "fence" is a wait value on a queue's timeline semaphore — no Vulkan
+    /// object is created. `signaled` picks the initial value: `0` (every
+    /// counter starts at 0, so trivially satisfied) or `u64::MAX` (never
+    /// satisfied until `execute_graph` stamps a real submit value). The
+    /// semaphore defaults to the graphics timeline; `execute_graph` re-stamps
+    /// it with the routed queue's timeline at submit.
     pub fn create_fence(&self, signaled: bool) -> Result<GpuFence, GraphicsError> {
-        let flags = if signaled {
-            vk::FenceCreateFlags::SIGNALED
-        } else {
-            vk::FenceCreateFlags::empty()
-        };
-
-        let fence_info = vk::FenceCreateInfo::default().flags(flags);
-
-        let fence = unsafe { self.device.create_fence(&fence_info, None) }.map_err(|e| {
-            GraphicsError::ResourceCreationFailed(format!("Failed to create fence: {:?}", e))
-        })?;
-
         Ok(GpuFence::Vulkan {
             device: self.device.clone(),
-            fence,
+            semaphore: AtomicU64::new(self.queue_timeline.as_raw()),
+            value: AtomicU64::new(if signaled { 0 } else { u64::MAX }),
         })
     }
 
@@ -1588,9 +1709,19 @@ impl VulkanBackend {
     /// or GPU lockups. Timeout and device loss are returned as errors — the
     /// caller must not recycle resources guarded by this fence in that case.
     pub fn wait_fence(&self, fence: &GpuFence) -> Result<(), GraphicsError> {
-        if let GpuFence::Vulkan { device, fence, .. } = fence {
+        if let GpuFence::Vulkan {
+            device,
+            semaphore,
+            value,
+        } = fence
+        {
+            let semaphores = [vk::Semaphore::from_raw(semaphore.load(Ordering::Acquire))];
+            let values = [value.load(Ordering::Acquire)];
+            let wait_info = vk::SemaphoreWaitInfo::default()
+                .semaphores(&semaphores)
+                .values(&values);
             unsafe {
-                match device.wait_for_fences(&[*fence], true, FENCE_WAIT_TIMEOUT_NS) {
+                match device.wait_semaphores(&wait_info, FENCE_WAIT_TIMEOUT_NS) {
                     Ok(()) => Ok(()),
                     Err(vk::Result::TIMEOUT) => Err(GraphicsError::Timeout(
                         "fence wait timed out after 10 s; GPU may be hung".into(),
@@ -1608,12 +1739,16 @@ impl VulkanBackend {
     }
 
     /// Check if a fence is signaled (non-blocking).
-    ///
-    /// `get_fence_status` returns `Ok(false)` for `VK_NOT_READY`, so the
-    /// success of the call alone does NOT mean the fence is signaled.
     pub fn is_fence_signaled(&self, fence: &GpuFence) -> bool {
-        if let GpuFence::Vulkan { device, fence, .. } = fence {
-            matches!(unsafe { device.get_fence_status(*fence) }, Ok(true))
+        if let GpuFence::Vulkan {
+            device,
+            semaphore,
+            value,
+        } = fence
+        {
+            let semaphore = vk::Semaphore::from_raw(semaphore.load(Ordering::Acquire));
+            unsafe { device.get_semaphore_counter_value(semaphore) }
+                .is_ok_and(|counter| counter >= value.load(Ordering::Acquire))
         } else {
             false
         }
@@ -1628,11 +1763,20 @@ impl VulkanBackend {
         fence: &GpuFence,
         timeout: std::time::Duration,
     ) -> Result<bool, GraphicsError> {
-        if let GpuFence::Vulkan { device, fence, .. } = fence {
-            // Convert Duration to nanoseconds for Vulkan
+        if let GpuFence::Vulkan {
+            device,
+            semaphore,
+            value,
+        } = fence
+        {
+            let semaphores = [vk::Semaphore::from_raw(semaphore.load(Ordering::Acquire))];
+            let values = [value.load(Ordering::Acquire)];
+            let wait_info = vk::SemaphoreWaitInfo::default()
+                .semaphores(&semaphores)
+                .values(&values);
             let timeout_ns = timeout.as_nanos() as u64;
             unsafe {
-                match device.wait_for_fences(&[*fence], true, timeout_ns) {
+                match device.wait_semaphores(&wait_info, timeout_ns) {
                     Ok(()) => Ok(true),
                     Err(vk::Result::TIMEOUT) => Ok(false),
                     Err(vk::Result::ERROR_DEVICE_LOST) => Err(GraphicsError::DeviceLost),
@@ -1660,23 +1804,28 @@ impl VulkanBackend {
     /// This always returns immediately after `vkQueueSubmit` — it does **not**
     /// block on GPU completion in either case.
     ///
-    /// - If `signal_fence` is provided: the submission signals that fence; the
-    ///   caller waits/polls it. Command buffers are queued for deferred freeing
-    ///   after the GPU finishes (per frame-in-flight slot).
-    /// - If `signal_fence` is `None`: submitted with a null fence. GPU lifetime
-    ///   of referenced resources is still guaranteed because the `RenderGraph`
-    ///   holds `Arc`s to them until the slot's frame fence is waited in
+    /// Every submit signals the queue timeline semaphore's next value.
+    ///
+    /// - If `signal_fence` is provided: the submit's timeline value is stamped
+    ///   into it, so the caller's waits/polls resolve against this submission.
+    /// - If `signal_fence` is `None`: the value is signaled but recorded
+    ///   nowhere. GPU lifetime of referenced resources is still guaranteed
+    ///   because the `RenderGraph` holds `Arc`s to them until the slot's frame
+    ///   fences are waited in
     ///   [`FramePipeline::begin_frame`](crate::pipeline::FramePipeline::begin_frame).
     ///
-    /// INVARIANT: exactly one graph is executed per frame, as one submit on the
-    /// single graphics queue. There are NO cross-graph GPU semaphores — the
-    /// only semaphores are the swapchain acquire/present handshake below.
-    /// Ordering between consecutive frames' graphs is provided entirely by the
-    /// persistent barrier trackers (`layout_tracker`, `buffer_tracker`), whose
-    /// `vkCmdPipelineBarrier`s synchronize across submissions *because they are
-    /// on one queue in submission order*. Adding a second queue or a second
-    /// per-frame submit would break this silently (pipeline barriers do not
-    /// cross queues) — see #47 before doing either.
+    /// # Queue routing (#47 phase 4)
+    ///
+    /// A graph is routed to the async compute queue only when it opted in
+    /// (`prefer_async_compute`), contains no graphics passes, and the device
+    /// actually has that queue — otherwise it runs on the graphics queue (the
+    /// first-class fallback). Ordering between submits is derived from
+    /// resource usage by the persistent trackers: same-queue hazards become
+    /// `vkCmdPipelineBarrier`s (valid across submits *within* one queue in
+    /// submission order), cross-queue hazards become timeline-semaphore waits
+    /// emitted on this submit (a pipeline barrier cannot cross queues). The
+    /// remaining binary semaphores are the swapchain acquire/present
+    /// handshake, on the graphics queue only.
     pub fn execute_graph(
         &self,
         graph: &RenderGraph,
@@ -1685,11 +1834,37 @@ impl VulkanBackend {
     ) -> Result<(), GraphicsError> {
         profile_scope!("vulkan_execute_graph");
 
-        // Allocate the frame's command buffer from the current slot's pool
-        // (reset wholesale when the slot is recycled).
+        // Route the graph. The swapchain handshake below is reachable only on
+        // the graphics route: a swapchain write needs a graphics pass, which
+        // disqualifies the graph from async routing.
+        let async_route = match &self.async_compute {
+            Some(ac) if graph.prefer_async_compute() && !graph.has_graphics_passes() => Some(ac),
+            _ => None,
+        };
+        let (queue_id, queue, queue_timeline, timeline_next) = match async_route {
+            Some(ac) => (
+                QueueId::AsyncCompute,
+                ac.queue,
+                ac.timeline,
+                &ac.timeline_next,
+            ),
+            None => (
+                QueueId::Graphics,
+                self.graphics_queue,
+                self.queue_timeline,
+                &self.timeline_next,
+            ),
+        };
+
+        // Allocate the frame's command buffer from the current slot's pool on
+        // the routed queue (reset wholesale when the slot is recycled).
         let slot = self.current_slot.load(Ordering::Relaxed);
+        let command_pool = match async_route {
+            Some(ac) => ac.command_pools[slot],
+            None => self.frame_command_pools[slot],
+        };
         let alloc_info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(self.frame_command_pools[slot])
+            .command_pool(command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
 
@@ -1708,8 +1883,22 @@ impl VulkanBackend {
             GraphicsError::Internal(format!("Failed to begin command buffer: {:?}", e))
         })?;
 
+        // Allocate this submit's timeline value up front: the trackers record
+        // it as each resource's last-access value while barriers are
+        // generated. Values allocated for failed submits leave a gap in the
+        // signal sequence, which is fine — a later submit's higher signal
+        // satisfies any wait on the gap value. (A gap value recorded in the
+        // trackers makes a dependent submit wait for work that never ran —
+        // over-synchronization, never corruption.)
+        let timeline_value = timeline_next.fetch_add(1, Ordering::Relaxed);
+
         // Get all passes from the graph
         let passes = graph.passes();
+
+        // Cross-queue timeline waits accumulated by the trackers: hazards
+        // against work last touched by the OTHER queue, resolved by waiting
+        // its timeline (pipeline barriers cannot cross queues).
+        let mut waits = SubmitWaits::default();
 
         // Process each pass in compiled order using pre-computed resource usages
         {
@@ -1723,7 +1912,13 @@ impl VulkanBackend {
 
                 // Generate barriers from pre-computed resource usage
                 barriers.clear();
-                self.generate_barriers_for_pass(&mut barriers, &pass_usages[i]);
+                self.generate_barriers_for_pass(
+                    &mut barriers,
+                    &pass_usages[i],
+                    queue_id,
+                    timeline_value,
+                    &mut waits,
+                );
                 barriers.submit(&self.device, cmd);
 
                 // Encode the pass
@@ -1736,60 +1931,99 @@ impl VulkanBackend {
             GraphicsError::Internal(format!("Failed to end command buffer: {:?}", e))
         })?;
 
-        // One render graph per frame: the only synchronization is the swapchain
-        // acquire/render-finished handshake below. There is no cross-graph
-        // semaphore ordering (a single submit per frame) — at most one
-        // wait/signal pair, held in fixed-size arrays (no per-frame Vecs).
+        // The binary semaphores are the swapchain acquire/render-finished
+        // handshake below (graphics queue only — a swapchain writer is never
+        // routed async). The pair exists once per frame and is consumed
+        // (`take`) by the single swapchain-writing graph — the scheduler
+        // enforces at most one such graph per frame.
         //
         // If this graph writes the acquired swapchain image, this submit must
         // wait on `image_available` (so it does not write the image before the
         // presentation engine releases it) and signal `image_render_finished`
         // (so present transitions/presents only after rendering completes).
-        let swapchain_pair = if graph_writes_swapchain(graph) {
+        let swapchain_pair = if graph.writes_swapchain() {
             self.take_swapchain_render_sync()
         } else {
             None
         };
-        let (vk_wait_semaphores, vk_signal_semaphores) = match swapchain_pair {
-            Some((image_available, image_render_finished)) => {
-                ([image_available], [image_render_finished])
+
+        // Waits: the optional binary swapchain acquire, plus the cross-queue
+        // timeline waits collected by the trackers. Cross-queue waits use an
+        // all-commands destination scope — that is what lets the trackers
+        // treat a waited-on write as fully visible on this queue.
+        let mut wait_semaphores = [vk::Semaphore::null(); 1 + barriers::QUEUE_COUNT];
+        let mut wait_values = [0u64; 1 + barriers::QUEUE_COUNT];
+        let mut wait_stage_masks =
+            [vk::PipelineStageFlags::ALL_COMMANDS; 1 + barriers::QUEUE_COUNT];
+        let mut wait_count = 0;
+        if let Some((image_available, _)) = swapchain_pair {
+            wait_semaphores[0] = image_available;
+            wait_values[0] = 0; // binary semaphore: value ignored
+            wait_stage_masks[0] = vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT;
+            wait_count = 1;
+        }
+        let other_queue_timelines = [
+            (QueueId::Graphics, self.queue_timeline),
+            (
+                QueueId::AsyncCompute,
+                self.async_compute
+                    .as_ref()
+                    .map_or(vk::Semaphore::null(), |ac| ac.timeline),
+            ),
+        ];
+        for (wait_queue, timeline) in other_queue_timelines {
+            if wait_queue == queue_id {
+                continue; // own-queue hazards are pipeline barriers, not waits
             }
-            None => ([vk::Semaphore::null()], [vk::Semaphore::null()]),
+            if let Some(value) = waits.get(wait_queue) {
+                debug_assert_ne!(
+                    timeline,
+                    vk::Semaphore::null(),
+                    "tracker emitted a wait on a queue that does not exist"
+                );
+                wait_semaphores[wait_count] = timeline;
+                wait_values[wait_count] = value;
+                wait_count += 1;
+            }
+        }
+
+        // Every submit signals its queue timeline's next value (in addition
+        // to the binary `image_render_finished` when this graph writes the
+        // swapchain). The value is stamped into `signal_fence` on success, so
+        // the frontend `Fence` waits on (timeline, value).
+        let (vk_signal_semaphores, signal_values, signal_count) = match swapchain_pair {
+            Some((_, image_render_finished)) => (
+                [image_render_finished, queue_timeline],
+                [0, timeline_value], // binary semaphore's value is ignored
+                2,
+            ),
+            None => (
+                [queue_timeline, vk::Semaphore::null()],
+                [timeline_value, 0],
+                1,
+            ),
         };
-        let wait_stage_masks = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-        let sem_count = usize::from(swapchain_pair.is_some());
 
-        // Get fence to signal
-        let fence = signal_fence.and_then(|f| {
-            if let GpuFence::Vulkan { fence, .. } = f {
-                // Reset fence before use
-                unsafe {
-                    let _ = self.device.reset_fences(&[*fence]);
-                }
-                Some(*fence)
-            } else {
-                None
-            }
-        });
-
-        // Submit command buffer with semaphores and fence
+        // Submit the command buffer with the semaphores
         {
             profile_scope!("queue_submit");
-            let mut submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
+            let mut timeline_info = vk::TimelineSemaphoreSubmitInfo::default()
+                .wait_semaphore_values(&wait_values[..wait_count])
+                .signal_semaphore_values(&signal_values[..signal_count]);
+            let mut submit_info = vk::SubmitInfo::default()
+                .command_buffers(&command_buffers)
+                .signal_semaphores(&vk_signal_semaphores[..signal_count])
+                .push_next(&mut timeline_info);
 
-            if sem_count > 0 {
+            if wait_count > 0 {
                 submit_info = submit_info
-                    .wait_semaphores(&vk_wait_semaphores[..sem_count])
-                    .wait_dst_stage_mask(&wait_stage_masks[..sem_count])
-                    .signal_semaphores(&vk_signal_semaphores[..sem_count]);
+                    .wait_semaphores(&wait_semaphores[..wait_count])
+                    .wait_dst_stage_mask(&wait_stage_masks[..wait_count]);
             }
 
             let submit_result = unsafe {
-                self.device.queue_submit(
-                    self.graphics_queue,
-                    &[submit_info],
-                    fence.unwrap_or(vk::Fence::null()),
-                )
+                self.device
+                    .queue_submit(queue, &[submit_info], vk::Fence::null())
             };
             if let Err(e) = submit_result {
                 // Nothing was enqueued: hand the swapchain semaphore pair back
@@ -1805,6 +2039,16 @@ impl VulkanBackend {
                     )),
                 });
             }
+        }
+
+        // Submit enqueued: this fence is now satisfied exactly when the
+        // routed queue's timeline reaches this submit's value.
+        if let Some(GpuFence::Vulkan {
+            semaphore, value, ..
+        }) = signal_fence
+        {
+            semaphore.store(queue_timeline.as_raw(), Ordering::Release);
+            value.store(timeline_value, Ordering::Release);
         }
 
         // No per-buffer freeing: the slot's pool is reset wholesale in
@@ -1824,6 +2068,9 @@ impl VulkanBackend {
         &self,
         batch: &mut BarrierBatch,
         usage: &crate::graph::resource_usage::PassResourceUsage,
+        queue: QueueId,
+        submit_value: u64,
+        waits: &mut SubmitWaits,
     ) {
         use crate::graph::resource_usage::TextureAccessMode;
 
@@ -1839,8 +2086,9 @@ impl VulkanBackend {
             // Key by the stable id, not the raw image handle (handle reuse after
             // destruction would otherwise alias a stale tracked layout).
             let texture_id = TextureId::from_raw(*id);
-            let current_layout = tracker.get_layout(texture_id);
             let required_layout = decl.access.to_layout();
+            let current_layout =
+                tracker.request_access(texture_id, required_layout, queue, submit_value, waits);
 
             // Determine aspect mask based on access mode and format
             let is_depth = matches!(
@@ -1858,7 +2106,13 @@ impl VulkanBackend {
                 vk::ImageAspectFlags::COLOR
             };
 
-            // Add barrier if layout change is needed
+            // Add barrier if layout change is needed (`request_access`
+            // already updated the tracked layout and recorded queue
+            // ownership). For a cross-queue transition the barrier's source
+            // scope refers to stages of THIS queue — where nothing touched
+            // the image — which is exactly right: availability of the other
+            // queue's writes comes from the timeline wait recorded in
+            // `waits`, and the transition itself is ordered after that wait.
             batch.add_image_barrier(
                 texture_id,
                 *image,
@@ -1866,9 +2120,6 @@ impl VulkanBackend {
                 required_layout,
                 aspect_mask,
             );
-
-            // Update tracked state
-            tracker.set_layout(texture_id, required_layout);
         }
 
         // Generate buffer barriers from per-buffer last-access tracking: the
@@ -1885,7 +2136,7 @@ impl VulkanBackend {
             let buffer_id = BufferId::from(*buffer);
 
             if let Some((src_stage, src_access)) =
-                buffer_tracker.request_access(buffer_id, decl.access)
+                buffer_tracker.request_access(buffer_id, decl.access, queue, submit_value, waits)
             {
                 batch.add_buffer_barrier(
                     buffer_id,
@@ -2232,11 +2483,18 @@ impl VulkanBackend {
         }
         let aspect_mask = image_aspect_mask(format);
 
-        // Create staging buffer
-        let staging_buffer_info = vk::BufferCreateInfo::default()
+        // Create staging buffer (CONCURRENT when an async compute family
+        // exists — a transfer graph routed there reads it on that queue)
+        let mut staging_buffer_info = vk::BufferCreateInfo::default()
             .size(data.len() as u64)
             .usage(vk::BufferUsageFlags::TRANSFER_SRC)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let concurrent_families = self.concurrent_families();
+        if let Some(families) = &concurrent_families {
+            staging_buffer_info = staging_buffer_info
+                .sharing_mode(vk::SharingMode::CONCURRENT)
+                .queue_family_indices(families);
+        }
 
         let staging_buffer = unsafe { self.device.create_buffer(&staging_buffer_info, None) }
             .map_err(|e| {
@@ -3070,10 +3328,16 @@ impl VulkanBackend {
         bytes: &[u8],
         label: &str,
     ) -> Result<(vk::Buffer, gpu_allocator::vulkan::Allocation), GraphicsError> {
-        let buffer_info = vk::BufferCreateInfo::default()
+        let mut buffer_info = vk::BufferCreateInfo::default()
             .size(bytes.len() as u64)
             .usage(vk::BufferUsageFlags::TRANSFER_SRC)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let concurrent_families = self.concurrent_families();
+        if let Some(families) = &concurrent_families {
+            buffer_info = buffer_info
+                .sharing_mode(vk::SharingMode::CONCURRENT)
+                .queue_family_indices(families);
+        }
         let buffer = unsafe { self.device.create_buffer(&buffer_info, None) }.map_err(|e| {
             GraphicsError::ResourceCreationFailed(format!("Failed to create staging buffer: {e:?}"))
         })?;

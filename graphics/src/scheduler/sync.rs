@@ -99,8 +99,10 @@ impl Fence {
 
     /// Create a new GPU-backed fence.
     ///
-    /// The fence is created in the signaled state initially (ready for first use).
-    /// When passed to `execute_graph`, the GPU will signal it upon completion.
+    /// The fence is created in the signaled state initially (ready for first
+    /// use). When passed to `execute_graph`, it is tied to that submission and
+    /// signals when the GPU completes it (on Vulkan the fence is a wait value
+    /// on the queue's timeline semaphore; on wgpu a submission-index state).
     pub(crate) fn new_gpu(
         instance: Arc<GraphicsInstance>,
     ) -> Result<Self, crate::error::GraphicsError> {
@@ -191,8 +193,9 @@ impl Fence {
                 signaled.store(false, Ordering::Release);
             }
             FenceInner::Gpu { .. } => {
-                // GPU fences are reset automatically when passed to execute_graph
-                // No manual reset needed - the backend handles this
+                // GPU fences re-arm automatically when passed to execute_graph
+                // (a fresh timeline value / submission index is assigned).
+                // No manual reset needed.
             }
         }
     }

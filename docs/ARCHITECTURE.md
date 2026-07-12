@@ -132,17 +132,22 @@ The rendering system is organized in four layers, from low-level to high-level:
 │  - Graceful shutdown (wait_idle)                                        │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                          FrameSchedule                                  │
-│  Executes the ONE render graph for the frame (one submit per frame).    │
-│  Cross-frame CPU/GPU overlap comes from frames-in-flight, so there are  │
-│  no cross-graph dependencies or GPU semaphores.                         │
+│  Submits the frame's render graphs (one queue submit per graph, any     │
+│  number per frame). Graphs run on the graphics queue unless they opt    │
+│  into async compute routing (set_prefer_async_compute — honored only    │
+│  for compute/transfer-only graphs on devices with a second queue).      │
+│  Ordering is automatic: same-queue hazards become tracker-emitted       │
+│  pipeline barriers (submission order), cross-queue hazards become       │
+│  timeline-semaphore waits (#47). At most one graph per frame may write  │
+│  the swapchain.                                                         │
 │                                                                         │
 │  Responsibilities:                                                      │
-│  - Compile and submit the single frame graph to the GPU                 │
-│  - Signal the frame fence on that submit                                │
+│  - Compile and submit each graph to the GPU (submit)                    │
+│  - Signal one fence per submit                                          │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                           RenderGraph                                   │
-│  The single graph for the frame: all passes (shadow, main, post,        │
-│  transfer/upload, UI overlay) and their dependencies.                   │
+│  A set of passes (shadow, main, post, transfer/upload, UI overlay)      │
+│  and their dependencies, submitted as one unit.                         │
 │                                                                         │
 │  Responsibilities:                                                      │
 │  - Store passes (graphics, transfer, compute)                           │
@@ -166,8 +171,9 @@ Different synchronization primitives are used at different levels:
 | Level | Primitive | Purpose |
 |-------|-----------|---------|
 | Pass → Pass | Barriers | Resource state transitions within a graph |
-| Graph → Graph | Semaphores | GPU-GPU sync within a frame |
-| Frame → Frame | Fences | CPU-GPU sync across frames |
+| Graph → Graph (same queue) | Submission order | Barriers from the persistent trackers are valid across submits within a queue |
+| Graph → Graph (cross-queue) | Timeline-semaphore waits | Emitted automatically by the queue-ownership trackers; resources are CONCURRENT-shared, no ownership transfers (#47) |
+| Frame → Frame | Fences (timeline values) | CPU-GPU sync across frames (one per submit) |
 
 ### Automatic Texture Layout Tracking (Vulkan Backend)
 

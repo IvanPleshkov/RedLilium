@@ -24,7 +24,7 @@
 //! |-------|------|---------|
 //! | Pass | [`GraphicsPass`], [`TransferPass`], [`ComputePass`] | Single unit of GPU work |
 //! | Graph | [`RenderGraph`] + [`PassHandle`] | Passes and dependencies for one task |
-//! | Schedule | [`FrameSchedule`] | Executes the one render graph per frame |
+//! | Schedule | [`FrameSchedule`] | Submits the frame's render graphs |
 //! | Pipeline | [`FramePipeline`] | Multiple frames in flight for CPU-GPU overlap |
 //!
 //! **Creation hierarchy:**
@@ -33,7 +33,9 @@
 //!
 //! **Synchronization primitives:**
 //! - Pass → Pass: Barriers (automatic, within the graph)
-//! - Frame → Frame: [`Fence`] (CPU-GPU sync across frames, one submit per frame)
+//! - Graph → Graph: Submission order on the single graphics queue (barriers
+//!   cross submits automatically; see `FrameSchedule::submit`)
+//! - Frame → Frame: [`Fence`] (CPU-GPU sync across frames, one per submit)
 //!
 //! For detailed architecture documentation, see `docs/ARCHITECTURE.md`.
 //!
@@ -56,7 +58,7 @@
 //!     let lighting = graph.add_graphics_pass(GraphicsPass::new("lighting".into()));
 //!     graph.add_dependency(lighting, geometry);
 //!
-//!     schedule.render(graph); // execute the single frame graph
+//!     schedule.submit(graph); // graphs execute in submission order
 //!     pipeline.end_frame(schedule);
 //! }
 //!
@@ -109,7 +111,7 @@ pub use mesh::{
 pub use pipeline::FramePipeline;
 pub use resize::{ResizeEvent, ResizeManager, ResizeStrategy};
 pub use resources::{Buffer, RingAllocation, RingBuffer, Sampler, Texture};
-pub use scheduler::{Fence, FenceStatus, FrameSchedule};
+pub use scheduler::{Fence, FenceStatus, FrameSchedule, SubmitHandle};
 pub use shader::ShaderLibrary;
 pub use swapchain::{PresentMode, Surface, SurfaceConfiguration, SurfaceTexture};
 pub use types::{
