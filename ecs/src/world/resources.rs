@@ -39,6 +39,28 @@ impl World {
         self.resources.remove::<T>()
     }
 
+    /// Moves a resource out of `from` into this world — the **same** `Arc`
+    /// and lock, so external handles stay valid. The entry's recorded source
+    /// and the type-identity record carry over. Returns `false` when `from`
+    /// has no such resource.
+    ///
+    /// The world-rebuild flows (editor game reload) use this to carry
+    /// shell-owned resources (remote transport, GPU-backed renderers) across
+    /// to the replacement world instead of recreating them.
+    pub fn adopt_resource_from<T: Resource>(&mut self, from: &mut World) -> bool {
+        let Some(entry) = from.resources.remove_entry::<T>() else {
+            return false;
+        };
+        let type_id = std::any::TypeId::of::<T>();
+        let source = from
+            .type_sources
+            .remove(&type_id)
+            .unwrap_or_else(|| self.resolve_type_source(type_id));
+        self.resources.insert_entry::<T>(entry);
+        self.type_sources.insert(type_id, source);
+        true
+    }
+
     /// Returns whether a resource of type T exists.
     pub fn has_resource<T: 'static>(&self) -> bool {
         self.resources.contains::<T>()
@@ -323,7 +345,8 @@ impl World {
             return;
         }
         self.insert_resource(Events::<T>::new());
-        self.event_update_fns.push(super::update_event_buffer::<T>);
+        self.event_update_fns
+            .push((self.current_source, super::update_event_buffer::<T>));
     }
 
     /// Advances all registered event queues (drops last frame's events,
@@ -338,7 +361,7 @@ impl World {
             return;
         }
         let fns = std::mem::take(&mut self.event_update_fns);
-        for f in &fns {
+        for (_, f) in &fns {
             f(self);
         }
         self.event_update_fns = fns;

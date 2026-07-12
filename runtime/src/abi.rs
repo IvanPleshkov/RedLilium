@@ -143,6 +143,10 @@ pub enum GameModuleError {
     /// The game entry symbol panicked while constructing the plugin. The host
     /// stays alive; the panic payload was dropped before the library unmapped.
     EntryPanicked,
+    /// Copying the cdylib to its unique temp path failed (see
+    /// [`GameModule::load_fresh_copy`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    TempCopy(std::io::Error),
 }
 
 impl std::fmt::Display for GameModuleError {
@@ -160,6 +164,10 @@ impl std::fmt::Display for GameModuleError {
             }
             GameModuleError::EntryPanicked => {
                 write!(f, "game cdylib panicked while constructing its plugin")
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            GameModuleError::TempCopy(e) => {
+                write!(f, "temp-copy of game cdylib failed: {e}")
             }
         }
     }
@@ -331,6 +339,43 @@ impl GameModule {
     /// The plugin to build into an [`App`](crate::App).
     pub fn plugin(&self) -> &dyn Plugin {
         self.plugin.as_ref()
+    }
+
+    /// [`load`](Self::load), but from a **unique temp copy** of `path` —
+    /// returns the module and the temp path (the caller removes the file
+    /// after the module drops).
+    ///
+    /// `dlopen` is path-keyed: loading a path that is already mapped just
+    /// bumps the refcount and aliases the *old* image, so a rebuilt cdylib at
+    /// the same path would never actually map fresh code. Copying to a unique
+    /// temp path first sidesteps that (and dyld's path caching) — this is the
+    /// loader every reload flow must use (#59).
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`load`](Self::load) — the copy changes where the
+    /// image maps from, not what it is.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub unsafe fn load_fresh_copy(
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<(Self, std::path::PathBuf), GameModuleError> {
+        let path = path.as_ref();
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("game");
+        // Unique per process AND per load: a reload within one process must
+        // not overwrite the temp file the still-mapped previous image came
+        // from.
+        static LOAD_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = LOAD_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("so");
+        let dst = std::env::temp_dir().join(format!(
+            "redlilium_game_{}_{n}_{stem}.{ext}",
+            std::process::id()
+        ));
+        std::fs::copy(path, &dst).map_err(GameModuleError::TempCopy)?;
+        let module = unsafe { Self::load(&dst) }.inspect_err(|_| {
+            let _ = std::fs::remove_file(&dst);
+        })?;
+        Ok((module, dst))
     }
 }
 

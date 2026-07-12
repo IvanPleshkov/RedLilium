@@ -132,6 +132,23 @@ pub fn create_editor_world(
     scene_view: &mut SceneViewState,
     aspect: f32,
 ) -> EditorWorld {
+    let mut ew = create_editor_world_base(params, engine, scene_view);
+    ew.editor_camera = spawn_editor_camera(&mut ew.world, aspect);
+    spawn_demo_scene(&mut ew.world, engine);
+    ew
+}
+
+/// [`create_editor_world`] minus the editor camera and the demo scene: all
+/// resources and schedules, **zero entities**. The game-reload path builds a
+/// replacement world with this and then restores every entity (editor camera
+/// included) from a whole-world snapshot — spawning anything here would
+/// duplicate it on restore. `editor_camera` is [`Entity::DANGLING`] until the
+/// caller resolves it.
+pub fn create_editor_world_base(
+    params: &EditorWorldParams,
+    engine: &EngineContext,
+    scene_view: &mut SceneViewState,
+) -> EditorWorld {
     let mut world = World::new();
     register_std_components(&mut world);
     redlilium_ecs::register_rendering_components(&mut world);
@@ -150,28 +167,6 @@ pub fn create_editor_world(
             ".redlilium/editor.port",
         ));
     }
-
-    // Resolve the demo meshes by path (fall back to generated if absent).
-    let (cube_source, sphere_source) = {
-        let asset_db = engine.asset_db().read();
-        (
-            asset_db
-                .guid_of(&AssetPath::new("std", "meshes/cube.rmesh"))
-                .map(MeshSource::File)
-                .unwrap_or_else(|| MeshSource::Generated(MeshGenerator::cube(0.5))),
-            asset_db
-                .guid_of(&AssetPath::new("std", "meshes/sphere.rmesh"))
-                .map(MeshSource::File)
-                .unwrap_or_else(|| MeshSource::Generated(MeshGenerator::sphere(0.5, 32, 16))),
-        )
-    };
-    // The std `default` material instance every demo primitive binds. Bound by
-    // its stable guid (not a path lookup) so it survives a rename/move of the
-    // asset and merely fails to resolve — rather than crashing the editor — if
-    // it is deleted.
-    let material_source = MaterialInstanceSource {
-        guid: Guid::stable("materials/default.matinst"),
-    };
 
     // Holds the per-frame render graph while the `Render` schedule runs.
     world.insert_resource(RenderSchedule::empty());
@@ -215,7 +210,30 @@ pub fn create_editor_world(
     let debug_drawer_handle = world.insert_resource(DebugDrawer::new());
     world.insert_resource(GridConfig::new());
 
-    // --- Editor camera ---
+    // Insert ActionQueue for editor action dispatch
+    world.insert_resource(ActionQueue::<World>::new());
+
+    // The name -> constructor registry over EditActions: the remote channel's
+    // generic `action` command builds from it (docs/REMOTE.md).
+    world.insert_resource(redlilium_ecs::ui::ActionRegistry::with_builtins());
+
+    // Insert Selection resource for tracking selected entities
+    world.insert_resource(redlilium_ecs::ui::Selection::new());
+
+    let schedules = build_editor_schedules(params.egui);
+
+    EditorWorld {
+        world,
+        schedules,
+        history: EditActionHistory::new(DEFAULT_MAX_UNDO),
+        editor_camera: Entity::DANGLING,
+        window_input: window_input_handle,
+        debug_drawer: debug_drawer_handle,
+    }
+}
+
+/// Spawn the editor camera (marked EDITOR) and return its entity.
+pub fn spawn_editor_camera(world: &mut World, aspect: f32) -> Entity {
     let editor_camera = world.spawn();
 
     let camera = Camera::perspective(FRAC_PI_4, aspect, 0.1, 500.0);
@@ -234,7 +252,33 @@ pub fn create_editor_world(
 
     // Mark the editor camera as an editor-only entity so it is hidden
     // from game queries and the world inspector by default.
-    redlilium_ecs::mark_editor(&mut world, editor_camera);
+    redlilium_ecs::mark_editor(world, editor_camera);
+    editor_camera
+}
+
+/// Spawn the demo scene (ground plane, cubes, spheres).
+fn spawn_demo_scene(world: &mut World, engine: &EngineContext) {
+    // Resolve the demo meshes by path (fall back to generated if absent).
+    let (cube_source, sphere_source) = {
+        let asset_db = engine.asset_db().read();
+        (
+            asset_db
+                .guid_of(&AssetPath::new("std", "meshes/cube.rmesh"))
+                .map(MeshSource::File)
+                .unwrap_or_else(|| MeshSource::Generated(MeshGenerator::cube(0.5))),
+            asset_db
+                .guid_of(&AssetPath::new("std", "meshes/sphere.rmesh"))
+                .map(MeshSource::File)
+                .unwrap_or_else(|| MeshSource::Generated(MeshGenerator::sphere(0.5, 32, 16))),
+        )
+    };
+    // The std `default` material instance every demo primitive binds. Bound by
+    // its stable guid (not a path lookup) so it survives a rename/move of the
+    // asset and merely fails to resolve — rather than crashing the editor — if
+    // it is deleted.
+    let material_source = MaterialInstanceSource {
+        guid: Guid::stable("materials/default.matinst"),
+    };
 
     // --- Demo scene entities ---
     // `cube_source` / `sphere_source` were resolved above (File assets from the
@@ -325,18 +369,13 @@ pub fn create_editor_world(
             .unwrap();
         world.insert(entity, Name::new("Textured Sphere")).unwrap();
     }
+}
 
-    // Insert ActionQueue for editor action dispatch
-    world.insert_resource(ActionQueue::<World>::new());
-
-    // The name -> constructor registry over EditActions: the remote channel's
-    // generic `action` command builds from it (docs/REMOTE.md).
-    world.insert_resource(redlilium_ecs::ui::ActionRegistry::with_builtins());
-
-    // Insert Selection resource for tracking selected entities
-    world.insert_resource(redlilium_ecs::ui::Selection::new());
-
-    // --- Setup schedules ---
+/// Build the editor's schedule graph. Pure of world state — the game-reload
+/// path calls this to stand up a fresh `Schedules` (dropping the previous
+/// generation's game systems wholesale) and then re-runs `Plugin::build`
+/// against it.
+pub fn build_editor_schedules(egui: bool) -> Schedules {
     let mut schedules = Schedules::new();
     // The editor opens in editor mode (PlayState::Stopped): game schedules are
     // inactive, so editor-only systems (grid, gizmos) run. Play/Stop transitions
@@ -399,7 +438,7 @@ pub fn create_editor_world(
     // egui composites on top of the scene/debug passes; it reads the last
     // CameraTarget writer (ScenePass) to depend on it, so order it last.
     // The headless shell has no window to composite onto and skips it.
-    if params.egui {
+    if egui {
         schedules.get_mut::<Render>().add(EguiRender);
         schedules
             .get_mut::<Render>()
@@ -465,14 +504,7 @@ pub fn create_editor_world(
     // per-frame GPU-sync ECS systems (UpdatePerEntityUniforms,
     // InitializeRenderEntities, SyncMaterialUniforms) in the editor schedule.
 
-    EditorWorld {
-        world,
-        schedules,
-        history: EditActionHistory::new(DEFAULT_MAX_UNDO),
-        editor_camera,
-        window_input: window_input_handle,
-        debug_drawer: debug_drawer_handle,
-    }
+    schedules
 }
 
 /// Write the mount's records to its local `<dir>/assets.db` (RON, mount-relative).

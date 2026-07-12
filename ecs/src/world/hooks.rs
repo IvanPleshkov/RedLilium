@@ -109,7 +109,8 @@ impl World {
         &mut self,
         handler: impl Fn(&mut World, Entity) + Send + Sync + 'static,
     ) {
-        self.observers.add_on_add::<T>(handler);
+        let source = self.current_source;
+        self.observers.add_on_add::<T>(source, handler);
     }
 
     /// Registers a deferred observer that fires on every insertion of
@@ -120,7 +121,8 @@ impl World {
         &mut self,
         handler: impl Fn(&mut World, Entity) + Send + Sync + 'static,
     ) {
-        self.observers.add_on_insert::<T>(handler);
+        let source = self.current_source;
+        self.observers.add_on_insert::<T>(source, handler);
     }
 
     /// Registers a deferred observer that fires when component `T` is
@@ -133,7 +135,8 @@ impl World {
         &mut self,
         handler: impl Fn(&mut World, Entity) + Send + Sync + 'static,
     ) {
-        self.observers.add_on_remove::<T>(handler);
+        let source = self.current_source;
+        self.observers.add_on_remove::<T>(source, handler);
     }
 
     /// Drains and fires all pending observer triggers.
@@ -177,7 +180,7 @@ impl World {
             world.resource_mut::<Triggers<OnAdd<T>>>().push(entity);
         });
         self.trigger_swap_fns
-            .push(super::swap_trigger_buffer::<OnAdd<T>>);
+            .push((self.current_source, super::swap_trigger_buffer::<OnAdd<T>>));
     }
 
     /// Enables trigger collection for `OnInsert<T>`.
@@ -196,8 +199,10 @@ impl World {
         self.observe_insert::<T>(|world, entity| {
             world.resource_mut::<Triggers<OnInsert<T>>>().push(entity);
         });
-        self.trigger_swap_fns
-            .push(super::swap_trigger_buffer::<OnInsert<T>>);
+        self.trigger_swap_fns.push((
+            self.current_source,
+            super::swap_trigger_buffer::<OnInsert<T>>,
+        ));
     }
 
     /// Enables trigger collection for `OnRemove<T>`.
@@ -216,8 +221,10 @@ impl World {
         self.observe_remove::<T>(|world, entity| {
             world.resource_mut::<Triggers<OnRemove<T>>>().push(entity);
         });
-        self.trigger_swap_fns
-            .push(super::swap_trigger_buffer::<OnRemove<T>>);
+        self.trigger_swap_fns.push((
+            self.current_source,
+            super::swap_trigger_buffer::<OnRemove<T>>,
+        ));
     }
 
     /// Swaps all reactive trigger buffers.
@@ -233,7 +240,7 @@ impl World {
             return;
         }
         let fns = std::mem::take(&mut self.trigger_swap_fns);
-        for f in &fns {
+        for (_, f) in &fns {
             f(self);
         }
         self.trigger_swap_fns = fns;

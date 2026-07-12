@@ -55,6 +55,7 @@ const COMMANDS: &[&str] = &[
     "spawn_prefab",
     "pick",
     "pick_rect",
+    "reload_game",
 ];
 
 /// Per-editor remote protocol state (parked writes/waits, screenshot job).
@@ -64,6 +65,9 @@ pub struct RemoteCommands {
     screenshot: Option<ScreenshotJob>,
     pick: Option<PickJob>,
     shutdown: bool,
+    /// A game-module reload was requested; the shell executes it between
+    /// frames (dispatch cannot — the reload replaces the whole world).
+    reload_game: bool,
 }
 
 impl RemoteCommands {
@@ -77,6 +81,12 @@ impl RemoteCommands {
     /// exit (the headless loop breaks; the windowed editor closes the window).
     pub fn take_shutdown(&mut self) -> bool {
         std::mem::take(&mut self.shutdown)
+    }
+
+    /// Take the `reload_game` request, if one arrived. The shell runs the
+    /// reload (see `game_host::reload_game`) between frames.
+    pub fn take_reload(&mut self) -> bool {
+        std::mem::take(&mut self.reload_game)
     }
 }
 
@@ -782,6 +792,14 @@ fn dispatch(
         }
         "shutdown" => {
             rc.shutdown = true;
+            send(world, conn, &OkResp { id, ok: true });
+        }
+        // Queue a game-module warm reload; the shell executes it between
+        // frames (the reload replaces the whole world, which dispatch cannot
+        // do from inside it). `ok: true` means *queued* — the outcome lands
+        // in the editor log. Requires a hosted game and the Stopped state.
+        "reload_game" => {
+            rc.reload_game = true;
             send(world, conn, &OkResp { id, ok: true });
         }
         // The generic path: any action in the ActionRegistry, invoked by name

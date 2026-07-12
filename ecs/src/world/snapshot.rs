@@ -16,6 +16,8 @@ use super::World;
 
 /// Type-erased capture/restore hooks for one registered snapshot resource.
 pub(crate) struct SnapshotResourceEntry {
+    /// The registration source (game-module unloads purge by it).
+    pub(crate) source: crate::type_identity::SourceId,
     /// Reads the resource (if present) and serializes it. Returns `Ok(None)`
     /// when the resource type is registered but not currently in the world.
     capture: fn(&World) -> Result<Option<SerializedResource>, SerializeError>,
@@ -60,9 +62,11 @@ impl World {
     /// insert the resource. A registered-but-absent resource is simply skipped
     /// at capture time.
     pub fn register_snapshot_resource<T: SnapshotResource>(&mut self) {
+        let source = self.current_source;
         self.snapshot_resources
             .entry(T::NAME)
             .or_insert_with(|| SnapshotResourceEntry {
+                source,
                 capture: capture_snapshot_resource::<T>,
                 restore: restore_snapshot_resource::<T>,
             });

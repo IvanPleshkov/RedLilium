@@ -91,7 +91,7 @@ pub trait PlayModeAware: Resource {
 }
 
 /// A single type-erased resource entry.
-struct ResourceEntry {
+pub(crate) struct ResourceEntry {
     /// The resource value, stored as `Arc<RwLock<dyn Resource>>`.
     handle: Arc<RwLock<dyn Resource>>,
     type_name: &'static str,
@@ -181,6 +181,29 @@ impl Resources {
     /// Removes a resource, returning the `Arc<RwLock<dyn Resource>>` if present.
     pub fn remove<T: 'static>(&mut self) -> Option<Arc<RwLock<dyn Resource>>> {
         self.entries.remove(&TypeId::of::<T>()).map(|e| e.handle)
+    }
+
+    /// Removes and returns the whole entry (handle + recorded source) for `T`.
+    /// Pairs with [`insert_entry`](Self::insert_entry) to move a resource
+    /// between worlds without touching its `Arc` (same value, same lock).
+    pub(crate) fn remove_entry<T: 'static>(&mut self) -> Option<ResourceEntry> {
+        self.entries.remove(&TypeId::of::<T>())
+    }
+
+    /// Inserts a previously removed entry under `T`'s `TypeId`, preserving
+    /// its handle and recorded source. See [`remove_entry`](Self::remove_entry).
+    pub(crate) fn insert_entry<T: 'static>(&mut self, entry: ResourceEntry) {
+        self.entries.insert(TypeId::of::<T>(), entry);
+    }
+
+    /// Removes every resource whose entry was recorded under `source`,
+    /// returning how many were dropped. Game-module unload: the resources'
+    /// drop glue lives in the module's image, so this must run while the
+    /// module is still mapped.
+    pub(crate) fn remove_by_source(&mut self, source: crate::type_identity::SourceId) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|_, e| e.source != source);
+        before - self.entries.len()
     }
 
     /// Returns whether a resource of type T exists.
