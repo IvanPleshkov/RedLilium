@@ -27,9 +27,10 @@ struct GameState {
     /// Current size of the main camera's render target.
     target_size: (u32, u32),
     color_format: TextureFormat,
-    /// Plugin registry for lifecycle cleanup (on_stop, on_unload).
-    /// Host-owned to enforce drop order: plugin drops before dylib unload.
-    plugins: Vec<Box<dyn crate::Plugin>>,
+    /// Plugin module: owns plugin(s) + dylib library handle.
+    /// Field order is load-bearing: app drops first, module drops last.
+    /// This ensures plugin drop glue runs while dylib is still mapped (ADR-020, #45).
+    module: crate::GameModule,
 }
 
 pub(crate) struct RuntimeHandler<P: Plugin + 'static> {
@@ -66,9 +67,10 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
         let blit = PresentBlit::new(ctx.device(), ctx.surface_format());
         let window_input = app.window_input();
 
-        // Collect plugin for lifecycle callbacks (on_stop, on_unload).
-        // Host-owned registry to enforce drop order.
-        let plugins = vec![Box::new(plugin) as Box<dyn crate::Plugin>];
+        // Create GameModule: owns plugin(s) and (eventually) dylib library handle.
+        // For static linking: _library is None; for dynamic loading it holds libloading::Library.
+        // Field order in GameState ensures: app drops first, module drops last (drop order enforced).
+        let module = crate::GameModule::from_static(Box::new(plugin) as Box<dyn crate::Plugin>);
 
         self.state = Some(GameState {
             _engine: engine,
@@ -78,7 +80,7 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
             blit,
             target_size: (0, 0),
             color_format: ctx.surface_format(),
-            plugins,
+            module,
         });
     }
 
@@ -106,7 +108,8 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
         };
 
         if should_stop {
-            for plugin in &state.plugins {
+            let plugins = state.module.plugins();
+            for plugin in plugins {
                 // Catch panics in plugin cleanup; one plugin's error shouldn't
                 // block others from running their cleanup.
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -115,8 +118,9 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
                     Ok(()) => {}
                     Err(_payload) => {
                         log::error!("plugin.on_stop panicked; continuing to next plugin");
-                        // Payload is dropped here, inside the closure's scope, before
-                        // any unwinding might propagate.
+                        // CRITICAL: Payload's drop glue may live in dylib.
+                        // It drops here at end of match arm, not inside closure.
+                        // Must drop BEFORE dylib unload (guaranteed by prepare_for_reload sequencing).
                     }
                 }
             }
@@ -219,11 +223,14 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
 }
 
 impl<P: Plugin + 'static> RuntimeHandler<P> {
-    /// Phase 3: Prepare for warm-restart reload. Sequence:
-    /// 1. Loop plugins: call on_unload(&mut app) with panic catching
-    /// 2. Capture scene snapshot
+    /// Phase 3: Prepare for warm-restart reload. Sequence (Fable-corrected):
+    /// 1. Capture scene snapshot (FIRST, captures pre-cleanup running state)
+    /// 2. Loop plugins: call on_unload(&mut app) with panic catching (after snapshot)
     /// 3. Drop app (triggers World drop, clears PlayTasks, cancels task tokens)
-    /// 4. Quiesce ComputePool until all tasks complete (timeout: 5s)
+    /// 4. Quiesce ComputePool until all tasks complete (timeout: 5s, AFTER app drop)
+    ///
+    /// CRITICAL: If quiesce times out, ABORT RELOAD (fail closed). Leaking the dylib
+    /// is safer than unmapping it with tasks still running.
     ///
     /// Returns the captured snapshot. Caller then unloads dylib and reloads.
     #[allow(dead_code)] // Will be called when reload is requested via remote
@@ -237,50 +244,49 @@ impl<P: Plugin + 'static> RuntimeHandler<P> {
             ));
         };
 
-        // Phase 3a: Plugin unload cleanup (before World drop)
-        for plugin in &state.plugins {
+        // Phase 3a: Capture scene snapshot FIRST (captures pre-cleanup running state)
+        let snapshot = state.app.capture()?;
+
+        // Phase 3b: Plugin unload cleanup (after snapshot, before World drop)
+        let plugins = state.module.plugins();
+        for plugin in plugins {
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 plugin.on_unload(&mut state.app)
             })) {
                 Ok(()) => {}
                 Err(_payload) => {
                     log::error!("plugin.on_unload panicked; continuing to next plugin");
+                    // CRITICAL: Payload's drop glue may live in dylib.
+                    // It drops here at end of match arm. Must drop BEFORE dylib unload.
                 }
             }
         }
 
-        // Phase 3b: Capture snapshot (while World is still live)
-        let snapshot = state.app.capture()?;
-
         // Phase 3c: Drop app (World drop triggers PlayTasks cleanup + token cancellation)
-        // NOTE: This is a placeholder for the actual implementation. In the real reload flow,
-        // the app would be dropped here explicitly before proceeding to quiesce. For now,
-        // the app lives in state and will be dropped when state is dropped.
+        // When state goes out of scope at the end of this function, App drops, which
+        // triggers World drop and PlayTasks token cancellation.
 
         // Phase 3d: Task quiescence (block until all tasks complete or timeout)
-        // After World drop, tokens are cancelled. Now quiesce the pool to wait
-        // for tasks to actually finish before we unload dylib.
+        // CRITICAL: Only NOW, after World drop cancels tokens, do tasks finish.
+        // Before World drop, long-lived tasks may legitimately still be running.
         use std::time::Duration;
-        match &state.runner {
+        let quiesce_result = match &state.runner {
             redlilium_ecs::EcsRunner::SingleThread(r) => {
-                let elapsed = r.compute().quiesce(Duration::from_secs(5));
-                if elapsed >= Duration::from_secs(5) {
-                    log::warn!(
-                        "Task quiescence timeout: some plugin tasks may still be executing. \
-                         Unloading dylib now risks UB if tasks try to jump back into unloaded code."
-                    );
-                }
+                r.compute().quiesce(Duration::from_secs(5))
             }
             #[cfg(not(target_arch = "wasm32"))]
-            redlilium_ecs::EcsRunner::MultiThread(r) => {
-                let elapsed = r.compute().quiesce(Duration::from_secs(5));
-                if elapsed >= Duration::from_secs(5) {
-                    log::warn!(
-                        "Task quiescence timeout: some plugin tasks may still be executing. \
-                         Unloading dylib now risks UB if tasks try to jump back into unloaded code."
-                    );
-                }
-            }
+            redlilium_ecs::EcsRunner::MultiThread(r) => r.compute().quiesce(Duration::from_secs(5)),
+        };
+
+        if quiesce_result >= Duration::from_secs(5) {
+            log::error!(
+                "Task quiescence timeout: some plugin tasks still executing after 5s. \
+                 Unloading dylib now would cause UB (tasks jump into unmapped memory). \
+                 ABORTING RELOAD and leaking dylib (bounded memory leak vs process UB)."
+            );
+            return Err(redlilium_ecs::serialize::SerializeError::FormatError(
+                "Task quiescence timeout — reload aborted to prevent UB".to_string(),
+            ));
         }
 
         Ok(snapshot)

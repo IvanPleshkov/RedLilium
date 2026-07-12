@@ -209,6 +209,12 @@ impl GameModule {
         }
     }
 
+    /// Return a slice of plugins in this module.
+    /// Currently single-plugin; extends to multi-plugin later.
+    pub fn plugins(&self) -> &[Box<dyn Plugin>] {
+        std::slice::from_ref(&self.plugin)
+    }
+
     /// Load a game cdylib from `path`, gating on the ABI fingerprint.
     ///
     /// Sequence: `dlopen` the library → call the **C-ABI** fingerprint symbol
