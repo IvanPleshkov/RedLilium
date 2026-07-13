@@ -1,4 +1,4 @@
-//! Texture types and descriptors.
+﻿//! Texture types and descriptors.
 
 use super::Extent3d;
 use bitflags::bitflags;
@@ -46,6 +46,17 @@ pub struct TextureDescriptor {
     pub format: TextureFormat,
     /// Usage flags.
     pub usage: TextureUsage,
+    /// Whether this texture may be accessed by BOTH the graphics queue and
+    /// the async compute queue (#88).
+    ///
+    /// Declared textures are created `VK_SHARING_MODE_CONCURRENT` on devices
+    /// with a distinct compute queue family, which can cost framebuffer
+    /// compression (DCC) on some hardware; undeclared textures stay
+    /// `EXCLUSIVE` and keep compression, but a graph that touches one is
+    /// never routed to the async compute queue (the async hint falls back to
+    /// the graphics queue). Buffers need no declaration — compression does
+    /// not apply to them and they are always cross-queue-capable.
+    pub cross_queue: bool,
 }
 
 impl TextureDescriptor {
@@ -59,6 +70,7 @@ impl TextureDescriptor {
             dimension: TextureDimension::D2,
             format,
             usage,
+            cross_queue: false,
         }
     }
 
@@ -75,6 +87,7 @@ impl TextureDescriptor {
             dimension: TextureDimension::Cube,
             format,
             usage,
+            cross_queue: false,
         }
     }
 
@@ -97,6 +110,7 @@ impl TextureDescriptor {
             dimension: TextureDimension::D2Array,
             format,
             usage,
+            cross_queue: false,
         }
     }
 
@@ -116,6 +130,7 @@ impl TextureDescriptor {
             dimension: TextureDimension::D3,
             format,
             usage,
+            cross_queue: false,
         }
     }
 
@@ -140,6 +155,13 @@ impl TextureDescriptor {
     /// Set the texture dimension.
     pub fn with_dimension(mut self, dimension: TextureDimension) -> Self {
         self.dimension = dimension;
+        self
+    }
+
+    /// Declare that this texture may be accessed by both the graphics and
+    /// the async compute queue (see the `cross_queue` field).
+    pub fn with_cross_queue(mut self, cross_queue: bool) -> Self {
+        self.cross_queue = cross_queue;
         self
     }
 
@@ -170,6 +192,7 @@ impl Default for TextureDescriptor {
             dimension: TextureDimension::default(),
             format: TextureFormat::default(),
             usage: TextureUsage::empty(),
+            cross_queue: false,
         }
     }
 }

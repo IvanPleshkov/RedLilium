@@ -134,7 +134,7 @@ impl TabViewer for EditorTabViewer<'_> {
                     ui.painter().rect_stroke(
                         rect,
                         egui::CornerRadius::ZERO,
-                        egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 130, 230)),
+                        egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(70, 130, 230)),
                         egui::StrokeKind::Outside,
                     );
                 }

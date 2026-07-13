@@ -544,12 +544,15 @@ impl TextureLayoutTracker {
     /// value `submit_value`, requiring `layout`.
     ///
     /// Returns the texture's previous layout (the transition source for the
-    /// barrier batch) and updates the tracked layout. Cross-queue hazards —
-    /// the last write came from another queue, or this is a write and other
-    /// queues have read since the last write — are pushed into `waits` as
-    /// timeline waits; performed with an all-commands scope they make the
-    /// prior access available and visible here, so the caller's layout
-    /// transition barrier needs no cross-queue source scope.
+    /// barrier batch) plus whether the last write came from ANOTHER queue,
+    /// and updates the tracked layout. Cross-queue hazards — the last write
+    /// came from another queue, or this is a write and other queues have read
+    /// since the last write — are pushed into `waits` as timeline waits;
+    /// performed with an all-commands scope they make the prior access
+    /// available and visible here, so the caller's layout transition barrier
+    /// must use an EMPTY source scope on this queue (the flag says when): the
+    /// writer's stages belong to the other queue and may not even exist on
+    /// this queue's family (VUID-vkCmdPipelineBarrier-srcStageMask-06461).
     pub fn request_access(
         &mut self,
         id: TextureId,
@@ -557,15 +560,20 @@ impl TextureLayoutTracker {
         queue: super::barriers::QueueId,
         submit_value: u64,
         waits: &mut super::barriers::SubmitWaits,
-    ) -> TextureLayout {
+    ) -> (TextureLayout, bool) {
         let state = self.layouts.entry(id).or_default();
         let is_write = layout.is_write();
 
-        if let Some((write_queue, write_value)) = state.last_write_submit
-            && write_queue != queue
-        {
-            waits.add(write_queue, write_value);
-        }
+        // Whether the last write came from another queue: its hazard is
+        // resolved by a timeline wait, and its stage/access scopes are
+        // meaningless on this queue (mirrors BufferAccessTracker).
+        let cross_queue_write = match state.last_write_submit {
+            Some((write_queue, write_value)) if write_queue != queue => {
+                waits.add(write_queue, write_value);
+                true
+            }
+            _ => false,
+        };
 
         if is_write {
             for (queue_index, read) in state.read_submits.iter().enumerate() {
@@ -587,7 +595,10 @@ impl TextureLayoutTracker {
             *slot = Some(slot.map_or(submit_value, |v| v.max(submit_value)));
         }
 
-        std::mem::replace(&mut state.layout, layout)
+        (
+            std::mem::replace(&mut state.layout, layout),
+            cross_queue_write,
+        )
     }
 
     /// Remove a destroyed texture's entry (called from the retirement drain
@@ -610,7 +621,7 @@ mod tests {
 
         // Write then read on the graphics queue: layout transitions returned,
         // no cross-queue waits.
-        let old = tracker.request_access(
+        let (old, cross_queue) = tracker.request_access(
             id,
             TextureLayout::ColorAttachment,
             QueueId::Graphics,
@@ -618,7 +629,8 @@ mod tests {
             &mut waits,
         );
         assert_eq!(old, TextureLayout::Undefined);
-        let old = tracker.request_access(
+        assert!(!cross_queue);
+        let (old, cross_queue) = tracker.request_access(
             id,
             TextureLayout::ShaderReadOnly,
             QueueId::Graphics,
@@ -626,6 +638,7 @@ mod tests {
             &mut waits,
         );
         assert_eq!(old, TextureLayout::ColorAttachment);
+        assert!(!cross_queue);
         assert!(waits.is_empty());
         assert_eq!(tracker.get_layout(id), TextureLayout::ShaderReadOnly);
     }
@@ -647,9 +660,10 @@ mod tests {
         assert!(waits.is_empty());
 
         // Async compute samples it: wait on graphics value 4, transition
-        // source is the real previous layout.
+        // source is the real previous layout, and the cross-queue flag tells
+        // the caller to use an empty source scope on this queue.
         let mut waits = SubmitWaits::default();
-        let old = tracker.request_access(
+        let (old, cross_queue) = tracker.request_access(
             id,
             TextureLayout::ShaderReadOnly,
             QueueId::AsyncCompute,
@@ -657,6 +671,7 @@ mod tests {
             &mut waits,
         );
         assert_eq!(old, TextureLayout::ColorAttachment);
+        assert!(cross_queue);
         assert_eq!(waits.get(QueueId::Graphics), Some(4));
     }
 

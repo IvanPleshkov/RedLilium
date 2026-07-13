@@ -61,7 +61,7 @@ pub fn asset_drop_target(
     ui.painter().rect_stroke(
         response.rect,
         2.0,
-        egui::Stroke::new(2.0, stroke_color),
+        egui::Stroke::new(2.0_f32, stroke_color),
         egui::StrokeKind::Outside,
     );
     if !accepted {

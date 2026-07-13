@@ -48,6 +48,12 @@ web-sys = { workspace = true, features = ["Window", "Document", "Element"] }
 name = "window_demo"
 path = "src/bin/window_demo.rs"
 
+# Async compute overlap harness for GPU profiling (#47 phase 4 / #82): needs
+# a window and ideally a dedicated compute queue, so it is run by hand.
+[[bin]]
+name = "async_overlap_demo"
+path = "src/bin/async_overlap_demo.rs"
+
 [[bin]]
 name = "pbr_ibl_demo"
 path = "src/bin/pbr_ibl/main.rs"

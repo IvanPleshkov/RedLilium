@@ -7,6 +7,9 @@ use winit::window::Window;
 /// Actions that can be triggered from the menu.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuAction {
+    // Constructed only by the native macOS menu; the egui fallback has no
+    // About handler yet (mirrors CloseWindow, which is non-macOS-only).
+    #[allow(dead_code)]
     About,
     Save,
     Undo,

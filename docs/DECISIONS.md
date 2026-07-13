@@ -1676,3 +1676,89 @@ identity**:
 - #47: automatic graph ordering makes multi-camera safe
 - #6: per-camera quality = system variant axes (future)
 - #2: scene save/load consumes the serializable spec
+
+## ADR-030: Per-Resource Sharing Mode for Cross-Queue Textures
+
+**Date**: 2026-07-13
+**Status**: Accepted
+
+### Context
+
+Phase 4 of #47 created **every** buffer and image `VK_SHARING_MODE_CONCURRENT`
+whenever the device exposes a distinct async compute family, so cross-queue
+access needs no queue-family ownership transfers (QFOT). CONCURRENT images can
+cost framebuffer compression (DCC) on AMD hardware — the canonical guidance
+(GPUOpen's DOOM article, GCN era) reports a ~3% whole-frame win from EXCLUSIVE
+sharing. Research for #88 found: the ecosystem avoids full QFOT (Granite, AnKi,
+vkd3d/D3D12 — D3D12 has no QFOT concept at all); `VK_KHR_maintenance9` (2025)
+makes QFOT optional where the driver reports it unnecessary; but on Windows the
+RDNA1/2 driver branch no longer receives new Vulkan extensions, so ~6% of the
+Steam fleet (frozen GCN + Windows RDNA1/2) will never have maintenance9.
+
+### Decision
+
+1. **Textures are EXCLUSIVE by default.** `TextureDescriptor::cross_queue`
+   (builder: `with_cross_queue`) declares a texture as accessible by both the
+   graphics and the async compute queue; only declared textures are created
+   CONCURRENT (and only when a distinct compute family exists). This recovers
+   DCC for the overwhelming majority of images on all hardware generations.
+2. **Buffers stay CONCURRENT** whenever the async queue exists: compression
+   does not apply to buffers, and engine-internal staging (belt chunks) is
+   read by async-routed transfer graphs.
+3. **Routing safety**: `execute_graph` honors the async hint only when every
+   texture the graph touches is declared cross-queue. Accessing an EXCLUSIVE
+   image from another queue family leaves contents undefined per spec, so an
+   undeclared texture silently falls the graph back to the graphics queue —
+   consistent with the hint's existing "honored only when safe" semantics.
+4. **maintenance9 fast path** (implemented): when the extension is available
+   (hand-rolled FFI in `backend/vulkan/maintenance9.rs` until ash catches up)
+   and the graphics/compute families may *mutually* implicitly acquire each
+   other's optimal images (`VkQueueFamilyOwnershipTransferPropertiesKHR`),
+   declared cross-queue textures stay EXCLUSIVE too — no transfers, no
+   compression loss. Skipped when validating under a layer older than the
+   extension (spec < 1.4.316), which would emit false "unknown
+   VkStructureType" errors and disable its handling of the extension.
+5. **Full QFOT (paired release/acquire) is not implemented.** The streaming
+   submit model records command buffers before future consumers are known,
+   making the release side structurally awkward, and the measured driver
+   reality (below) shows the payoff is a handful of images on one vendor.
+
+### Measured driver reality (RX 9070 XT, Adrenalin 2.0.373, 2026-07)
+
+The AMD Windows driver reports `optimalImageTransferToQueueFamilies == 0`
+for **every** queue family: even with maintenance9 enabled, AMD requires
+real ownership transfers for optimal-tiling images (consistent with DCC
+metadata needing a handoff). On AMD the fast path therefore stays off and
+declared textures use the CONCURRENT fallback — which further validates not
+building full QFOT. The fast path is expected to engage on NVIDIA
+(unverified — no hardware at hand).
+
+**And the CONCURRENT fallback measures as free on RDNA4** (RGP, solid-color
+fullscreen fills into two 8192² RGBA8 targets — 256 MiB each, deliberately
+larger than Infinity Cache so fills are bandwidth-bound; solid color is the
+best case for compression, so losing it would show directly as fill time):
+EXCLUSIVE 335.6 µs vs CONCURRENT 300.0 µs. An uncompressed 256 MiB write at
+the card's ~640 GB/s cannot beat ~440 µs, and both fills do — **write
+compression stays on under CONCURRENT**. The GCN-era "CONCURRENT loses DCC"
+penalty does not reproduce on this generation; it remains unmeasured on
+RDNA1/2 and GCN (`async_overlap_demo` is the harness when such hardware is
+available).
+
+### Consequences
+
+- ✅ DCC retained for all undeclared images (render targets, sampled assets)
+- ✅ No new synchronization semantics; #82-validated CONCURRENT path unchanged
+  for declared resources
+- ✅ Async hint stays a hint: correctness never depends on the declaration
+- ⚠️ Declared textures still lose DCC on hardware without maintenance9
+  (~6% of fleet); acceptable — a frame shares a handful of such images
+- ⚠️ Forgetting the declaration serializes an intended-async graph onto the
+  graphics queue; each offending texture logs one warning (a hard error would
+  break the hint semantics — the same graph legitimately runs single-queue on
+  devices without an async queue)
+
+### Related Issues
+
+- #47: multi-queue design (CONCURRENT-everything superseded by this ADR)
+- #82: hardware validation of the CONCURRENT path
+- #88: research, staged plan, maintenance9 follow-up

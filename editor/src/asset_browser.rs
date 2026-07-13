@@ -350,7 +350,7 @@ impl AssetBrowser {
             ui.painter().rect_stroke(
                 rect,
                 4.0,
-                egui::Stroke::new(2.0, crate::theme::ACCENT),
+                egui::Stroke::new(2.0_f32, crate::theme::ACCENT),
                 egui::StrokeKind::Outside,
             );
         }
@@ -463,7 +463,7 @@ impl AssetBrowser {
             ui.painter().rect_stroke(
                 hdr.rect,
                 2.0,
-                egui::Stroke::new(2.0, crate::theme::ACCENT),
+                egui::Stroke::new(2.0_f32, crate::theme::ACCENT),
                 egui::StrokeKind::Outside,
             );
         }
@@ -728,7 +728,7 @@ impl AssetBrowser {
             ui.painter().rect_stroke(
                 drop_resp.rect,
                 4.0,
-                egui::Stroke::new(2.0, crate::theme::ACCENT),
+                egui::Stroke::new(2.0_f32, crate::theme::ACCENT),
                 egui::StrokeKind::Outside,
             );
         }
