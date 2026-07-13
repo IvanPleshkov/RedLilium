@@ -65,7 +65,9 @@ pub use resources::{
 };
 pub use resources::{FrameRing, MainViewport, MeshManager, RenderSchedule, TextureManager};
 #[cfg(feature = "rendering")]
-pub use shading::{PropDef, PropValue, ShadingModel, ShadingRegistry, pack_props, texture_props};
+pub use shading::{
+    FeatureValue, PropDef, PropValue, ShadingModel, ShadingRegistry, pack_props, texture_props,
+};
 #[cfg(feature = "rendering")]
 pub use systems::HotReload;
 pub use systems::{

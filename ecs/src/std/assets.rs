@@ -58,12 +58,15 @@ impl System for AssetPump {
     }
 }
 
-/// Flushes ready GPU asset stages into the frame graph held by the
-/// [`RenderSchedule`] resource (adding their upload transfer pass), making the
-/// freshly loaded assets GPU-resident through the graph.
+/// Flushes ready GPU asset stages into a **transfer-only graph** queued on the
+/// [`RenderSchedule`] resource (#89), making the freshly loaded assets
+/// GPU-resident. The host drains the queued graphs and submits each before
+/// the frame graph; on hardware with a dedicated transfer queue the uploads
+/// then overlap rendering (DMA engines), with automatic fallback to async
+/// compute / the graphics queue elsewhere.
 ///
-/// Runs in the `Render` schedule (it needs the bound graph). No-op without an
-/// `AssetProcessor` resource or a bound graph.
+/// Runs in the `Render` schedule (the render bracket). No-op without an
+/// `AssetProcessor` resource or a bound frame graph.
 pub struct AssetGpuFlush;
 
 impl System for AssetGpuFlush {
@@ -73,11 +76,16 @@ impl System for AssetGpuFlush {
         if !world.has_resource::<AssetProcessor>() || !world.has_resource::<RenderSchedule>() {
             return Ok(());
         }
-        let mut schedule = world.resource_mut::<RenderSchedule>();
-        let Some(graph) = schedule.graph_mut() else {
-            return Ok(()); // no frame graph bound (not in the render bracket)
-        };
-        world.resource_mut::<AssetProcessor>().flush_gpu(graph);
+        // Gate on the bound frame graph: outside the render bracket a queued
+        // transfer graph would never be drained/submitted this frame.
+        if !world.resource::<RenderSchedule>().is_active() {
+            return Ok(());
+        }
+        if let Some(transfer) = world.resource_mut::<AssetProcessor>().flush_gpu() {
+            world
+                .resource_mut::<RenderSchedule>()
+                .push_transfer_graph(transfer);
+        }
         Ok(())
     }
 }

@@ -266,9 +266,12 @@ impl AssetStage for UploadTextureStage {
             dimension: cpu.dimension,
             format: cpu.format,
             usage: TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST,
-            // Sampled asset textures stay EXCLUSIVE (keeps compression, #88);
-            // upload graphs touching them are routed to the graphics queue.
-            cross_queue: false,
+            // Declared cross-queue (#89): the asset-upload transfer graph is
+            // routed to the dedicated transfer queue (DMA engines), which
+            // requires the image to be legally accessible from both families
+            // (CONCURRENT, or EXCLUSIVE under the maintenance9 implicit
+            // fast path). On single-queue devices the flag is inert.
+            cross_queue: true,
         };
         let texture = self.device.create_texture(&descriptor)?;
         let op =

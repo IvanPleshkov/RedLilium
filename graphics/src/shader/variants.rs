@@ -310,6 +310,26 @@ impl ShaderVariantSpace {
         }
     }
 
+    /// Build the **material's feature half** of a variant key (Decision 5's
+    /// split): validates and canonicalizes the given feature-axis selections
+    /// (feature defaults applied), while system axes are left unset — the
+    /// render pipeline supplies them at draw time via
+    /// [`VariantSelection::with_features`] + `.system(…)` + `build()`.
+    ///
+    /// Naming a system axis here is a [`VariantError::SelectorMismatch`];
+    /// unknown axes and invalid values error as usual — a typo in a material
+    /// asset is diagnosed at resolve time, not silently ignored.
+    pub fn build_features(
+        &self,
+        features: &[(String, VariantValue)],
+    ) -> Result<VariantKey, VariantError> {
+        let mut selection = self.select();
+        for (name, value) in features {
+            selection = selection.feature(name, value.clone());
+        }
+        selection.build_feature_half()
+    }
+
     /// Every variant of this space (cartesian product over all axes), for the
     /// offline bake. Errors above [`MAX_VARIANTS_PER_SHADER`].
     ///
@@ -411,12 +431,55 @@ impl VariantSelection<'_> {
         self
     }
 
+    /// Seed this selection with a prebuilt **feature half**
+    /// (see [`ShaderVariantSpace::build_features`]): the render pipeline then
+    /// adds its `.system()` axes and [`build`](Self::build)s the full key.
+    /// Feature axes present in `features` count as explicitly set (a duplicate
+    /// `.feature()` call for the same axis is an error, as always).
+    pub fn with_features(mut self, features: &VariantKey) -> Self {
+        for (name, value) in features.defines() {
+            let value = match self.space.axes.iter().find(|a| a.name == *name) {
+                Some(VariantAxis {
+                    kind: VariantAxisKind::Bool { .. },
+                    ..
+                }) => VariantValue::Bool(true),
+                _ => VariantValue::Value(value.clone()),
+            };
+            self.set
+                .push((name.clone(), value, VariantSelector::Feature));
+        }
+        // Bool feature axes the half resolved to OFF are absent from its
+        // defines; mark them explicitly set so build() does not re-apply a
+        // `default 1` over the material's deliberate `false`.
+        for axis in &self.space.axes {
+            if axis.selector == VariantSelector::Feature
+                && !self.set.iter().any(|(n, _, _)| *n == axis.name)
+                && matches!(axis.kind, VariantAxisKind::Bool { .. })
+            {
+                self.set
+                    .push((axis.name.clone(), VariantValue::Bool(false), axis.selector));
+            }
+        }
+        self
+    }
+
     /// Validate the selection against the space and produce the canonical key.
     ///
     /// Feature axes fall back to their declared defaults; every system axis
     /// must have been set. Unknown names, kind/selector mismatches and
     /// duplicates are errors — never silently ignored.
     pub fn build(self) -> Result<VariantKey, VariantError> {
+        self.build_impl(true)
+    }
+
+    /// As [`build`](Self::build), but for the **feature half** only: system
+    /// axes are not required (the render pipeline sets them at draw time) and
+    /// contribute nothing to the key. Setting one explicitly still errors.
+    fn build_feature_half(self) -> Result<VariantKey, VariantError> {
+        self.build_impl(false)
+    }
+
+    fn build_impl(self, require_system: bool) -> Result<VariantKey, VariantError> {
         let mut seen: HashSet<&str> = HashSet::new();
         for (name, _, _) in &self.set {
             if !seen.insert(name.as_str()) {
@@ -465,7 +528,9 @@ impl VariantSelection<'_> {
                 }
                 (kind, None) => match axis.selector {
                     VariantSelector::System => {
-                        return Err(VariantError::MissingSystemAxis(axis.name.clone()));
+                        if require_system {
+                            return Err(VariantError::MissingSystemAxis(axis.name.clone()));
+                        }
                     }
                     VariantSelector::Feature => match kind {
                         VariantAxisKind::Bool { default: true } => {
@@ -709,5 +774,89 @@ void main() {}
         let key = space.select().system("HDR_OUTPUT", false).build().unwrap();
         assert!(key.is_empty());
         assert_eq!(key, VariantKey::empty());
+    }
+}
+
+#[cfg(test)]
+mod split_selection_tests {
+    use super::*;
+
+    const SHADER: &str = r#"
+//#pragma variant ALPHA_CUTOUT
+//#pragma variant GLOW default 1
+//#pragma variant QUALITY 0 1 2 default 1
+//#pragma variant_system HDR_OUTPUT
+"#;
+
+    /// The material half validates feature axes and applies their defaults,
+    /// without requiring (or emitting) system axes.
+    #[test]
+    fn feature_half_builds_without_system_axes() {
+        let space = ShaderVariantSpace::parse(SHADER).unwrap();
+        let half = space
+            .build_features(&[("ALPHA_CUTOUT".into(), true.into())])
+            .unwrap();
+        assert_eq!(half.to_string(), "[ALPHA_CUTOUT,GLOW,QUALITY=1]");
+
+        // Typos and system axes are errors at material-resolve time.
+        assert_eq!(
+            space.build_features(&[("ALPHA_CUTOUP".into(), true.into())]),
+            Err(VariantError::UnknownAxis("ALPHA_CUTOUP".into()))
+        );
+        assert_eq!(
+            space.build_features(&[("HDR_OUTPUT".into(), true.into())]),
+            Err(VariantError::SelectorMismatch {
+                axis: "HDR_OUTPUT".into(),
+                expected: VariantSelector::System
+            })
+        );
+    }
+
+    /// The pipeline completes a feature half with its system axes; the result
+    /// equals a one-shot full selection of the same values.
+    #[test]
+    fn with_features_completes_to_the_same_full_key() {
+        let space = ShaderVariantSpace::parse(SHADER).unwrap();
+        let half = space
+            .build_features(&[
+                ("ALPHA_CUTOUT".into(), true.into()),
+                ("QUALITY".into(), 2.into()),
+            ])
+            .unwrap();
+        let full = space
+            .select()
+            .with_features(&half)
+            .system("HDR_OUTPUT", true)
+            .build()
+            .unwrap();
+        let oneshot = space
+            .select()
+            .feature("ALPHA_CUTOUT", true)
+            .feature("QUALITY", 2)
+            .system("HDR_OUTPUT", true)
+            .build()
+            .unwrap();
+        assert_eq!(full, oneshot);
+    }
+
+    /// A bool feature the material deliberately turned OFF (against a
+    /// `default 1`) must stay off through the half → full round trip.
+    #[test]
+    fn deliberate_false_survives_the_round_trip() {
+        let space = ShaderVariantSpace::parse(SHADER).unwrap();
+        let half = space
+            .build_features(&[("GLOW".into(), false.into())])
+            .unwrap();
+        assert!(!half.defines().iter().any(|(n, _)| n == "GLOW"));
+        let full = space
+            .select()
+            .with_features(&half)
+            .system("HDR_OUTPUT", false)
+            .build()
+            .unwrap();
+        assert!(
+            !full.defines().iter().any(|(n, _)| n == "GLOW"),
+            "default 1 must not resurrect a deliberately-off feature"
+        );
     }
 }

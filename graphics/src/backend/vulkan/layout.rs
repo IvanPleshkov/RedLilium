@@ -580,12 +580,10 @@ impl TextureLayoutTracker {
                 if let Some(read_value) = read
                     && queue_index != queue as usize
                 {
-                    let read_queue = if queue_index == super::barriers::QueueId::Graphics as usize {
-                        super::barriers::QueueId::Graphics
-                    } else {
-                        super::barriers::QueueId::AsyncCompute
-                    };
-                    waits.add(read_queue, *read_value);
+                    waits.add(
+                        super::barriers::QueueId::from_index(queue_index),
+                        *read_value,
+                    );
                 }
             }
             state.last_write_submit = Some((queue, submit_value));

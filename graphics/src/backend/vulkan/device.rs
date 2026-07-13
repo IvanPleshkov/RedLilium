@@ -334,17 +334,23 @@ fn device_extension_set(
 ///
 /// Planned before device creation from the physical device's queue families:
 /// the graphics queue (always), plus an async compute queue when the hardware
-/// exposes one (#47 phase 4). A dedicated compute-capable family is preferred
-/// (real overlap on most discrete GPUs); a second queue in the graphics
-/// family is the fallback; otherwise there is no async queue and everything
-/// runs on the graphics queue — a first-class, fully supported mode
-/// (MoltenVK's default configuration, for one, exposes a single queue).
+/// exposes one (#47 phase 4), plus a dedicated transfer queue when the
+/// hardware exposes a transfer-only family (#89 — DMA engines: AMD SDMA,
+/// NVIDIA copy engines). For async compute a dedicated compute-capable family
+/// is preferred (real overlap on most discrete GPUs) with a second queue in
+/// the graphics family as fallback; the transfer queue has no same-family
+/// fallback — without DMA engines a "transfer queue" buys nothing, the
+/// routing ladder falls back to async compute / graphics instead. Missing
+/// queues are a first-class, fully supported mode (MoltenVK's default
+/// configuration, for one, exposes a single queue).
 #[derive(Debug, Clone, Copy)]
 pub struct QueuePlan {
     /// Queue family of the graphics queue (queue index 0 within it).
     pub graphics_family: u32,
     /// `(family, queue index)` of the async compute queue, if available.
     pub async_compute: Option<(u32, u32)>,
+    /// `(family, queue index)` of the dedicated transfer queue, if available.
+    pub transfer: Option<(u32, u32)>,
 }
 
 /// Plan which queues to create on the device.
@@ -354,7 +360,33 @@ pub fn plan_queues(
 ) -> Result<QueuePlan, GraphicsError> {
     let queue_families =
         unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+    let plan = plan_queues_from_families(&queue_families)?;
 
+    match plan.async_compute {
+        Some((family, index)) => log::info!(
+            "Async compute queue planned: family {family}, queue {index}{}",
+            if family == plan.graphics_family {
+                " (graphics family)"
+            } else {
+                " (dedicated family)"
+            }
+        ),
+        None => log::info!("No async compute queue available; single-queue mode"),
+    }
+    match plan.transfer {
+        Some((family, index)) => {
+            log::info!("Dedicated transfer queue planned: family {family}, queue {index}")
+        }
+        None => log::info!("No dedicated transfer queue; transfer graphs fall back"),
+    }
+
+    Ok(plan)
+}
+
+/// Pure queue planning from the queried family properties (unit-testable).
+fn plan_queues_from_families(
+    queue_families: &[vk::QueueFamilyProperties],
+) -> Result<QueuePlan, GraphicsError> {
     let graphics_family = queue_families
         .iter()
         .position(|family| family.queue_flags.contains(vk::QueueFlags::GRAPHICS))
@@ -377,21 +409,36 @@ pub fn plan_queues(
         None => None,
     };
 
-    match async_compute {
-        Some((family, index)) => log::info!(
-            "Async compute queue planned: family {family}, queue {index}{}",
-            if family == graphics_family {
-                " (graphics family)"
-            } else {
-                " (dedicated family)"
-            }
-        ),
-        None => log::info!("No async compute queue available; single-queue mode"),
-    }
+    // A transfer-only family = the DMA engines. Exclude specialized families
+    // (video decode/encode, optical flow) that also advertise TRANSFER, and
+    // require 1×1×1 image-transfer granularity so buffer→image copies of
+    // arbitrary regions are legal — a coarser-granularity family would need
+    // per-copy alignment validation, which no target device has warranted.
+    let specialized = vk::QueueFlags::GRAPHICS
+        | vk::QueueFlags::COMPUTE
+        | vk::QueueFlags::VIDEO_DECODE_KHR
+        | vk::QueueFlags::VIDEO_ENCODE_KHR
+        | vk::QueueFlags::OPTICAL_FLOW_NV;
+    let transfer = queue_families
+        .iter()
+        .enumerate()
+        .find(|(_, family)| {
+            family.queue_flags.contains(vk::QueueFlags::TRANSFER)
+                && !family.queue_flags.intersects(specialized)
+                && family.queue_count > 0
+                && family.min_image_transfer_granularity
+                    == vk::Extent3D {
+                        width: 1,
+                        height: 1,
+                        depth: 1,
+                    }
+        })
+        .map(|(family, _)| (family as u32, 0));
 
     Ok(QueuePlan {
         graphics_family,
         async_compute,
+        transfer,
     })
 }
 
@@ -427,6 +474,15 @@ pub fn create_logical_device(
             );
         }
         None => {}
+    }
+    // The transfer family is transfer-only by construction (#89), so it can
+    // never coincide with the graphics family or a compute-capable family.
+    if let Some((family, _)) = plan.transfer {
+        queue_create_infos.push(
+            vk::DeviceQueueCreateInfo::default()
+                .queue_family_index(family)
+                .queue_priorities(&queue_priorities[..1]),
+        );
     }
 
     // Baseline-tier extensions (verified present during selection).
@@ -527,6 +583,7 @@ pub fn device_capabilities(
             .as_raw(),
         wireframe: selected.optional.fill_mode_non_solid,
         async_compute: plan.async_compute.is_some(),
+        transfer_queue: plan.transfer.is_some(),
         compute_shaders: true,
     }
 }
@@ -618,6 +675,94 @@ mod tests {
             &AdapterPreference::Auto,
         );
         assert!(integrated > llvmpipe);
+    }
+
+    fn family(flags: vk::QueueFlags, count: u32, granularity: u32) -> vk::QueueFamilyProperties {
+        vk::QueueFamilyProperties {
+            queue_flags: flags,
+            queue_count: count,
+            min_image_transfer_granularity: vk::Extent3D {
+                width: granularity,
+                height: granularity,
+                depth: granularity,
+            },
+            ..Default::default()
+        }
+    }
+
+    /// #89: a typical discrete-GPU family layout (graphics+compute, dedicated
+    /// compute, transfer-only SDMA) plans all three queues.
+    #[test]
+    fn plan_finds_dedicated_transfer_family() {
+        let families = [
+            family(
+                vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE | vk::QueueFlags::TRANSFER,
+                1,
+                1,
+            ),
+            family(vk::QueueFlags::COMPUTE | vk::QueueFlags::TRANSFER, 4, 1),
+            family(
+                vk::QueueFlags::TRANSFER | vk::QueueFlags::SPARSE_BINDING,
+                2,
+                1,
+            ),
+        ];
+        let plan = plan_queues_from_families(&families).unwrap();
+        assert_eq!(plan.graphics_family, 0);
+        assert_eq!(plan.async_compute, Some((1, 0)));
+        assert_eq!(plan.transfer, Some((2, 0)));
+    }
+
+    /// #89: video decode/encode families advertise TRANSFER but are not DMA
+    /// engines for general streaming — they must not be picked.
+    #[test]
+    fn plan_skips_video_families() {
+        let families = [
+            family(
+                vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE | vk::QueueFlags::TRANSFER,
+                2,
+                1,
+            ),
+            family(
+                vk::QueueFlags::VIDEO_DECODE_KHR | vk::QueueFlags::TRANSFER,
+                1,
+                1,
+            ),
+        ];
+        let plan = plan_queues_from_families(&families).unwrap();
+        assert_eq!(plan.transfer, None);
+        // Async compute still falls back to the second graphics-family queue.
+        assert_eq!(plan.async_compute, Some((0, 1)));
+    }
+
+    /// #89: a transfer family with coarse `minImageTransferGranularity` would
+    /// restrict image copies; it is skipped rather than validated per copy.
+    #[test]
+    fn plan_skips_coarse_granularity_transfer_family() {
+        let families = [
+            family(
+                vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE | vk::QueueFlags::TRANSFER,
+                1,
+                1,
+            ),
+            family(vk::QueueFlags::TRANSFER, 1, 8),
+        ];
+        let plan = plan_queues_from_families(&families).unwrap();
+        assert_eq!(plan.transfer, None);
+    }
+
+    /// Single-family devices (MoltenVK default) plan no secondary queues —
+    /// the first-class fallback mode.
+    #[test]
+    fn plan_single_family_no_secondary_queues() {
+        let families = [family(
+            vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE | vk::QueueFlags::TRANSFER,
+            1,
+            1,
+        )];
+        let plan = plan_queues_from_families(&families).unwrap();
+        assert_eq!(plan.async_compute, None);
+        assert_eq!(plan.transfer, None);
     }
 
     /// Same type: more device-local memory wins.

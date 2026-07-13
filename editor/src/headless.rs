@@ -285,11 +285,16 @@ fn tick(
     scene_view.sync_camera_output(&mut ew.world, ew.editor_camera, width, height);
     ew.world.resource_mut::<RenderSchedule>().set(graph);
     ew.schedules.run_schedule::<Render>(&mut ew.world, runner);
-    graph = ew
-        .world
-        .resource_mut::<RenderSchedule>()
+    let mut schedule_res = ew.world.resource_mut::<RenderSchedule>();
+    // Asset-upload transfer graphs (#89) go first, each as its own submit.
+    let transfer_graphs = schedule_res.take_transfer_graphs();
+    graph = schedule_res
         .take()
         .expect("RenderSchedule must hold the graph after the Render schedule");
+    drop(schedule_res);
+    for transfer in transfer_graphs {
+        schedule.submit(transfer);
+    }
     remote_commands::inject_screenshot_pass(rc, &ew.world, scene_view.device(), &mut graph);
 
     // Entity-index pass + readback, only while a remote pick is in flight

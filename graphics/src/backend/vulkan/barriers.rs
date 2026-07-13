@@ -21,10 +21,24 @@ pub enum QueueId {
     Graphics = 0,
     /// The async compute queue (present only when the device exposes one).
     AsyncCompute = 1,
+    /// The dedicated transfer queue — DMA engines (present only when the
+    /// device exposes a transfer-only family, #89).
+    Transfer = 2,
 }
 
 /// Number of queues a resource can be tracked across.
-pub const QUEUE_COUNT: usize = 2;
+pub const QUEUE_COUNT: usize = 3;
+
+impl QueueId {
+    /// All queue ids, indexable by `QueueId as usize`.
+    pub const ALL: [QueueId; QUEUE_COUNT] =
+        [QueueId::Graphics, QueueId::AsyncCompute, QueueId::Transfer];
+
+    /// The queue id whose tracker-array index is `index`.
+    pub fn from_index(index: usize) -> QueueId {
+        Self::ALL[index]
+    }
+}
 
 /// Timeline-semaphore waits a submit must perform before it executes,
 /// accumulated by the trackers while barriers are generated.
@@ -189,12 +203,7 @@ impl BufferAccessTracker {
                 if let Some(read_value) = read
                     && queue_index != queue as usize
                 {
-                    let read_queue = if queue_index == QueueId::Graphics as usize {
-                        QueueId::Graphics
-                    } else {
-                        QueueId::AsyncCompute
-                    };
-                    waits.add(read_queue, *read_value);
+                    waits.add(QueueId::from_index(queue_index), *read_value);
                 }
             }
 
@@ -887,6 +896,63 @@ mod tests {
         assert_eq!(barrier, None);
         assert_eq!(waits.get(QueueId::AsyncCompute), Some(5));
         assert_eq!(waits.get(QueueId::Graphics), None);
+    }
+
+    /// #89: the asset-streaming pattern — a transfer-queue upload, then a
+    /// graphics read. The read emits no pipeline barrier (the timeline wait
+    /// covers availability and visibility) and waits the TRANSFER timeline;
+    /// a later write on graphics must additionally wait the transfer queue's
+    /// reads (three-queue bookkeeping).
+    #[test]
+    fn tracker_transfer_queue_upload_then_graphics_read() {
+        let mut tracker = BufferAccessTracker::new();
+        let id = BufferId::from_raw(1);
+
+        // Transfer queue uploads at timeline value 2.
+        let mut waits = SubmitWaits::default();
+        tracker.request_access(
+            id,
+            BufferAccessMode::TransferWrite,
+            QueueId::Transfer,
+            2,
+            &mut waits,
+        );
+        assert!(waits.is_empty());
+
+        // Graphics reads: wait on the transfer timeline, no barrier.
+        let mut waits = SubmitWaits::default();
+        let barrier = tracker.request_access(
+            id,
+            BufferAccessMode::VertexBuffer,
+            QueueId::Graphics,
+            9,
+            &mut waits,
+        );
+        assert_eq!(barrier, None);
+        assert_eq!(waits.get(QueueId::Transfer), Some(2));
+        assert_eq!(waits.get(QueueId::Graphics), None);
+        assert_eq!(waits.get(QueueId::AsyncCompute), None);
+
+        // A transfer-queue read of the same (host-written) generation, then
+        // an async-compute write: WAR waits must name BOTH reading queues.
+        let mut waits = SubmitWaits::default();
+        tracker.request_access(
+            id,
+            BufferAccessMode::TransferRead,
+            QueueId::Transfer,
+            3,
+            &mut waits,
+        );
+        let mut waits = SubmitWaits::default();
+        tracker.request_access(
+            id,
+            BufferAccessMode::StorageWrite,
+            QueueId::AsyncCompute,
+            4,
+            &mut waits,
+        );
+        assert_eq!(waits.get(QueueId::Graphics), Some(9));
+        assert_eq!(waits.get(QueueId::Transfer), Some(3));
     }
 
     #[test]

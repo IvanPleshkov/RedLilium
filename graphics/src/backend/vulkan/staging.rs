@@ -55,23 +55,28 @@ pub(crate) struct StagingBelt {
     in_use: [Vec<StagingChunk>; MAX_FRAMES_IN_FLIGHT],
     /// Retired chunks ready for reuse.
     free: Vec<StagingChunk>,
-    /// Queue families for CONCURRENT chunk creation, when the device has an
-    /// async compute queue in a distinct family (#47 phase 4): a transfer
+    /// Queue families for CONCURRENT chunk creation, when the device has
+    /// secondary queues in distinct families (#47 phase 4, #89): a transfer
     /// graph routed there reads staging chunks on that queue, so chunks must
-    /// be shareable. `None` = EXCLUSIVE (single family). Set once at backend
+    /// be shareable. Empty = EXCLUSIVE (single family). Set once at backend
     /// init, before any chunk exists.
-    concurrent_families: Option<[u32; 2]>,
+    concurrent_families: Vec<u32>,
 }
 
 impl StagingBelt {
-    /// Set the queue families for CONCURRENT chunk creation. Must be called
-    /// before the first `write` (chunks created earlier would be EXCLUSIVE).
-    pub fn set_concurrent_families(&mut self, families: Option<[u32; 2]>) {
+    /// Set the queue families (at least two) for CONCURRENT chunk creation.
+    /// Must be called before the first `write` (chunks created earlier would
+    /// be EXCLUSIVE).
+    pub fn set_concurrent_families(&mut self, families: &[u32]) {
         debug_assert!(
             self.free.is_empty() && self.in_use.iter().all(Vec::is_empty),
             "set_concurrent_families must run before any chunk is created"
         );
-        self.concurrent_families = families;
+        debug_assert!(
+            families.len() >= 2,
+            "CONCURRENT needs at least two families"
+        );
+        self.concurrent_families = families.to_vec();
     }
 
     /// Copy `bytes` into belt memory owned by `slot`.
@@ -137,10 +142,10 @@ impl StagingBelt {
             .size(capacity)
             .usage(vk::BufferUsageFlags::TRANSFER_SRC)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
-        if let Some(families) = &self.concurrent_families {
+        if !self.concurrent_families.is_empty() {
             buffer_info = buffer_info
                 .sharing_mode(vk::SharingMode::CONCURRENT)
-                .queue_family_indices(families);
+                .queue_family_indices(&self.concurrent_families);
         }
         let buffer = unsafe { device.create_buffer(&buffer_info, None) }.map_err(|e| {
             GraphicsError::ResourceCreationFailed(format!(

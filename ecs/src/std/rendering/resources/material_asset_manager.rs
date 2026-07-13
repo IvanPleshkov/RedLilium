@@ -35,6 +35,11 @@ pub struct ResolvedMaterial {
     pub shader: Arc<Shader>,
     /// Property values in schema order — the canonical packing order.
     pub properties: Vec<(String, PropValue)>,
+    /// The material half of the shader variant key (#6, Decision 5):
+    /// the asset's feature selections validated against the shader's
+    /// `//#pragma variant` space, defaults applied. The render system
+    /// completes it with its system axes at draw time.
+    pub variant: redlilium_graphics::VariantKey,
 }
 
 /// Owns and shares resolved material templates (an ECS resource).
@@ -92,12 +97,36 @@ impl MaterialAssetManager {
         };
         let shader = shader_mgr.get_or_request(processor, db, model.shader)?; // None → still loading
 
+        // Phase 2.5: validate the asset's feature selections against the
+        // shader's declared variant space (#6). A typo'd axis, invalid value,
+        // or attempt to set a system axis fails the material loudly — never a
+        // shader silently compiled without the feature.
+        let variant = {
+            let source = String::from_utf8_lossy(&shader.source);
+            let features: Vec<(String, redlilium_graphics::VariantValue)> = data
+                .features
+                .iter()
+                .map(|(name, value)| (name.clone(), value.into()))
+                .collect();
+            match redlilium_graphics::ShaderVariantSpace::parse(&source)
+                .and_then(|space| space.build_features(&features))
+            {
+                Ok(variant) => variant,
+                Err(e) => {
+                    log::warn!("material {guid:?}: invalid shader features: {e}");
+                    self.cache.fail(guid);
+                    return None;
+                }
+            }
+        };
+
         // Phase 3: build + publish the resolved template.
         let resolved = Arc::new(ResolvedMaterial {
             shading_model: data.shading_model.clone(),
             shader_guid: model.shader,
             shader,
             properties: model.resolve(&data.properties),
+            variant,
         });
         self.cache.publish(guid, resolved.clone());
         Some(resolved)

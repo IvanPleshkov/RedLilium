@@ -3,7 +3,8 @@
 //! It owns the in-flight requests but does **not** spawn: `drain_tasks` hands
 //! the async (IO/CPU) stage futures to the ECS bridge (which spawns them on
 //! `ctx.io()` / `ctx.compute()`), results flow back over a channel and are
-//! applied by `collect`; GPU stages run in `flush_gpu` with the frame graph.
+//! applied by `collect`; GPU stages run in `flush_gpu`, which returns their
+//! uploads as a transfer-only graph routed to the transfer queue (#89).
 //! No cache/dedup — each request is independent; sharing is the consumer's job.
 //!
 //! Budgets are trivial and settable: `ram_budget` gates how many requests are
@@ -19,7 +20,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use parking_lot::Mutex;
-use redlilium_graphics::{GraphicsDevice, RenderGraph, TransferConfig, TransferPass};
+use redlilium_graphics::{
+    GraphicsDevice, QueuePreference, RenderGraph, TransferConfig, TransferPass,
+};
 use redlilium_vfs::Vfs;
 
 use crate::db::{AssetDb, AssetPath};
@@ -269,9 +272,17 @@ impl AssetProcessor {
         }
     }
 
-    /// Run pending GPU stages (up to `gpu_per_frame`), adding their upload ops to
-    /// `graph`. Call in `on_draw`.
-    pub fn flush_gpu(&mut self, graph: &mut RenderGraph) {
+    /// Run pending GPU stages (up to `gpu_per_frame`) and return their upload
+    /// ops as a **transfer-only graph** requesting the dedicated transfer
+    /// queue (#89): on hardware with DMA engines the streaming copies overlap
+    /// both rendering and compute; elsewhere the preference falls back to
+    /// async compute, then the graphics queue. Cross-queue ordering against
+    /// the consuming frame graph (upload → first sample) is derived
+    /// automatically by the backend trackers — the caller only has to submit
+    /// this graph in the same frame, before the main graph.
+    ///
+    /// Returns `None` when no GPU stage was ready. Call in `on_draw`.
+    pub fn flush_gpu(&mut self) -> Option<RenderGraph> {
         let ready: Vec<RequestId> = self
             .requests
             .iter()
@@ -307,11 +318,15 @@ impl AssetProcessor {
             }
         }
 
-        if !ops.is_empty() {
-            let mut pass = TransferPass::new(format!("asset_uploads_{}", self.id));
-            pass.set_transfer_config(TransferConfig::new().with_operations(ops));
-            graph.add_transfer_pass(pass);
+        if ops.is_empty() {
+            return None;
         }
+        let mut pass = TransferPass::new(format!("asset_uploads_{}", self.id));
+        pass.set_transfer_config(TransferConfig::new().with_operations(ops));
+        let mut graph = RenderGraph::new();
+        graph.set_queue_preference(QueuePreference::Transfer);
+        graph.add_transfer_pass(pass);
+        Some(graph)
     }
 
     /// Number of requests still in flight (queued, running, or awaiting GPU).

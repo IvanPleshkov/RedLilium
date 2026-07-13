@@ -145,10 +145,17 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
         let graph = ctx.acquire_graph();
         world.resource_mut::<RenderSchedule>().set(graph);
         schedules.run_schedule::<Render>(world, &state.runner);
-        let mut graph = world
-            .resource_mut::<RenderSchedule>()
+        let mut schedule_res = world.resource_mut::<RenderSchedule>();
+        // Asset-upload transfer graphs (#89) go first, each as its own
+        // submit — on hardware with a transfer queue they overlap the frame.
+        let transfer_graphs = schedule_res.take_transfer_graphs();
+        let mut graph = schedule_res
             .take()
             .expect("RenderSchedule must hold the graph after the Render schedule");
+        drop(schedule_res);
+        for transfer in transfer_graphs {
+            ctx.submit(transfer);
+        }
 
         state.blit.flush_uploads(&mut graph);
         let scene_pass = world.resource::<ScenePass>().0;

@@ -65,6 +65,25 @@ pub fn texture_props(props: &[(String, PropValue)]) -> Vec<(String, TextureSourc
         .collect()
 }
 
+/// A serializable feature-axis selection on a material — Decision 5's
+/// *material half* of the shader variant split. Mirrors the graphics
+/// [`VariantValue`](redlilium_graphics::VariantValue) shape: `Bool` for
+/// `//#pragma variant NAME` axes, `Value` for enum axes.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum FeatureValue {
+    Bool(bool),
+    Value(String),
+}
+
+impl From<&FeatureValue> for redlilium_graphics::VariantValue {
+    fn from(value: &FeatureValue) -> Self {
+        match value {
+            FeatureValue::Bool(b) => Self::Bool(*b),
+            FeatureValue::Value(v) => Self::Value(v.clone()),
+        }
+    }
+}
+
 /// One property slot in a shading model's schema: a name and its default value
 /// (the value type is implied by the default's variant).
 #[derive(Debug, Clone, PartialEq)]
@@ -154,6 +173,13 @@ impl ShadingRegistry {
                 PropDef {
                     name: "base_color".to_owned(),
                     default: PropValue::Vec4([1.0, 1.0, 1.0, 1.0]),
+                },
+                PropDef {
+                    // x: alpha cutoff for the ALPHA_CUTOUT feature (a full
+                    // Vec4 slot keeps the packed uniform 16-byte aligned,
+                    // matching the shader's cbuffer layout).
+                    name: "cutout_params".to_owned(),
+                    default: PropValue::Vec4([0.5, 0.0, 0.0, 0.0]),
                 },
                 PropDef {
                     name: "base_texture".to_owned(),

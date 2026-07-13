@@ -1447,11 +1447,18 @@ impl AppHandler for Editor {
             ew.world.resource_mut::<RenderSchedule>().set(graph);
             ew.schedules
                 .run_schedule::<Render>(&mut ew.world, &self.runner);
-            graph = ew
-                .world
-                .resource_mut::<RenderSchedule>()
+            let mut schedule_res = ew.world.resource_mut::<RenderSchedule>();
+            // Asset-upload transfer graphs (#89) go first, each as its own
+            // submit — on hardware with a transfer queue they overlap the
+            // frame.
+            let transfer_graphs = schedule_res.take_transfer_graphs();
+            graph = schedule_res
                 .take()
                 .expect("RenderSchedule must hold the graph after the Render schedule");
+            drop(schedule_res);
+            for transfer in transfer_graphs {
+                ctx.submit(transfer);
+            }
         }
 
         // Remote screenshot: copy this frame's scene target through the graph.
