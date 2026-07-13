@@ -16,6 +16,7 @@ mod pipeline;
 mod staging;
 pub mod swapchain;
 
+use std::collections::HashSet;
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -256,6 +257,12 @@ pub struct VulkanBackend {
     /// `None` is the first-class single-queue mode: everything runs on the
     /// graphics queue exactly as before.
     async_compute: Option<AsyncComputeQueue>,
+    /// Stable ids of textures already warned about declining the async
+    /// compute hint (#88) — the fallback is correct but silently serializes
+    /// work the caller wanted overlapped, so it warns once per texture, not
+    /// per frame. Entries are dropped when the texture retires (same drain
+    /// as the trackers in [`advance_frame`](Self::advance_frame)).
+    async_decline_warned: Mutex<HashSet<u64>>,
     /// Capabilities queried from the selected physical device at creation
     /// (ADR-027) — the single source of truth downstream clamps against.
     device_caps: crate::device::DeviceCapabilities,
@@ -492,6 +499,7 @@ impl VulkanBackend {
             queue_timeline,
             timeline_next: AtomicU64::new(1),
             async_compute,
+            async_decline_warned: Mutex::new(HashSet::new()),
             device_caps,
             adapter_info,
             surface_support,
@@ -712,8 +720,10 @@ impl VulkanBackend {
         let retired = std::mem::take(&mut *self.retired_tracker_handles.lock());
         if !retired.textures.is_empty() {
             let mut tracker = self.layout_tracker.lock();
+            let mut warned = self.async_decline_warned.lock();
             for id in retired.textures {
                 tracker.remove(layout::TextureId::from_raw(id));
+                warned.remove(&id);
             }
         }
         if !retired.buffers.is_empty() {
@@ -1926,22 +1936,37 @@ impl VulkanBackend {
         // graph touches is declared cross-queue (#88): undeclared images are
         // EXCLUSIVE, and accessing an EXCLUSIVE image from another queue
         // family leaves its contents undefined per spec. Buffers are always
-        // CONCURRENT-shared and need no declaration.
-        let all_textures_cross_queue = || {
-            compiled.pass_usages().iter().all(|usage| {
-                usage
-                    .texture_usages
-                    .iter()
-                    .all(|decl| decl.texture.descriptor().cross_queue)
-            })
-        };
+        // CONCURRENT-shared and need no declaration. The fallback is correct
+        // but silently serializes work the caller wanted overlapped, so each
+        // offending texture warns once (the same graph legitimately runs
+        // this way on single-queue devices, hence no hard error).
         let async_route = match &self.async_compute {
-            Some(ac)
-                if graph.prefer_async_compute()
-                    && !graph.has_graphics_passes()
-                    && all_textures_cross_queue() =>
-            {
-                Some(ac)
+            Some(ac) if graph.prefer_async_compute() && !graph.has_graphics_passes() => {
+                let mut eligible = true;
+                for usage in compiled.pass_usages() {
+                    for decl in &usage.texture_usages {
+                        if decl.texture.descriptor().cross_queue {
+                            continue;
+                        }
+                        eligible = false;
+                        let GpuTexture::Vulkan { id, .. } = decl.texture.gpu_handle() else {
+                            continue;
+                        };
+                        if self.async_decline_warned.lock().insert(*id) {
+                            log::warn!(
+                                "Async compute hint declined: texture {:?} is not declared \
+                                 cross-queue (TextureDescriptor::with_cross_queue); the graph \
+                                 runs on the graphics queue instead",
+                                decl.texture
+                                    .descriptor()
+                                    .label
+                                    .as_deref()
+                                    .unwrap_or("<unlabeled>"),
+                            );
+                        }
+                    }
+                }
+                eligible.then_some(ac)
             }
             _ => None,
         };

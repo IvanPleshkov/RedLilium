@@ -1724,8 +1724,10 @@ Steam fleet (frozen GCN + Windows RDNA1/2) will never have maintenance9.
 - ✅ Async hint stays a hint: correctness never depends on the declaration
 - ⚠️ Declared textures still lose DCC on hardware without maintenance9
   (~6% of fleet); acceptable — a frame shares a handful of such images
-- ⚠️ Forgetting the declaration silently serializes an intended-async graph
-  onto the graphics queue (visible via `RUST_LOG=debug` submit logs)
+- ⚠️ Forgetting the declaration serializes an intended-async graph onto the
+  graphics queue; each offending texture logs one warning (a hard error would
+  break the hint semantics — the same graph legitimately runs single-queue on
+  devices without an async queue)
 
 ### Related Issues
 
