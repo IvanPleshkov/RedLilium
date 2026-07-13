@@ -72,3 +72,25 @@ pub fn draw_play_controls(
         }
     }
 }
+
+/// Draw the gizmo mode switch (W/E/R shortcuts do the same); returns the
+/// newly selected mode when the user clicks a different one.
+pub fn draw_gizmo_mode_controls(
+    ui: &mut egui::Ui,
+    current: redlilium_gizmo::GizmoMode,
+) -> Option<redlilium_gizmo::GizmoMode> {
+    use redlilium_gizmo::GizmoMode;
+    let mut selected = None;
+    for (label, mode, hint) in [
+        ("Move", GizmoMode::Translate, "Translate (W)"),
+        ("Rot", GizmoMode::Rotate, "Rotate (E)"),
+        ("Scale", GizmoMode::Scale, "Scale (R)"),
+    ] {
+        let active = current == mode;
+        let button = egui::Button::new(label).selected(active);
+        if ui.add(button).on_hover_text(hint).clicked() && !active {
+            selected = Some(mode);
+        }
+    }
+    selected
+}

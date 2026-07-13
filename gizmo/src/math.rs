@@ -167,6 +167,45 @@ pub fn perpendicular_basis(axis: Vec3) -> (Vec3, Vec3) {
     (u, v)
 }
 
+/// Ray-vs-ring test: a torus-like band around `center` in the plane with
+/// `normal`, at `radius` with half-width `band`. Returns the ray parameter
+/// of the plane hit when it lands inside the band.
+pub fn ray_ring_hit(ray: &Ray, center: Vec3, normal: Vec3, radius: f32, band: f32) -> Option<f32> {
+    let denom = ray.dir.dot(&normal);
+    if denom.abs() < 5e-2 {
+        // Edge-on ring: picking (and dragging) would be unstable.
+        return None;
+    }
+    let t = (center - ray.origin).dot(&normal) / denom;
+    if t < 0.0 {
+        return None;
+    }
+    let p = ray.origin + ray.dir * t;
+    let r = (p - center).norm();
+    ((radius - band)..=(radius + band))
+        .contains(&r)
+        .then_some(t)
+}
+
+/// The direction from `center` to the ray's intersection with the plane
+/// (`normal` through `center`), normalized. The rotate drag's anchor and
+/// per-frame sample. `None` when the ray misses or grazes the plane, or the
+/// hit is (numerically) at the center.
+pub fn ring_direction(ray: &Ray, center: Vec3, normal: Vec3) -> Option<Vec3> {
+    let p = ray_plane_intersect(ray, center, normal)?;
+    let v = p - center;
+    let len = v.norm();
+    (len > 1e-6).then(|| v / len)
+}
+
+/// Signed angle (radians) rotating `from` to `to` around `normal`
+/// (right-handed). Both inputs unit-length and in the plane of `normal`.
+pub fn signed_angle(from: Vec3, to: Vec3, normal: Vec3) -> f32 {
+    let cos = from.dot(&to).clamp(-1.0, 1.0);
+    let sin = from.cross(&to).dot(&normal);
+    sin.atan2(cos)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,5 +321,28 @@ mod tests {
         let near = screen_scale(&cam, Vec3::new(0.0, 0.0, 4.0), 0.15); // dist 1
         let far = screen_scale(&cam, Vec3::new(0.0, 0.0, -5.0), 0.15); // dist 10
         assert!((far / near - 10.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn ring_hit_band_and_miss() {
+        let ray = |x: f32| Ray {
+            origin: Vec3::new(x, 0.0, 5.0),
+            dir: Vec3::new(0.0, 0.0, -1.0),
+        };
+        let n = Vec3::new(0.0, 0.0, 1.0);
+        // Ring radius 1.0, band 0.1 in the XY plane.
+        assert!(ray_ring_hit(&ray(1.05), Vec3::zeros(), n, 1.0, 0.1).is_some());
+        assert!(ray_ring_hit(&ray(0.5), Vec3::zeros(), n, 1.0, 0.1).is_none());
+        assert!(ray_ring_hit(&ray(1.3), Vec3::zeros(), n, 1.0, 0.1).is_none());
+    }
+
+    #[test]
+    fn signed_angle_quarter_turns() {
+        let x = Vec3::new(1.0, 0.0, 0.0);
+        let y = Vec3::new(0.0, 1.0, 0.0);
+        let z = Vec3::new(0.0, 0.0, 1.0);
+        assert!((signed_angle(x, y, z) - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+        assert!((signed_angle(y, x, z) + std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+        assert!((signed_angle(x, -x, z).abs() - std::f32::consts::PI).abs() < 1e-5);
     }
 }

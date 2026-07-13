@@ -112,13 +112,13 @@ pub(crate) type DeserializeComponentFn = fn(
 pub(crate) type GizmoAnchorsFn =
     fn(&World, Entity, &crate::ui::AnchorCtx) -> Vec<crate::ui::GizmoAnchor>;
 
-/// Type-erased gizmo drag → undoable action (see [`crate::ui::GizmoAnchors`]).
+/// Type-erased gizmo edit → undoable action (see [`crate::ui::GizmoAnchors`]).
 pub(crate) type GizmoDragFn =
     fn(
         &World,
         Entity,
         u32,
-        redlilium_core::math::Vec3,
+        crate::ui::AnchorEdit,
         &crate::ui::AnchorCtx,
     ) -> Option<Box<dyn redlilium_core::abstract_editor::EditAction<World>>>;
 

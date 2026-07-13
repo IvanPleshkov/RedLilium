@@ -56,6 +56,7 @@ const COMMANDS: &[&str] = &[
     "pick",
     "pick_rect",
     "reload_game",
+    "set_gizmo_mode",
 ];
 
 /// Per-editor remote protocol state (parked writes/waits, screenshot job).
@@ -793,6 +794,35 @@ fn dispatch(
         "shutdown" => {
             rc.shutdown = true;
             send(world, conn, &OkResp { id, ok: true });
+        }
+        // Switch the transform gizmo's manipulation mode (#85 v2):
+        // translate | rotate | scale. Immediate — the mode is plain editor
+        // state, not an undoable edit.
+        "set_gizmo_mode" => {
+            let Some(mode) = str_param("mode") else {
+                return send_err(world, conn, id, "missing 'mode'");
+            };
+            let mode = match mode.as_str() {
+                "translate" => redlilium_gizmo::GizmoMode::Translate,
+                "rotate" => redlilium_gizmo::GizmoMode::Rotate,
+                "scale" => redlilium_gizmo::GizmoMode::Scale,
+                other => {
+                    return send_err(
+                        world,
+                        conn,
+                        id,
+                        &format!("unknown mode '{other}' (translate|rotate|scale)"),
+                    );
+                }
+            };
+            if world.has_resource::<redlilium_gizmo::TransformGizmo>() {
+                world
+                    .resource_mut::<redlilium_gizmo::TransformGizmo>()
+                    .set_mode(mode);
+                send(world, conn, &OkResp { id, ok: true });
+            } else {
+                send_err(world, conn, id, "gizmo not available");
+            }
         }
         // Queue a game-module warm reload; the shell executes it between
         // frames (the reload replaces the whole world, which dispatch cannot

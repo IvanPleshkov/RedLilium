@@ -224,7 +224,7 @@ pub fn create_editor_world_base(
     // mapping the shells publish each frame. The GPU renderer resource is
     // shell-owned (needs device/format) and inserted next to
     // DebugDrawerRenderer.
-    world.insert_resource(redlilium_gizmo::TranslateGizmo::new(
+    world.insert_resource(redlilium_gizmo::TransformGizmo::new(
         redlilium_gizmo::GizmoConfig::default(),
     ));
     world.insert_resource(crate::gizmo_system::GizmoUiState::default());

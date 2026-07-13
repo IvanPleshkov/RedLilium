@@ -462,10 +462,10 @@ impl Editor {
     /// live drag) — clicks then manipulate, not select (#85).
     fn gizmo_wants_cursor(&self) -> bool {
         self.world.as_ref().is_some_and(|ew| {
-            ew.world.has_resource::<redlilium_gizmo::TranslateGizmo>()
+            ew.world.has_resource::<redlilium_gizmo::TransformGizmo>()
                 && ew
                     .world
-                    .resource::<redlilium_gizmo::TranslateGizmo>()
+                    .resource::<redlilium_gizmo::TransformGizmo>()
                     .wants_cursor()
         })
     }
@@ -1057,12 +1057,18 @@ impl AppHandler for Editor {
                             let available = ui.available_width();
                             ui.add_space((available / 2.0 - 40.0).max(0.0));
 
-                            let ew = self.world.as_ref().unwrap();
-                            let paused_due_to_panic = ew
-                                .world
-                                .resource::<redlilium_ecs::PlayControl>()
-                                .panic_info()
-                                .is_some();
+                            let (paused_due_to_panic, gizmo_mode) = {
+                                let ew = self.world.as_ref().unwrap();
+                                (
+                                    ew.world
+                                        .resource::<redlilium_ecs::PlayControl>()
+                                        .panic_info()
+                                        .is_some(),
+                                    ew.world
+                                        .resource::<redlilium_gizmo::TransformGizmo>()
+                                        .mode(),
+                                )
+                            };
 
                             if let Some(play_action) = crate::toolbar::draw_play_controls(
                                 ui,
@@ -1075,6 +1081,17 @@ impl AppHandler for Editor {
                             // Phase 6: Play mode indicator badge
                             ui.add_space(8.0);
                             crate::toolbar::draw_play_mode_indicator(ui, self.play_state);
+
+                            // Gizmo mode switch (#85 v2); mirrors W/E/R.
+                            ui.add_space(16.0);
+                            if let Some(mode) =
+                                crate::toolbar::draw_gizmo_mode_controls(ui, gizmo_mode)
+                            {
+                                let ew = self.world.as_ref().unwrap();
+                                ew.world
+                                    .resource_mut::<redlilium_gizmo::TransformGizmo>()
+                                    .set_mode(mode);
+                            }
                         });
 
                         // Double-click on background toggles maximize
