@@ -33,6 +33,11 @@ pub struct CreatedInstance {
     /// without a display): offscreen rendering works, surface creation and
     /// the swapchain device extension are unavailable.
     pub surface_support: bool,
+    /// Spec version of `VK_LAYER_KHRONOS_validation` when it was enabled
+    /// (`None` = validation off or unavailable). Lets device creation skip
+    /// extensions the layer predates — an unknown extension makes the layer
+    /// emit false-positive errors and disable its handling of that extension.
+    pub validation_layer_spec: Option<u32>,
 }
 
 /// Create a Vulkan instance with optional validation layers.
@@ -72,7 +77,12 @@ pub fn create_instance(
     );
 
     // Check if validation layers are available
-    let validation_available = validation_enabled && check_validation_layer_support(entry);
+    let validation_layer_spec = if validation_enabled {
+        validation_layer_spec_version(entry)
+    } else {
+        None
+    };
+    let validation_available = validation_layer_spec.is_some();
 
     if validation_enabled && !validation_available {
         log::warn!("Validation layers requested but not available");
@@ -176,6 +186,7 @@ pub fn create_instance(
         debug_messenger,
         debug_utils,
         surface_support,
+        validation_layer_spec,
     })
 }
 
@@ -193,19 +204,15 @@ fn available_instance_extensions(entry: &ash::Entry) -> Result<HashSet<CString>,
         .collect())
 }
 
-/// Check if the validation layer is available.
-fn check_validation_layer_support(entry: &ash::Entry) -> bool {
-    let available_layers = match unsafe { entry.enumerate_instance_layer_properties() } {
-        Ok(layers) => layers,
-        Err(_) => return false,
-    };
+/// Spec version of the validation layer, or `None` when it is not installed.
+fn validation_layer_spec_version(entry: &ash::Entry) -> Option<u32> {
+    let available_layers = unsafe { entry.enumerate_instance_layer_properties() }.ok()?;
 
-    for layer in &available_layers {
-        let name = unsafe { CStr::from_ptr(layer.layer_name.as_ptr()) };
-        if name == VALIDATION_LAYER_NAME {
-            return true;
-        }
-    }
-
-    false
+    available_layers
+        .iter()
+        .find(|layer| {
+            let name = unsafe { CStr::from_ptr(layer.layer_name.as_ptr()) };
+            name == VALIDATION_LAYER_NAME
+        })
+        .map(|layer| layer.spec_version)
 }

@@ -1710,11 +1710,28 @@ Steam fleet (frozen GCN + Windows RDNA1/2) will never have maintenance9.
    image from another queue family leaves contents undefined per spec, so an
    undeclared texture silently falls the graph back to the graphics queue —
    consistent with the hint's existing "honored only when safe" semantics.
-4. **Full QFOT (paired release/acquire) is not implemented.** The streaming
+4. **maintenance9 fast path** (implemented): when the extension is available
+   (hand-rolled FFI in `backend/vulkan/maintenance9.rs` until ash catches up)
+   and the graphics/compute families may *mutually* implicitly acquire each
+   other's optimal images (`VkQueueFamilyOwnershipTransferPropertiesKHR`),
+   declared cross-queue textures stay EXCLUSIVE too — no transfers, no
+   compression loss. Skipped when validating under a layer older than the
+   extension (spec < 1.4.316), which would emit false "unknown
+   VkStructureType" errors and disable its handling of the extension.
+5. **Full QFOT (paired release/acquire) is not implemented.** The streaming
    submit model records command buffers before future consumers are known,
-   making the release side structurally awkward. Planned instead (#88): a
-   maintenance9 fast path — EXCLUSIVE without transfers for declared textures
-   where the driver reports transfers unnecessary.
+   making the release side structurally awkward, and the measured driver
+   reality (below) shows the payoff is a handful of images on one vendor.
+
+### Measured driver reality (RX 9070 XT, Adrenalin 2.0.373, 2026-07)
+
+The AMD Windows driver reports `optimalImageTransferToQueueFamilies == 0`
+for **every** queue family: even with maintenance9 enabled, AMD requires
+real ownership transfers for optimal-tiling images (consistent with DCC
+metadata needing a handoff). On AMD the fast path therefore stays off and
+declared textures use the CONCURRENT fallback — which further validates not
+building full QFOT. The fast path is expected to engage on NVIDIA
+(unverified — no hardware at hand).
 
 ### Consequences
 

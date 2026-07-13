@@ -12,6 +12,7 @@ pub use debug::{reset_validation_error_count, validation_error_count};
 mod device;
 mod instance;
 pub mod layout;
+mod maintenance9;
 mod pipeline;
 mod staging;
 pub mod swapchain;
@@ -263,6 +264,13 @@ pub struct VulkanBackend {
     /// per frame. Entries are dropped when the texture retires (same drain
     /// as the trackers in [`advance_frame`](Self::advance_frame)).
     async_decline_warned: Mutex<HashSet<u64>>,
+    /// maintenance9 image fast path (#88): true when the extension is
+    /// enabled AND the graphics and async compute families may mutually
+    /// implicitly acquire each other's optimal-tiling images. Declared
+    /// cross-queue textures are then created EXCLUSIVE (keeping framebuffer
+    /// compression) with no ownership transfers — synchronization is still
+    /// the tracker-emitted timeline waits, unchanged.
+    implicit_cross_queue_images: bool,
     /// Capabilities queried from the selected physical device at creation
     /// (ADR-027) — the single source of truth downstream clamps against.
     device_caps: crate::device::DeviceCapabilities,
@@ -321,11 +329,24 @@ impl VulkanBackend {
         let debug_utils = created.debug_utils;
         let surface_support = created.surface_support;
 
+        // maintenance9 is usable only when validation is off or the layer is
+        // new enough to know it — an older layer reports our hand-rolled
+        // structs as "unknown VkStructureType" errors and disables its
+        // handling of the extension.
+        let allow_maintenance9 = created
+            .validation_layer_spec
+            .is_none_or(|spec| spec >= maintenance9::MIN_AWARE_HEADER_VERSION);
+
         // Select physical device (filter-then-score against the baseline
         // tier under the adapter preference; a headless instance cannot
         // require the swapchain extension).
-        let selected =
-            device::select_physical_device(&entry, &instance, surface_support, &params.adapter)?;
+        let selected = device::select_physical_device(
+            &entry,
+            &instance,
+            surface_support,
+            &params.adapter,
+            allow_maintenance9,
+        )?;
         let physical_device = selected.physical_device;
 
         // Plan queues (graphics + async compute when available) and create
@@ -339,6 +360,35 @@ impl VulkanBackend {
         let device_caps = device::device_capabilities(&instance, &selected, &queue_plan);
         let adapter_info = device::adapter_info(&selected);
         log::info!("Device capabilities: {device_caps:?}");
+
+        // maintenance9 image fast path (#88): with the feature enabled and
+        // mutual implicit-acquire support between the graphics and compute
+        // families, declared cross-queue textures stay EXCLUSIVE.
+        let implicit_cross_queue_images = selected.optional.maintenance9
+            && match queue_plan.async_compute {
+                Some((family, _)) if family != queue_plan.graphics_family => {
+                    maintenance9::implicit_image_transfer_ok(
+                        &instance,
+                        physical_device,
+                        queue_plan.graphics_family,
+                        family,
+                    )
+                }
+                _ => false,
+            };
+        if queue_plan
+            .async_compute
+            .is_some_and(|(family, _)| family != queue_plan.graphics_family)
+        {
+            log::info!(
+                "Cross-queue textures: {}",
+                if implicit_cross_queue_images {
+                    "EXCLUSIVE via maintenance9 implicit ownership (compression retained)"
+                } else {
+                    "CONCURRENT (maintenance9 implicit image acquire unavailable)"
+                }
+            );
+        }
 
         let graphics_queue = unsafe { device.get_device_queue(graphics_queue_family, 0) };
 
@@ -500,6 +550,7 @@ impl VulkanBackend {
             timeline_next: AtomicU64::new(1),
             async_compute,
             async_decline_warned: Mutex::new(HashSet::new()),
+            implicit_cross_queue_images,
             device_caps,
             adapter_info,
             surface_support,
@@ -532,10 +583,11 @@ impl VulkanBackend {
     /// queue-family ownership transfers — timeline semaphores alone carry the
     /// synchronization (#47 design decision). Undeclared textures stay
     /// EXCLUSIVE to keep framebuffer compression; `execute_graph` never
-    /// routes a graph that touches one to the async queue. Full EXCLUSIVE +
-    /// QFOT is deliberately not implemented (#88); a maintenance9 fast path
-    /// (EXCLUSIVE without transfers where the driver reports them
-    /// unnecessary) is the planned next step.
+    /// routes a graph that touches one to the async queue. Where the
+    /// maintenance9 fast path is active
+    /// ([`implicit_cross_queue_images`](Self::implicit_cross_queue_images))
+    /// even declared textures stay EXCLUSIVE. Full EXCLUSIVE + QFOT is
+    /// deliberately not implemented (#88 / ADR-030).
     fn concurrent_families(&self) -> Option<[u32; 2]> {
         self.async_compute
             .as_ref()
@@ -1239,9 +1291,12 @@ impl VulkanBackend {
         };
 
         // Create image. CONCURRENT across graphics + async compute families
-        // only when the texture is DECLARED cross-queue (#88): CONCURRENT can
-        // cost framebuffer compression (DCC), so undeclared images stay
-        // EXCLUSIVE and `execute_graph` keeps them off the async queue.
+        // only when the texture is DECLARED cross-queue (#88) AND the
+        // maintenance9 fast path is unavailable: with mutual implicit
+        // ownership acquisition the declared texture stays EXCLUSIVE too
+        // (compression retained, no transfers — the D3D12 model). Undeclared
+        // images always stay EXCLUSIVE and `execute_graph` keeps them off
+        // the async queue.
         let mut image_info = vk::ImageCreateInfo::default()
             .flags(flags)
             .image_type(image_type)
@@ -1257,8 +1312,7 @@ impl VulkanBackend {
             .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
-        let concurrent_families = descriptor
-            .cross_queue
+        let concurrent_families = (descriptor.cross_queue && !self.implicit_cross_queue_images)
             .then(|| self.concurrent_families())
             .flatten();
         if let Some(families) = &concurrent_families {

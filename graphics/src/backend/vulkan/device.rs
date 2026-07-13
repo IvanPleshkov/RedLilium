@@ -22,6 +22,10 @@ pub struct OptionalFeatures {
     /// Wireframe (`PolygonMode::Line`) pipelines; without it line mode
     /// downgrades to fill.
     pub fill_mode_non_solid: bool,
+    /// `VK_KHR_maintenance9` (#88): queue-family ownership transfers become
+    /// optional where the driver says so — declared cross-queue textures can
+    /// then stay EXCLUSIVE (keeping compression) instead of CONCURRENT.
+    pub maintenance9: bool,
 }
 
 /// The physical device chosen by [`select_physical_device`] plus everything
@@ -185,6 +189,7 @@ pub fn select_physical_device(
     instance: &ash::Instance,
     require_swapchain: bool,
     preference: &crate::instance::AdapterPreference,
+    allow_maintenance9: bool,
 ) -> Result<SelectedDevice, GraphicsError> {
     let devices = unsafe { instance.enumerate_physical_devices() }.map_err(|e| {
         GraphicsError::InitializationFailed(format!(
@@ -267,6 +272,9 @@ pub fn select_physical_device(
 
         if best.as_ref().is_none_or(|(s, _)| score > *s) {
             let features = unsafe { instance.get_physical_device_features(device) };
+            let maintenance9 = allow_maintenance9
+                && extensions.contains(super::maintenance9::EXTENSION_NAME.to_bytes())
+                && super::maintenance9::feature_supported(instance, device);
             best = Some((
                 score,
                 SelectedDevice {
@@ -275,6 +283,7 @@ pub fn select_physical_device(
                     optional: OptionalFeatures {
                         sampler_anisotropy: features.sampler_anisotropy == vk::TRUE,
                         fill_mode_non_solid: features.fill_mode_non_solid == vk::TRUE,
+                        maintenance9,
                     },
                     portability_subset: extensions.contains(b"VK_KHR_portability_subset".as_ref()),
                 },
@@ -430,6 +439,12 @@ pub fn create_logical_device(
     if selected.portability_subset {
         device_extensions.push(c"VK_KHR_portability_subset".as_ptr());
     }
+    // maintenance9 (#88): optional queue-family ownership transfers. Enabled
+    // whenever supported; the image fast path additionally checks the
+    // per-queue-family transfer property (see `VulkanBackend::with_params`).
+    if selected.optional.maintenance9 {
+        device_extensions.push(super::maintenance9::EXTENSION_NAME.as_ptr());
+    }
 
     // Optional features, enabled only where supported.
     let features = vk::PhysicalDeviceFeatures::default()
@@ -451,13 +466,20 @@ pub fn create_logical_device(
     let mut vulkan12_features =
         vk::PhysicalDeviceVulkan12Features::default().timeline_semaphore(true);
 
-    let create_info = vk::DeviceCreateInfo::default()
+    // maintenance9 feature struct — chained only when the device supports it.
+    let mut maintenance9_features =
+        super::maintenance9::PhysicalDeviceMaintenance9FeaturesKHR::enabled();
+
+    let mut create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_create_infos)
         .enabled_extension_names(&device_extensions)
         .enabled_features(&features)
         .push_next(&mut dynamic_rendering_features)
         .push_next(&mut vulkan11_features)
         .push_next(&mut vulkan12_features);
+    if selected.optional.maintenance9 {
+        create_info = create_info.push_next(&mut maintenance9_features);
+    }
 
     let device = unsafe { instance.create_device(selected.physical_device, &create_info, None) }
         .map_err(|e| {
