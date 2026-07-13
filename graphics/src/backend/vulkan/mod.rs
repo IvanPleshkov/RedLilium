@@ -12,10 +12,12 @@ pub use debug::{reset_validation_error_count, validation_error_count};
 mod device;
 mod instance;
 pub mod layout;
+mod maintenance9;
 mod pipeline;
 mod staging;
 pub mod swapchain;
 
+use std::collections::HashSet;
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -256,6 +258,19 @@ pub struct VulkanBackend {
     /// `None` is the first-class single-queue mode: everything runs on the
     /// graphics queue exactly as before.
     async_compute: Option<AsyncComputeQueue>,
+    /// Stable ids of textures already warned about declining the async
+    /// compute hint (#88) — the fallback is correct but silently serializes
+    /// work the caller wanted overlapped, so it warns once per texture, not
+    /// per frame. Entries are dropped when the texture retires (same drain
+    /// as the trackers in [`advance_frame`](Self::advance_frame)).
+    async_decline_warned: Mutex<HashSet<u64>>,
+    /// maintenance9 image fast path (#88): true when the extension is
+    /// enabled AND the graphics and async compute families may mutually
+    /// implicitly acquire each other's optimal-tiling images. Declared
+    /// cross-queue textures are then created EXCLUSIVE (keeping framebuffer
+    /// compression) with no ownership transfers — synchronization is still
+    /// the tracker-emitted timeline waits, unchanged.
+    implicit_cross_queue_images: bool,
     /// Capabilities queried from the selected physical device at creation
     /// (ADR-027) — the single source of truth downstream clamps against.
     device_caps: crate::device::DeviceCapabilities,
@@ -314,11 +329,24 @@ impl VulkanBackend {
         let debug_utils = created.debug_utils;
         let surface_support = created.surface_support;
 
+        // maintenance9 is usable only when validation is off or the layer is
+        // new enough to know it — an older layer reports our hand-rolled
+        // structs as "unknown VkStructureType" errors and disables its
+        // handling of the extension.
+        let allow_maintenance9 = created
+            .validation_layer_spec
+            .is_none_or(|spec| spec >= maintenance9::MIN_AWARE_HEADER_VERSION);
+
         // Select physical device (filter-then-score against the baseline
         // tier under the adapter preference; a headless instance cannot
         // require the swapchain extension).
-        let selected =
-            device::select_physical_device(&entry, &instance, surface_support, &params.adapter)?;
+        let selected = device::select_physical_device(
+            &entry,
+            &instance,
+            surface_support,
+            &params.adapter,
+            allow_maintenance9,
+        )?;
         let physical_device = selected.physical_device;
 
         // Plan queues (graphics + async compute when available) and create
@@ -332,6 +360,35 @@ impl VulkanBackend {
         let device_caps = device::device_capabilities(&instance, &selected, &queue_plan);
         let adapter_info = device::adapter_info(&selected);
         log::info!("Device capabilities: {device_caps:?}");
+
+        // maintenance9 image fast path (#88): with the feature enabled and
+        // mutual implicit-acquire support between the graphics and compute
+        // families, declared cross-queue textures stay EXCLUSIVE.
+        let implicit_cross_queue_images = selected.optional.maintenance9
+            && match queue_plan.async_compute {
+                Some((family, _)) if family != queue_plan.graphics_family => {
+                    maintenance9::implicit_image_transfer_ok(
+                        &instance,
+                        physical_device,
+                        queue_plan.graphics_family,
+                        family,
+                    )
+                }
+                _ => false,
+            };
+        if queue_plan
+            .async_compute
+            .is_some_and(|(family, _)| family != queue_plan.graphics_family)
+        {
+            log::info!(
+                "Cross-queue textures: {}",
+                if implicit_cross_queue_images {
+                    "EXCLUSIVE via maintenance9 implicit ownership (compression retained)"
+                } else {
+                    "CONCURRENT (maintenance9 implicit image acquire unavailable)"
+                }
+            );
+        }
 
         let graphics_queue = unsafe { device.get_device_queue(graphics_queue_family, 0) };
 
@@ -492,6 +549,8 @@ impl VulkanBackend {
             queue_timeline,
             timeline_next: AtomicU64::new(1),
             async_compute,
+            async_decline_warned: Mutex::new(HashSet::new()),
+            implicit_cross_queue_images,
             device_caps,
             adapter_info,
             surface_support,
@@ -518,11 +577,17 @@ impl VulkanBackend {
     /// suffices (no async compute queue, or it lives in the graphics family —
     /// sharing modes only matter across *families*).
     ///
-    /// With a distinct compute family, buffers and images are created
-    /// CONCURRENT across both families so cross-queue access needs no
+    /// With a distinct compute family, buffers (all of them — compression
+    /// does not apply to buffers) and textures DECLARED cross-queue (#88) are
+    /// created CONCURRENT across both families so cross-queue access needs no
     /// queue-family ownership transfers — timeline semaphores alone carry the
-    /// synchronization (#47 design decision; EXCLUSIVE + QFOT is a possible
-    /// later optimization if profiling shows compression loss matters).
+    /// synchronization (#47 design decision). Undeclared textures stay
+    /// EXCLUSIVE to keep framebuffer compression; `execute_graph` never
+    /// routes a graph that touches one to the async queue. Where the
+    /// maintenance9 fast path is active
+    /// ([`implicit_cross_queue_images`](Self::implicit_cross_queue_images))
+    /// even declared textures stay EXCLUSIVE. Full EXCLUSIVE + QFOT is
+    /// deliberately not implemented (#88 / ADR-030).
     fn concurrent_families(&self) -> Option<[u32; 2]> {
         self.async_compute
             .as_ref()
@@ -707,8 +772,10 @@ impl VulkanBackend {
         let retired = std::mem::take(&mut *self.retired_tracker_handles.lock());
         if !retired.textures.is_empty() {
             let mut tracker = self.layout_tracker.lock();
+            let mut warned = self.async_decline_warned.lock();
             for id in retired.textures {
                 tracker.remove(layout::TextureId::from_raw(id));
+                warned.remove(&id);
             }
         }
         if !retired.buffers.is_empty() {
@@ -1224,7 +1291,12 @@ impl VulkanBackend {
         };
 
         // Create image. CONCURRENT across graphics + async compute families
-        // when the latter exists (see `concurrent_families`).
+        // only when the texture is DECLARED cross-queue (#88) AND the
+        // maintenance9 fast path is unavailable: with mutual implicit
+        // ownership acquisition the declared texture stays EXCLUSIVE too
+        // (compression retained, no transfers — the D3D12 model). Undeclared
+        // images always stay EXCLUSIVE and `execute_graph` keeps them off
+        // the async queue.
         let mut image_info = vk::ImageCreateInfo::default()
             .flags(flags)
             .image_type(image_type)
@@ -1240,7 +1312,9 @@ impl VulkanBackend {
             .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
-        let concurrent_families = self.concurrent_families();
+        let concurrent_families = (descriptor.cross_queue && !self.implicit_cross_queue_images)
+            .then(|| self.concurrent_families())
+            .flatten();
         if let Some(families) = &concurrent_families {
             image_info = image_info
                 .sharing_mode(vk::SharingMode::CONCURRENT)
@@ -1911,8 +1985,43 @@ impl VulkanBackend {
         // Route the graph. The swapchain handshake below is reachable only on
         // the graphics route: a swapchain write needs a graphics pass, which
         // disqualifies the graph from async routing.
+        //
+        // The async hint is additionally honored only when every texture the
+        // graph touches is declared cross-queue (#88): undeclared images are
+        // EXCLUSIVE, and accessing an EXCLUSIVE image from another queue
+        // family leaves its contents undefined per spec. Buffers are always
+        // CONCURRENT-shared and need no declaration. The fallback is correct
+        // but silently serializes work the caller wanted overlapped, so each
+        // offending texture warns once (the same graph legitimately runs
+        // this way on single-queue devices, hence no hard error).
         let async_route = match &self.async_compute {
-            Some(ac) if graph.prefer_async_compute() && !graph.has_graphics_passes() => Some(ac),
+            Some(ac) if graph.prefer_async_compute() && !graph.has_graphics_passes() => {
+                let mut eligible = true;
+                for usage in compiled.pass_usages() {
+                    for decl in &usage.texture_usages {
+                        if decl.texture.descriptor().cross_queue {
+                            continue;
+                        }
+                        eligible = false;
+                        let GpuTexture::Vulkan { id, .. } = decl.texture.gpu_handle() else {
+                            continue;
+                        };
+                        if self.async_decline_warned.lock().insert(*id) {
+                            log::warn!(
+                                "Async compute hint declined: texture {:?} is not declared \
+                                 cross-queue (TextureDescriptor::with_cross_queue); the graph \
+                                 runs on the graphics queue instead",
+                                decl.texture
+                                    .descriptor()
+                                    .label
+                                    .as_deref()
+                                    .unwrap_or("<unlabeled>"),
+                            );
+                        }
+                    }
+                }
+                eligible.then_some(ac)
+            }
             _ => None,
         };
         let (queue_id, queue, queue_timeline, timeline_next) = match async_route {
@@ -2004,6 +2113,14 @@ impl VulkanBackend {
         unsafe { self.device.end_command_buffer(cmd) }.map_err(|e| {
             GraphicsError::Internal(format!("Failed to end command buffer: {:?}", e))
         })?;
+
+        if !waits.is_empty() {
+            log::debug!(
+                "submit {timeline_value} on {queue_id:?} waits: graphics={:?} async={:?}",
+                waits.get(QueueId::Graphics),
+                waits.get(QueueId::AsyncCompute),
+            );
+        }
 
         // The binary semaphores are the swapchain acquire/render-finished
         // handshake below (graphics queue only — a swapchain writer is never
@@ -2161,7 +2278,7 @@ impl VulkanBackend {
             // destruction would otherwise alias a stale tracked layout).
             let texture_id = TextureId::from_raw(*id);
             let required_layout = decl.access.to_layout();
-            let current_layout =
+            let (current_layout, cross_queue_write) =
                 tracker.request_access(texture_id, required_layout, queue, submit_value, waits);
 
             // Determine aspect mask based on access mode and format
@@ -2182,18 +2299,28 @@ impl VulkanBackend {
 
             // Add barrier if layout change is needed (`request_access`
             // already updated the tracked layout and recorded queue
-            // ownership). For a cross-queue transition the barrier's source
-            // scope refers to stages of THIS queue — where nothing touched
-            // the image — which is exactly right: availability of the other
-            // queue's writes comes from the timeline wait recorded in
-            // `waits`, and the transition itself is ordered after that wait.
-            batch.add_image_barrier(
-                texture_id,
-                *image,
-                current_layout,
-                required_layout,
-                aspect_mask,
-            );
+            // ownership). When the previous write came from the OTHER queue
+            // its availability comes from the timeline wait recorded in
+            // `waits`, so the transition uses an empty source scope on this
+            // queue — the previous layout's own stages may not even exist on
+            // this queue's family (VUID 06461, caught on RDNA4 in #82).
+            if cross_queue_write {
+                batch.add_image_barrier_cross_queue(
+                    texture_id,
+                    *image,
+                    current_layout,
+                    required_layout,
+                    aspect_mask,
+                );
+            } else {
+                batch.add_image_barrier(
+                    texture_id,
+                    *image,
+                    current_layout,
+                    required_layout,
+                    aspect_mask,
+                );
+            }
         }
 
         // Generate buffer barriers from per-buffer last-access tracking: the

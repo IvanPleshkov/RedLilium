@@ -266,6 +266,9 @@ impl AssetStage for UploadTextureStage {
             dimension: cpu.dimension,
             format: cpu.format,
             usage: TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST,
+            // Sampled asset textures stay EXCLUSIVE (keeps compression, #88);
+            // upload graphs touching them are routed to the graphics queue.
+            cross_queue: false,
         };
         let texture = self.device.create_texture(&descriptor)?;
         let op =

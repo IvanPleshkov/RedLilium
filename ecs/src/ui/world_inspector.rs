@@ -88,7 +88,7 @@ pub fn show_world_inspector(ui: &mut egui::Ui, world: &World, state: &mut Inspec
                     ui.painter().rect_stroke(
                         resp.rect,
                         egui::CornerRadius::same(2),
-                        egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 200, 100)),
+                        egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(100, 200, 100)),
                         egui::StrokeKind::Outside,
                     );
                 }
@@ -114,7 +114,7 @@ pub fn show_world_inspector(ui: &mut egui::Ui, world: &World, state: &mut Inspec
                     ui.painter().rect_stroke(
                         resp.rect,
                         egui::CornerRadius::same(2),
-                        egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 200, 100)),
+                        egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(100, 200, 100)),
                         egui::StrokeKind::Outside,
                     );
                 }
@@ -242,7 +242,7 @@ fn handle_drop_target(
         ui.painter().rect_stroke(
             response.rect,
             egui::CornerRadius::same(2),
-            egui::Stroke::new(2.0, color),
+            egui::Stroke::new(2.0_f32, color),
             egui::StrokeKind::Outside,
         );
 
@@ -257,7 +257,7 @@ fn handle_drop_target(
         ui.painter().rect_stroke(
             response.rect,
             egui::CornerRadius::same(2),
-            egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 200, 100)),
+            egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(100, 200, 100)),
             egui::StrokeKind::Outside,
         );
 
@@ -301,7 +301,7 @@ fn handle_asset_drop(
     ui.painter().rect_stroke(
         response.rect,
         egui::CornerRadius::same(2),
-        egui::Stroke::new(2.0, color),
+        egui::Stroke::new(2.0_f32, color),
         egui::StrokeKind::Outside,
     );
     if !acceptable {

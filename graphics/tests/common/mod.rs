@@ -126,6 +126,9 @@ impl TestContext {
     }
 
     fn with_validation(backend: Backend, validation: bool) -> Option<Self> {
+        // Surface backend logs (queue plan, validation warnings) under RUST_LOG.
+        let _ = env_logger::builder().is_test(true).try_init();
+
         if !backend.is_available() {
             return None;
         }
@@ -187,6 +190,24 @@ impl TestContext {
             TextureFormat::Rgba8Unorm,
             TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
         )
+    }
+
+    /// Create a render target DECLARED cross-queue (#88): graphs touching it
+    /// remain eligible for async compute routing (undeclared textures force
+    /// the graphics queue).
+    #[allow(dead_code)]
+    pub fn create_cross_queue_render_target(&self, width: u32, height: u32) -> Arc<Texture> {
+        self.device
+            .create_texture(
+                &TextureDescriptor::new_2d(
+                    width,
+                    height,
+                    TextureFormat::Rgba8Unorm,
+                    TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
+                )
+                .with_cross_queue(true),
+            )
+            .expect("Failed to create texture")
     }
 
     /// Create a depth texture.

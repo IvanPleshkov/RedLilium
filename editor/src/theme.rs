@@ -49,34 +49,34 @@ pub fn apply(ctx: &egui::Context) {
     v.window_corner_radius = egui::CornerRadius::same(4);
 
     // --- Stroke / border ---
-    v.window_stroke = egui::Stroke::new(1.0, BORDER);
-    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, BORDER);
-    v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, TEXT_SECONDARY);
+    v.window_stroke = egui::Stroke::new(1.0_f32, BORDER);
+    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, BORDER);
+    v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, TEXT_SECONDARY);
 
     // --- Widget backgrounds ---
 
     // Inactive (buttons, combo-boxes at rest)
     v.widgets.inactive.bg_fill = SURFACE2;
-    v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, BORDER);
-    v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, TEXT_PRIMARY);
+    v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, BORDER);
+    v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, TEXT_PRIMARY);
     v.widgets.inactive.weak_bg_fill = SURFACE2;
 
     // Hovered
     v.widgets.hovered.bg_fill = SURFACE3;
-    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, ACCENT_HOVER);
-    v.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, TEXT_PRIMARY);
+    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, ACCENT_HOVER);
+    v.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, TEXT_PRIMARY);
     v.widgets.hovered.weak_bg_fill = SURFACE3;
 
     // Active (pressed)
     v.widgets.active.bg_fill = ACCENT_PRESSED;
-    v.widgets.active.bg_stroke = egui::Stroke::new(1.0, ACCENT);
-    v.widgets.active.fg_stroke = egui::Stroke::new(1.0, TEXT_PRIMARY);
+    v.widgets.active.bg_stroke = egui::Stroke::new(1.0_f32, ACCENT);
+    v.widgets.active.fg_stroke = egui::Stroke::new(1.0_f32, TEXT_PRIMARY);
     v.widgets.active.weak_bg_fill = ACCENT_PRESSED;
 
     // Open (menus / combo-box popups)
     v.widgets.open.bg_fill = SURFACE3;
-    v.widgets.open.bg_stroke = egui::Stroke::new(1.0, ACCENT);
-    v.widgets.open.fg_stroke = egui::Stroke::new(1.0, TEXT_PRIMARY);
+    v.widgets.open.bg_stroke = egui::Stroke::new(1.0_f32, ACCENT);
+    v.widgets.open.fg_stroke = egui::Stroke::new(1.0_f32, TEXT_PRIMARY);
     v.widgets.open.weak_bg_fill = SURFACE3;
 
     // Non-interactive (labels, separators)
@@ -85,7 +85,7 @@ pub fn apply(ctx: &egui::Context) {
 
     // --- Selection ---
     v.selection.bg_fill = SELECTION;
-    v.selection.stroke = egui::Stroke::new(1.0, ACCENT);
+    v.selection.stroke = egui::Stroke::new(1.0_f32, ACCENT);
 
     // --- Hyperlinks ---
     v.hyperlink_color = ACCENT_HOVER;

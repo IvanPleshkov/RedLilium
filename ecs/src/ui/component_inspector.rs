@@ -438,7 +438,7 @@ pub fn show_component_inspector(ui: &mut egui::Ui, world: &mut World, state: &mu
         ui.painter().rect_stroke(
             drop_resp.rect,
             4.0,
-            egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
+            egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_BLUE),
             egui::StrokeKind::Outside,
         );
     }
