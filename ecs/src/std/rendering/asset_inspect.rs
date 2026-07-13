@@ -177,6 +177,7 @@ mod render_assets {
                 let data = MaterialData {
                     shading_model: "opaque".to_owned(),
                     properties: Vec::new(),
+                    features: Vec::new(),
                 };
                 Some(NewAssetSpec {
                     extension: "material",

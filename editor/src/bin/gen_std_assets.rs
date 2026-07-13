@@ -181,6 +181,7 @@ fn main() {
                 "base_color".to_owned(),
                 PropValue::Vec4([0.6, 0.6, 0.65, 1.0]),
             )],
+            features: Vec::new(),
         },
     );
     instance(&mut db, "materials/default.matinst", opaque_guid);
@@ -194,6 +195,7 @@ fn main() {
                 "base_texture".to_owned(),
                 PropValue::Texture(TextureSource::File(checker_guid)),
             )],
+            features: Vec::new(),
         },
     );
     instance(&mut db, "materials/textured.matinst", textured_guid);

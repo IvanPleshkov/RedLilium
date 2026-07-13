@@ -1,6 +1,11 @@
 // Standard textured opaque shader — Blinn-Phong lighting with
 // position + normal + uv vertex layout; base color texture times base color.
 //
+// Variant axes (#6, Decision 5) — selected by the material asset's `features`:
+//   ALPHA_CUTOUT - discard fragments whose albedo alpha falls below
+//                  cutout_params.x (foliage, fences, grates).
+//#pragma variant ALPHA_CUTOUT
+//
 // Binding sets are ParameterBlocks classified by update frequency (the
 // [UpdateRate] attribute from the engine library module — see
 // docs/MATERIAL_ASSETS.md Decision 7). Declaration order fixes the set
@@ -20,6 +25,10 @@ struct ModelParams {
 
 struct MaterialParams {
     float4 base_color;
+    // x: alpha cutoff threshold (consumed under ALPHA_CUTOUT; a full float4
+    // slot so the uniform packing stays 16-byte aligned — see the schema in
+    // ShadingRegistry::opaque_textured).
+    float4 cutout_params;
     Texture2D base_texture;
     SamplerState base_texture_sampler;
 };
@@ -63,6 +72,11 @@ float4 fs_main(VsOutput input) : SV_Target {
     float4 albedo =
         gMaterial.base_texture.Sample(gMaterial.base_texture_sampler, input.uv)
         * gMaterial.base_color;
+#ifdef ALPHA_CUTOUT
+    if (albedo.a < gMaterial.cutout_params.x) {
+        discard;
+    }
+#endif
     float3 ambient = float3(0.15, 0.15, 0.18);
     float3 color = ambient * albedo.rgb + albedo.rgb * ndotl;
     return float4(color, albedo.a);

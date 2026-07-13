@@ -434,12 +434,14 @@ impl System for ForwardRender {
                         };
                         // Specialize the pipeline for this shader + variant + the
                         // mesh's vertex layout + the target formats (built once,
-                        // then cached). The empty variant until material assets
-                        // declare feature flags (Decision 5's material half).
+                        // then cached). The variant is the material's feature
+                        // half (Decision 5); when the forward path grows system
+                        // axes (lighting modes), this is where it completes
+                        // them via with_features + .system().
                         let Ok(pipeline) = pipelines.get_or_build(
                             instance.shader_guid,
                             &instance.shader,
-                            &redlilium_graphics::VariantKey::empty(),
+                            &instance.variant,
                             mesh.layout(),
                             color_fmt,
                             depth_fmt,

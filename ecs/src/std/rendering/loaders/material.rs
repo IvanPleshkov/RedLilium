@@ -37,6 +37,12 @@ pub struct MaterialData {
     pub shading_model: String,
     /// Property values by name; any omitted slot falls back to the model default.
     pub properties: Vec<(String, PropValue)>,
+    /// Feature-axis selections for the shader's `//#pragma variant` axes
+    /// (#6, Decision 5's material half). Unset axes take their pragma
+    /// defaults; unknown names or system axes fail the material resolve
+    /// loudly. Old records without the field parse as "all defaults".
+    #[serde(default)]
+    pub features: Vec<(String, super::super::shading::FeatureValue)>,
 }
 
 /// Loads a [`MaterialData`] from its DB record's `settings` (the file is empty —
@@ -85,10 +91,61 @@ impl AssetStage for MaterialFromSettingsStage {
 mod tests {
     use super::*;
 
+    /// A material with feature selections round-trips through RON, and an old
+    /// record without the field parses as "all defaults".
+    #[test]
+    fn material_features_ron_roundtrip_and_default() {
+        use crate::std::rendering::shading::FeatureValue;
+        let data = MaterialData {
+            shading_model: "opaque_textured".to_owned(),
+            properties: Vec::new(),
+            features: vec![("ALPHA_CUTOUT".to_owned(), FeatureValue::Bool(true))],
+        };
+        let ron = ron::to_string(&data).expect("material -> ron");
+        let back: MaterialData = ron::from_str(&ron).expect("ron -> material");
+        assert_eq!(data, back);
+
+        // Pre-features record: field absent → empty (all pragma defaults).
+        let old: MaterialData =
+            ron::from_str("(shading_model:\"opaque\",properties:[])").expect("old record parses");
+        assert!(old.features.is_empty());
+    }
+
+    /// The live axis: the real std shader declares ALPHA_CUTOUT, and the
+    /// material half of the variant key builds against it — on, off, and
+    /// typo'd (loud error naming the axis).
+    #[test]
+    fn opaque_textured_declares_alpha_cutout() {
+        use redlilium_graphics::{ShaderVariantSpace, VariantValue};
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../std-assets/shaders/opaque_textured.slang"
+        ))
+        .expect("std shader readable");
+        let space = ShaderVariantSpace::parse(&source).expect("pragmas parse");
+
+        let on = space
+            .build_features(&[("ALPHA_CUTOUT".into(), VariantValue::Bool(true))])
+            .unwrap();
+        assert_eq!(on.to_string(), "[ALPHA_CUTOUT]");
+
+        // Default (a record without features): the empty key — the same baked
+        // permutation as before the axis existed.
+        let off = space.build_features(&[]).unwrap();
+        assert!(off.is_empty());
+
+        assert!(
+            space
+                .build_features(&[("ALPHA_CUTOUP".into(), VariantValue::Bool(true))])
+                .is_err()
+        );
+    }
+
     #[test]
     fn material_data_ron_roundtrip() {
         let data = MaterialData {
             shading_model: "opaque".to_owned(),
+            features: Vec::new(),
             properties: vec![(
                 "base_color".to_owned(),
                 PropValue::Vec4([1.0, 0.5, 0.2, 1.0]),

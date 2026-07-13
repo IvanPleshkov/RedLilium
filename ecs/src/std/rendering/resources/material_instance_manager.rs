@@ -51,6 +51,11 @@ pub struct ResolvedInstance {
     pub shader_guid: Guid,
     /// The resident shader source (from the parent template).
     pub shader: Arc<Shader>,
+    /// The material half of the shader variant key, carried from the parent
+    /// template (#6, Decision 5). Per-instance feature overrides are a
+    /// follow-up — Unreal allows static-switch overrides on instances; we
+    /// start with template-owned features.
+    pub variant: redlilium_graphics::VariantKey,
     /// The resolved texture properties this instance was built with (schema
     /// order — the binding order). Retained so hot reload can pull-validate: a
     /// re-resolved texture (`Arc` mismatch) triggers a rebuild.
@@ -259,6 +264,7 @@ impl MaterialInstanceManager {
                         parent_guid,
                         shader_guid: parent.shader_guid,
                         shader: parent.shader.clone(),
+                        variant: parent.variant.clone(),
                         parent,
                         textures,
                         props,
