@@ -348,10 +348,24 @@ mod tests {
         let grab_world = anchor_pos + Vec3::new(0.6 * scale, 0.0, 0.0);
         let grab = camera.project(grab_world).expect("on screen");
 
-        // Press on the X arrow.
+        // Hover first: the shell's press-time gesture routing relies on
+        // wants_cursor() being true BEFORE the click lands (a press on a
+        // hovered handle must not clear the selection or start a pick).
         {
             let mut input = ew.window_input.write();
             input.cursor_position = [grab.0, grab.1];
+        }
+        tick(&mut ew);
+        assert!(
+            ew.world
+                .resource::<redlilium_gizmo::TranslateGizmo>()
+                .wants_cursor(),
+            "hovering the X arrow must claim the cursor before the press"
+        );
+
+        // Press on the X arrow.
+        {
+            let mut input = ew.window_input.write();
             input.mouse_left = true;
         }
         tick(&mut ew);

@@ -1518,8 +1518,12 @@ impl AppHandler for Editor {
         if button == MouseButton::Left
             && !pressed
             && !is_playing
+            && !self.gizmo_wants_cursor()
             && let Some(ew) = &mut self.world
         {
+            // Not during a gizmo drag: its final delta actions drain AFTER
+            // this event — breaking here would split the drag into two undo
+            // entries. The gizmo queues its own MergeBarrier behind them.
             ew.history.break_merge();
         }
         // Only forward presses when cursor is in scene view and egui doesn't
@@ -1546,14 +1550,24 @@ impl AppHandler for Editor {
             // Phase 6: Block drag selection during Play mode
             if button == MouseButton::Left && self.scene_view_rect_phys.is_some() && !is_playing {
                 if pressed && self.cursor_in_scene_view() && !self.egui_wants_pointer {
-                    self.drag_start = Some(self.cursor_pos);
-                    self.dragging_box = false;
-                    // Clear selection immediately on click; the GPU pick or
-                    // box selection will re-select if anything is hit.
-                    if let Some(ew) = &mut self.world {
-                        let action: Box<dyn redlilium_core::abstract_editor::EditAction<World>> =
-                            Box::new(SelectAction::clear());
-                        let _ = ew.history.execute(action, &mut ew.world);
+                    if self.gizmo_wants_cursor() {
+                        // The press lands on a hovered gizmo handle: it is a
+                        // manipulation, not a selection gesture. Leave the
+                        // selection intact (clearing it would yank the gizmo
+                        // out from under the drag) and start no pick/box
+                        // gesture; the press reaches the gizmo via the
+                        // WindowInput forward above.
+                    } else {
+                        self.drag_start = Some(self.cursor_pos);
+                        self.dragging_box = false;
+                        // Clear selection immediately on click; the GPU pick or
+                        // box selection will re-select if anything is hit.
+                        if let Some(ew) = &mut self.world {
+                            let action: Box<
+                                dyn redlilium_core::abstract_editor::EditAction<World>,
+                            > = Box::new(SelectAction::clear());
+                            let _ = ew.history.execute(action, &mut ew.world);
+                        }
                     }
                 } else if !pressed {
                     let gizmo_owns_cursor = self.gizmo_wants_cursor();
