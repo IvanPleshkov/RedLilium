@@ -55,6 +55,18 @@ impl<T: Component + Clone> EditAction<World> for SetComponentAction<T> {
     }
 }
 
+/// A boxed set-component action for programmatic edits (the gizmo drag
+/// path). Same merge semantics as inspector edits: consecutive actions on
+/// the same entity+type collapse (first `old`, latest `new`) — a drag
+/// becomes one undo entry.
+pub fn set_component_action<T: Component + Clone>(
+    entity: Entity,
+    old: T,
+    new: T,
+) -> Box<dyn EditAction<World>> {
+    Box::new(SetComponentAction { entity, old, new })
+}
+
 /// Creates an [`InspectResult`] that replaces a component value on an entity.
 ///
 /// This is the standard way for [`Component::inspect_ui`] implementations to

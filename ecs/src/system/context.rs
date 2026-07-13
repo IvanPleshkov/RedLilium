@@ -568,16 +568,17 @@ impl<'a> SystemContext<'a> {
         self.world
     }
 
-    /// Undeclared whole-world access for engine-internal systems (render
-    /// graph, asset pipeline, remote serve) whose access pattern cannot be
+    /// Undeclared whole-world access for systems (render graph, asset
+    /// pipeline, editor gizmo orchestration) whose access pattern cannot be
     /// expressed through `ctx.lock()`.
     ///
     /// Recorded as [`AccessKind::RawWorld`](crate::query::access::AccessKind)
     /// when ambiguity detection is on: the detector then treats this system
     /// as conflicting with **every** unordered peer, so a missing dependency
     /// edge shows up as a warning instead of a silent MT data race (#54).
-    /// Zero cost when detection is off.
-    pub(crate) fn raw_world(&self) -> &'a World {
+    /// Zero cost when detection is off. Raw access is *priced*, not
+    /// forbidden — order such a system explicitly against its schedule peers.
+    pub fn raw_world(&self) -> &'a World {
         self.record_access(&[crate::query::access::AccessInfo::raw_world()]);
         self.world
     }

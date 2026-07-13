@@ -23,6 +23,7 @@ redlilium-graphics = { path = "../graphics" }
 redlilium-app = { path = "../app" }
 redlilium-runtime = { path = "../runtime" }
 redlilium-debug-drawer = { path = "../debug_drawer" }
+redlilium-gizmo = { path = "../gizmo" }
 redlilium-vfs = { path = "../vfs", features = ["sftp"] }
 
 parking_lot = { workspace = true }

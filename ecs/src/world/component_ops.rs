@@ -131,6 +131,8 @@ impl World {
             serialize_fn: serialize_component_fn::<T>,
             deserialize_fn: deserialize_component_fn::<T>,
             display_order: 100,
+            gizmo_anchors_fn: None,
+            gizmo_drag_fn: None,
         });
     }
 
@@ -210,6 +212,8 @@ impl World {
             serialize_fn: serialize_component_fn::<T>,
             deserialize_fn: deserialize_component_fn::<T>,
             display_order: 100,
+            gizmo_anchors_fn: None,
+            gizmo_drag_fn: None,
         });
     }
 

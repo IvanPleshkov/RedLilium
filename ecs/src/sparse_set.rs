@@ -108,6 +108,20 @@ pub(crate) type DeserializeComponentFn = fn(
     &mut crate::serialize::DeserializeContext<'_>,
 ) -> Result<(), crate::serialize::DeserializeError>;
 
+/// Type-erased gizmo-anchor listing (see [`crate::ui::GizmoAnchors`]).
+pub(crate) type GizmoAnchorsFn =
+    fn(&World, Entity, &crate::ui::AnchorCtx) -> Vec<crate::ui::GizmoAnchor>;
+
+/// Type-erased gizmo drag → undoable action (see [`crate::ui::GizmoAnchors`]).
+pub(crate) type GizmoDragFn =
+    fn(
+        &World,
+        Entity,
+        u32,
+        redlilium_core::math::Vec3,
+        &crate::ui::AnchorCtx,
+    ) -> Option<Box<dyn redlilium_core::abstract_editor::EditAction<World>>>;
+
 /// The return type of an inspector's `inspect_fn`.
 ///
 /// `None` means the entity didn't have the component or nothing was edited.
@@ -166,6 +180,12 @@ pub(crate) struct ComponentMeta {
     pub patch_asset_refs_fn: PatchAssetRefsFn,
     /// Display order in the inspector panel. Lower values appear first.
     pub display_order: u32,
+    /// List this component's draggable gizmo anchors (None: no gizmo support).
+    /// Living in the meta (not a registry resource) means a game module's
+    /// provider fns are purged with the storage on unload (#84 hazard class).
+    pub gizmo_anchors_fn: Option<GizmoAnchorsFn>,
+    /// Turn a gizmo drag on one anchor into an undoable edit action.
+    pub gizmo_drag_fn: Option<GizmoDragFn>,
 }
 
 /// Function signature for component lifecycle hooks.

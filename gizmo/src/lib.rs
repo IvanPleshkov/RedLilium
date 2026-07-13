@@ -42,6 +42,6 @@ mod renderer;
 mod state;
 
 pub use math::{GizmoCamera, Ray, screen_scale};
-pub use mesh::{GizmoUniforms, GizmoVertex, build_vertices};
+pub use mesh::{GizmoUniforms, GizmoVertex, build_anchor_dots, build_vertices};
 pub use renderer::GizmoRenderer;
 pub use state::{CursorState, GizmoConfig, GizmoEvent, Handle, TranslateGizmo};

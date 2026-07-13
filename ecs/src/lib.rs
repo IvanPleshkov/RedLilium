@@ -207,6 +207,9 @@ pub use rendering::{
 pub fn register_std_components(world: &mut World) {
     // Inspector-enabled components (support "Add Component" via Default)
     world.register_inspector_default::<Transform>();
+    // Transform is the built-in gizmo-anchor provider (#85): one draggable
+    // origin. Must follow register_inspector (the provider lives in meta).
+    world.register_gizmo_anchors::<Transform>();
     world.register_inspector_default::<GlobalTransform>();
     world.register_inspector_default::<Visibility>();
     world.register_inspector_default::<Name>();
