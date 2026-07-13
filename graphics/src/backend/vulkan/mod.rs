@@ -199,7 +199,7 @@ pub struct VulkanBackend {
     /// Command pool for graphics operations.
     ///
     /// INVARIANT: Vulkan requires the pool (and recording into its buffers) to
-    /// be externally synchronized. All users — `execute_graph`, `write_texture`,
+    /// be externally synchronized. All users — `execute_graph`, `write_buffer`,
     /// swapchain present, and `advance_frame` — run on the single render thread
     /// that drives `&mut FrameSchedule`, so accesses are serialized by that
     /// ownership. If GPU submission/upload is ever moved off that thread (e.g.
@@ -257,7 +257,11 @@ pub struct VulkanBackend {
     /// The async compute queue, when the device exposes one (#47 phase 4).
     /// `None` is the first-class single-queue mode: everything runs on the
     /// graphics queue exactly as before.
-    async_compute: Option<AsyncComputeQueue>,
+    async_compute: Option<SecondaryQueue>,
+    /// The dedicated transfer queue — DMA engines — when the device exposes
+    /// a transfer-only family (#89). `None` is first-class: transfer graphs
+    /// fall back to async compute, then graphics.
+    transfer_queue: Option<SecondaryQueue>,
     /// Stable ids of textures already warned about declining the async
     /// compute hint (#88) — the fallback is correct but silently serializes
     /// work the caller wanted overlapped, so it warns once per texture, not
@@ -281,13 +285,41 @@ pub struct VulkanBackend {
     surface_support: bool,
 }
 
-/// The async compute queue and its submission state (#47 phase 4).
-struct AsyncComputeQueue {
+/// Distinct queue families for CONCURRENT resource creation (graphics plus
+/// up to one per secondary queue), inline to avoid a per-creation allocation.
+#[derive(Debug, Clone, Copy)]
+struct ConcurrentFamilies {
+    families: [u32; barriers::QUEUE_COUNT],
+    len: usize,
+}
+
+impl ConcurrentFamilies {
+    fn new(graphics_family: u32) -> Self {
+        Self {
+            families: [graphics_family; barriers::QUEUE_COUNT],
+            len: 1,
+        }
+    }
+
+    fn push(&mut self, family: u32) {
+        self.families[self.len] = family;
+        self.len += 1;
+    }
+
+    fn as_slice(&self) -> &[u32] {
+        &self.families[..self.len]
+    }
+}
+
+/// A secondary queue (async compute / dedicated transfer) and its submission
+/// state (#47 phase 4, #89).
+struct SecondaryQueue {
     /// The queue itself.
     queue: vk::Queue,
-    /// Its queue family (may equal the graphics family — second queue in the
-    /// same family; CONCURRENT sharing is then unnecessary but cross-queue
-    /// semaphores still are).
+    /// Its queue family (async compute may equal the graphics family — second
+    /// queue in the same family; CONCURRENT sharing is then unnecessary but
+    /// cross-queue semaphores still are. A transfer family is always
+    /// distinct by construction).
     family: u32,
     /// This queue's timeline semaphore (mirrors `queue_timeline`).
     timeline: vk::Semaphore,
@@ -362,24 +394,28 @@ impl VulkanBackend {
         log::info!("Device capabilities: {device_caps:?}");
 
         // maintenance9 image fast path (#88): with the feature enabled and
-        // mutual implicit-acquire support between the graphics and compute
-        // families, declared cross-queue textures stay EXCLUSIVE.
-        let implicit_cross_queue_images = selected.optional.maintenance9
-            && match queue_plan.async_compute {
-                Some((family, _)) if family != queue_plan.graphics_family => {
-                    maintenance9::implicit_image_transfer_ok(
-                        &instance,
-                        physical_device,
-                        queue_plan.graphics_family,
-                        family,
-                    )
-                }
-                _ => false,
-            };
-        if queue_plan
+        // mutual implicit-acquire support between EVERY pair of distinct
+        // families a declared cross-queue texture can be touched from
+        // (graphics, async compute, dedicated transfer #89), declared
+        // textures stay EXCLUSIVE.
+        let distinct_secondary_families: Vec<u32> = queue_plan
             .async_compute
-            .is_some_and(|(family, _)| family != queue_plan.graphics_family)
-        {
+            .into_iter()
+            .chain(queue_plan.transfer)
+            .map(|(family, _)| family)
+            .filter(|&family| family != queue_plan.graphics_family)
+            .collect();
+        let implicit_cross_queue_images =
+            selected.optional.maintenance9 && !distinct_secondary_families.is_empty() && {
+                let mut all_families = vec![queue_plan.graphics_family];
+                all_families.extend(&distinct_secondary_families);
+                all_families.iter().enumerate().all(|(i, &a)| {
+                    all_families[i + 1..].iter().all(|&b| {
+                        maintenance9::implicit_image_transfer_ok(&instance, physical_device, a, b)
+                    })
+                })
+            };
+        if !distinct_secondary_families.is_empty() {
             log::info!(
                 "Cross-queue textures: {}",
                 if implicit_cross_queue_images {
@@ -431,12 +467,15 @@ impl VulkanBackend {
         };
         let queue_timeline = create_timeline(&device)?;
 
-        // The async compute queue, when planned: its own timeline and
-        // per-slot command pools (a command pool is tied to one family and
-        // one recording thread's pools must not be shared across queues'
-        // submit streams anyway).
-        let async_compute = match queue_plan.async_compute {
-            Some((family, index)) => {
+        // The secondary queues (async compute #47, dedicated transfer #89),
+        // when planned: each gets its own timeline and per-slot command pools
+        // (a command pool is tied to one family and one recording thread's
+        // pools must not be shared across queues' submit streams anyway).
+        let create_secondary =
+            |planned: Option<(u32, u32)>| -> Result<Option<SecondaryQueue>, GraphicsError> {
+                let Some((family, index)) = planned else {
+                    return Ok(None);
+                };
                 let queue = unsafe { device.get_device_queue(family, index) };
                 let timeline = create_timeline(&device)?;
                 let command_pools = {
@@ -446,27 +485,35 @@ impl VulkanBackend {
                     }
                     pools
                 };
-                Some(AsyncComputeQueue {
+                Ok(Some(SecondaryQueue {
                     queue,
                     family,
                     timeline,
                     timeline_next: AtomicU64::new(1),
                     command_pools,
-                })
-            }
-            None => None,
-        };
+                }))
+            };
+        let async_compute = create_secondary(queue_plan.async_compute)?;
+        let transfer_queue = create_secondary(queue_plan.transfer)?;
 
-        // Staging chunks must be CONCURRENT-shareable when transfer graphs
-        // can be routed to a distinct-family async compute queue.
+        // Staging chunks must be CONCURRENT-shareable across every distinct
+        // family a transfer graph can be routed to (async compute, dedicated
+        // transfer).
         let staging_belt = {
+            let mut families = vec![graphics_queue_family];
+            if let Some(ac) = async_compute
+                .as_ref()
+                .filter(|ac| ac.family != graphics_queue_family)
+            {
+                families.push(ac.family);
+            }
+            if let Some(tq) = &transfer_queue {
+                families.push(tq.family);
+            }
             let mut belt = staging::StagingBelt::default();
-            belt.set_concurrent_families(
-                async_compute
-                    .as_ref()
-                    .filter(|ac| ac.family != graphics_queue_family)
-                    .map(|ac| [graphics_queue_family, ac.family]),
-            );
+            if families.len() >= 2 {
+                belt.set_concurrent_families(&families);
+            }
             belt
         };
 
@@ -549,6 +596,7 @@ impl VulkanBackend {
             queue_timeline,
             timeline_next: AtomicU64::new(1),
             async_compute,
+            transfer_queue,
             async_decline_warned: Mutex::new(HashSet::new()),
             implicit_cross_queue_images,
             device_caps,
@@ -574,25 +622,34 @@ impl VulkanBackend {
     }
 
     /// Queue family indices for CONCURRENT sharing, or `None` when EXCLUSIVE
-    /// suffices (no async compute queue, or it lives in the graphics family —
-    /// sharing modes only matter across *families*).
+    /// suffices (no secondary queue in a distinct family — sharing modes
+    /// only matter across *families*).
     ///
-    /// With a distinct compute family, buffers (all of them — compression
-    /// does not apply to buffers) and textures DECLARED cross-queue (#88) are
-    /// created CONCURRENT across both families so cross-queue access needs no
+    /// With distinct secondary families (async compute #47, dedicated
+    /// transfer #89), buffers (all of them — compression does not apply to
+    /// buffers) and textures DECLARED cross-queue (#88) are created
+    /// CONCURRENT across every such family so cross-queue access needs no
     /// queue-family ownership transfers — timeline semaphores alone carry the
     /// synchronization (#47 design decision). Undeclared textures stay
     /// EXCLUSIVE to keep framebuffer compression; `execute_graph` never
-    /// routes a graph that touches one to the async queue. Where the
+    /// routes a graph that touches one off the graphics queue. Where the
     /// maintenance9 fast path is active
     /// ([`implicit_cross_queue_images`](Self::implicit_cross_queue_images))
     /// even declared textures stay EXCLUSIVE. Full EXCLUSIVE + QFOT is
     /// deliberately not implemented (#88 / ADR-030).
-    fn concurrent_families(&self) -> Option<[u32; 2]> {
-        self.async_compute
+    fn concurrent_families(&self) -> Option<ConcurrentFamilies> {
+        let mut families = ConcurrentFamilies::new(self.graphics_queue_family);
+        if let Some(ac) = self
+            .async_compute
             .as_ref()
             .filter(|ac| ac.family != self.graphics_queue_family)
-            .map(|ac| [self.graphics_queue_family, ac.family])
+        {
+            families.push(ac.family);
+        }
+        if let Some(tq) = &self.transfer_queue {
+            families.push(tq.family);
+        }
+        (families.as_slice().len() >= 2).then_some(families)
     }
 
     /// Convert an engine texture format to the Vulkan format this device
@@ -731,17 +788,20 @@ impl VulkanBackend {
         let oldest = (current + 1) % MAX_FRAMES_IN_FLIGHT;
 
         // Reset the oldest slot's frame command pools (graphics and, when
-        // present, async compute), freeing all their command buffers at once.
-        // Safe: ALL of the slot's fences have been waited (GPU done on both
-        // queues).
+        // present, the secondary queues'), freeing all their command buffers
+        // at once. Safe: ALL of the slot's fences have been waited (GPU done
+        // on every queue).
         unsafe {
             let _ = self.device.reset_command_pool(
                 self.frame_command_pools[oldest],
                 vk::CommandPoolResetFlags::empty(),
             );
-            if let Some(async_compute) = &self.async_compute {
+            for secondary in [&self.async_compute, &self.transfer_queue]
+                .into_iter()
+                .flatten()
+            {
                 let _ = self.device.reset_command_pool(
-                    async_compute.command_pools[oldest],
+                    secondary.command_pools[oldest],
                     vk::CommandPoolResetFlags::empty(),
                 );
             }
@@ -1065,12 +1125,15 @@ impl Drop for VulkanBackend {
             // keeps this backend alive (#50).
             self.device.destroy_semaphore(self.queue_timeline, None);
 
-            // Async compute queue resources, if present.
-            if let Some(async_compute) = &self.async_compute {
-                for &pool in &async_compute.command_pools {
+            // Secondary queue resources (async compute, transfer), if present.
+            for secondary in [&self.async_compute, &self.transfer_queue]
+                .into_iter()
+                .flatten()
+            {
+                for &pool in &secondary.command_pools {
                     self.device.destroy_command_pool(pool, None);
                 }
-                self.device.destroy_semaphore(async_compute.timeline, None);
+                self.device.destroy_semaphore(secondary.timeline, None);
             }
 
             // Destroy the staging belt (the device_wait_idle above
@@ -1136,10 +1199,9 @@ impl VulkanBackend {
 
         // Guard the ADR-021 contract: a buffer meant for direct mapped writes
         // (RING every frame, or MAP_WRITE) must be host-visible. If a future
-        // policy change let one land GpuOnly, `write_buffer`'s mapped path
-        // would silently fall through to the blocking one-shot staging copy —
-        // every frame — a catastrophic, invisible perf regression (the exact
-        // class the editor smoke caught during #41).
+        // policy change let one land GpuOnly, every `write_buffer` on it
+        // would fail (the blocking one-shot fallback was removed in #89) —
+        // catch the miscreated buffer at creation instead.
         debug_assert!(
             !descriptor
                 .usage
@@ -1158,7 +1220,7 @@ impl VulkanBackend {
         if let Some(families) = &concurrent_families {
             buffer_info = buffer_info
                 .sharing_mode(vk::SharingMode::CONCURRENT)
-                .queue_family_indices(families);
+                .queue_family_indices(families.as_slice());
         }
 
         let buffer = unsafe { self.device.create_buffer(&buffer_info, None) }.map_err(|e| {
@@ -1318,7 +1380,7 @@ impl VulkanBackend {
         if let Some(families) = &concurrent_families {
             image_info = image_info
                 .sharing_mode(vk::SharingMode::CONCURRENT)
-                .queue_family_indices(families);
+                .queue_family_indices(families.as_slice());
         }
 
         let image = unsafe { self.device.create_image(&image_info, None) }.map_err(|e| {
@@ -1945,6 +2007,76 @@ impl VulkanBackend {
         // This is a no-op for the Vulkan backend
     }
 
+    /// Resolve a graph's [`QueuePreference`] to an actual secondary queue,
+    /// or `None` for the graphics queue (#47 phase 4, #89).
+    ///
+    /// The ladder: `Transfer` → dedicated transfer queue (transfer-only
+    /// graphs — a transfer family cannot execute compute passes) → async
+    /// compute → graphics; `AsyncCompute` → async compute (no graphics
+    /// passes) → graphics. Each rung requires the queue to exist.
+    ///
+    /// Any secondary rung is additionally honored only when every texture
+    /// the graph touches is declared cross-queue (#88): undeclared images
+    /// are EXCLUSIVE, and accessing an EXCLUSIVE image from another queue
+    /// family leaves its contents undefined per spec. Buffers are always
+    /// CONCURRENT-shared and need no declaration. The fallback is correct
+    /// but silently serializes work the caller wanted overlapped, so each
+    /// offending texture warns once (the same graph legitimately runs
+    /// this way on single-queue devices, hence no hard error).
+    fn route_graph(
+        &self,
+        graph: &RenderGraph,
+        compiled: &CompiledGraph,
+    ) -> Option<(QueueId, &SecondaryQueue)> {
+        use crate::graph::QueuePreference;
+
+        let target = match graph.queue_preference() {
+            QueuePreference::Graphics => return None,
+            _ if graph.has_graphics_passes() => return None,
+            QueuePreference::AsyncCompute => self
+                .async_compute
+                .as_ref()
+                .map(|q| (QueueId::AsyncCompute, q)),
+            QueuePreference::Transfer => self
+                .transfer_queue
+                .as_ref()
+                .filter(|_| graph.is_transfer_only())
+                .map(|q| (QueueId::Transfer, q))
+                .or_else(|| {
+                    self.async_compute
+                        .as_ref()
+                        .map(|q| (QueueId::AsyncCompute, q))
+                }),
+        };
+        let (queue_id, queue) = target?;
+
+        let mut eligible = true;
+        for usage in compiled.pass_usages() {
+            for decl in &usage.texture_usages {
+                if decl.texture.descriptor().cross_queue {
+                    continue;
+                }
+                eligible = false;
+                let GpuTexture::Vulkan { id, .. } = decl.texture.gpu_handle() else {
+                    continue;
+                };
+                if self.async_decline_warned.lock().insert(*id) {
+                    log::warn!(
+                        "{queue_id:?} queue hint declined: texture {:?} is not declared \
+                         cross-queue (TextureDescriptor::with_cross_queue); the graph \
+                         runs on the graphics queue instead",
+                        decl.texture
+                            .descriptor()
+                            .label
+                            .as_deref()
+                            .unwrap_or("<unlabeled>"),
+                    );
+                }
+            }
+        }
+        eligible.then_some((queue_id, queue))
+    }
+
     /// Execute a compiled render graph.
     ///
     /// # Async Behavior
@@ -1962,18 +2094,20 @@ impl VulkanBackend {
     ///   fences are waited in
     ///   [`FramePipeline::begin_frame`](crate::pipeline::FramePipeline::begin_frame).
     ///
-    /// # Queue routing (#47 phase 4)
+    /// # Queue routing (#47 phase 4, #89)
     ///
-    /// A graph is routed to the async compute queue only when it opted in
-    /// (`prefer_async_compute`), contains no graphics passes, and the device
-    /// actually has that queue — otherwise it runs on the graphics queue (the
-    /// first-class fallback). Ordering between submits is derived from
-    /// resource usage by the persistent trackers: same-queue hazards become
-    /// `vkCmdPipelineBarrier`s (valid across submits *within* one queue in
-    /// submission order), cross-queue hazards become timeline-semaphore waits
-    /// emitted on this submit (a pipeline barrier cannot cross queues). The
-    /// remaining binary semaphores are the swapchain acquire/present
-    /// handshake, on the graphics queue only.
+    /// A graph is routed to a secondary queue only when it asked for one
+    /// ([`RenderGraph::set_queue_preference`]), its passes are legal on that
+    /// queue, and the device actually has it — otherwise it walks down the
+    /// fallback ladder (transfer → async compute → graphics) and ultimately
+    /// runs on the graphics queue (the first-class fallback); see
+    /// [`route_graph`](Self::route_graph). Ordering between submits is
+    /// derived from resource usage by the persistent trackers: same-queue
+    /// hazards become `vkCmdPipelineBarrier`s (valid across submits *within*
+    /// one queue in submission order), cross-queue hazards become
+    /// timeline-semaphore waits emitted on this submit (a pipeline barrier
+    /// cannot cross queues). The remaining binary semaphores are the
+    /// swapchain acquire/present handshake, on the graphics queue only.
     pub fn execute_graph(
         &self,
         graph: &RenderGraph,
@@ -1984,53 +2118,10 @@ impl VulkanBackend {
 
         // Route the graph. The swapchain handshake below is reachable only on
         // the graphics route: a swapchain write needs a graphics pass, which
-        // disqualifies the graph from async routing.
-        //
-        // The async hint is additionally honored only when every texture the
-        // graph touches is declared cross-queue (#88): undeclared images are
-        // EXCLUSIVE, and accessing an EXCLUSIVE image from another queue
-        // family leaves its contents undefined per spec. Buffers are always
-        // CONCURRENT-shared and need no declaration. The fallback is correct
-        // but silently serializes work the caller wanted overlapped, so each
-        // offending texture warns once (the same graph legitimately runs
-        // this way on single-queue devices, hence no hard error).
-        let async_route = match &self.async_compute {
-            Some(ac) if graph.prefer_async_compute() && !graph.has_graphics_passes() => {
-                let mut eligible = true;
-                for usage in compiled.pass_usages() {
-                    for decl in &usage.texture_usages {
-                        if decl.texture.descriptor().cross_queue {
-                            continue;
-                        }
-                        eligible = false;
-                        let GpuTexture::Vulkan { id, .. } = decl.texture.gpu_handle() else {
-                            continue;
-                        };
-                        if self.async_decline_warned.lock().insert(*id) {
-                            log::warn!(
-                                "Async compute hint declined: texture {:?} is not declared \
-                                 cross-queue (TextureDescriptor::with_cross_queue); the graph \
-                                 runs on the graphics queue instead",
-                                decl.texture
-                                    .descriptor()
-                                    .label
-                                    .as_deref()
-                                    .unwrap_or("<unlabeled>"),
-                            );
-                        }
-                    }
-                }
-                eligible.then_some(ac)
-            }
-            _ => None,
-        };
-        let (queue_id, queue, queue_timeline, timeline_next) = match async_route {
-            Some(ac) => (
-                QueueId::AsyncCompute,
-                ac.queue,
-                ac.timeline,
-                &ac.timeline_next,
-            ),
+        // disqualifies the graph from secondary routing.
+        let route = self.route_graph(graph, compiled);
+        let (queue_id, queue, queue_timeline, timeline_next) = match route {
+            Some((id, q)) => (id, q.queue, q.timeline, &q.timeline_next),
             None => (
                 QueueId::Graphics,
                 self.graphics_queue,
@@ -2042,8 +2133,8 @@ impl VulkanBackend {
         // Allocate the frame's command buffer from the current slot's pool on
         // the routed queue (reset wholesale when the slot is recycled).
         let slot = self.current_slot.load(Ordering::Relaxed);
-        let command_pool = match async_route {
-            Some(ac) => ac.command_pools[slot],
+        let command_pool = match route {
+            Some((_, q)) => q.command_pools[slot],
             None => self.frame_command_pools[slot],
         };
         let alloc_info = vk::CommandBufferAllocateInfo::default()
@@ -2116,9 +2207,11 @@ impl VulkanBackend {
 
         if !waits.is_empty() {
             log::debug!(
-                "submit {timeline_value} on {queue_id:?} waits: graphics={:?} async={:?}",
+                "submit {timeline_value} on {queue_id:?} waits: graphics={:?} async={:?} \
+                 transfer={:?}",
                 waits.get(QueueId::Graphics),
                 waits.get(QueueId::AsyncCompute),
+                waits.get(QueueId::Transfer),
             );
         }
 
@@ -2159,7 +2252,13 @@ impl VulkanBackend {
                 QueueId::AsyncCompute,
                 self.async_compute
                     .as_ref()
-                    .map_or(vk::Semaphore::null(), |ac| ac.timeline),
+                    .map_or(vk::Semaphore::null(), |q| q.timeline),
+            ),
+            (
+                QueueId::Transfer,
+                self.transfer_queue
+                    .as_ref()
+                    .map_or(vk::Semaphore::null(), |q| q.timeline),
             ),
         ];
         for (wait_queue, timeline) in other_queue_timelines {
@@ -2351,9 +2450,13 @@ impl VulkanBackend {
         }
     }
 
-    /// Write data to a buffer.
+    /// Write data to a host-visible (mapped) buffer.
     ///
-    /// Returns an error if the buffer is not a Vulkan buffer or is not mapped.
+    /// Returns an error if the buffer is not a Vulkan buffer or is not
+    /// host-visible. There is deliberately NO device-local fallback (#89):
+    /// GPU-only destinations must go through the frame graph
+    /// (`TransferOperation::WriteBuffer`), which batches staging via the
+    /// belt and lets the trackers derive synchronization.
     pub fn write_buffer(
         &self,
         buffer: &GpuBuffer,
@@ -2361,10 +2464,7 @@ impl VulkanBackend {
         data: &[u8],
     ) -> Result<(), GraphicsError> {
         let GpuBuffer::Vulkan {
-            buffer: dst_buffer,
-            allocation,
-            size,
-            ..
+            allocation, size, ..
         } = buffer
         else {
             return Err(GraphicsError::Internal(
@@ -2384,163 +2484,22 @@ impl VulkanBackend {
         }
 
         // Host-visible buffer (MAP_WRITE/MAP_READ): direct mapped write.
-        {
-            let guard = allocation.lock();
-            let Some(alloc) = guard.as_ref() else {
-                return Err(GraphicsError::Internal(
-                    "Buffer allocation is None".to_string(),
-                ));
-            };
-            if let Some(mapped_ptr) = alloc.mapped_ptr() {
-                unsafe {
-                    let dst = mapped_ptr.as_ptr().add(offset as usize);
-                    std::ptr::copy_nonoverlapping(data.as_ptr(), dst as *mut u8, data.len());
-                }
-                return Ok(());
-            }
-        }
-
-        // Device-local destination: **blocking convenience path** (ADR-021),
-        // mirroring `write_texture` — one-shot staging copy + synchronous
-        // wait. Fine for tools/tests/one-time setup; per-frame data belongs
-        // in a RingBuffer (MAP_WRITE) or a `TransferOperation::WriteBuffer`
-        // in the frame graph. Assumes the buffer is not concurrently read by
-        // in-flight frames (same contract as `write_texture`).
-        let (staging, staging_alloc) =
-            self.create_transient_staging(data, "write_buffer_oneshot")?;
-        let dst = *dst_buffer;
-        let byte_len = data.len() as u64;
-        let result = self.submit_one_shot(|device, cmd| {
-            let region = vk::BufferCopy::default()
-                .src_offset(0)
-                .dst_offset(offset)
-                .size(byte_len);
-            // The one-shot submit is outside the frame graph, so the buffer
-            // tracker knows nothing about this write — make it visible to
-            // any later use up front.
-            let barrier = vk::BufferMemoryBarrier::default()
-                .buffer(dst)
-                .offset(0)
-                .size(vk::WHOLE_SIZE)
-                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                .dst_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE)
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED);
-            unsafe {
-                device.cmd_copy_buffer(cmd, staging, dst, &[region]);
-                device.cmd_pipeline_barrier(
-                    cmd,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::PipelineStageFlags::ALL_COMMANDS,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[barrier],
-                    &[],
-                );
-            }
-        });
-        match result {
-            Ok(()) => {
-                unsafe {
-                    self.device.destroy_buffer(staging, None);
-                }
-                if let Err(e) = self.allocator.lock().free(staging_alloc) {
-                    log::error!("Failed to free one-shot staging allocation: {e}");
-                }
-                Ok(())
-            }
-            Err(e) => {
-                // On timeout/device loss the GPU may still read the staging
-                // buffer — leak it rather than freeing in-use memory.
-                log::error!("One-shot write_buffer failed ({e}); leaking staging buffer");
-                Err(e)
-            }
-        }
-    }
-
-    /// Record and synchronously execute a one-shot command buffer on the
-    /// graphics queue.
-    ///
-    /// Blocking convenience paths only. On fence-wait failure the command
-    /// buffer is leaked (the GPU may still be executing it) and the error is
-    /// returned.
-    fn submit_one_shot(
-        &self,
-        record: impl FnOnce(&ash::Device, vk::CommandBuffer),
-    ) -> Result<(), GraphicsError> {
-        let alloc_info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(self.command_pool)
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(1);
-        let cmd_buffers =
-            unsafe { self.device.allocate_command_buffers(&alloc_info) }.map_err(|e| {
-                GraphicsError::Internal(format!("Failed to allocate command buffer: {e:?}"))
-            })?;
-        let cmd = cmd_buffers[0];
-
-        let begin_info = vk::CommandBufferBeginInfo::default()
-            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        let recorded = unsafe { self.device.begin_command_buffer(cmd, &begin_info) }
-            .map_err(|e| GraphicsError::Internal(format!("Failed to begin command buffer: {e:?}")))
-            .map(|_| record(&self.device, cmd))
-            .and_then(|_| {
-                unsafe { self.device.end_command_buffer(cmd) }.map_err(|e| {
-                    GraphicsError::Internal(format!("Failed to end command buffer: {e:?}"))
-                })
-            });
-        if let Err(e) = recorded {
-            unsafe {
-                self.device
-                    .free_command_buffers(self.command_pool, &cmd_buffers);
-            }
-            return Err(e);
-        }
-
-        let fence = unsafe {
-            self.device
-                .create_fence(&vk::FenceCreateInfo::default(), None)
-        }
-        .map_err(|e| {
-            unsafe {
-                self.device
-                    .free_command_buffers(self.command_pool, &cmd_buffers);
-            }
-            GraphicsError::Internal(format!("Failed to create one-shot fence: {e:?}"))
-        })?;
-
-        let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
-        if let Err(e) = unsafe {
-            self.device
-                .queue_submit(self.graphics_queue, &[submit_info], fence)
-        } {
-            unsafe {
-                self.device.destroy_fence(fence, None);
-                self.device
-                    .free_command_buffers(self.command_pool, &cmd_buffers);
-            }
-            return Err(match e {
-                vk::Result::ERROR_DEVICE_LOST => GraphicsError::DeviceLost,
-                other => GraphicsError::Internal(format!("One-shot submit failed: {other:?}")),
-            });
-        }
-
-        if let Err(e) = unsafe {
-            self.device
-                .wait_for_fences(&[fence], true, FENCE_WAIT_TIMEOUT_NS)
-        } {
-            log::error!("One-shot fence wait failed ({e:?}); leaking command buffer and fence");
-            return Err(match e {
-                vk::Result::TIMEOUT => {
-                    GraphicsError::Timeout("one-shot submit did not complete within 10 s".into())
-                }
-                vk::Result::ERROR_DEVICE_LOST => GraphicsError::DeviceLost,
-                other => GraphicsError::Internal(format!("one-shot fence wait failed: {other:?}")),
-            });
-        }
+        let guard = allocation.lock();
+        let Some(alloc) = guard.as_ref() else {
+            return Err(GraphicsError::Internal(
+                "Buffer allocation is None".to_string(),
+            ));
+        };
+        let Some(mapped_ptr) = alloc.mapped_ptr() else {
+            return Err(GraphicsError::InvalidParameter(
+                "write_buffer on a device-local buffer; upload through the frame graph \
+                 via TransferOperation::write_buffer instead (#89)"
+                    .to_string(),
+            ));
+        };
         unsafe {
-            self.device.destroy_fence(fence, None);
-            self.device
-                .free_command_buffers(self.command_pool, &cmd_buffers);
+            let dst = mapped_ptr.as_ptr().add(offset as usize);
+            std::ptr::copy_nonoverlapping(data.as_ptr(), dst as *mut u8, data.len());
         }
         Ok(())
     }
@@ -2612,395 +2571,6 @@ impl VulkanBackend {
             std::ptr::copy_nonoverlapping(src as *const u8, result.as_mut_ptr(), size as usize);
         }
         Ok(result)
-    }
-
-    /// Write tightly-packed data covering mip 0 of every layer of a texture.
-    ///
-    /// **Blocking convenience path**: uploads through a one-shot staging
-    /// buffer and waits for the copy synchronously — fine for tools and
-    /// one-time setup, wrong for streaming (each call is a full GPU
-    /// round-trip). Load-time/streaming uploads belong in the frame graph
-    /// via [`TransferOperation::upload_texture_data`]; batching/staging-belt
-    /// perf work is tracked in issue #41.
-    ///
-    /// `data` must be tightly packed for the whole image: all array layers
-    /// (cube faces) back to back, block-compressed formats in block rows.
-    /// Textures with `mip_level_count > 1` are rejected — upload each mip
-    /// with an explicit region through the transfer ops instead. Combined
-    /// depth-stencil formats are rejected (single-aspect copies only).
-    ///
-    /// After the upload the image is in `SHADER_READ_ONLY_OPTIMAL` and the
-    /// layout tracker is updated accordingly, so the first render-graph use
-    /// does not re-transition from `UNDEFINED` (which could legally discard
-    /// the uploaded texels).
-    pub fn write_texture(
-        &self,
-        texture: &GpuTexture,
-        data: &[u8],
-        descriptor: &crate::types::TextureDescriptor,
-    ) -> Result<(), GraphicsError> {
-        let GpuTexture::Vulkan { image, id, .. } = texture else {
-            return Err(GraphicsError::Internal(
-                "write_texture called with non-Vulkan texture".to_string(),
-            ));
-        };
-
-        if data.is_empty() {
-            return Ok(());
-        }
-
-        let format = descriptor.format;
-        if format.is_depth_stencil() && format.has_stencil() {
-            return Err(GraphicsError::InvalidParameter(format!(
-                "write_texture does not support combined depth-stencil formats ({format:?})"
-            )));
-        }
-        if descriptor.mip_level_count > 1 {
-            return Err(GraphicsError::InvalidParameter(format!(
-                "write_texture uploads mip 0 only, but the texture has {} mip levels — upload \
-                 each mip with an explicit region via TransferOperation::upload_texture",
-                descriptor.mip_level_count
-            )));
-        }
-
-        // Tightly-packed size for mip 0 of every layer/depth slice.
-        let (block_w, block_h) = format.block_dimensions();
-        let block_size = format.block_size();
-        let row_blocks = descriptor.size.width.div_ceil(block_w);
-        let col_blocks = descriptor.size.height.div_ceil(block_h);
-        let (layer_count, depth) = descriptor.layers_and_depth();
-        let expected = row_blocks as usize
-            * col_blocks as usize
-            * block_size as usize
-            * depth as usize
-            * layer_count as usize;
-        if data.len() != expected {
-            return Err(GraphicsError::InvalidParameter(format!(
-                "write_texture data size {} does not match the texture's tightly-packed size \
-                 {expected} ({row_blocks}x{col_blocks} blocks x {block_size} bytes x \
-                 {layer_count} layers x {depth} depth)",
-                data.len(),
-            )));
-        }
-        let aspect_mask = image_aspect_mask(format);
-
-        // Create staging buffer (CONCURRENT when an async compute family
-        // exists — a transfer graph routed there reads it on that queue)
-        let mut staging_buffer_info = vk::BufferCreateInfo::default()
-            .size(data.len() as u64)
-            .usage(vk::BufferUsageFlags::TRANSFER_SRC)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
-        let concurrent_families = self.concurrent_families();
-        if let Some(families) = &concurrent_families {
-            staging_buffer_info = staging_buffer_info
-                .sharing_mode(vk::SharingMode::CONCURRENT)
-                .queue_family_indices(families);
-        }
-
-        let staging_buffer = unsafe { self.device.create_buffer(&staging_buffer_info, None) }
-            .map_err(|e| {
-                GraphicsError::ResourceCreationFailed(format!(
-                    "Failed to create staging buffer: {:?}",
-                    e
-                ))
-            })?;
-
-        // Get memory requirements and allocate
-        let mem_requirements =
-            unsafe { self.device.get_buffer_memory_requirements(staging_buffer) };
-
-        let staging_allocation = {
-            let mut allocator = self.allocator.lock();
-            allocator
-                .allocate(&gpu_allocator::vulkan::AllocationCreateDesc {
-                    name: "texture_staging",
-                    requirements: mem_requirements,
-                    location: gpu_allocator::MemoryLocation::CpuToGpu,
-                    linear: true,
-                    allocation_scheme: gpu_allocator::vulkan::AllocationScheme::GpuAllocatorManaged,
-                })
-                .map_err(|e| {
-                    unsafe {
-                        self.device.destroy_buffer(staging_buffer, None);
-                    }
-                    GraphicsError::ResourceCreationFailed(format!(
-                        "Failed to allocate staging buffer memory: {}",
-                        e
-                    ))
-                })?
-        };
-
-        // Bind memory to staging buffer
-        if let Err(e) = unsafe {
-            self.device.bind_buffer_memory(
-                staging_buffer,
-                staging_allocation.memory(),
-                staging_allocation.offset(),
-            )
-        } {
-            {
-                let mut allocator = self.allocator.lock();
-                let _ = allocator.free(staging_allocation);
-            }
-            unsafe {
-                self.device.destroy_buffer(staging_buffer, None);
-            }
-            return Err(GraphicsError::Internal(format!(
-                "Failed to bind staging buffer memory: {:?}",
-                e
-            )));
-        }
-
-        // Copy data to staging buffer
-        let Some(mapped_ptr) = staging_allocation.mapped_ptr() else {
-            {
-                let mut allocator = self.allocator.lock();
-                let _ = allocator.free(staging_allocation);
-            }
-            unsafe {
-                self.device.destroy_buffer(staging_buffer, None);
-            }
-            return Err(GraphicsError::Internal(
-                "Staging buffer is not mapped".to_string(),
-            ));
-        };
-
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                data.as_ptr(),
-                mapped_ptr.as_ptr() as *mut u8,
-                data.len(),
-            );
-        }
-
-        // Allocate command buffer
-        let alloc_info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(self.command_pool)
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(1);
-
-        let cmd_buffers = match unsafe { self.device.allocate_command_buffers(&alloc_info) } {
-            Ok(c) => c,
-            Err(e) => {
-                {
-                    let mut allocator = self.allocator.lock();
-                    let _ = allocator.free(staging_allocation);
-                }
-                unsafe {
-                    self.device.destroy_buffer(staging_buffer, None);
-                }
-                return Err(GraphicsError::Internal(format!(
-                    "Failed to allocate command buffer: {:?}",
-                    e
-                )));
-            }
-        };
-        let cmd = cmd_buffers[0];
-
-        // Begin command buffer
-        let begin_info = vk::CommandBufferBeginInfo::default()
-            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-
-        if let Err(e) = unsafe { self.device.begin_command_buffer(cmd, &begin_info) } {
-            unsafe {
-                self.device
-                    .free_command_buffers(self.command_pool, &cmd_buffers);
-            }
-            {
-                let mut allocator = self.allocator.lock();
-                let _ = allocator.free(staging_allocation);
-            }
-            unsafe {
-                self.device.destroy_buffer(staging_buffer, None);
-            }
-            return Err(GraphicsError::Internal(format!(
-                "Failed to begin command buffer: {:?}",
-                e
-            )));
-        }
-
-        // Transition the WHOLE image (all layers/aspects) to
-        // TRANSFER_DST_OPTIMAL so no subresource is left in UNDEFINED.
-        let barrier = vk::ImageMemoryBarrier::default()
-            .old_layout(vk::ImageLayout::UNDEFINED)
-            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .image(*image)
-            .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask,
-                base_mip_level: 0,
-                level_count: vk::REMAINING_MIP_LEVELS,
-                base_array_layer: 0,
-                layer_count: vk::REMAINING_ARRAY_LAYERS,
-            })
-            .src_access_mask(vk::AccessFlags::empty())
-            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
-
-        unsafe {
-            self.device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[barrier],
-            );
-        }
-
-        // Copy mip 0 of every layer (tightly packed, layers back to back).
-        let region = vk::BufferImageCopy::default()
-            .buffer_offset(0)
-            .buffer_row_length(0) // 0 means tightly packed
-            .buffer_image_height(0)
-            .image_subresource(vk::ImageSubresourceLayers {
-                aspect_mask,
-                mip_level: 0,
-                base_array_layer: 0,
-                layer_count,
-            })
-            .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
-            .image_extent(vk::Extent3D {
-                width: descriptor.size.width,
-                height: descriptor.size.height,
-                depth,
-            });
-
-        unsafe {
-            self.device.cmd_copy_buffer_to_image(
-                cmd,
-                staging_buffer,
-                *image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &[region],
-            );
-        }
-
-        // Transition the whole image to SHADER_READ_ONLY_OPTIMAL. The dst
-        // scope covers every shader stage that may sample it — fragment-only
-        // would leave vertex/compute sampling unsynchronized.
-        let barrier = vk::ImageMemoryBarrier::default()
-            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .image(*image)
-            .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask,
-                base_mip_level: 0,
-                level_count: vk::REMAINING_MIP_LEVELS,
-                base_array_layer: 0,
-                layer_count: vk::REMAINING_ARRAY_LAYERS,
-            })
-            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .dst_access_mask(vk::AccessFlags::SHADER_READ);
-
-        unsafe {
-            self.device.cmd_pipeline_barrier(
-                cmd,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::VERTEX_SHADER
-                    | vk::PipelineStageFlags::FRAGMENT_SHADER
-                    | vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[barrier],
-            );
-        }
-
-        // End command buffer
-        if let Err(e) = unsafe { self.device.end_command_buffer(cmd) } {
-            unsafe {
-                self.device
-                    .free_command_buffers(self.command_pool, &cmd_buffers);
-            }
-            {
-                let mut allocator = self.allocator.lock();
-                let _ = allocator.free(staging_allocation);
-            }
-            unsafe {
-                self.device.destroy_buffer(staging_buffer, None);
-            }
-            return Err(GraphicsError::Internal(format!(
-                "Failed to end command buffer: {:?}",
-                e
-            )));
-        }
-
-        // Submit and wait for the staging copy to complete synchronously.
-        // Texture uploads are one-time load operations, so a brief stall is acceptable
-        // and avoids the need to track staging resources per-frame.
-        let staging_fence = unsafe {
-            self.device
-                .create_fence(&vk::FenceCreateInfo::default(), None)
-        }
-        .map_err(|e| GraphicsError::Internal(format!("Failed to create staging fence: {:?}", e)))?;
-
-        let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
-
-        let submit_result = unsafe {
-            self.device
-                .queue_submit(self.graphics_queue, &[submit_info], staging_fence)
-        };
-
-        if let Err(e) = submit_result {
-            // On submit failure, clean up immediately since nothing was submitted
-            unsafe {
-                self.device.destroy_fence(staging_fence, None);
-                self.device
-                    .free_command_buffers(self.command_pool, &cmd_buffers);
-            }
-            {
-                let mut allocator = self.allocator.lock();
-                let _ = allocator.free(staging_allocation);
-            }
-            unsafe {
-                self.device.destroy_buffer(staging_buffer, None);
-            }
-            return Err(GraphicsError::Internal(format!(
-                "Failed to submit command buffer: {:?}",
-                e
-            )));
-        }
-
-        // Wait for staging copy to complete, then free staging resources
-        // immediately. On timeout/device-loss the GPU may still be reading the
-        // staging buffer — leak it (and the fence) instead of freeing in-use
-        // memory, and surface the error.
-        if let Err(e) = unsafe {
-            self.device
-                .wait_for_fences(&[staging_fence], true, FENCE_WAIT_TIMEOUT_NS)
-        } {
-            log::error!("Staging copy fence wait failed ({e:?}); leaking staging buffer and fence");
-            return Err(match e {
-                vk::Result::TIMEOUT => {
-                    GraphicsError::Timeout("staging copy did not complete within 10 s".into())
-                }
-                vk::Result::ERROR_DEVICE_LOST => GraphicsError::DeviceLost,
-                other => GraphicsError::Internal(format!("staging fence wait failed: {other:?}")),
-            });
-        }
-        unsafe {
-            self.device.destroy_fence(staging_fence, None);
-            self.device
-                .free_command_buffers(self.command_pool, &cmd_buffers);
-            self.device.destroy_buffer(staging_buffer, None);
-        }
-        if let Err(e) = self.allocator.lock().free(staging_allocation) {
-            log::error!("Failed to free staging allocation: {}", e);
-        }
-
-        // The whole image is now in SHADER_READ_ONLY_OPTIMAL. Registering it
-        // keeps the render graph's first use from re-transitioning out of
-        // UNDEFINED — a transition that may legally discard the texels we
-        // just uploaded.
-        self.layout_tracker
-            .lock()
-            .set_layout(TextureId::from_raw(*id), TextureLayout::ShaderReadOnly);
-
-        Ok(())
     }
 
     fn encode_pass(&self, cmd: vk::CommandBuffer, pass: &Pass) -> Result<(), GraphicsError> {
@@ -3516,77 +3086,6 @@ impl VulkanBackend {
         }
 
         Ok(())
-    }
-
-    /// Create a transient host-visible staging buffer pre-filled with `bytes`.
-    ///
-    /// The returned pair must be pushed into [`Self::retired_staging`] for the
-    /// current frame slot so the buffer outlives the GPU copy that reads it.
-    /// Host writes made here are visible to the GPU via the implicit
-    /// host→device memory dependency performed by `vkQueueSubmit`.
-    fn create_transient_staging(
-        &self,
-        bytes: &[u8],
-        label: &str,
-    ) -> Result<(vk::Buffer, gpu_allocator::vulkan::Allocation), GraphicsError> {
-        let mut buffer_info = vk::BufferCreateInfo::default()
-            .size(bytes.len() as u64)
-            .usage(vk::BufferUsageFlags::TRANSFER_SRC)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE);
-        let concurrent_families = self.concurrent_families();
-        if let Some(families) = &concurrent_families {
-            buffer_info = buffer_info
-                .sharing_mode(vk::SharingMode::CONCURRENT)
-                .queue_family_indices(families);
-        }
-        let buffer = unsafe { self.device.create_buffer(&buffer_info, None) }.map_err(|e| {
-            GraphicsError::ResourceCreationFailed(format!("Failed to create staging buffer: {e:?}"))
-        })?;
-
-        let requirements = unsafe { self.device.get_buffer_memory_requirements(buffer) };
-        let allocation =
-            match self
-                .allocator
-                .lock()
-                .allocate(&gpu_allocator::vulkan::AllocationCreateDesc {
-                    name: label,
-                    requirements,
-                    location: gpu_allocator::MemoryLocation::CpuToGpu,
-                    linear: true,
-                    allocation_scheme: gpu_allocator::vulkan::AllocationScheme::GpuAllocatorManaged,
-                }) {
-                Ok(allocation) => allocation,
-                Err(e) => {
-                    unsafe { self.device.destroy_buffer(buffer, None) };
-                    return Err(GraphicsError::ResourceCreationFailed(format!(
-                        "Failed to allocate staging memory: {e}"
-                    )));
-                }
-            };
-
-        if let Err(e) = unsafe {
-            self.device
-                .bind_buffer_memory(buffer, allocation.memory(), allocation.offset())
-        } {
-            unsafe { self.device.destroy_buffer(buffer, None) };
-            let _ = self.allocator.lock().free(allocation);
-            return Err(GraphicsError::ResourceCreationFailed(format!(
-                "Failed to bind staging memory: {e:?}"
-            )));
-        }
-
-        let Some(mapped) = allocation.mapped_ptr() else {
-            unsafe { self.device.destroy_buffer(buffer, None) };
-            let _ = self.allocator.lock().free(allocation);
-            return Err(GraphicsError::Internal(
-                "staging buffer is not host-mapped".to_string(),
-            ));
-        };
-        unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr() as *mut u8, bytes.len());
-        }
-
-        Ok((buffer, allocation))
     }
 
     fn encode_transfer_pass(

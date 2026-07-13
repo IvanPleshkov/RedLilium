@@ -60,6 +60,9 @@ pub struct DeviceCapabilities {
     pub wireframe: bool,
     /// Whether the device has a distinct async compute queue (#47).
     pub async_compute: bool,
+    /// Whether the device has a dedicated transfer queue — DMA engines for
+    /// host↔device streaming that overlaps both graphics and compute (#89).
+    pub transfer_queue: bool,
     /// Whether compute shaders are supported (false on WebGL downlevel).
     pub compute_shaders: bool,
 }

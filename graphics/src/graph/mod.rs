@@ -117,9 +117,31 @@ pub struct RenderGraph {
     /// Cached compiled result. Uses [`Pooled`] to preserve allocation
     /// across invalidations instead of deallocating with `Option<T>`.
     compiled: Pooled<CompiledGraph>,
-    /// Routing hint: prefer the async compute queue (#47 phase 4). See
-    /// [`set_prefer_async_compute`](Self::set_prefer_async_compute).
-    prefer_async_compute: bool,
+    /// Queue routing hint (#47 phase 4, #89). See
+    /// [`set_queue_preference`](Self::set_queue_preference).
+    queue_preference: QueuePreference,
+}
+
+/// Which queue a graph asks to run on (#47 phase 4, #89).
+///
+/// An explicit placement **hint**, not a command: it is honored only when the
+/// device exposes the queue AND the graph's passes are legal on it; otherwise
+/// the backend walks down the fallback ladder and ultimately runs the graph
+/// on the graphics queue — a first-class, fully supported mode. Placement is
+/// deliberately explicit while *ordering* stays automatic: cross-queue
+/// synchronization is derived from resource usage by the trackers, never
+/// declared by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QueuePreference {
+    /// The graphics queue — the default; always honored.
+    #[default]
+    Graphics,
+    /// The async compute queue. Requires a graph with no graphics passes.
+    AsyncCompute,
+    /// The dedicated transfer queue (DMA engines — host↔device streaming).
+    /// Requires a transfer-only graph. Falls back to the async compute
+    /// queue, then graphics.
+    Transfer,
 }
 
 impl RenderGraph {
@@ -130,7 +152,7 @@ impl RenderGraph {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
-            prefer_async_compute: false,
+            queue_preference: QueuePreference::Graphics,
             passes: Vec::new(),
             edges: Vec::new(),
             compiled: Pooled::default(),
@@ -239,22 +261,24 @@ impl RenderGraph {
         self.passes.iter().any(|pass| pass.as_graphics().is_some())
     }
 
-    /// Request routing this graph to the async compute queue (#47 phase 4).
+    /// Request routing this graph to a specific queue (#47 phase 4, #89).
     ///
-    /// An explicit opt-in **hint**: it is honored only when the device
-    /// actually exposes an async compute queue AND the graph contains no
-    /// graphics passes — otherwise the graph runs on the graphics queue
-    /// exactly as if the hint were unset (the first-class single-queue
-    /// fallback). Placement is deliberately explicit while *ordering* stays
-    /// automatic: cross-queue synchronization is derived from resource usage
-    /// by the trackers, never declared by hand.
-    pub fn set_prefer_async_compute(&mut self, prefer: bool) {
-        self.prefer_async_compute = prefer;
+    /// See [`QueuePreference`] for the honoring rules and fallback ladder.
+    pub fn set_queue_preference(&mut self, preference: QueuePreference) {
+        self.queue_preference = preference;
     }
 
-    /// Whether this graph requests async compute routing.
-    pub fn prefer_async_compute(&self) -> bool {
-        self.prefer_async_compute
+    /// Which queue this graph requests.
+    pub fn queue_preference(&self) -> QueuePreference {
+        self.queue_preference
+    }
+
+    /// Whether every pass in the graph is a transfer pass (the only pass
+    /// kind legal on a transfer-only queue family).
+    pub fn is_transfer_only(&self) -> bool {
+        self.passes
+            .iter()
+            .all(|pass| matches!(pass, Pass::Transfer(_)))
     }
 
     /// Whether any pass renders to the swapchain (surface) image.
@@ -332,7 +356,7 @@ impl Poolable for RenderGraph {
         self.passes.clear();
         self.edges.clear();
         self.compiled.release();
-        self.prefer_async_compute = false;
+        self.queue_preference = QueuePreference::Graphics;
     }
 }
 

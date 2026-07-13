@@ -2,10 +2,11 @@
 //!
 //! Each frame builds and submits **one or more** render graphs, each as its
 //! own queue submit. Graphs run on the graphics queue unless they opt into
-//! async compute routing ([`RenderGraph::set_prefer_async_compute`]) — an
-//! explicit placement hint, honored only for compute/transfer-only graphs on
-//! devices that expose a second queue; otherwise everything runs on the
-//! graphics queue, the first-class fallback. Ordering is always automatic:
+//! secondary-queue routing ([`RenderGraph::set_queue_preference`] — async
+//! compute #47, dedicated transfer #89) — an explicit placement hint,
+//! honored only for compute/transfer-only graphs on devices that expose the
+//! queue; otherwise everything runs on the graphics queue, the first-class
+//! fallback. Ordering is always automatic:
 //! same-queue hazards become pipeline barriers from the backend's persistent
 //! trackers (valid across submits within one queue, exactly as across
 //! frames), cross-queue hazards become timeline-semaphore waits emitted at

@@ -39,6 +39,7 @@ impl DummyBackend {
             sample_count_mask: 1 | 2 | 4 | 8,
             wireframe: true,
             async_compute: false,
+            transfer_queue: false,
             compute_shaders: true,
         }
     }
@@ -201,16 +202,6 @@ impl DummyBackend {
             *dst.lock().unwrap_or_else(|e| e.into_inner()) = data;
         }
         map_pending.store(false, std::sync::atomic::Ordering::Release);
-    }
-
-    /// Write data to a texture.
-    pub fn write_texture(
-        &self,
-        _texture: &GpuTexture,
-        _data: &[u8],
-        _descriptor: &TextureDescriptor,
-    ) -> Result<(), crate::error::GraphicsError> {
-        Ok(())
     }
 }
 

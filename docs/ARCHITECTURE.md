@@ -134,8 +134,10 @@ The rendering system is organized in four layers, from low-level to high-level:
 │                          FrameSchedule                                  │
 │  Submits the frame's render graphs (one queue submit per graph, any     │
 │  number per frame). Graphs run on the graphics queue unless they opt    │
-│  into async compute routing (set_prefer_async_compute — honored only    │
-│  for compute/transfer-only graphs on devices with a second queue).      │
+│  into secondary-queue routing (set_queue_preference: async compute #47  │
+│  or dedicated transfer #89 — honored only for compute/transfer-only     │
+│  graphs on devices exposing the queue, with an automatic fallback       │
+│  ladder transfer → async compute → graphics).                           │
 │  Ordering is automatic: same-queue hazards become tracker-emitted       │
 │  pipeline barriers (submission order), cross-queue hazards become       │
 │  timeline-semaphore waits (#47). At most one graph per frame may write  │
