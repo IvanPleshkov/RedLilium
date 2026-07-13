@@ -1,3 +1,29 @@
+/// The built-in gizmo provider: one anchor at the entity's world origin;
+/// drags convert into the parent's space before landing in the local
+/// `translation` (#85).
+impl crate::ui::GizmoAnchors for Transform {
+    fn anchors(&self, ctx: &crate::ui::AnchorCtx) -> Vec<crate::ui::GizmoAnchor> {
+        let p = ctx
+            .parent_global
+            .transform_point(&redlilium_core::math::nalgebra::Point3::from(
+                self.translation,
+            ));
+        vec![crate::ui::GizmoAnchor {
+            id: 0,
+            position: p.coords,
+        }]
+    }
+
+    fn apply_drag(
+        &mut self,
+        _id: u32,
+        world_delta: redlilium_core::math::Vec3,
+        ctx: &crate::ui::AnchorCtx,
+    ) {
+        self.translation += ctx.world_delta_to_parent(world_delta);
+    }
+}
+
 #[cfg(test)]
 use redlilium_core::math::quat_from_rotation_y;
 use redlilium_core::math::{

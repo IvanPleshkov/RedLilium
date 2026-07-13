@@ -140,6 +140,40 @@ fn push_quad(
     push_tri(out, p00, p01, p11, color);
 }
 
+/// Anchor dots: small screen-constant octahedra marking every draggable
+/// control point of the focused entity. The active one (carrying the full
+/// gizmo) renders hot, the rest neutral.
+pub fn build_anchor_dots(
+    dots: &[(Vec3, bool)],
+    camera: &GizmoCamera,
+    size_factor: f32,
+) -> Vec<GizmoVertex> {
+    let mut out = Vec::with_capacity(dots.len() * 24);
+    for &(pos, active) in dots {
+        let r = screen_scale(camera, pos, size_factor) * 0.06;
+        let color = if active {
+            [1.0, 0.85, 0.2, 1.0]
+        } else {
+            [0.95, 0.95, 0.95, 0.9]
+        };
+        push_octahedron(&mut out, pos, r, color);
+    }
+    out
+}
+
+fn push_octahedron(out: &mut Vec<GizmoVertex>, c: Vec3, r: f32, color: [f32; 4]) {
+    let px = c + Vec3::new(r, 0.0, 0.0);
+    let nx = c - Vec3::new(r, 0.0, 0.0);
+    let py = c + Vec3::new(0.0, r, 0.0);
+    let ny = c - Vec3::new(0.0, r, 0.0);
+    let pz = c + Vec3::new(0.0, 0.0, r);
+    let nz = c - Vec3::new(0.0, 0.0, r);
+    for (a, b) in [(px, pz), (pz, nx), (nx, nz), (nz, px)] {
+        push_tri(out, py, a, b, color);
+        push_tri(out, ny, b, a, color);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

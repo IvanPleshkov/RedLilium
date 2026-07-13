@@ -209,6 +209,33 @@ pub trait EditAction<T: Editable>: fmt::Debug + AsAny + Send {
     }
 }
 
+/// A transient action that only severs undo merging: executing it makes the
+/// next recorded action start a fresh undo entry instead of merging with the
+/// previous one. Not recorded itself.
+///
+/// The gizmo pushes one at drag end, so each drag (whose per-frame
+/// set-component actions merge into one entry) is its own undo step.
+#[derive(Debug)]
+pub struct MergeBarrier;
+
+impl<T: Editable> EditAction<T> for MergeBarrier {
+    fn apply(&mut self, _target: &mut T) -> EditActionResult {
+        Ok(())
+    }
+    fn undo(&mut self, _target: &mut T) -> EditActionResult {
+        Ok(())
+    }
+    fn description(&self) -> &str {
+        "merge barrier"
+    }
+    fn is_recorded(&self) -> bool {
+        false
+    }
+    fn breaks_merge(&self) -> bool {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

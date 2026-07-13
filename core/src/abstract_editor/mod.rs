@@ -32,6 +32,6 @@ mod action;
 mod action_queue;
 mod history;
 
-pub use action::{AsAny, EditAction, EditActionError, EditActionResult, Editable};
+pub use action::{AsAny, EditAction, EditActionError, EditActionResult, Editable, MergeBarrier};
 pub use action_queue::ActionQueue;
 pub use history::{DEFAULT_MAX_UNDO, EditActionHistory};

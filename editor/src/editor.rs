@@ -194,6 +194,18 @@ impl Editor {
     }
 
     /// Get the active editor world (immutable).
+    /// Whether the translate gizmo owns the cursor this frame (hover or a
+    /// live drag) — clicks then manipulate, not select (#85).
+    fn gizmo_wants_cursor(&self) -> bool {
+        self.world.as_ref().is_some_and(|ew| {
+            ew.world.has_resource::<redlilium_gizmo::TranslateGizmo>()
+                && ew
+                    .world
+                    .resource::<redlilium_gizmo::TranslateGizmo>()
+                    .wants_cursor()
+        })
+    }
+
     fn active_world(&self) -> &EditorWorld {
         self.world.as_ref().unwrap()
     }
@@ -409,6 +421,11 @@ impl AppHandler for Editor {
                 ctx.surface_format(),
                 Some(TextureFormat::Depth32Float),
             ));
+            ew.world
+                .insert_resource(redlilium_gizmo::GizmoRenderer::new(
+                    ctx.device().clone(),
+                    ctx.surface_format(),
+                ));
         }
 
         // Run startup schedules
@@ -739,6 +756,20 @@ impl AppHandler for Editor {
                     }
                 }
             }
+        }
+
+        // Publish the scene panel's rect so world systems (gizmo) can map the
+        // window-space cursor into scene-image space (#85).
+        {
+            let rect = self
+                .scene_view_rect_phys
+                .map(|[x, y, w, h]| crate::gizmo_system::SceneViewRect {
+                    offset: [x, y],
+                    size: [w, h],
+                })
+                .unwrap_or_default();
+            let ew = self.world.as_mut().unwrap();
+            ew.world.insert_resource(rect);
         }
 
         // Run ECS schedules (always run in editing mode for camera/transforms)
@@ -1525,6 +1556,7 @@ impl AppHandler for Editor {
                         let _ = ew.history.execute(action, &mut ew.world);
                     }
                 } else if !pressed {
+                    let gizmo_owns_cursor = self.gizmo_wants_cursor();
                     if self.dragging_box {
                         // Box selection: select entities whose screen AABBs
                         // intersect the drag rectangle.
@@ -1533,8 +1565,10 @@ impl AppHandler for Editor {
                         }
                     } else if let Some(scene_view) = &mut self.scene_view
                         && self.drag_start.is_some()
+                        && !gizmo_owns_cursor
                     {
-                        // Single click: GPU pick at cursor position.
+                        // Single click: GPU pick at cursor position (unless the
+                        // gizmo owns the cursor — a handle drag is not a select).
                         let px = self.cursor_pos[0].max(0.0) as u32;
                         let py = self.cursor_pos[1].max(0.0) as u32;
                         scene_view.request_pick(px, py);

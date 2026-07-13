@@ -12,6 +12,7 @@ mod dock;
 mod editor;
 mod fs_watcher;
 mod game_host;
+mod gizmo_system;
 mod headless;
 mod history_panel;
 mod log_capture;

@@ -29,6 +29,7 @@
 #[cfg(feature = "serialize-ron")]
 mod action_registry;
 mod component_inspector;
+mod gizmo_anchors;
 mod world_inspector;
 
 #[cfg(feature = "serialize-ron")]
@@ -36,6 +37,7 @@ pub use action_registry::{ActionRegistry, RegisteredAction};
 pub use component_inspector::{
     AddComponentAction, ImportComponentAction, RemoveComponentAction, show_component_inspector,
 };
+pub use gizmo_anchors::{AnchorCtx, GizmoAnchor, GizmoAnchors};
 pub use world_inspector::{
     DeleteEntityAction, ReparentAction, SpawnEntityAction, SpawnPrefabAction, SpawnReport,
     show_world_inspector,

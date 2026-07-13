@@ -100,6 +100,17 @@ pub fn run() {
         color_format,
         Some(TextureFormat::Depth32Float),
     ));
+    ew.world
+        .insert_resource(redlilium_gizmo::GizmoRenderer::new(
+            device.clone(),
+            color_format,
+        ));
+    // Headless: the scene image is the whole frame.
+    ew.world
+        .insert_resource(crate::gizmo_system::SceneViewRect {
+            offset: [0.0, 0.0],
+            size: [width as f32, height as f32],
+        });
     ew.schedules.run_startup(&mut ew.world, &runner);
 
     let aspect = width as f32 / height as f32;

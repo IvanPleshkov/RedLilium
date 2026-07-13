@@ -220,6 +220,16 @@ pub fn create_editor_world_base(
     // Insert Selection resource for tracking selected entities
     world.insert_resource(redlilium_ecs::ui::Selection::new());
 
+    // Translate gizmo (#85): interaction state + focus/dots + the scene-rect
+    // mapping the shells publish each frame. The GPU renderer resource is
+    // shell-owned (needs device/format) and inserted next to
+    // DebugDrawerRenderer.
+    world.insert_resource(redlilium_gizmo::TranslateGizmo::new(
+        redlilium_gizmo::GizmoConfig::default(),
+    ));
+    world.insert_resource(crate::gizmo_system::GizmoUiState::default());
+    world.insert_resource(crate::gizmo_system::SceneViewRect::default());
+
     let schedules = build_editor_schedules(params.egui);
 
     EditorWorld {
@@ -444,6 +454,14 @@ pub fn build_editor_schedules(egui: bool) -> Schedules {
         .get_mut::<Render>()
         .add_edge::<ForwardRender, DebugRender>()
         .expect("ForwardRender -> DebugRender edge");
+    // Gizmo overlay draws over the scene+debug image (#85).
+    schedules
+        .get_mut::<Render>()
+        .add(crate::gizmo_system::GizmoRender);
+    schedules
+        .get_mut::<Render>()
+        .add_edge::<DebugRender, crate::gizmo_system::GizmoRender>()
+        .expect("DebugRender -> GizmoRender edge");
     // egui composites on top of the scene/debug passes; it reads the last
     // CameraTarget writer (ScenePass) to depend on it, so order it last.
     // The headless shell has no window to composite onto and skips it.
@@ -453,6 +471,10 @@ pub fn build_editor_schedules(egui: bool) -> Schedules {
             .get_mut::<Render>()
             .add_edge::<DebugRender, EguiRender>()
             .expect("DebugRender -> EguiRender edge");
+        schedules
+            .get_mut::<Render>()
+            .add_edge::<crate::gizmo_system::GizmoRender, EguiRender>()
+            .expect("GizmoRender -> EguiRender edge");
     }
 
     // PostUpdate: camera input -> transform propagation -> camera matrices.
@@ -499,6 +521,23 @@ pub fn build_editor_schedules(egui: bool) -> Schedules {
     // order: camera chain first, then the asset pipeline as a chain, then
     // the remote pump. `core::tests::editor_schedules_have_no_ambiguities`
     // enforces this stays complete.
+    // Gizmo interaction (#85): editor-only, needs fresh camera matrices,
+    // raw world access (anchors + action queue) -> chained explicitly per #54.
+    schedules
+        .get_mut::<PostUpdate>()
+        .add(crate::gizmo_system::GizmoInteract);
+    schedules
+        .get_mut::<PostUpdate>()
+        .add_edge::<redlilium_ecs::NotGameActiveCondition, crate::gizmo_system::GizmoInteract>()
+        .expect("No cycle");
+    schedules
+        .get_mut::<PostUpdate>()
+        .add_edge::<UpdateCameraMatrices, crate::gizmo_system::GizmoInteract>()
+        .expect("UpdateCameraMatrices -> GizmoInteract edge");
+    schedules
+        .get_mut::<PostUpdate>()
+        .add_edge::<crate::gizmo_system::GizmoInteract, HotReload>()
+        .expect("GizmoInteract -> HotReload edge");
     schedules
         .get_mut::<PostUpdate>()
         .add_edge::<UpdateCameraMatrices, HotReload>()

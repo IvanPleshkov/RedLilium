@@ -26,6 +26,44 @@ impl World {
         })
     }
 
+    /// Mutates `T`'s meta in place; returns false when `T` has no meta
+    /// (never registered through `register_inspector`).
+    pub(crate) fn with_component_meta_mut<T: 'static>(
+        &mut self,
+        f: impl FnOnce(&mut ComponentMeta),
+    ) -> bool {
+        let Some(lock) = self.components.get_mut(&std::any::TypeId::of::<T>()) else {
+            return false;
+        };
+        match lock.get_mut().meta.as_mut() {
+            Some(meta) => {
+                f(meta);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// All components that registered gizmo-anchor providers.
+    pub(crate) fn gizmo_anchor_providers(
+        &self,
+    ) -> Vec<(&'static str, crate::sparse_set::GizmoAnchorsFn)> {
+        self.iter_meta()
+            .filter_map(|m| m.gizmo_anchors_fn.map(|f| (m.name, f)))
+            .collect()
+    }
+
+    /// The drag provider for one component, by name.
+    pub(crate) fn gizmo_drag_provider(
+        &self,
+        component: &str,
+    ) -> Option<crate::sparse_set::GizmoDragFn> {
+        let type_id = self.name_index.get(component)?;
+        let lock = self.components.get(type_id)?;
+        let storage = unsafe { &*lock.data_ptr() };
+        storage.meta().and_then(|m| m.gizmo_drag_fn)
+    }
+
     // ---- Asset references (generic sync / hot reload) ----
 
     /// Scan the asset references of every instance of every inspector-registered

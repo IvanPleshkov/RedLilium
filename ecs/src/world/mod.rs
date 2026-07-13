@@ -80,7 +80,7 @@ pub type ComponentNotRegistered = WorldError;
 // Re-export InspectResult for public API consumers.
 pub use crate::sparse_set::InspectResult;
 
-pub use actions::set_component_actions;
+pub use actions::{set_component_action, set_component_actions};
 
 /// Type-erased serialize helper: reads `T` from the world and serializes it.
 fn serialize_component_fn<T: Component>(
