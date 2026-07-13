@@ -221,7 +221,11 @@ impl<P: Plugin + 'static> RuntimeHandler<P> {
     /// is safer than unmapping it with tasks still running.
     ///
     /// Returns the captured snapshot. Caller then unloads dylib and reloads.
-    #[allow(dead_code)] // Will be called when reload is requested via remote
+    // Standalone-runtime reload entry, currently unwired: the editor hosts
+    // games through its own GameHost world-rebuild path (#58) instead. This
+    // stays as the runtime-side counterpart (plus its timeout tests below)
+    // until the standalone runtime grows a reload trigger.
+    #[allow(dead_code)]
     fn prepare_for_reload(
         &mut self,
     ) -> Result<redlilium_ecs::serialize::SerializedWorld, redlilium_ecs::serialize::SerializeError>
