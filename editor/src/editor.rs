@@ -1552,24 +1552,16 @@ impl AppHandler for Editor {
             // routing decision — egui / gizmo / select — is a pure function
             // in `gestures.rs`; this block only acts on it.
             if button == MouseButton::Left && self.scene_view_rect_phys.is_some() && !is_playing {
-                use crate::gestures::{PressRouting, ReleaseAction};
+                use crate::gestures::ReleaseAction;
                 if pressed {
-                    let routing = {
-                        let in_view = self.cursor_in_scene_view();
-                        let egui_owns = self.egui_wants_pointer;
-                        let gizmo_owns = self.gizmo_wants_cursor();
-                        self.gestures.on_press(in_view, egui_owns, gizmo_owns)
-                    };
-                    if routing == PressRouting::SceneGesture {
-                        // Clear selection immediately on click; the GPU pick or
-                        // box selection will re-select if anything is hit.
-                        if let Some(ew) = &mut self.world {
-                            let action: Box<
-                                dyn redlilium_core::abstract_editor::EditAction<World>,
-                            > = Box::new(SelectAction::clear());
-                            let _ = ew.history.execute(action, &mut ew.world);
-                        }
-                    }
+                    // Routing arms (or refuses) the gesture; selection is not
+                    // touched at press time — the release's pick resolves to
+                    // exactly one recorded SelectAction (set on a hit, clear
+                    // on a miss), one undo entry per click.
+                    let in_view = self.cursor_in_scene_view();
+                    let egui_owns = self.egui_wants_pointer;
+                    let gizmo_owns = self.gizmo_wants_cursor();
+                    let _ = self.gestures.on_press(in_view, egui_owns, gizmo_owns);
                 } else {
                     let gizmo_owns = self.gizmo_wants_cursor();
                     match self.gestures.on_release(gizmo_owns) {

@@ -280,7 +280,8 @@ impl System for GizmoRender {
         if world.has_resource::<GizmoUiState>() {
             let state = world.resource::<GizmoUiState>();
             if !state.dots.is_empty() {
-                vertices.extend(build_anchor_dots(&state.dots, &camera, 0.15));
+                let size_factor = world.resource::<TransformGizmo>().config().size_factor;
+                vertices.extend(build_anchor_dots(&state.dots, &camera, size_factor));
             }
         }
         if vertices.is_empty() {
@@ -380,7 +381,14 @@ mod tests {
         let camera = gizmo_camera(&ew.world, (1600.0, 900.0)).expect("camera present");
         let anchors = ew.world.gizmo_anchors_of(target);
         let anchor_pos = anchors[0].1.position;
-        let scale = screen_scale(&camera, anchor_pos, 0.15);
+        let scale = {
+            let f = ew
+                .world
+                .resource::<redlilium_gizmo::TransformGizmo>()
+                .config()
+                .size_factor;
+            screen_scale(&camera, anchor_pos, f)
+        };
         let grab_world = anchor_pos + Vec3::new(0.6 * scale, 0.0, 0.0);
         let grab = camera.project(grab_world).expect("on screen");
 
@@ -496,7 +504,14 @@ mod tests {
         let camera = gizmo_camera(&ew.world, (1600.0, 900.0)).expect("camera");
         let anchors = ew.world.gizmo_anchors_of(target);
         let center = anchors[0].1.position;
-        let scale = screen_scale(&camera, center, 0.15);
+        let scale = {
+            let f = ew
+                .world
+                .resource::<redlilium_gizmo::TransformGizmo>()
+                .config()
+                .size_factor;
+            screen_scale(&camera, center, f)
+        };
         let r = 0.9 * scale; // ring_radius default
 
         // The editor camera looks at the scene from an angle, so pick the

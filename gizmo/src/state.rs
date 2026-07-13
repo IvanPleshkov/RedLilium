@@ -166,7 +166,7 @@ pub struct GizmoConfig {
 impl Default for GizmoConfig {
     fn default() -> Self {
         Self {
-            size_factor: 0.15,
+            size_factor: 0.11,
             axis_pick_radius: 0.1,
             plane_min: 0.3,
             plane_max: 0.6,
