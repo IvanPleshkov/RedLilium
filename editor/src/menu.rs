@@ -140,6 +140,9 @@ pub use native::NativeMenu;
 pub struct MenuBarResult {
     pub action: Option<MenuAction>,
     pub play_action: Option<crate::toolbar::PlayAction>,
+    /// Newly selected gizmo mode, when the user clicked the mode switch
+    /// (#85 v2; mirrors W/E/R — same control the macOS titlebar shows).
+    pub gizmo_mode: Option<redlilium_gizmo::GizmoMode>,
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -149,9 +152,11 @@ pub fn draw_menu_bar(
     custom_titlebar: bool,
     play_state: crate::toolbar::PlayState,
     paused_due_to_panic: bool,
+    current_gizmo_mode: redlilium_gizmo::GizmoMode,
 ) -> MenuBarResult {
     let mut action = None;
     let mut play_action = None;
+    let mut gizmo_mode = None;
     let window_for_drag = window.clone();
 
     egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
@@ -202,7 +207,7 @@ pub fn draw_menu_bar(
             // the window controls.
             let play_rect = egui::Rect::from_min_size(
                 egui::pos2(usable_center - 40.0, full_rect.top()),
-                egui::vec2(120.0, full_rect.height()),
+                egui::vec2(280.0, full_rect.height()),
             );
             let mut play_ui = ui.new_child(
                 egui::UiBuilder::new()
@@ -215,6 +220,12 @@ pub fn draw_menu_bar(
             // Phase 6: Play mode indicator badge
             play_ui.add_space(8.0);
             crate::toolbar::draw_play_mode_indicator(&mut play_ui, play_state);
+
+            // Gizmo mode switch (#85 v2); mirrors W/E/R. Same control the
+            // macOS custom titlebar draws — without this the switch had no
+            // UI on Windows/Linux.
+            play_ui.add_space(16.0);
+            gizmo_mode = crate::toolbar::draw_gizmo_mode_controls(&mut play_ui, current_gizmo_mode);
 
             // Right: window control buttons (custom titlebar only)
             if custom_titlebar {
@@ -248,6 +259,7 @@ pub fn draw_menu_bar(
     MenuBarResult {
         action,
         play_action,
+        gizmo_mode,
     }
 }
 
