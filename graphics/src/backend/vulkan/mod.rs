@@ -2646,7 +2646,17 @@ impl VulkanBackend {
                 .and_then(|attachment| {
                     let (load_op, clear_value) =
                         conversion::convert_load_op_depth(&attachment.depth_load_op());
-                    let store_op = conversion::convert_store_op(&attachment.depth_store_op());
+                    // A read-only aspect is not written at all: STORE_OP_NONE is
+                    // the semantically correct op (#87) — storeOp=STORE is modeled
+                    // as a write at LATE_FRAGMENT_TESTS and races same-pass
+                    // sampling under sync validation. Unconditional: the enum is
+                    // provided by VK_KHR_dynamic_rendering (core 1.3), which the
+                    // baseline tier already requires of every selected device.
+                    let store_op = if attachment.depth_read_only {
+                        vk::AttachmentStoreOp::NONE
+                    } else {
+                        conversion::convert_store_op(&attachment.depth_store_op())
+                    };
                     // A fully read-only attachment shares DEPTH_STENCIL_READ_ONLY_OPTIMAL,
                     // matching the layout the barrier system transitions it to (and any
                     // co-use sampling descriptor); otherwise it is a write target.
@@ -2689,7 +2699,14 @@ impl VulkanBackend {
             .and_then(|attachment| {
                 let (load_op, clear_value) =
                     conversion::convert_load_op_stencil(&attachment.stencil_load_op());
-                let store_op = conversion::convert_store_op(&attachment.stencil_store_op());
+                // Read-only stencil aspect: STORE_OP_NONE, mirroring the depth
+                // aspect above (#87). Store ops are per-aspect, so a mixed
+                // depth-read-only / stencil-write attachment keeps STORE here.
+                let store_op = if attachment.stencil_read_only {
+                    vk::AttachmentStoreOp::NONE
+                } else {
+                    conversion::convert_store_op(&attachment.stencil_store_op())
+                };
                 // Same image as the depth attachment, so it must carry the same layout.
                 let ds_layout = ds_attachment_layout(attachment);
 
