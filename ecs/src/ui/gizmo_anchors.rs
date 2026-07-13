@@ -21,14 +21,57 @@ use crate::component::Component;
 use crate::entity::Entity;
 use crate::world::World;
 
+/// Which manipulations an anchor supports. The editor greys out / hides
+/// gizmo modes the focused anchor cannot express (a level-generator corner
+/// is usually translate-only; a Transform origin supports everything).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GizmoCaps(pub u8);
+
+impl GizmoCaps {
+    pub const TRANSLATE: Self = Self(1);
+    pub const ROTATE: Self = Self(2);
+    pub const SCALE: Self = Self(4);
+    pub const ALL: Self = Self(7);
+
+    pub fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+
 /// One draggable control point exposed by a component.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GizmoAnchor {
     /// Provider-stable identifier (e.g. a corner index). Passed back to
-    /// [`GizmoAnchors::apply_drag`].
+    /// [`GizmoAnchors::apply_edit`].
     pub id: u32,
     /// World-space position of the anchor.
     pub position: Vec3,
+    /// Supported manipulations. [`GizmoAnchor::translate`] is the common
+    /// translate-only constructor.
+    pub caps: GizmoCaps,
+}
+
+impl GizmoAnchor {
+    /// A translate-only anchor (the common case for control points).
+    pub fn translate(id: u32, position: Vec3) -> Self {
+        Self {
+            id,
+            position,
+            caps: GizmoCaps::TRANSLATE,
+        }
+    }
+}
+
+/// A mode-typed edit applied to an anchor, in world space. Mirrors the gizmo
+/// crate's delta (the editor maps between them) without depending on it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AnchorEdit {
+    /// World-space translation.
+    Translate(Vec3),
+    /// Rotation around a world axis (radians, right-handed).
+    Rotate { axis: Vec3, angle: f32 },
+    /// Per-component scale factor.
+    Scale(Vec3),
 }
 
 /// Context handed to anchor providers: the entity and its parent's global
@@ -54,15 +97,17 @@ impl AnchorCtx {
 
 /// A component with draggable gizmo control points.
 ///
-/// `anchors` reports world-space points; `apply_drag` mutates the component
-/// by a world-space delta on one of them. The editor wraps `apply_drag` into
-/// a clone-old/clone-new undoable action, so implementations just move data.
+/// `anchors` reports world-space points (with per-anchor capabilities);
+/// `apply_edit` mutates the component by a world-space edit on one of them.
+/// The editor wraps `apply_edit` into a clone-old/clone-new undoable action,
+/// so implementations just move data. Edits outside an anchor's declared
+/// caps are never delivered.
 pub trait GizmoAnchors: Component + Clone {
     /// The component's control points, in world space.
     fn anchors(&self, ctx: &AnchorCtx) -> Vec<GizmoAnchor>;
 
-    /// Apply a world-space translation to the anchor `id`.
-    fn apply_drag(&mut self, id: u32, world_delta: Vec3, ctx: &AnchorCtx);
+    /// Apply a world-space edit to the anchor `id`.
+    fn apply_edit(&mut self, id: u32, edit: AnchorEdit, ctx: &AnchorCtx);
 }
 
 /// Monomorphized `ComponentMeta::gizmo_anchors_fn` body.
@@ -79,12 +124,12 @@ fn drag_fn<T: GizmoAnchors>(
     world: &World,
     entity: Entity,
     id: u32,
-    world_delta: Vec3,
+    edit: AnchorEdit,
     ctx: &AnchorCtx,
 ) -> Option<Box<dyn EditAction<World>>> {
     let old = world.get::<T>(entity)?.clone();
     let mut new = old.clone();
-    new.apply_drag(id, world_delta, ctx);
+    new.apply_edit(id, edit, ctx);
     Some(crate::world::set_component_action::<T>(entity, old, new))
 }
 
@@ -136,22 +181,22 @@ impl World {
         out
     }
 
-    /// Build the undoable action for dragging `anchor_id` of `component` on
-    /// `entity` by `world_delta`. `None` when the entity/component/provider
-    /// is gone (a stale drag — the consumer drops it).
-    pub fn gizmo_drag_action(
+    /// Build the undoable action for applying `edit` to `anchor_id` of
+    /// `component` on `entity`. `None` when the entity/component/provider is
+    /// gone (a stale drag — the consumer drops it).
+    pub fn gizmo_edit_action(
         &self,
         entity: Entity,
         component: &str,
         anchor_id: u32,
-        world_delta: Vec3,
+        edit: AnchorEdit,
     ) -> Option<Box<dyn EditAction<World>>> {
         if !self.is_alive(entity) {
             return None;
         }
         let ctx = self.anchor_ctx(entity);
         let f = self.gizmo_drag_provider(component)?;
-        f(self, entity, anchor_id, world_delta, &ctx)
+        f(self, entity, anchor_id, edit, &ctx)
     }
 }
 
@@ -171,17 +216,15 @@ mod tests {
     impl GizmoAnchors for Corridor {
         fn anchors(&self, _ctx: &AnchorCtx) -> Vec<GizmoAnchor> {
             vec![
-                GizmoAnchor {
-                    id: 0,
-                    position: self.a,
-                },
-                GizmoAnchor {
-                    id: 1,
-                    position: self.b,
-                },
+                GizmoAnchor::translate(0, self.a),
+                GizmoAnchor::translate(1, self.b),
             ]
         }
-        fn apply_drag(&mut self, id: u32, world_delta: Vec3, _ctx: &AnchorCtx) {
+        fn apply_edit(&mut self, id: u32, edit: AnchorEdit, _ctx: &AnchorCtx) {
+            // Translate-only anchors: other edit kinds are never delivered.
+            let AnchorEdit::Translate(world_delta) = edit else {
+                return;
+            };
             match id {
                 0 => self.a += world_delta,
                 _ => self.b += world_delta,
@@ -226,7 +269,12 @@ mod tests {
         // Ten per-frame deltas on corner 1, as the gizmo would emit them.
         for _ in 0..10 {
             let action = world
-                .gizmo_drag_action(e, Corridor::NAME, 1, Vec3::new(0.1, 0.0, 0.0))
+                .gizmo_edit_action(
+                    e,
+                    Corridor::NAME,
+                    1,
+                    AnchorEdit::Translate(Vec3::new(0.1, 0.0, 0.0)),
+                )
                 .expect("provider present");
             history.execute(action, &mut world).unwrap();
         }
@@ -271,7 +319,12 @@ mod tests {
         // Drag the child by world +X: its LOCAL translation must move along
         // the axis that maps to world +X under the parent's rotation.
         let mut action = world
-            .gizmo_drag_action(child, Transform::NAME, 0, Vec3::new(1.0, 0.0, 0.0))
+            .gizmo_edit_action(
+                child,
+                Transform::NAME,
+                0,
+                AnchorEdit::Translate(Vec3::new(1.0, 0.0, 0.0)),
+            )
             .expect("provider present");
         action.apply(&mut world).unwrap();
 
@@ -279,5 +332,83 @@ mod tests {
         // inv(rotY(90°)) * (1,0,0) = (0,0,1)
         assert!(local.x.abs() < 1e-4, "local = {local:?}");
         assert!((local.z - 1.0).abs() < 1e-4, "local = {local:?}");
+    }
+
+    /// Rotating about a world axis under a rotated parent converts the axis
+    /// into parent space, so the visible turn matches the ring dragged.
+    #[test]
+    fn transform_provider_rotates_about_world_axis() {
+        let mut world = World::new();
+        world.register_inspector::<Transform>();
+        world.register_gizmo_anchors::<Transform>();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY).unwrap();
+
+        // 90° about world Y on an unparented entity.
+        let mut action = world
+            .gizmo_edit_action(
+                e,
+                Transform::NAME,
+                0,
+                AnchorEdit::Rotate {
+                    axis: Vec3::new(0.0, 1.0, 0.0),
+                    angle: std::f32::consts::FRAC_PI_2,
+                },
+            )
+            .expect("provider present");
+        action.apply(&mut world).unwrap();
+
+        let q = world.get::<Transform>(e).unwrap().rotation;
+        // quat for 90° about Y: (x,y,z,w) = (0, sin45, 0, cos45)
+        let s45 = std::f32::consts::FRAC_1_SQRT_2;
+        assert!((q.i.abs()) < 1e-5 && (q.k.abs()) < 1e-5);
+        assert!((q.j - s45).abs() < 1e-5, "j = {}", q.j);
+        assert!((q.w - s45).abs() < 1e-5, "w = {}", q.w);
+    }
+
+    #[test]
+    fn transform_provider_scales_componentwise() {
+        let mut world = World::new();
+        world.register_inspector::<Transform>();
+        world.register_gizmo_anchors::<Transform>();
+        let e = world.spawn();
+        world.insert(e, Transform::IDENTITY).unwrap();
+
+        let mut action = world
+            .gizmo_edit_action(
+                e,
+                Transform::NAME,
+                0,
+                AnchorEdit::Scale(Vec3::new(2.0, 1.0, 0.5)),
+            )
+            .expect("provider present");
+        action.apply(&mut world).unwrap();
+
+        let sc = world.get::<Transform>(e).unwrap().scale;
+        assert!((sc.x - 2.0).abs() < 1e-6);
+        assert!((sc.y - 1.0).abs() < 1e-6);
+        assert!((sc.z - 0.5).abs() < 1e-6);
+    }
+
+    /// Translate-only anchors advertise their caps; non-translate edits are
+    /// a documented no-op.
+    #[test]
+    fn caps_gate_and_noop_edits() {
+        let (mut world, e) = corridor_world();
+        let anchors = world.gizmo_anchors_of(e);
+        assert!(anchors.iter().all(|(_, a)| a.caps == GizmoCaps::TRANSLATE));
+        assert!(!anchors[0].1.caps.contains(GizmoCaps::ROTATE));
+
+        let before = world.get::<Corridor>(e).unwrap().b;
+        let mut action = world
+            .gizmo_edit_action(
+                e,
+                Corridor::NAME,
+                1,
+                AnchorEdit::Scale(Vec3::new(2.0, 2.0, 2.0)),
+            )
+            .expect("action still builds");
+        action.apply(&mut world).unwrap();
+        assert_eq!(world.get::<Corridor>(e).unwrap().b, before, "no-op");
     }
 }

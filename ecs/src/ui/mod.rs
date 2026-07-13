@@ -37,7 +37,7 @@ pub use action_registry::{ActionRegistry, RegisteredAction};
 pub use component_inspector::{
     AddComponentAction, ImportComponentAction, RemoveComponentAction, show_component_inspector,
 };
-pub use gizmo_anchors::{AnchorCtx, GizmoAnchor, GizmoAnchors};
+pub use gizmo_anchors::{AnchorCtx, AnchorEdit, GizmoAnchor, GizmoAnchors, GizmoCaps};
 pub use world_inspector::{
     DeleteEntityAction, ReparentAction, SpawnEntityAction, SpawnPrefabAction, SpawnReport,
     show_world_inspector,

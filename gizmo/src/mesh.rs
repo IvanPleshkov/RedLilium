@@ -5,7 +5,7 @@ use bytemuck::{Pod, Zeroable};
 use redlilium_core::math::Vec3;
 
 use crate::math::{GizmoCamera, perpendicular_basis, screen_scale};
-use crate::state::{Handle, TranslateGizmo, plane_axes};
+use crate::state::{GizmoMode, Handle, TransformGizmo, plane_axes};
 
 /// One gizmo vertex: world position + RGBA color. Matches the debug-draw
 /// shader's input layout.
@@ -28,14 +28,15 @@ const SHAFT_SIDES: usize = 6;
 
 fn axis_color(handle: Handle) -> [f32; 4] {
     match handle {
-        Handle::AxisX | Handle::PlaneYZ => [0.92, 0.22, 0.18, 1.0],
-        Handle::AxisY | Handle::PlaneXZ => [0.32, 0.82, 0.22, 1.0],
-        Handle::AxisZ | Handle::PlaneXY => [0.22, 0.42, 0.95, 1.0],
+        Handle::AxisX | Handle::PlaneYZ | Handle::RingX | Handle::ScaleX => [0.92, 0.22, 0.18, 1.0],
+        Handle::AxisY | Handle::PlaneXZ | Handle::RingY | Handle::ScaleY => [0.32, 0.82, 0.22, 1.0],
+        Handle::AxisZ | Handle::PlaneXY | Handle::RingZ | Handle::ScaleZ => [0.22, 0.42, 0.95, 1.0],
+        Handle::ScaleUniform => [0.9, 0.9, 0.9, 1.0],
     }
 }
 
 /// Hover brightens, active drag goes hot yellow; planes are translucent.
-fn handle_color(gizmo: &TranslateGizmo, handle: Handle) -> [f32; 4] {
+fn handle_color(gizmo: &TransformGizmo, handle: Handle) -> [f32; 4] {
     let mut c = axis_color(handle);
     if handle.is_plane() {
         c[3] = 0.35;
@@ -54,24 +55,55 @@ fn handle_color(gizmo: &TranslateGizmo, handle: Handle) -> [f32; 4] {
     c
 }
 
-/// Tessellate the gizmo at its effective target for this frame's camera.
-/// Returns an empty list when the gizmo is hidden.
-pub fn build_vertices(gizmo: &TranslateGizmo, camera: &GizmoCamera) -> Vec<GizmoVertex> {
+/// Tessellate the gizmo (current mode's handles) at its effective target
+/// for this frame's camera. Returns an empty list when the gizmo is hidden.
+pub fn build_vertices(gizmo: &TransformGizmo, camera: &GizmoCamera) -> Vec<GizmoVertex> {
     let Some(target) = gizmo.effective_target() else {
         return Vec::new();
     };
     let s = screen_scale(camera, target, gizmo.config().size_factor);
-    let mut out = Vec::with_capacity(1024);
+    let mut out = Vec::with_capacity(2048);
 
-    for handle in [Handle::AxisX, Handle::AxisY, Handle::AxisZ] {
-        let color = handle_color(gizmo, handle);
-        push_arrow(&mut out, target, handle.primary_dir(), s, color);
-    }
-    for handle in [Handle::PlaneXY, Handle::PlaneXZ, Handle::PlaneYZ] {
-        let color = handle_color(gizmo, handle);
-        let (u, v) = plane_axes(handle);
-        let (min, max) = (gizmo.config().plane_min * s, gizmo.config().plane_max * s);
-        push_quad(&mut out, target, u, v, min, max, color);
+    match gizmo.mode() {
+        GizmoMode::Translate => {
+            for handle in [Handle::AxisX, Handle::AxisY, Handle::AxisZ] {
+                let color = handle_color(gizmo, handle);
+                push_arrow(&mut out, target, handle.primary_dir(), s, color);
+            }
+            for handle in [Handle::PlaneXY, Handle::PlaneXZ, Handle::PlaneYZ] {
+                let color = handle_color(gizmo, handle);
+                let (u, v) = plane_axes(handle);
+                let (min, max) = (gizmo.config().plane_min * s, gizmo.config().plane_max * s);
+                push_quad(&mut out, target, u, v, min, max, color);
+            }
+        }
+        GizmoMode::Rotate => {
+            let radius = gizmo.config().ring_radius * s;
+            for handle in [Handle::RingX, Handle::RingY, Handle::RingZ] {
+                let color = handle_color(gizmo, handle);
+                push_torus(
+                    &mut out,
+                    target,
+                    handle.primary_dir(),
+                    radius,
+                    0.02 * s,
+                    color,
+                );
+            }
+        }
+        GizmoMode::Scale => {
+            for handle in [Handle::ScaleX, Handle::ScaleY, Handle::ScaleZ] {
+                let color = handle_color(gizmo, handle);
+                push_scale_handle(&mut out, target, handle.primary_dir(), s, color);
+            }
+            let color = handle_color(gizmo, Handle::ScaleUniform);
+            push_cube(
+                &mut out,
+                target,
+                gizmo.config().uniform_pick_radius * s * 0.8,
+                color,
+            );
+        }
     }
     out
 }
@@ -140,6 +172,91 @@ fn push_quad(
     push_tri(out, p00, p01, p11, color);
 }
 
+/// Torus ring around `axis`: square tube swept along the major circle.
+fn push_torus(
+    out: &mut Vec<GizmoVertex>,
+    center: Vec3,
+    axis: Vec3,
+    radius: f32,
+    tube: f32,
+    color: [f32; 4],
+) {
+    const SEGMENTS: usize = 48;
+    let (u, v) = perpendicular_basis(axis);
+    let radial = |i: usize| -> Vec3 {
+        let a = i as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+        u * a.cos() + v * a.sin()
+    };
+    for i in 0..SEGMENTS {
+        let (r0, r1) = (radial(i), radial(i + 1));
+        let (p0, p1) = (center + r0 * radius, center + r1 * radius);
+        // Square tube corners: (radial, axis) offset pairs, matched between
+        // adjacent segments so the strip stays contiguous.
+        let corners = [
+            (r0 * tube, r1 * tube),
+            (axis * tube, axis * tube),
+            (-r0 * tube, -r1 * tube),
+            (-(axis * tube), -(axis * tube)),
+        ];
+        for k in 0..4 {
+            let (a0, a1) = corners[k];
+            let (b0, b1) = corners[(k + 1) % 4];
+            push_tri(out, p0 + a0, p1 + a1, p1 + b1, color);
+            push_tri(out, p0 + a0, p1 + b1, p0 + b0, color);
+        }
+    }
+}
+
+/// Per-axis scale handle: the shaft prism with a cube tip.
+fn push_scale_handle(
+    out: &mut Vec<GizmoVertex>,
+    origin: Vec3,
+    axis: Vec3,
+    s: f32,
+    color: [f32; 4],
+) {
+    let (u, v) = perpendicular_basis(axis);
+    let shaft_r = 0.022 * s;
+    let shaft_a = origin + axis * (0.2 * s);
+    let shaft_b = origin + axis * (0.9 * s);
+    for i in 0..SHAFT_SIDES {
+        let t0 = i as f32 / SHAFT_SIDES as f32 * std::f32::consts::TAU;
+        let t1 = (i + 1) as f32 / SHAFT_SIDES as f32 * std::f32::consts::TAU;
+        let r0 = (u * t0.cos() + v * t0.sin()) * shaft_r;
+        let r1 = (u * t1.cos() + v * t1.sin()) * shaft_r;
+        push_tri(out, shaft_a + r0, shaft_b + r0, shaft_b + r1, color);
+        push_tri(out, shaft_a + r0, shaft_b + r1, shaft_a + r1, color);
+    }
+    push_cube(out, shaft_b + axis * (0.07 * s), 0.07 * s, color);
+}
+
+/// Axis-aligned cube of half-extent `r` (12 tris).
+fn push_cube(out: &mut Vec<GizmoVertex>, c: Vec3, r: f32, color: [f32; 4]) {
+    let vx = |sx: f32, sy: f32, sz: f32| c + Vec3::new(sx * r, sy * r, sz * r);
+    let corners = [
+        vx(-1.0, -1.0, -1.0),
+        vx(1.0, -1.0, -1.0),
+        vx(1.0, 1.0, -1.0),
+        vx(-1.0, 1.0, -1.0),
+        vx(-1.0, -1.0, 1.0),
+        vx(1.0, -1.0, 1.0),
+        vx(1.0, 1.0, 1.0),
+        vx(-1.0, 1.0, 1.0),
+    ];
+    const FACES: [[usize; 4]; 6] = [
+        [0, 1, 2, 3],
+        [5, 4, 7, 6],
+        [4, 0, 3, 7],
+        [1, 5, 6, 2],
+        [3, 2, 6, 7],
+        [4, 5, 1, 0],
+    ];
+    for f in FACES {
+        push_tri(out, corners[f[0]], corners[f[1]], corners[f[2]], color);
+        push_tri(out, corners[f[0]], corners[f[2]], corners[f[3]], color);
+    }
+}
+
 /// Anchor dots: small screen-constant octahedra marking every draggable
 /// control point of the focused entity. The active one (carrying the full
 /// gizmo) renders hot, the rest neutral.
@@ -193,13 +310,13 @@ mod tests {
 
     #[test]
     fn hidden_gizmo_builds_nothing() {
-        let gizmo = TranslateGizmo::new(GizmoConfig::default());
+        let gizmo = TransformGizmo::new(GizmoConfig::default());
         assert!(build_vertices(&gizmo, &camera()).is_empty());
     }
 
     #[test]
     fn visible_gizmo_builds_triangle_list() {
-        let mut gizmo = TranslateGizmo::new(GizmoConfig::default());
+        let mut gizmo = TransformGizmo::new(GizmoConfig::default());
         gizmo.set_target(Some(Vec3::new(1.0, 2.0, 3.0)));
         let verts = build_vertices(&gizmo, &camera());
         assert!(!verts.is_empty());

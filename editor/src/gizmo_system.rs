@@ -10,13 +10,14 @@
 
 use redlilium_core::abstract_editor::{ActionQueue, MergeBarrier};
 use redlilium_core::math::{Vec3, mat4_to_cols_array_2d};
+use redlilium_ecs::ui::{AnchorEdit, GizmoCaps};
 use redlilium_ecs::{
     Camera, CameraTarget, Entity, RenderSchedule, ScenePass, System, SystemContext, SystemError,
     WindowInput, World, ui::Selection,
 };
 use redlilium_gizmo::{
-    CursorState, GizmoCamera, GizmoEvent, GizmoRenderer, TranslateGizmo, build_anchor_dots,
-    build_vertices,
+    CursorState, GizmoCamera, GizmoDelta, GizmoEvent, GizmoMode, GizmoRenderer, TransformGizmo,
+    build_anchor_dots, build_vertices,
 };
 use redlilium_graphics::graph::RenderTarget;
 
@@ -74,7 +75,7 @@ impl System for GizmoInteract {
     type Result = ();
     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<Self::Result, SystemError> {
         let world = ctx.raw_world();
-        if !world.has_resource::<TranslateGizmo>()
+        if !world.has_resource::<TransformGizmo>()
             || !world.has_resource::<GizmoUiState>()
             || !world.has_resource::<SceneViewRect>()
             || !world.has_resource::<Selection>()
@@ -108,6 +109,24 @@ impl System for GizmoInteract {
         let pressed_edge = pressed && !state.prev_pressed;
         state.prev_pressed = pressed;
 
+        // Mode shortcuts (Unity-style W/E/R), suppressed while the RMB
+        // fly-camera is navigating and while a drag is live (set_mode is
+        // drag-safe anyway, but skipping avoids hover flicker).
+        {
+            use redlilium_core::input::KeyCode;
+            let input = world.resource::<WindowInput>();
+            if !input.mouse_right {
+                let mut gizmo = world.resource_mut::<TransformGizmo>();
+                if input.is_key_pressed(KeyCode::W) {
+                    gizmo.set_mode(GizmoMode::Translate);
+                } else if input.is_key_pressed(KeyCode::E) {
+                    gizmo.set_mode(GizmoMode::Rotate);
+                } else if input.is_key_pressed(KeyCode::R) {
+                    gizmo.set_mode(GizmoMode::Scale);
+                }
+            }
+        }
+
         // The selection's primary entity provides the anchors.
         let primary = world
             .resource::<Selection>()
@@ -115,7 +134,7 @@ impl System for GizmoInteract {
             .first()
             .copied()
             .filter(|e| world.is_alive(*e));
-        let mut gizmo = world.resource_mut::<TranslateGizmo>();
+        let mut gizmo = world.resource_mut::<TransformGizmo>();
         let Some(entity) = primary else {
             state.focus = None;
             state.dots.clear();
@@ -123,7 +142,19 @@ impl System for GizmoInteract {
             return Ok(());
         };
 
-        let anchors = world.gizmo_anchors_of(entity);
+        let mode_cap = match gizmo.mode() {
+            GizmoMode::Translate => GizmoCaps::TRANSLATE,
+            GizmoMode::Rotate => GizmoCaps::ROTATE,
+            GizmoMode::Scale => GizmoCaps::SCALE,
+        };
+        // Only anchors supporting the current mode participate: a
+        // translate-only generator corner simply hides the gizmo in
+        // rotate/scale modes.
+        let anchors: Vec<_> = world
+            .gizmo_anchors_of(entity)
+            .into_iter()
+            .filter(|(_, a)| a.caps.contains(mode_cap))
+            .collect();
         if anchors.is_empty() {
             state.focus = None;
             state.dots.clear();
@@ -190,9 +221,14 @@ impl System for GizmoInteract {
         while let Some(event) = gizmo.poll_event() {
             match event {
                 GizmoEvent::DragStart { .. } => {}
-                GizmoEvent::DragDelta { world_delta, .. } => {
+                GizmoEvent::DragDelta { delta, .. } => {
+                    let edit = match delta {
+                        GizmoDelta::Translate(v) => AnchorEdit::Translate(v),
+                        GizmoDelta::Rotate { axis, angle } => AnchorEdit::Rotate { axis, angle },
+                        GizmoDelta::Scale(f) => AnchorEdit::Scale(f),
+                    };
                     if let Some(action) =
-                        world.gizmo_drag_action(entity, &focus_name, focus_id, world_delta)
+                        world.gizmo_edit_action(entity, &focus_name, focus_id, edit)
                     {
                         queue.push(action);
                     }
@@ -225,7 +261,7 @@ impl System for GizmoRender {
     type Result = ();
     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<Self::Result, SystemError> {
         let world = ctx.raw_world();
-        if !world.has_resource::<TranslateGizmo>()
+        if !world.has_resource::<TransformGizmo>()
             || !world.has_resource::<GizmoRenderer>()
             || !world.has_resource::<RenderSchedule>()
             || !world.has_resource::<SceneViewRect>()
@@ -238,7 +274,7 @@ impl System for GizmoRender {
         };
 
         let mut vertices = {
-            let gizmo = world.resource::<TranslateGizmo>();
+            let gizmo = world.resource::<TransformGizmo>();
             build_vertices(&gizmo, &camera)
         };
         if world.has_resource::<GizmoUiState>() {
@@ -358,7 +394,7 @@ mod tests {
         tick(&mut ew);
         assert!(
             ew.world
-                .resource::<redlilium_gizmo::TranslateGizmo>()
+                .resource::<redlilium_gizmo::TransformGizmo>()
                 .wants_cursor(),
             "hovering the X arrow must claim the cursor before the press"
         );
@@ -408,5 +444,133 @@ mod tests {
             "single undo reverts the whole drag: {reverted:?}"
         );
         assert!(!ew.history.can_undo(), "drag collapsed into one entry");
+    }
+
+    /// #85 v2: rotate mode end-to-end — switch mode via the remote-style
+    /// resource call, drag the Z ring through real frames, verify the
+    /// Transform rotation changed and a single undo reverts it.
+    #[test]
+    fn gizmo_rotate_drag_rotates_transform_and_undoes() {
+        use redlilium_gizmo::GizmoMode;
+
+        let instance = GraphicsInstance::new().expect("graphics instance");
+        let device = instance.create_device().expect("graphics device");
+        let engine = redlilium_runtime::EngineContext::with_vfs(device.clone(), Vfs::new());
+        let mut scene_view = SceneViewState::new(device, TextureFormat::Bgra8UnormSrgb);
+        let runner = EcsRunner::single_thread();
+
+        let mut ew = create_editor_world(
+            &EditorWorldParams {
+                remote: false,
+                egui: false,
+            },
+            &engine,
+            &mut scene_view,
+            16.0 / 9.0,
+        );
+        ew.world.insert_resource(SceneViewRect {
+            offset: [0.0, 0.0],
+            size: [1600.0, 900.0],
+        });
+
+        let target = ew
+            .world
+            .iter_entities()
+            .find(|&e| ew.world.get::<MeshRenderer>(e).is_some())
+            .expect("demo scene has meshes");
+        let start_rotation = ew.world.get::<Transform>(target).unwrap().rotation;
+        ew.world
+            .resource_mut::<redlilium_ecs::ui::Selection>()
+            .set(vec![target]);
+        ew.world
+            .resource_mut::<redlilium_gizmo::TransformGizmo>()
+            .set_mode(GizmoMode::Rotate);
+
+        let dt = 1.0 / 60.0;
+        let tick = |ew: &mut crate::core::EditorWorld| {
+            ew.drain_actions();
+            ew.schedules.run_frame(&mut ew.world, &runner, dt);
+        };
+        tick(&mut ew); // camera matrices
+
+        let camera = gizmo_camera(&ew.world, (1600.0, 900.0)).expect("camera");
+        let anchors = ew.world.gizmo_anchors_of(target);
+        let center = anchors[0].1.position;
+        let scale = screen_scale(&camera, center, 0.15);
+        let r = 0.9 * scale; // ring_radius default
+
+        // The editor camera looks at the scene from an angle, so pick the
+        // ring whose plane faces the camera best: project two points on each
+        // ring and pick... keep it simple — grab the Y ring (XZ plane) at
+        // its +X point; the default camera looks down enough for it to pick.
+        let grab_world = center + Vec3::new(r, 0.0, 0.0);
+        let grab = camera.project(grab_world).expect("on screen");
+        {
+            let mut input = ew.window_input.write();
+            input.cursor_position = [grab.0, grab.1];
+        }
+        tick(&mut ew);
+        let hovered = ew
+            .world
+            .resource::<redlilium_gizmo::TransformGizmo>()
+            .hovered();
+        assert!(hovered.is_some(), "a ring hovers at the grab point");
+
+        {
+            let mut input = ew.window_input.write();
+            input.mouse_left = true;
+        }
+        tick(&mut ew);
+
+        // Sweep the cursor to a rotated position on the same ring plane.
+        let axis = hovered.unwrap().primary_dir();
+        // Rotate the grab offset 40° around the hovered ring's axis.
+        let offset = grab_world - center;
+        let angle = 40f32.to_radians();
+        let (s_a, c_a) = (angle.sin(), angle.cos());
+        // Rodrigues rotation of `offset` around `axis`.
+        let rotated =
+            offset * c_a + axis.cross(&offset) * s_a + axis * axis.dot(&offset) * (1.0 - c_a);
+        let dest = camera.project(center + rotated).expect("on screen");
+        {
+            let mut input = ew.window_input.write();
+            input.cursor_position = [dest.0, dest.1];
+        }
+        tick(&mut ew);
+        tick(&mut ew); // drain delta actions
+
+        {
+            let mut input = ew.window_input.write();
+            input.mouse_left = false;
+        }
+        tick(&mut ew);
+        tick(&mut ew);
+
+        let rotated_q = ew.world.get::<Transform>(target).unwrap().rotation;
+        let dot = (rotated_q.i * start_rotation.i
+            + rotated_q.j * start_rotation.j
+            + rotated_q.k * start_rotation.k
+            + rotated_q.w * start_rotation.w)
+            .abs();
+        assert!(
+            dot < 0.999,
+            "rotation changed by a measurable angle (dot = {dot})"
+        );
+
+        // One undo reverts the whole rotation drag.
+        assert!(ew.history.can_undo());
+        ew.history.undo(&mut ew.world).unwrap();
+        let reverted = ew.world.get::<Transform>(target).unwrap().rotation;
+        let dot = rotated_q.i * reverted.i
+            + rotated_q.j * reverted.j
+            + rotated_q.k * reverted.k
+            + rotated_q.w * reverted.w;
+        let back = reverted.i * start_rotation.i
+            + reverted.j * start_rotation.j
+            + reverted.k * start_rotation.k
+            + reverted.w * start_rotation.w;
+        assert!(back.abs() > 0.9999, "undo restores the original rotation");
+        let _ = dot;
+        assert!(!ew.history.can_undo(), "whole drag was one entry");
     }
 }

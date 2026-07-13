@@ -11,16 +11,37 @@ impl crate::ui::GizmoAnchors for Transform {
         vec![crate::ui::GizmoAnchor {
             id: 0,
             position: p.coords,
+            caps: crate::ui::GizmoCaps::ALL,
         }]
     }
 
-    fn apply_drag(
-        &mut self,
-        _id: u32,
-        world_delta: redlilium_core::math::Vec3,
-        ctx: &crate::ui::AnchorCtx,
-    ) {
-        self.translation += ctx.world_delta_to_parent(world_delta);
+    fn apply_edit(&mut self, _id: u32, edit: crate::ui::AnchorEdit, ctx: &crate::ui::AnchorCtx) {
+        use redlilium_core::math::{Quat, quat_from_xyzw};
+        match edit {
+            crate::ui::AnchorEdit::Translate(world_delta) => {
+                self.translation += ctx.world_delta_to_parent(world_delta);
+            }
+            crate::ui::AnchorEdit::Rotate { axis, angle } => {
+                // World axis → parent space, then pre-multiply so the turn
+                // happens about the world axis regardless of current rotation.
+                let local_axis = ctx.world_delta_to_parent(axis);
+                let n = local_axis.norm();
+                if n < 1e-6 {
+                    return;
+                }
+                let local_axis = local_axis / n;
+                let half = angle * 0.5;
+                let (s, c) = (half.sin(), half.cos());
+                let dq: Quat =
+                    quat_from_xyzw(local_axis.x * s, local_axis.y * s, local_axis.z * s, c);
+                self.rotation = (dq * self.rotation).normalize();
+            }
+            crate::ui::AnchorEdit::Scale(factor) => {
+                self.scale.x *= factor.x;
+                self.scale.y *= factor.y;
+                self.scale.z *= factor.z;
+            }
+        }
     }
 }
 
