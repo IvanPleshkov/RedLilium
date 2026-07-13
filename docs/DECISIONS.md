@@ -1733,6 +1733,17 @@ declared textures use the CONCURRENT fallback — which further validates not
 building full QFOT. The fast path is expected to engage on NVIDIA
 (unverified — no hardware at hand).
 
+**And the CONCURRENT fallback measures as free on RDNA4** (RGP, solid-color
+fullscreen fills into two 8192² RGBA8 targets — 256 MiB each, deliberately
+larger than Infinity Cache so fills are bandwidth-bound; solid color is the
+best case for compression, so losing it would show directly as fill time):
+EXCLUSIVE 335.6 µs vs CONCURRENT 300.0 µs. An uncompressed 256 MiB write at
+the card's ~640 GB/s cannot beat ~440 µs, and both fills do — **write
+compression stays on under CONCURRENT**. The GCN-era "CONCURRENT loses DCC"
+penalty does not reproduce on this generation; it remains unmeasured on
+RDNA1/2 and GCN (`async_overlap_demo` is the harness when such hardware is
+available).
+
 ### Consequences
 
 - ✅ DCC retained for all undeclared images (render targets, sampled assets)

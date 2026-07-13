@@ -26,9 +26,72 @@ use winit::window::{Window, WindowId};
 use redlilium_graphics::{
     BackendType, Buffer, BufferDescriptor, BufferUsage, ColorAttachment, FramePipeline,
     GraphicsDevice, GraphicsError, GraphicsInstance, GraphicsPass, InstanceParameters, LoadOp,
-    PresentMode, RenderTargetConfig, StoreOp, Surface, SurfaceConfiguration, TransferConfig,
-    TransferOperation, TransferPass,
+    MaterialDescriptor, MaterialInstance, Mesh, MeshDescriptor, PresentMode, RenderTargetConfig,
+    ShaderSource, StoreOp, Surface, SurfaceConfiguration, Texture, TextureDescriptor,
+    TextureFormat, TextureUsage, TransferConfig, TransferOperation, TransferPass, VertexAttribute,
+    VertexBufferLayout, VertexLayout,
 };
+
+/// Solid-color fullscreen shader (WGSL): the render/depth-target views of
+/// GPU profilers only list targets that receive DRAW calls, so the
+/// compression-inspection targets need real draws, not just clears.
+const SOLID_COLOR_SHADER: &str = r#"
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+}
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+}
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.position = vec4<f32>(in.position, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return vec4<f32>(0.2, 0.6, 0.9, 1.0);
+}
+"#;
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct QuadVertex {
+    position: [f32; 3],
+    uv: [f32; 2],
+}
+
+/// Fullscreen quad (two CCW triangles) in clip space.
+const FULLSCREEN_QUAD: [QuadVertex; 6] = [
+    QuadVertex {
+        position: [-1.0, -1.0, 0.0],
+        uv: [0.0, 1.0],
+    },
+    QuadVertex {
+        position: [1.0, -1.0, 0.0],
+        uv: [1.0, 1.0],
+    },
+    QuadVertex {
+        position: [1.0, 1.0, 0.0],
+        uv: [1.0, 0.0],
+    },
+    QuadVertex {
+        position: [-1.0, -1.0, 0.0],
+        uv: [0.0, 1.0],
+    },
+    QuadVertex {
+        position: [1.0, 1.0, 0.0],
+        uv: [1.0, 0.0],
+    },
+    QuadVertex {
+        position: [-1.0, 1.0, 0.0],
+        uv: [0.0, 0.0],
+    },
+];
 
 /// Size of each ping-pong buffer. Large enough that the copies take a
 /// measurable slice of GPU time next to a trivial clear pass.
@@ -39,6 +102,22 @@ const BUFFER_SIZE: u64 = 64 * 1024 * 1024;
 /// profiler timeline.
 const COPIES_PER_FRAME: usize = 16;
 
+/// Size of the EXCLUSIVE (undeclared) offscreen render target — in a
+/// profiler's resource/render-target view compare its solid-fill duration
+/// against the cross-queue one (#88 validation). 8192² RGBA8 = 256 MiB,
+/// deliberately larger than any Infinity Cache so the fill is
+/// bandwidth-bound and a compression difference shows up as fill time.
+const RT_EXCLUSIVE_SIZE: u32 = 8192;
+
+/// Size of the `cross_queue`-declared render target (CONCURRENT on AMD, or
+/// EXCLUSIVE via the maintenance9 fast path). Same size as the EXCLUSIVE one
+/// so their solid-fill draw durations compare directly — solid color is the
+/// best case for framebuffer compression, so a compression difference shows
+/// up as a fill-rate difference. (RT #0 = exclusive, drawn first; RT #1 =
+/// cross-queue.) Read back by the async graph every frame, so the per-frame
+/// cross-queue ping-pong synchronization is also exercised.
+const RT_CROSS_QUEUE_SIZE: u32 = 8192;
+
 struct App {
     window: Option<Arc<Window>>,
     instance: Option<Arc<GraphicsInstance>>,
@@ -47,6 +126,15 @@ struct App {
     pipeline: Option<FramePipeline>,
     /// Ping-pong buffers the async graph copies between.
     buffers: Option<(Arc<Buffer>, Arc<Buffer>)>,
+    /// Offscreen render targets for compression inspection (#88): the
+    /// undeclared EXCLUSIVE one and the `cross_queue`-declared one, plus the
+    /// buffer the async graph copies the latter into each frame.
+    render_targets: Option<(Arc<Texture>, Arc<Texture>, Arc<Buffer>)>,
+    /// Fullscreen quad drawn into both inspection targets (profilers only
+    /// list render targets that receive draw calls).
+    quad: Option<(Arc<Mesh>, Arc<MaterialInstance>)>,
+    /// One-shot vertex upload, folded into the first frame's render graph.
+    pending_upload: Option<TransferOperation>,
     window_size: (u32, u32),
     frame_count: u64,
     last_stats: Instant,
@@ -62,6 +150,9 @@ impl App {
             surface: None,
             pipeline: None,
             buffers: None,
+            render_targets: None,
+            quad: None,
+            pending_upload: None,
             window_size: (1280, 720),
             frame_count: 0,
             last_stats: Instant::now(),
@@ -91,6 +182,78 @@ impl App {
         let buffer_a = device.create_buffer(&BufferDescriptor::new(BUFFER_SIZE, usage))?;
         let buffer_b = device.create_buffer(&BufferDescriptor::new(BUFFER_SIZE, usage))?;
 
+        // Compression-inspection targets (#88): identical usage, different
+        // declaration — compare their compression state in a GPU profiler
+        // (they are distinguishable by size: 2048² EXCLUSIVE, 1024² shared).
+        let rt_usage = TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC;
+        let rt_exclusive = device.create_texture(
+            &TextureDescriptor::new_2d(
+                RT_EXCLUSIVE_SIZE,
+                RT_EXCLUSIVE_SIZE,
+                TextureFormat::Rgba8Unorm,
+                rt_usage,
+            )
+            .with_label("rt_exclusive"),
+        )?;
+        let rt_cross_queue = device.create_texture(
+            &TextureDescriptor::new_2d(
+                RT_CROSS_QUEUE_SIZE,
+                RT_CROSS_QUEUE_SIZE,
+                TextureFormat::Rgba8Unorm,
+                rt_usage,
+            )
+            .with_cross_queue(true)
+            .with_label("rt_cross_queue"),
+        )?;
+        // 1024 * 4 bytes per row is already 256-aligned.
+        let rt_readback = device.create_buffer(&BufferDescriptor::new(
+            (RT_CROSS_QUEUE_SIZE * RT_CROSS_QUEUE_SIZE * 4) as u64,
+            BufferUsage::COPY_DST,
+        ))?;
+
+        // Fullscreen quad + solid-color material for the inspection targets.
+        let layout = Arc::new(
+            VertexLayout::new()
+                .with_buffer(VertexBufferLayout::new(
+                    std::mem::size_of::<QuadVertex>() as u32
+                ))
+                .with_attribute(VertexAttribute::position(0))
+                .with_attribute(VertexAttribute::texcoord0(12))
+                .with_label("quad_layout"),
+        );
+        let mesh = device.create_mesh(
+            &MeshDescriptor::new(layout.clone())
+                .with_vertex_count(FULLSCREEN_QUAD.len() as u32)
+                .with_label("fullscreen_quad"),
+        )?;
+        let material = device.create_material(
+            &MaterialDescriptor::new()
+                .with_shader(ShaderSource::vertex(
+                    SOLID_COLOR_SHADER.as_bytes().to_vec(),
+                    "vs_main",
+                ))
+                .with_shader(ShaderSource::fragment(
+                    SOLID_COLOR_SHADER.as_bytes().to_vec(),
+                    "fs_main",
+                ))
+                .with_vertex_layout(layout)
+                .with_color_format(TextureFormat::Rgba8Unorm)
+                .with_label("solid_color"),
+        )?;
+        let material_instance =
+            Arc::new(MaterialInstance::new(material).with_label("solid_color_instance"));
+        let vertex_buffer = mesh
+            .vertex_buffer(0)
+            .expect("quad mesh has a vertex buffer")
+            .clone();
+        let vertex_bytes: Arc<[u8]> = bytemuck::cast_slice(&FULLSCREEN_QUAD).to_vec().into();
+        self.pending_upload = Some(TransferOperation::write_buffer(
+            vertex_buffer,
+            0,
+            vertex_bytes,
+        ));
+        self.quad = Some((mesh, material_instance));
+
         log::info!(
             "Async overlap demo on {}: {} x {} MiB copies per frame alongside the render graph",
             device.name(),
@@ -103,12 +266,25 @@ impl App {
         self.surface = Some(surface);
         self.pipeline = Some(pipeline);
         self.buffers = Some((buffer_a, buffer_b));
+        self.render_targets = Some((rt_exclusive, rt_cross_queue, rt_readback));
         Ok(())
     }
 
     fn render_frame(&mut self) {
-        let (Some(surface), Some(pipeline), Some((buffer_a, buffer_b))) =
-            (&self.surface, &mut self.pipeline, &self.buffers)
+        let pending_upload = self.pending_upload.take();
+        let (
+            Some(surface),
+            Some(pipeline),
+            Some((buffer_a, buffer_b)),
+            Some((rt_exclusive, rt_cross_queue, rt_readback)),
+            Some((quad_mesh, quad_material)),
+        ) = (
+            &self.surface,
+            &mut self.pipeline,
+            &self.buffers,
+            &self.render_targets,
+            &self.quad,
+        )
         else {
             return;
         };
@@ -132,9 +308,10 @@ impl App {
 
         let mut schedule = pipeline.begin_frame().expect("begin_frame failed");
 
-        // Async graph: transfer-only ping-pong copies, no resources shared
-        // with the render graph — eligible for the async queue and free to
-        // overlap it.
+        // Async graph: transfer-only ping-pong copies (no shared resources,
+        // free to overlap) plus a copy of last frame's cross-queue render
+        // target — a per-frame cross-queue RAW ordered by tracker-emitted
+        // timeline waits.
         let mut async_graph = schedule.acquire_graph();
         async_graph.set_prefer_async_compute(true);
         let mut copy_pass = TransferPass::new("async_pingpong_copies".into());
@@ -150,14 +327,46 @@ impl App {
                 dst.clone(),
             ));
         }
+        config = config.with_operation(TransferOperation::readback_texture_whole(
+            rt_cross_queue.clone(),
+            rt_readback.clone(),
+        ));
         copy_pass.set_transfer_config(config);
         async_graph.add_transfer_pass(copy_pass);
         schedule.submit(async_graph);
 
-        // Main render graph: animated clear straight to the swapchain.
+        // Main render graph: draw a fullscreen quad into both offscreen
+        // compression-inspection targets (profilers only list targets with
+        // draw calls), then an animated clear straight to the swapchain. The
+        // first frame prepends the quad's one-shot vertex upload.
         let hue = (self.frame_count % 360) as f32;
         let (r, g, b) = hue_to_rgb(hue);
         let mut render_graph = schedule.acquire_graph();
+        if let Some(upload) = pending_upload {
+            let mut upload_pass = TransferPass::new("quad_vertex_upload".into());
+            upload_pass.set_transfer_config(TransferConfig::new().with_operation(upload));
+            render_graph.add_transfer_pass(upload_pass);
+        }
+        let mut pass = GraphicsPass::new("rt_exclusive_draw".into());
+        pass.set_render_targets(
+            RenderTargetConfig::new().with_color(
+                ColorAttachment::from_texture(rt_exclusive.clone())
+                    .with_load_op(LoadOp::clear_color(b, r, g, 1.0))
+                    .with_store_op(StoreOp::Store),
+            ),
+        );
+        pass.add_draw(quad_mesh.clone(), quad_material.clone());
+        render_graph.add_graphics_pass(pass);
+        let mut pass = GraphicsPass::new("rt_cross_queue_draw".into());
+        pass.set_render_targets(
+            RenderTargetConfig::new().with_color(
+                ColorAttachment::from_texture(rt_cross_queue.clone())
+                    .with_load_op(LoadOp::clear_color(g, b, r, 1.0))
+                    .with_store_op(StoreOp::Store),
+            ),
+        );
+        pass.add_draw(quad_mesh.clone(), quad_material.clone());
+        render_graph.add_graphics_pass(pass);
         let mut pass = GraphicsPass::new("main_render".into());
         pass.set_render_targets(
             RenderTargetConfig::new().with_color(
