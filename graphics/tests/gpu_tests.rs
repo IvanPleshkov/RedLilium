@@ -39,7 +39,7 @@ use common::{
 use redlilium_graphics::{
     BindingGroupDescriptor, BindingLayout, BindingLayoutEntry, BindingType, BufferUsage,
     ColorAttachment, DepthStencilAttachment, GraphicsPass, LoadOp, MaterialDescriptor,
-    MaterialInstance, RenderGraph, RenderGraphCompilationMode, RenderTargetConfig,
+    MaterialInstance, QueuePreference, RenderGraph, RenderGraphCompilationMode, RenderTargetConfig,
     SamplerDescriptor, ShaderSource, StoreOp, TextureFormat, TextureUsage, TransferConfig,
     TransferOperation, TransferPass,
 };
@@ -377,7 +377,7 @@ fn test_multi_submit_cross_graph_dependency(#[case] backend: Backend) {
 /// Test the async compute routing opt-in (#47 phase 4).
 ///
 /// Graph A renders (clears) into a texture on the graphics queue; graph B —
-/// flagged `prefer_async_compute` — copies it to a readback buffer. On
+/// flagged `QueuePreference::AsyncCompute` — copies it to a readback buffer. On
 /// devices with an async compute queue B runs there, and the cross-queue RAW
 /// hazard on the texture must be resolved by a tracker-emitted timeline wait
 /// (plus CONCURRENT-shared resources). On single-queue devices (MoltenVK
@@ -418,7 +418,7 @@ fn test_async_compute_opt_in_cross_queue_dependency(#[case] backend: Backend) {
     ));
 
     let mut graph_b = RenderGraph::new();
-    graph_b.set_prefer_async_compute(true);
+    graph_b.set_queue_preference(QueuePreference::AsyncCompute);
     let mut copy_pass = TransferPass::new("async_optin_readback".into());
     copy_pass.set_transfer_config(TransferConfig::new().with_operation(
         TransferOperation::readback_texture_whole(render_target, readback.clone()),
@@ -448,6 +448,78 @@ fn test_async_compute_opt_in_cross_queue_dependency(#[case] backend: Backend) {
         assert_eq!(
             errors, 0,
             "Vulkan validation reported {errors} error(s) during async compute cross-queue dependency"
+        );
+    }
+}
+
+/// Transfer-queue routing (#89): the asset-streaming pattern.
+///
+/// Graph A — transfer-only, flagged `QueuePreference::Transfer` — uploads a
+/// byte pattern into a device-local buffer; graph B reads it back on the
+/// graphics queue. On devices with a dedicated transfer family A runs on the
+/// DMA engines and the cross-queue RAW hazard is resolved by a
+/// tracker-emitted timeline wait; elsewhere the preference walks the ladder
+/// (async compute, then graphics) — every rung must produce identical bytes
+/// and zero validation errors.
+#[rstest]
+#[case::dummy(Backend::Dummy)]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_transfer_queue_upload_then_graphics_read(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        eprintln!("Backend {:?} not available, skipping", backend);
+        return;
+    };
+
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+    }
+
+    const SIZE: u64 = 512;
+    let pattern: Arc<[u8]> = (0..SIZE as usize).map(|i| (i * 7) as u8).collect();
+
+    let uploaded = ctx.create_buffer(SIZE, BufferUsage::COPY_DST | BufferUsage::COPY_SRC);
+    let readback = ctx.create_readback_buffer(SIZE);
+
+    // Graph A: the upload, requesting the transfer queue (what
+    // `AssetProcessor::flush_gpu` emits).
+    let mut graph_a = RenderGraph::new();
+    graph_a.set_queue_preference(QueuePreference::Transfer);
+    assert!(graph_a.is_transfer_only());
+    let mut upload_pass = TransferPass::new("transfer_route_upload".into());
+    upload_pass.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::write_buffer(uploaded.clone(), 0, pattern.clone()),
+    ));
+    graph_a.add_transfer_pass(upload_pass);
+
+    // Graph B: the graphics-queue consumer (cross-queue RAW against A).
+    let mut graph_b = RenderGraph::new();
+    let mut read_pass = TransferPass::new("transfer_route_read".into());
+    read_pass.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::copy_buffer_whole(uploaded.clone(), readback.clone()),
+    ));
+    graph_b.add_transfer_pass(read_pass);
+
+    ctx.execute_graphs(vec![graph_a, graph_b]);
+
+    if backend == Backend::Dummy {
+        return; // dummy doesn't execute copies; not panicking is the test
+    }
+
+    let data = ctx.read_buffer(&readback, SIZE);
+    assert_eq!(
+        data.as_slice(),
+        &pattern[..],
+        "graphics-read bytes must match the transfer-queue-uploaded pattern"
+    );
+
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        assert_eq!(
+            errors, 0,
+            "Vulkan validation reported {errors} error(s) during transfer-queue routing"
         );
     }
 }
@@ -493,7 +565,7 @@ fn test_async_compute_hint_declined_for_exclusive_texture(#[case] backend: Backe
     ));
 
     let mut graph_b = RenderGraph::new();
-    graph_b.set_prefer_async_compute(true);
+    graph_b.set_queue_preference(QueuePreference::AsyncCompute);
     let mut copy_pass = TransferPass::new("declined_readback".into());
     copy_pass.set_transfer_config(TransferConfig::new().with_operation(
         TransferOperation::readback_texture_whole(render_target, readback.clone()),
@@ -579,7 +651,7 @@ fn test_async_compute_cross_frame_cross_queue_dependency(#[case] backend: Backen
     // Frame 1: async-routed upload into `async_written`.
     let mut schedule = pipeline.begin_frame().expect("begin_frame failed");
     let mut graph = RenderGraph::new();
-    graph.set_prefer_async_compute(true);
+    graph.set_queue_preference(QueuePreference::AsyncCompute);
     let mut pass = TransferPass::new("xframe_async_write".into());
     pass.set_transfer_config(TransferConfig::new().with_operation(
         TransferOperation::write_buffer(async_written.clone(), 0, pattern_a.clone()),
@@ -620,7 +692,7 @@ fn test_async_compute_cross_frame_cross_queue_dependency(#[case] backend: Backen
     // direction).
     let mut schedule = pipeline.begin_frame().expect("begin_frame failed");
     let mut graph = RenderGraph::new();
-    graph.set_prefer_async_compute(true);
+    graph.set_queue_preference(QueuePreference::AsyncCompute);
     let mut pass = TransferPass::new("xframe_async_read".into());
     pass.set_transfer_config(
         TransferConfig::new()

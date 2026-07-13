@@ -1207,7 +1207,9 @@ impl GpuBackend {
     /// start of the next submission. Both satisfy the ring-buffer contract
     /// (fresh region each frame); nothing else should rely on this method.
     ///
-    /// For a synchronized, graph-ordered write use
+    /// Host-visible buffers only: on Vulkan a device-local destination is an
+    /// error (#89 — the blocking one-shot staging path was removed). Every
+    /// GPU-only upload goes through
     /// [`TransferOperation::WriteBuffer`](crate::TransferOperation::WriteBuffer),
     /// which copies at the transfer pass's position on both backends.
     pub fn write_buffer(
@@ -1279,35 +1281,6 @@ impl GpuBackend {
             Self::Vulkan(backend) => {
                 backend.read_buffer_async(buffer, offset, size, dst, map_pending)
             }
-        }
-    }
-
-    /// Write tightly-packed data covering mip 0 of every layer of a texture.
-    ///
-    /// **Blocking convenience path** for tools and one-time setup: the
-    /// Vulkan backend performs a synchronous staging upload (a full GPU
-    /// round-trip per call). Load-time and streaming uploads belong in the
-    /// frame graph via
-    /// [`TransferOperation::upload_texture_data`](crate::TransferOperation::upload_texture_data)
-    /// — batched staging-belt infrastructure is tracked in issue #41.
-    ///
-    /// Contract (identical on both backends): `data` is tightly packed for
-    /// the whole image (all layers back to back, compressed formats in block
-    /// rows) and its size is validated; textures with `mip_level_count > 1`
-    /// and combined depth-stencil formats are rejected — upload those with
-    /// explicit regions through the transfer ops.
-    pub fn write_texture(
-        &self,
-        texture: &GpuTexture,
-        data: &[u8],
-        descriptor: &TextureDescriptor,
-    ) -> Result<(), GraphicsError> {
-        match self {
-            Self::Dummy(backend) => backend.write_texture(texture, data, descriptor),
-            #[cfg(feature = "wgpu-backend")]
-            Self::Wgpu(backend) => backend.write_texture(texture, data, descriptor),
-            #[cfg(feature = "vulkan-backend")]
-            Self::Vulkan(backend) => backend.write_texture(texture, data, descriptor),
         }
     }
 

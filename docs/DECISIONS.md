@@ -1193,7 +1193,7 @@ still outside its scope, because they need real generations to matter:
 ## ADR-021: Device-Local Buffers with a Pooled Staging Belt (Vulkan)
 
 **Date**: 2026-07-05
-**Status**: Accepted
+**Status**: Accepted (decision 3's blocking device-local path removed by ADR-031)
 
 ### Context
 
@@ -1762,3 +1762,74 @@ available).
 - #47: multi-queue design (CONCURRENT-everything superseded by this ADR)
 - #82: hardware validation of the CONCURRENT path
 - #88: research, staged plan, maintenance9 follow-up
+
+## ADR-031: Dedicated Transfer Queue for Asset Streaming
+
+**Date**: 2026-07-13
+**Status**: Accepted
+
+### Context
+
+Discrete GPUs expose transfer-only queue families backed by DMA engines (AMD
+SDMA, NVIDIA copy engines) that move data across PCIe in parallel with both
+graphics and compute at zero CU/SM cost. RedLilium never created one:
+`plan_queues` looked for graphics + dedicated compute only, and every asset
+upload rode the main frame graph on the graphics queue (`flush_gpu` injected
+its `TransferPass` there), serializing streaming with rendering. Vendor
+guidance (AMD & NVIDIA) splits transfer work in two: **host→device streaming
+belongs on the transfer queue**; **small in-frame dependent copies belong on
+the consumer's queue** (DMA engines have weaker device-local bandwidth, and a
+semaphore round-trip adds latency the frame immediately pays).
+
+### Decision
+
+1. **Plan a third queue** from a transfer-only family (`TRANSFER` without
+   graphics/compute/video/optical-flow bits, `minImageTransferGranularity`
+   1×1×1 — coarser families are skipped rather than validated per copy).
+   No same-family fallback: without DMA engines a "transfer queue" buys
+   nothing.
+2. **`QueuePreference { Graphics, AsyncCompute, Transfer }`** replaces the
+   `prefer_async_compute` bool on `RenderGraph`. Placement stays an explicit
+   hint with a fallback ladder — `Transfer` requires a transfer-only graph
+   (a transfer family cannot execute compute) and falls back to async
+   compute, then graphics; every rung is first-class. Ordering remains fully
+   automatic: the #47 trackers generalize to `QUEUE_COUNT = 3` and emit
+   timeline waits for cross-queue hazards exactly as before.
+3. **Asset streaming is the first consumer**: `AssetProcessor::flush_gpu`
+   returns a transfer-only graph flagged `Transfer` instead of injecting
+   into the frame graph; hosts submit it before the main graph. In-frame
+   copies (material props, ring-buffer data, readbacks) stay on the
+   consumer's queue by design.
+4. **Sharing generalizes to three families**: staging-belt chunks and
+   buffers go CONCURRENT across every distinct family; asset textures are
+   declared `cross_queue` (ADR-030 semantics; EXCLUSIVE under the
+   maintenance9 implicit fast path, which now requires pairwise support
+   across all planned families).
+5. **Both blocking convenience paths are deleted.** `write_texture` is gone
+   on every backend (it had no callers), and `write_buffer` on a
+   device-local buffer is now an error instead of a one-shot staging copy +
+   synchronous wait (superseding ADR-021 decision 3) — with the transfer
+   queue in place there must be no bypass around the frame graph.
+   `write_buffer` remains the mapped-write primitive for host-visible
+   (RING/MAP_WRITE) buffers only.
+
+### Consequences
+
+- ✅ On hardware with DMA engines, asset uploads overlap rendering and
+  compute; visible as SDMA/copy-engine occupancy in RGP/Nsight
+- ✅ Single-queue devices (MoltenVK default, wgpu, web) are untouched — the
+  ladder lands on graphics, one extra submit per uploading frame
+- ✅ No new synchronization API: routing is the only knob, ordering is
+  derived (#47 invariant preserved)
+- ⚠️ QFOT for the streaming handoff (upload once → sample forever) remains
+  deliberately unimplemented pending #88 measurements on RDNA1/2 + NVIDIA;
+  maintenance9 covers the fast path where drivers grant it
+- ⚠️ A `Transfer`-flagged graph touching an undeclared texture silently
+  falls back to graphics (one warning per texture) — same hint semantics as
+  ADR-030
+
+### Related Issues
+
+- #89: implementation
+- #47: multi-queue machinery the routing generalizes
+- #88: sharing-mode measurements gating a QFOT revisit

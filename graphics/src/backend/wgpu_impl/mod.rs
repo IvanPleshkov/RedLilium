@@ -504,6 +504,8 @@ impl WgpuBackend {
             sample_count_mask: 1 | 4,
             wireframe: features.contains(wgpu::Features::POLYGON_MODE_LINE),
             async_compute: false,
+            // wgpu exposes a single queue; transfer routing is Vulkan-only.
+            transfer_queue: false,
             compute_shaders: downlevel
                 .flags
                 .contains(wgpu::DownlevelFlags::COMPUTE_SHADERS),

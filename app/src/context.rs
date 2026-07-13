@@ -296,6 +296,14 @@ impl<'a> DrawContext<'a> {
         self.schedule.acquire_graph()
     }
 
+    /// Submit a graph as its own queue submit, before the frame's main graph
+    /// (e.g. asset-upload transfer graphs, #89). Ordering against other
+    /// submits is automatic: same-queue hazards are tracker-emitted pipeline
+    /// barriers, cross-queue hazards are timeline waits.
+    pub fn submit(&mut self, graph: RenderGraph) {
+        self.schedule.submit(graph);
+    }
+
     /// Render the frame's single graph and present it.
     ///
     /// One render graph is submitted per frame (it may contain many passes;

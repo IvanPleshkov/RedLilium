@@ -2,7 +2,7 @@
 //!
 //! Minimal harness for profiling async compute queue overlap (#47 phase 4,
 //! #82 step 5): every frame submits a transfer-only graph flagged
-//! `set_prefer_async_compute(true)` alongside the main render graph. The two
+//! `QueuePreference::AsyncCompute` alongside the main render graph. The two
 //! graphs share no resources, so on hardware with a dedicated compute queue
 //! family the copy traffic runs concurrently with the graphics work — capture
 //! a frame with Radeon GPU Profiler (or Nsight) and the async queue's copies
@@ -26,10 +26,10 @@ use winit::window::{Window, WindowId};
 use redlilium_graphics::{
     BackendType, Buffer, BufferDescriptor, BufferUsage, ColorAttachment, FramePipeline,
     GraphicsDevice, GraphicsError, GraphicsInstance, GraphicsPass, InstanceParameters, LoadOp,
-    MaterialDescriptor, MaterialInstance, Mesh, MeshDescriptor, PresentMode, RenderTargetConfig,
-    ShaderSource, StoreOp, Surface, SurfaceConfiguration, Texture, TextureDescriptor,
-    TextureFormat, TextureUsage, TransferConfig, TransferOperation, TransferPass, VertexAttribute,
-    VertexBufferLayout, VertexLayout,
+    MaterialDescriptor, MaterialInstance, Mesh, MeshDescriptor, PresentMode, QueuePreference,
+    RenderTargetConfig, ShaderSource, StoreOp, Surface, SurfaceConfiguration, Texture,
+    TextureDescriptor, TextureFormat, TextureUsage, TransferConfig, TransferOperation,
+    TransferPass, VertexAttribute, VertexBufferLayout, VertexLayout,
 };
 
 /// Solid-color fullscreen shader (WGSL): the render/depth-target views of
@@ -313,7 +313,7 @@ impl App {
         // target — a per-frame cross-queue RAW ordered by tracker-emitted
         // timeline waits.
         let mut async_graph = schedule.acquire_graph();
-        async_graph.set_prefer_async_compute(true);
+        async_graph.set_queue_preference(QueuePreference::AsyncCompute);
         let mut copy_pass = TransferPass::new("async_pingpong_copies".into());
         let mut config = TransferConfig::new();
         for i in 0..COPIES_PER_FRAME {
