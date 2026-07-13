@@ -518,11 +518,16 @@ impl VulkanBackend {
     /// suffices (no async compute queue, or it lives in the graphics family —
     /// sharing modes only matter across *families*).
     ///
-    /// With a distinct compute family, buffers and images are created
-    /// CONCURRENT across both families so cross-queue access needs no
+    /// With a distinct compute family, buffers (all of them — compression
+    /// does not apply to buffers) and textures DECLARED cross-queue (#88) are
+    /// created CONCURRENT across both families so cross-queue access needs no
     /// queue-family ownership transfers — timeline semaphores alone carry the
-    /// synchronization (#47 design decision; EXCLUSIVE + QFOT is a possible
-    /// later optimization if profiling shows compression loss matters).
+    /// synchronization (#47 design decision). Undeclared textures stay
+    /// EXCLUSIVE to keep framebuffer compression; `execute_graph` never
+    /// routes a graph that touches one to the async queue. Full EXCLUSIVE +
+    /// QFOT is deliberately not implemented (#88); a maintenance9 fast path
+    /// (EXCLUSIVE without transfers where the driver reports them
+    /// unnecessary) is the planned next step.
     fn concurrent_families(&self) -> Option<[u32; 2]> {
         self.async_compute
             .as_ref()
@@ -1224,7 +1229,9 @@ impl VulkanBackend {
         };
 
         // Create image. CONCURRENT across graphics + async compute families
-        // when the latter exists (see `concurrent_families`).
+        // only when the texture is DECLARED cross-queue (#88): CONCURRENT can
+        // cost framebuffer compression (DCC), so undeclared images stay
+        // EXCLUSIVE and `execute_graph` keeps them off the async queue.
         let mut image_info = vk::ImageCreateInfo::default()
             .flags(flags)
             .image_type(image_type)
@@ -1240,7 +1247,10 @@ impl VulkanBackend {
             .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
-        let concurrent_families = self.concurrent_families();
+        let concurrent_families = descriptor
+            .cross_queue
+            .then(|| self.concurrent_families())
+            .flatten();
         if let Some(families) = &concurrent_families {
             image_info = image_info
                 .sharing_mode(vk::SharingMode::CONCURRENT)
@@ -1911,8 +1921,28 @@ impl VulkanBackend {
         // Route the graph. The swapchain handshake below is reachable only on
         // the graphics route: a swapchain write needs a graphics pass, which
         // disqualifies the graph from async routing.
+        //
+        // The async hint is additionally honored only when every texture the
+        // graph touches is declared cross-queue (#88): undeclared images are
+        // EXCLUSIVE, and accessing an EXCLUSIVE image from another queue
+        // family leaves its contents undefined per spec. Buffers are always
+        // CONCURRENT-shared and need no declaration.
+        let all_textures_cross_queue = || {
+            compiled.pass_usages().iter().all(|usage| {
+                usage
+                    .texture_usages
+                    .iter()
+                    .all(|decl| decl.texture.descriptor().cross_queue)
+            })
+        };
         let async_route = match &self.async_compute {
-            Some(ac) if graph.prefer_async_compute() && !graph.has_graphics_passes() => Some(ac),
+            Some(ac)
+                if graph.prefer_async_compute()
+                    && !graph.has_graphics_passes()
+                    && all_textures_cross_queue() =>
+            {
+                Some(ac)
+            }
             _ => None,
         };
         let (queue_id, queue, queue_timeline, timeline_next) = match async_route {

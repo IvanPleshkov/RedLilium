@@ -1676,3 +1676,59 @@ identity**:
 - #47: automatic graph ordering makes multi-camera safe
 - #6: per-camera quality = system variant axes (future)
 - #2: scene save/load consumes the serializable spec
+
+## ADR-030: Per-Resource Sharing Mode for Cross-Queue Textures
+
+**Date**: 2026-07-13
+**Status**: Accepted
+
+### Context
+
+Phase 4 of #47 created **every** buffer and image `VK_SHARING_MODE_CONCURRENT`
+whenever the device exposes a distinct async compute family, so cross-queue
+access needs no queue-family ownership transfers (QFOT). CONCURRENT images can
+cost framebuffer compression (DCC) on AMD hardware — the canonical guidance
+(GPUOpen's DOOM article, GCN era) reports a ~3% whole-frame win from EXCLUSIVE
+sharing. Research for #88 found: the ecosystem avoids full QFOT (Granite, AnKi,
+vkd3d/D3D12 — D3D12 has no QFOT concept at all); `VK_KHR_maintenance9` (2025)
+makes QFOT optional where the driver reports it unnecessary; but on Windows the
+RDNA1/2 driver branch no longer receives new Vulkan extensions, so ~6% of the
+Steam fleet (frozen GCN + Windows RDNA1/2) will never have maintenance9.
+
+### Decision
+
+1. **Textures are EXCLUSIVE by default.** `TextureDescriptor::cross_queue`
+   (builder: `with_cross_queue`) declares a texture as accessible by both the
+   graphics and the async compute queue; only declared textures are created
+   CONCURRENT (and only when a distinct compute family exists). This recovers
+   DCC for the overwhelming majority of images on all hardware generations.
+2. **Buffers stay CONCURRENT** whenever the async queue exists: compression
+   does not apply to buffers, and engine-internal staging (belt chunks) is
+   read by async-routed transfer graphs.
+3. **Routing safety**: `execute_graph` honors the async hint only when every
+   texture the graph touches is declared cross-queue. Accessing an EXCLUSIVE
+   image from another queue family leaves contents undefined per spec, so an
+   undeclared texture silently falls the graph back to the graphics queue —
+   consistent with the hint's existing "honored only when safe" semantics.
+4. **Full QFOT (paired release/acquire) is not implemented.** The streaming
+   submit model records command buffers before future consumers are known,
+   making the release side structurally awkward. Planned instead (#88): a
+   maintenance9 fast path — EXCLUSIVE without transfers for declared textures
+   where the driver reports transfers unnecessary.
+
+### Consequences
+
+- ✅ DCC retained for all undeclared images (render targets, sampled assets)
+- ✅ No new synchronization semantics; #82-validated CONCURRENT path unchanged
+  for declared resources
+- ✅ Async hint stays a hint: correctness never depends on the declaration
+- ⚠️ Declared textures still lose DCC on hardware without maintenance9
+  (~6% of fleet); acceptable — a frame shares a handful of such images
+- ⚠️ Forgetting the declaration silently serializes an intended-async graph
+  onto the graphics queue (visible via `RUST_LOG=debug` submit logs)
+
+### Related Issues
+
+- #47: multi-queue design (CONCURRENT-everything superseded by this ADR)
+- #82: hardware validation of the CONCURRENT path
+- #88: research, staged plan, maintenance9 follow-up

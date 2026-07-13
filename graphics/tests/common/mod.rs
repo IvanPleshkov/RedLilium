@@ -192,6 +192,24 @@ impl TestContext {
         )
     }
 
+    /// Create a render target DECLARED cross-queue (#88): graphs touching it
+    /// remain eligible for async compute routing (undeclared textures force
+    /// the graphics queue).
+    #[allow(dead_code)]
+    pub fn create_cross_queue_render_target(&self, width: u32, height: u32) -> Arc<Texture> {
+        self.device
+            .create_texture(
+                &TextureDescriptor::new_2d(
+                    width,
+                    height,
+                    TextureFormat::Rgba8Unorm,
+                    TextureUsage::RENDER_ATTACHMENT | TextureUsage::COPY_SRC,
+                )
+                .with_cross_queue(true),
+            )
+            .expect("Failed to create texture")
+    }
+
     /// Create a depth texture.
     pub fn create_depth_texture(&self, width: u32, height: u32) -> Arc<Texture> {
         self.create_texture_2d(

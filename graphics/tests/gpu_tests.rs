@@ -405,7 +405,8 @@ fn test_async_compute_opt_in_cross_queue_dependency(#[case] backend: Backend) {
     const HEIGHT: u32 = 32;
     const CLEAR_COLOR: [f32; 4] = [0.5, 0.75, 0.25, 1.0];
 
-    let render_target = ctx.create_render_target(WIDTH, HEIGHT);
+    // Declared cross-queue (#88): keeps graph B eligible for async routing.
+    let render_target = ctx.create_cross_queue_render_target(WIDTH, HEIGHT);
     let readback_size = readback_buffer_size(WIDTH, HEIGHT, 4);
     let readback = ctx.create_readback_buffer(readback_size);
 
@@ -447,6 +448,81 @@ fn test_async_compute_opt_in_cross_queue_dependency(#[case] backend: Backend) {
         assert_eq!(
             errors, 0,
             "Vulkan validation reported {errors} error(s) during async compute cross-queue dependency"
+        );
+    }
+}
+
+/// Async routing safety for UNDECLARED textures (#88).
+///
+/// Same shape as [`test_async_compute_opt_in_cross_queue_dependency`], but
+/// the render target is a plain (EXCLUSIVE) texture: the async hint must be
+/// declined and the copy must run on the graphics queue — accessing an
+/// EXCLUSIVE image from another queue family would leave its contents
+/// undefined per spec. Verified by readback correctness plus zero validation
+/// errors; on single-queue devices this is indistinguishable from the plain
+/// fallback.
+#[rstest]
+#[case::dummy(Backend::Dummy)]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_async_compute_hint_declined_for_exclusive_texture(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        eprintln!("Backend {:?} not available, skipping", backend);
+        return;
+    };
+
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+    }
+
+    const WIDTH: u32 = 32;
+    const HEIGHT: u32 = 32;
+    const CLEAR_COLOR: [f32; 4] = [0.25, 0.5, 0.75, 1.0];
+
+    // Deliberately NOT declared cross-queue.
+    let render_target = ctx.create_render_target(WIDTH, HEIGHT);
+    let readback_size = readback_buffer_size(WIDTH, HEIGHT, 4);
+    let readback = ctx.create_readback_buffer(readback_size);
+
+    let mut graph_a = RenderGraph::new();
+    graph_a.add_graphics_pass(create_simple_render_pass(
+        "declined_render",
+        render_target.clone(),
+        CLEAR_COLOR,
+    ));
+
+    let mut graph_b = RenderGraph::new();
+    graph_b.set_prefer_async_compute(true);
+    let mut copy_pass = TransferPass::new("declined_readback".into());
+    copy_pass.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::readback_texture_whole(render_target, readback.clone()),
+    ));
+    graph_b.add_transfer_pass(copy_pass);
+
+    ctx.execute_graphs(vec![graph_a, graph_b]);
+
+    if backend == Backend::Dummy {
+        return;
+    }
+
+    let data = ctx.read_buffer(&readback, readback_size);
+
+    let expected = ExpectedPixel::from_float(0.25, 0.5, 0.75, 1.0);
+    let center_pixel = get_pixel(&data, WIDTH, WIDTH / 2, HEIGHT / 2);
+    assert!(
+        verify_pixel(&data, WIDTH, WIDTH / 2, HEIGHT / 2, expected, 2),
+        "Pixel copied by the declined-hint graph should be {:?}, but got {:?}",
+        expected,
+        center_pixel
+    );
+
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        assert_eq!(
+            errors, 0,
+            "Vulkan validation reported {errors} error(s) with the async hint declined"
         );
     }
 }
