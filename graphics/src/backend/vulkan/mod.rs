@@ -344,6 +344,9 @@ impl VulkanBackend {
     ///
     /// This initializes the Vulkan instance, selects a physical device,
     /// creates a logical device, and sets up the memory allocator.
+    ///
+    /// Callers arrive through [`super::create_backend_with_params`], which
+    /// holds [`super::BACKEND_LIFECYCLE_LOCK`] (#93).
     pub fn with_params(
         params: &crate::instance::InstanceParameters,
     ) -> Result<Self, GraphicsError> {
@@ -1105,6 +1108,9 @@ struct SwapchainSync {
 
 impl Drop for VulkanBackend {
     fn drop(&mut self) {
+        // Serialized against creation of other backends (#93) — see
+        // BACKEND_LIFECYCLE_LOCK.
+        let _lifecycle = super::BACKEND_LIFECYCLE_LOCK.lock();
         unsafe {
             // Wait for device to be idle before cleanup
             let _ = self.device.device_wait_idle();
