@@ -90,14 +90,9 @@ pub struct Editor {
     // Scene view interaction
     /// Scene view rect in physical pixels (x, y, w, h).
     scene_view_rect_phys: Option<[f32; 4]>,
-    /// Current cursor position in physical pixels (for hit-testing).
-    cursor_pos: [f32; 2],
-
-    // Box selection drag state
-    /// Physical pixel position where LMB was pressed (drag origin).
-    drag_start: Option<[f32; 2]>,
-    /// Whether the drag has exceeded the threshold and is now a box selection.
-    dragging_box: bool,
+    /// Scene-view mouse gesture state machine (cursor, click-pick vs
+    /// box-select vs gizmo ownership) — see `gestures.rs`.
+    gestures: crate::gestures::SceneGestures,
 
     /// Smoothed frames-per-second for the status bar.
     fps: f32,
@@ -155,8 +150,8 @@ impl Editor {
         Self {
             world: None,
             game_host: None,
-            // Single-threaded for now. Switching to the multi-threaded runner
-            // Multi-threaded runner enabled after Track 2 MT-hardening (#45).
+            // Multi-threaded runner, enabled after Track 2 MT-hardening
+            // (#52-#55: barriers, explicit edges, raw-access-aware detector).
             runner: EcsRunner::multi_thread(
                 std::thread::available_parallelism()
                     .map(|p| p.get().saturating_sub(2).max(1))
@@ -180,9 +175,7 @@ impl Editor {
             egui_wants_pointer: false,
             egui_wants_keyboard: false,
             scene_view_rect_phys: None,
-            cursor_pos: [0.0, 0.0],
-            drag_start: None,
-            dragging_box: false,
+            gestures: crate::gestures::SceneGestures::default(),
             fps: 0.0,
             pending_import: None,
             pending_prefab_import: None,
@@ -193,7 +186,278 @@ impl Editor {
         }
     }
 
-    /// Get the active editor world (immutable).
+    /// Resolve last frame's GPU pick / rect-pick readbacks into the entity
+    /// selection (or into a pending remote pick response).
+    fn resolve_pick_readbacks(&mut self) {
+        // Resolve GPU pick from the previous frame's readback
+        if let Some(scene_view) = &mut self.scene_view
+            && let Some(hit) = scene_view.resolve_pick()
+        {
+            let ew = self.world.as_mut().unwrap();
+            // A remote `pick` owns this readback — answer it, don't select.
+            if self
+                .remote
+                .as_ref()
+                .is_some_and(crate::remote_commands::pick_in_flight)
+            {
+                let rc = self.remote.as_mut().unwrap();
+                crate::remote_commands::complete_point_pick(rc, &ew.world, hit);
+            } else {
+                // Find entity whose sparse-set index matches the picked index
+                let target = hit.filter(|&entity_index| {
+                    ew.world
+                        .read::<MeshRenderer>()
+                        .ok()
+                        .is_some_and(|buffers| buffers.iter().any(|(idx, _)| idx == entity_index))
+                });
+                // Reconstruct full Entity from world (need spawn_tick etc.)
+                let target_entity =
+                    target.and_then(|entity_index| ew.world.entity_at_index(entity_index));
+                let action: Box<dyn redlilium_core::abstract_editor::EditAction<World>> =
+                    if let Some(entity) = target_entity {
+                        Box::new(SelectAction::single(entity))
+                    } else {
+                        Box::new(SelectAction::clear())
+                    };
+                if let Err(e) = ew.history.execute(action, &mut ew.world) {
+                    log::warn!("Pick selection failed: {e}");
+                }
+            }
+        }
+
+        // Resolve GPU rect pick from the previous frame's readback
+        if let Some(scene_view) = &mut self.scene_view
+            && let Some(entity_indices) = scene_view.resolve_rect_pick()
+        {
+            let ew = self.world.as_mut().unwrap();
+            // A remote `pick_rect` owns this readback — answer it, don't select.
+            if self
+                .remote
+                .as_ref()
+                .is_some_and(crate::remote_commands::pick_in_flight)
+            {
+                let rc = self.remote.as_mut().unwrap();
+                crate::remote_commands::complete_rect_pick(rc, &ew.world, &entity_indices);
+            } else {
+                let selected: Vec<Entity> = if let Ok(renderers) = ew.world.read::<MeshRenderer>() {
+                    entity_indices
+                        .iter()
+                        .filter_map(|&idx| {
+                            // Verify the index is a renderable entity.
+                            if renderers.get(idx).is_some() {
+                                ew.world.entity_at_index(idx)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+
+                let action: Box<dyn redlilium_core::abstract_editor::EditAction<World>> =
+                    if selected.is_empty() {
+                        Box::new(SelectAction::clear())
+                    } else {
+                        Box::new(SelectAction::set(selected))
+                    };
+                if let Err(e) = ew.history.execute(action, &mut ew.world) {
+                    log::warn!("Rect selection failed: {e}");
+                }
+            }
+        }
+    }
+
+    /// Drain the asset browser's and inspector's deferred operations queued
+    /// during the previous UI frame: component export/import, asset
+    /// create/rename/move/delete, prefab export/import.
+    fn process_asset_browser_ops(&mut self) {
+        // Process component export (inspector → asset browser)
+        if let Some((entity, comp_name, vfs_dir)) =
+            self.asset_browser.pending_component_export.take()
+        {
+            let ew = self.world.as_ref().unwrap();
+            match ew.world.serialize_component_by_name(entity, comp_name) {
+                Ok(Some(serialized)) => {
+                    match redlilium_ecs::serialize::encode(
+                        &serialized,
+                        redlilium_ecs::serialize::Format::Ron,
+                    ) {
+                        Ok(data) => {
+                            let vfs_path = format!("{vfs_dir}/{comp_name}.component");
+                            log::info!("Exporting component to: {vfs_path}");
+                            self.asset_browser
+                                .dispatch_write(&self.vfs, &vfs_path, data);
+                        }
+                        Err(e) => log::error!("Failed to encode component: {e}"),
+                    }
+                }
+                Ok(None) => log::warn!("Component '{comp_name}' not found or not serializable"),
+                Err(e) => log::error!("Failed to serialize component: {e}"),
+            }
+        }
+
+        // Process "New asset" creation (asset browser context menu → file + record).
+        if let Some((source, dir, kind)) = self.asset_browser.take_pending_new() {
+            let ew = self.world.as_mut().unwrap();
+            // A material instance parents to the std opaque material by default.
+            let parent = if kind == "material_instance" {
+                ew.world
+                    .resource::<AssetDb>()
+                    .guid_of(&AssetPath::new("std", "materials/opaque.material"))
+            } else {
+                None
+            };
+            match redlilium_ecs::new_asset_spec(&kind, parent) {
+                Some(spec) => {
+                    let path = unique_asset_path(&ew.world, &source, &dir, spec.extension);
+                    let asset_path = AssetPath::new(&source, &path);
+                    let guid = ew
+                        .world
+                        .resource_mut::<AssetDb>()
+                        .register_path(asset_path, &kind, 0);
+                    ew.world
+                        .resource_mut::<AssetDb>()
+                        .set_settings(&guid, spec.settings);
+                    let vfs_path = format!("{source}/{path}");
+                    self.asset_browser
+                        .dispatch_write(&self.vfs, &vfs_path, Vec::new());
+                    self.asset_browser.mark_db_dirty(&source);
+                    self.asset_browser
+                        .notify_asset_created(&source, &dir, &path);
+                    log::info!("Created asset: {vfs_path}");
+                }
+                None => log::warn!("Cannot create asset of kind '{kind}' (missing parent?)"),
+            }
+        }
+
+        // Rename an asset (browser context menu → inline edit): same dir, new name.
+        if let Some((source, old_path, new_name)) = self.asset_browser.take_pending_rename() {
+            let dir = old_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+            let new_path = if dir.is_empty() {
+                new_name
+            } else {
+                format!("{dir}/{new_name}")
+            };
+            self.perform_asset_move(&source, &old_path, &new_path);
+        }
+
+        // Move an asset (drag onto a directory): keep name, new directory.
+        if let Some((source, old_path, new_dir)) = self.asset_browser.take_pending_move() {
+            let name = old_path.rsplit('/').next().unwrap_or(&old_path).to_owned();
+            let new_path = if new_dir.is_empty() {
+                name
+            } else {
+                format!("{new_dir}/{name}")
+            };
+            self.perform_asset_move(&source, &old_path, &new_path);
+        }
+
+        // Delete an asset (browser context menu): ask for confirmation first.
+        if let Some((source, path)) = self.asset_browser.take_pending_delete() {
+            self.pending_delete_confirm = Some((source, path));
+        }
+
+        // Process component import (asset browser → inspector): dispatch read
+        if let Some((vfs_path, entity)) = self.inspector_state.pending_component_import.take() {
+            self.asset_browser.dispatch_read(&self.vfs, &vfs_path);
+            self.pending_import = Some(PendingImport { vfs_path, entity });
+        }
+
+        // Process completed VFS reads for component import
+        if let Some(pending) = &self.pending_import
+            && let Some(idx) = self
+                .asset_browser
+                .completed_reads
+                .iter()
+                .position(|(path, _)| path == &pending.vfs_path)
+        {
+            let entity = pending.entity;
+            let (path, data) = self.asset_browser.completed_reads.remove(idx);
+            log::info!("Importing component from: {path}");
+            self.pending_import = None;
+
+            match redlilium_ecs::serialize::decode::<redlilium_ecs::serialize::SerializedComponent>(
+                &data,
+                redlilium_ecs::serialize::Format::Ron,
+            ) {
+                Ok(serialized) => {
+                    let action = ImportComponentAction::new(entity, serialized);
+                    let ew = self.world.as_mut().unwrap();
+                    if let Err(e) = ew.history.execute(Box::new(action), &mut ew.world) {
+                        log::warn!("Import action failed: {e}");
+                    }
+                }
+                Err(e) => log::error!("Failed to decode .component file: {e}"),
+            }
+        }
+
+        // Process prefab export (world inspector → asset browser)
+        if let Some((root_entity, vfs_dir)) = self.asset_browser.pending_prefab_export.take() {
+            let ew = self.world.as_ref().unwrap();
+            if ew.world.is_alive(root_entity) {
+                // Asset export: the prefab must be self-contained (external
+                // entity references are rejected with a clear error).
+                match ew.world.serialize_prefab_asset(root_entity) {
+                    Ok(serialized) => {
+                        match redlilium_ecs::serialize::encode(
+                            &serialized,
+                            redlilium_ecs::serialize::Format::Ron,
+                        ) {
+                            Ok(data) => {
+                                let name = ew
+                                    .world
+                                    .get::<Name>(root_entity)
+                                    .map(|n| n.as_str().to_owned())
+                                    .unwrap_or_else(|| format!("Entity_{}", root_entity.index()));
+                                let vfs_path = format!("{vfs_dir}/{name}.prefab");
+                                log::info!("Exporting prefab to: {vfs_path}");
+                                self.asset_browser
+                                    .dispatch_write(&self.vfs, &vfs_path, data);
+                            }
+                            Err(e) => log::error!("Failed to encode prefab: {e}"),
+                        }
+                    }
+                    Err(e) => log::error!("Failed to serialize prefab: {e}"),
+                }
+            }
+        }
+
+        // Process prefab import (asset browser → world inspector): dispatch read
+        if let Some((vfs_path, parent)) = self.inspector_state.pending_prefab_import.take() {
+            self.asset_browser.dispatch_read(&self.vfs, &vfs_path);
+            self.pending_prefab_import = Some(PendingPrefabImport { vfs_path, parent });
+        }
+
+        // Process completed VFS reads for prefab import
+        if let Some(pending) = &self.pending_prefab_import
+            && let Some(idx) = self
+                .asset_browser
+                .completed_reads
+                .iter()
+                .position(|(path, _)| path == &pending.vfs_path)
+        {
+            let parent = pending.parent;
+            let (path, data) = self.asset_browser.completed_reads.remove(idx);
+            log::info!("Importing prefab from: {path}");
+            self.pending_prefab_import = None;
+
+            match redlilium_ecs::serialize::decode::<redlilium_ecs::serialize::SerializedPrefab>(
+                &data,
+                redlilium_ecs::serialize::Format::Ron,
+            ) {
+                Ok(serialized) => {
+                    let action = SpawnPrefabAction::new(serialized, parent);
+                    let ew = self.world.as_mut().unwrap();
+                    if let Err(e) = ew.history.execute(Box::new(action), &mut ew.world) {
+                        log::warn!("Prefab spawn action failed: {e}");
+                    }
+                }
+                Err(e) => log::error!("Failed to decode .prefab file: {e}"),
+            }
+        }
+    }
+
     /// Whether the translate gizmo owns the cursor this frame (hover or a
     /// live drag) — clicks then manipulate, not select (#85).
     fn gizmo_wants_cursor(&self) -> bool {
@@ -206,6 +470,7 @@ impl Editor {
         })
     }
 
+    /// Get the active editor world (immutable).
     fn active_world(&self) -> &EditorWorld {
         self.world.as_ref().unwrap()
     }
@@ -257,7 +522,7 @@ impl Editor {
     /// Whether the cursor is currently inside the scene view panel.
     fn cursor_in_scene_view(&self) -> bool {
         if let Some([x, y, w, h]) = self.scene_view_rect_phys {
-            let [cx, cy] = self.cursor_pos;
+            let [cx, cy] = self.gestures.cursor_pos();
             cx >= x && cx <= x + w && cy >= y && cy <= y + h
         } else {
             false
@@ -511,84 +776,8 @@ impl AppHandler for Editor {
             }
         }
 
-        // Resolve GPU pick from the previous frame's readback
-        if let Some(scene_view) = &mut self.scene_view
-            && let Some(hit) = scene_view.resolve_pick()
-        {
-            let ew = self.world.as_mut().unwrap();
-            // A remote `pick` owns this readback — answer it, don't select.
-            if self
-                .remote
-                .as_ref()
-                .is_some_and(crate::remote_commands::pick_in_flight)
-            {
-                let rc = self.remote.as_mut().unwrap();
-                crate::remote_commands::complete_point_pick(rc, &ew.world, hit);
-            } else {
-                // Find entity whose sparse-set index matches the picked index
-                let target = hit.filter(|&entity_index| {
-                    ew.world
-                        .read::<MeshRenderer>()
-                        .ok()
-                        .is_some_and(|buffers| buffers.iter().any(|(idx, _)| idx == entity_index))
-                });
-                // Reconstruct full Entity from world (need spawn_tick etc.)
-                let target_entity =
-                    target.and_then(|entity_index| ew.world.entity_at_index(entity_index));
-                let action: Box<dyn redlilium_core::abstract_editor::EditAction<World>> =
-                    if let Some(entity) = target_entity {
-                        Box::new(SelectAction::single(entity))
-                    } else {
-                        Box::new(SelectAction::clear())
-                    };
-                if let Err(e) = ew.history.execute(action, &mut ew.world) {
-                    log::warn!("Pick selection failed: {e}");
-                }
-            }
-        }
-
-        // Resolve GPU rect pick from the previous frame's readback
-        if let Some(scene_view) = &mut self.scene_view
-            && let Some(entity_indices) = scene_view.resolve_rect_pick()
-        {
-            let ew = self.world.as_mut().unwrap();
-            // A remote `pick_rect` owns this readback — answer it, don't select.
-            if self
-                .remote
-                .as_ref()
-                .is_some_and(crate::remote_commands::pick_in_flight)
-            {
-                let rc = self.remote.as_mut().unwrap();
-                crate::remote_commands::complete_rect_pick(rc, &ew.world, &entity_indices);
-            } else {
-                let selected: Vec<Entity> = if let Ok(renderers) = ew.world.read::<MeshRenderer>() {
-                    entity_indices
-                        .iter()
-                        .filter_map(|&idx| {
-                            // Verify the index is a renderable entity.
-                            if renderers.get(idx).is_some() {
-                                ew.world.entity_at_index(idx)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-
-                let action: Box<dyn redlilium_core::abstract_editor::EditAction<World>> =
-                    if selected.is_empty() {
-                        Box::new(SelectAction::clear())
-                    } else {
-                        Box::new(SelectAction::set(selected))
-                    };
-                if let Err(e) = ew.history.execute(action, &mut ew.world) {
-                    log::warn!("Rect selection failed: {e}");
-                }
-            }
-        }
-
+        // Entity picking: resolve last frame's GPU readbacks into selection.
+        self.resolve_pick_readbacks();
         // Poll native menu events (macOS only)
         #[cfg(target_os = "macos")]
         if let Some(menu) = &self.native_menu
@@ -783,191 +972,8 @@ impl AppHandler for Editor {
         // Sync play state after systems have run (ManagePlayModeTransitions applies state changes)
         self.sync_play_state();
 
-        // Process component export (inspector → asset browser)
-        if let Some((entity, comp_name, vfs_dir)) =
-            self.asset_browser.pending_component_export.take()
-        {
-            let ew = self.world.as_ref().unwrap();
-            match ew.world.serialize_component_by_name(entity, comp_name) {
-                Ok(Some(serialized)) => {
-                    match redlilium_ecs::serialize::encode(
-                        &serialized,
-                        redlilium_ecs::serialize::Format::Ron,
-                    ) {
-                        Ok(data) => {
-                            let vfs_path = format!("{vfs_dir}/{comp_name}.component");
-                            log::info!("Exporting component to: {vfs_path}");
-                            self.asset_browser
-                                .dispatch_write(&self.vfs, &vfs_path, data);
-                        }
-                        Err(e) => log::error!("Failed to encode component: {e}"),
-                    }
-                }
-                Ok(None) => log::warn!("Component '{comp_name}' not found or not serializable"),
-                Err(e) => log::error!("Failed to serialize component: {e}"),
-            }
-        }
-
-        // Process "New asset" creation (asset browser context menu → file + record).
-        if let Some((source, dir, kind)) = self.asset_browser.take_pending_new() {
-            let ew = self.world.as_mut().unwrap();
-            // A material instance parents to the std opaque material by default.
-            let parent = if kind == "material_instance" {
-                ew.world
-                    .resource::<AssetDb>()
-                    .guid_of(&AssetPath::new("std", "materials/opaque.material"))
-            } else {
-                None
-            };
-            match redlilium_ecs::new_asset_spec(&kind, parent) {
-                Some(spec) => {
-                    let path = unique_asset_path(&ew.world, &source, &dir, spec.extension);
-                    let asset_path = AssetPath::new(&source, &path);
-                    let guid = ew
-                        .world
-                        .resource_mut::<AssetDb>()
-                        .register_path(asset_path, &kind, 0);
-                    ew.world
-                        .resource_mut::<AssetDb>()
-                        .set_settings(&guid, spec.settings);
-                    let vfs_path = format!("{source}/{path}");
-                    self.asset_browser
-                        .dispatch_write(&self.vfs, &vfs_path, Vec::new());
-                    self.asset_browser.mark_db_dirty(&source);
-                    self.asset_browser
-                        .notify_asset_created(&source, &dir, &path);
-                    log::info!("Created asset: {vfs_path}");
-                }
-                None => log::warn!("Cannot create asset of kind '{kind}' (missing parent?)"),
-            }
-        }
-
-        // Rename an asset (browser context menu → inline edit): same dir, new name.
-        if let Some((source, old_path, new_name)) = self.asset_browser.take_pending_rename() {
-            let dir = old_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-            let new_path = if dir.is_empty() {
-                new_name
-            } else {
-                format!("{dir}/{new_name}")
-            };
-            self.perform_asset_move(&source, &old_path, &new_path);
-        }
-
-        // Move an asset (drag onto a directory): keep name, new directory.
-        if let Some((source, old_path, new_dir)) = self.asset_browser.take_pending_move() {
-            let name = old_path.rsplit('/').next().unwrap_or(&old_path).to_owned();
-            let new_path = if new_dir.is_empty() {
-                name
-            } else {
-                format!("{new_dir}/{name}")
-            };
-            self.perform_asset_move(&source, &old_path, &new_path);
-        }
-
-        // Delete an asset (browser context menu): ask for confirmation first.
-        if let Some((source, path)) = self.asset_browser.take_pending_delete() {
-            self.pending_delete_confirm = Some((source, path));
-        }
-
-        // Process component import (asset browser → inspector): dispatch read
-        if let Some((vfs_path, entity)) = self.inspector_state.pending_component_import.take() {
-            self.asset_browser.dispatch_read(&self.vfs, &vfs_path);
-            self.pending_import = Some(PendingImport { vfs_path, entity });
-        }
-
-        // Process completed VFS reads for component import
-        if let Some(pending) = &self.pending_import
-            && let Some(idx) = self
-                .asset_browser
-                .completed_reads
-                .iter()
-                .position(|(path, _)| path == &pending.vfs_path)
-        {
-            let entity = pending.entity;
-            let (path, data) = self.asset_browser.completed_reads.remove(idx);
-            log::info!("Importing component from: {path}");
-            self.pending_import = None;
-
-            match redlilium_ecs::serialize::decode::<redlilium_ecs::serialize::SerializedComponent>(
-                &data,
-                redlilium_ecs::serialize::Format::Ron,
-            ) {
-                Ok(serialized) => {
-                    let action = ImportComponentAction::new(entity, serialized);
-                    let ew = self.world.as_mut().unwrap();
-                    if let Err(e) = ew.history.execute(Box::new(action), &mut ew.world) {
-                        log::warn!("Import action failed: {e}");
-                    }
-                }
-                Err(e) => log::error!("Failed to decode .component file: {e}"),
-            }
-        }
-
-        // Process prefab export (world inspector → asset browser)
-        if let Some((root_entity, vfs_dir)) = self.asset_browser.pending_prefab_export.take() {
-            let ew = self.world.as_ref().unwrap();
-            if ew.world.is_alive(root_entity) {
-                // Asset export: the prefab must be self-contained (external
-                // entity references are rejected with a clear error).
-                match ew.world.serialize_prefab_asset(root_entity) {
-                    Ok(serialized) => {
-                        match redlilium_ecs::serialize::encode(
-                            &serialized,
-                            redlilium_ecs::serialize::Format::Ron,
-                        ) {
-                            Ok(data) => {
-                                let name = ew
-                                    .world
-                                    .get::<Name>(root_entity)
-                                    .map(|n| n.as_str().to_owned())
-                                    .unwrap_or_else(|| format!("Entity_{}", root_entity.index()));
-                                let vfs_path = format!("{vfs_dir}/{name}.prefab");
-                                log::info!("Exporting prefab to: {vfs_path}");
-                                self.asset_browser
-                                    .dispatch_write(&self.vfs, &vfs_path, data);
-                            }
-                            Err(e) => log::error!("Failed to encode prefab: {e}"),
-                        }
-                    }
-                    Err(e) => log::error!("Failed to serialize prefab: {e}"),
-                }
-            }
-        }
-
-        // Process prefab import (asset browser → world inspector): dispatch read
-        if let Some((vfs_path, parent)) = self.inspector_state.pending_prefab_import.take() {
-            self.asset_browser.dispatch_read(&self.vfs, &vfs_path);
-            self.pending_prefab_import = Some(PendingPrefabImport { vfs_path, parent });
-        }
-
-        // Process completed VFS reads for prefab import
-        if let Some(pending) = &self.pending_prefab_import
-            && let Some(idx) = self
-                .asset_browser
-                .completed_reads
-                .iter()
-                .position(|(path, _)| path == &pending.vfs_path)
-        {
-            let parent = pending.parent;
-            let (path, data) = self.asset_browser.completed_reads.remove(idx);
-            log::info!("Importing prefab from: {path}");
-            self.pending_prefab_import = None;
-
-            match redlilium_ecs::serialize::decode::<redlilium_ecs::serialize::SerializedPrefab>(
-                &data,
-                redlilium_ecs::serialize::Format::Ron,
-            ) {
-                Ok(serialized) => {
-                    let action = SpawnPrefabAction::new(serialized, parent);
-                    let ew = self.world.as_mut().unwrap();
-                    if let Err(e) = ew.history.execute(Box::new(action), &mut ew.world) {
-                        log::warn!("Prefab spawn action failed: {e}");
-                    }
-                }
-                Err(e) => log::error!("Failed to decode .prefab file: {e}"),
-            }
-        }
-
+        // Asset-browser deferred operations (export/import, file ops).
+        self.process_asset_browser_ops();
         // Clear per-frame deltas *after* systems have consumed them
         {
             let ew = self.active_world();
@@ -1172,21 +1178,13 @@ impl AppHandler for Editor {
                     let ew = self.world.as_mut();
                     if let Some(ew) = ew {
                         // Compute drag selection rect in egui logical points.
-                        let drag_rect = if self.dragging_box
-                            && let Some(start) = self.drag_start
-                        {
+                        let drag_rect = self.gestures.box_rect().map(|(start, end)| {
                             let inv = 1.0 / pixels_per_point;
-                            let x0 = start[0] * inv;
-                            let y0 = start[1] * inv;
-                            let x1 = self.cursor_pos[0] * inv;
-                            let y1 = self.cursor_pos[1] * inv;
-                            Some(egui::Rect::from_two_pos(
-                                egui::pos2(x0, y0),
-                                egui::pos2(x1, y1),
-                            ))
-                        } else {
-                            None
-                        };
+                            egui::Rect::from_two_pos(
+                                egui::pos2(start[0] * inv, start[1] * inv),
+                                egui::pos2(end[0] * inv, end[1] * inv),
+                            )
+                        });
 
                         if is_playing {
                             // Full-screen game viewport during Play mode
@@ -1480,7 +1478,7 @@ impl AppHandler for Editor {
     }
 
     fn on_mouse_move(&mut self, _ctx: &mut AppContext, x: f64, y: f64) {
-        self.cursor_pos = [x as f32, y as f32];
+        self.gestures.on_move(x as f32, y as f32);
         self.with_egui(|egui| {
             egui.on_mouse_move(x, y);
         });
@@ -1489,17 +1487,6 @@ impl AppHandler for Editor {
             {
                 let mut input = ew.window_input.write();
                 input.on_mouse_move(x, y);
-            }
-        }
-
-        // Detect drag threshold for box selection
-        if let Some(start) = self.drag_start
-            && !self.dragging_box
-        {
-            let dx = self.cursor_pos[0] - start[0];
-            let dy = self.cursor_pos[1] - start[1];
-            if (dx * dx + dy * dy).sqrt() > 5.0 {
-                self.dragging_box = true;
             }
         }
     }
@@ -1544,22 +1531,19 @@ impl AppHandler for Editor {
                 input.on_mouse_button(idx, pressed);
             }
 
-            // LMB press: start potential drag for box selection.
-            // LMB release: if it was a small movement → single-click GPU pick,
-            // otherwise → box selection of all entities in the rectangle.
-            // Phase 6: Block drag selection during Play mode
+            // LMB gestures over the scene view (blocked during Play). The
+            // routing decision — egui / gizmo / select — is a pure function
+            // in `gestures.rs`; this block only acts on it.
             if button == MouseButton::Left && self.scene_view_rect_phys.is_some() && !is_playing {
-                if pressed && self.cursor_in_scene_view() && !self.egui_wants_pointer {
-                    if self.gizmo_wants_cursor() {
-                        // The press lands on a hovered gizmo handle: it is a
-                        // manipulation, not a selection gesture. Leave the
-                        // selection intact (clearing it would yank the gizmo
-                        // out from under the drag) and start no pick/box
-                        // gesture; the press reaches the gizmo via the
-                        // WindowInput forward above.
-                    } else {
-                        self.drag_start = Some(self.cursor_pos);
-                        self.dragging_box = false;
+                use crate::gestures::{PressRouting, ReleaseAction};
+                if pressed {
+                    let routing = {
+                        let in_view = self.cursor_in_scene_view();
+                        let egui_owns = self.egui_wants_pointer;
+                        let gizmo_owns = self.gizmo_wants_cursor();
+                        self.gestures.on_press(in_view, egui_owns, gizmo_owns)
+                    };
+                    if routing == PressRouting::SceneGesture {
                         // Clear selection immediately on click; the GPU pick or
                         // box selection will re-select if anything is hit.
                         if let Some(ew) = &mut self.world {
@@ -1569,26 +1553,19 @@ impl AppHandler for Editor {
                             let _ = ew.history.execute(action, &mut ew.world);
                         }
                     }
-                } else if !pressed {
-                    let gizmo_owns_cursor = self.gizmo_wants_cursor();
-                    if self.dragging_box {
-                        // Box selection: select entities whose screen AABBs
-                        // intersect the drag rectangle.
-                        if let Some(start) = self.drag_start {
-                            self.perform_box_selection(start, self.cursor_pos);
+                } else {
+                    let gizmo_owns = self.gizmo_wants_cursor();
+                    match self.gestures.on_release(gizmo_owns) {
+                        ReleaseAction::BoxSelect { start, end } => {
+                            self.perform_box_selection(start, end);
                         }
-                    } else if let Some(scene_view) = &mut self.scene_view
-                        && self.drag_start.is_some()
-                        && !gizmo_owns_cursor
-                    {
-                        // Single click: GPU pick at cursor position (unless the
-                        // gizmo owns the cursor — a handle drag is not a select).
-                        let px = self.cursor_pos[0].max(0.0) as u32;
-                        let py = self.cursor_pos[1].max(0.0) as u32;
-                        scene_view.request_pick(px, py);
+                        ReleaseAction::ClickPick { x, y } => {
+                            if let Some(scene_view) = &mut self.scene_view {
+                                scene_view.request_pick(x, y);
+                            }
+                        }
+                        ReleaseAction::GizmoOwned | ReleaseAction::Nothing => {}
                     }
-                    self.drag_start = None;
-                    self.dragging_box = false;
                 }
             }
         }
