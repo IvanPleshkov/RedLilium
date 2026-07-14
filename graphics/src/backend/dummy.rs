@@ -43,6 +43,7 @@ impl DummyBackend {
             compute_shaders: true,
             gpu_timestamps: false,
             mip_generation: false,
+            memory_budget: false,
         }
     }
 
@@ -50,6 +51,12 @@ impl DummyBackend {
     /// records no timestamps (#95).
     pub fn latest_gpu_timings(&self) -> crate::device::FrameGpuTimings {
         crate::device::FrameGpuTimings::default()
+    }
+
+    /// GPU-memory statistics — always empty; the dummy backend has no GPU
+    /// heaps or allocator (#98). Resource counts are filled at the device layer.
+    pub fn latest_memory_stats(&self) -> crate::device::GpuMemoryStats {
+        crate::device::GpuMemoryStats::default()
     }
 
     /// Adapter info for the dummy backend.

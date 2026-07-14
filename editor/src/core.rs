@@ -215,6 +215,11 @@ pub fn create_editor_world_base(
     // window reads it like any other panel.
     world.insert_resource(redlilium_graphics::FrameGpuTimings::default());
 
+    // Latest GPU-memory stats (#98): the render shell copies the device's
+    // per-frame sample (driver heap budgets + allocator totals + resource
+    // counts) here and the GPU stats window's "Memory" section reads it.
+    world.insert_resource(redlilium_graphics::GpuMemoryStats::default());
+
     // Insert ActionQueue for editor action dispatch
     world.insert_resource(ActionQueue::<World>::new());
 

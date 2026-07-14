@@ -77,6 +77,13 @@ pub struct DeviceCapabilities {
     /// ([`GraphicsDevice::supports_mipmap_generation`]). `false` on wgpu/dummy
     /// (no blit path), so the texture loader falls back to a single mip.
     pub mip_generation: bool,
+    /// Whether `VK_EXT_memory_budget` is enabled on the device (#98). When true,
+    /// [`GraphicsDevice::latest_memory_stats`] fills each heap's `budget`/`usage`
+    /// from `VkPhysicalDeviceMemoryBudgetPropertiesEXT` (queried once per frame,
+    /// never cached across frames — the spec allows the values to change at any
+    /// moment). When false, heap `budget`/`usage` are `None` and the stats panel
+    /// shows heap sizes + allocator totals only. Always false on wgpu/dummy.
+    pub memory_budget: bool,
 }
 
 impl DeviceCapabilities {
@@ -124,6 +131,69 @@ impl FrameGpuTimings {
     pub fn is_empty(&self) -> bool {
         self.submits.is_empty()
     }
+}
+
+/// One Vulkan memory heap's driver-level figures (#98).
+///
+/// `budget`/`usage` come from `VK_EXT_memory_budget` and are `None` when the
+/// extension is unavailable ([`DeviceCapabilities::memory_budget`]). Usage
+/// reflects the *whole process* (and, for budget, system-wide pressure) — it
+/// shows headroom, not just this engine's footprint.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HeapStats {
+    /// Vulkan memory-heap index.
+    pub index: u32,
+    /// Whether this heap is `DEVICE_LOCAL` (VRAM on discrete GPUs).
+    pub device_local: bool,
+    /// Total heap size in bytes (`VkMemoryHeap::size`).
+    pub size: u64,
+    /// Driver-reported budget for this heap in bytes — how much the process may
+    /// use before eviction pressure. `None` without `VK_EXT_memory_budget`.
+    pub budget: Option<u64>,
+    /// Driver-reported current usage of this heap in bytes (process-wide).
+    /// `None` without `VK_EXT_memory_budget`.
+    pub usage: Option<u64>,
+}
+
+/// Live GPU-memory counts for this device ([`GraphicsDevice`] resource trackers).
+///
+/// These are the engine's own live-resource tallies (not byte figures), shown
+/// next to the allocator totals so the panel is meaningful even on backends
+/// without heap/budget data.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResourceCounts {
+    pub buffers: usize,
+    pub textures: usize,
+    pub samplers: usize,
+    pub materials: usize,
+    pub meshes: usize,
+}
+
+/// GPU-memory statistics sampled once per frame (#98).
+///
+/// Two data sources: driver-level heap budgets (`VK_EXT_memory_budget`, in
+/// [`Self::heaps`]) and the engine's `gpu-allocator` totals
+/// ([`Self::allocator_allocated`] / [`Self::allocator_reserved`] /
+/// [`Self::allocation_count`]), plus the engine's live-resource counts
+/// ([`Self::resources`]). Empty/zeroed on backends without data (dummy); the
+/// wgpu backend leaves [`Self::heaps`] empty but the resource counts are still
+/// filled by [`GraphicsDevice::latest_memory_stats`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GpuMemoryStats {
+    /// Per-heap driver figures, `DEVICE_LOCAL` heaps not guaranteed first
+    /// (the UI sorts). Empty without a Vulkan backend.
+    pub heaps: Vec<HeapStats>,
+    /// Bytes currently sub-allocated to live resources by our allocator
+    /// (`AllocatorReport::total_allocated_bytes`).
+    pub allocator_allocated: u64,
+    /// Bytes reserved in the allocator's memory blocks, including unused slack
+    /// (`AllocatorReport::total_capacity_bytes`).
+    pub allocator_reserved: u64,
+    /// Number of live allocations tracked by the allocator.
+    pub allocation_count: usize,
+    /// Engine live-resource counts, filled at the device layer regardless of
+    /// backend.
+    pub resources: ResourceCounts,
 }
 
 /// A graphics device for creating GPU resources.
@@ -200,6 +270,26 @@ impl GraphicsDevice {
     /// [`DeviceCapabilities::gpu_timestamps`] is false.
     pub fn latest_gpu_timings(&self) -> FrameGpuTimings {
         self.instance.backend().latest_gpu_timings()
+    }
+
+    /// GPU-memory statistics for the current frame (#98).
+    ///
+    /// Heap budgets and allocator totals come from the backend (sampled once
+    /// per frame on the render thread in `advance_frame` — never queried from
+    /// this call, which may run on the UI thread). The engine's live-resource
+    /// counts are filled here from this device's trackers, so the result is
+    /// meaningful even on backends without heap/budget data (wgpu) or with none
+    /// at all (dummy → empty heaps, zero allocator totals).
+    pub fn latest_memory_stats(&self) -> GpuMemoryStats {
+        let mut stats = self.instance.backend().latest_memory_stats();
+        stats.resources = ResourceCounts {
+            buffers: self.buffer_count(),
+            textures: self.texture_count(),
+            samplers: self.sampler_count(),
+            materials: self.material_count(),
+            meshes: self.mesh_count(),
+        };
+        stats
     }
 
     /// Whether the GPU can generate a mip chain for `format` (#96).

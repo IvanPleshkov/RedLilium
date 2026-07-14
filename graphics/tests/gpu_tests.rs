@@ -749,6 +749,90 @@ fn test_gpu_timestamps_two_pass(#[case] backend: Backend) {
     }
 }
 
+/// GPU memory stats (#98): `latest_memory_stats` must report the engine's live
+/// resource counts on every backend, and — on Vulkan — non-empty driver heaps
+/// with plausible sizes and (when `VK_EXT_memory_budget` is present) budget/usage.
+/// The sample is refreshed each frame in `advance_frame`, so a graph is run first.
+#[rstest]
+#[case::dummy(Backend::Dummy)]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_gpu_memory_stats(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        eprintln!("Skipping test: {backend:?} backend not available");
+        return;
+    };
+
+    if backend == Backend::Vulkan {
+        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+    }
+
+    // A handful of live buffers so the resource counts are non-trivial; keep
+    // them alive across the frames below (the counts are weak-ref filtered).
+    let _buffers: Vec<_> = (0..3)
+        .map(|_| ctx.create_gpu_buffer(4096, BufferUsage::VERTEX))
+        .collect();
+
+    let target = ctx.create_render_target(64, 64);
+    for _ in 0..3 {
+        let mut graph = RenderGraph::new();
+        graph.add_graphics_pass(create_simple_render_pass(
+            "pass",
+            target.clone(),
+            [0.1, 0.2, 0.3, 1.0],
+        ));
+        ctx.execute_graph(graph);
+    }
+
+    let stats = ctx.device.latest_memory_stats();
+
+    // Resource counts work on every backend (filled at the device layer).
+    assert!(
+        stats.resources.buffers >= 3,
+        "expected >=3 live buffers in memory stats, got {}",
+        stats.resources.buffers
+    );
+
+    if backend == Backend::Vulkan {
+        assert!(
+            !stats.heaps.is_empty(),
+            "Vulkan reported no memory heaps: {stats:?}"
+        );
+        for heap in &stats.heaps {
+            assert!(heap.size > 0, "heap {} has zero size: {heap:?}", heap.index);
+        }
+        // The allocator has live resources, so reserved >= allocated > 0.
+        assert!(
+            stats.allocator_reserved >= stats.allocator_allocated,
+            "allocator reserved {} < allocated {}",
+            stats.allocator_reserved,
+            stats.allocator_allocated
+        );
+
+        if ctx.device.capabilities().memory_budget {
+            let budgeted = stats
+                .heaps
+                .iter()
+                .find(|h| h.budget.is_some())
+                .unwrap_or_else(|| panic!("memory_budget on but no heap has a budget: {stats:?}"));
+            assert!(
+                budgeted.budget.unwrap() > 0,
+                "budgeted heap reports zero budget: {budgeted:?}"
+            );
+            assert!(
+                budgeted.usage.is_some(),
+                "heap with a budget has no usage: {budgeted:?}"
+            );
+        }
+
+        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        assert_eq!(
+            errors, 0,
+            "Vulkan validation reported {errors} error(s) during memory-stats sampling"
+        );
+    }
+}
+
 /// GPU crash breadcrumbs (#97): with breadcrumbs forced on, a multi-frame
 /// two-pass graph must encode its per-pass markers with zero validation errors.
 /// On MoltenVK this exercises the portable `vkCmdFillBuffer` fallback (no vendor

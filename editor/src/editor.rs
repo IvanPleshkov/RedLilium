@@ -190,7 +190,7 @@ impl Editor {
             pending_delete_confirm: None,
             should_close: false,
             last_selection: Vec::new(),
-            show_gpu_stats: false,
+            show_gpu_stats: true, // TEMP QA PATCH for #98 validation, will be reverted
             gpu_stats_panel: crate::gpu_stats_panel::GpuStatsPanel::default(),
         }
     }
@@ -1047,8 +1047,10 @@ impl AppHandler for Editor {
             // any other panel (#95). `gpu_timestamps_supported` drives the
             // "unavailable" fallback on backends without timestamp queries.
             let gpu_timestamps_supported = ctx.device().capabilities().gpu_timestamps;
+            let memory_budget_supported = ctx.device().capabilities().memory_budget;
             {
                 let timings = ctx.device().latest_gpu_timings();
+                let memory = ctx.device().latest_memory_stats();
                 let ew = self.world.as_mut().unwrap();
                 if ew
                     .world
@@ -1056,6 +1058,13 @@ impl AppHandler for Editor {
                 {
                     *ew.world
                         .resource_mut::<redlilium_graphics::FrameGpuTimings>() = timings;
+                }
+                if ew
+                    .world
+                    .has_resource::<redlilium_graphics::GpuMemoryStats>()
+                {
+                    *ew.world
+                        .resource_mut::<redlilium_graphics::GpuMemoryStats>() = memory;
                 }
             }
 
@@ -1385,14 +1394,32 @@ impl AppHandler for Editor {
                             .clone()
                     })
                     .unwrap_or_default();
+                let memory = self
+                    .world
+                    .as_ref()
+                    .filter(|ew| {
+                        ew.world
+                            .has_resource::<redlilium_graphics::GpuMemoryStats>()
+                    })
+                    .map(|ew| {
+                        ew.world
+                            .resource::<redlilium_graphics::GpuMemoryStats>()
+                            .clone()
+                    })
+                    .unwrap_or_default();
                 let mut open = true;
                 egui::Window::new("GPU Stats")
                     .default_width(320.0)
                     .resizable(true)
                     .open(&mut open)
                     .show(&egui_ctx, |ui| {
-                        self.gpu_stats_panel
-                            .show(ui, &timings, gpu_timestamps_supported);
+                        self.gpu_stats_panel.show(
+                            ui,
+                            &timings,
+                            gpu_timestamps_supported,
+                            &memory,
+                            memory_budget_supported,
+                        );
                     });
                 if !open {
                     self.show_gpu_stats = false;
