@@ -756,7 +756,6 @@ impl VulkanBackend {
             depth24_stencil8_format,
             &selected.properties,
             device_caps.wireframe,
-            selected.portability_subset,
         )?;
 
         // Seed the memory-stats cache so the panel has heap sizes immediately;
