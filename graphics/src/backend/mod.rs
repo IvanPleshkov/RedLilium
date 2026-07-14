@@ -1565,24 +1565,17 @@ pub async fn create_backend_with_params_async(
 }
 
 /// Auto-select the best available backend.
+///
+/// Native Vulkan (via ash) is the default path on **every** desktop platform,
+/// macOS included (through MoltenVK) — it is the engine's first-class backend
+/// and the one the frame graph / breadcrumbs / queue-routing paths are tuned
+/// for. wgpu is only a fallback here, used when Vulkan cannot be created; to
+/// run on wgpu deliberately, request it explicitly with
+/// `BackendType::Wgpu` (that path never falls through to Vulkan).
 fn create_backend_auto(
     params: &crate::instance::InstanceParameters,
 ) -> Result<GpuBackend, GraphicsError> {
-    // Try wgpu backend first if available (supports WGSL shaders and full draw commands)
-    #[cfg(feature = "wgpu-backend")]
-    {
-        match wgpu_impl::WgpuBackend::with_params(params) {
-            Ok(backend) => {
-                log::info!("Using wgpu backend");
-                return Ok(GpuBackend::Wgpu(backend));
-            }
-            Err(e) => {
-                log::warn!("Failed to create wgpu backend: {}", e);
-            }
-        }
-    }
-
-    // Try Vulkan backend if wgpu unavailable (native Vulkan via ash)
+    // Prefer native Vulkan (ash) everywhere, including macOS via MoltenVK.
     #[cfg(feature = "vulkan-backend")]
     {
         match vulkan::VulkanBackend::with_params(params) {
@@ -1592,6 +1585,20 @@ fn create_backend_auto(
             }
             Err(e) => {
                 log::warn!("Failed to create Vulkan backend: {}", e);
+            }
+        }
+    }
+
+    // Fall back to wgpu only if Vulkan is unavailable.
+    #[cfg(feature = "wgpu-backend")]
+    {
+        match wgpu_impl::WgpuBackend::with_params(params) {
+            Ok(backend) => {
+                log::info!("Using wgpu backend (fallback)");
+                return Ok(GpuBackend::Wgpu(backend));
+            }
+            Err(e) => {
+                log::warn!("Failed to create wgpu backend: {}", e);
             }
         }
     }

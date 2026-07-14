@@ -19,7 +19,10 @@ use crate::swapchain::Surface;
 /// Backend selection for the graphics instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum BackendType {
-    /// Automatically select the best available backend.
+    /// Automatically select the best available backend: native Vulkan (via
+    /// ash) on every desktop platform including macOS (MoltenVK), falling back
+    /// to wgpu and then dummy only if Vulkan cannot be created. wgpu is never
+    /// the default here — request it explicitly with [`Wgpu`](Self::Wgpu).
     #[default]
     Auto,
     /// Use the dummy backend (no actual GPU operations).
