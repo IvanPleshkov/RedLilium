@@ -262,6 +262,12 @@ pub struct VulkanBackend {
     /// a transfer-only family (#89). `None` is first-class: transfer graphs
     /// fall back to async compute, then graphics.
     transfer_queue: Option<SecondaryQueue>,
+    /// `minImageTransferGranularity` of the transfer family (`Some` exactly
+    /// when [`transfer_queue`](Self::transfer_queue) is). A coarse granularity
+    /// (AMD SDMA: 16×16×8) restricts which image copies may be routed to the
+    /// transfer queue — buffer copies and whole-subresource image copies are
+    /// legal at any granularity; anything else falls back (#92).
+    transfer_granularity: Option<vk::Extent3D>,
     /// Stable ids of textures already warned about declining the async
     /// compute hint (#88) — the fallback is correct but silently serializes
     /// work the caller wanted overlapped, so it warns once per texture, not
@@ -353,11 +359,56 @@ impl std::fmt::Debug for VulkanBackend {
     }
 }
 
+/// Whether a transfer op is legal on a transfer queue whose image granularity
+/// is coarser than 1×1×1 (#92). Buffer-only ops are always legal; image copies
+/// are legal only when they cover a whole base subresource (mip 0, origin
+/// (0,0,0), full descriptor extent), which reaches every subresource edge and
+/// so satisfies the granularity rule at any granularity (the spec exempts a
+/// copy whose `offset + extent` equals the subresource dimensions). Partial or
+/// non-base image copies — none generated today — read as unsafe so the graph
+/// falls back to async compute.
+fn op_ok_on_coarse_transfer(op: &crate::graph::TransferOperation) -> bool {
+    use crate::graph::TransferOperation as Op;
+    match op {
+        Op::BufferToBuffer { .. } | Op::WriteBuffer { .. } | Op::ReadbackBuffer { .. } => true,
+        Op::BufferToTexture { dst, regions, .. } => regions
+            .iter()
+            .all(|r| region_is_whole_base(dst, &r.texture_location, r.extent)),
+        Op::TextureToBuffer { src, regions, .. } => regions
+            .iter()
+            .all(|r| region_is_whole_base(src, &r.texture_location, r.extent)),
+        Op::TextureToTexture { src, dst, regions } => regions.iter().all(|r| {
+            region_is_whole_base(src, &r.src, r.extent)
+                && region_is_whole_base(dst, &r.dst, r.extent)
+        }),
+        // Mip generation is a blit chain (#96): not a transfer-queue operation
+        // at all, and already routed to the graphics queue by
+        // `RenderGraph::requires_graphics_queue`. Never legal on a transfer queue.
+        Op::GenerateMipmaps { .. } => false,
+    }
+}
+
+/// Whether a copy region covers the whole base (mip 0) subresource of `tex`.
+fn region_is_whole_base(
+    tex: &crate::resources::Texture,
+    loc: &crate::graph::TextureCopyLocation,
+    extent: crate::types::Extent3d,
+) -> bool {
+    loc.mip_level == 0
+        && loc.origin.x == 0
+        && loc.origin.y == 0
+        && loc.origin.z == 0
+        && extent == tex.size()
+}
+
 impl VulkanBackend {
     /// Create a new Vulkan backend with explicit validation setting.
     ///
     /// This initializes the Vulkan instance, selects a physical device,
     /// creates a logical device, and sets up the memory allocator.
+    ///
+    /// Callers arrive through [`super::create_backend_with_params`], which
+    /// holds [`super::BACKEND_LIFECYCLE_LOCK`] (#93).
     pub fn with_params(
         params: &crate::instance::InstanceParameters,
     ) -> Result<Self, GraphicsError> {
@@ -735,6 +786,7 @@ impl VulkanBackend {
             timestamps,
             breadcrumbs,
             device_lost_reported: std::sync::atomic::AtomicBool::new(false),
+            transfer_granularity: queue_plan.transfer_granularity,
             async_decline_warned: Mutex::new(HashSet::new()),
             implicit_cross_queue_images,
             device_caps,
@@ -1322,6 +1374,9 @@ struct SwapchainSync {
 
 impl Drop for VulkanBackend {
     fn drop(&mut self) {
+        // Serialized against creation of other backends (#93) — see
+        // BACKEND_LIFECYCLE_LOCK.
+        let _lifecycle = super::BACKEND_LIFECYCLE_LOCK.lock();
         unsafe {
             // Wait for device to be idle before cleanup
             let _ = self.device.device_wait_idle();
@@ -2257,6 +2312,29 @@ impl VulkanBackend {
     /// but silently serializes work the caller wanted overlapped, so each
     /// offending texture warns once (the same graph legitimately runs
     /// this way on single-queue devices, hence no hard error).
+    ///
+    /// The transfer rung has one more gate ([`transfer_granularity_ok`]):
+    /// on a transfer family coarser than 1×1×1 (AMD SDMA), only buffer copies
+    /// and whole-subresource image copies are legal, so a graph with a
+    /// partial image copy falls to async compute instead.
+    ///
+    /// [`transfer_granularity_ok`]: Self::transfer_granularity_ok
+    fn transfer_granularity_ok(&self, graph: &RenderGraph) -> bool {
+        let Some(g) = self.transfer_granularity else {
+            return false; // no transfer queue; unreachable via route_graph
+        };
+        // A 1×1×1 family (NVIDIA copy engines) aligns every copy — nothing to
+        // restrict. Only a coarse family needs the per-op check.
+        if g.width <= 1 && g.height <= 1 && g.depth <= 1 {
+            return true;
+        }
+        graph.passes().iter().all(|pass| {
+            pass.as_transfer()
+                .and_then(|p| p.transfer_config())
+                .is_none_or(|cfg| cfg.operations.iter().all(op_ok_on_coarse_transfer))
+        })
+    }
+
     fn route_graph(
         &self,
         graph: &RenderGraph,
@@ -2277,7 +2355,7 @@ impl VulkanBackend {
             QueuePreference::Transfer => self
                 .transfer_queue
                 .as_ref()
-                .filter(|_| graph.is_transfer_only())
+                .filter(|_| graph.is_transfer_only() && self.transfer_granularity_ok(graph))
                 .map(|q| (QueueId::Transfer, q))
                 .or_else(|| {
                     self.async_compute

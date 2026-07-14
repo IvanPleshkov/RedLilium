@@ -1487,11 +1487,24 @@ pub fn create_backend() -> Result<GpuBackend, GraphicsError> {
     create_backend_with_params(&crate::instance::InstanceParameters::default())
 }
 
+/// Serializes GPU backend creation process-wide (#93).
+///
+/// NVIDIA's Windows drivers (observed via wgpu/DX12 on an RTX 3070)
+/// intermittently abort the process (exception 0x87D raised through
+/// `RaiseException`) when many devices are created and torn down
+/// concurrently — the pattern parallel unit tests produce. Real applications
+/// create one device once, so this lock is uncontended in production. The
+/// Vulkan backend's Drop takes the same lock so teardown is serialized
+/// against creation as well.
+pub(crate) static BACKEND_LIFECYCLE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 /// Selects and creates the appropriate backend based on parameters.
 pub fn create_backend_with_params(
     params: &crate::instance::InstanceParameters,
 ) -> Result<GpuBackend, GraphicsError> {
     use crate::instance::BackendType;
+
+    let _lifecycle = BACKEND_LIFECYCLE_LOCK.lock();
 
     match params.backend {
         BackendType::Auto => create_backend_auto(params),

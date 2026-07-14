@@ -942,6 +942,113 @@ fn test_transfer_queue_upload_then_graphics_read(#[case] backend: Backend) {
     }
 }
 
+/// Transfer-queue image upload on a coarse-granularity family (#92).
+///
+/// Graph A — transfer-only, `QueuePreference::Transfer` — uploads a byte
+/// pattern into a cross-queue-declared texture with a **whole-subresource**
+/// `BufferToTexture` (exactly what `AssetProcessor::flush_gpu` emits for a
+/// texture). Whole-subresource copies are legal at any image-transfer
+/// granularity, so on AMD SDMA (granularity 16×16×8, which #92 stopped
+/// excluding) the upload routes to the DMA engines; on 1×1×1 families to the
+/// transfer queue; elsewhere down the ladder. Every route must produce
+/// identical bytes and zero validation errors — a granularity violation
+/// (e.g. wrongly routing a partial copy to SDMA) surfaces as a validation
+/// error here.
+#[rstest]
+#[case::dummy(Backend::Dummy)]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_transfer_queue_whole_image_upload(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        eprintln!("Backend {:?} not available, skipping", backend);
+        return;
+    };
+
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+    }
+
+    // 64×64 RGBA8: tight row pitch is 256 (already the 256-byte copy alignment),
+    // so uploaded and read-back bytes compare directly. The depth axis (1, not a
+    // multiple of SDMA's granularity-depth 8) means only the whole-subresource
+    // rule — not granularity-multiple alignment — makes this legal on SDMA.
+    const W: u32 = 64;
+    const H: u32 = 64;
+    let pattern: Vec<u8> = (0..(W * H * 4)).map(|i| (i * 13) as u8).collect();
+
+    let texture = ctx
+        .device
+        .create_texture(
+            // TEXTURE_BINDING mirrors a real sampled asset (and gives the
+            // texture a valid image view); COPY_DST for the upload, COPY_SRC
+            // for the readback.
+            &TextureDescriptor::new_2d(
+                W,
+                H,
+                TextureFormat::Rgba8Unorm,
+                TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST | TextureUsage::COPY_SRC,
+            )
+            .with_cross_queue(true)
+            .with_label("transfer_upload_target"),
+        )
+        .expect("create texture");
+
+    // Graph A: fill a device buffer with the pattern (pass 1), then copy it
+    // whole into the texture (pass 2) — both on the transfer queue. Two passes,
+    // not two ops in one pass: the RAW on `src` is ordered by the barrier the
+    // tracker places between passes. WriteBuffer is buffer-only
+    // (granularity-exempt); the BufferToTexture covers the whole base
+    // subresource (legal at any granularity). Tight row pitch is 256 for W=64,
+    // so the packed layout satisfies the 256-byte copy alignment.
+    let src = ctx.create_gpu_buffer(pattern.len() as u64, BufferUsage::empty());
+    let mut graph_a = RenderGraph::new();
+    graph_a.set_queue_preference(QueuePreference::Transfer);
+    let mut fill_pass = TransferPass::new("transfer_fill_src".into());
+    fill_pass.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::write_buffer(src.clone(), 0, Arc::from(pattern.as_slice())),
+    ));
+    graph_a.add_transfer_pass(fill_pass);
+    let mut upload_pass = TransferPass::new("transfer_image_upload".into());
+    upload_pass.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::upload_texture_whole(src.clone(), texture.clone()),
+    ));
+    graph_a.add_transfer_pass(upload_pass);
+    assert!(graph_a.is_transfer_only());
+
+    // Graph B: graphics-queue readback (cross-queue RAW against A).
+    let readback_size = readback_buffer_size(W, H, 4);
+    let readback = ctx.create_readback_buffer(readback_size);
+    let mut graph_b = RenderGraph::new();
+    let mut read_pass = TransferPass::new("transfer_image_read".into());
+    read_pass.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::readback_texture_whole(texture.clone(), readback.clone()),
+    ));
+    graph_b.add_transfer_pass(read_pass);
+
+    ctx.execute_graphs(vec![graph_a, graph_b]);
+
+    if backend == Backend::Dummy {
+        return;
+    }
+
+    let data = ctx.read_buffer(&readback, readback_size);
+    assert_eq!(
+        data.as_slice(),
+        pattern.as_slice(),
+        "read-back texture bytes must match the transfer-uploaded pattern"
+    );
+
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        assert_eq!(
+            errors, 0,
+            "Vulkan validation reported {errors} error(s) during transfer-queue image upload"
+        );
+    }
+}
+
 /// Async routing safety for UNDECLARED textures (#88).
 ///
 /// Same shape as [`test_async_compute_opt_in_cross_queue_dependency`], but

@@ -1150,12 +1150,18 @@ impl AppHandler for Editor {
             // Menu bar with play controls (egui fallback for non-macOS platforms)
             #[cfg(not(target_os = "macos"))]
             {
-                let ew = self.world.as_ref().unwrap();
-                let paused_due_to_panic = ew
-                    .world
-                    .resource::<redlilium_ecs::PlayControl>()
-                    .panic_info()
-                    .is_some();
+                let (paused_due_to_panic, gizmo_mode) = {
+                    let ew = self.world.as_ref().unwrap();
+                    (
+                        ew.world
+                            .resource::<redlilium_ecs::PlayControl>()
+                            .panic_info()
+                            .is_some(),
+                        ew.world
+                            .resource::<redlilium_gizmo::TransformGizmo>()
+                            .mode(),
+                    )
+                };
 
                 let result = menu::draw_menu_bar(
                     &egui_ctx,
@@ -1164,12 +1170,19 @@ impl AppHandler for Editor {
                     self.play_state,
                     paused_due_to_panic,
                     self.show_gpu_stats,
+                    gizmo_mode,
                 );
                 if result.toggle_gpu_stats {
                     self.show_gpu_stats = !self.show_gpu_stats;
                 }
                 if let Some(play_action) = result.play_action {
                     self.apply_play_action(play_action);
+                }
+                if let Some(mode) = result.gizmo_mode {
+                    let ew = self.world.as_ref().unwrap();
+                    ew.world
+                        .resource_mut::<redlilium_gizmo::TransformGizmo>()
+                        .set_mode(mode);
                 }
                 if let Some(action) = result.action {
                     use crate::menu::MenuAction;
