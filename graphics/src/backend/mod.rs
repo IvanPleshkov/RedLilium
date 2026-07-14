@@ -1039,6 +1039,19 @@ impl GpuBackend {
         }
     }
 
+    /// GPU-memory statistics for the current frame (#98) — driver heap budgets
+    /// plus allocator totals. Heaps are empty on non-Vulkan backends; the
+    /// engine's resource counts are filled at the device layer regardless.
+    pub fn latest_memory_stats(&self) -> crate::device::GpuMemoryStats {
+        match self {
+            Self::Dummy(backend) => backend.latest_memory_stats(),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(backend) => backend.latest_memory_stats(),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => backend.latest_memory_stats(),
+        }
+    }
+
     /// Whether `format` is blit-eligible for GPU mip generation (#96). Only the
     /// Vulkan backend queries format features; the others report `false`
     /// (`mip_generation` is already false there, so this is never reached).

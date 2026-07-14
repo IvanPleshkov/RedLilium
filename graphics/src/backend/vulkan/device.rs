@@ -26,6 +26,11 @@ pub struct OptionalFeatures {
     /// optional where the driver says so — declared cross-queue textures can
     /// then stay EXCLUSIVE (keeping compression) instead of CONCURRENT.
     pub maintenance9: bool,
+    /// `VK_EXT_memory_budget` (#98): per-heap budget/usage via
+    /// `VkPhysicalDeviceMemoryBudgetPropertiesEXT`. Enabled whenever advertised
+    /// (it is free — a query-only extension, no feature struct); drives the GPU
+    /// stats panel's driver-level VRAM figures.
+    pub memory_budget: bool,
 }
 
 /// GPU crash breadcrumb extensions the device advertises (#97).
@@ -314,6 +319,7 @@ pub fn select_physical_device(
                         sampler_anisotropy: features.sampler_anisotropy == vk::TRUE,
                         fill_mode_non_solid: features.fill_mode_non_solid == vk::TRUE,
                         maintenance9,
+                        memory_budget: has_ext(ash::ext::memory_budget::NAME),
                     },
                     breadcrumbs,
                     portability_subset: extensions.contains(b"VK_KHR_portability_subset".as_ref()),
@@ -546,6 +552,11 @@ pub fn create_logical_device(
     if selected.optional.maintenance9 {
         device_extensions.push(super::maintenance9::EXTENSION_NAME.as_ptr());
     }
+    // memory_budget (#98): query-only, no feature struct. Enabled whenever the
+    // device advertises it so the stats panel can report driver heap budgets.
+    if selected.optional.memory_budget {
+        device_extensions.push(ash::ext::memory_budget::NAME.as_ptr());
+    }
     // GPU crash breadcrumbs (#97): the vendor extensions (NV checkpoints, AMD
     // buffer marker) and device-fault reporting, enabled only when breadcrumbs
     // are on so the happy path adds no extensions. The portable fallback needs
@@ -673,6 +684,9 @@ pub fn device_capabilities(
         // chain (#96); per-format blit eligibility is checked separately at
         // load time (see `VulkanBackend::supports_blit_mipgen`).
         mip_generation: true,
+        // VK_EXT_memory_budget, when advertised (#98). Drives per-heap
+        // budget/usage in the stats panel; without it heap budget/usage are None.
+        memory_budget: selected.optional.memory_budget,
     }
 }
 

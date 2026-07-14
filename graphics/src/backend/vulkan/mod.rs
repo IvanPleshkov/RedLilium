@@ -14,6 +14,7 @@ mod device;
 mod instance;
 pub mod layout;
 mod maintenance9;
+mod memory;
 mod pipeline;
 mod staging;
 pub mod swapchain;
@@ -286,6 +287,14 @@ pub struct VulkanBackend {
     /// same reason as the other per-frame state: `execute_graph`/`advance_frame`
     /// take `&self` but run on the single render thread.
     timestamps: Option<Mutex<timestamps::TimestampManager>>,
+    /// GPU-memory statistics (#98), re-sampled once per frame in
+    /// [`advance_frame`](Self::advance_frame) — driver heap budgets
+    /// (`VK_EXT_memory_budget`, when enabled) plus allocator totals. Behind a
+    /// `Mutex` because the sample runs on the render thread while
+    /// [`latest_memory_stats`](Self::latest_memory_stats) may read from the UI
+    /// thread. Budget/usage are deliberately not cached across frames (the spec
+    /// allows them to change any moment); the once-per-frame sample is the cache.
+    memory_stats: Mutex<crate::device::GpuMemoryStats>,
     /// Per-pass GPU crash breadcrumbs (#97), `None` when breadcrumbs are off.
     /// Marks which pass the GPU was in when a `VK_ERROR_DEVICE_LOST` is
     /// observed. Behind a `Mutex` for the same single-render-thread reason as
@@ -750,6 +759,15 @@ impl VulkanBackend {
             selected.portability_subset,
         )?;
 
+        // Seed the memory-stats cache so the panel has heap sizes immediately;
+        // it is re-sampled every frame in `advance_frame` (#98).
+        let memory_stats = Mutex::new(memory::sample(
+            &instance,
+            physical_device,
+            device_caps.memory_budget,
+            &allocator.lock(),
+        ));
+
         log::info!(
             "Vulkan backend initialized (validation: {})",
             validation_enabled
@@ -784,6 +802,7 @@ impl VulkanBackend {
             async_compute,
             transfer_queue,
             timestamps,
+            memory_stats,
             breadcrumbs,
             device_lost_reported: std::sync::atomic::AtomicBool::new(false),
             transfer_granularity: queue_plan.transfer_granularity,
@@ -807,6 +826,14 @@ impl VulkanBackend {
             .as_ref()
             .map(|m| m.lock().latest())
             .unwrap_or_default()
+    }
+
+    /// GPU-memory statistics as of the last per-frame sample (#98). Read-only:
+    /// the actual Vulkan query happens on the render thread in `advance_frame`,
+    /// so this is safe to call from the UI thread. `resources` is filled at the
+    /// device layer.
+    pub fn latest_memory_stats(&self) -> crate::device::GpuMemoryStats {
+        self.memory_stats.lock().clone()
     }
 
     /// Whether `format` supports a `vkCmdBlitImage` mip-generation chain (#96):
@@ -1085,6 +1112,20 @@ impl VulkanBackend {
         // available, so `vkGetQueryPoolResults` needs no WAIT bit.
         if let Some(m) = &self.timestamps {
             m.lock().read_slot(&self.device, oldest);
+        }
+
+        // Re-sample GPU-memory stats for this frame (#98). Driver budget/usage
+        // may change at any moment, so this runs every frame — never cached
+        // across frames. On the render thread, so the UI-thread reader
+        // (`latest_memory_stats`) only ever clones a completed sample.
+        {
+            let stats = memory::sample(
+                &self.instance,
+                self.physical_device,
+                self.device_caps.memory_budget,
+                &self.allocator.lock(),
+            );
+            *self.memory_stats.lock() = stats;
         }
 
         // Retire the slot's crash breadcrumbs (#97): its fence signaled, so its

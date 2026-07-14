@@ -516,6 +516,9 @@ impl WgpuBackend {
             // and the loader falls back to a single mip. A wgpu render/compute
             // downsampler is a named follow-up.
             mip_generation: false,
+            // No VRAM budget API on wgpu (#98); heaps are empty, the panel
+            // falls back to the engine's allocator/resource figures.
+            memory_budget: false,
         }
     }
 
@@ -523,6 +526,13 @@ impl WgpuBackend {
     /// not record timestamps (#95).
     pub fn latest_gpu_timings(&self) -> crate::device::FrameGpuTimings {
         crate::device::FrameGpuTimings::default()
+    }
+
+    /// GPU-memory statistics — no budget API on wgpu, so heaps and allocator
+    /// totals are empty (#98). The device layer still fills the engine's
+    /// live-resource counts so the panel shows something meaningful.
+    pub fn latest_memory_stats(&self) -> crate::device::GpuMemoryStats {
+        crate::device::GpuMemoryStats::default()
     }
 
     /// Adapter info from the wgpu adapter.
