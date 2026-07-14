@@ -28,12 +28,31 @@ pub struct OptionalFeatures {
     pub maintenance9: bool,
 }
 
+/// GPU crash breadcrumb extensions the device advertises (#97).
+///
+/// Detected during selection; enabled at logical-device creation only when
+/// breadcrumbs are on. The mechanism the backend picks follows this priority:
+/// NV checkpoints → AMD buffer marker → portable `vkCmdFillBuffer` fallback
+/// (always available). `device_fault` is orthogonal — its structured fault
+/// report is appended to the crash log wherever present.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BreadcrumbExtensions {
+    /// `VK_NV_device_diagnostic_checkpoints` (`vkCmdSetCheckpointNV`).
+    pub nv_checkpoints: bool,
+    /// `VK_AMD_buffer_marker` (`vkCmdWriteBufferMarkerAMD`).
+    pub amd_buffer_marker: bool,
+    /// `VK_EXT_device_fault` (`vkGetDeviceFaultInfoEXT`).
+    pub device_fault: bool,
+}
+
 /// The physical device chosen by [`select_physical_device`] plus everything
 /// queried about it during selection.
 pub struct SelectedDevice {
     pub physical_device: vk::PhysicalDevice,
     pub properties: vk::PhysicalDeviceProperties,
     pub optional: OptionalFeatures,
+    /// GPU crash breadcrumb extensions this device advertises (#97).
+    pub breadcrumbs: BreadcrumbExtensions,
     /// Whether the device lists `VK_KHR_portability_subset` (it must then be
     /// enabled at logical-device creation, per spec).
     pub portability_subset: bool,
@@ -285,6 +304,12 @@ pub fn select_physical_device(
             let maintenance9 = allow_maintenance9
                 && extensions.contains(super::maintenance9::EXTENSION_NAME.to_bytes())
                 && super::maintenance9::feature_supported(instance, device);
+            let has_ext = |name: &CStr| extensions.contains(name.to_bytes());
+            let breadcrumbs = BreadcrumbExtensions {
+                nv_checkpoints: has_ext(ash::nv::device_diagnostic_checkpoints::NAME),
+                amd_buffer_marker: has_ext(ash::amd::buffer_marker::NAME),
+                device_fault: has_ext(ash::ext::device_fault::NAME),
+            };
             best = Some((
                 score,
                 SelectedDevice {
@@ -295,6 +320,7 @@ pub fn select_physical_device(
                         fill_mode_non_solid: features.fill_mode_non_solid == vk::TRUE,
                         maintenance9,
                     },
+                    breadcrumbs,
                     portability_subset: extensions.contains(b"VK_KHR_portability_subset".as_ref()),
                 },
             ));
@@ -464,6 +490,7 @@ pub fn create_logical_device(
     selected: &SelectedDevice,
     plan: &QueuePlan,
     enable_swapchain: bool,
+    enable_breadcrumbs: bool,
 ) -> Result<ash::Device, GraphicsError> {
     // Two priority slots so a same-family plan can create two queues from
     // one create-info; a different-family plan uses one slot per info.
@@ -515,6 +542,22 @@ pub fn create_logical_device(
     if selected.optional.maintenance9 {
         device_extensions.push(super::maintenance9::EXTENSION_NAME.as_ptr());
     }
+    // GPU crash breadcrumbs (#97): the vendor extensions (NV checkpoints, AMD
+    // buffer marker) and device-fault reporting, enabled only when breadcrumbs
+    // are on so the happy path adds no extensions. The portable fallback needs
+    // none of these (core `vkCmdFillBuffer`). Enabling an extension is free;
+    // the per-pass encode cost is gated separately at the call site.
+    if enable_breadcrumbs {
+        if selected.breadcrumbs.nv_checkpoints {
+            device_extensions.push(ash::nv::device_diagnostic_checkpoints::NAME.as_ptr());
+        }
+        if selected.breadcrumbs.amd_buffer_marker {
+            device_extensions.push(ash::amd::buffer_marker::NAME.as_ptr());
+        }
+        if selected.breadcrumbs.device_fault {
+            device_extensions.push(ash::ext::device_fault::NAME.as_ptr());
+        }
+    }
 
     // Optional features, enabled only where supported.
     let features = vk::PhysicalDeviceFeatures::default()
@@ -545,6 +588,11 @@ pub fn create_logical_device(
     let mut maintenance9_features =
         super::maintenance9::PhysicalDeviceMaintenance9FeaturesKHR::enabled();
 
+    // device_fault feature — chained only when the extension is enabled;
+    // `vkGetDeviceFaultInfoEXT` requires it (#97).
+    let enable_device_fault = enable_breadcrumbs && selected.breadcrumbs.device_fault;
+    let mut fault_features = vk::PhysicalDeviceFaultFeaturesEXT::default().device_fault(true);
+
     let mut create_info = vk::DeviceCreateInfo::default()
         .queue_create_infos(&queue_create_infos)
         .enabled_extension_names(&device_extensions)
@@ -555,6 +603,9 @@ pub fn create_logical_device(
         .push_next(&mut vulkan12_features);
     if selected.optional.maintenance9 {
         create_info = create_info.push_next(&mut maintenance9_features);
+    }
+    if enable_device_fault {
+        create_info = create_info.push_next(&mut fault_features);
     }
 
     let device = unsafe { instance.create_device(selected.physical_device, &create_info, None) }

@@ -420,7 +420,10 @@ impl VulkanSwapchain {
             vk::Result::TIMEOUT => GraphicsError::Timeout(
                 "in-flight fence wait timed out after 10 s; GPU may be hung".into(),
             ),
-            vk::Result::ERROR_DEVICE_LOST => GraphicsError::DeviceLost,
+            vk::Result::ERROR_DEVICE_LOST => {
+                vulkan_backend.report_device_lost();
+                GraphicsError::DeviceLost
+            }
             other => {
                 GraphicsError::Internal(format!("Failed to wait for in-flight fence: {other:?}"))
             }
@@ -448,7 +451,10 @@ impl VulkanSwapchain {
             vk::Result::TIMEOUT | vk::Result::NOT_READY => GraphicsError::Timeout(
                 "swapchain image acquire timed out after 10 s; GPU may be hung".into(),
             ),
-            vk::Result::ERROR_DEVICE_LOST => GraphicsError::DeviceLost,
+            vk::Result::ERROR_DEVICE_LOST => {
+                vulkan_backend.report_device_lost();
+                GraphicsError::DeviceLost
+            }
             other => GraphicsError::ResourceCreationFailed(format!(
                 "Failed to acquire swapchain image: {other:?}"
             )),
@@ -683,7 +689,10 @@ pub fn present_vulkan_frame(
             log::error!("Failed to re-signal in-flight fence after failed present submit: {re:?}");
         }
         return Err(match e {
-            vk::Result::ERROR_DEVICE_LOST => GraphicsError::DeviceLost,
+            vk::Result::ERROR_DEVICE_LOST => {
+                vulkan_backend.report_device_lost();
+                GraphicsError::DeviceLost
+            }
             other => {
                 GraphicsError::Internal(format!("Failed to submit presentation sync: {other:?}"))
             }
@@ -716,7 +725,10 @@ pub fn present_vulkan_frame(
             Err(GraphicsError::SurfaceOutdated)
         }
         Err(vk::Result::ERROR_SURFACE_LOST_KHR) => Err(GraphicsError::SurfaceLost),
-        Err(vk::Result::ERROR_DEVICE_LOST) => Err(GraphicsError::DeviceLost),
+        Err(vk::Result::ERROR_DEVICE_LOST) => {
+            vulkan_backend.report_device_lost();
+            Err(GraphicsError::DeviceLost)
+        }
         Err(e) => Err(GraphicsError::Internal(format!(
             "Failed to present swapchain image: {:?}",
             e

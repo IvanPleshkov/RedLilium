@@ -5,6 +5,7 @@
 
 mod allocator;
 pub mod barriers;
+mod breadcrumbs;
 mod command;
 pub(crate) mod conversion;
 mod debug;
@@ -285,6 +286,15 @@ pub struct VulkanBackend {
     /// same reason as the other per-frame state: `execute_graph`/`advance_frame`
     /// take `&self` but run on the single render thread.
     timestamps: Option<Mutex<timestamps::TimestampManager>>,
+    /// Per-pass GPU crash breadcrumbs (#97), `None` when breadcrumbs are off.
+    /// Marks which pass the GPU was in when a `VK_ERROR_DEVICE_LOST` is
+    /// observed. Behind a `Mutex` for the same single-render-thread reason as
+    /// the other per-frame state.
+    breadcrumbs: Option<Mutex<breadcrumbs::BreadcrumbManager>>,
+    /// Set on the first observed device loss so the (expensive, log-and-file)
+    /// breadcrumb report runs exactly once even though device loss cascades
+    /// through every subsequent submit/wait/present.
+    device_lost_reported: std::sync::atomic::AtomicBool,
     /// Capabilities queried from the selected physical device at creation
     /// (ADR-027) — the single source of truth downstream clamps against.
     device_caps: crate::device::DeviceCapabilities,
@@ -391,12 +401,22 @@ impl VulkanBackend {
         )?;
         let physical_device = selected.physical_device;
 
+        // GPU crash breadcrumbs (#97): on for dev/editor builds (validation on)
+        // unless overridden. Resolved before device creation so the vendor
+        // extensions are enabled only when breadcrumbs are actually on.
+        let breadcrumbs_on = params.breadcrumbs.resolve(validation_enabled);
+
         // Plan queues (graphics + async compute when available) and create
         // the logical device.
         let queue_plan = device::plan_queues(&instance, physical_device)?;
         let graphics_queue_family = queue_plan.graphics_family;
-        let device =
-            device::create_logical_device(&instance, &selected, &queue_plan, surface_support)?;
+        let device = device::create_logical_device(
+            &instance,
+            &selected,
+            &queue_plan,
+            surface_support,
+            breadcrumbs_on,
+        )?;
 
         // Everything downstream clamps/validates against these (ADR-027).
         let device_caps = device::device_capabilities(&instance, &selected, &queue_plan);
@@ -578,6 +598,72 @@ impl VulkanBackend {
         // Load synchronization2 extension (baseline-tier requirement, #94).
         let synchronization2 = ash::khr::synchronization2::Device::new(&instance, &device);
 
+        // GPU crash breadcrumbs (#97). Pick the mechanism by extension
+        // availability (NV checkpoints → AMD buffer marker → portable
+        // `vkCmdFillBuffer`), load its handles, and build one marker buffer per
+        // (queue, slot) for the buffer mechanisms.
+        let breadcrumbs = if breadcrumbs_on {
+            use self::barriers::QueueId;
+            use self::breadcrumbs::{Mechanism, QueueBreadcrumbInfo};
+            let mechanism = if selected.breadcrumbs.nv_checkpoints {
+                Mechanism::NvCheckpoints
+            } else if selected.breadcrumbs.amd_buffer_marker {
+                Mechanism::AmdBufferMarker
+            } else {
+                Mechanism::Fallback
+            };
+            let checkpoints = selected
+                .breadcrumbs
+                .nv_checkpoints
+                .then(|| ash::nv::device_diagnostic_checkpoints::Device::new(&instance, &device));
+            let buffer_marker = selected
+                .breadcrumbs
+                .amd_buffer_marker
+                .then(|| ash::amd::buffer_marker::Device::new(&instance, &device));
+            let device_fault = selected
+                .breadcrumbs
+                .device_fault
+                .then(|| ash::ext::device_fault::Device::new(&instance, &device));
+
+            let mut infos = vec![QueueBreadcrumbInfo {
+                queue: QueueId::Graphics,
+                preference: crate::graph::QueuePreference::Graphics,
+                handle: graphics_queue,
+            }];
+            if let Some(ac) = &async_compute {
+                infos.push(QueueBreadcrumbInfo {
+                    queue: QueueId::AsyncCompute,
+                    preference: crate::graph::QueuePreference::AsyncCompute,
+                    handle: ac.queue,
+                });
+            }
+            if let Some(tq) = &transfer_queue {
+                infos.push(QueueBreadcrumbInfo {
+                    queue: QueueId::Transfer,
+                    preference: crate::graph::QueuePreference::Transfer,
+                    handle: tq.queue,
+                });
+            }
+            let manager = breadcrumbs::BreadcrumbManager::new(
+                &device,
+                &synchronization2,
+                &mut allocator.lock(),
+                mechanism,
+                checkpoints,
+                buffer_marker,
+                device_fault,
+                &infos,
+            );
+            match &manager {
+                Some(_) => log::info!("GPU crash breadcrumbs active: {}", mechanism.label()),
+                None => log::warn!("GPU crash breadcrumbs requested but could not be initialized"),
+            }
+            manager.map(Mutex::new)
+        } else {
+            log::info!("GPU crash breadcrumbs: off");
+            None
+        };
+
         // Load surface extension
         let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
 
@@ -658,6 +744,8 @@ impl VulkanBackend {
             async_compute,
             transfer_queue,
             timestamps,
+            breadcrumbs,
+            device_lost_reported: std::sync::atomic::AtomicBool::new(false),
             async_decline_warned: Mutex::new(HashSet::new()),
             implicit_cross_queue_images,
             device_caps,
@@ -685,6 +773,38 @@ impl VulkanBackend {
     fn abort_timestamps(&self, queue: QueueId, slot: usize) {
         if let Some(m) = &self.timestamps {
             m.lock().abort_submit(queue, slot);
+        }
+    }
+
+    /// Drop an abandoned submit's breadcrumbs for `queue`/`slot` (#97). No-op
+    /// without breadcrumbs.
+    fn abort_breadcrumbs(&self, queue: QueueId, slot: usize) {
+        if let Some(m) = &self.breadcrumbs {
+            m.lock().abort_submit(queue, slot);
+        }
+    }
+
+    /// Post-mortem for a `VK_ERROR_DEVICE_LOST` (#97): read the per-queue
+    /// breadcrumbs, log a structured report at `error!`, and write it to
+    /// `redlilium-gpu-crash-<timestamp>.txt` next to the executable (a hung app
+    /// often loses its log tail). Runs exactly once per backend even though
+    /// device loss cascades through every subsequent submit/wait/present.
+    fn report_device_lost(&self) {
+        if self.device_lost_reported.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let Some(m) = &self.breadcrumbs else {
+            log::error!(
+                "VK_ERROR_DEVICE_LOST on {} — GPU crash breadcrumbs are off; \
+                 set REDLILIUM_BREADCRUMBS=1 to identify the guilty pass (#97)",
+                self.adapter_info.name
+            );
+            return;
+        };
+        let report = m.lock().collect_report(&self.adapter_info);
+        log::error!("VK_ERROR_DEVICE_LOST — GPU crash breadcrumbs:\n{report}");
+        if let Some(path) = breadcrumbs::write_crash_file(&report) {
+            log::error!("GPU crash report written to {}", path.display());
         }
     }
 
@@ -914,6 +1034,13 @@ impl VulkanBackend {
         // available, so `vkGetQueryPoolResults` needs no WAIT bit.
         if let Some(m) = &self.timestamps {
             m.lock().read_slot(&self.device, oldest);
+        }
+
+        // Retire the slot's crash breadcrumbs (#97): its fence signaled, so its
+        // work completed and its breadcrumbs are no longer interesting. This
+        // re-arms the marker reset for the slot's next use.
+        if let Some(m) = &self.breadcrumbs {
+            m.lock().retire_slot(oldest);
         }
 
         // Remove destroyed resources from the barrier trackers so the maps
@@ -1230,6 +1357,12 @@ impl Drop for VulkanBackend {
             // Destroy the timestamp query pools (#95), if any.
             if let Some(m) = &self.timestamps {
                 m.lock().destroy(&self.device);
+            }
+
+            // Destroy the breadcrumb marker buffers (#97), if any (the
+            // device_wait_idle above guarantees the GPU is done with them).
+            if let Some(m) = &self.breadcrumbs {
+                m.lock().destroy(&self.device, &mut self.allocator.lock());
             }
 
             // Destroy the staging belt (the device_wait_idle above
@@ -2032,7 +2165,10 @@ impl VulkanBackend {
                     Err(vk::Result::TIMEOUT) => Err(GraphicsError::Timeout(
                         "fence wait timed out after 10 s; GPU may be hung".into(),
                     )),
-                    Err(vk::Result::ERROR_DEVICE_LOST) => Err(GraphicsError::DeviceLost),
+                    Err(vk::Result::ERROR_DEVICE_LOST) => {
+                        self.report_device_lost();
+                        Err(GraphicsError::DeviceLost)
+                    }
                     Err(e) => Err(GraphicsError::Internal(format!(
                         "Fence wait failed: {:?}",
                         e
@@ -2085,7 +2221,10 @@ impl VulkanBackend {
                 match device.wait_semaphores(&wait_info, timeout_ns) {
                     Ok(()) => Ok(true),
                     Err(vk::Result::TIMEOUT) => Ok(false),
-                    Err(vk::Result::ERROR_DEVICE_LOST) => Err(GraphicsError::DeviceLost),
+                    Err(vk::Result::ERROR_DEVICE_LOST) => {
+                        self.report_device_lost();
+                        Err(GraphicsError::DeviceLost)
+                    }
                     Err(e) => Err(GraphicsError::Internal(format!(
                         "Fence wait failed: {:?}",
                         e
@@ -2284,6 +2423,19 @@ impl VulkanBackend {
             )
         });
 
+        // Per-pass GPU crash breadcrumbs (#97): reserve markers and record the
+        // buffer reset + submit-begin marker before the passes. `None` when
+        // breadcrumbs are off or this queue has none.
+        let mut breadcrumbs = self.breadcrumbs.as_ref().and_then(|m| {
+            m.lock().begin_submit(
+                queue_id,
+                slot,
+                compiled.pass_order().len(),
+                timeline_value,
+                cmd,
+            )
+        });
+
         // Process each pass in compiled order using pre-computed resource usages
         {
             profile_scope!("record_passes");
@@ -2309,16 +2461,26 @@ impl VulkanBackend {
                 if let Some(rec) = recording.as_mut() {
                     rec.pass_begin(&self.synchronization2, cmd, i, pass.name());
                 }
+                // Breadcrumb the pass (begin before, end after).
+                if let Some(bc) = breadcrumbs.as_mut() {
+                    bc.pass_begin(cmd, i, pass.name());
+                }
                 if let Err(e) = self.encode_pass(cmd, pass) {
-                    // The command buffer (with its reset + timestamp writes) is
-                    // abandoned; re-arm the pool so its next use resets it.
+                    // The command buffer (with its reset + timestamp/breadcrumb
+                    // writes) is abandoned; re-arm both so their next use resets.
                     if recording.is_some() {
                         self.abort_timestamps(queue_id, slot);
+                    }
+                    if breadcrumbs.is_some() {
+                        self.abort_breadcrumbs(queue_id, slot);
                     }
                     return Err(e);
                 }
                 if let Some(rec) = recording.as_mut() {
                     rec.pass_end(&self.synchronization2, cmd, i);
+                }
+                if let Some(bc) = breadcrumbs.as_ref() {
+                    bc.pass_end(cmd, i);
                 }
             }
         }
@@ -2332,11 +2494,21 @@ impl VulkanBackend {
             }
         }
 
+        // Submit-end breadcrumb, then hand the trace back so it survives for a
+        // post-mortem if a later submit loses the device.
+        if let Some(bc) = breadcrumbs {
+            bc.submit_end(cmd);
+            if let Some(m) = &self.breadcrumbs {
+                m.lock().finish_submit(bc);
+            }
+        }
+
         // End command buffer
         if let Err(e) = unsafe { self.device.end_command_buffer(cmd) } {
             // Same as the encode error: the command buffer is abandoned, so
-            // re-arm the query pool for a fresh reset before its next use.
+            // re-arm the query pool / breadcrumbs for a fresh reset.
             self.abort_timestamps(queue_id, slot);
+            self.abort_breadcrumbs(queue_id, slot);
             return Err(GraphicsError::Internal(format!(
                 "Failed to end command buffer: {:?}",
                 e
@@ -2463,10 +2635,16 @@ impl VulkanBackend {
                 if let Some((image_available, _)) = swapchain_pair {
                     self.restore_swapchain_render_sync(image_available);
                 }
-                // The command buffer never ran, so its query reset+writes
-                // didn't happen: drop this submit's timing records and re-arm
-                // the pool so its next use resets before writing (#95).
+                // Device loss: read the breadcrumbs BEFORE the aborts below
+                // clear this slot's traces, so the post-mortem sees them (#97).
+                if e == vk::Result::ERROR_DEVICE_LOST {
+                    self.report_device_lost();
+                }
+                // The command buffer never ran, so its query/breadcrumb
+                // reset+writes didn't happen: drop this submit's records and
+                // re-arm the pools so their next use resets before writing.
                 self.abort_timestamps(queue_id, slot);
+                self.abort_breadcrumbs(queue_id, slot);
                 return Err(match e {
                     vk::Result::ERROR_DEVICE_LOST => GraphicsError::DeviceLost,
                     other => GraphicsError::Internal(format!(

@@ -602,6 +602,49 @@ fn test_gpu_timestamps_two_pass(#[case] backend: Backend) {
     }
 }
 
+/// GPU crash breadcrumbs (#97): with breadcrumbs forced on, a multi-frame
+/// two-pass graph must encode its per-pass markers with zero validation errors.
+/// On MoltenVK this exercises the portable `vkCmdFillBuffer` fallback (no vendor
+/// extension); the whole point is that the marker writes and the per-slot buffer
+/// reset are legal. Vulkan-only — wgpu/dummy have no breadcrumbs.
+#[rstest]
+#[case::vulkan(Backend::Vulkan)]
+fn test_breadcrumbs_two_pass_encodes_cleanly(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new_with_breadcrumbs(backend) else {
+        eprintln!("Skipping test: {backend:?} backend not available");
+        return;
+    };
+
+    redlilium_graphics::backend::vulkan::reset_validation_error_count();
+
+    let target_a = ctx.create_render_target(64, 64);
+    let target_b = ctx.create_render_target(64, 64);
+
+    // Several frames so each per-slot marker buffer is reset-then-written at
+    // least once across the frame-in-flight ring (the reset path is the one
+    // most likely to trip validation).
+    for _ in 0..8 {
+        let mut graph = RenderGraph::new();
+        graph.add_graphics_pass(create_simple_render_pass(
+            "breadcrumb_pass_a",
+            target_a.clone(),
+            [0.1, 0.2, 0.3, 1.0],
+        ));
+        graph.add_graphics_pass(create_simple_render_pass(
+            "breadcrumb_pass_b",
+            target_b.clone(),
+            [0.3, 0.2, 0.1, 1.0],
+        ));
+        ctx.execute_graph(graph);
+    }
+
+    let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+    assert_eq!(
+        errors, 0,
+        "Vulkan validation reported {errors} error(s) while encoding GPU crash breadcrumbs"
+    );
+}
+
 /// Test the async compute routing opt-in (#47 phase 4).
 ///
 /// Graph A renders (clears) into a texture on the graphics queue; graph B —

@@ -1572,12 +1572,32 @@ already guarantees completion — the staging-belt retirement argument).
 Durations only: timestamps from different queues are not compared (that needs
 `VK_EXT_calibrated_timestamps`, out of scope).
 
+### Amendment (2026-07-14, #97): GPU crash breadcrumbs are instance/debug tooling, NOT a capability
+
+Per-pass GPU crash breadcrumbs (post-mortem for `VK_ERROR_DEVICE_LOST`:
+"which pass did the GPU die in") are deliberately **not** a
+`DeviceCapabilities` field. They are debug tooling, gated by an
+`InstanceParameters` option (`BreadcrumbsMode`, default on when validation is
+enabled, `REDLILIUM_BREADCRUMBS` env override — the ADR-028 override
+precedent), not a queried device property the renderer clamps against.
+"Breadcrumbs active: <mechanism>" is a single startup info line instead. The
+mechanism is chosen at backend creation by extension availability —
+`VK_NV_device_diagnostic_checkpoints` → `VK_AMD_buffer_marker` → a portable
+`vkCmdFillBuffer` fallback (always available, coarser) — all behind one
+interface encoding the same per-pass marker code, so one pure diagnosis
+function serves every mechanism (`backend/vulkan/breadcrumbs.rs`).
+`VK_EXT_device_fault` is orthogonal: its structured report is appended where
+present. The happy path with breadcrumbs off adds zero encode work (the guard
+is at the call site, not inside the marker fn). Granularity is per-pass, never
+per-draw (per-draw is where breadcrumbs start costing real perf).
+
 ### Related Issues
 
 - #38: device/instance hardcodes (implementation)
 - #47: async compute queue availability is a capability, not a tier
 - #94: synchronization2 baseline requirement (sync1 path deleted)
 - #95: per-pass GPU timestamps surfaced as the `gpu_timestamps` capability
+- #97: GPU crash breadcrumbs are instance/debug tooling, not a capability
 
 ---
 

@@ -186,6 +186,40 @@ pub enum AdapterPreference {
     Explicit(AdapterId),
 }
 
+/// Whether the Vulkan backend records per-pass GPU crash breadcrumbs (#97).
+///
+/// Breadcrumbs mark which pass the GPU was executing when a
+/// `VK_ERROR_DEVICE_LOST` is reported, turning a bare `DeviceLost` into a
+/// named "the GPU died in pass X" post-mortem. They add one marker write per
+/// pass; the happy path with them off adds zero encode work.
+///
+/// `Auto` (the default) follows validation — on for dev/editor builds (where
+/// validation is enabled), off otherwise. The `REDLILIUM_BREADCRUMBS`
+/// environment variable overrides whatever the application configured
+/// (`1`/`true`/`on` → on, `0`/`false`/`off` → off), mirroring the
+/// `REDLILIUM_ADAPTER` precedent (ADR-028).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BreadcrumbsMode {
+    /// Follow validation: on when validation is enabled, off otherwise.
+    #[default]
+    Auto,
+    /// Always record breadcrumbs.
+    On,
+    /// Never record breadcrumbs.
+    Off,
+}
+
+impl BreadcrumbsMode {
+    /// Resolve to an on/off decision given whether validation is enabled.
+    pub fn resolve(self, validation: bool) -> bool {
+        match self {
+            Self::Auto => validation,
+            Self::On => true,
+            Self::Off => false,
+        }
+    }
+}
+
 /// Configuration parameters for creating a graphics instance.
 ///
 /// Use the builder pattern to configure the instance:
@@ -211,6 +245,9 @@ pub struct InstanceParameters {
     pub debug: bool,
     /// Which adapter to select (ADR-028). Overridden by `REDLILIUM_ADAPTER`.
     pub adapter: AdapterPreference,
+    /// Per-pass GPU crash breadcrumbs (#97). Overridden by
+    /// `REDLILIUM_BREADCRUMBS`.
+    pub breadcrumbs: BreadcrumbsMode,
 }
 
 impl InstanceParameters {
@@ -254,11 +291,18 @@ impl InstanceParameters {
         self
     }
 
-    /// Apply the `REDLILIUM_ADAPTER` environment override, if set.
+    /// Set the GPU crash breadcrumb mode (#97).
+    pub fn with_breadcrumbs(mut self, breadcrumbs: BreadcrumbsMode) -> Self {
+        self.breadcrumbs = breadcrumbs;
+        self
+    }
+
+    /// Apply the `REDLILIUM_ADAPTER` and `REDLILIUM_BREADCRUMBS` environment
+    /// overrides, if set.
     ///
-    /// Called by instance creation so the override works regardless of how
+    /// Called by instance creation so the overrides work regardless of how
     /// the application built its parameters.
-    fn with_env_adapter_override(mut self) -> Self {
+    fn with_env_overrides(mut self) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         if let Ok(value) = std::env::var("REDLILIUM_ADAPTER")
             && !value.is_empty()
@@ -266,6 +310,24 @@ impl InstanceParameters {
             let id = AdapterId::parse(&value);
             log::info!("Adapter override via REDLILIUM_ADAPTER: {value} -> {id:?}");
             self.adapter = AdapterPreference::Explicit(id);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(value) = std::env::var("REDLILIUM_BREADCRUMBS") {
+            match value.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "on" | "yes" => {
+                    log::info!("GPU breadcrumbs forced ON via REDLILIUM_BREADCRUMBS");
+                    self.breadcrumbs = BreadcrumbsMode::On;
+                }
+                "0" | "false" | "off" | "no" => {
+                    log::info!("GPU breadcrumbs forced OFF via REDLILIUM_BREADCRUMBS");
+                    self.breadcrumbs = BreadcrumbsMode::Off;
+                }
+                "" => {}
+                other => log::warn!(
+                    "ignoring unrecognized REDLILIUM_BREADCRUMBS value {other:?} \
+                     (expected 1/true/on or 0/false/off)"
+                ),
+            }
         }
         self
     }
@@ -399,7 +461,7 @@ impl GraphicsInstance {
     /// let instance = GraphicsInstance::with_parameters(params)?;
     /// ```
     pub fn with_parameters(params: InstanceParameters) -> Result<Arc<Self>, GraphicsError> {
-        let params = params.with_env_adapter_override();
+        let params = params.with_env_overrides();
         log::info!("Creating GraphicsInstance with params: {:?}", params);
 
         // Create the GPU backend based on parameters
@@ -418,7 +480,7 @@ impl GraphicsInstance {
     pub async fn with_parameters_async(
         params: InstanceParameters,
     ) -> Result<Arc<Self>, GraphicsError> {
-        let params = params.with_env_adapter_override();
+        let params = params.with_env_overrides();
         log::info!(
             "Creating GraphicsInstance (async) with params: {:?}",
             params

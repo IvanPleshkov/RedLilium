@@ -94,8 +94,8 @@ pub use graph::{
     resource_usage::{PassResourceUsage, TextureAccessMode, TextureUsageDecl},
 };
 pub use instance::{
-    AdapterId, AdapterInfo, AdapterPreference, AdapterType, BackendType, GraphicsInstance,
-    InstanceParameters, WgpuBackendType,
+    AdapterId, AdapterInfo, AdapterPreference, AdapterType, BackendType, BreadcrumbsMode,
+    GraphicsInstance, InstanceParameters, WgpuBackendType,
 };
 pub use materials::{
     BindingGroup, BindingGroupDescriptor, BindingLayout, BindingLayoutEntry, BindingType,

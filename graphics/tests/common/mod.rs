@@ -122,10 +122,32 @@ impl TestContext {
     /// (with a log warning) if the layers are not installed.
     #[allow(dead_code)]
     pub fn new_with_validation(backend: Backend) -> Option<Self> {
-        Self::with_validation(backend, true)
+        Self::with_options(backend, true, redlilium_graphics::BreadcrumbsMode::Auto)
+    }
+
+    /// Create a test context with validation layers AND GPU crash breadcrumbs
+    /// (#97) forced on, so the marker-encode path is exercised (and any
+    /// validation error it produces is counted). On MoltenVK — which has
+    /// neither vendor extension — this drives the portable `vkCmdFillBuffer`
+    /// fallback.
+    #[allow(dead_code)]
+    pub fn new_with_breadcrumbs(backend: Backend) -> Option<Self> {
+        Self::with_options(backend, true, redlilium_graphics::BreadcrumbsMode::On)
     }
 
     fn with_validation(backend: Backend, validation: bool) -> Option<Self> {
+        Self::with_options(
+            backend,
+            validation,
+            redlilium_graphics::BreadcrumbsMode::Auto,
+        )
+    }
+
+    fn with_options(
+        backend: Backend,
+        validation: bool,
+        breadcrumbs: redlilium_graphics::BreadcrumbsMode,
+    ) -> Option<Self> {
         // Surface backend logs (queue plan, validation warnings) under RUST_LOG.
         let _ = env_logger::builder().is_test(true).try_init();
 
@@ -133,7 +155,10 @@ impl TestContext {
             return None;
         }
 
-        let params = backend.to_instance_parameters().with_validation(validation);
+        let params = backend
+            .to_instance_parameters()
+            .with_validation(validation)
+            .with_breadcrumbs(breadcrumbs);
         let instance = GraphicsInstance::with_parameters(params).ok()?;
         let device = instance.create_device().ok()?;
         // Use 1 frame in flight for synchronous test execution
