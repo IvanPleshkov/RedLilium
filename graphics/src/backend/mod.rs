@@ -1039,6 +1039,19 @@ impl GpuBackend {
         }
     }
 
+    /// Whether `format` is blit-eligible for GPU mip generation (#96). Only the
+    /// Vulkan backend queries format features; the others report `false`
+    /// (`mip_generation` is already false there, so this is never reached).
+    pub fn supports_blit_mipgen(&self, format: crate::types::TextureFormat) -> bool {
+        match self {
+            Self::Dummy(_) => false,
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(_) => false,
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => backend.supports_blit_mipgen(format),
+        }
+    }
+
     /// Create a buffer resource.
     pub fn create_buffer(&self, descriptor: &BufferDescriptor) -> Result<GpuBuffer, GraphicsError> {
         match self {

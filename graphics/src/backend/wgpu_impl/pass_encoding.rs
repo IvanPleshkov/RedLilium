@@ -526,6 +526,10 @@ impl WgpuBackend {
                     );
                 }
             }
+            // No blit path in wgpu (#96): DeviceCapabilities.mip_generation is
+            // false, so the loader never emits this op for a wgpu device and the
+            // texture stays single-mip. Encode nothing if one arrives anyway.
+            TransferOperation::GenerateMipmaps { .. } => {}
         }
         Ok(())
     }

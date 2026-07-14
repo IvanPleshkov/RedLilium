@@ -42,6 +42,7 @@ impl DummyBackend {
             transfer_queue: false,
             compute_shaders: true,
             gpu_timestamps: false,
+            mip_generation: false,
         }
     }
 

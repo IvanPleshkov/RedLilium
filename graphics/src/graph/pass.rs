@@ -975,6 +975,16 @@ impl TransferPass {
             .unwrap_or(false)
     }
 
+    /// Whether any operation is legal only on a graphics-capable queue (#96):
+    /// today that is `GenerateMipmaps` (`vkCmdBlitImage`).
+    pub fn requires_graphics_queue(&self) -> bool {
+        self.transfer_config.as_ref().is_some_and(|c| {
+            c.operations
+                .iter()
+                .any(|op| matches!(op, TransferOperation::GenerateMipmaps { .. }))
+        })
+    }
+
     /// Infer resource usage from the transfer operations.
     ///
     /// This examines transfer operations to determine which textures and buffers
@@ -1007,6 +1017,14 @@ impl TransferPass {
                     // Drained by the frame pipeline after the fence; no GPU work
                     // here, so no barrier. The GPU->src copy is a separate op.
                     TransferOperation::ReadbackBuffer { .. } => {}
+                    // Whole-image TransferWrite (#96): the op both reads lower
+                    // mips and writes higher ones, but the per-mip transitions
+                    // are internal — for hazard purposes the write wins, and the
+                    // op starts and ends in TRANSFER_DST so the whole-image
+                    // tracker model stays truthful.
+                    TransferOperation::GenerateMipmaps { texture } => {
+                        usage.add_texture(Arc::clone(texture), TextureAccessMode::TransferWrite);
+                    }
                 }
             }
         }

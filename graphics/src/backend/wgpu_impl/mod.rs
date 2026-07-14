@@ -512,6 +512,10 @@ impl WgpuBackend {
             // Per-pass timestamp collection is wired for the Vulkan backend
             // only (#95); the wgpu pass encoders pass `timestamp_writes: None`.
             gpu_timestamps: false,
+            // No blit path in the wgpu backend (#96); GenerateMipmaps is a no-op
+            // and the loader falls back to a single mip. A wgpu render/compute
+            // downsampler is a named follow-up.
+            mip_generation: false,
         }
     }
 

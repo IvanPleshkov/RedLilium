@@ -70,6 +70,13 @@ pub struct DeviceCapabilities {
     /// (Vulkan). When false, [`GraphicsDevice::latest_gpu_timings`] returns an
     /// empty result and the editor stats panel degrades to "unavailable".
     pub gpu_timestamps: bool,
+    /// Whether the backend can generate mip chains on the GPU via the frame
+    /// graph (#96, `TransferOperation::GenerateMipmaps` — a `vkCmdBlitImage`
+    /// chain). This is the format-independent "backend supports the op" bit;
+    /// per-format blit eligibility is a separate query
+    /// ([`GraphicsDevice::supports_mipmap_generation`]). `false` on wgpu/dummy
+    /// (no blit path), so the texture loader falls back to a single mip.
+    pub mip_generation: bool,
 }
 
 impl DeviceCapabilities {
@@ -193,6 +200,17 @@ impl GraphicsDevice {
     /// [`DeviceCapabilities::gpu_timestamps`] is false.
     pub fn latest_gpu_timings(&self) -> FrameGpuTimings {
         self.instance.backend().latest_gpu_timings()
+    }
+
+    /// Whether the GPU can generate a mip chain for `format` (#96).
+    ///
+    /// True only when the backend supports the op
+    /// ([`DeviceCapabilities::mip_generation`]) AND the format is blit-eligible
+    /// (`BLIT_SRC | BLIT_DST | SAMPLED_IMAGE_FILTER_LINEAR` on Vulkan).
+    /// Block-compressed and other non-blittable formats return false; the
+    /// texture loader then keeps a single mip. Always false on wgpu/dummy.
+    pub fn supports_mipmap_generation(&self, format: crate::types::TextureFormat) -> bool {
+        self.capabilities.mip_generation && self.instance.backend().supports_blit_mipgen(format)
     }
 
     /// Create a GPU buffer.

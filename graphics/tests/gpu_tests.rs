@@ -38,11 +38,12 @@ use common::{
     readback_buffer_size, verify_pixel, write_quad_vertices,
 };
 use redlilium_graphics::{
-    BindingGroupDescriptor, BindingLayout, BindingLayoutEntry, BindingType, BufferUsage,
-    ColorAttachment, DepthStencilAttachment, GraphicsPass, LoadOp, MaterialDescriptor,
-    MaterialInstance, QueuePreference, RenderGraph, RenderGraphCompilationMode, RenderTargetConfig,
-    SamplerDescriptor, ShaderSource, StoreOp, TextureFormat, TextureUsage, TransferConfig,
-    TransferOperation, TransferPass,
+    BindingGroupDescriptor, BindingLayout, BindingLayoutEntry, BindingType,
+    BufferTextureCopyRegion, BufferTextureLayout, BufferUsage, ColorAttachment,
+    DepthStencilAttachment, Extent3d, GraphicsPass, LoadOp, MaterialDescriptor, MaterialInstance,
+    QueuePreference, RenderGraph, RenderGraphCompilationMode, RenderTargetConfig,
+    SamplerDescriptor, ShaderSource, StoreOp, TextureCopyLocation, TextureDescriptor,
+    TextureFormat, TextureUsage, TransferConfig, TransferOperation, TransferPass,
 };
 
 // ============================================================================
@@ -179,6 +180,152 @@ fn test_upload_texture_data_roundtrip(#[case] backend: Backend) {
         data, pixels,
         "read-back texture bytes must match the uploaded pattern"
     );
+}
+
+/// GPU mip-chain generation (#96): a 4×4 texture with four distinct quadrant
+/// colors, then `GenerateMipmaps`, must produce a 1×1 top mip that is the
+/// average of the four colors (two linear blit steps: 4→2→1). Runs with
+/// validation on so a subresource-range barrier mistake in the blit chain is
+/// caught. Skipped where `mip_generation == false` (wgpu/dummy).
+#[rstest]
+#[case::vulkan(Backend::Vulkan)]
+fn test_generate_mipmaps_4x4_average(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        eprintln!("Skipping test: {backend:?} backend not available");
+        return;
+    };
+    if !ctx.device.capabilities().mip_generation {
+        eprintln!("Skipping test: mip_generation unsupported on {backend:?}");
+        return;
+    }
+
+    if backend == Backend::Vulkan {
+        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+    }
+
+    const W: u32 = 4;
+    const H: u32 = 4;
+    // Quadrants: top-left red, top-right green, bottom-left blue, bottom-right
+    // white. Their average is (~128, ~128, ~128, 255).
+    let colors = [
+        [255u8, 0, 0, 255],
+        [0, 255, 0, 255],
+        [0, 0, 255, 255],
+        [255, 255, 255, 255],
+    ];
+    let mut pixels = vec![0u8; (W * H * 4) as usize];
+    for y in 0..H {
+        for x in 0..W {
+            let q = (if y < 2 { 0 } else { 2 }) + (if x < 2 { 0 } else { 1 });
+            let i = ((y * W + x) * 4) as usize;
+            pixels[i..i + 4].copy_from_slice(&colors[q]);
+        }
+    }
+
+    // 4×4 → 3 mips (4, 2, 1). COPY_SRC so the blit can read lower mips.
+    let mip_count = 3;
+    let texture = ctx
+        .device
+        .create_texture(
+            &TextureDescriptor::new_2d(
+                W,
+                H,
+                TextureFormat::Rgba8Unorm,
+                TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST | TextureUsage::COPY_SRC,
+            )
+            .with_mip_levels(mip_count),
+        )
+        .expect("create mip texture");
+
+    // One pass: upload mip 0, then blit the chain — exercises the intra-pass
+    // upload→blit barrier the op emits internally.
+    let upload = TransferOperation::upload_texture_data(&ctx.device, texture.clone(), &pixels)
+        .expect("stage mip0 upload");
+    let mut graph = RenderGraph::new();
+    let mut pass = TransferPass::new("mipgen".into());
+    pass.set_transfer_config(TransferConfig::new().with_operations(vec![
+        upload,
+        TransferOperation::generate_mipmaps(texture.clone()),
+    ]));
+    graph.add_transfer_pass(pass);
+    ctx.execute_graph(graph);
+
+    // Read back the 1×1 top mip (mip 2).
+    let readback = ctx.create_readback_buffer(4);
+    let region = BufferTextureCopyRegion::new(
+        BufferTextureLayout::packed(),
+        TextureCopyLocation::mip(mip_count - 1),
+        Extent3d::new_2d(1, 1),
+    );
+    let mut read_graph = RenderGraph::new();
+    let mut read_pass = TransferPass::new("read_top_mip".into());
+    read_pass.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::readback_texture(texture.clone(), readback.clone(), vec![region]),
+    ));
+    read_graph.add_transfer_pass(read_pass);
+    ctx.execute_graph(read_graph);
+
+    let data = ctx.read_buffer(&readback, 4);
+    assert_eq!(data.len(), 4, "expected one RGBA texel, got {data:?}");
+    // Two linear halvings of the four quadrant colors → mid-gray, opaque.
+    let expected = [128i32, 128, 128, 255];
+    for (i, &exp) in expected.iter().enumerate() {
+        let got = data[i] as i32;
+        assert!(
+            (got - exp).abs() <= 8,
+            "top-mip channel {i}: got {got}, expected ~{exp} (full texel {data:?})"
+        );
+    }
+
+    if backend == Backend::Vulkan {
+        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        assert_eq!(
+            errors, 0,
+            "Vulkan validation reported {errors} error(s) during mip generation"
+        );
+    }
+}
+
+/// Format gate for mip generation (#96): a blit-eligible color format is
+/// supported on Vulkan; a block-compressed format never is (it cannot be
+/// blit-downsampled). wgpu/dummy report `false` for everything (no blit path),
+/// so the loader keeps a single mip there.
+#[rstest]
+#[case::dummy(Backend::Dummy)]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_mip_generation_format_gate(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new(backend) else {
+        eprintln!("Skipping test: {backend:?} backend not available");
+        return;
+    };
+
+    let color = ctx
+        .device
+        .supports_mipmap_generation(TextureFormat::Rgba8Unorm);
+    let compressed = ctx
+        .device
+        .supports_mipmap_generation(TextureFormat::Bc7RgbaUnorm);
+
+    // Block-compressed formats are never blit-downsamplable on any backend.
+    assert!(
+        !compressed,
+        "{backend:?} claimed mip generation for a block-compressed format"
+    );
+
+    if ctx.device.capabilities().mip_generation {
+        // Vulkan: a plain color format is blit-eligible.
+        assert!(
+            color,
+            "{backend:?} supports mip generation but rejected Rgba8Unorm"
+        );
+    } else {
+        // wgpu/dummy: no blit path at all.
+        assert!(
+            !color,
+            "{backend:?} has no mip_generation cap but claimed format support"
+        );
+    }
 }
 
 /// Cross-backend face-culling agreement (#39): a counter-clockwise, front-

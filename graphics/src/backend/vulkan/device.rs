@@ -668,6 +668,10 @@ pub fn device_capabilities(
         transfer_queue: plan.transfer.is_some(),
         compute_shaders: true,
         gpu_timestamps,
+        // The Vulkan backend implements GenerateMipmaps via a vkCmdBlitImage
+        // chain (#96); per-format blit eligibility is checked separately at
+        // load time (see `VulkanBackend::supports_blit_mipgen`).
+        mip_generation: true,
     }
 }
 

@@ -421,6 +421,24 @@ pub enum TransferOperation {
         /// CPU destination, filled after the fence.
         dst: Arc<Mutex<Vec<u8>>>,
     },
+
+    /// Generate the full mip chain of `texture` from mip 0 on the GPU (#96).
+    ///
+    /// A linear blit chain (mip N → N+1) — the simplest correct baseline. The
+    /// per-mip subresource layout transitions are internal to the op: it starts
+    /// from and ends in the tracker-declared whole-image `TransferWrite`
+    /// (`TRANSFER_DST`) layout, so the whole-image layout model stays truthful.
+    ///
+    /// `vkCmdBlitImage` is legal only on graphics-capable queues, so a graph
+    /// containing this op is never routed to the transfer or async-compute
+    /// queue ([`requires_graphics_queue`](crate::graph::RenderGraph::requires_graphics_queue)).
+    /// `texture` must have been created with a full `mip_level_count`, `COPY_SRC`
+    /// usage (blit reads lower mips), and a blit-eligible format; the loader
+    /// arranges this behind [`DeviceCapabilities::mip_generation`](crate::DeviceCapabilities).
+    GenerateMipmaps {
+        /// The texture whose mips 1.. are generated from mip 0.
+        texture: Arc<Texture>,
+    },
 }
 
 impl TransferOperation {
@@ -456,6 +474,11 @@ impl TransferOperation {
             dst,
             regions: vec![TextureCopyRegion::whole(extent)],
         }
+    }
+
+    /// Create a mip-chain generation operation (#96).
+    pub fn generate_mipmaps(texture: Arc<Texture>) -> Self {
+        Self::GenerateMipmaps { texture }
     }
 
     /// Create a buffer-to-texture upload operation.

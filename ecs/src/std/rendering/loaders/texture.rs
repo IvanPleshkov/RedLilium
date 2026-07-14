@@ -86,6 +86,10 @@ pub struct TextureSettings {
     /// Maximum anisotropy level (1 = off).
     #[serde(default = "default_anisotropy")]
     pub anisotropy: u16,
+    /// Generate a full GPU mip chain at load time (#96). When the device or
+    /// format cannot blit-downsample, the texture keeps a single mip regardless.
+    #[serde(default = "default_generate_mips")]
+    pub generate_mips: bool,
 }
 
 fn default_srgb() -> bool {
@@ -100,6 +104,9 @@ fn default_address() -> AddressMode {
 fn default_anisotropy() -> u16 {
     1
 }
+fn default_generate_mips() -> bool {
+    true
+}
 
 impl Default for TextureSettings {
     fn default() -> Self {
@@ -108,6 +115,7 @@ impl Default for TextureSettings {
             filter: default_filter(),
             address: default_address(),
             anisotropy: default_anisotropy(),
+            generate_mips: default_generate_mips(),
         }
     }
 }
@@ -138,6 +146,8 @@ impl AssetLoader for TextureLoader {
 
     fn pipeline(source: &TextureSource, _deps: &(), env: &LoadEnv) -> Vec<Box<dyn AssetStage>> {
         let mut stages: Vec<Box<dyn AssetStage>> = Vec::new();
+        // Solid 1×1 defaults never need mips; only file textures opt in (#96).
+        let mut generate_mips = false;
         match source {
             TextureSource::File(_) => {
                 if let Some(path) = &env.path {
@@ -151,6 +161,7 @@ impl AssetLoader for TextureLoader {
                     .as_deref()
                     .and_then(|s| ron::from_str::<TextureSettings>(s).ok())
                     .unwrap_or_default();
+                generate_mips = settings.generate_mips;
                 stages.push(Box::new(DecodeImageStage { settings }));
             }
             TextureSource::Solid(rgba) => {
@@ -166,6 +177,7 @@ impl AssetLoader for TextureLoader {
         }
         stages.push(Box::new(UploadTextureStage {
             device: env.device.clone(),
+            generate_mips,
         }));
         stages
     }
@@ -248,6 +260,14 @@ impl AssetStage for MakeSolidStage {
 /// frame graph.
 struct UploadTextureStage {
     device: Arc<GraphicsDevice>,
+    /// Whether to request a full GPU-generated mip chain (#96). Still gated at
+    /// runtime by the device capability and per-format blit eligibility.
+    generate_mips: bool,
+}
+
+/// Full mip count for a `width × height` 2D image: `floor(log2(max)) + 1`.
+fn full_mip_level_count(width: u32, height: u32) -> u32 {
+    32 - width.max(height).max(1).leading_zeros()
 }
 
 impl AssetStage for UploadTextureStage {
@@ -258,14 +278,37 @@ impl AssetStage for UploadTextureStage {
         let cpu = *input
             .downcast::<CpuTexture>()
             .map_err(|_| AssetError::Decode("texture: upload stage expected CpuTexture".into()))?;
+
+        // Mip generation (#96) is requested only when the record asks for it,
+        // the backend supports the op, the format is blit-eligible, and the
+        // image is larger than 1×1. Otherwise keep a single mip exactly as
+        // before — never fail the load. Ineligible formats log once.
+        let wants_mips = self.generate_mips && (cpu.width > 1 || cpu.height > 1);
+        let can_mip = wants_mips && self.device.supports_mipmap_generation(cpu.format);
+        if wants_mips && !can_mip {
+            log_mip_fallback(cpu.format);
+        }
+        let mip_level_count = if can_mip {
+            full_mip_level_count(cpu.width, cpu.height)
+        } else {
+            1
+        };
+
+        // Blit reads lower mips as TRANSFER_SRC, so the texture needs COPY_SRC
+        // when a chain is generated.
+        let mut usage = TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST;
+        if mip_level_count > 1 {
+            usage |= TextureUsage::COPY_SRC;
+        }
+
         let descriptor = TextureDescriptor {
             label: cpu.name.clone(),
             size: Extent3d::new_2d(cpu.width, cpu.height),
-            mip_level_count: 1,
+            mip_level_count,
             sample_count: 1,
             dimension: cpu.dimension,
             format: cpu.format,
-            usage: TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST,
+            usage,
             // Declared cross-queue (#89): the asset-upload transfer graph is
             // routed to the dedicated transfer queue (DMA engines), which
             // requires the image to be legally accessible from both families
@@ -274,9 +317,32 @@ impl AssetStage for UploadTextureStage {
             cross_queue: true,
         };
         let texture = self.device.create_texture(&descriptor)?;
-        let op =
-            TransferOperation::upload_texture_data(&self.device, Arc::clone(&texture), &cpu.data)?;
-        Ok((Box::new(texture) as GpuValue, vec![op]))
+        let mut ops = vec![TransferOperation::upload_texture_data(
+            &self.device,
+            Arc::clone(&texture),
+            &cpu.data,
+        )?];
+        // The blit chain runs after the mip0 upload; flush_gpu routes it to the
+        // graphics queue (blit is illegal on the transfer family).
+        if mip_level_count > 1 {
+            ops.push(TransferOperation::generate_mipmaps(Arc::clone(&texture)));
+        }
+        Ok((Box::new(texture) as GpuValue, ops))
+    }
+}
+
+/// Log once per format that mip generation was skipped (unsupported device or
+/// non-blittable format) so a load never fails and the log never floods.
+fn log_mip_fallback(format: TextureFormat) {
+    use std::collections::HashSet;
+    use std::sync::{LazyLock, Mutex};
+    static LOGGED: LazyLock<Mutex<HashSet<TextureFormat>>> =
+        LazyLock::new(|| Mutex::new(HashSet::new()));
+    if LOGGED.lock().unwrap().insert(format) {
+        log::info!(
+            "texture mip generation unavailable for {format:?} (device or format cannot \
+             blit-downsample); keeping a single mip (#96)"
+        );
     }
 }
 
@@ -293,6 +359,17 @@ mod tests {
         assert_eq!(s.filter, FilterMode::Linear);
         assert_eq!(s.address, AddressMode::Repeat);
         assert_eq!(s.anisotropy, 1);
+        // Old records with no `generate_mips` field default to on (#96).
+        assert!(s.generate_mips);
+    }
+
+    /// `floor(log2(max(w,h))) + 1` — the full 2D mip count.
+    #[test]
+    fn mip_level_count_matches_dimension() {
+        assert_eq!(full_mip_level_count(1, 1), 1);
+        assert_eq!(full_mip_level_count(4, 4), 3); // 4→2→1
+        assert_eq!(full_mip_level_count(256, 256), 9);
+        assert_eq!(full_mip_level_count(640, 480), 10); // driven by max
     }
 
     /// The settings→sampler mapping applies filter to all three filters and the

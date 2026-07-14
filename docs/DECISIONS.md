@@ -1881,8 +1881,26 @@ semaphore round-trip adds latency the frame immediately pays).
   falls back to graphics (one warning per texture) — same hint semantics as
   ADR-030
 
+### Amendment (2026-07-14, #96): requires-graphics ops split off the transfer graph
+
+GPU mip-chain generation (`TransferOperation::GenerateMipmaps`, a
+`vkCmdBlitImage` chain) is legal **only on a graphics-capable queue** —
+neither the transfer family nor a dedicated compute family can blit. So the
+per-op routing gate this ADR introduced grows a *requires-graphics* rung:
+`RenderGraph::requires_graphics_queue()` makes a graph containing such an op
+ineligible for both the Transfer and AsyncCompute routes (alongside the
+existing `has_graphics_passes` check). `AssetProcessor::flush_gpu` now returns
+**two** graphs per flush: the mip-0 upload stays on the transfer-routed graph;
+the mip-gen blit chain goes into a second, graphics-routed graph pushed after
+it. Cross-queue ordering (upload on transfer → blit on graphics → sample in
+the frame) is derived automatically by the trackers — no manual sync. The op
+is gated by `DeviceCapabilities.mip_generation` (Vulkan only; the loader falls
+back to a single mip on wgpu/dummy and on blit-ineligible formats). See #96.
+
 ### Related Issues
 
 - #89: implementation
 - #47: multi-queue machinery the routing generalizes
 - #88: sharing-mode measurements gating a QFOT revisit
+- #96: GPU mip generation — a requires-graphics transfer op routed off the
+  transfer queue

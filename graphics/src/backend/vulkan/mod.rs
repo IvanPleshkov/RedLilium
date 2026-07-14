@@ -768,6 +768,22 @@ impl VulkanBackend {
             .unwrap_or_default()
     }
 
+    /// Whether `format` supports a `vkCmdBlitImage` mip-generation chain (#96):
+    /// the format's optimal tiling must advertise `BLIT_SRC | BLIT_DST |
+    /// SAMPLED_IMAGE_FILTER_LINEAR`. Block-compressed formats never do. Queried
+    /// straight from the driver — a cheap call made once per texture load.
+    pub fn supports_blit_mipgen(&self, format: crate::types::TextureFormat) -> bool {
+        let vk_format = self.vk_texture_format(format);
+        let props = unsafe {
+            self.instance
+                .get_physical_device_format_properties(self.physical_device, vk_format)
+        };
+        let needed = vk::FormatFeatureFlags::BLIT_SRC
+            | vk::FormatFeatureFlags::BLIT_DST
+            | vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR;
+        props.optimal_tiling_features.contains(needed)
+    }
+
     /// Re-arm the timestamp query pool for `queue`/`slot` after a recording
     /// error abandoned the command buffer (#95). No-op without timestamps.
     fn abort_timestamps(&self, queue: QueueId, slot: usize) {
@@ -2268,6 +2284,9 @@ impl VulkanBackend {
         let target = match graph.queue_preference() {
             QueuePreference::Graphics => return None,
             _ if graph.has_graphics_passes() => return None,
+            // A GenerateMipmaps op (vkCmdBlitImage) is legal only on a
+            // graphics-capable queue — never transfer or async compute (#96).
+            _ if graph.requires_graphics_queue() => return None,
             QueuePreference::AsyncCompute => self
                 .async_compute
                 .as_ref()
@@ -3681,6 +3700,119 @@ impl VulkanBackend {
                         &copy_regions,
                     );
                 }
+            }
+            TransferOperation::GenerateMipmaps { texture } => {
+                let GpuTexture::Vulkan { image, .. } = texture.gpu_handle() else {
+                    return Ok(());
+                };
+                let image = *image;
+                let mip_count = texture.mip_level_count();
+                // A single-mip texture (ineligible format / cap off) is a no-op.
+                if mip_count <= 1 {
+                    return Ok(());
+                }
+
+                let aspect = image_aspect_mask(texture.format());
+                let extent = texture.size();
+                let mut mip_w = extent.width.max(1) as i32;
+                let mut mip_h = extent.height.max(1) as i32;
+
+                // The whole image arrives in TRANSFER_DST (the tracker-declared
+                // TransferWrite after the mip0 upload). Blit each mip i-1 → i
+                // with a linear filter, transitioning the source mip to
+                // TRANSFER_SRC immediately before it is read — that barrier is
+                // also the write→read dependency on the blit that produced it.
+                let subresource = |base: u32, count: u32| vk::ImageSubresourceRange {
+                    aspect_mask: aspect,
+                    base_mip_level: base,
+                    level_count: count,
+                    base_array_layer: 0,
+                    layer_count: vk::REMAINING_ARRAY_LAYERS,
+                };
+                for i in 1..mip_count {
+                    let src_level = i - 1;
+                    let to_src = vk::ImageMemoryBarrier2::default()
+                        .src_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
+                        .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                        .dst_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
+                        .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                        .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .image(image)
+                        .subresource_range(subresource(src_level, 1));
+                    let barriers = [to_src];
+                    let dep = vk::DependencyInfo::default().image_memory_barriers(&barriers);
+                    unsafe { self.synchronization2.cmd_pipeline_barrier2(cmd, &dep) };
+
+                    let dst_w = (mip_w / 2).max(1);
+                    let dst_h = (mip_h / 2).max(1);
+                    let blit = vk::ImageBlit::default()
+                        .src_subresource(vk::ImageSubresourceLayers {
+                            aspect_mask: aspect,
+                            mip_level: src_level,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        })
+                        .src_offsets([
+                            vk::Offset3D { x: 0, y: 0, z: 0 },
+                            vk::Offset3D {
+                                x: mip_w,
+                                y: mip_h,
+                                z: 1,
+                            },
+                        ])
+                        .dst_subresource(vk::ImageSubresourceLayers {
+                            aspect_mask: aspect,
+                            mip_level: i,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        })
+                        .dst_offsets([
+                            vk::Offset3D { x: 0, y: 0, z: 0 },
+                            vk::Offset3D {
+                                x: dst_w,
+                                y: dst_h,
+                                z: 1,
+                            },
+                        ]);
+                    unsafe {
+                        self.device.cmd_blit_image(
+                            cmd,
+                            image,
+                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                            image,
+                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            &[blit],
+                            vk::Filter::LINEAR,
+                        );
+                    }
+                    mip_w = dst_w;
+                    mip_h = dst_h;
+                }
+
+                // CRITICAL (#96): the tracker models one layout per image, so the
+                // op must END with every mip in the SAME layout it started in
+                // (TRANSFER_DST). Mips 0..mip_count-1 were transitioned to
+                // TRANSFER_SRC as blit sources; the last mip is still
+                // TRANSFER_DST. Transition the sources back so the whole-image
+                // tracker model stays truthful and the next barrier (→ SHADER_READ
+                // before sampling) is correct.
+                let restore = vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
+                    .src_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                    .dst_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
+                    .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                    .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(image)
+                    .subresource_range(subresource(0, mip_count - 1));
+                let barriers = [restore];
+                let dep = vk::DependencyInfo::default().image_memory_barriers(&barriers);
+                unsafe { self.synchronization2.cmd_pipeline_barrier2(cmd, &dep) };
             }
         }
         Ok(())

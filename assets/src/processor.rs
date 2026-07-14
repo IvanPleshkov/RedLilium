@@ -21,7 +21,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use parking_lot::Mutex;
 use redlilium_graphics::{
-    GraphicsDevice, QueuePreference, RenderGraph, TransferConfig, TransferPass,
+    GraphicsDevice, QueuePreference, RenderGraph, TransferConfig, TransferOperation, TransferPass,
 };
 use redlilium_vfs::Vfs;
 
@@ -272,17 +272,24 @@ impl AssetProcessor {
         }
     }
 
-    /// Run pending GPU stages (up to `gpu_per_frame`) and return their upload
-    /// ops as a **transfer-only graph** requesting the dedicated transfer
-    /// queue (#89): on hardware with DMA engines the streaming copies overlap
-    /// both rendering and compute; elsewhere the preference falls back to
-    /// async compute, then the graphics queue. Cross-queue ordering against
-    /// the consuming frame graph (upload → first sample) is derived
-    /// automatically by the backend trackers — the caller only has to submit
-    /// this graph in the same frame, before the main graph.
+    /// Run pending GPU stages (up to `gpu_per_frame`) and return their ops as
+    /// up to **two graphs**, in submission order (#89, #96):
     ///
-    /// Returns `None` when no GPU stage was ready. Call in `on_draw`.
-    pub fn flush_gpu(&mut self) -> Option<RenderGraph> {
+    /// 1. A **transfer-only upload graph** requesting the dedicated transfer
+    ///    queue: on hardware with DMA engines the streaming copies overlap both
+    ///    rendering and compute; elsewhere the preference falls back to async
+    ///    compute, then the graphics queue.
+    /// 2. A **graphics-routed mip-generation graph** for any
+    ///    [`GenerateMipmaps`](redlilium_graphics::TransferOperation::GenerateMipmaps)
+    ///    ops — `vkCmdBlitImage` is legal only on a graphics-capable queue, so
+    ///    mip-gen must not ride the transfer graph. It is pushed *after* the
+    ///    upload graph; the cross-queue ordering (upload → blit → sample) is
+    ///    derived automatically by the backend trackers.
+    ///
+    /// Both are pushed to the frame's transfer-graph list and submitted before
+    /// the main frame graph. Returns an empty `Vec` when no GPU stage was
+    /// ready. Call in `on_draw`.
+    pub fn flush_gpu(&mut self) -> Vec<RenderGraph> {
         let ready: Vec<RequestId> = self
             .requests
             .iter()
@@ -319,14 +326,39 @@ impl AssetProcessor {
         }
 
         if ops.is_empty() {
-            return None;
+            return Vec::new();
         }
-        let mut pass = TransferPass::new(format!("asset_uploads_{}", self.id));
-        pass.set_transfer_config(TransferConfig::new().with_operations(ops));
-        let mut graph = RenderGraph::new();
-        graph.set_queue_preference(QueuePreference::Transfer);
-        graph.add_transfer_pass(pass);
-        Some(graph)
+
+        // Split: mip generation (vkCmdBlitImage) is legal only on a graphics
+        // queue, so it cannot ride the transfer-routed upload graph (#96). The
+        // upload graph writes mip 0; the mip-gen graph reads it and fills the
+        // rest — cross-queue ordering (transfer → graphics) is derived by the
+        // backend trackers, so the two only need to be submitted in this order.
+        let (mip_ops, upload_ops): (Vec<_>, Vec<_>) = ops
+            .into_iter()
+            .partition(|op| matches!(op, TransferOperation::GenerateMipmaps { .. }));
+
+        let mut graphs = Vec::with_capacity(2);
+        if !upload_ops.is_empty() {
+            let mut pass = TransferPass::new(format!("asset_uploads_{}", self.id));
+            pass.set_transfer_config(TransferConfig::new().with_operations(upload_ops));
+            let mut graph = RenderGraph::new();
+            graph.set_queue_preference(QueuePreference::Transfer);
+            graph.add_transfer_pass(pass);
+            graphs.push(graph);
+        }
+        if !mip_ops.is_empty() {
+            let mut pass = TransferPass::new(format!("asset_mipgen_{}", self.id));
+            pass.set_transfer_config(TransferConfig::new().with_operations(mip_ops));
+            let mut graph = RenderGraph::new();
+            // Routed to the graphics queue (blit requires it, #96); the
+            // requires-graphics gate in `route_graph` enforces this even if the
+            // preference were left at the default.
+            graph.set_queue_preference(QueuePreference::Graphics);
+            graph.add_transfer_pass(pass);
+            graphs.push(graph);
+        }
+        graphs
     }
 
     /// Number of requests still in flight (queued, running, or awaiting GPU).

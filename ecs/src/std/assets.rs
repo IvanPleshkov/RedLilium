@@ -81,10 +81,14 @@ impl System for AssetGpuFlush {
         if !world.resource::<RenderSchedule>().is_active() {
             return Ok(());
         }
-        if let Some(transfer) = world.resource_mut::<AssetProcessor>().flush_gpu() {
-            world
-                .resource_mut::<RenderSchedule>()
-                .push_transfer_graph(transfer);
+        // flush_gpu returns the upload graph and (when mips are generated) a
+        // graphics-routed mip-gen graph, in submission order (#89, #96).
+        let graphs = world.resource_mut::<AssetProcessor>().flush_gpu();
+        if !graphs.is_empty() {
+            let mut schedule = world.resource_mut::<RenderSchedule>();
+            for graph in graphs {
+                schedule.push_transfer_graph(graph);
+            }
         }
         Ok(())
     }

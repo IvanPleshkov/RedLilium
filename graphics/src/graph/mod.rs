@@ -281,6 +281,18 @@ impl RenderGraph {
             .all(|pass| matches!(pass, Pass::Transfer(_)))
     }
 
+    /// Whether the graph contains an operation that is legal only on a
+    /// graphics-capable queue (#96): a transfer pass with a
+    /// [`GenerateMipmaps`](crate::graph::TransferOperation::GenerateMipmaps) op
+    /// (`vkCmdBlitImage`), which the transfer and async-compute families cannot
+    /// execute. Such a graph must run on the graphics queue.
+    pub fn requires_graphics_queue(&self) -> bool {
+        self.passes.iter().any(|pass| match pass {
+            Pass::Transfer(p) => p.requires_graphics_queue(),
+            _ => false,
+        })
+    }
+
     /// Whether any pass renders to the swapchain (surface) image.
     ///
     /// At most one such graph may be submitted per frame: its submit is
