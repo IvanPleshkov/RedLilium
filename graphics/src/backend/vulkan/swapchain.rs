@@ -543,7 +543,6 @@ pub fn present_vulkan_frame(
     _frame_index: u64,
 ) -> Result<(), GraphicsError> {
     let cmd = present_command_buffer;
-    let command_buffers = [cmd];
 
     // Reset and begin command buffer
     unsafe {
@@ -584,12 +583,20 @@ pub fn present_vulkan_frame(
     let (old_layout, src_access) = if rendered {
         (
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
         )
     } else {
-        (vk::ImageLayout::UNDEFINED, vk::AccessFlags::empty())
+        (vk::ImageLayout::UNDEFINED, vk::AccessFlags2::NONE)
     };
-    let barrier = vk::ImageMemoryBarrier::default()
+    // sync2: the COLOR_ATTACHMENT_OUTPUT → present transition. The
+    // destination scope stays empty (`NONE`, formerly BOTTOM_OF_PIPE): the
+    // present operation is ordered by the `render_finished` semaphore, not by
+    // this barrier's second scope.
+    let barrier = vk::ImageMemoryBarrier2::default()
+        .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+        .src_access_mask(src_access)
+        .dst_stage_mask(vk::PipelineStageFlags2::NONE)
+        .dst_access_mask(vk::AccessFlags2::NONE)
         .old_layout(old_layout)
         .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
         .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
@@ -601,20 +608,14 @@ pub fn present_vulkan_frame(
             level_count: 1,
             base_array_layer: 0,
             layer_count: 1,
-        })
-        .src_access_mask(src_access)
-        .dst_access_mask(vk::AccessFlags::empty());
+        });
 
+    let image_barriers = [barrier];
+    let dependency_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
     unsafe {
-        vulkan_backend.device().cmd_pipeline_barrier(
-            cmd,
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[barrier],
-        );
+        vulkan_backend
+            .synchronization2()
+            .cmd_pipeline_barrier2(cmd, &dependency_info);
     }
 
     // End command buffer
@@ -635,15 +636,21 @@ pub fn present_vulkan_frame(
     } else {
         image_available_semaphore
     };
-    let wait_semaphores = [wait_semaphore];
-    let signal_semaphores = [render_finished_semaphore];
-    let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+    // sync2: wait/signal are `VkSemaphoreSubmitInfo` lists carrying their own
+    // stage masks. The binary present wait keeps COLOR_ATTACHMENT_OUTPUT; the
+    // render-finished signal uses ALL_COMMANDS (signal after all work).
+    let wait_semaphore_infos = [vk::SemaphoreSubmitInfo::default()
+        .semaphore(wait_semaphore)
+        .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)];
+    let signal_semaphore_infos = [vk::SemaphoreSubmitInfo::default()
+        .semaphore(render_finished_semaphore)
+        .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
+    let command_buffer_infos = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
 
-    let submit_info = vk::SubmitInfo::default()
-        .wait_semaphores(&wait_semaphores)
-        .wait_dst_stage_mask(&wait_stages)
-        .command_buffers(&command_buffers)
-        .signal_semaphores(&signal_semaphores);
+    let submit_info = vk::SubmitInfo2::default()
+        .wait_semaphore_infos(&wait_semaphore_infos)
+        .command_buffer_infos(&command_buffer_infos)
+        .signal_semaphore_infos(&signal_semaphore_infos);
 
     // Reset the in-flight fence only now, immediately before the submit that
     // signals it (see `acquire_next_image`): between acquire and this point
@@ -654,7 +661,7 @@ pub fn present_vulkan_frame(
 
     // Submit and signal the fence
     let submit_result = unsafe {
-        vulkan_backend.device().queue_submit(
+        vulkan_backend.synchronization2().queue_submit2(
             vulkan_backend.graphics_queue(),
             &[submit_info],
             in_flight_fence,
@@ -666,9 +673,9 @@ pub fn present_vulkan_frame(
         // does not stall out the full fence timeout. If that also fails the
         // device is almost certainly lost.
         let resignal = unsafe {
-            vulkan_backend.device().queue_submit(
+            vulkan_backend.synchronization2().queue_submit2(
                 vulkan_backend.graphics_queue(),
-                &[vk::SubmitInfo::default()],
+                &[vk::SubmitInfo2::default()],
                 in_flight_fence,
             )
         };
@@ -683,11 +690,13 @@ pub fn present_vulkan_frame(
         });
     }
 
-    // Present the swapchain image
+    // Present the swapchain image. `vkQueuePresentKHR` has no sync2 variant;
+    // it waits on the plain binary semaphore signaled by the submit above.
     let swapchains = [swapchain];
     let image_indices = [image_index];
+    let present_wait_semaphores = [render_finished_semaphore];
     let present_info = vk::PresentInfoKHR::default()
-        .wait_semaphores(&signal_semaphores)
+        .wait_semaphores(&present_wait_semaphores)
         .swapchains(&swapchains)
         .image_indices(&image_indices);
 

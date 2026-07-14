@@ -121,35 +121,35 @@ impl BufferAccessMode {
 
     /// Get the Vulkan access flags for this buffer access mode (as source).
     #[cfg(feature = "vulkan-backend")]
-    pub fn src_access_mask(self) -> ash::vk::AccessFlags {
-        use ash::vk::AccessFlags;
+    pub fn src_access_mask(self) -> ash::vk::AccessFlags2 {
+        use ash::vk::AccessFlags2;
         match self {
-            Self::VertexBuffer => AccessFlags::VERTEX_ATTRIBUTE_READ,
-            Self::IndexBuffer => AccessFlags::INDEX_READ,
-            Self::UniformRead => AccessFlags::UNIFORM_READ,
-            Self::StorageRead => AccessFlags::SHADER_READ,
-            Self::StorageWrite => AccessFlags::SHADER_WRITE,
-            Self::StorageReadWrite => AccessFlags::SHADER_READ | AccessFlags::SHADER_WRITE,
-            Self::IndirectRead => AccessFlags::INDIRECT_COMMAND_READ,
-            Self::TransferRead => AccessFlags::TRANSFER_READ,
-            Self::TransferWrite => AccessFlags::TRANSFER_WRITE,
+            Self::VertexBuffer => AccessFlags2::VERTEX_ATTRIBUTE_READ,
+            Self::IndexBuffer => AccessFlags2::INDEX_READ,
+            Self::UniformRead => AccessFlags2::UNIFORM_READ,
+            Self::StorageRead => AccessFlags2::SHADER_READ,
+            Self::StorageWrite => AccessFlags2::SHADER_WRITE,
+            Self::StorageReadWrite => AccessFlags2::SHADER_READ | AccessFlags2::SHADER_WRITE,
+            Self::IndirectRead => AccessFlags2::INDIRECT_COMMAND_READ,
+            Self::TransferRead => AccessFlags2::TRANSFER_READ,
+            Self::TransferWrite => AccessFlags2::TRANSFER_WRITE,
         }
     }
 
     /// Get the Vulkan access flags for this buffer access mode (as destination).
     #[cfg(feature = "vulkan-backend")]
-    pub fn dst_access_mask(self) -> ash::vk::AccessFlags {
-        use ash::vk::AccessFlags;
+    pub fn dst_access_mask(self) -> ash::vk::AccessFlags2 {
+        use ash::vk::AccessFlags2;
         match self {
-            Self::VertexBuffer => AccessFlags::VERTEX_ATTRIBUTE_READ,
-            Self::IndexBuffer => AccessFlags::INDEX_READ,
-            Self::UniformRead => AccessFlags::UNIFORM_READ,
-            Self::StorageRead => AccessFlags::SHADER_READ,
-            Self::StorageWrite => AccessFlags::SHADER_WRITE,
-            Self::StorageReadWrite => AccessFlags::SHADER_READ | AccessFlags::SHADER_WRITE,
-            Self::IndirectRead => AccessFlags::INDIRECT_COMMAND_READ,
-            Self::TransferRead => AccessFlags::TRANSFER_READ,
-            Self::TransferWrite => AccessFlags::TRANSFER_WRITE,
+            Self::VertexBuffer => AccessFlags2::VERTEX_ATTRIBUTE_READ,
+            Self::IndexBuffer => AccessFlags2::INDEX_READ,
+            Self::UniformRead => AccessFlags2::UNIFORM_READ,
+            Self::StorageRead => AccessFlags2::SHADER_READ,
+            Self::StorageWrite => AccessFlags2::SHADER_WRITE,
+            Self::StorageReadWrite => AccessFlags2::SHADER_READ | AccessFlags2::SHADER_WRITE,
+            Self::IndirectRead => AccessFlags2::INDIRECT_COMMAND_READ,
+            Self::TransferRead => AccessFlags2::TRANSFER_READ,
+            Self::TransferWrite => AccessFlags2::TRANSFER_WRITE,
         }
     }
 
@@ -160,18 +160,18 @@ impl BufferAccessMode {
     /// including `COMPUTE_SHADER` for uniform reads (a UBO can feed a
     /// dispatch just as well as a draw).
     #[cfg(feature = "vulkan-backend")]
-    pub fn src_stage(self) -> ash::vk::PipelineStageFlags {
-        use ash::vk::PipelineStageFlags;
+    pub fn src_stage(self) -> ash::vk::PipelineStageFlags2 {
+        use ash::vk::PipelineStageFlags2;
         match self {
-            Self::VertexBuffer => PipelineStageFlags::VERTEX_INPUT,
-            Self::IndexBuffer => PipelineStageFlags::VERTEX_INPUT,
+            Self::VertexBuffer => PipelineStageFlags2::VERTEX_INPUT,
+            Self::IndexBuffer => PipelineStageFlags2::VERTEX_INPUT,
             Self::UniformRead | Self::StorageRead | Self::StorageWrite | Self::StorageReadWrite => {
-                PipelineStageFlags::VERTEX_SHADER
-                    | PipelineStageFlags::FRAGMENT_SHADER
-                    | PipelineStageFlags::COMPUTE_SHADER
+                PipelineStageFlags2::VERTEX_SHADER
+                    | PipelineStageFlags2::FRAGMENT_SHADER
+                    | PipelineStageFlags2::COMPUTE_SHADER
             }
-            Self::IndirectRead => PipelineStageFlags::DRAW_INDIRECT,
-            Self::TransferRead | Self::TransferWrite => PipelineStageFlags::TRANSFER,
+            Self::IndirectRead => PipelineStageFlags2::DRAW_INDIRECT,
+            Self::TransferRead | Self::TransferWrite => PipelineStageFlags2::ALL_TRANSFER,
         }
     }
 
@@ -180,18 +180,18 @@ impl BufferAccessMode {
     /// See [`src_stage`](Self::src_stage) for why shader modes return the
     /// union of vertex/fragment/compute stages.
     #[cfg(feature = "vulkan-backend")]
-    pub fn dst_stage(self) -> ash::vk::PipelineStageFlags {
-        use ash::vk::PipelineStageFlags;
+    pub fn dst_stage(self) -> ash::vk::PipelineStageFlags2 {
+        use ash::vk::PipelineStageFlags2;
         match self {
-            Self::VertexBuffer => PipelineStageFlags::VERTEX_INPUT,
-            Self::IndexBuffer => PipelineStageFlags::VERTEX_INPUT,
+            Self::VertexBuffer => PipelineStageFlags2::VERTEX_INPUT,
+            Self::IndexBuffer => PipelineStageFlags2::VERTEX_INPUT,
             Self::UniformRead | Self::StorageRead | Self::StorageWrite | Self::StorageReadWrite => {
-                PipelineStageFlags::VERTEX_SHADER
-                    | PipelineStageFlags::FRAGMENT_SHADER
-                    | PipelineStageFlags::COMPUTE_SHADER
+                PipelineStageFlags2::VERTEX_SHADER
+                    | PipelineStageFlags2::FRAGMENT_SHADER
+                    | PipelineStageFlags2::COMPUTE_SHADER
             }
-            Self::IndirectRead => PipelineStageFlags::DRAW_INDIRECT,
-            Self::TransferRead | Self::TransferWrite => PipelineStageFlags::TRANSFER,
+            Self::IndirectRead => PipelineStageFlags2::DRAW_INDIRECT,
+            Self::TransferRead | Self::TransferWrite => PipelineStageFlags2::ALL_TRANSFER,
         }
     }
 }

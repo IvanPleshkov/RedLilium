@@ -71,21 +71,31 @@ fn baseline_gaps(
     if !has_ext(ash::khr::dynamic_rendering::NAME) {
         gaps.push("VK_KHR_dynamic_rendering");
     }
+    // synchronization2 is a baseline-tier requirement (ADR-027): the Vulkan
+    // backend has no sync1 path. Devices lacking it fall back to wgpu.
+    if !has_ext(ash::khr::synchronization2::NAME) {
+        gaps.push("VK_KHR_synchronization2");
+    }
 
     // Feature queries: the baseline tier needs dynamicRendering,
-    // timelineSemaphore, and shaderDrawParameters (SV_InstanceID compiles to
-    // SPIR-V DrawParameters).
+    // synchronization2, timelineSemaphore, and shaderDrawParameters
+    // (SV_InstanceID compiles to SPIR-V DrawParameters).
     let mut vulkan11 = vk::PhysicalDeviceVulkan11Features::default();
     let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default();
     let mut dynamic_rendering = vk::PhysicalDeviceDynamicRenderingFeatures::default();
+    let mut synchronization2 = vk::PhysicalDeviceSynchronization2Features::default();
     let mut features2 = vk::PhysicalDeviceFeatures2::default()
         .push_next(&mut vulkan11)
         .push_next(&mut vulkan12)
-        .push_next(&mut dynamic_rendering);
+        .push_next(&mut dynamic_rendering)
+        .push_next(&mut synchronization2);
     unsafe { instance.get_physical_device_features2(device, &mut features2) };
 
     if dynamic_rendering.dynamic_rendering == vk::FALSE {
         gaps.push("dynamicRendering feature");
+    }
+    if synchronization2.synchronization2 == vk::FALSE {
+        gaps.push("synchronization2 feature");
     }
     if vulkan12.timeline_semaphore == vk::FALSE {
         gaps.push("timelineSemaphore feature");
@@ -302,7 +312,8 @@ pub fn select_physical_device(
         } else {
             GraphicsError::InitializationFailed(
                 "No GPU meets the baseline tier (Vulkan 1.2, dynamic rendering, \
-                 timeline semaphores, shaderDrawParameters); see log for per-device gaps"
+                 synchronization2, timeline semaphores, shaderDrawParameters); \
+                 see log for per-device gaps"
                     .to_string(),
             )
         }
@@ -486,7 +497,10 @@ pub fn create_logical_device(
     }
 
     // Baseline-tier extensions (verified present during selection).
-    let mut device_extensions = vec![ash::khr::dynamic_rendering::NAME.as_ptr()];
+    let mut device_extensions = vec![
+        ash::khr::dynamic_rendering::NAME.as_ptr(),
+        ash::khr::synchronization2::NAME.as_ptr(),
+    ];
     if enable_swapchain {
         device_extensions.push(ash::khr::swapchain::NAME.as_ptr());
     }
@@ -512,6 +526,11 @@ pub fn create_logical_device(
     let mut dynamic_rendering_features =
         vk::PhysicalDeviceDynamicRenderingFeatures::default().dynamic_rendering(true);
 
+    // synchronization2: the backend records all barriers via
+    // vkCmdPipelineBarrier2 and submits via vkQueueSubmit2 (ADR-027, #94).
+    let mut synchronization2_features =
+        vk::PhysicalDeviceSynchronization2Features::default().synchronization2(true);
+
     // shaderDrawParameters: shaders that read SV_InstanceID compile to SPIR-V
     // using the DrawParameters capability, which requires this feature.
     let mut vulkan11_features =
@@ -531,6 +550,7 @@ pub fn create_logical_device(
         .enabled_extension_names(&device_extensions)
         .enabled_features(&features)
         .push_next(&mut dynamic_rendering_features)
+        .push_next(&mut synchronization2_features)
         .push_next(&mut vulkan11_features)
         .push_next(&mut vulkan12_features);
     if selected.optional.maintenance9 {

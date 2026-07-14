@@ -1541,10 +1541,25 @@ philosophy as #47's "no manual sync mode".
 - ⚠️ Tier detection must stay in sync with each tier's actual feature set —
   centralized per backend in one place
 
+### Amendment (2026-07-14, #94): synchronization2 is a baseline requirement
+
+The Vulkan backend records every barrier via `vkCmdPipelineBarrier2` and
+submits via `vkQueueSubmit2` — there is no sync1 path. `VK_KHR_synchronization2`
+(extension + `synchronization2` feature bit) therefore joins the baseline-tier
+requirement list alongside dynamic rendering, timeline semaphores, and
+shaderDrawParameters: a device lacking it fails the baseline filter with the
+named gap `"synchronization2 feature"` and falls back to the wgpu backend (or,
+for explicit `BackendType::Vulkan`, fails loudly). Rationale: sync2 is core in
+Vulkan 1.3 and, on 1.2, shipped in the same driver wave as dynamic rendering
+(which baseline already requires), so the set of devices passing today's filter
+but lacking sync2 is effectively empty. Enforced in
+`backend/vulkan/device.rs::{baseline_gaps, create_logical_device}`.
+
 ### Related Issues
 
 - #38: device/instance hardcodes (implementation)
 - #47: async compute queue availability is a capability, not a tier
+- #94: synchronization2 baseline requirement (sync1 path deleted)
 
 ---
 
