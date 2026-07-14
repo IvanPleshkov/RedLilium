@@ -609,11 +609,31 @@ impl VulkanBackend {
                 });
             }
             if let Some(tq) = &transfer_queue {
-                infos.push(QueueTimestampInfo {
-                    queue: QueueId::Transfer,
-                    preference: crate::graph::QueuePreference::Transfer,
-                    valid_bits: valid_bits(tq.family),
+                // `vkCmdResetQueryPool` requires a graphics- or compute-capable
+                // queue (VUID-vkCmdResetQueryPool-commandBuffer-cmdpool). A
+                // dedicated transfer family (#89) exposes neither, so a timestamp
+                // pool there could never be reset on its own command buffer —
+                // skip it. Resetting host-side would need the `hostQueryReset`
+                // feature this module deliberately avoids; transfer-queue DMA
+                // timing is a minor loss. (The check is on family flags, so a
+                // device whose transfer queue also exposes compute still times.)
+                let can_reset = family_props.get(tq.family as usize).is_some_and(|p| {
+                    p.queue_flags
+                        .intersects(vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE)
                 });
+                if can_reset {
+                    infos.push(QueueTimestampInfo {
+                        queue: QueueId::Transfer,
+                        preference: crate::graph::QueuePreference::Transfer,
+                        valid_bits: valid_bits(tq.family),
+                    });
+                } else {
+                    log::debug!(
+                        "GPU timestamps: skipping transfer queue (family {} is \
+                         transfer-only; vkCmdResetQueryPool needs graphics/compute) (#95)",
+                        tq.family
+                    );
+                }
             }
             timestamps::TimestampManager::new(
                 &device,
