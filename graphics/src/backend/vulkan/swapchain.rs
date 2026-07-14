@@ -35,7 +35,11 @@ pub struct VulkanSwapchain {
     /// flight). This is what orders "render finished" → "present barrier".
     pub(crate) image_render_finished_semaphores: Vec<vk::Semaphore>,
     /// Semaphores signaled when the present barrier is complete, waited on by
-    /// `queue_present` (one per frame in flight).
+    /// `queue_present` — ONE PER SWAPCHAIN IMAGE, indexed by acquired image
+    /// index. Present completion is not gated by the frame fence, so a per-frame
+    /// semaphore would be re-signaled while a prior present still holds it
+    /// (VUID-vkQueueSubmit2-semaphore-03868); a per-image semaphore is
+    /// guaranteed idle by the time its image is re-acquired.
     pub(crate) render_finished_semaphores: Vec<vk::Semaphore>,
     /// Fences for CPU-GPU synchronization (one per frame in flight).
     pub(crate) in_flight_fences: Vec<vk::Fence>,
@@ -236,7 +240,9 @@ impl VulkanSwapchain {
         let frames_in_flight = config.frames_in_flight;
         let mut image_available_semaphores = Vec::with_capacity(frames_in_flight);
         let mut image_render_finished_semaphores = Vec::with_capacity(frames_in_flight);
-        let mut render_finished_semaphores = Vec::with_capacity(frames_in_flight);
+        // Present-wait semaphores are per swapchain image (see field doc), not
+        // per frame in flight.
+        let mut render_finished_semaphores = Vec::with_capacity(images.len());
         let mut in_flight_fences = Vec::with_capacity(frames_in_flight);
 
         for _ in 0..frames_in_flight {
@@ -266,6 +272,18 @@ impl VulkanSwapchain {
             })?;
             image_render_finished_semaphores.push(image_render_finished);
 
+            let fence = unsafe { vulkan_backend.device().create_fence(&fence_info, None) }
+                .map_err(|e| {
+                    GraphicsError::ResourceCreationFailed(format!(
+                        "Failed to create in-flight fence: {:?}",
+                        e
+                    ))
+                })?;
+            in_flight_fences.push(fence);
+        }
+
+        // Present-wait semaphores: one per swapchain image (see field doc).
+        for _ in 0..images.len() {
             let render_finished = unsafe {
                 vulkan_backend
                     .device()
@@ -278,15 +296,6 @@ impl VulkanSwapchain {
                 ))
             })?;
             render_finished_semaphores.push(render_finished);
-
-            let fence = unsafe { vulkan_backend.device().create_fence(&fence_info, None) }
-                .map_err(|e| {
-                    GraphicsError::ResourceCreationFailed(format!(
-                        "Failed to create in-flight fence: {:?}",
-                        e
-                    ))
-                })?;
-            in_flight_fences.push(fence);
         }
 
         // Allocate command buffers for presentation (one per frame in flight)
@@ -431,7 +440,8 @@ impl VulkanSwapchain {
 
         let image_available_semaphore = self.image_available_semaphores[current_frame];
         let image_render_finished_semaphore = self.image_render_finished_semaphores[current_frame];
-        let render_finished_semaphore = self.render_finished_semaphores[current_frame];
+        // The present-wait semaphore is chosen by acquired image index (below),
+        // not frame slot — it must be unique per swapchain image.
 
         // Acquire next image with semaphore synchronization. OUT_OF_DATE is a
         // recoverable signal: the caller must reconfigure the surface and
@@ -483,6 +493,9 @@ impl VulkanSwapchain {
         let image = self.images[image_idx];
         let swapchain_handle = self.swapchain;
         let present_cmd = self.present_command_buffers[current_frame];
+        // Per-image present-wait semaphore (VUID-03868): indexed by the acquired
+        // image, guaranteed idle since the image's prior present has completed.
+        let render_finished_semaphore = self.render_finished_semaphores[image_idx];
 
         // Advance to next frame slot
         self.current_frame = (current_frame + 1) % self.frames_in_flight;
