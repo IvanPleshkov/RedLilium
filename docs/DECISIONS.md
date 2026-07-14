@@ -1723,26 +1723,34 @@ Steam fleet (frozen GCN + Windows RDNA1/2) will never have maintenance9.
    making the release side structurally awkward, and the measured driver
    reality (below) shows the payoff is a handful of images on one vendor.
 
-### Measured driver reality (RX 9070 XT, Adrenalin 2.0.373, 2026-07)
+### Measured driver reality (RX 9070 XT + RX 6400 + RTX 3070, 2026-07)
 
 The AMD Windows driver reports `optimalImageTransferToQueueFamilies == 0`
 for **every** queue family: even with maintenance9 enabled, AMD requires
 real ownership transfers for optimal-tiling images (consistent with DCC
 metadata needing a handoff). On AMD the fast path therefore stays off and
 declared textures use the CONCURRENT fallback — which further validates not
-building full QFOT. The fast path is expected to engage on NVIDIA
-(unverified — no hardware at hand).
+building full QFOT. **On NVIDIA the fast path engages** (RTX 3070, driver
+573-era: every family reports `0b111111`, so declared textures stay
+EXCLUSIVE with no transfers).
 
-**And the CONCURRENT fallback measures as free on RDNA4** (RGP, solid-color
-fullscreen fills into two 8192² RGBA8 targets — 256 MiB each, deliberately
-larger than Infinity Cache so fills are bandwidth-bound; solid color is the
-best case for compression, so losing it would show directly as fill time):
-EXCLUSIVE 335.6 µs vs CONCURRENT 300.0 µs. An uncompressed 256 MiB write at
-the card's ~640 GB/s cannot beat ~440 µs, and both fills do — **write
-compression stays on under CONCURRENT**. The GCN-era "CONCURRENT loses DCC"
-penalty does not reproduce on this generation; it remains unmeasured on
-RDNA1/2 and GCN (`async_overlap_demo` is the harness when such hardware is
-available).
+**The CONCURRENT fallback measures as free on both AMD generations tested.**
+Methodology (`async_overlap_demo`): solid-color fullscreen fills into two
+8192² RGBA8 targets — 256 MiB each, larger than any Infinity Cache so fills
+are bandwidth-bound; solid color is the best case for compression, so losing
+it would show directly as fill time.
+
+- **RDNA4 (RX 9070 XT)**: EXCLUSIVE 335.6 µs vs CONCURRENT 300.0 µs; an
+  uncompressed 256 MiB write at ~640 GB/s cannot beat ~440 µs, and both fills
+  do. (RGP's Compression column reports N/A on RDNA4 — timing only.)
+- **RDNA2 (RX 6400)**: EXCLUSIVE 928 µs vs CONCURRENT 950 µs, both far under
+  the ~2.1 ms uncompressed floor at ~128 GB/s — and here **RGP reports
+  `Compression: ON` for the CONCURRENT target directly**, driver-confirmed,
+  not merely inferred.
+
+The GCN-era "CONCURRENT loses DCC" penalty does not reproduce on RDNA2 or
+RDNA4. It remains unmeasured on GCN proper (Polaris/Vega); `async_overlap_demo`
+is the harness if such hardware appears.
 
 ### Consequences
 
@@ -1750,8 +1758,10 @@ available).
 - ✅ No new synchronization semantics; #82-validated CONCURRENT path unchanged
   for declared resources
 - ✅ Async hint stays a hint: correctness never depends on the declaration
-- ⚠️ Declared textures still lose DCC on hardware without maintenance9
-  (~6% of fleet); acceptable — a frame shares a handful of such images
+- ⚠️ Declared textures fall to CONCURRENT on hardware without maintenance9
+  (~6% of fleet), but measured DCC loss there is nil on RDNA2/RDNA4 — the
+  concern is theoretical for the AMD generations tested, real only on
+  unmeasured GCN, and a frame shares only a handful of such images anyway
 - ⚠️ Forgetting the declaration serializes an intended-async graph onto the
   graphics queue; each offending texture logs one warning (a hard error would
   break the hint semantics — the same graph legitimately runs single-queue on
