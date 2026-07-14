@@ -619,6 +619,7 @@ impl VulkanBackend {
             depth24_stencil8_format,
             &selected.properties,
             device_caps.wireframe,
+            selected.portability_subset,
         )?;
 
         log::info!(

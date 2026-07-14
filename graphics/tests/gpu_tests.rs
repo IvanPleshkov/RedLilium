@@ -33,8 +33,9 @@ use common::{
     Backend, ExpectedPixel, FULLSCREEN_QUAD_VERTICES, LEFT_HALF_QUAD_VERTICES, TestContext,
     create_fullscreen_quad, create_left_half_quad, create_material_instance, create_mrt_pass,
     create_render_pass_with_depth, create_simple_render_pass, create_solid_color_material,
-    create_texture_sample_instance, create_texture_sample_material, generate_test_pattern,
-    get_pixel, quad_vertex_layout, readback_buffer_size, verify_pixel, write_quad_vertices,
+    create_solid_color_material_with_raster, create_texture_sample_instance,
+    create_texture_sample_material, generate_test_pattern, get_pixel, quad_vertex_layout,
+    readback_buffer_size, verify_pixel, write_quad_vertices,
 };
 use redlilium_graphics::{
     BindingGroupDescriptor, BindingLayout, BindingLayoutEntry, BindingType, BufferUsage,
@@ -177,6 +178,73 @@ fn test_upload_texture_data_roundtrip(#[case] backend: Backend) {
     assert_eq!(
         data, pixels,
         "read-back texture bytes must match the uploaded pattern"
+    );
+}
+
+/// Cross-backend face-culling agreement (#39): a counter-clockwise, front-
+/// facing quad with `CullMode::Back` must render on BOTH Vulkan and wgpu.
+///
+/// The engine's logical convention is CCW = front (glTF/OpenGL). The fullscreen
+/// quad is wound CCW, so back-face culling must keep it. If a backend's
+/// effective winding is inverted (e.g. a Vulkan negative-viewport Y-flip not
+/// matched by the front-face mapping), it culls the front face and the target
+/// stays at the clear color — the "draws the back side of geometry" bug.
+#[rstest]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_back_face_culling_agreement(#[case] backend: Backend) {
+    use redlilium_graphics::{CullMode, FrontFace, PolygonMode, RasterState};
+
+    let Some(ctx) = TestContext::new(backend) else {
+        eprintln!("Backend {backend:?} not available, skipping");
+        return;
+    };
+
+    const WIDTH: u32 = 16;
+    const HEIGHT: u32 = 16;
+    const CLEAR_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
+    let render_target = ctx.create_render_target(WIDTH, HEIGHT);
+    let readback_size = readback_buffer_size(WIDTH, HEIGHT, 4);
+    let readback = ctx.create_readback_buffer(readback_size);
+
+    // The fullscreen quad is wound counter-clockwise in clip space.
+    let quad_mesh = create_fullscreen_quad(&ctx);
+    write_quad_vertices(&ctx, &quad_mesh, &FULLSCREEN_QUAD_VERTICES);
+
+    // CCW-front + cull back faces: the quad is front-facing, so it renders.
+    let material = create_solid_color_material_with_raster(
+        &ctx,
+        RasterState {
+            cull_mode: CullMode::Back,
+            front_face: FrontFace::Ccw,
+            polygon_mode: PolygonMode::Fill,
+        },
+    );
+    let instance = create_material_instance(material);
+
+    let mut graph = RenderGraph::new();
+    let mut render_pass =
+        create_simple_render_pass("cull_back_ccw", render_target.clone(), CLEAR_COLOR);
+    render_pass.add_draw(quad_mesh, instance);
+    let render_handle = graph.add_graphics_pass(render_pass);
+
+    let mut copy_pass = TransferPass::new("copy_to_readback".into());
+    copy_pass.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::readback_texture_whole(render_target, readback.clone()),
+    ));
+    let copy_handle = graph.add_transfer_pass(copy_pass);
+    graph.add_dependency(copy_handle, render_handle);
+
+    ctx.execute_graph(graph);
+
+    let data = ctx.read_buffer(&readback, readback_size);
+    let center = get_pixel(&data, WIDTH, WIDTH / 2, HEIGHT / 2);
+    assert!(
+        verify_pixel(&data, WIDTH, WIDTH / 2, HEIGHT / 2, ExpectedPixel::RED, 2),
+        "CCW front-facing quad with back-face culling must render red on \
+         {backend:?}, but got {center:?} — the front face was culled (winding \
+         inverted)"
     );
 }
 

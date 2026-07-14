@@ -775,6 +775,33 @@ pub fn create_material_instance(material: Arc<Material>) -> Arc<MaterialInstance
     Arc::new(MaterialInstance::new(material).with_label("test_instance"))
 }
 
+/// Create a solid-red material with an explicit rasterizer state (culling /
+/// front-face winding). Used to verify that face culling agrees across
+/// backends (#39).
+#[allow(dead_code)]
+pub fn create_solid_color_material_with_raster(
+    ctx: &TestContext,
+    raster: redlilium_graphics::RasterState,
+) -> Arc<Material> {
+    ctx.device
+        .create_material(
+            &MaterialDescriptor::new()
+                .with_shader(ShaderSource::vertex(
+                    SOLID_RED_SHADER.as_bytes().to_vec(),
+                    "vs_main",
+                ))
+                .with_shader(ShaderSource::fragment(
+                    SOLID_RED_SHADER.as_bytes().to_vec(),
+                    "fs_main",
+                ))
+                .with_vertex_layout(quad_vertex_layout())
+                .with_color_format(TextureFormat::Rgba8Unorm)
+                .with_raster(raster)
+                .with_label("solid_red_culled_material"),
+        )
+        .expect("Failed to create material")
+}
+
 /// Quad vertex data for a left-half quad (covers x from -1 to 0).
 #[allow(dead_code)]
 pub const LEFT_HALF_QUAD_VERTICES: [QuadVertex; 6] = [

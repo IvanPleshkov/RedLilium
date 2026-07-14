@@ -166,6 +166,17 @@ pub struct PipelineManager {
     /// tripping validation — mirroring the wgpu backend's handling of a
     /// missing `POLYGON_MODE_LINE` (ADR-027 capability, VK-M10).
     wireframe_supported: bool,
+    /// Whether the negative-viewport-height Y-flip (vulkan/mod.rs) reverses
+    /// screen-space winding on this device, requiring the front-face winding to
+    /// be inverted from the logical convention.
+    ///
+    /// True on conformant native Vulkan (the spec computes front/back from the
+    /// signed area in framebuffer coordinates, which the flipped viewport
+    /// inverts). False on the portability subset (MoltenVK / Metal), where
+    /// facing is determined independently of the viewport flip — exactly like
+    /// wgpu-on-Metal, so passing the logical winding through matches wgpu
+    /// (#39, VK back-face bug).
+    viewport_flips_winding: bool,
     /// Whether resources have been explicitly destroyed.
     destroyed: bool,
 }
@@ -182,6 +193,7 @@ impl PipelineManager {
         depth24_stencil8_format: vk::Format,
         device_properties: &vk::PhysicalDeviceProperties,
         wireframe_supported: bool,
+        portability_subset: bool,
     ) -> Result<Self, GraphicsError> {
         let pool_sizes = vec![
             vk::DescriptorPoolSize {
@@ -237,6 +249,9 @@ impl PipelineManager {
             pipeline_cache_dirty: std::sync::atomic::AtomicBool::new(false),
             ds_layout_cache: parking_lot::Mutex::new(HashMap::new()),
             wireframe_supported,
+            // Only conformant native Vulkan flips winding with the negative
+            // viewport; the portability subset (MoltenVK) does not.
+            viewport_flips_winding: !portability_subset,
             destroyed: false,
         })
     }
@@ -738,11 +753,15 @@ impl PipelineManager {
             })
             .line_width(1.0)
             .cull_mode(vk_cull_mode(raster.cull_mode))
-            // Inverted from the logical winding: the negative-viewport-height
-            // Y-flip (vulkan/mod.rs) reverses screen-space winding, so logical
-            // CCW-front becomes physical CW here. Applied unconditionally (even
-            // when culling is off) so `@front_facing` matches wgpu (#39, XB-M4).
-            .front_face(vk_front_face(raster.front_face))
+            // Logical winding (CCW-front), inverted only when the negative-
+            // viewport-height Y-flip (vulkan/mod.rs) actually reverses screen-
+            // space winding — true on native Vulkan, false on MoltenVK/Metal.
+            // Applied unconditionally (even when culling is off) so
+            // `@front_facing` matches wgpu (#39, XB-M4).
+            .front_face(vk_front_face(
+                raster.front_face,
+                self.viewport_flips_winding,
+            ))
             .depth_bias_enable(false);
 
         let multisample_state = vk::PipelineMultisampleStateCreateInfo::default()
@@ -1063,16 +1082,25 @@ fn vk_cull_mode(mode: crate::materials::CullMode) -> vk::CullModeFlags {
     }
 }
 
-/// Map the engine's logical front-face convention to Vulkan's physical one,
-/// **inverting** it: the backend renders with a negative-viewport-height Y-flip
-/// (to match wgpu/OpenGL screen space, see `vulkan/mod.rs`), which reverses
-/// screen-space triangle winding. So logical CCW-front becomes physical
-/// `CLOCKWISE` and vice-versa. Centralizing this here is what keeps culling
-/// consistent with the wgpu backend once enabled (#39, XB-M4).
-fn vk_front_face(front_face: crate::materials::FrontFace) -> vk::FrontFace {
-    match front_face {
-        crate::materials::FrontFace::Ccw => vk::FrontFace::CLOCKWISE,
-        crate::materials::FrontFace::Cw => vk::FrontFace::COUNTER_CLOCKWISE,
+/// Map the engine's logical front-face convention (CCW-front) to Vulkan's
+/// physical one.
+///
+/// The backend renders with a negative-viewport-height Y-flip (to match
+/// wgpu/OpenGL screen space, see `vulkan/mod.rs`). On conformant native Vulkan
+/// that flip reverses screen-space triangle winding — front/back are computed
+/// from the framebuffer-space signed area — so the winding must be inverted
+/// (`invert = true`): logical CCW-front becomes physical `CLOCKWISE`. On the
+/// portability subset (MoltenVK / Metal) facing is determined independently of
+/// the viewport flip, exactly like wgpu-on-Metal, so the logical winding is
+/// passed through (`invert = false`) — otherwise Vulkan culls the wrong face
+/// and draws the back side of geometry (#39, VK back-face bug).
+fn vk_front_face(front_face: crate::materials::FrontFace, invert: bool) -> vk::FrontFace {
+    let logical_ccw = matches!(front_face, crate::materials::FrontFace::Ccw);
+    // XOR the logical winding with the inversion the flipped viewport demands.
+    if logical_ccw ^ invert {
+        vk::FrontFace::COUNTER_CLOCKWISE
+    } else {
+        vk::FrontFace::CLOCKWISE
     }
 }
 
