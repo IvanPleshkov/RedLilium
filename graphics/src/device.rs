@@ -65,12 +65,57 @@ pub struct DeviceCapabilities {
     pub transfer_queue: bool,
     /// Whether compute shaders are supported (false on WebGL downlevel).
     pub compute_shaders: bool,
+    /// Whether per-pass GPU timestamp queries are available (#95). Requires the
+    /// device's graphics queue family to expose a non-zero `timestampValidBits`
+    /// (Vulkan). When false, [`GraphicsDevice::latest_gpu_timings`] returns an
+    /// empty result and the editor stats panel degrades to "unavailable".
+    pub gpu_timestamps: bool,
 }
 
 impl DeviceCapabilities {
     /// Whether MSAA render attachments with `count` samples are supported.
     pub fn supports_sample_count(&self, count: u32) -> bool {
         count.is_power_of_two() && (self.sample_count_mask & count) != 0
+    }
+}
+
+/// Per-pass GPU timings for one submitted queue (#95).
+///
+/// Durations only — begin/end deltas resolved *within a single queue*. Cross-
+/// queue timelines are not built (timestamps from different queues are not
+/// comparable without `VK_EXT_calibrated_timestamps`, which is out of scope).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubmitTiming {
+    /// Which queue this submit ran on.
+    pub queue: crate::graph::QueuePreference,
+    /// Wall-clock GPU time for the whole submit (begin→end), in milliseconds.
+    pub total_ms: f32,
+    /// Per-pass GPU time in milliseconds, keyed by the graph's pass label.
+    pub passes: Vec<(String, f32)>,
+}
+
+/// GPU timings for the most recently *retired* frame slot (#95).
+///
+/// Because timestamp results are read back only after a slot's fence has
+/// signaled, these values are always ~`MAX_FRAMES_IN_FLIGHT` frames stale —
+/// which is fine for a stats panel. Empty on backends without
+/// [`DeviceCapabilities::gpu_timestamps`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FrameGpuTimings {
+    /// One entry per submit recorded during the retired frame.
+    pub submits: Vec<SubmitTiming>,
+}
+
+impl FrameGpuTimings {
+    /// Sum of every submit's `total_ms` — a coarse whole-frame GPU figure.
+    /// Note this over-counts when submits on different queues overlap in time.
+    pub fn frame_total_ms(&self) -> f32 {
+        self.submits.iter().map(|s| s.total_ms).sum()
+    }
+
+    /// Whether any timing data is present.
+    pub fn is_empty(&self) -> bool {
+        self.submits.is_empty()
     }
 }
 
@@ -138,6 +183,16 @@ impl GraphicsDevice {
     /// Get the device capabilities.
     pub fn capabilities(&self) -> &DeviceCapabilities {
         &self.capabilities
+    }
+
+    /// GPU timings for the most recently retired frame slot (#95).
+    ///
+    /// Values are always ~`MAX_FRAMES_IN_FLIGHT` frames stale (results are read
+    /// back only once a slot's fence has signaled) — fine for a stats panel.
+    /// Returns an empty [`FrameGpuTimings`] when
+    /// [`DeviceCapabilities::gpu_timestamps`] is false.
+    pub fn latest_gpu_timings(&self) -> FrameGpuTimings {
+        self.instance.backend().latest_gpu_timings()
     }
 
     /// Create a GPU buffer.

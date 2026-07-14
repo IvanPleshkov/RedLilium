@@ -16,6 +16,7 @@ mod maintenance9;
 mod pipeline;
 mod staging;
 pub mod swapchain;
+mod timestamps;
 
 use std::collections::HashSet;
 use std::mem::ManuallyDrop;
@@ -279,6 +280,11 @@ pub struct VulkanBackend {
     /// compression) with no ownership transfers — synchronization is still
     /// the tracker-emitted timeline waits, unchanged.
     implicit_cross_queue_images: bool,
+    /// Per-pass GPU timestamp collector (#95), `None` when the device lacks
+    /// `timestampValidBits` on the graphics family. Behind a `Mutex` for the
+    /// same reason as the other per-frame state: `execute_graph`/`advance_frame`
+    /// take `&self` but run on the single render thread.
+    timestamps: Option<Mutex<timestamps::TimestampManager>>,
     /// Capabilities queried from the selected physical device at creation
     /// (ADR-027) — the single source of truth downstream clamps against.
     device_caps: crate::device::DeviceCapabilities,
@@ -500,6 +506,51 @@ impl VulkanBackend {
         let async_compute = create_secondary(queue_plan.async_compute)?;
         let transfer_queue = create_secondary(queue_plan.transfer)?;
 
+        // Per-pass GPU timestamps (#95). Build one query pool per (queue, slot)
+        // for every queue whose family exposes `timestampValidBits > 0`. The
+        // capability bit already gates on the graphics family; a secondary
+        // family reporting 0 valid bits is simply skipped (its passes report no
+        // timing). Only the graphics queue can report `gpu_timestamps == false`
+        // as unsupported outright.
+        let timestamps = if device_caps.gpu_timestamps {
+            let family_props =
+                unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+            let valid_bits = |family: u32| {
+                family_props
+                    .get(family as usize)
+                    .map_or(0, |p| p.timestamp_valid_bits)
+            };
+            use self::barriers::QueueId;
+            use self::timestamps::QueueTimestampInfo;
+            let mut infos = vec![QueueTimestampInfo {
+                queue: QueueId::Graphics,
+                preference: crate::graph::QueuePreference::Graphics,
+                valid_bits: valid_bits(graphics_queue_family),
+            }];
+            if let Some(ac) = &async_compute {
+                infos.push(QueueTimestampInfo {
+                    queue: QueueId::AsyncCompute,
+                    preference: crate::graph::QueuePreference::AsyncCompute,
+                    valid_bits: valid_bits(ac.family),
+                });
+            }
+            if let Some(tq) = &transfer_queue {
+                infos.push(QueueTimestampInfo {
+                    queue: QueueId::Transfer,
+                    preference: crate::graph::QueuePreference::Transfer,
+                    valid_bits: valid_bits(tq.family),
+                });
+            }
+            timestamps::TimestampManager::new(
+                &device,
+                selected.properties.limits.timestamp_period,
+                &infos,
+            )
+            .map(Mutex::new)
+        } else {
+            None
+        };
+
         // Staging chunks must be CONCURRENT-shareable across every distinct
         // family a transfer graph can be routed to (async compute, dedicated
         // transfer).
@@ -605,6 +656,7 @@ impl VulkanBackend {
             timeline_next: AtomicU64::new(1),
             async_compute,
             transfer_queue,
+            timestamps,
             async_decline_warned: Mutex::new(HashSet::new()),
             implicit_cross_queue_images,
             device_caps,
@@ -616,6 +668,23 @@ impl VulkanBackend {
     /// Capabilities queried at backend creation (ADR-027).
     pub fn capabilities(&self) -> crate::device::DeviceCapabilities {
         self.device_caps
+    }
+
+    /// GPU timings for the most recently retired frame slot (#95). Empty when
+    /// the device lacks timestamp support.
+    pub fn latest_gpu_timings(&self) -> crate::device::FrameGpuTimings {
+        self.timestamps
+            .as_ref()
+            .map(|m| m.lock().latest())
+            .unwrap_or_default()
+    }
+
+    /// Re-arm the timestamp query pool for `queue`/`slot` after a recording
+    /// error abandoned the command buffer (#95). No-op without timestamps.
+    fn abort_timestamps(&self, queue: QueueId, slot: usize) {
+        if let Some(m) = &self.timestamps {
+            m.lock().abort_submit(queue, slot);
+        }
     }
 
     /// Info about the selected physical device.
@@ -838,6 +907,13 @@ impl VulkanBackend {
         self.staging_belt
             .lock()
             .retire_slot(&self.device, &mut self.allocator.lock(), oldest);
+
+        // Read back the retiring slot's GPU timestamps (#95). The same fence
+        // wait that lets the staging chunks retire guarantees these queries are
+        // available, so `vkGetQueryPoolResults` needs no WAIT bit.
+        if let Some(m) = &self.timestamps {
+            m.lock().read_slot(&self.device, oldest);
+        }
 
         // Remove destroyed resources from the barrier trackers so the maps
         // stay bounded by live resources. Safe at any point: texture ids are
@@ -1148,6 +1224,11 @@ impl Drop for VulkanBackend {
                     self.device.destroy_command_pool(pool, None);
                 }
                 self.device.destroy_semaphore(secondary.timeline, None);
+            }
+
+            // Destroy the timestamp query pools (#95), if any.
+            if let Some(m) = &self.timestamps {
+                m.lock().destroy(&self.device);
             }
 
             // Destroy the staging belt (the device_wait_idle above
@@ -2188,6 +2269,20 @@ impl VulkanBackend {
         // its timeline (pipeline barriers cannot cross queues).
         let mut waits = SubmitWaits::default();
 
+        // Per-pass GPU timestamps (#95): reserve query indices and record the
+        // pool reset + submit-begin marker before the passes. `None` when the
+        // device lacks timestamp support or this queue has no query pool.
+        let mut recording = self.timestamps.as_ref().and_then(|m| {
+            m.lock().begin_submit(
+                &self.device,
+                &self.synchronization2,
+                queue_id,
+                slot,
+                compiled.pass_order().len(),
+                cmd,
+            )
+        });
+
         // Process each pass in compiled order using pre-computed resource usages
         {
             profile_scope!("record_passes");
@@ -2209,15 +2304,43 @@ impl VulkanBackend {
                 );
                 barriers.submit(&self.synchronization2, cmd);
 
-                // Encode the pass
-                self.encode_pass(cmd, pass)?;
+                // Timestamp the pass's GPU work (begin before, end after).
+                if let Some(rec) = recording.as_mut() {
+                    rec.pass_begin(&self.synchronization2, cmd, i, pass.name());
+                }
+                if let Err(e) = self.encode_pass(cmd, pass) {
+                    // The command buffer (with its reset + timestamp writes) is
+                    // abandoned; re-arm the pool so its next use resets it.
+                    if recording.is_some() {
+                        self.abort_timestamps(queue_id, slot);
+                    }
+                    return Err(e);
+                }
+                if let Some(rec) = recording.as_mut() {
+                    rec.pass_end(&self.synchronization2, cmd, i);
+                }
+            }
+        }
+
+        // Submit-end marker, then hand the recording back for read-back at slot
+        // retirement.
+        if let Some(rec) = recording {
+            rec.submit_end(&self.synchronization2, cmd);
+            if let Some(m) = &self.timestamps {
+                m.lock().finish_submit(slot, rec);
             }
         }
 
         // End command buffer
-        unsafe { self.device.end_command_buffer(cmd) }.map_err(|e| {
-            GraphicsError::Internal(format!("Failed to end command buffer: {:?}", e))
-        })?;
+        if let Err(e) = unsafe { self.device.end_command_buffer(cmd) } {
+            // Same as the encode error: the command buffer is abandoned, so
+            // re-arm the query pool for a fresh reset before its next use.
+            self.abort_timestamps(queue_id, slot);
+            return Err(GraphicsError::Internal(format!(
+                "Failed to end command buffer: {:?}",
+                e
+            )));
+        }
 
         if !waits.is_empty() {
             log::debug!(
@@ -2339,6 +2462,10 @@ impl VulkanBackend {
                 if let Some((image_available, _)) = swapchain_pair {
                     self.restore_swapchain_render_sync(image_available);
                 }
+                // The command buffer never ran, so its query reset+writes
+                // didn't happen: drop this submit's timing records and re-arm
+                // the pool so its next use resets before writing (#95).
+                self.abort_timestamps(queue_id, slot);
                 return Err(match e {
                     vk::Result::ERROR_DEVICE_LOST => GraphicsError::DeviceLost,
                     other => GraphicsError::Internal(format!(

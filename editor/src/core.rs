@@ -210,6 +210,11 @@ pub fn create_editor_world_base(
     let debug_drawer_handle = world.insert_resource(DebugDrawer::new());
     world.insert_resource(GridConfig::new());
 
+    // Latest per-pass GPU timings (#95); the render shell copies the device's
+    // most recent retired-slot timings here each frame and the GPU stats
+    // window reads it like any other panel.
+    world.insert_resource(redlilium_graphics::FrameGpuTimings::default());
+
     // Insert ActionQueue for editor action dispatch
     world.insert_resource(ActionQueue::<World>::new());
 

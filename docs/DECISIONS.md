@@ -1555,11 +1555,29 @@ Vulkan 1.3 and, on 1.2, shipped in the same driver wave as dynamic rendering
 but lacking sync2 is effectively empty. Enforced in
 `backend/vulkan/device.rs::{baseline_gaps, create_logical_device}`.
 
+### Amendment (2026-07-14, #95): `gpu_timestamps` is a queried capability
+
+Per-pass GPU timing is exposed as `DeviceCapabilities.gpu_timestamps: bool` —
+a capability (an orthogonal axis), never a tier gate. It is queried, never
+fabricated (the ADR-027 contract): the Vulkan backend reports `true` only when
+the graphics queue family exposes a non-zero `timestampValidBits` and a
+non-zero `timestampPeriod`; wgpu and dummy report `false`. When false,
+`GraphicsDevice::latest_gpu_timings()` returns an empty `FrameGpuTimings` and
+the editor stats window degrades to "unavailable" — no feature is denied, the
+data axis is simply absent. Collection lives entirely in the Vulkan backend
+(`backend/vulkan/timestamps.rs`): one `vkQueryPool` per (queue, frame-slot),
+`vkCmdWriteTimestamp2` (sync2, #94) around each pass and submit, read back
+without a WAIT bit when the slot retires in `advance_frame` (the slot fence
+already guarantees completion — the staging-belt retirement argument).
+Durations only: timestamps from different queues are not compared (that needs
+`VK_EXT_calibrated_timestamps`, out of scope).
+
 ### Related Issues
 
 - #38: device/instance hardcodes (implementation)
 - #47: async compute queue availability is a capability, not a tier
 - #94: synchronization2 baseline requirement (sync1 path deleted)
+- #95: per-pass GPU timestamps surfaced as the `gpu_timestamps` capability
 
 ---
 

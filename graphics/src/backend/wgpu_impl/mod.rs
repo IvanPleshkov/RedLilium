@@ -509,7 +509,16 @@ impl WgpuBackend {
             compute_shaders: downlevel
                 .flags
                 .contains(wgpu::DownlevelFlags::COMPUTE_SHADERS),
+            // Per-pass timestamp collection is wired for the Vulkan backend
+            // only (#95); the wgpu pass encoders pass `timestamp_writes: None`.
+            gpu_timestamps: false,
         }
+    }
+
+    /// Latest retired-slot GPU timings — always empty; the wgpu backend does
+    /// not record timestamps (#95).
+    pub fn latest_gpu_timings(&self) -> crate::device::FrameGpuTimings {
+        crate::device::FrameGpuTimings::default()
     }
 
     /// Adapter info from the wgpu adapter.

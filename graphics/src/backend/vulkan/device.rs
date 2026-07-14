@@ -584,6 +584,17 @@ pub fn device_capabilities(
         bytes => bytes,
     };
 
+    // Per-pass GPU timestamps (#95) require the graphics queue family to expose
+    // a non-zero `timestampValidBits` and a non-zero tick period. `timestamp_
+    // period` is nanoseconds-per-tick; a value of 0 means timestamps are
+    // unsupported. This is queried, never fabricated (ADR-027).
+    let queue_families =
+        unsafe { instance.get_physical_device_queue_family_properties(selected.physical_device) };
+    let gpu_timestamps = limits.timestamp_period > 0.0
+        && queue_families
+            .get(plan.graphics_family as usize)
+            .is_some_and(|f| f.timestamp_valid_bits > 0);
+
     crate::device::DeviceCapabilities {
         // Selection passing the baseline filter IS the tier detection today;
         // higher rungs (bindless, ray tracing) will extend this when their
@@ -605,6 +616,7 @@ pub fn device_capabilities(
         async_compute: plan.async_compute.is_some(),
         transfer_queue: plan.transfer.is_some(),
         compute_shaders: true,
+        gpu_timestamps,
     }
 }
 

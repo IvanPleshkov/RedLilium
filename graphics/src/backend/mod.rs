@@ -1027,6 +1027,18 @@ impl GpuBackend {
         }
     }
 
+    /// GPU timings collected for the most recently retired frame slot (#95).
+    /// Empty on backends without `gpu_timestamps` capability.
+    pub fn latest_gpu_timings(&self) -> crate::device::FrameGpuTimings {
+        match self {
+            Self::Dummy(backend) => backend.latest_gpu_timings(),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(backend) => backend.latest_gpu_timings(),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => backend.latest_gpu_timings(),
+        }
+    }
+
     /// Create a buffer resource.
     pub fn create_buffer(&self, descriptor: &BufferDescriptor) -> Result<GpuBuffer, GraphicsError> {
         match self {
