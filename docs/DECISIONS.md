@@ -1555,6 +1555,27 @@ Vulkan 1.3 and, on 1.2, shipped in the same driver wave as dynamic rendering
 but lacking sync2 is effectively empty. Enforced in
 `backend/vulkan/device.rs::{baseline_gaps, create_logical_device}`.
 
+### Amendment (2026-07-14): baseline is Vulkan 1.3 core (sync2 + dynamic rendering)
+
+The Vulkan baseline tier is raised from 1.2 to **1.3**. Both
+`synchronization2` and `dynamicRendering` are core *and mandatory* in 1.3, so
+the backend stops enabling the `VK_KHR_synchronization2` / `VK_KHR_dynamic_rendering`
+extensions and calls the core entry points (`vkCmdPipelineBarrier2`,
+`vkQueueSubmit2`, `vkCmdWriteTimestamp2`, `vkCmd{Begin,End}Rendering`) directly
+on `ash::Device` — no `khr::*::Device` loaders. Consequences:
+
+- The instance and per-device version gates require 1.3
+  (`instance.rs::MINIMUM_API_VERSION`, `device.rs::baseline_gaps`); a 1.2-only
+  loader/device fails the filter and Auto falls back to wgpu.
+- `baseline_gaps` no longer probes the two extension *names* (a conformant 1.3
+  driver may drop the promoted names) — it verifies the feature bits via
+  `PhysicalDeviceVulkan13Features` instead, and enables them the same way at
+  device creation.
+- Rationale: MoltenVK (the macOS path, now the default backend everywhere)
+  reports 1.4 and satisfies 1.3 core, so nothing is lost on Apple; requiring
+  1.3 removes the extension-advertisement dependency and the dual sync1/sync2
+  bookkeeping the KHR loaders implied.
+
 ### Amendment (2026-07-14, #95): `gpu_timestamps` is a queried capability
 
 Per-pass GPU timing is exposed as `DeviceCapabilities.gpu_timestamps: bool` —

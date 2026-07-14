@@ -11,14 +11,17 @@ use super::debug;
 
 /// The highest Vulkan API version the engine targets.
 ///
-/// The instance requests `min(PREFERRED, loader version)` — a 1.2-only loader
-/// (e.g. MoltenVK) gets 1.2 instead of failing (VK-L10). Anything below
+/// The instance requests `min(PREFERRED, loader version)`. Anything below
 /// [`MINIMUM_API_VERSION`] is rejected: the baseline tier (ADR-027) needs
-/// Vulkan 1.2 core features (timeline semaphores).
+/// Vulkan 1.3 core, which folds `synchronization2` and `dynamicRendering` in
+/// as **mandatory** features — the backend uses the core entry points
+/// (`vkCmdPipelineBarrier2`, `vkQueueSubmit2`, `vkCmd{Begin,End}Rendering`)
+/// directly instead of the `VK_KHR_*` extension loaders. A loader that only
+/// offers 1.2 falls back to wgpu (auto path).
 const PREFERRED_API_VERSION: u32 = vk::make_api_version(0, 1, 3, 0);
 
 /// The lowest Vulkan API version the engine can run on.
-const MINIMUM_API_VERSION: u32 = vk::make_api_version(0, 1, 2, 0);
+const MINIMUM_API_VERSION: u32 = vk::make_api_version(0, 1, 3, 0);
 
 /// Validation layer name.
 const VALIDATION_LAYER_NAME: &CStr = c"VK_LAYER_KHRONOS_validation";
@@ -62,7 +65,7 @@ pub fn create_instance(
         .unwrap_or(vk::API_VERSION_1_0);
     if loader_version < MINIMUM_API_VERSION {
         return Err(GraphicsError::InitializationFailed(format!(
-            "Vulkan loader is version {}.{}, but the engine requires at least 1.2",
+            "Vulkan loader is version {}.{}, but the engine requires at least 1.3",
             vk::api_version_major(loader_version),
             vk::api_version_minor(loader_version),
         )));

@@ -90,7 +90,7 @@ impl SubmitRecording {
     /// Write the begin timestamp for pass `i` and record its label.
     pub fn pass_begin(
         &mut self,
-        sync2: &ash::khr::synchronization2::Device,
+        sync2: &ash::Device,
         cmd: vk::CommandBuffer,
         i: usize,
         name: &str,
@@ -104,12 +104,7 @@ impl SubmitRecording {
     }
 
     /// Write the end timestamp for pass `i`.
-    pub fn pass_end(
-        &mut self,
-        sync2: &ash::khr::synchronization2::Device,
-        cmd: vk::CommandBuffer,
-        i: usize,
-    ) {
+    pub fn pass_end(&mut self, sync2: &ash::Device, cmd: vk::CommandBuffer, i: usize) {
         if let Some(query) = self.passes[i].end {
             unsafe { sync2.cmd_write_timestamp2(cmd, STAGE_END, self.pool, query) };
         }
@@ -117,7 +112,7 @@ impl SubmitRecording {
 
     /// Write the whole-submit end timestamp (call after the last pass, before
     /// `end_command_buffer`).
-    pub fn submit_end(&self, sync2: &ash::khr::synchronization2::Device, cmd: vk::CommandBuffer) {
+    pub fn submit_end(&self, sync2: &ash::Device, cmd: vk::CommandBuffer) {
         if let Some(query) = self.end {
             unsafe { sync2.cmd_write_timestamp2(cmd, STAGE_END, self.pool, query) };
         }
@@ -217,7 +212,7 @@ impl TimestampManager {
     pub fn begin_submit(
         &mut self,
         core: &ash::Device,
-        sync2: &ash::khr::synchronization2::Device,
+        sync2: &ash::Device,
         queue: QueueId,
         slot: usize,
         num_passes: usize,

@@ -71,8 +71,8 @@ fn baseline_gaps(
     let mut gaps = Vec::new();
 
     let properties = unsafe { instance.get_physical_device_properties(device) };
-    if properties.api_version < vk::make_api_version(0, 1, 2, 0) {
-        gaps.push("Vulkan 1.2");
+    if properties.api_version < vk::make_api_version(0, 1, 3, 0) {
+        gaps.push("Vulkan 1.3");
     }
 
     let queue_families = unsafe { instance.get_physical_device_queue_family_properties(device) };
@@ -87,33 +87,28 @@ fn baseline_gaps(
     if require_swapchain && !has_ext(ash::khr::swapchain::NAME) {
         gaps.push("VK_KHR_swapchain");
     }
-    if !has_ext(ash::khr::dynamic_rendering::NAME) {
-        gaps.push("VK_KHR_dynamic_rendering");
-    }
-    // synchronization2 is a baseline-tier requirement (ADR-027): the Vulkan
-    // backend has no sync1 path. Devices lacking it fall back to wgpu.
-    if !has_ext(ash::khr::synchronization2::NAME) {
-        gaps.push("VK_KHR_synchronization2");
-    }
+    // `dynamicRendering` and `synchronization2` are no longer probed as
+    // extensions: at the 1.3 baseline both are core and **mandatory**, so the
+    // version gate above already guarantees them. We still verify the feature
+    // bits below (a conformant 1.3 driver must report them true) via the
+    // Vulkan 1.3 feature struct.
 
     // Feature queries: the baseline tier needs dynamicRendering,
     // synchronization2, timelineSemaphore, and shaderDrawParameters
     // (SV_InstanceID compiles to SPIR-V DrawParameters).
     let mut vulkan11 = vk::PhysicalDeviceVulkan11Features::default();
     let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default();
-    let mut dynamic_rendering = vk::PhysicalDeviceDynamicRenderingFeatures::default();
-    let mut synchronization2 = vk::PhysicalDeviceSynchronization2Features::default();
+    let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default();
     let mut features2 = vk::PhysicalDeviceFeatures2::default()
         .push_next(&mut vulkan11)
         .push_next(&mut vulkan12)
-        .push_next(&mut dynamic_rendering)
-        .push_next(&mut synchronization2);
+        .push_next(&mut vulkan13);
     unsafe { instance.get_physical_device_features2(device, &mut features2) };
 
-    if dynamic_rendering.dynamic_rendering == vk::FALSE {
+    if vulkan13.dynamic_rendering == vk::FALSE {
         gaps.push("dynamicRendering feature");
     }
-    if synchronization2.synchronization2 == vk::FALSE {
+    if vulkan13.synchronization2 == vk::FALSE {
         gaps.push("synchronization2 feature");
     }
     if vulkan12.timeline_semaphore == vk::FALSE {
@@ -337,9 +332,9 @@ pub fn select_physical_device(
             ))
         } else {
             GraphicsError::InitializationFailed(
-                "No GPU meets the baseline tier (Vulkan 1.2, dynamic rendering, \
-                 synchronization2, timeline semaphores, shaderDrawParameters); \
-                 see log for per-device gaps"
+                "No GPU meets the baseline tier (Vulkan 1.3 with core dynamic \
+                 rendering + synchronization2, timeline semaphores, \
+                 shaderDrawParameters); see log for per-device gaps"
                     .to_string(),
             )
         }
@@ -524,10 +519,12 @@ pub fn create_logical_device(
     }
 
     // Baseline-tier extensions (verified present during selection).
-    let mut device_extensions = vec![
-        ash::khr::dynamic_rendering::NAME.as_ptr(),
-        ash::khr::synchronization2::NAME.as_ptr(),
-    ];
+    //
+    // `dynamic_rendering` and `synchronization2` are NOT listed here: at the
+    // 1.3 baseline both are core, so we enable them through the Vulkan 1.3
+    // feature struct below rather than as `VK_KHR_*` extensions (a conformant
+    // 1.3 driver may stop advertising the promoted extension names).
+    let mut device_extensions = Vec::new();
     if enable_swapchain {
         device_extensions.push(ash::khr::swapchain::NAME.as_ptr());
     }
@@ -564,15 +561,13 @@ pub fn create_logical_device(
         .sampler_anisotropy(selected.optional.sampler_anisotropy)
         .fill_mode_non_solid(selected.optional.fill_mode_non_solid);
 
-    // Enable dynamic rendering via extension features (works on Vulkan 1.2 with extension)
-    // This is compatible with MoltenVK which only supports Vulkan 1.2
-    let mut dynamic_rendering_features =
-        vk::PhysicalDeviceDynamicRenderingFeatures::default().dynamic_rendering(true);
-
-    // synchronization2: the backend records all barriers via
-    // vkCmdPipelineBarrier2 and submits via vkQueueSubmit2 (ADR-027, #94).
-    let mut synchronization2_features =
-        vk::PhysicalDeviceSynchronization2Features::default().synchronization2(true);
+    // Vulkan 1.3 core features. `dynamicRendering` drives the attachment-less
+    // render pass path; `synchronization2` backs every barrier
+    // (`vkCmdPipelineBarrier2`) and graph submit (`vkQueueSubmit2`) via the
+    // core entry points (ADR-027, #94). Both are mandatory at the 1.3 baseline.
+    let mut vulkan13_features = vk::PhysicalDeviceVulkan13Features::default()
+        .dynamic_rendering(true)
+        .synchronization2(true);
 
     // shaderDrawParameters: shaders that read SV_InstanceID compile to SPIR-V
     // using the DrawParameters capability, which requires this feature.
@@ -597,8 +592,7 @@ pub fn create_logical_device(
         .queue_create_infos(&queue_create_infos)
         .enabled_extension_names(&device_extensions)
         .enabled_features(&features)
-        .push_next(&mut dynamic_rendering_features)
-        .push_next(&mut synchronization2_features)
+        .push_next(&mut vulkan13_features)
         .push_next(&mut vulkan11_features)
         .push_next(&mut vulkan12_features);
     if selected.optional.maintenance9 {

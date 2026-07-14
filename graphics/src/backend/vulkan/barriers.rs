@@ -476,7 +476,7 @@ impl BarrierBatch {
     /// Submit all barriers in a single `vkCmdPipelineBarrier2` command.
     ///
     /// Does nothing if the batch is empty.
-    pub fn submit(&self, sync2: &ash::khr::synchronization2::Device, cmd: vk::CommandBuffer) {
+    pub fn submit(&self, sync2: &ash::Device, cmd: vk::CommandBuffer) {
         if self.is_empty() {
             return;
         }

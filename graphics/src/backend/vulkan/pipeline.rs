@@ -638,7 +638,7 @@ impl PipelineManager {
         blend_state: Option<&crate::materials::BlendState>,
         raster: crate::materials::RasterState,
         sample_count: u32,
-        _dynamic_rendering: &ash::khr::dynamic_rendering::Device,
+        _dynamic_rendering: &ash::Device,
     ) -> Result<vk::Pipeline, GraphicsError> {
         // Derived once from the optional depth state; used by both the depth-
         // stencil state and the dynamic-rendering attachment formats below.

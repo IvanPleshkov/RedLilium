@@ -215,12 +215,6 @@ pub struct VulkanBackend {
     /// Whether validation layers are enabled.
     #[allow(dead_code)]
     validation_enabled: bool,
-    /// Dynamic rendering extension.
-    dynamic_rendering: ash::khr::dynamic_rendering::Device,
-    /// synchronization2 extension: all barriers (`vkCmdPipelineBarrier2`) and
-    /// graph submits (`vkQueueSubmit2`) go through this loader (baseline-tier
-    /// requirement, ADR-027 / #94 — no sync1 path).
-    synchronization2: ash::khr::synchronization2::Device,
     /// Surface extension.
     surface_loader: ash::khr::surface::Instance,
     /// Swapchain extension.
@@ -592,11 +586,9 @@ impl VulkanBackend {
             belt
         };
 
-        // Load dynamic rendering extension
-        let dynamic_rendering = ash::khr::dynamic_rendering::Device::new(&instance, &device);
-
-        // Load synchronization2 extension (baseline-tier requirement, #94).
-        let synchronization2 = ash::khr::synchronization2::Device::new(&instance, &device);
+        // dynamic rendering and synchronization2 are Vulkan 1.3 core: the
+        // backend calls `vkCmd{Begin,End}Rendering`, `vkCmdPipelineBarrier2`,
+        // `vkQueueSubmit2`, and `vkCmdWriteTimestamp2` directly on `device`.
 
         // GPU crash breadcrumbs (#97). Pick the mechanism by extension
         // availability (NV checkpoints → AMD buffer marker → portable
@@ -646,7 +638,6 @@ impl VulkanBackend {
             }
             let manager = breadcrumbs::BreadcrumbManager::new(
                 &device,
-                &synchronization2,
                 &mut allocator.lock(),
                 mechanism,
                 checkpoints,
@@ -726,8 +717,6 @@ impl VulkanBackend {
             command_pool,
             swapchain_sync: Mutex::new(SwapchainSync::default()),
             validation_enabled,
-            dynamic_rendering,
-            synchronization2,
             surface_loader,
             swapchain_loader,
             frame_command_pools,
@@ -919,12 +908,6 @@ impl VulkanBackend {
     /// Get the swapchain loader.
     pub fn swapchain_loader(&self) -> &ash::khr::swapchain::Device {
         &self.swapchain_loader
-    }
-
-    /// Get the synchronization2 loader (`vkCmdPipelineBarrier2` /
-    /// `vkQueueSubmit2`).
-    pub fn synchronization2(&self) -> &ash::khr::synchronization2::Device {
-        &self.synchronization2
     }
 
     /// Get the command pool.
@@ -2067,7 +2050,7 @@ impl VulkanBackend {
             descriptor.blend_state.as_ref(),
             descriptor.raster,
             descriptor.sample_count,
-            &self.dynamic_rendering,
+            &self.device,
         )?;
 
         // Shader modules are baked into the pipeline; destroy them now.
@@ -2434,7 +2417,7 @@ impl VulkanBackend {
         let mut recording = self.timestamps.as_ref().and_then(|m| {
             m.lock().begin_submit(
                 &self.device,
-                &self.synchronization2,
+                &self.device,
                 queue_id,
                 slot,
                 compiled.pass_order().len(),
@@ -2474,11 +2457,11 @@ impl VulkanBackend {
                     timeline_value,
                     &mut waits,
                 );
-                barriers.submit(&self.synchronization2, cmd);
+                barriers.submit(&self.device, cmd);
 
                 // Timestamp the pass's GPU work (begin before, end after).
                 if let Some(rec) = recording.as_mut() {
-                    rec.pass_begin(&self.synchronization2, cmd, i, pass.name());
+                    rec.pass_begin(&self.device, cmd, i, pass.name());
                 }
                 // Breadcrumb the pass (begin before, end after).
                 if let Some(bc) = breadcrumbs.as_mut() {
@@ -2496,7 +2479,7 @@ impl VulkanBackend {
                     return Err(e);
                 }
                 if let Some(rec) = recording.as_mut() {
-                    rec.pass_end(&self.synchronization2, cmd, i);
+                    rec.pass_end(&self.device, cmd, i);
                 }
                 if let Some(bc) = breadcrumbs.as_ref() {
                     bc.pass_end(cmd, i);
@@ -2507,7 +2490,7 @@ impl VulkanBackend {
         // Submit-end marker, then hand the recording back for read-back at slot
         // retirement.
         if let Some(rec) = recording {
-            rec.submit_end(&self.synchronization2, cmd);
+            rec.submit_end(&self.device, cmd);
             if let Some(m) = &self.timestamps {
                 m.lock().finish_submit(slot, rec);
             }
@@ -2644,7 +2627,7 @@ impl VulkanBackend {
                 .signal_semaphore_infos(&signal_infos);
 
             let submit_result = unsafe {
-                self.synchronization2
+                self.device
                     .queue_submit2(queue, &[submit_info], vk::Fence::null())
             };
             if let Err(e) = submit_result {
@@ -3158,8 +3141,7 @@ impl VulkanBackend {
                 let dependency_info =
                     vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
                 unsafe {
-                    self.synchronization2
-                        .cmd_pipeline_barrier2(cmd, &dependency_info);
+                    self.device.cmd_pipeline_barrier2(cmd, &dependency_info);
                 }
             }
         }
@@ -3180,8 +3162,7 @@ impl VulkanBackend {
 
         // Begin dynamic rendering
         unsafe {
-            self.dynamic_rendering
-                .cmd_begin_rendering(cmd, &rendering_info);
+            self.device.cmd_begin_rendering(cmd, &rendering_info);
         }
 
         // Set viewport with Y-flip and [0, 1] depth range to match wgpu/D3D conventions.
@@ -3244,7 +3225,7 @@ impl VulkanBackend {
 
         // End dynamic rendering
         unsafe {
-            self.dynamic_rendering.cmd_end_rendering(cmd);
+            self.device.cmd_end_rendering(cmd);
         }
 
         // Note: Surface images are transitioned to PRESENT_SRC_KHR in present_vulkan_frame,
@@ -3744,7 +3725,7 @@ impl VulkanBackend {
                         .subresource_range(subresource(src_level, 1));
                     let barriers = [to_src];
                     let dep = vk::DependencyInfo::default().image_memory_barriers(&barriers);
-                    unsafe { self.synchronization2.cmd_pipeline_barrier2(cmd, &dep) };
+                    unsafe { self.device.cmd_pipeline_barrier2(cmd, &dep) };
 
                     let dst_w = (mip_w / 2).max(1);
                     let dst_h = (mip_h / 2).max(1);
@@ -3812,7 +3793,7 @@ impl VulkanBackend {
                     .subresource_range(subresource(0, mip_count - 1));
                 let barriers = [restore];
                 let dep = vk::DependencyInfo::default().image_memory_barriers(&barriers);
-                unsafe { self.synchronization2.cmd_pipeline_barrier2(cmd, &dep) };
+                unsafe { self.device.cmd_pipeline_barrier2(cmd, &dep) };
             }
         }
         Ok(())

@@ -325,7 +325,6 @@ impl SubmitBreadcrumbs {
 pub struct BreadcrumbManager {
     mechanism: Mechanism,
     device: ash::Device,
-    sync2: ash::khr::synchronization2::Device,
     checkpoints: Option<ash::nv::device_diagnostic_checkpoints::Device>,
     buffer_marker: Option<ash::amd::buffer_marker::Device>,
     device_fault: Option<ash::ext::device_fault::Device>,
@@ -339,7 +338,6 @@ impl BreadcrumbManager {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         device: &ash::Device,
-        sync2: &ash::khr::synchronization2::Device,
         allocator: &mut Allocator,
         mechanism: Mechanism,
         checkpoints: Option<ash::nv::device_diagnostic_checkpoints::Device>,
@@ -395,7 +393,6 @@ impl BreadcrumbManager {
         Some(Self {
             mechanism,
             device: device.clone(),
-            sync2: sync2.clone(),
             checkpoints,
             buffer_marker,
             device_fault,
@@ -435,7 +432,7 @@ impl BreadcrumbManager {
                         .dst_access_mask(vk::AccessFlags2::MEMORY_WRITE);
                     let barriers = [barrier];
                     let dep = vk::DependencyInfo::default().memory_barriers(&barriers);
-                    self.sync2.cmd_pipeline_barrier2(cmd, &dep);
+                    self.device.cmd_pipeline_barrier2(cmd, &dep);
                 }
             }
         }

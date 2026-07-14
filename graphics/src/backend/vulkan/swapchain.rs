@@ -620,7 +620,7 @@ pub fn present_vulkan_frame(
     let dependency_info = vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
     unsafe {
         vulkan_backend
-            .synchronization2()
+            .device()
             .cmd_pipeline_barrier2(cmd, &dependency_info);
     }
 
@@ -667,7 +667,7 @@ pub fn present_vulkan_frame(
 
     // Submit and signal the fence
     let submit_result = unsafe {
-        vulkan_backend.synchronization2().queue_submit2(
+        vulkan_backend.device().queue_submit2(
             vulkan_backend.graphics_queue(),
             &[submit_info],
             in_flight_fence,
@@ -679,7 +679,7 @@ pub fn present_vulkan_frame(
         // does not stall out the full fence timeout. If that also fails the
         // device is almost certainly lost.
         let resignal = unsafe {
-            vulkan_backend.synchronization2().queue_submit2(
+            vulkan_backend.device().queue_submit2(
                 vulkan_backend.graphics_queue(),
                 &[vk::SubmitInfo2::default()],
                 in_flight_fence,
