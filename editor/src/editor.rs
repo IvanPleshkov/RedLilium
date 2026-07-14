@@ -112,6 +112,13 @@ pub struct Editor {
     /// Last frame's entity selection — when it changes to a non-empty set, the
     /// asset selection is cleared so the inspector switches back to the entity.
     last_selection: Vec<Entity>,
+
+    /// Whether the GPU stats window is open (#95). Toggled from the menu / the
+    /// macOS titlebar; the window itself is a plain reader of the
+    /// `FrameGpuTimings` resource.
+    show_gpu_stats: bool,
+    /// Rolling-average state for the GPU stats window.
+    gpu_stats_panel: crate::gpu_stats_panel::GpuStatsPanel,
 }
 
 /// Tracks an in-flight VFS read for component import.
@@ -183,6 +190,8 @@ impl Editor {
             pending_delete_confirm: None,
             should_close: false,
             last_selection: Vec::new(),
+            show_gpu_stats: false,
+            gpu_stats_panel: crate::gpu_stats_panel::GpuStatsPanel::default(),
         }
     }
 
@@ -1033,6 +1042,23 @@ impl AppHandler for Editor {
         if self.world.is_some() {
             let elapsed = ctx.elapsed_time() as f64;
 
+            // Copy the device's latest per-pass GPU timings (a few frames
+            // stale) into the ECS resource so the stats window reads it like
+            // any other panel (#95). `gpu_timestamps_supported` drives the
+            // "unavailable" fallback on backends without timestamp queries.
+            let gpu_timestamps_supported = ctx.device().capabilities().gpu_timestamps;
+            {
+                let timings = ctx.device().latest_gpu_timings();
+                let ew = self.world.as_mut().unwrap();
+                if ew
+                    .world
+                    .has_resource::<redlilium_graphics::FrameGpuTimings>()
+                {
+                    *ew.world
+                        .resource_mut::<redlilium_graphics::FrameGpuTimings>() = timings;
+                }
+            }
+
             // begin_frame + grab the (cloned) egui context; the dock below builds
             // UI through the context, so we don't hold the controller resource
             // across it. (end_frame happens at the bottom, also via the resource.)
@@ -1092,6 +1118,16 @@ impl AppHandler for Editor {
                                     .resource_mut::<redlilium_gizmo::TransformGizmo>()
                                     .set_mode(mode);
                             }
+
+                            // GPU stats window toggle (#95).
+                            ui.add_space(16.0);
+                            if ui
+                                .selectable_label(self.show_gpu_stats, "\u{23F1} GPU")
+                                .on_hover_text("Toggle the GPU per-pass timings window")
+                                .clicked()
+                            {
+                                self.show_gpu_stats = !self.show_gpu_stats;
+                            }
                         });
 
                         // Double-click on background toggles maximize
@@ -1127,7 +1163,11 @@ impl AppHandler for Editor {
                     custom_titlebar,
                     self.play_state,
                     paused_due_to_panic,
+                    self.show_gpu_stats,
                 );
+                if result.toggle_gpu_stats {
+                    self.show_gpu_stats = !self.show_gpu_stats;
+                }
                 if let Some(play_action) = result.play_action {
                     self.apply_play_action(play_action);
                 }
@@ -1314,6 +1354,36 @@ impl AppHandler for Editor {
                             }
                         });
                     });
+            }
+
+            // GPU stats window (#95): a plain reader of the `FrameGpuTimings`
+            // resource, toggled from the menu / titlebar. Non-modal, closable.
+            if self.show_gpu_stats {
+                let timings = self
+                    .world
+                    .as_ref()
+                    .filter(|ew| {
+                        ew.world
+                            .has_resource::<redlilium_graphics::FrameGpuTimings>()
+                    })
+                    .map(|ew| {
+                        ew.world
+                            .resource::<redlilium_graphics::FrameGpuTimings>()
+                            .clone()
+                    })
+                    .unwrap_or_default();
+                let mut open = true;
+                egui::Window::new("GPU Stats")
+                    .default_width(320.0)
+                    .resizable(true)
+                    .open(&mut open)
+                    .show(&egui_ctx, |ui| {
+                        self.gpu_stats_panel
+                            .show(ui, &timings, gpu_timestamps_supported);
+                    });
+                if !open {
+                    self.show_gpu_stats = false;
+                }
             }
 
             // Modal "Delete asset?" confirmation.

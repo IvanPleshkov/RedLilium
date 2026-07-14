@@ -79,17 +79,17 @@ impl TextureLayout {
     }
 
     /// Get the access mask for this layout (as source).
-    pub fn src_access_mask(self) -> vk::AccessFlags {
+    pub fn src_access_mask(self) -> vk::AccessFlags2 {
         match self {
-            Self::Undefined => vk::AccessFlags::empty(),
-            Self::ColorAttachment => vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-            Self::DepthStencilAttachment => vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-            Self::DepthStencilReadOnly => vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ,
-            Self::ShaderReadOnly => vk::AccessFlags::SHADER_READ,
-            Self::TransferSrc => vk::AccessFlags::TRANSFER_READ,
-            Self::TransferDst => vk::AccessFlags::TRANSFER_WRITE,
-            Self::PresentSrc => vk::AccessFlags::empty(),
-            Self::General => vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
+            Self::Undefined => vk::AccessFlags2::NONE,
+            Self::ColorAttachment => vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+            Self::DepthStencilAttachment => vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            Self::DepthStencilReadOnly => vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ,
+            Self::ShaderReadOnly => vk::AccessFlags2::SHADER_READ,
+            Self::TransferSrc => vk::AccessFlags2::TRANSFER_READ,
+            Self::TransferDst => vk::AccessFlags2::TRANSFER_WRITE,
+            Self::PresentSrc => vk::AccessFlags2::NONE,
+            Self::General => vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
         }
     }
 
@@ -100,87 +100,96 @@ impl TextureLayout {
     /// depth attachment, and `DepthStencilReadOnly` is sampled by shaders in
     /// addition to feeding the depth test. Omitting them would leave those
     /// reads outside the barrier's visibility scope.
-    pub fn dst_access_mask(self) -> vk::AccessFlags {
+    pub fn dst_access_mask(self) -> vk::AccessFlags2 {
         match self {
-            Self::Undefined => vk::AccessFlags::empty(),
+            Self::Undefined => vk::AccessFlags2::NONE,
             Self::ColorAttachment => {
-                vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::COLOR_ATTACHMENT_READ
+                vk::AccessFlags2::COLOR_ATTACHMENT_WRITE | vk::AccessFlags2::COLOR_ATTACHMENT_READ
             }
             Self::DepthStencilAttachment => {
-                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
-                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE
+                    | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ
             }
             Self::DepthStencilReadOnly => {
-                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ | vk::AccessFlags::SHADER_READ
+                vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ | vk::AccessFlags2::SHADER_READ
             }
-            Self::ShaderReadOnly => vk::AccessFlags::SHADER_READ,
-            Self::TransferSrc => vk::AccessFlags::TRANSFER_READ,
-            Self::TransferDst => vk::AccessFlags::TRANSFER_WRITE,
-            Self::PresentSrc => vk::AccessFlags::empty(),
-            Self::General => vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
+            Self::ShaderReadOnly => vk::AccessFlags2::SHADER_READ,
+            Self::TransferSrc => vk::AccessFlags2::TRANSFER_READ,
+            Self::TransferDst => vk::AccessFlags2::TRANSFER_WRITE,
+            Self::PresentSrc => vk::AccessFlags2::NONE,
+            Self::General => vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
         }
     }
 
     /// Get the pipeline stage for this layout (as source).
-    pub fn src_stage(self) -> vk::PipelineStageFlags {
+    ///
+    /// sync2 deprecates `TOP_OF_PIPE`/`BOTTOM_OF_PIPE`: an empty source scope
+    /// (`Undefined`) becomes `NONE`, and "wait for everything" (`PresentSrc`,
+    /// formerly `BOTTOM_OF_PIPE` as a first sync scope) becomes `ALL_COMMANDS`.
+    pub fn src_stage(self) -> vk::PipelineStageFlags2 {
         match self {
-            Self::Undefined => vk::PipelineStageFlags::TOP_OF_PIPE,
-            Self::ColorAttachment => vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            Self::DepthStencilAttachment => vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+            Self::Undefined => vk::PipelineStageFlags2::NONE,
+            Self::ColorAttachment => vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+            Self::DepthStencilAttachment => vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
             // Read both by the depth test and by shaders sampling it.
             Self::DepthStencilReadOnly => {
-                vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
-                    | vk::PipelineStageFlags::VERTEX_SHADER
-                    | vk::PipelineStageFlags::FRAGMENT_SHADER
-                    | vk::PipelineStageFlags::COMPUTE_SHADER
+                vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags2::VERTEX_SHADER
+                    | vk::PipelineStageFlags2::FRAGMENT_SHADER
+                    | vk::PipelineStageFlags2::COMPUTE_SHADER
             }
             // ShaderReadOnly textures can be sampled from vertex, fragment, or compute shaders.
             // Use all shader stages to ensure correct synchronization.
             Self::ShaderReadOnly => {
-                vk::PipelineStageFlags::VERTEX_SHADER
-                    | vk::PipelineStageFlags::FRAGMENT_SHADER
-                    | vk::PipelineStageFlags::COMPUTE_SHADER
+                vk::PipelineStageFlags2::VERTEX_SHADER
+                    | vk::PipelineStageFlags2::FRAGMENT_SHADER
+                    | vk::PipelineStageFlags2::COMPUTE_SHADER
             }
-            Self::TransferSrc => vk::PipelineStageFlags::TRANSFER,
-            Self::TransferDst => vk::PipelineStageFlags::TRANSFER,
-            Self::PresentSrc => vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+            Self::TransferSrc => vk::PipelineStageFlags2::ALL_TRANSFER,
+            Self::TransferDst => vk::PipelineStageFlags2::ALL_TRANSFER,
+            Self::PresentSrc => vk::PipelineStageFlags2::ALL_COMMANDS,
             // General layout is used for storage images accessed from any shader stage.
             Self::General => {
-                vk::PipelineStageFlags::VERTEX_SHADER
-                    | vk::PipelineStageFlags::FRAGMENT_SHADER
-                    | vk::PipelineStageFlags::COMPUTE_SHADER
+                vk::PipelineStageFlags2::VERTEX_SHADER
+                    | vk::PipelineStageFlags2::FRAGMENT_SHADER
+                    | vk::PipelineStageFlags2::COMPUTE_SHADER
             }
         }
     }
 
     /// Get the pipeline stage for this layout (as destination).
-    pub fn dst_stage(self) -> vk::PipelineStageFlags {
+    ///
+    /// sync2 deprecates `TOP_OF_PIPE`/`BOTTOM_OF_PIPE`: "block everything"
+    /// (`Undefined` as a second sync scope, never actually a transition
+    /// target) becomes `ALL_COMMANDS`, and "block nothing" (`PresentSrc`,
+    /// formerly `BOTTOM_OF_PIPE`) becomes `NONE`.
+    pub fn dst_stage(self) -> vk::PipelineStageFlags2 {
         match self {
-            Self::Undefined => vk::PipelineStageFlags::TOP_OF_PIPE,
-            Self::ColorAttachment => vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            Self::DepthStencilAttachment => vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+            Self::Undefined => vk::PipelineStageFlags2::ALL_COMMANDS,
+            Self::ColorAttachment => vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+            Self::DepthStencilAttachment => vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS,
             // Read both by the depth test and by shaders sampling it.
             Self::DepthStencilReadOnly => {
-                vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
-                    | vk::PipelineStageFlags::VERTEX_SHADER
-                    | vk::PipelineStageFlags::FRAGMENT_SHADER
-                    | vk::PipelineStageFlags::COMPUTE_SHADER
+                vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+                    | vk::PipelineStageFlags2::VERTEX_SHADER
+                    | vk::PipelineStageFlags2::FRAGMENT_SHADER
+                    | vk::PipelineStageFlags2::COMPUTE_SHADER
             }
             // ShaderReadOnly textures can be sampled from vertex, fragment, or compute shaders.
             // Use all shader stages to ensure correct synchronization.
             Self::ShaderReadOnly => {
-                vk::PipelineStageFlags::VERTEX_SHADER
-                    | vk::PipelineStageFlags::FRAGMENT_SHADER
-                    | vk::PipelineStageFlags::COMPUTE_SHADER
+                vk::PipelineStageFlags2::VERTEX_SHADER
+                    | vk::PipelineStageFlags2::FRAGMENT_SHADER
+                    | vk::PipelineStageFlags2::COMPUTE_SHADER
             }
-            Self::TransferSrc => vk::PipelineStageFlags::TRANSFER,
-            Self::TransferDst => vk::PipelineStageFlags::TRANSFER,
-            Self::PresentSrc => vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+            Self::TransferSrc => vk::PipelineStageFlags2::ALL_TRANSFER,
+            Self::TransferDst => vk::PipelineStageFlags2::ALL_TRANSFER,
+            Self::PresentSrc => vk::PipelineStageFlags2::NONE,
             // General layout is used for storage images accessed from any shader stage.
             Self::General => {
-                vk::PipelineStageFlags::VERTEX_SHADER
-                    | vk::PipelineStageFlags::FRAGMENT_SHADER
-                    | vk::PipelineStageFlags::COMPUTE_SHADER
+                vk::PipelineStageFlags2::VERTEX_SHADER
+                    | vk::PipelineStageFlags2::FRAGMENT_SHADER
+                    | vk::PipelineStageFlags2::COMPUTE_SHADER
             }
         }
     }

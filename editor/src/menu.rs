@@ -140,6 +140,8 @@ pub use native::NativeMenu;
 pub struct MenuBarResult {
     pub action: Option<MenuAction>,
     pub play_action: Option<crate::toolbar::PlayAction>,
+    /// Set when the user toggled the GPU stats window from the View menu (#95).
+    pub toggle_gpu_stats: bool,
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -149,9 +151,11 @@ pub fn draw_menu_bar(
     custom_titlebar: bool,
     play_state: crate::toolbar::PlayState,
     paused_due_to_panic: bool,
+    gpu_stats_open: bool,
 ) -> MenuBarResult {
     let mut action = None;
     let mut play_action = None;
+    let mut toggle_gpu_stats = false;
     let window_for_drag = window.clone();
 
     egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
@@ -185,6 +189,13 @@ pub fn draw_menu_bar(
                         .clicked()
                     {
                         action = Some(MenuAction::Redo);
+                        ui.close();
+                    }
+                });
+                ui.menu_button("View", |ui| {
+                    let mut open = gpu_stats_open;
+                    if ui.checkbox(&mut open, "GPU Stats").clicked() {
+                        toggle_gpu_stats = true;
                         ui.close();
                     }
                 });
@@ -248,6 +259,7 @@ pub fn draw_menu_bar(
     MenuBarResult {
         action,
         play_action,
+        toggle_gpu_stats,
     }
 }
 

@@ -33,8 +33,9 @@ use common::{
     Backend, ExpectedPixel, FULLSCREEN_QUAD_VERTICES, LEFT_HALF_QUAD_VERTICES, TestContext,
     create_fullscreen_quad, create_left_half_quad, create_material_instance, create_mrt_pass,
     create_render_pass_with_depth, create_simple_render_pass, create_solid_color_material,
-    create_texture_sample_instance, create_texture_sample_material, generate_test_pattern,
-    get_pixel, quad_vertex_layout, readback_buffer_size, verify_pixel, write_quad_vertices,
+    create_solid_color_material_with_raster, create_texture_sample_instance,
+    create_texture_sample_material, generate_test_pattern, get_pixel, quad_vertex_layout,
+    readback_buffer_size, verify_pixel, write_quad_vertices,
 };
 use redlilium_graphics::{
     BindingGroupDescriptor, BindingLayout, BindingLayoutEntry, BindingType, BufferUsage,
@@ -117,6 +118,134 @@ fn test_buffer_copy_roundtrip(#[case] backend: Backend) {
     assert_eq!(test_data.len(), BUFFER_SIZE as usize);
     assert_eq!(test_data[0], 0);
     assert_eq!(test_data[255], 255);
+}
+
+/// Regression test for `TransferOperation::upload_texture_data` (the path egui
+/// uses to stage its font-atlas / user textures).
+///
+/// Under ADR-021 (#89) a buffer created without a mapping flag lands
+/// device-local, where the mapped write used to fill the staging buffer
+/// panics ("write_buffer on a device-local buffer"). The staging buffer must
+/// carry `MAP_WRITE`. Uploads a known pattern into a texture and reads it back.
+#[rstest]
+#[case::dummy(Backend::Dummy)]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_upload_texture_data_roundtrip(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new(backend) else {
+        eprintln!("Backend {backend:?} not available, skipping");
+        return;
+    };
+
+    // Single-row texture: the tight row pitch is used verbatim (no 256-byte
+    // multi-row padding), so the readback bytes match the uploaded bytes 1:1.
+    const WIDTH: u32 = 16;
+    let pixels: Vec<u8> = (0..WIDTH * 4).map(|i| (i % 251) as u8).collect();
+
+    let texture = ctx.create_texture_2d(
+        WIDTH,
+        1,
+        TextureFormat::Rgba8Unorm,
+        TextureUsage::COPY_DST | TextureUsage::COPY_SRC,
+    );
+
+    // The exact call egui makes — must not panic on a device-local staging
+    // buffer.
+    let upload = TransferOperation::upload_texture_data(&ctx.device, texture.clone(), &pixels)
+        .expect("upload_texture_data should stage the pixels without error");
+    let mut upload_graph = RenderGraph::new();
+    let mut upload_pass = TransferPass::new("upload_texture".into());
+    upload_pass.set_transfer_config(TransferConfig::new().with_operation(upload));
+    upload_graph.add_transfer_pass(upload_pass);
+    ctx.execute_graph(upload_graph);
+
+    // The dummy backend performs no real copy; the point there is just that the
+    // staging + graph execution did not panic.
+    if backend == Backend::Dummy {
+        return;
+    }
+
+    let readback = ctx.create_readback_buffer((WIDTH * 4) as u64);
+    let mut readback_graph = RenderGraph::new();
+    let mut readback_pass = TransferPass::new("readback_texture".into());
+    readback_pass.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::readback_texture_whole(texture.clone(), readback.clone()),
+    ));
+    readback_graph.add_transfer_pass(readback_pass);
+    ctx.execute_graph(readback_graph);
+
+    let data = ctx.read_buffer(&readback, (WIDTH * 4) as u64);
+    assert_eq!(
+        data, pixels,
+        "read-back texture bytes must match the uploaded pattern"
+    );
+}
+
+/// Cross-backend face-culling agreement (#39): a counter-clockwise, front-
+/// facing quad with `CullMode::Back` must render on BOTH Vulkan and wgpu.
+///
+/// The engine's logical convention is CCW = front (glTF/OpenGL). The fullscreen
+/// quad is wound CCW, so back-face culling must keep it. If a backend's
+/// effective winding is inverted (e.g. a Vulkan negative-viewport Y-flip not
+/// matched by the front-face mapping), it culls the front face and the target
+/// stays at the clear color — the "draws the back side of geometry" bug.
+#[rstest]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_back_face_culling_agreement(#[case] backend: Backend) {
+    use redlilium_graphics::{CullMode, FrontFace, PolygonMode, RasterState};
+
+    let Some(ctx) = TestContext::new(backend) else {
+        eprintln!("Backend {backend:?} not available, skipping");
+        return;
+    };
+
+    const WIDTH: u32 = 16;
+    const HEIGHT: u32 = 16;
+    const CLEAR_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
+    let render_target = ctx.create_render_target(WIDTH, HEIGHT);
+    let readback_size = readback_buffer_size(WIDTH, HEIGHT, 4);
+    let readback = ctx.create_readback_buffer(readback_size);
+
+    // The fullscreen quad is wound counter-clockwise in clip space.
+    let quad_mesh = create_fullscreen_quad(&ctx);
+    write_quad_vertices(&ctx, &quad_mesh, &FULLSCREEN_QUAD_VERTICES);
+
+    // CCW-front + cull back faces: the quad is front-facing, so it renders.
+    let material = create_solid_color_material_with_raster(
+        &ctx,
+        RasterState {
+            cull_mode: CullMode::Back,
+            front_face: FrontFace::Ccw,
+            polygon_mode: PolygonMode::Fill,
+        },
+    );
+    let instance = create_material_instance(material);
+
+    let mut graph = RenderGraph::new();
+    let mut render_pass =
+        create_simple_render_pass("cull_back_ccw", render_target.clone(), CLEAR_COLOR);
+    render_pass.add_draw(quad_mesh, instance);
+    let render_handle = graph.add_graphics_pass(render_pass);
+
+    let mut copy_pass = TransferPass::new("copy_to_readback".into());
+    copy_pass.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::readback_texture_whole(render_target, readback.clone()),
+    ));
+    let copy_handle = graph.add_transfer_pass(copy_pass);
+    graph.add_dependency(copy_handle, render_handle);
+
+    ctx.execute_graph(graph);
+
+    let data = ctx.read_buffer(&readback, readback_size);
+    let center = get_pixel(&data, WIDTH, WIDTH / 2, HEIGHT / 2);
+    assert!(
+        verify_pixel(&data, WIDTH, WIDTH / 2, HEIGHT / 2, ExpectedPixel::RED, 2),
+        "CCW front-facing quad with back-face culling must render red on \
+         {backend:?}, but got {center:?} — the front face was culled (winding \
+         inverted)"
+    );
 }
 
 /// Test buffer copy with partial regions.
@@ -370,6 +499,105 @@ fn test_multi_submit_cross_graph_dependency(#[case] backend: Backend) {
         assert_eq!(
             errors, 0,
             "Vulkan validation reported {errors} error(s) during multi-submit cross-graph dependency"
+        );
+    }
+}
+
+/// Per-pass GPU timestamps (#95): a two-pass graph must report a timing for
+/// each pass, with non-negative durations bounded by the submit total.
+///
+/// Timestamp results are read back only when a slot retires (~MAX_FRAMES_IN_
+/// FLIGHT frames later), so the graph is run several frames before the timings
+/// are populated. Skipped on backends without `gpu_timestamps` (wgpu/dummy).
+#[rstest]
+#[case::dummy(Backend::Dummy)]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_gpu_timestamps_two_pass(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        eprintln!("Skipping test: {backend:?} backend not available");
+        return;
+    };
+
+    // wgpu/dummy report no timestamp support and return empty timings.
+    if !ctx.device.capabilities().gpu_timestamps {
+        eprintln!("Skipping test: gpu_timestamps unsupported on {backend:?}");
+        return;
+    }
+
+    if backend == Backend::Vulkan {
+        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+    }
+
+    let target_a = ctx.create_render_target(64, 64);
+    let target_b = ctx.create_render_target(64, 64);
+
+    // Run the same two-pass graph enough frames for a recorded slot to retire
+    // and have its query results read back into `latest_gpu_timings`.
+    let mut timings = redlilium_graphics::FrameGpuTimings::default();
+    for _ in 0..8 {
+        let mut graph = RenderGraph::new();
+        graph.add_graphics_pass(create_simple_render_pass(
+            "pass_a",
+            target_a.clone(),
+            [0.1, 0.2, 0.3, 1.0],
+        ));
+        graph.add_graphics_pass(create_simple_render_pass(
+            "pass_b",
+            target_b.clone(),
+            [0.3, 0.2, 0.1, 1.0],
+        ));
+        ctx.execute_graph(graph);
+
+        let latest = ctx.device.latest_gpu_timings();
+        if !latest.is_empty() {
+            timings = latest;
+        }
+    }
+
+    assert!(
+        !timings.is_empty(),
+        "no GPU timings were reported after running the two-pass graph"
+    );
+
+    // The submit that carried both passes.
+    let submit = timings
+        .submits
+        .iter()
+        .find(|s| s.passes.len() >= 2)
+        .unwrap_or_else(|| panic!("expected a submit timing both passes, got {timings:?}"));
+
+    assert!(
+        submit.passes.iter().any(|(n, _)| n == "pass_a"),
+        "pass_a missing from timings: {:?}",
+        submit.passes
+    );
+    assert!(
+        submit.passes.iter().any(|(n, _)| n == "pass_b"),
+        "pass_b missing from timings: {:?}",
+        submit.passes
+    );
+
+    assert!(submit.total_ms >= 0.0, "submit total is negative");
+    // Each pass's timestamp region is a subset of the submit region, so its
+    // duration is non-negative and bounded by the submit total. (Passes can
+    // pipeline, so their *sum* may exceed the total — do not assert on the sum.)
+    // A small epsilon absorbs tick-precision rounding.
+    let eps = 0.5;
+    for (name, ms) in &submit.passes {
+        assert!(*ms >= 0.0, "pass {name} has a negative duration {ms}");
+        assert!(
+            *ms <= submit.total_ms + eps,
+            "pass {name} duration {ms} exceeds submit total {}",
+            submit.total_ms
+        );
+    }
+
+    if backend == Backend::Vulkan {
+        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        assert_eq!(
+            errors, 0,
+            "Vulkan validation reported {errors} error(s) during GPU timestamp collection"
         );
     }
 }

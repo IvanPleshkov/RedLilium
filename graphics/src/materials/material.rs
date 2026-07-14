@@ -261,10 +261,15 @@ pub enum CullMode {
 /// a right-handed math convention (#39).
 ///
 /// This is normalized at the API boundary: each backend maps it to its physical
-/// convention. The wgpu backend passes it through; the Vulkan backend **inverts**
-/// it, because its negative-viewport-height Y-flip (matching wgpu/OpenGL screen
-/// space) reverses screen-space winding. Defining winding once, logically, is
-/// what lets culling be enabled without the two backends diverging (XB-M4).
+/// convention. The wgpu backend passes it through. The Vulkan backend renders
+/// with a negative-viewport-height Y-flip (matching wgpu/OpenGL screen space);
+/// on conformant native Vulkan that flip reverses screen-space winding, so the
+/// backend **inverts** the winding to compensate — but on the portability
+/// subset (MoltenVK / Metal) facing is determined independently of the flip
+/// (like wgpu-on-Metal), so the logical winding is passed through there. See
+/// `backend/vulkan/pipeline.rs::vk_front_face`. Defining winding once,
+/// logically, is what lets culling be enabled without the backends diverging
+/// (XB-M4, #39).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum FrontFace {
     /// Counter-clockwise winding is front-facing (engine default).

@@ -110,21 +110,21 @@ impl BufferId {
 #[derive(Debug, Default, Clone, Copy)]
 struct BufferAccessState {
     /// Pipeline stages of the last tracked write.
-    last_write_stage: vk::PipelineStageFlags,
+    last_write_stage: vk::PipelineStageFlags2,
     /// Access mask of the last tracked write.
-    last_write_access: vk::AccessFlags,
+    last_write_access: vk::AccessFlags2,
     /// Queue and submit timeline value of the last tracked write.
     last_write_submit: Option<(QueueId, u64)>,
     /// Read stages the last write has been made visible to (via a barrier)
     /// **on the writing queue**. On other queues visibility comes from the
     /// semaphore wait itself.
-    visible_stages: vk::PipelineStageFlags,
+    visible_stages: vk::PipelineStageFlags2,
     /// Read access types the last write has been made visible to.
-    visible_access: vk::AccessFlags,
+    visible_access: vk::AccessFlags2,
     /// All read stages seen since the last write **on the writing queue**
     /// (for same-queue write-after-read execution dependencies). Cross-queue
     /// reads are recorded in `read_submits` instead.
-    reads_since_write: vk::PipelineStageFlags,
+    reads_since_write: vk::PipelineStageFlags2,
     /// Highest submit timeline value that read this buffer since the last
     /// write, per queue (write-after-read across queues waits on these).
     read_submits: [Option<u64>; QUEUE_COUNT],
@@ -181,7 +181,7 @@ impl BufferAccessTracker {
         queue: QueueId,
         submit_value: u64,
         waits: &mut SubmitWaits,
-    ) -> Option<(vk::PipelineStageFlags, vk::AccessFlags)> {
+    ) -> Option<(vk::PipelineStageFlags2, vk::AccessFlags2)> {
         let state = self.states.entry(id).or_default();
         let stage = access.dst_stage();
         let access_mask = access.dst_access_mask();
@@ -213,7 +213,7 @@ impl BufferAccessTracker {
             // write was cross-queue — the wait already covers it, and its
             // scopes belong to the other queue.
             let (src_stage, src_access) = if cross_queue_write {
-                (vk::PipelineStageFlags::empty(), vk::AccessFlags::empty())
+                (vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE)
             } else {
                 (
                     state.last_write_stage | state.reads_since_write,
@@ -268,18 +268,17 @@ impl BufferAccessTracker {
 
 /// A batch of memory barriers (both image and buffer) to submit together.
 ///
-/// Barriers are collected from all resource usages in a pass, then
-/// submitted as a single `vkCmdPipelineBarrier` call for efficiency.
+/// Barriers are collected from all resource usages in a pass, then submitted
+/// as a single `vkCmdPipelineBarrier2` call (one `VkDependencyInfo`) for
+/// efficiency. Under synchronization2 each barrier carries its own
+/// stage+access scopes, so there is no batch-wide stage mask: per-barrier
+/// scopes are strictly tighter than the old union-of-everything masks.
 #[derive(Debug, Default)]
 pub struct BarrierBatch {
     /// Image barriers keyed by image handle (to avoid duplicates).
     image_barriers: HashMap<TextureId, ImageBarrierInfo>,
     /// Buffer barriers keyed by buffer handle (to avoid duplicates).
     buffer_barriers: HashMap<BufferId, BufferBarrierInfo>,
-    /// Source pipeline stage mask (union of all barriers).
-    src_stage_mask: vk::PipelineStageFlags,
-    /// Destination pipeline stage mask (union of all barriers).
-    dst_stage_mask: vk::PipelineStageFlags,
 }
 
 /// Information for a single image barrier.
@@ -288,8 +287,10 @@ struct ImageBarrierInfo {
     image: vk::Image,
     old_layout: vk::ImageLayout,
     new_layout: vk::ImageLayout,
-    src_access_mask: vk::AccessFlags,
-    dst_access_mask: vk::AccessFlags,
+    src_stage_mask: vk::PipelineStageFlags2,
+    dst_stage_mask: vk::PipelineStageFlags2,
+    src_access_mask: vk::AccessFlags2,
+    dst_access_mask: vk::AccessFlags2,
     aspect_mask: vk::ImageAspectFlags,
 }
 
@@ -302,8 +303,10 @@ struct ImageBarrierInfo {
 #[derive(Debug, Clone)]
 struct BufferBarrierInfo {
     buffer: vk::Buffer,
-    src_access_mask: vk::AccessFlags,
-    dst_access_mask: vk::AccessFlags,
+    src_stage_mask: vk::PipelineStageFlags2,
+    dst_stage_mask: vk::PipelineStageFlags2,
+    src_access_mask: vk::AccessFlags2,
+    dst_access_mask: vk::AccessFlags2,
 }
 
 impl BarrierBatch {
@@ -350,11 +353,11 @@ impl BarrierBatch {
     ///
     /// The wait (all-commands destination scope) already made the other
     /// queue's access available and visible here, so the transition's source
-    /// scope is empty on this queue: `TOP_OF_PIPE` and no access mask. Using
+    /// scope is empty on this queue: `NONE` stage and no access mask. Using
     /// the previous layout's own scopes instead would name stages of the
     /// OTHER queue, which may not exist on this queue's family — e.g.
     /// `COLOR_ATTACHMENT_OUTPUT` on a dedicated compute family
-    /// (VUID-vkCmdPipelineBarrier-srcStageMask-06461).
+    /// (VUID-vkCmdPipelineBarrier2-srcStageMask-03849).
     pub fn add_image_barrier_cross_queue(
         &mut self,
         id: TextureId,
@@ -369,8 +372,8 @@ impl BarrierBatch {
             old_layout,
             new_layout,
             aspect_mask,
-            vk::PipelineStageFlags::TOP_OF_PIPE,
-            vk::AccessFlags::empty(),
+            vk::PipelineStageFlags2::NONE,
+            vk::AccessFlags2::NONE,
         );
     }
 
@@ -382,18 +385,24 @@ impl BarrierBatch {
         old_layout: TextureLayout,
         new_layout: TextureLayout,
         aspect_mask: vk::ImageAspectFlags,
-        src_stage: vk::PipelineStageFlags,
-        src_access: vk::AccessFlags,
+        src_stage: vk::PipelineStageFlags2,
+        src_access: vk::AccessFlags2,
     ) {
         // Same read-only layout: no hazard, nothing to do.
         if old_layout == new_layout && !new_layout.is_write() {
             return;
         }
 
+        // sync2: stage+access scopes live in the barrier itself. Where the
+        // batch collapses two transitions of one image into a chain, the
+        // scopes are unioned within that single barrier — still tighter than
+        // the old batch-wide mask which applied every stage to every image.
         match self.image_barriers.entry(id) {
             std::collections::hash_map::Entry::Occupied(mut occupied) => {
                 let info = occupied.get_mut();
                 info.new_layout = new_layout.to_vk();
+                info.src_stage_mask |= src_stage;
+                info.dst_stage_mask |= new_layout.dst_stage();
                 info.src_access_mask |= src_access;
                 info.dst_access_mask |= new_layout.dst_access_mask();
             }
@@ -402,14 +411,14 @@ impl BarrierBatch {
                     image,
                     old_layout: old_layout.to_vk(),
                     new_layout: new_layout.to_vk(),
+                    src_stage_mask: src_stage,
+                    dst_stage_mask: new_layout.dst_stage(),
                     src_access_mask: src_access,
                     dst_access_mask: new_layout.dst_access_mask(),
                     aspect_mask,
                 });
             }
         }
-        self.src_stage_mask |= src_stage;
-        self.dst_stage_mask |= new_layout.dst_stage();
     }
 
     /// Add a buffer memory barrier with explicit stage/access scopes.
@@ -423,23 +432,25 @@ impl BarrierBatch {
         &mut self,
         id: BufferId,
         buffer: vk::Buffer,
-        src_stage: vk::PipelineStageFlags,
-        src_access: vk::AccessFlags,
-        dst_stage: vk::PipelineStageFlags,
-        dst_access: vk::AccessFlags,
+        src_stage: vk::PipelineStageFlags2,
+        src_access: vk::AccessFlags2,
+        dst_stage: vk::PipelineStageFlags2,
+        dst_access: vk::AccessFlags2,
     ) {
         let info = self
             .buffer_barriers
             .entry(id)
             .or_insert_with(|| BufferBarrierInfo {
                 buffer,
-                src_access_mask: vk::AccessFlags::empty(),
-                dst_access_mask: vk::AccessFlags::empty(),
+                src_stage_mask: vk::PipelineStageFlags2::NONE,
+                dst_stage_mask: vk::PipelineStageFlags2::NONE,
+                src_access_mask: vk::AccessFlags2::NONE,
+                dst_access_mask: vk::AccessFlags2::NONE,
             });
+        info.src_stage_mask |= src_stage;
+        info.dst_stage_mask |= dst_stage;
         info.src_access_mask |= src_access;
         info.dst_access_mask |= dst_access;
-        self.src_stage_mask |= src_stage;
-        self.dst_stage_mask |= dst_stage;
     }
 
     /// Check if the batch has any barriers.
@@ -462,19 +473,23 @@ impl BarrierBatch {
         self.image_barriers.len() + self.buffer_barriers.len()
     }
 
-    /// Submit all barriers in a single pipeline barrier command.
+    /// Submit all barriers in a single `vkCmdPipelineBarrier2` command.
     ///
     /// Does nothing if the batch is empty.
-    pub fn submit(&self, device: &ash::Device, cmd: vk::CommandBuffer) {
+    pub fn submit(&self, sync2: &ash::khr::synchronization2::Device, cmd: vk::CommandBuffer) {
         if self.is_empty() {
             return;
         }
 
-        let image_barriers: Vec<vk::ImageMemoryBarrier> = self
+        let image_barriers: Vec<vk::ImageMemoryBarrier2> = self
             .image_barriers
             .values()
             .map(|info| {
-                vk::ImageMemoryBarrier::default()
+                vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(info.src_stage_mask)
+                    .src_access_mask(info.src_access_mask)
+                    .dst_stage_mask(info.dst_stage_mask)
+                    .dst_access_mask(info.dst_access_mask)
                     .old_layout(info.old_layout)
                     .new_layout(info.new_layout)
                     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
@@ -487,36 +502,32 @@ impl BarrierBatch {
                         base_array_layer: 0,
                         layer_count: vk::REMAINING_ARRAY_LAYERS,
                     })
-                    .src_access_mask(info.src_access_mask)
-                    .dst_access_mask(info.dst_access_mask)
             })
             .collect();
 
-        let buffer_barriers: Vec<vk::BufferMemoryBarrier> = self
+        let buffer_barriers: Vec<vk::BufferMemoryBarrier2> = self
             .buffer_barriers
             .values()
             .map(|info| {
-                vk::BufferMemoryBarrier::default()
+                vk::BufferMemoryBarrier2::default()
+                    .src_stage_mask(info.src_stage_mask)
+                    .src_access_mask(info.src_access_mask)
+                    .dst_stage_mask(info.dst_stage_mask)
+                    .dst_access_mask(info.dst_access_mask)
                     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                     .buffer(info.buffer)
                     .offset(0)
                     .size(vk::WHOLE_SIZE)
-                    .src_access_mask(info.src_access_mask)
-                    .dst_access_mask(info.dst_access_mask)
             })
             .collect();
 
+        let dependency_info = vk::DependencyInfo::default()
+            .buffer_memory_barriers(&buffer_barriers)
+            .image_memory_barriers(&image_barriers);
+
         unsafe {
-            device.cmd_pipeline_barrier(
-                cmd,
-                self.src_stage_mask,
-                self.dst_stage_mask,
-                vk::DependencyFlags::empty(),
-                &[],
-                &buffer_barriers,
-                &image_barriers,
-            );
+            sync2.cmd_pipeline_barrier2(cmd, &dependency_info);
         }
     }
 
@@ -524,8 +535,6 @@ impl BarrierBatch {
     pub fn clear(&mut self) {
         self.image_barriers.clear();
         self.buffer_barriers.clear();
-        self.src_stage_mask = vk::PipelineStageFlags::empty();
-        self.dst_stage_mask = vk::PipelineStageFlags::empty();
     }
 }
 
@@ -582,7 +591,7 @@ mod tests {
         assert_eq!(info.old_layout, info.new_layout);
         assert!(
             info.dst_access_mask
-                .contains(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                .contains(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
         );
     }
 
@@ -615,7 +624,7 @@ mod tests {
         let info = batch.image_barriers.values().next().unwrap();
         assert_eq!(info.old_layout, vk::ImageLayout::UNDEFINED);
         assert_eq!(info.new_layout, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
-        assert!(info.dst_access_mask.contains(vk::AccessFlags::SHADER_READ));
+        assert!(info.dst_access_mask.contains(vk::AccessFlags2::SHADER_READ));
     }
 
     #[test]
@@ -698,10 +707,10 @@ mod tests {
 
     /// Shorthand: barrier scopes for "transfer write -> vertex read".
     fn transfer_to_vertex() -> (
-        vk::PipelineStageFlags,
-        vk::AccessFlags,
-        vk::PipelineStageFlags,
-        vk::AccessFlags,
+        vk::PipelineStageFlags2,
+        vk::AccessFlags2,
+        vk::PipelineStageFlags2,
+        vk::AccessFlags2,
     ) {
         (
             BufferAccessMode::TransferWrite.src_stage(),
@@ -739,27 +748,27 @@ mod tests {
         batch.add_buffer_barrier(
             id,
             buffer,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
-            vk::AccessFlags::SHADER_WRITE,
-            vk::PipelineStageFlags::VERTEX_SHADER,
-            vk::AccessFlags::UNIFORM_READ,
+            vk::PipelineStageFlags2::COMPUTE_SHADER,
+            vk::AccessFlags2::SHADER_WRITE,
+            vk::PipelineStageFlags2::VERTEX_SHADER,
+            vk::AccessFlags2::UNIFORM_READ,
         );
 
         assert_eq!(batch.buffer_barrier_count(), 1);
         let info = batch.buffer_barriers.values().next().unwrap();
         assert!(
             info.src_access_mask
-                .contains(vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::SHADER_WRITE)
+                .contains(vk::AccessFlags2::TRANSFER_WRITE | vk::AccessFlags2::SHADER_WRITE)
         );
         assert!(
             info.dst_access_mask
-                .contains(vk::AccessFlags::VERTEX_ATTRIBUTE_READ | vk::AccessFlags::UNIFORM_READ)
+                .contains(vk::AccessFlags2::VERTEX_ATTRIBUTE_READ | vk::AccessFlags2::UNIFORM_READ)
         );
-        assert!(
-            batch.src_stage_mask.contains(
-                vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::COMPUTE_SHADER
-            )
-        );
+        // sync2: stage scopes live in the barrier itself, not a batch-wide
+        // mask. The merged barrier carries both source stages.
+        assert!(info.src_stage_mask.contains(
+            vk::PipelineStageFlags2::ALL_TRANSFER | vk::PipelineStageFlags2::COMPUTE_SHADER
+        ));
     }
 
     // Buffer access tracker tests (VK-C3 / VK-P7)
@@ -771,7 +780,7 @@ mod tests {
         tracker: &mut BufferAccessTracker,
         id: BufferId,
         access: BufferAccessMode,
-    ) -> Option<(vk::PipelineStageFlags, vk::AccessFlags)> {
+    ) -> Option<(vk::PipelineStageFlags2, vk::AccessFlags2)> {
         let mut waits = SubmitWaits::default();
         let result = tracker.request_access(id, access, QueueId::Graphics, 1, &mut waits);
         assert!(
@@ -812,8 +821,8 @@ mod tests {
         // the old hardcoded TRANSFER source would miss it entirely (VK-C3).
         let (src_stage, src_access) = gfx_access(&mut tracker, id, BufferAccessMode::VertexBuffer)
             .expect("read after write needs a barrier");
-        assert!(src_stage.contains(vk::PipelineStageFlags::COMPUTE_SHADER));
-        assert!(src_access.contains(vk::AccessFlags::SHADER_WRITE));
+        assert!(src_stage.contains(vk::PipelineStageFlags2::COMPUTE_SHADER));
+        assert!(src_access.contains(vk::AccessFlags2::SHADER_WRITE));
     }
 
     #[test]
@@ -843,8 +852,8 @@ mod tests {
         // with no source access (reads make nothing available).
         let (src_stage, src_access) = gfx_access(&mut tracker, id, BufferAccessMode::TransferWrite)
             .expect("write after read needs a barrier");
-        assert!(src_stage.contains(vk::PipelineStageFlags::VERTEX_INPUT));
-        assert_eq!(src_access, vk::AccessFlags::empty());
+        assert!(src_stage.contains(vk::PipelineStageFlags2::VERTEX_INPUT));
+        assert_eq!(src_access, vk::AccessFlags2::empty());
     }
 
     #[test]
@@ -855,14 +864,14 @@ mod tests {
         gfx_access(&mut tracker, id, BufferAccessMode::TransferWrite);
         let (src_stage, src_access) = gfx_access(&mut tracker, id, BufferAccessMode::StorageWrite)
             .expect("write after write needs a barrier");
-        assert!(src_stage.contains(vk::PipelineStageFlags::TRANSFER));
-        assert!(src_access.contains(vk::AccessFlags::TRANSFER_WRITE));
+        assert!(src_stage.contains(vk::PipelineStageFlags2::ALL_TRANSFER));
+        assert!(src_access.contains(vk::AccessFlags2::TRANSFER_WRITE));
 
         // And a read now synchronizes against the SECOND write.
         let (src_stage, src_access) = gfx_access(&mut tracker, id, BufferAccessMode::UniformRead)
             .expect("read after write needs a barrier");
-        assert!(src_stage.contains(vk::PipelineStageFlags::COMPUTE_SHADER));
-        assert!(src_access.contains(vk::AccessFlags::SHADER_WRITE));
+        assert!(src_stage.contains(vk::PipelineStageFlags2::COMPUTE_SHADER));
+        assert!(src_access.contains(vk::AccessFlags2::SHADER_WRITE));
     }
 
     // Cross-queue tracker tests (#47 phase 4)
@@ -1032,8 +1041,8 @@ mod tests {
             )
             .expect("same-queue read after write needs a barrier");
         assert!(waits.is_empty());
-        assert!(barrier.0.contains(vk::PipelineStageFlags::COMPUTE_SHADER));
-        assert!(barrier.1.contains(vk::AccessFlags::SHADER_WRITE));
+        assert!(barrier.0.contains(vk::PipelineStageFlags2::COMPUTE_SHADER));
+        assert!(barrier.1.contains(vk::AccessFlags2::SHADER_WRITE));
     }
 
     #[test]

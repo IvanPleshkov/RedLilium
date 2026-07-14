@@ -41,7 +41,14 @@ impl DummyBackend {
             async_compute: false,
             transfer_queue: false,
             compute_shaders: true,
+            gpu_timestamps: false,
         }
+    }
+
+    /// Latest retired-slot GPU timings — always empty; the dummy backend
+    /// records no timestamps (#95).
+    pub fn latest_gpu_timings(&self) -> crate::device::FrameGpuTimings {
+        crate::device::FrameGpuTimings::default()
     }
 
     /// Adapter info for the dummy backend.

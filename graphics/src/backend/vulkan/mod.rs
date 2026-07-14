@@ -16,6 +16,7 @@ mod maintenance9;
 mod pipeline;
 mod staging;
 pub mod swapchain;
+mod timestamps;
 
 use std::collections::HashSet;
 use std::mem::ManuallyDrop;
@@ -215,6 +216,10 @@ pub struct VulkanBackend {
     validation_enabled: bool,
     /// Dynamic rendering extension.
     dynamic_rendering: ash::khr::dynamic_rendering::Device,
+    /// synchronization2 extension: all barriers (`vkCmdPipelineBarrier2`) and
+    /// graph submits (`vkQueueSubmit2`) go through this loader (baseline-tier
+    /// requirement, ADR-027 / #94 — no sync1 path).
+    synchronization2: ash::khr::synchronization2::Device,
     /// Surface extension.
     surface_loader: ash::khr::surface::Instance,
     /// Swapchain extension.
@@ -275,6 +280,11 @@ pub struct VulkanBackend {
     /// compression) with no ownership transfers — synchronization is still
     /// the tracker-emitted timeline waits, unchanged.
     implicit_cross_queue_images: bool,
+    /// Per-pass GPU timestamp collector (#95), `None` when the device lacks
+    /// `timestampValidBits` on the graphics family. Behind a `Mutex` for the
+    /// same reason as the other per-frame state: `execute_graph`/`advance_frame`
+    /// take `&self` but run on the single render thread.
+    timestamps: Option<Mutex<timestamps::TimestampManager>>,
     /// Capabilities queried from the selected physical device at creation
     /// (ADR-027) — the single source of truth downstream clamps against.
     device_caps: crate::device::DeviceCapabilities,
@@ -496,6 +506,51 @@ impl VulkanBackend {
         let async_compute = create_secondary(queue_plan.async_compute)?;
         let transfer_queue = create_secondary(queue_plan.transfer)?;
 
+        // Per-pass GPU timestamps (#95). Build one query pool per (queue, slot)
+        // for every queue whose family exposes `timestampValidBits > 0`. The
+        // capability bit already gates on the graphics family; a secondary
+        // family reporting 0 valid bits is simply skipped (its passes report no
+        // timing). Only the graphics queue can report `gpu_timestamps == false`
+        // as unsupported outright.
+        let timestamps = if device_caps.gpu_timestamps {
+            let family_props =
+                unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+            let valid_bits = |family: u32| {
+                family_props
+                    .get(family as usize)
+                    .map_or(0, |p| p.timestamp_valid_bits)
+            };
+            use self::barriers::QueueId;
+            use self::timestamps::QueueTimestampInfo;
+            let mut infos = vec![QueueTimestampInfo {
+                queue: QueueId::Graphics,
+                preference: crate::graph::QueuePreference::Graphics,
+                valid_bits: valid_bits(graphics_queue_family),
+            }];
+            if let Some(ac) = &async_compute {
+                infos.push(QueueTimestampInfo {
+                    queue: QueueId::AsyncCompute,
+                    preference: crate::graph::QueuePreference::AsyncCompute,
+                    valid_bits: valid_bits(ac.family),
+                });
+            }
+            if let Some(tq) = &transfer_queue {
+                infos.push(QueueTimestampInfo {
+                    queue: QueueId::Transfer,
+                    preference: crate::graph::QueuePreference::Transfer,
+                    valid_bits: valid_bits(tq.family),
+                });
+            }
+            timestamps::TimestampManager::new(
+                &device,
+                selected.properties.limits.timestamp_period,
+                &infos,
+            )
+            .map(Mutex::new)
+        } else {
+            None
+        };
+
         // Staging chunks must be CONCURRENT-shareable across every distinct
         // family a transfer graph can be routed to (async compute, dedicated
         // transfer).
@@ -519,6 +574,9 @@ impl VulkanBackend {
 
         // Load dynamic rendering extension
         let dynamic_rendering = ash::khr::dynamic_rendering::Device::new(&instance, &device);
+
+        // Load synchronization2 extension (baseline-tier requirement, #94).
+        let synchronization2 = ash::khr::synchronization2::Device::new(&instance, &device);
 
         // Load surface extension
         let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
@@ -561,6 +619,7 @@ impl VulkanBackend {
             depth24_stencil8_format,
             &selected.properties,
             device_caps.wireframe,
+            selected.portability_subset,
         )?;
 
         log::info!(
@@ -582,6 +641,7 @@ impl VulkanBackend {
             swapchain_sync: Mutex::new(SwapchainSync::default()),
             validation_enabled,
             dynamic_rendering,
+            synchronization2,
             surface_loader,
             swapchain_loader,
             frame_command_pools,
@@ -597,6 +657,7 @@ impl VulkanBackend {
             timeline_next: AtomicU64::new(1),
             async_compute,
             transfer_queue,
+            timestamps,
             async_decline_warned: Mutex::new(HashSet::new()),
             implicit_cross_queue_images,
             device_caps,
@@ -608,6 +669,23 @@ impl VulkanBackend {
     /// Capabilities queried at backend creation (ADR-027).
     pub fn capabilities(&self) -> crate::device::DeviceCapabilities {
         self.device_caps
+    }
+
+    /// GPU timings for the most recently retired frame slot (#95). Empty when
+    /// the device lacks timestamp support.
+    pub fn latest_gpu_timings(&self) -> crate::device::FrameGpuTimings {
+        self.timestamps
+            .as_ref()
+            .map(|m| m.lock().latest())
+            .unwrap_or_default()
+    }
+
+    /// Re-arm the timestamp query pool for `queue`/`slot` after a recording
+    /// error abandoned the command buffer (#95). No-op without timestamps.
+    fn abort_timestamps(&self, queue: QueueId, slot: usize) {
+        if let Some(m) = &self.timestamps {
+            m.lock().abort_submit(queue, slot);
+        }
     }
 
     /// Info about the selected physical device.
@@ -705,6 +783,12 @@ impl VulkanBackend {
     /// Get the swapchain loader.
     pub fn swapchain_loader(&self) -> &ash::khr::swapchain::Device {
         &self.swapchain_loader
+    }
+
+    /// Get the synchronization2 loader (`vkCmdPipelineBarrier2` /
+    /// `vkQueueSubmit2`).
+    pub fn synchronization2(&self) -> &ash::khr::synchronization2::Device {
+        &self.synchronization2
     }
 
     /// Get the command pool.
@@ -824,6 +908,13 @@ impl VulkanBackend {
         self.staging_belt
             .lock()
             .retire_slot(&self.device, &mut self.allocator.lock(), oldest);
+
+        // Read back the retiring slot's GPU timestamps (#95). The same fence
+        // wait that lets the staging chunks retire guarantees these queries are
+        // available, so `vkGetQueryPoolResults` needs no WAIT bit.
+        if let Some(m) = &self.timestamps {
+            m.lock().read_slot(&self.device, oldest);
+        }
 
         // Remove destroyed resources from the barrier trackers so the maps
         // stay bounded by live resources. Safe at any point: texture ids are
@@ -1134,6 +1225,11 @@ impl Drop for VulkanBackend {
                     self.device.destroy_command_pool(pool, None);
                 }
                 self.device.destroy_semaphore(secondary.timeline, None);
+            }
+
+            // Destroy the timestamp query pools (#95), if any.
+            if let Some(m) = &self.timestamps {
+                m.lock().destroy(&self.device);
             }
 
             // Destroy the staging belt (the device_wait_idle above
@@ -2174,6 +2270,20 @@ impl VulkanBackend {
         // its timeline (pipeline barriers cannot cross queues).
         let mut waits = SubmitWaits::default();
 
+        // Per-pass GPU timestamps (#95): reserve query indices and record the
+        // pool reset + submit-begin marker before the passes. `None` when the
+        // device lacks timestamp support or this queue has no query pool.
+        let mut recording = self.timestamps.as_ref().and_then(|m| {
+            m.lock().begin_submit(
+                &self.device,
+                &self.synchronization2,
+                queue_id,
+                slot,
+                compiled.pass_order().len(),
+                cmd,
+            )
+        });
+
         // Process each pass in compiled order using pre-computed resource usages
         {
             profile_scope!("record_passes");
@@ -2193,17 +2303,45 @@ impl VulkanBackend {
                     timeline_value,
                     &mut waits,
                 );
-                barriers.submit(&self.device, cmd);
+                barriers.submit(&self.synchronization2, cmd);
 
-                // Encode the pass
-                self.encode_pass(cmd, pass)?;
+                // Timestamp the pass's GPU work (begin before, end after).
+                if let Some(rec) = recording.as_mut() {
+                    rec.pass_begin(&self.synchronization2, cmd, i, pass.name());
+                }
+                if let Err(e) = self.encode_pass(cmd, pass) {
+                    // The command buffer (with its reset + timestamp writes) is
+                    // abandoned; re-arm the pool so its next use resets it.
+                    if recording.is_some() {
+                        self.abort_timestamps(queue_id, slot);
+                    }
+                    return Err(e);
+                }
+                if let Some(rec) = recording.as_mut() {
+                    rec.pass_end(&self.synchronization2, cmd, i);
+                }
+            }
+        }
+
+        // Submit-end marker, then hand the recording back for read-back at slot
+        // retirement.
+        if let Some(rec) = recording {
+            rec.submit_end(&self.synchronization2, cmd);
+            if let Some(m) = &self.timestamps {
+                m.lock().finish_submit(slot, rec);
             }
         }
 
         // End command buffer
-        unsafe { self.device.end_command_buffer(cmd) }.map_err(|e| {
-            GraphicsError::Internal(format!("Failed to end command buffer: {:?}", e))
-        })?;
+        if let Err(e) = unsafe { self.device.end_command_buffer(cmd) } {
+            // Same as the encode error: the command buffer is abandoned, so
+            // re-arm the query pool for a fresh reset before its next use.
+            self.abort_timestamps(queue_id, slot);
+            return Err(GraphicsError::Internal(format!(
+                "Failed to end command buffer: {:?}",
+                e
+            )));
+        }
 
         if !waits.is_empty() {
             log::debug!(
@@ -2232,19 +2370,20 @@ impl VulkanBackend {
         };
 
         // Waits: the optional binary swapchain acquire, plus the cross-queue
-        // timeline waits collected by the trackers. Cross-queue waits use an
-        // all-commands destination scope — that is what lets the trackers
-        // treat a waited-on write as fully visible on this queue.
-        let mut wait_semaphores = [vk::Semaphore::null(); 1 + barriers::QUEUE_COUNT];
-        let mut wait_values = [0u64; 1 + barriers::QUEUE_COUNT];
-        let mut wait_stage_masks =
-            [vk::PipelineStageFlags::ALL_COMMANDS; 1 + barriers::QUEUE_COUNT];
-        let mut wait_count = 0;
+        // timeline waits collected by the trackers. Under sync2 each wait is a
+        // `VkSemaphoreSubmitInfo` carrying its own destination stage mask —
+        // the swapchain acquire keeps COLOR_ATTACHMENT_OUTPUT, and cross-queue
+        // timeline waits keep the ALL_COMMANDS destination scope that lets the
+        // trackers treat a waited-on write as fully visible on this queue.
+        let mut wait_infos: Vec<vk::SemaphoreSubmitInfo> =
+            Vec::with_capacity(1 + barriers::QUEUE_COUNT);
         if let Some((image_available, _)) = swapchain_pair {
-            wait_semaphores[0] = image_available;
-            wait_values[0] = 0; // binary semaphore: value ignored
-            wait_stage_masks[0] = vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT;
-            wait_count = 1;
+            wait_infos.push(
+                vk::SemaphoreSubmitInfo::default()
+                    .semaphore(image_available)
+                    .value(0) // binary semaphore: value ignored
+                    .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT),
+            );
         }
         let other_queue_timelines = [
             (QueueId::Graphics, self.queue_timeline),
@@ -2271,49 +2410,51 @@ impl VulkanBackend {
                     vk::Semaphore::null(),
                     "tracker emitted a wait on a queue that does not exist"
                 );
-                wait_semaphores[wait_count] = timeline;
-                wait_values[wait_count] = value;
-                wait_count += 1;
+                wait_infos.push(
+                    vk::SemaphoreSubmitInfo::default()
+                        .semaphore(timeline)
+                        .value(value)
+                        .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
+                );
             }
         }
 
         // Every submit signals its queue timeline's next value (in addition
         // to the binary `image_render_finished` when this graph writes the
         // swapchain). The value is stamped into `signal_fence` on success, so
-        // the frontend `Fence` waits on (timeline, value).
-        let (vk_signal_semaphores, signal_values, signal_count) = match swapchain_pair {
-            Some((_, image_render_finished)) => (
-                [image_render_finished, queue_timeline],
-                [0, timeline_value], // binary semaphore's value is ignored
-                2,
-            ),
-            None => (
-                [queue_timeline, vk::Semaphore::null()],
-                [timeline_value, 0],
-                1,
-            ),
-        };
+        // the frontend `Fence` waits on (timeline, value). Signals use an
+        // ALL_COMMANDS source scope: the semaphore signals after every stage.
+        let mut signal_infos: Vec<vk::SemaphoreSubmitInfo> = Vec::with_capacity(2);
+        signal_infos.push(
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(queue_timeline)
+                .value(timeline_value)
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
+        );
+        if let Some((_, image_render_finished)) = swapchain_pair {
+            signal_infos.push(
+                vk::SemaphoreSubmitInfo::default()
+                    .semaphore(image_render_finished)
+                    .value(0) // binary semaphore's value is ignored
+                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
+            );
+        }
 
-        // Submit the command buffer with the semaphores
+        // Submit the command buffer with the semaphores (vkQueueSubmit2).
         {
             profile_scope!("queue_submit");
-            let mut timeline_info = vk::TimelineSemaphoreSubmitInfo::default()
-                .wait_semaphore_values(&wait_values[..wait_count])
-                .signal_semaphore_values(&signal_values[..signal_count]);
-            let mut submit_info = vk::SubmitInfo::default()
-                .command_buffers(&command_buffers)
-                .signal_semaphores(&vk_signal_semaphores[..signal_count])
-                .push_next(&mut timeline_info);
-
-            if wait_count > 0 {
-                submit_info = submit_info
-                    .wait_semaphores(&wait_semaphores[..wait_count])
-                    .wait_dst_stage_mask(&wait_stage_masks[..wait_count]);
-            }
+            let cmd_buffer_infos: Vec<vk::CommandBufferSubmitInfo> = command_buffers
+                .iter()
+                .map(|&cb| vk::CommandBufferSubmitInfo::default().command_buffer(cb))
+                .collect();
+            let submit_info = vk::SubmitInfo2::default()
+                .wait_semaphore_infos(&wait_infos)
+                .command_buffer_infos(&cmd_buffer_infos)
+                .signal_semaphore_infos(&signal_infos);
 
             let submit_result = unsafe {
-                self.device
-                    .queue_submit(queue, &[submit_info], vk::Fence::null())
+                self.synchronization2
+                    .queue_submit2(queue, &[submit_info], vk::Fence::null())
             };
             if let Err(e) = submit_result {
                 // Nothing was enqueued: hand the swapchain semaphore pair back
@@ -2322,6 +2463,10 @@ impl VulkanBackend {
                 if let Some((image_available, _)) = swapchain_pair {
                     self.restore_swapchain_render_sync(image_available);
                 }
+                // The command buffer never ran, so its query reset+writes
+                // didn't happen: drop this submit's timing records and re-arm
+                // the pool so its next use resets before writing (#95).
+                self.abort_timestamps(queue_id, slot);
                 return Err(match e {
                     vk::Result::ERROR_DEVICE_LOST => GraphicsError::DeviceLost,
                     other => GraphicsError::Internal(format!(
@@ -2783,15 +2928,22 @@ impl VulkanBackend {
                     first
                 };
                 let (old_layout, src_access) = if first_write {
-                    (vk::ImageLayout::UNDEFINED, vk::AccessFlags::empty())
+                    (vk::ImageLayout::UNDEFINED, vk::AccessFlags2::NONE)
                 } else {
                     (
                         vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                        vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                        vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
                     )
                 };
 
-                let barrier = vk::ImageMemoryBarrier::default()
+                let barrier = vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                    .src_access_mask(src_access)
+                    .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                    .dst_access_mask(
+                        vk::AccessFlags2::COLOR_ATTACHMENT_WRITE
+                            | vk::AccessFlags2::COLOR_ATTACHMENT_READ,
+                    )
                     .old_layout(old_layout)
                     .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
@@ -2803,23 +2955,14 @@ impl VulkanBackend {
                         level_count: 1,
                         base_array_layer: 0,
                         layer_count: 1,
-                    })
-                    .src_access_mask(src_access)
-                    .dst_access_mask(
-                        vk::AccessFlags::COLOR_ATTACHMENT_WRITE
-                            | vk::AccessFlags::COLOR_ATTACHMENT_READ,
-                    );
+                    });
 
+                let image_barriers = [barrier];
+                let dependency_info =
+                    vk::DependencyInfo::default().image_memory_barriers(&image_barriers);
                 unsafe {
-                    self.device.cmd_pipeline_barrier(
-                        cmd,
-                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[],
-                        &[barrier],
-                    );
+                    self.synchronization2
+                        .cmd_pipeline_barrier2(cmd, &dependency_info);
                 }
             }
         }
@@ -3467,109 +3610,5 @@ impl VulkanBackend {
         }
 
         Ok(())
-    }
-
-    #[allow(dead_code)]
-    fn transition_image_layout(
-        &self,
-        cmd: vk::CommandBuffer,
-        image: vk::Image,
-        old_layout: vk::ImageLayout,
-        new_layout: vk::ImageLayout,
-        aspect_mask: vk::ImageAspectFlags,
-    ) {
-        let (src_access_mask, src_stage) = match old_layout {
-            vk::ImageLayout::UNDEFINED => (
-                vk::AccessFlags::empty(),
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-            ),
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL => (
-                vk::AccessFlags::TRANSFER_WRITE,
-                vk::PipelineStageFlags::TRANSFER,
-            ),
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL => (
-                vk::AccessFlags::TRANSFER_READ,
-                vk::PipelineStageFlags::TRANSFER,
-            ),
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => (
-                vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            ),
-            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => (
-                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-            ),
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => (
-                vk::AccessFlags::SHADER_READ,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
-            ),
-            vk::ImageLayout::PRESENT_SRC_KHR => (
-                vk::AccessFlags::empty(),
-                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-            ),
-            _ => (
-                vk::AccessFlags::empty(),
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-            ),
-        };
-
-        let (dst_access_mask, dst_stage) = match new_layout {
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL => (
-                vk::AccessFlags::TRANSFER_WRITE,
-                vk::PipelineStageFlags::TRANSFER,
-            ),
-            vk::ImageLayout::TRANSFER_SRC_OPTIMAL => (
-                vk::AccessFlags::TRANSFER_READ,
-                vk::PipelineStageFlags::TRANSFER,
-            ),
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => (
-                vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-            ),
-            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL => (
-                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-            ),
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => (
-                vk::AccessFlags::SHADER_READ,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
-            ),
-            vk::ImageLayout::PRESENT_SRC_KHR => (
-                vk::AccessFlags::empty(),
-                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-            ),
-            _ => (
-                vk::AccessFlags::empty(),
-                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-            ),
-        };
-
-        let barrier = vk::ImageMemoryBarrier::default()
-            .old_layout(old_layout)
-            .new_layout(new_layout)
-            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .image(image)
-            .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask,
-                base_mip_level: 0,
-                level_count: vk::REMAINING_MIP_LEVELS,
-                base_array_layer: 0,
-                layer_count: vk::REMAINING_ARRAY_LAYERS,
-            })
-            .src_access_mask(src_access_mask)
-            .dst_access_mask(dst_access_mask);
-
-        unsafe {
-            self.device.cmd_pipeline_barrier(
-                cmd,
-                src_stage,
-                dst_stage,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[barrier],
-            );
-        }
     }
 }

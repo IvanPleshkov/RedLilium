@@ -83,7 +83,7 @@ pub mod swapchain;
 pub mod types;
 
 // Re-export main types for convenience
-pub use device::{DeviceCapabilities, DeviceTier, GraphicsDevice};
+pub use device::{DeviceCapabilities, DeviceTier, FrameGpuTimings, GraphicsDevice, SubmitTiming};
 pub use error::GraphicsError;
 pub use graph::{
     BufferCopyRegion, BufferTextureCopyRegion, BufferTextureLayout, ColorAttachment, CompiledGraph,
