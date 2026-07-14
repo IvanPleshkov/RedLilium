@@ -568,7 +568,14 @@ impl TransferOperation {
         let staging = device.create_buffer(
             &BufferDescriptor::new(
                 staging_bytes.len() as u64,
-                BufferUsage::COPY_SRC | BufferUsage::COPY_DST,
+                // RING is the cross-backend "CPU-written, host-visible" flag:
+                // on Vulkan it forces host-visible memory (under ADR-021 / #89 a
+                // buffer without a mapping flag lands device-local, where the
+                // `write_mapped` below cannot map it), while mapping to no wgpu
+                // usage — so it avoids wgpu's MAP_WRITE/COPY_DST conflict. COPY_DST
+                // is what wgpu's `Queue::write_buffer` requires; COPY_SRC makes it
+                // a valid buffer→texture copy source.
+                BufferUsage::COPY_SRC | BufferUsage::COPY_DST | BufferUsage::RING,
             )
             .with_label("texture_upload_staging"),
         )?;

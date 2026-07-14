@@ -119,6 +119,67 @@ fn test_buffer_copy_roundtrip(#[case] backend: Backend) {
     assert_eq!(test_data[255], 255);
 }
 
+/// Regression test for `TransferOperation::upload_texture_data` (the path egui
+/// uses to stage its font-atlas / user textures).
+///
+/// Under ADR-021 (#89) a buffer created without a mapping flag lands
+/// device-local, where the mapped write used to fill the staging buffer
+/// panics ("write_buffer on a device-local buffer"). The staging buffer must
+/// carry `MAP_WRITE`. Uploads a known pattern into a texture and reads it back.
+#[rstest]
+#[case::dummy(Backend::Dummy)]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_upload_texture_data_roundtrip(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new(backend) else {
+        eprintln!("Backend {backend:?} not available, skipping");
+        return;
+    };
+
+    // Single-row texture: the tight row pitch is used verbatim (no 256-byte
+    // multi-row padding), so the readback bytes match the uploaded bytes 1:1.
+    const WIDTH: u32 = 16;
+    let pixels: Vec<u8> = (0..WIDTH * 4).map(|i| (i % 251) as u8).collect();
+
+    let texture = ctx.create_texture_2d(
+        WIDTH,
+        1,
+        TextureFormat::Rgba8Unorm,
+        TextureUsage::COPY_DST | TextureUsage::COPY_SRC,
+    );
+
+    // The exact call egui makes — must not panic on a device-local staging
+    // buffer.
+    let upload = TransferOperation::upload_texture_data(&ctx.device, texture.clone(), &pixels)
+        .expect("upload_texture_data should stage the pixels without error");
+    let mut upload_graph = RenderGraph::new();
+    let mut upload_pass = TransferPass::new("upload_texture".into());
+    upload_pass.set_transfer_config(TransferConfig::new().with_operation(upload));
+    upload_graph.add_transfer_pass(upload_pass);
+    ctx.execute_graph(upload_graph);
+
+    // The dummy backend performs no real copy; the point there is just that the
+    // staging + graph execution did not panic.
+    if backend == Backend::Dummy {
+        return;
+    }
+
+    let readback = ctx.create_readback_buffer((WIDTH * 4) as u64);
+    let mut readback_graph = RenderGraph::new();
+    let mut readback_pass = TransferPass::new("readback_texture".into());
+    readback_pass.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::readback_texture_whole(texture.clone(), readback.clone()),
+    ));
+    readback_graph.add_transfer_pass(readback_pass);
+    ctx.execute_graph(readback_graph);
+
+    let data = ctx.read_buffer(&readback, (WIDTH * 4) as u64);
+    assert_eq!(
+        data, pixels,
+        "read-back texture bytes must match the uploaded pattern"
+    );
+}
+
 /// Test buffer copy with partial regions.
 #[rstest]
 #[case::dummy(Backend::Dummy)]
