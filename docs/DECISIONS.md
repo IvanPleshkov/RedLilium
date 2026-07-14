@@ -1794,10 +1794,15 @@ semaphore round-trip adds latency the frame immediately pays).
 ### Decision
 
 1. **Plan a third queue** from a transfer-only family (`TRANSFER` without
-   graphics/compute/video/optical-flow bits, `minImageTransferGranularity`
-   1×1×1 — coarser families are skipped rather than validated per copy).
-   No same-family fallback: without DMA engines a "transfer queue" buys
-   nothing.
+   graphics/compute/video/optical-flow bits). A coarse
+   `minImageTransferGranularity` is **not** a disqualifier (#92): AMD SDMA
+   reports 16×16×8, but buffer copies are granularity-exempt and
+   whole-subresource image copies (offset 0, full extent — what asset
+   streaming emits) are legal at any granularity. The family is planned with
+   its granularity recorded, and the routing layer gates per op: on a coarse
+   family a graph with a partial/non-base image copy falls down the ladder
+   instead. A 1×1×1 family (NVIDIA copy engines) accepts every copy. No
+   same-family fallback: without DMA engines a "transfer queue" buys nothing.
 2. **`QueuePreference { Graphics, AsyncCompute, Transfer }`** replaces the
    `prefer_async_compute` bool on `RenderGraph`. Placement stays an explicit
    hint with a fallback ladder — `Transfer` requires a transfer-only graph

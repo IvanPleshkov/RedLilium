@@ -340,7 +340,9 @@ fn device_extension_set(
 /// is preferred (real overlap on most discrete GPUs) with a second queue in
 /// the graphics family as fallback; the transfer queue has no same-family
 /// fallback — without DMA engines a "transfer queue" buys nothing, the
-/// routing ladder falls back to async compute / graphics instead. Missing
+/// routing ladder falls back to async compute / graphics instead. A coarse
+/// image-transfer granularity does not disqualify the family (#92); the
+/// routing layer restricts image copies to whole subresources there. Missing
 /// queues are a first-class, fully supported mode (MoltenVK's default
 /// configuration, for one, exposes a single queue).
 #[derive(Debug, Clone, Copy)]
@@ -351,6 +353,12 @@ pub struct QueuePlan {
     pub async_compute: Option<(u32, u32)>,
     /// `(family, queue index)` of the dedicated transfer queue, if available.
     pub transfer: Option<(u32, u32)>,
+    /// `minImageTransferGranularity` of the transfer family (`Some` exactly
+    /// when [`transfer`](Self::transfer) is). A family coarser than 1×1×1
+    /// (AMD SDMA reports e.g. 16×16×8) can still copy buffers and whole image
+    /// subresources — the routing layer checks each op rather than the plan
+    /// rejecting the family outright (#92).
+    pub transfer_granularity: Option<vk::Extent3D>,
 }
 
 /// Plan which queues to create on the device.
@@ -373,11 +381,15 @@ pub fn plan_queues(
         ),
         None => log::info!("No async compute queue available; single-queue mode"),
     }
-    match plan.transfer {
-        Some((family, index)) => {
-            log::info!("Dedicated transfer queue planned: family {family}, queue {index}")
-        }
-        None => log::info!("No dedicated transfer queue; transfer graphs fall back"),
+    match (plan.transfer, plan.transfer_granularity) {
+        (Some((family, index)), Some(g)) => log::info!(
+            "Dedicated transfer queue planned: family {family}, queue {index} \
+             (image granularity {}x{}x{})",
+            g.width,
+            g.height,
+            g.depth,
+        ),
+        _ => log::info!("No dedicated transfer queue; transfer graphs fall back"),
     }
 
     Ok(plan)
@@ -410,35 +422,30 @@ fn plan_queues_from_families(
     };
 
     // A transfer-only family = the DMA engines. Exclude specialized families
-    // (video decode/encode, optical flow) that also advertise TRANSFER, and
-    // require 1×1×1 image-transfer granularity so buffer→image copies of
-    // arbitrary regions are legal — a coarser-granularity family would need
-    // per-copy alignment validation, which no target device has warranted.
+    // (video decode/encode, optical flow) that also advertise TRANSFER but
+    // are not general streaming engines. A coarse `minImageTransferGranularity`
+    // (AMD SDMA: 16×16×8) is NOT a disqualifier — buffer copies are exempt and
+    // whole-subresource image copies are legal at any granularity, so the
+    // family is accepted here and the routing layer gates per op (#92).
     let specialized = vk::QueueFlags::GRAPHICS
         | vk::QueueFlags::COMPUTE
         | vk::QueueFlags::VIDEO_DECODE_KHR
         | vk::QueueFlags::VIDEO_ENCODE_KHR
         | vk::QueueFlags::OPTICAL_FLOW_NV;
-    let transfer = queue_families
-        .iter()
-        .enumerate()
-        .find(|(_, family)| {
-            family.queue_flags.contains(vk::QueueFlags::TRANSFER)
-                && !family.queue_flags.intersects(specialized)
-                && family.queue_count > 0
-                && family.min_image_transfer_granularity
-                    == vk::Extent3D {
-                        width: 1,
-                        height: 1,
-                        depth: 1,
-                    }
-        })
-        .map(|(family, _)| (family as u32, 0));
+    let transfer_family = queue_families.iter().enumerate().find(|(_, family)| {
+        family.queue_flags.contains(vk::QueueFlags::TRANSFER)
+            && !family.queue_flags.intersects(specialized)
+            && family.queue_count > 0
+    });
+    let transfer = transfer_family.map(|(family, _)| (family as u32, 0));
+    let transfer_granularity =
+        transfer_family.map(|(_, family)| family.min_image_transfer_granularity);
 
     Ok(QueuePlan {
         graphics_family,
         async_compute,
         transfer,
+        transfer_granularity,
     })
 }
 
@@ -711,6 +718,14 @@ mod tests {
         assert_eq!(plan.graphics_family, 0);
         assert_eq!(plan.async_compute, Some((1, 0)));
         assert_eq!(plan.transfer, Some((2, 0)));
+        assert_eq!(
+            plan.transfer_granularity,
+            Some(vk::Extent3D {
+                width: 1,
+                height: 1,
+                depth: 1
+            })
+        );
     }
 
     /// #89: video decode/encode families advertise TRANSFER but are not DMA
@@ -735,10 +750,11 @@ mod tests {
         assert_eq!(plan.async_compute, Some((0, 1)));
     }
 
-    /// #89: a transfer family with coarse `minImageTransferGranularity` would
-    /// restrict image copies; it is skipped rather than validated per copy.
+    /// #92: a transfer family with coarse `minImageTransferGranularity` (AMD
+    /// SDMA) is accepted, carrying its granularity; the routing layer, not the
+    /// plan, restricts image copies to whole subresources there.
     #[test]
-    fn plan_skips_coarse_granularity_transfer_family() {
+    fn plan_accepts_coarse_granularity_transfer_family() {
         let families = [
             family(
                 vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE | vk::QueueFlags::TRANSFER,
@@ -748,7 +764,15 @@ mod tests {
             family(vk::QueueFlags::TRANSFER, 1, 8),
         ];
         let plan = plan_queues_from_families(&families).unwrap();
-        assert_eq!(plan.transfer, None);
+        assert_eq!(plan.transfer, Some((1, 0)));
+        assert_eq!(
+            plan.transfer_granularity,
+            Some(vk::Extent3D {
+                width: 8,
+                height: 8,
+                depth: 8
+            })
+        );
     }
 
     /// Single-family devices (MoltenVK default) plan no secondary queues —
