@@ -233,6 +233,25 @@ impl EguiController {
         ))
     }
 
+    /// Abandon an open frame without producing a draw pass.
+    ///
+    /// For hosts that split the bracket across callbacks ([`begin_frame`]
+    /// before game/UI logic, [`end_frame`](Self::end_frame) in the draw phase):
+    /// when the draw phase is skipped (outdated surface, busy frame slot), the
+    /// pass is still open and the next [`begin_frame`](Self::begin_frame) would
+    /// stack a second pass onto it. Call this first to close the stale pass.
+    /// Texture-atlas deltas and platform output are preserved (they are
+    /// incremental and must not be lost); only the frame's shapes are dropped.
+    ///
+    /// [`begin_frame`]: Self::begin_frame
+    pub fn discard_frame(&mut self) {
+        let output = self.ctx.end_pass();
+        self.wants_keyboard_input = self.ctx.wants_keyboard_input();
+        self.wants_pointer_input = self.ctx.wants_pointer_input();
+        self.input_state.update_from_output(&output.platform_output);
+        self.renderer.update_textures(&output.textures_delta);
+    }
+
     /// Register a user-managed texture with egui.
     ///
     /// This allows external textures (such as render targets, offscreen buffers,

@@ -9,11 +9,20 @@ use redlilium_ecs::{
     Camera, CameraOutput, CameraTarget, EcsRunner, MainViewport, OutputFormat, Render,
     RenderSchedule, ScenePass, WindowInput, World,
 };
-use redlilium_graphics::FrameSchedule;
+use redlilium_graphics::egui::{EguiApp, EguiController};
+use redlilium_graphics::{FrameSchedule, RenderTarget};
 use winit::event::{KeyEvent, MouseButton};
 
 use crate::blit::PresentBlit;
-use crate::{App, EngineContext, GameConfig, Plugin};
+use crate::{App, EngineContext, GameConfig, GameUi, Plugin};
+
+/// The runtime builds its UI from game systems (via the [`GameUi`] resource),
+/// not through the controller's [`EguiApp`] callback — this stub satisfies the
+/// constructor.
+struct NoopUi;
+impl EguiApp for NoopUi {
+    fn update(&mut self, _ctx: &redlilium_graphics::egui::egui::Context) {}
+}
 
 /// Everything created once the graphics device exists.
 struct GameState {
@@ -23,6 +32,13 @@ struct GameState {
     runner: EcsRunner,
     window_input: Arc<RwLock<WindowInput>>,
     blit: PresentBlit,
+    /// In-game UI layer (#100): the host brackets each frame around the game
+    /// schedules so systems can draw through the [`GameUi`] resource.
+    egui: EguiController,
+    /// Whether an egui pass is open (`begin_frame` ran without a matching
+    /// `end_frame`) — the draw phase can be skipped (outdated surface, busy
+    /// frame slot), so the bracket must tolerate an unpaired update.
+    ui_frame_open: bool,
     /// Primary-camera output format, derived from the surface's color space.
     output_format: OutputFormat,
     /// Plugin module: owns plugin(s) + dylib library handle.
@@ -65,6 +81,20 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
         let blit = PresentBlit::new(ctx.device(), ctx.surface_format());
         let window_input = app.window_input();
 
+        // In-game UI layer (#100): the controller renders straight to the
+        // swapchain on top of the present blit; game systems build the UI
+        // through the world-resident GameUi handle.
+        let egui = EguiController::new(
+            ctx.device().clone(),
+            Arc::new(parking_lot::RwLock::new(NoopUi)),
+            ctx.width(),
+            ctx.height(),
+            ctx.scale_factor(),
+            ctx.surface_format(),
+        );
+        app.world_mut()
+            .insert_resource(GameUi::new(egui.context().clone()));
+
         // Create GameModule: owns plugin(s) and (eventually) dylib library handle.
         // For static linking: _library is None; for dynamic loading it holds libloading::Library.
         // Field order in GameState ensures: app drops first, module drops last (drop order enforced).
@@ -76,9 +106,17 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
             runner,
             window_input,
             blit,
+            egui,
+            ui_frame_open: false,
             output_format: OutputFormat::matching_surface(ctx.surface_format()),
             module,
         });
+    }
+
+    fn on_resize(&mut self, ctx: &mut AppContext) {
+        if let Some(state) = self.state.as_mut() {
+            state.egui.on_resize(ctx.width(), ctx.height());
+        }
     }
 
     fn on_update(&mut self, ctx: &mut AppContext) -> bool {
@@ -123,8 +161,31 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
             }
         }
 
+        // Open the UI frame before the game schedules so systems can draw
+        // through GameUi. If the previous frame's draw was skipped (outdated
+        // surface, busy frame slot), the stale pass is still open — discard it
+        // (atlas deltas survive, shapes are dropped) before opening a new one.
+        if state.ui_frame_open {
+            state.egui.discard_frame();
+        }
+        state.egui.begin_frame(ctx.elapsed_time() as f64);
+        state.ui_frame_open = true;
+
         let (world, schedules) = state.app.parts_mut();
         schedules.run_frame(world, &state.runner, ctx.delta_time() as f64);
+
+        // Game-requested exit (#100). On wasm a browser tab has no process to
+        // exit, so the request is ignored there.
+        #[cfg(not(target_arch = "wasm32"))]
+        if state
+            .app
+            .world()
+            .resource::<crate::AppControl>()
+            .exit_requested()
+        {
+            log::info!("game requested exit (AppControl)");
+            return false;
+        }
         true
     }
 
@@ -163,7 +224,7 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
             .read_all::<CameraTarget>()
             .ok()
             .and_then(|targets| targets.iter().next().map(|(_, t)| t.color.clone()));
-        state.blit.encode(
+        let blit_handle = state.blit.encode(
             &mut graph,
             ctx.swapchain_texture(),
             source,
@@ -171,18 +232,38 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
             clear,
         );
 
-        state.window_input.write().begin_frame();
+        // Close the UI frame opened in on_update and composite it over the
+        // blit (#100). The egui pass loads (not clears) the swapchain, so the
+        // dependency edge is what keeps it on top.
+        if state.ui_frame_open {
+            state.ui_frame_open = false;
+            let target = RenderTarget::from_surface(ctx.swapchain_texture());
+            state.egui.flush_uploads(&mut graph);
+            if let Some(pass) = state.egui.end_frame(&target, width, height) {
+                let handle = graph.add_graphics_pass(pass);
+                graph.add_dependency(handle, blit_handle);
+            }
+        }
+
+        {
+            let mut input = state.window_input.write();
+            input.ui_wants_input =
+                state.egui.wants_pointer_input || state.egui.wants_keyboard_input;
+            input.begin_frame();
+        }
         ctx.render(graph)
     }
 
     fn on_key(&mut self, _ctx: &mut AppContext, event: &KeyEvent) {
-        let Some(state) = self.state.as_ref() else {
+        let Some(state) = self.state.as_mut() else {
             return;
         };
+        let ui_wants = state.egui.on_key(event);
         if let winit::keyboard::PhysicalKey::Code(code) = event.physical_key
             && let Some(key) = map_winit_key(code)
         {
             let mut input = state.window_input.write();
+            input.ui_wants_input = ui_wants;
             if event.state.is_pressed() {
                 input.on_key_pressed(key);
             } else {
@@ -192,27 +273,48 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
     }
 
     fn on_mouse_move(&mut self, _ctx: &mut AppContext, x: f64, y: f64) {
-        if let Some(state) = self.state.as_ref() {
-            state.window_input.write().on_mouse_move(x, y);
+        if let Some(state) = self.state.as_mut() {
+            let ui_wants = state.egui.on_mouse_move(x, y);
+            let mut input = state.window_input.write();
+            input.on_mouse_move(x, y);
+            input.ui_wants_input = ui_wants;
         }
     }
 
     fn on_mouse_button(&mut self, _ctx: &mut AppContext, button: MouseButton, pressed: bool) {
-        let Some(state) = self.state.as_ref() else {
+        let Some(state) = self.state.as_mut() else {
             return;
         };
+        let ui_wants = state.egui.on_mouse_button(button, pressed);
         let index = match button {
             MouseButton::Left => 0,
             MouseButton::Right => 1,
             MouseButton::Middle => 2,
             _ => return,
         };
-        state.window_input.write().on_mouse_button(index, pressed);
+        let mut input = state.window_input.write();
+        input.on_mouse_button(index, pressed);
+        input.ui_wants_input = ui_wants;
     }
 
     fn on_mouse_scroll(&mut self, _ctx: &mut AppContext, delta_x: f32, delta_y: f32) {
-        if let Some(state) = self.state.as_ref() {
-            state.window_input.write().on_scroll(delta_x, delta_y);
+        if let Some(state) = self.state.as_mut() {
+            let ui_wants = state
+                .egui
+                .on_mouse_scroll(winit::event::MouseScrollDelta::LineDelta(delta_x, delta_y));
+            let mut input = state.window_input.write();
+            input.on_scroll(delta_x, delta_y);
+            input.ui_wants_input = ui_wants;
+        }
+    }
+
+    fn on_modifiers_changed(
+        &mut self,
+        _ctx: &mut AppContext,
+        modifiers: winit::keyboard::ModifiersState,
+    ) {
+        if let Some(state) = self.state.as_mut() {
+            state.egui.on_modifiers_changed(modifiers);
         }
     }
 }
@@ -365,6 +467,14 @@ mod tests {
         let runner = EcsRunner::single_thread();
         let window_input = app.window_input();
         let blit = PresentBlit::new(&device, redlilium_graphics::TextureFormat::Rgba8Unorm);
+        let egui = EguiController::new(
+            device.clone(),
+            Arc::new(parking_lot::RwLock::new(NoopUi)),
+            1,
+            1,
+            1.0,
+            redlilium_graphics::TextureFormat::Rgba8Unorm,
+        );
         let module = crate::GameModule::from_static(Box::new(plugin) as Box<dyn crate::Plugin>);
 
         RuntimeHandler {
@@ -376,6 +486,8 @@ mod tests {
                 runner,
                 window_input,
                 blit,
+                egui,
+                ui_frame_open: false,
                 output_format: OutputFormat::default(),
                 module,
             }),

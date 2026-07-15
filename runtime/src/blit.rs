@@ -109,7 +109,8 @@ impl PresentBlit {
 
     /// Append the present pass to the frame graph: clears the swapchain and,
     /// if a scene texture exists, draws it fullscreen. `depends_on` orders
-    /// the blit after the scene's last writer.
+    /// the blit after the scene's last writer. Returns the blit's own pass
+    /// handle so overlays (the in-game egui pass, #100) can order after it.
     pub(crate) fn encode(
         &mut self,
         graph: &mut RenderGraph,
@@ -117,7 +118,7 @@ impl PresentBlit {
         source: Option<Arc<Texture>>,
         depends_on: Option<PassHandle>,
         clear_color: [f32; 4],
-    ) {
+    ) -> PassHandle {
         let mut pass = GraphicsPass::new("present_blit".into());
         pass.set_render_targets(RenderTargetConfig::new().with_color(
             ColorAttachment::from_surface(swapchain).with_clear_color(
@@ -137,6 +138,7 @@ impl PresentBlit {
         if let Some(dep) = depends_on {
             graph.add_dependency(handle, dep);
         }
+        handle
     }
 
     /// The cached material instance for `source`, rebuilt when the camera

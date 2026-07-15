@@ -532,6 +532,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "car-game"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "log",
+ "redlilium-assets",
+ "redlilium-core",
+ "redlilium-ecs",
+ "redlilium-graphics",
+ "redlilium-runtime",
+]
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4475,6 +4488,7 @@ dependencies = [
  "bytemuck",
  "libloading",
  "log",
+ "parking_lot",
  "redlilium-app",
  "redlilium-assets",
  "redlilium-core",

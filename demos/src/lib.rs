@@ -99,11 +99,16 @@ impl Plugin for SpinDemo {
             app.add_system::<Update, _>(PanicOnce::default());
         }
         // Viewport navigation: the std free-fly camera, ordered before the
-        // transform propagation the runtime installed.
-        app.add_system::<PostUpdate, _>(UpdateFreeFlyCamera);
-        app.schedule_mut::<PostUpdate>()
-            .add_edge::<UpdateFreeFlyCamera, UpdateGlobalTransforms>()
-            .expect("no cycle");
+        // transform propagation the runtime installed. The editor's schedules
+        // already register this engine system — adding it again would panic
+        // when the editor hosts this module, so guard (see
+        // `SystemsContainer::contains`).
+        let post = app.schedule_mut::<PostUpdate>();
+        if !post.contains::<UpdateFreeFlyCamera>() {
+            post.add(UpdateFreeFlyCamera);
+            post.add_edge::<UpdateFreeFlyCamera, UpdateGlobalTransforms>()
+                .expect("no cycle");
+        }
     }
 
     fn spawn_scene(&self, app: &mut App) {

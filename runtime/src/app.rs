@@ -65,6 +65,9 @@ impl App {
         world.insert_resource(RealTime::default());
         world.insert_resource(GameTime::default());
 
+        // Host-control surface for game code (#100): request_exit etc.
+        world.insert_resource(crate::AppControl::default());
+
         // Play/Pause/Resume/Stop state machine for editor integration.
         world.insert_resource(PlayControl::default());
         let mut registry = PlayModeAwareRegistry::default();

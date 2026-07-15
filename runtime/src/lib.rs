@@ -46,6 +46,7 @@ mod blit;
 mod embedded_assets;
 mod engine_context;
 mod handler;
+mod ui;
 
 pub use abi::{
     ABI_FINGERPRINT, ABI_FINGERPRINT_SYMBOL, AbiFingerprintFn, GAME_MODULE_SYMBOL, GameModule,
@@ -53,6 +54,7 @@ pub use abi::{
 };
 pub use app::App;
 pub use engine_context::EngineContext;
+pub use ui::{AppControl, GameUi};
 
 use redlilium_app::AppArgs;
 
