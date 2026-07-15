@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Arcade car vertical slice built on redlilium-runtime (milestone: Vertical Slice — Arcade Car)"
+default-run = "car-game"
 
 [lib]
 name = "car_game"
@@ -22,9 +23,10 @@ redlilium-graphics = { path = "../graphics", default-features = false, features 
     "dummy",
     "wgpu-backend",
 ] }
-redlilium-ecs = { path = "../ecs", features = ["physics", "rendering"] }
+redlilium-ecs = { path = "../ecs", features = ["physics", "rendering", "serialize-ron"] }
 redlilium-runtime = { path = "../runtime" }
 redlilium-assets = { path = "../assets" }
+redlilium-vfs = { path = "../vfs" }
 log.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

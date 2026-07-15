@@ -1,0 +1,579 @@
+(
+    entities: [
+        (
+            entity_index: 0,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
+                (
+                    type_name: "Transform",
+                    schema_version: 1,
+                    data: Map([
+                        ("translation", List([
+                            F32(0.0),
+                            F32(-0.1),
+                            F32(0.0),
+                        ])),
+                        ("rotation", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                            F32(1.0),
+                        ])),
+                        ("scale", List([
+                            F32(40.0),
+                            F32(0.2),
+                            F32(40.0),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "MeshRenderer",
+                    schema_version: 1,
+                    data: Map([
+                        ("primitives", List([
+                            Map([
+                                ("mesh", Map([
+                                    ("Generated", Map([
+                                        ("Cube", Map([
+                                            ("half_bits", U64(1056964608)),
+                                        ])),
+                                    ])),
+                                ])),
+                                ("material", Map([
+                                    ("guid", String("5232225d-f91b-5bb1-b975-d2d536eb9668")),
+                                ])),
+                            ]),
+                        ])),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 1,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
+                (
+                    type_name: "Transform",
+                    schema_version: 1,
+                    data: Map([
+                        ("translation", List([
+                            F32(10.0),
+                            F32(0.5),
+                            F32(0.0),
+                        ])),
+                        ("rotation", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                            F32(1.0),
+                        ])),
+                        ("scale", List([
+                            F32(1.0),
+                            F32(1.0),
+                            F32(1.0),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "MeshRenderer",
+                    schema_version: 1,
+                    data: Map([
+                        ("primitives", List([
+                            Map([
+                                ("mesh", Map([
+                                    ("Generated", Map([
+                                        ("Cube", Map([
+                                            ("half_bits", U64(1056964608)),
+                                        ])),
+                                    ])),
+                                ])),
+                                ("material", Map([
+                                    ("guid", String("5232225d-f91b-5bb1-b975-d2d536eb9668")),
+                                ])),
+                            ]),
+                        ])),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 2,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
+                (
+                    type_name: "Transform",
+                    schema_version: 1,
+                    data: Map([
+                        ("translation", List([
+                            F32(7.071068),
+                            F32(0.5),
+                            F32(7.071068),
+                        ])),
+                        ("rotation", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                            F32(1.0),
+                        ])),
+                        ("scale", List([
+                            F32(1.0),
+                            F32(1.0),
+                            F32(1.0),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "MeshRenderer",
+                    schema_version: 1,
+                    data: Map([
+                        ("primitives", List([
+                            Map([
+                                ("mesh", Map([
+                                    ("Generated", Map([
+                                        ("Cube", Map([
+                                            ("half_bits", U64(1056964608)),
+                                        ])),
+                                    ])),
+                                ])),
+                                ("material", Map([
+                                    ("guid", String("5232225d-f91b-5bb1-b975-d2d536eb9668")),
+                                ])),
+                            ]),
+                        ])),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 3,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
+                (
+                    type_name: "Transform",
+                    schema_version: 1,
+                    data: Map([
+                        ("translation", List([
+                            F32(-0.0000004371139),
+                            F32(0.5),
+                            F32(10.0),
+                        ])),
+                        ("rotation", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                            F32(1.0),
+                        ])),
+                        ("scale", List([
+                            F32(1.0),
+                            F32(1.0),
+                            F32(1.0),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "MeshRenderer",
+                    schema_version: 1,
+                    data: Map([
+                        ("primitives", List([
+                            Map([
+                                ("mesh", Map([
+                                    ("Generated", Map([
+                                        ("Cube", Map([
+                                            ("half_bits", U64(1056964608)),
+                                        ])),
+                                    ])),
+                                ])),
+                                ("material", Map([
+                                    ("guid", String("5232225d-f91b-5bb1-b975-d2d536eb9668")),
+                                ])),
+                            ]),
+                        ])),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 4,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
+                (
+                    type_name: "Transform",
+                    schema_version: 1,
+                    data: Map([
+                        ("translation", List([
+                            F32(-7.071068),
+                            F32(0.5),
+                            F32(7.071068),
+                        ])),
+                        ("rotation", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                            F32(1.0),
+                        ])),
+                        ("scale", List([
+                            F32(1.0),
+                            F32(1.0),
+                            F32(1.0),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "MeshRenderer",
+                    schema_version: 1,
+                    data: Map([
+                        ("primitives", List([
+                            Map([
+                                ("mesh", Map([
+                                    ("Generated", Map([
+                                        ("Cube", Map([
+                                            ("half_bits", U64(1056964608)),
+                                        ])),
+                                    ])),
+                                ])),
+                                ("material", Map([
+                                    ("guid", String("5232225d-f91b-5bb1-b975-d2d536eb9668")),
+                                ])),
+                            ]),
+                        ])),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 5,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
+                (
+                    type_name: "Transform",
+                    schema_version: 1,
+                    data: Map([
+                        ("translation", List([
+                            F32(-10.0),
+                            F32(0.5),
+                            F32(-0.0000008742278),
+                        ])),
+                        ("rotation", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                            F32(1.0),
+                        ])),
+                        ("scale", List([
+                            F32(1.0),
+                            F32(1.0),
+                            F32(1.0),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "MeshRenderer",
+                    schema_version: 1,
+                    data: Map([
+                        ("primitives", List([
+                            Map([
+                                ("mesh", Map([
+                                    ("Generated", Map([
+                                        ("Cube", Map([
+                                            ("half_bits", U64(1056964608)),
+                                        ])),
+                                    ])),
+                                ])),
+                                ("material", Map([
+                                    ("guid", String("5232225d-f91b-5bb1-b975-d2d536eb9668")),
+                                ])),
+                            ]),
+                        ])),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 6,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
+                (
+                    type_name: "Transform",
+                    schema_version: 1,
+                    data: Map([
+                        ("translation", List([
+                            F32(-7.0710664),
+                            F32(0.5),
+                            F32(-7.071069),
+                        ])),
+                        ("rotation", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                            F32(1.0),
+                        ])),
+                        ("scale", List([
+                            F32(1.0),
+                            F32(1.0),
+                            F32(1.0),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "MeshRenderer",
+                    schema_version: 1,
+                    data: Map([
+                        ("primitives", List([
+                            Map([
+                                ("mesh", Map([
+                                    ("Generated", Map([
+                                        ("Cube", Map([
+                                            ("half_bits", U64(1056964608)),
+                                        ])),
+                                    ])),
+                                ])),
+                                ("material", Map([
+                                    ("guid", String("5232225d-f91b-5bb1-b975-d2d536eb9668")),
+                                ])),
+                            ]),
+                        ])),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 7,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
+                (
+                    type_name: "Transform",
+                    schema_version: 1,
+                    data: Map([
+                        ("translation", List([
+                            F32(0.00000011924881),
+                            F32(0.5),
+                            F32(-10.0),
+                        ])),
+                        ("rotation", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                            F32(1.0),
+                        ])),
+                        ("scale", List([
+                            F32(1.0),
+                            F32(1.0),
+                            F32(1.0),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "MeshRenderer",
+                    schema_version: 1,
+                    data: Map([
+                        ("primitives", List([
+                            Map([
+                                ("mesh", Map([
+                                    ("Generated", Map([
+                                        ("Cube", Map([
+                                            ("half_bits", U64(1056964608)),
+                                        ])),
+                                    ])),
+                                ])),
+                                ("material", Map([
+                                    ("guid", String("5232225d-f91b-5bb1-b975-d2d536eb9668")),
+                                ])),
+                            ]),
+                        ])),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 8,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
+                (
+                    type_name: "Transform",
+                    schema_version: 1,
+                    data: Map([
+                        ("translation", List([
+                            F32(7.07107),
+                            F32(0.5),
+                            F32(-7.0710654),
+                        ])),
+                        ("rotation", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                            F32(1.0),
+                        ])),
+                        ("scale", List([
+                            F32(1.0),
+                            F32(1.0),
+                            F32(1.0),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "MeshRenderer",
+                    schema_version: 1,
+                    data: Map([
+                        ("primitives", List([
+                            Map([
+                                ("mesh", Map([
+                                    ("Generated", Map([
+                                        ("Cube", Map([
+                                            ("half_bits", U64(1056964608)),
+                                        ])),
+                                    ])),
+                                ])),
+                                ("material", Map([
+                                    ("guid", String("5232225d-f91b-5bb1-b975-d2d536eb9668")),
+                                ])),
+                            ]),
+                        ])),
+                    ]),
+                ),
+            ],
+        ),
+        (
+            entity_index: 9,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "CarController",
+                    schema_version: 1,
+                    data: Map([
+                        ("engine_force", F32(700.0)),
+                        ("steer_torque", F32(160.0)),
+                        ("max_speed", F32(18.0)),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
+                (
+                    type_name: "Transform",
+                    schema_version: 1,
+                    data: Map([
+                        ("translation", List([
+                            F32(0.0),
+                            F32(0.5),
+                            F32(0.0),
+                        ])),
+                        ("rotation", List([
+                            F32(0.0),
+                            F32(0.0),
+                            F32(0.0),
+                            F32(1.0),
+                        ])),
+                        ("scale", List([
+                            F32(1.0),
+                            F32(0.6),
+                            F32(2.0),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "MeshRenderer",
+                    schema_version: 1,
+                    data: Map([
+                        ("primitives", List([
+                            Map([
+                                ("mesh", Map([
+                                    ("Generated", Map([
+                                        ("Cube", Map([
+                                            ("half_bits", U64(1056964608)),
+                                        ])),
+                                    ])),
+                                ])),
+                                ("material", Map([
+                                    ("guid", String("5232225d-f91b-5bb1-b975-d2d536eb9668")),
+                                ])),
+                            ]),
+                        ])),
+                    ]),
+                ),
+            ],
+        ),
+    ],
+    resources: [],
+    metadata: (
+        engine_fingerprint: "",
+        timestamp: 1784128273,
+        component_schemas: {},
+    ),
+)

@@ -542,6 +542,7 @@ dependencies = [
  "redlilium-ecs",
  "redlilium-graphics",
  "redlilium-runtime",
+ "redlilium-vfs",
 ]
 
 [[package]]

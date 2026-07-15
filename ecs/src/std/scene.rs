@@ -264,6 +264,7 @@ impl crate::ExclusiveSystem for ApplySceneTransitions {
         // Instantiate + tag.
         match instantiate_scene(world, &scene) {
             Ok(spawned) => {
+                log::info!("scene '{path}' loaded ({} entities)", spawned.len());
                 for entity in spawned {
                     let _ = world.insert(
                         entity,
