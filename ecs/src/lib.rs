@@ -187,8 +187,8 @@ pub use rendering::{
 #[cfg(all(feature = "rendering", feature = "serialize-ron"))]
 pub use self::std::scene::{
     ApplySceneTransitions, ReplaceSceneAction, SceneData, SceneLoader, SceneManager, SceneMember,
-    SceneSource, instantiate_scene, request_scene, rescan_asset_managers, scene_from_world,
-    serialize_scene_ron,
+    SceneSource, empty_scene_ron, instantiate_scene, request_scene, rescan_asset_managers,
+    scene_from_world, serialize_scene_ron,
 };
 
 // Rendering components, resources, and systems (feature-gated)

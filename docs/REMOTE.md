@@ -56,7 +56,7 @@ Claude): текстовый протокол, через который можн
 | Команда | Параметры | Ответ |
 |---|---|---|
 | `hello` | — | `proto`, `commands` |
-| `state` | — | `entities: [(entity, name, parent, components)]`, `selection` |
+| `state` | — | `scene` (текущая сцена, `"mount/path"` \| None), `entities: [(entity, name, parent, components)]`, `selection` |
 | `inspect` | `entity` | `components: [(имя, натуральный RON)]` |
 | `edit_component` | `entity`, `component`, `data: <RON>` | снапшот компонента после применения |
 | `add_component` / `remove_component` | `entity`, `component` | ack после применения |
@@ -69,7 +69,7 @@ Claude): текстовый протокол, через который можн
 | `shutdown` | — | ack; редактор завершается |
 | `action` | `name`, `params: (…)` | ack после применения; spawn-действия возвращают `entities` |
 | `actions` | — | `[(имя, usage)]` — интроспекция реестра |
-| `new_asset` | `source`, `kind`, `dir?`, `name?` | `guid`, `path` — файл + запись в DB |
+| `new_asset` | `source`, `kind`, `dir?`, `name?` | `guid`, `path` — файл + запись в DB; `kind: "scene"` создаёт валидную пустую сцену (открывается через `load_scene`) |
 | `save_prefab` | `entity`, `path` | ack — поддерево записано как `.prefab` (RON) |
 | `spawn_prefab` | `path`, `parent?` | `entities` после применения (undoable) |
 | `save_scene` | `path?` (default — текущая сцена) | `path` — контент мира (без editor-сущностей) записан как `.scene`; путь становится текущей сценой |

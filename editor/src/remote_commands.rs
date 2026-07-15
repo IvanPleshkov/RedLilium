@@ -914,7 +914,7 @@ fn dispatch(
                 world
                     .resource::<AssetProcessor>()
                     .vfs()
-                    .write(&vfs_path, Vec::new()),
+                    .write(&vfs_path, spec.content),
             );
             if let Err(e) = write {
                 world
@@ -1188,6 +1188,9 @@ fn cmd_state(world: &World, conn: u64, id: i64) {
     struct StateResp {
         id: i64,
         ok: bool,
+        /// The scene asset the world content belongs to (VFS `"mount/path"`,
+        /// #112) — `None` before the first save/load picks one.
+        scene: Option<String>,
         entities: Vec<EntityRow>,
         selection: Vec<String>,
     }
@@ -1220,6 +1223,7 @@ fn cmd_state(world: &World, conn: u64, id: i64) {
         &StateResp {
             id,
             ok: true,
+            scene: world.resource::<crate::core::CurrentScene>().0.clone(),
             entities,
             selection,
         },

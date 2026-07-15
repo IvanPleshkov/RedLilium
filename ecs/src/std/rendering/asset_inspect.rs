@@ -154,11 +154,16 @@ mod render_assets {
     };
     use crate::World;
 
-    /// Default extension + record `settings` for a newly-created asset (the "New"
-    /// menu). See [`new_asset_spec`].
+    /// Default extension, record `settings`, and initial file bytes for a
+    /// newly-created asset (the "New" menu). See [`new_asset_spec`].
     pub struct NewAssetSpec {
         pub extension: &'static str,
         pub settings: Option<String>,
+        /// Initial file content. Most kinds keep their data in the record's
+        /// `settings` and start as an empty file; kinds whose content lives
+        /// in the file itself (scenes) must start valid, not zero-byte —
+        /// their loader would reject an empty file.
+        pub content: Vec<u8>,
     }
 
     /// The default spec for creating an asset of `kind`. A material instance needs
@@ -171,6 +176,7 @@ mod render_assets {
                 Some(NewAssetSpec {
                     extension: "vlayout",
                     settings: ron::to_string(&layout).ok(),
+                    content: Vec::new(),
                 })
             }
             "material" => {
@@ -182,6 +188,7 @@ mod render_assets {
                 Some(NewAssetSpec {
                     extension: "material",
                     settings: ron::to_string(&data).ok(),
+                    content: Vec::new(),
                 })
             }
             "material_instance" => {
@@ -192,8 +199,15 @@ mod render_assets {
                 Some(NewAssetSpec {
                     extension: "matinst",
                     settings: ron::to_string(&data).ok(),
+                    content: Vec::new(),
                 })
             }
+            #[cfg(feature = "serialize-ron")]
+            "scene" => Some(NewAssetSpec {
+                extension: "scene",
+                settings: None,
+                content: crate::std::scene::empty_scene_ron().into_bytes(),
+            }),
             _ => None,
         }
     }

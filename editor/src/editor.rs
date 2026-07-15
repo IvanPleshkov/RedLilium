@@ -335,13 +335,40 @@ impl Editor {
                         .set_settings(&guid, spec.settings);
                     let vfs_path = format!("{source}/{path}");
                     self.asset_browser
-                        .dispatch_write(&self.vfs, &vfs_path, Vec::new());
+                        .dispatch_write(&self.vfs, &vfs_path, spec.content);
                     self.asset_browser.mark_db_dirty(&source);
                     self.asset_browser
                         .notify_asset_created(&source, &dir, &path);
                     log::info!("Created asset: {vfs_path}");
                 }
                 None => log::warn!("Cannot create asset of kind '{kind}' (missing parent?)"),
+            }
+        }
+
+        // Open a double-clicked scene asset (#112): the browser twin of the
+        // remote `load_scene` — an undoable replace of the world's scene
+        // content, through the ActionQueue like every other edit.
+        if let Some((source, path)) = self.asset_browser.take_pending_open_scene() {
+            let vfs_path = format!("{source}/{path}");
+            let scene = pollster::block_on(self.vfs.read(&vfs_path))
+                .map_err(|e| e.to_string())
+                .and_then(|data| {
+                    redlilium_ecs::serialize::decode::<redlilium_ecs::serialize::SerializedWorld>(
+                        &data,
+                        redlilium_ecs::serialize::Format::Ron,
+                    )
+                    .map_err(|e| e.to_string())
+                });
+            match scene {
+                Ok(scene) => {
+                    let ew = self.world.as_mut().unwrap();
+                    let action = redlilium_ecs::ReplaceSceneAction::new(scene, &vfs_path);
+                    ew.world
+                        .resource::<redlilium_core::abstract_editor::ActionQueue<redlilium_ecs::World>>()
+                        .push(Box::new(action));
+                    ew.world.resource_mut::<crate::core::CurrentScene>().0 = Some(vfs_path);
+                }
+                Err(e) => log::error!("failed to open scene {vfs_path}: {e}"),
             }
         }
 

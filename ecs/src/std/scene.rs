@@ -162,6 +162,14 @@ pub fn scene_from_world(world: &World) -> Result<SerializedWorld, SerializeError
     Ok(scene)
 }
 
+/// The RON of an *empty* scene — the initial content of a newly created
+/// `.scene` asset (#112). A freshly created scene must be valid from byte
+/// one (the loader rejects a zero-length file), and an empty world is the
+/// canonical blank canvas.
+pub fn empty_scene_ron() -> String {
+    serialize_scene_ron(&World::new()).expect("an empty world always serializes")
+}
+
 /// Serialize `world`'s scene content ([`scene_from_world`]) into scene RON —
 /// the bytes a `.scene` asset stores. Used by the editor's scene save (#2)
 /// and by offline tooling (`gen_scenes`, tests).
@@ -660,6 +668,23 @@ mod tests {
             matches!(handle.get(), Some(Err(_))),
             "missing file must resolve to an error"
         );
+    }
+
+    /// #112: a freshly created scene asset must be valid RON that parses and
+    /// instantiates to an empty world — never a zero-byte file the loader
+    /// would reject.
+    #[test]
+    fn empty_scene_is_valid_and_instantiates_empty() {
+        let ron_text = empty_scene_ron();
+        let scene: SerializedWorld = ron::from_str(&ron_text).expect("empty scene parses");
+        assert!(scene.entities.is_empty());
+
+        let mut world = World::new();
+        crate::register_std_components(&mut world);
+        let spawned = world
+            .deserialize_world_into(&scene)
+            .expect("empty scene instantiates");
+        assert!(spawned.is_empty(), "an empty scene spawns nothing");
     }
 
     /// #2: a scene asset stores *scene content* — editor machinery (the
