@@ -68,6 +68,11 @@ impl App {
         // Host-control surface for game code (#100): request_exit etc.
         world.insert_resource(crate::AppControl::default());
 
+        // Scene transitions (#101/#102): switch_to requests are applied by
+        // ApplySceneTransitions in PreUpdate (installed below).
+        world.register_inspector::<redlilium_ecs::SceneMember>();
+        world.insert_resource(redlilium_ecs::SceneManager::default());
+
         // Play/Pause/Resume/Stop state machine for editor integration.
         world.insert_resource(PlayControl::default());
         let mut registry = PlayModeAwareRegistry::default();
@@ -89,6 +94,11 @@ impl App {
         {
             let pre = schedules.get_mut::<PreUpdate>();
             pre.add_exclusive(ManagePlayModeTransitions);
+            // Scene swaps happen at a defined point (never mid-schedule),
+            // after play-mode transitions have settled.
+            pre.add_exclusive(redlilium_ecs::ApplySceneTransitions);
+            pre.add_edge::<ManagePlayModeTransitions, redlilium_ecs::ApplySceneTransitions>()
+                .expect("no cycle");
         }
         {
             let post = schedules.get_mut::<PostUpdate>();
