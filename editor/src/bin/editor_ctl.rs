@@ -16,6 +16,8 @@
 //! editor-ctl wait-assets 5000
 //! editor-ctl logs 0
 //! editor-ctl undo
+//! editor-ctl load-scene game/scenes/level1.scene
+//! editor-ctl play          # + pause / resume / stop, reload-game
 //! editor-ctl raw '(id: 1, cmd: "hello")'
 //! ```
 
@@ -108,8 +110,25 @@ fn build_envelope(args: &[String]) -> Result<String, String> {
             need(1, "raw '<RON envelope>'")?;
             rest[0].clone()
         }
-        "hello" | "state" | "undo" | "redo" | "shutdown" | "actions" => {
-            format!("(id: 1, cmd: {})", q(cmd))
+        "hello" | "state" | "undo" | "redo" | "shutdown" | "actions" | "play" | "pause"
+        | "resume" | "stop" | "reload-game" => {
+            let wire = match cmd {
+                "reload-game" => "reload_game",
+                other => other,
+            };
+            format!("(id: 1, cmd: {})", q(wire))
+        }
+        "save-scene" => {
+            let mut envelope = "(id: 1, cmd: \"save_scene\"".to_string();
+            if let Some(path) = rest.first() {
+                envelope.push_str(&format!(", path: {}", q(path)));
+            }
+            envelope.push(')');
+            envelope
+        }
+        "load-scene" => {
+            need(1, "load-scene <mount/path.scene>")?;
+            format!("(id: 1, cmd: \"load_scene\", path: {})", q(&rest[0]))
         }
         "action" => {
             need(1, "action <name> ['(params…)']")?;
