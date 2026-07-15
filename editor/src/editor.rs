@@ -1264,24 +1264,16 @@ impl AppHandler for Editor {
                             let available = ui.available_width();
                             ui.add_space((available / 2.0 - 40.0).max(0.0));
 
-                            let (paused_due_to_panic, gizmo_mode) = {
+                            let gizmo_mode = {
                                 let ew = self.world.as_ref().unwrap();
-                                (
-                                    ew.world
-                                        .resource::<redlilium_ecs::PlayControl>()
-                                        .panic_info()
-                                        .is_some(),
-                                    ew.world
-                                        .resource::<redlilium_gizmo::TransformGizmo>()
-                                        .mode(),
-                                )
+                                ew.world
+                                    .resource::<redlilium_gizmo::TransformGizmo>()
+                                    .mode()
                             };
 
-                            if let Some(play_action) = crate::toolbar::draw_play_controls(
-                                ui,
-                                self.play_state,
-                                paused_due_to_panic,
-                            ) {
+                            if let Some(play_action) =
+                                crate::toolbar::draw_play_controls(ui, self.play_state)
+                            {
                                 self.apply_play_action(play_action);
                             }
 
@@ -1331,17 +1323,11 @@ impl AppHandler for Editor {
             // Menu bar with play controls (egui fallback for non-macOS platforms)
             #[cfg(not(target_os = "macos"))]
             {
-                let (paused_due_to_panic, gizmo_mode) = {
+                let gizmo_mode = {
                     let ew = self.world.as_ref().unwrap();
-                    (
-                        ew.world
-                            .resource::<redlilium_ecs::PlayControl>()
-                            .panic_info()
-                            .is_some(),
-                        ew.world
-                            .resource::<redlilium_gizmo::TransformGizmo>()
-                            .mode(),
-                    )
+                    ew.world
+                        .resource::<redlilium_gizmo::TransformGizmo>()
+                        .mode()
                 };
 
                 let result = menu::draw_menu_bar(
@@ -1349,7 +1335,6 @@ impl AppHandler for Editor {
                     &window,
                     custom_titlebar,
                     self.play_state,
-                    paused_due_to_panic,
                     self.show_gpu_stats,
                     gizmo_mode,
                 );

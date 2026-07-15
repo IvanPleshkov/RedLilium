@@ -30,7 +30,6 @@ use redlilium_graphics::{
 };
 
 use super::{MaterialAssetManager, ShaderManager, TextureManager};
-use crate::PlayModeAware;
 use crate::std::rendering::loaders::{
     MaterialInstanceLoader, MaterialInstanceSource, Shader, TextureSource,
 };
@@ -336,29 +335,10 @@ impl MaterialInstanceManager {
         Ok(group)
     }
 
-    /// Force MeshLoad to re-scan all asset refs by bumping generation.
-    /// Called on snapshot restore to ensure unresolved refs get re-requested.
+    /// Force MeshLoad to re-scan all asset refs without reloading anything.
     /// See `MeshManager::request_rescan` — rescan without reloading.
     pub(crate) fn request_rescan(&mut self) {
         self.cache.bump_generation();
-    }
-
-    pub(crate) fn force_rescan(&mut self) {
-        // Invalidate all RESIDENT material instances (the actual resolved instances)
-        // so the generation bumps. This forces MeshLoad to re-scan all asset refs
-        // even in steady state (when nothing is demanded/in-flight). On re-scan,
-        // unresolved refs get re-requested and re-resolved.
-        // We collect keys first because invalidate mutates the cache.
-        let guids: Vec<_> = self.cache.iter().map(|(k, _)| *k).collect();
-        for guid in guids {
-            self.cache.invalidate(&guid);
-        }
-    }
-}
-
-impl PlayModeAware for MaterialInstanceManager {
-    fn on_stop(&mut self) {
-        self.force_rescan();
     }
 }
 

@@ -138,38 +138,6 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
             input.window_height = ctx.height() as f32;
         }
 
-        // Phase 2: Plugin Stop cleanup (before transition applies).
-        // Check if a Stop transition is pending; if so, run all plugins' on_stop
-        // callbacks while the game world is still live.
-        let should_stop = {
-            let world = state.app.world();
-            if world.has_resource::<redlilium_ecs::PlayControl>() {
-                world.resource::<redlilium_ecs::PlayControl>().pending()
-                    == Some(redlilium_ecs::PlayState::Stopped)
-            } else {
-                false
-            }
-        };
-
-        if should_stop {
-            let plugins = state.module.plugins();
-            for plugin in plugins {
-                // Catch panics in plugin cleanup; one plugin's error shouldn't
-                // block others from running their cleanup.
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    plugin.on_stop(&mut state.app)
-                })) {
-                    Ok(()) => {}
-                    Err(_payload) => {
-                        log::error!("plugin.on_stop panicked; continuing to next plugin");
-                        // CRITICAL: Payload's drop glue may live in dylib.
-                        // It drops here at end of match arm, not inside closure.
-                        // Must drop BEFORE dylib unload (guaranteed by prepare_for_reload sequencing).
-                    }
-                }
-            }
-        }
-
         // Open the UI frame before the game schedules so systems can draw
         // through GameUi. If the previous frame's draw was skipped (outdated
         // surface, busy frame slot), the stale pass is still open — discard it

@@ -280,9 +280,8 @@ impl GameModule {
     ///   host a plain `Err(SystemError::Panicked)` value. The reload harness
     ///   verifies containment against a real cdylib (`--panic-child` must
     ///   exit cleanly). Caveat: only *systems* are shielded; other
-    ///   game-planted callbacks (observers, deserialize fns, PlayModeAware
-    ///   hooks, command closures) still abort on panic — keep them
-    ///   panic-free.
+    ///   game-planted callbacks (observers, deserialize fns, command
+    ///   closures) still abort on panic — keep them panic-free.
     #[cfg(not(target_arch = "wasm32"))]
     pub unsafe fn load(path: impl AsRef<std::ffi::OsStr>) -> Result<Self, GameModuleError> {
         unsafe {

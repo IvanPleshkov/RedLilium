@@ -269,11 +269,9 @@ impl World {
     ///
     /// INVARIANT: the tick doubles as the **entity generation counter**.
     /// Entities are identified as `(index, spawn_tick)`; snapshot restore
-    /// matches entities by that pair, and the Stop transition compares entity
-    /// world ticks against `PlayStartTick` to separate pre-play entities from
-    /// play-spawned ones. Because identity hangs off it, the tick must stay
-    /// monotonic for the lifetime of the `World` — never reset or rewind it,
-    /// however tempting a "fresh ticks on Play" cleanup may look.
+    /// matches entities by that pair. Because identity hangs off it, the tick
+    /// must stay monotonic for the lifetime of the `World` — never reset or
+    /// rewind it.
     pub fn current_tick(&self) -> u64 {
         self.tick.load(std::sync::atomic::Ordering::Relaxed)
     }

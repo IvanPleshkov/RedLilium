@@ -83,9 +83,6 @@ use redlilium_app::AppArgs;
 ///   [`App::world_mut`]. It runs **only when there is no snapshot to restore**
 ///   (first boot); a reload restores entities from the captured snapshot
 ///   instead. Default: no-op.
-/// - [`on_stop`](Plugin::on_stop) — cleanup when transitioning from Play to Stop.
-///   Runs **before** engine-side despawn and snapshot restore, while game world is
-///   still live. Default: no-op. See ADR-024.
 /// - [`on_unload`](Plugin::on_unload) — cleanup before dylib unload during reload.
 ///   Runs after scene serialization but **before** World drop, the last chance to
 ///   access game state. Default: no-op. Use for: joining tasks, flushing I/O.
@@ -114,22 +111,6 @@ pub trait Plugin {
     /// Populate the initial scene. Called only on first boot — a reload
     /// restores entities from a snapshot instead. Default: no-op.
     fn spawn_scene(&self, app: &mut App) {
-        let _ = app;
-    }
-
-    /// Stop cleanup: called when Play → Stop transition fires.
-    ///
-    /// Runs **before** engine-side hooks (despawn, restore, etc.). Use for:
-    /// - Muting audio
-    /// - Canceling async tasks
-    /// - Flushing pending game state
-    ///
-    /// **Invariant:** The game world is still live and consistent;
-    /// entity despawn and snapshot restore happen after this returns.
-    /// Default: no-op.
-    ///
-    /// See `docs/DESIGN_45_PLUGIN_LIFECYCLE.md` for lifecycle details.
-    fn on_stop(&self, app: &mut App) {
         let _ = app;
     }
 

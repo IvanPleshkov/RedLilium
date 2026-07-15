@@ -68,7 +68,8 @@ fn gizmo_camera(world: &World, viewport: (f32, f32)) -> Option<GizmoCamera> {
 /// Per-frame gizmo interaction: anchors → focus → drag → undoable actions.
 ///
 /// Runs in `PostUpdate` after `UpdateCameraMatrices` (fresh view-proj) and
-/// before the asset chain (#54 ordering), gated `NotGameActiveCondition`.
+/// before the asset chain (#54 ordering). Editor-only, but unconditional —
+/// this system never runs in a game world.
 pub struct GizmoInteract;
 
 impl System for GizmoInteract {

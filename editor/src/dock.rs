@@ -158,15 +158,7 @@ impl TabViewer for EditorTabViewer<'_> {
                     ui.disable();
                     ui.label("Console disabled during Play mode");
                 } else {
-                    let panic_info = if self.world.has_resource::<redlilium_ecs::PlayControl>() {
-                        self.world
-                            .resource::<redlilium_ecs::PlayControl>()
-                            .panic_info()
-                            .cloned()
-                    } else {
-                        None
-                    };
-                    self.console.show(ui, panic_info);
+                    self.console.show(ui);
                 }
             }
             Tab::History => {

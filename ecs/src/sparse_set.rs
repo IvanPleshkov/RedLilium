@@ -711,12 +711,12 @@ pub struct Ref<'a, T: 'static> {
 }
 
 impl<'a, T: 'static> Ref<'a, T> {
-    /// Default exclude mask: skip disabled, static, editor, and hidden-in-play entities.
+    /// Default exclude mask: skip disabled, static, and editor entities.
     const DEFAULT_MASK: u32 = Entity::DEFAULT_GAME_QUERY_EXCLUDE_MASK;
 
     /// Creates a new shared borrow guard, acquiring the storage's read lock.
     ///
-    /// Uses the default exclude mask (`DISABLED | STATIC | EDITOR | HIDDEN_IN_PLAY`).
+    /// Uses the default exclude mask (`DISABLED | STATIC | EDITOR`).
     pub(crate) fn new(
         lock: &'a crate::sync::RwLock<ComponentStorage>,
         entities: &'a Entities,
@@ -924,12 +924,12 @@ pub struct RefMut<'a, T: 'static> {
 }
 
 impl<'a, T: 'static> RefMut<'a, T> {
-    /// Default exclude mask: skip disabled, static, editor, and hidden-in-play entities.
+    /// Default exclude mask: skip disabled, static, and editor entities.
     const DEFAULT_MASK: u32 = Entity::DEFAULT_GAME_QUERY_EXCLUDE_MASK;
 
     /// Creates a new exclusive borrow guard, acquiring the storage's write lock.
     ///
-    /// Uses the default exclude mask (`DISABLED | STATIC | EDITOR | HIDDEN_IN_PLAY`).
+    /// Uses the default exclude mask (`DISABLED | STATIC | EDITOR`).
     pub(crate) fn new(
         lock: &'a crate::sync::RwLock<ComponentStorage>,
         entities: &'a Entities,
@@ -1478,21 +1478,16 @@ mod tests {
     // ---- Query mask tests ----
 
     #[test]
-    fn default_mask_includes_hidden_in_play() {
-        // Verify that DEFAULT_GAME_QUERY_EXCLUDE_MASK includes HIDDEN_IN_PLAY
+    fn default_mask_covers_disabled_static_editor() {
         assert_eq!(
             Entity::DEFAULT_GAME_QUERY_EXCLUDE_MASK,
-            Entity::DISABLED | Entity::STATIC | Entity::EDITOR | Entity::HIDDEN_IN_PLAY
+            Entity::DISABLED | Entity::STATIC | Entity::EDITOR
         );
     }
 
     #[test]
-    fn infrastructure_mask_excludes_hidden_in_play() {
-        // Verify that INFRASTRUCTURE_QUERY_EXCLUDE_MASK includes HIDDEN_IN_PLAY but not EDITOR
-        assert_eq!(
-            Entity::INFRASTRUCTURE_QUERY_EXCLUDE_MASK,
-            Entity::DISABLED | Entity::HIDDEN_IN_PLAY
-        );
+    fn infrastructure_mask_excludes_only_disabled() {
+        assert_eq!(Entity::INFRASTRUCTURE_QUERY_EXCLUDE_MASK, Entity::DISABLED);
         // Should NOT include EDITOR or STATIC
         assert_eq!(
             Entity::INFRASTRUCTURE_QUERY_EXCLUDE_MASK & Entity::EDITOR,

@@ -18,12 +18,10 @@ use redlilium_debug_drawer::DebugDrawer;
 use redlilium_ecs::{
     AssetGpuFlush, AssetPump, Camera, DebugRender, DrawGrid, DrawSelectionAabb, EguiRender, Entity,
     FlushUploads, ForwardRender, FrameRing, FreeFlyCamera, GameTime, GlobalTransform, GridConfig,
-    HotReload, ManagePlayModeTransitions, MaterialInstanceLoad, MaterialInstanceManager,
-    MaterialInstanceSource, MeshGenerator, MeshLoad, MeshManager, MeshRenderer, MeshSource, Name,
-    PlayControl, PlayModeAwareRegistry, PlayStartTick, PostUpdate, PreUpdate, Primitive, RealTime,
-    Render, RenderSchedule, ScenePass, Schedules, TextureManager, Transform, Update,
-    UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms, Visibility, WindowInput,
-    World, register_std_components,
+    HotReload, MaterialInstanceLoad, MaterialInstanceSource, MeshGenerator, MeshLoad, MeshRenderer,
+    MeshSource, Name, PostUpdate, Primitive, RealTime, Render, RenderSchedule, ScenePass,
+    Schedules, Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera,
+    UpdateGlobalTransforms, Visibility, WindowInput, World, register_std_components,
 };
 use redlilium_runtime::EngineContext;
 
@@ -223,26 +221,11 @@ pub fn create_editor_world_base(
     // Insert WindowInput resource
     let window_input_handle = world.insert_resource(WindowInput::default());
 
-    // Dual-clock time management for Play/Pause support.
+    // Dual-clock time resources. The editing world's own game systems (if
+    // any) tick RealTime/GameTime like any other world; Play runs a
+    // completely separate game world (editor/src/play.rs) with its own clocks.
     world.insert_resource(RealTime::default());
     world.insert_resource(GameTime::default());
-
-    // Play/Pause/Resume/Stop state machine for game code.
-    world.insert_resource(PlayControl::default());
-    let mut registry = PlayModeAwareRegistry::default();
-    // Register asset managers as PlayModeAware so they bump generation on Stop
-    // to force re-scan of unresolved refs after snapshot restore.
-    if world.has_resource::<MeshManager>() {
-        registry.register::<MeshManager>();
-    }
-    if world.has_resource::<MaterialInstanceManager>() {
-        registry.register::<MaterialInstanceManager>();
-    }
-    if world.has_resource::<TextureManager>() {
-        registry.register::<TextureManager>();
-    }
-    world.insert_resource(registry);
-    world.insert_resource(PlayStartTick(0));
 
     // Insert debug drawing resources
     let debug_drawer_handle = world.insert_resource(DebugDrawer::new());
@@ -435,35 +418,16 @@ fn spawn_demo_scene(world: &mut World, engine: &EngineContext) {
 /// against it.
 pub fn build_editor_schedules(egui: bool) -> Schedules {
     let mut schedules = Schedules::new();
-    // The editor opens in editor mode (PlayState::Stopped): game schedules are
-    // inactive, so editor-only systems (grid, gizmos) run. Play/Stop transitions
-    // flip this via the GameActive resource (#67).
-    schedules.set_game_active(false);
-
-    // PreUpdate: manage Play/Pause/Resume/Stop state transitions.
-    schedules
-        .get_mut::<PreUpdate>()
-        .add_exclusive(ManagePlayModeTransitions);
 
     // Update: read-only editor systems (debug grid, future interaction systems).
     // Systems here cannot mutate the world directly — they must push actions
-    // through the ActionQueue resource.
-    // Condition: these only run when the game is NOT active.
-    schedules
-        .get_mut::<Update>()
-        .add_condition(redlilium_ecs::NotGameActiveCondition);
+    // through the ActionQueue resource. Nothing gates game systems anymore
+    // (#67 is moot): Play boots a wholly separate game world (editor/src/play.rs),
+    // so these editor-only systems always run against the editing world.
     schedules.get_mut::<Update>().add(DrawGrid);
     schedules
         .get_mut::<Update>()
-        .add_edge::<redlilium_ecs::NotGameActiveCondition, DrawGrid>()
-        .expect("No cycle");
-    schedules
-        .get_mut::<Update>()
         .add(DrawSelectionAabb::default());
-    schedules
-        .get_mut::<Update>()
-        .add_edge::<redlilium_ecs::NotGameActiveCondition, DrawSelectionAabb>()
-        .expect("No cycle");
     schedules.get_mut::<Update>().set_read_only(true);
 
     // Render schedule: flush uploads -> render the forward scene -> overlay
@@ -527,16 +491,10 @@ pub fn build_editor_schedules(egui: bool) -> Schedules {
 
     // PostUpdate: camera input -> transform propagation -> camera matrices.
     // Camera movement is viewport navigation, not a scene mutation, so it
-    // lives in the non-read-only PostUpdate schedule.
-    // UpdateFreeFlyCamera is editor-only: condition gates it out during Play.
-    schedules
-        .get_mut::<PostUpdate>()
-        .add_condition(redlilium_ecs::NotGameActiveCondition);
+    // lives in the non-read-only PostUpdate schedule. UpdateFreeFlyCamera is
+    // editor-only, but there is nothing to gate it against anymore — Play
+    // never runs in this world.
     schedules.get_mut::<PostUpdate>().add(UpdateFreeFlyCamera);
-    schedules
-        .get_mut::<PostUpdate>()
-        .add_edge::<redlilium_ecs::NotGameActiveCondition, UpdateFreeFlyCamera>()
-        .expect("No cycle");
     schedules
         .get_mut::<PostUpdate>()
         .add(UpdateGlobalTransforms);
@@ -574,10 +532,6 @@ pub fn build_editor_schedules(egui: bool) -> Schedules {
     schedules
         .get_mut::<PostUpdate>()
         .add(crate::gizmo_system::GizmoInteract);
-    schedules
-        .get_mut::<PostUpdate>()
-        .add_edge::<redlilium_ecs::NotGameActiveCondition, crate::gizmo_system::GizmoInteract>()
-        .expect("No cycle");
     schedules
         .get_mut::<PostUpdate>()
         .add_edge::<UpdateCameraMatrices, crate::gizmo_system::GizmoInteract>()
@@ -661,7 +615,7 @@ pub fn unique_asset_path(world: &World, source: &str, dir: &str, ext: &str) -> S
 mod tests {
     use super::*;
     use crate::scene_view::SceneViewState;
-    use redlilium_ecs::{EcsRunner, RunDiagnostics};
+    use redlilium_ecs::{EcsRunner, PreUpdate, RunDiagnostics};
     use redlilium_graphics::{GraphicsInstance, TextureFormat};
     use redlilium_vfs::Vfs;
 

@@ -22,7 +22,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use redlilium_ecs::{Camera, EcsRunner, Entity, PlayControl, PlayState, SourceId, World};
+use redlilium_ecs::{Camera, EcsRunner, Entity, SourceId, World};
 use redlilium_runtime::{EngineContext, GameModule};
 
 use crate::core::{EditorWorld, EditorWorldParams, create_editor_world_base, spawn_editor_camera};
@@ -217,17 +217,20 @@ pub struct ReloadOptions {
 ///
 /// Sequence (the order is load-bearing, see `GameModule`'s lifetime notes):
 ///
-/// 1. refuse outside `Stopped` (play-state restore interplay is out of scope)
-/// 2. snapshot the **whole** world — editor and game entities alike
-/// 3. build the replacement world (resources + schedules, zero entities) and
+/// Callers stop the play session before reloading (both shells do) — there
+/// is no play-state check here, since Play now runs in a wholly separate
+/// world (`editor/src/play.rs`) that the caller has already dropped.
+///
+/// 1. snapshot the **whole** world — editor and game entities alike
+/// 2. build the replacement world (resources + schedules, zero entities) and
 ///    adopt shell-owned resources from the old world
-/// 4. drop the old world/history — the old image is still mapped, so game
+/// 3. drop the old world/history — the old image is still mapped, so game
 ///    storage drop glue and system destructors are sound
-/// 5. quiesce the compute pool (abort on timeout: keep the old module)
-/// 6. swap the module image (fresh temp copy, fresh generation)
-/// 7. re-run `Plugin::register_types` into the replacement (the scene comes
+/// 4. quiesce the compute pool (abort on timeout: keep the old module)
+/// 5. swap the module image (fresh temp copy, fresh generation)
+/// 6. re-run `Plugin::register_types` into the replacement (the scene comes
 ///    from the snapshot; game systems never live in the editing world)
-/// 8. restore the snapshot (schema-validated) and re-resolve the editor camera
+/// 7. restore the snapshot (schema-validated) and re-resolve the editor camera
 ///
 /// On reload the undo history and selection reset by design.
 pub fn reload_game(
@@ -239,20 +242,16 @@ pub fn reload_game(
     opts: &ReloadOptions,
     swap: impl FnOnce(&mut GameHost, &EngineContext) -> Result<(), String>,
 ) -> (EditorWorld, Result<(), String>) {
-    // 1. Only from Stopped.
-    if old.world.resource::<PlayControl>().state() != PlayState::Stopped {
-        return (old, Err("reload_game requires PlayState::Stopped".into()));
-    }
     let mut old = old;
 
-    // 2. Whole-world snapshot: editor entities (camera pose included), game
+    // 1. Whole-world snapshot: editor entities (camera pose included), game
     // entities, and opted-in snapshot resources.
     let snapshot = match old.world.serialize_world() {
         Ok(s) => s,
         Err(e) => return (old, Err(format!("snapshot capture failed: {e}"))),
     };
 
-    // 3. Replacement world. Built while the old world is still alive so
+    // 2. Replacement world. Built while the old world is still alive so
     // shell-owned resources can be adopted (same Arcs); the base world binds
     // no remote transport of its own (`remote: false` semantics come from
     // adoption), so there is no port collision.
@@ -279,10 +278,10 @@ pub fn reload_game(
         .world
         .adopt_resource_from::<redlilium_graphics::egui::EguiController>(&mut old.world);
 
-    // 4. Tear the old world down while the old image is mapped.
+    // 3. Tear the old world down while the old image is mapped.
     drop(old);
 
-    // 5. Game tasks must finish before the image unmaps (their futures'
+    // 4. Game tasks must finish before the image unmaps (their futures'
     // code lives inside it).
     let elapsed = runner.compute().quiesce(QUIESCE_TIMEOUT);
     if elapsed >= QUIESCE_TIMEOUT {
@@ -302,7 +301,7 @@ pub fn reload_game(
         return (fresh, Err(msg));
     }
 
-    // 6. Swap the image (dylib: unmap + fresh temp copy + new generation).
+    // 5. Swap the image (dylib: unmap + fresh temp copy + new generation).
     if let Err(e) = swap(host, engine) {
         // Old module still mapped (swap fails before unmapping only for
         // static hosts / IO errors after which `module` was reloaded or
@@ -312,11 +311,11 @@ pub fn reload_game(
         return (fresh, Err(format!("module swap failed: {e}")));
     }
 
-    // 7. Fresh registrations under the new generation; the scene comes from
+    // 6. Fresh registrations under the new generation; the scene comes from
     // the snapshot.
     host.register_into(&mut fresh);
 
-    // 8. Snapshot restore + camera re-resolution.
+    // 7. Snapshot restore + camera re-resolution.
     let restore = restore_into(&mut fresh, &snapshot, opts.aspect);
     (fresh, restore)
 }

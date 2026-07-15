@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 
 use super::rapier3d::prelude::*;
-use crate::PlayModeAware;
 
 // ---- Handle components ----
 
@@ -56,8 +55,6 @@ pub struct PhysicsWorld3D {
     pub body_to_entity: HashMap<RigidBodyHandle, crate::Entity>,
     /// Maps ECS entity → rapier impulse joint handle.
     pub entity_to_joint: HashMap<crate::Entity, ImpulseJointHandle>,
-
-    paused: bool,
 }
 
 impl Default for PhysicsWorld3D {
@@ -77,7 +74,6 @@ impl Default for PhysicsWorld3D {
             entity_to_body: HashMap::new(),
             body_to_entity: HashMap::new(),
             entity_to_joint: HashMap::new(),
-            paused: false,
         }
     }
 }
@@ -91,12 +87,8 @@ impl PhysicsWorld3D {
         }
     }
 
-    /// Steps the physics simulation by one timestep. Skips if paused.
+    /// Steps the physics simulation by one timestep.
     pub fn step(&mut self) {
-        if self.paused {
-            return;
-        }
-
         redlilium_core::profile_scope!("rapier3d: step");
         self.pipeline.step(
             self.gravity,
@@ -196,24 +188,6 @@ impl PhysicsWorld3D {
         let body_handle = collider.parent()?;
         let entity = self.body_to_entity.get(&body_handle)?;
         Some((*entity, toi as f32))
-    }
-}
-
-impl PlayModeAware for PhysicsWorld3D {
-    fn on_play_start(&mut self) {
-        self.paused = false;
-    }
-
-    fn on_pause(&mut self) {
-        self.paused = true;
-    }
-
-    fn on_resume(&mut self) {
-        self.paused = false;
-    }
-
-    fn on_stop(&mut self) {
-        self.paused = false;
     }
 }
 

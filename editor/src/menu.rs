@@ -153,7 +153,6 @@ pub fn draw_menu_bar(
     window: &Arc<Window>,
     custom_titlebar: bool,
     play_state: crate::toolbar::PlayState,
-    paused_due_to_panic: bool,
     gpu_stats_open: bool,
     current_gizmo_mode: redlilium_gizmo::GizmoMode,
 ) -> MenuBarResult {
@@ -225,8 +224,7 @@ pub fn draw_menu_bar(
                     .max_rect(play_rect)
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
-            play_action =
-                crate::toolbar::draw_play_controls(&mut play_ui, play_state, paused_due_to_panic);
+            play_action = crate::toolbar::draw_play_controls(&mut play_ui, play_state);
 
             // Phase 6: Play mode indicator badge
             play_ui.add_space(8.0);
