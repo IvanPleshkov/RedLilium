@@ -799,7 +799,7 @@ impl AppHandler for Editor {
             // SAFETY: the operator points this at a game cdylib built in the
             // same `cargo build` as this editor (fingerprint-gated; see
             // GameModule::load).
-            match unsafe { crate::game_host::GameHost::load(&path, engine, ew, aspect) } {
+            match unsafe { crate::game_host::GameHost::load(&path, engine, ew) } {
                 Ok(host) => self.game_host = Some(host),
                 Err(e) => log::error!("failed to load game module '{path}': {e}"),
             }

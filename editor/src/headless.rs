@@ -120,7 +120,7 @@ pub fn run() {
         // SAFETY: the operator points this at a game cdylib built in the same
         // `cargo build` as this editor (the fingerprint gate enforces engine
         // parity; the same-build contract is documented on GameModule::load).
-        match unsafe { crate::game_host::GameHost::load(&path, &engine, &mut ew, aspect) } {
+        match unsafe { crate::game_host::GameHost::load(&path, &engine, &mut ew) } {
             Ok(host) => game_host = Some(host),
             Err(e) => log::error!("failed to load game module '{path}': {e}"),
         }

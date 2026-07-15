@@ -220,14 +220,13 @@ impl System for UpdateFollowCamera {
     }
 }
 
-/// Menu + HUD + scene flow (#106). Drawn through the [`GameUi`] resource,
-/// which only the standalone runtime host provides — hosted in the editor
-/// this system is a no-op.
+/// Menu + HUD + scene flow (#106). Drawn through the [`GameUi`] resource;
+/// a host that provides no in-game UI surface (no `GameUi`) makes this a
+/// no-op.
 ///
 /// States by [`SceneManager::current`]: the level scene → gameplay HUD, Esc
 /// returns to the menu; anything else → main menu with Play (switches to the
-/// level) and Quit. Without a `SceneManager` (editor hosting) only the HUD is
-/// drawn.
+/// level) and Quit.
 pub struct GameFlowUi;
 
 impl System for GameFlowUi {
@@ -240,11 +239,9 @@ impl System for GameFlowUi {
         use redlilium_graphics::egui::egui;
         let egui_ctx = world.resource::<GameUi>().ctx().clone();
 
-        let in_game = if world.has_resource::<SceneManager>() {
+        let in_game = {
             let manager = world.resource::<SceneManager>();
             manager.current() == Some(LEVEL_SCENE) && !manager.transitioning()
-        } else {
-            true // editor hosting: no scene flow, gameplay content is live
         };
 
         if in_game {
@@ -270,14 +267,13 @@ impl System for GameFlowUi {
                     ui.label(format!("speed: {speed:.1} m/s"));
                     ui.label("WASD — drive, Esc — menu");
                 });
-            if world.has_resource::<SceneManager>()
-                && world
-                    .resource::<WindowInput>()
-                    .is_key_pressed(KeyCode::Escape)
+            if world
+                .resource::<WindowInput>()
+                .is_key_pressed(KeyCode::Escape)
             {
                 world.resource_mut::<SceneManager>().switch_to(MENU_SCENE);
             }
-        } else if world.has_resource::<SceneManager>() {
+        } else {
             let transitioning = world.resource::<SceneManager>().transitioning();
             egui::Window::new("Car Game")
                 .collapsible(false)
@@ -328,42 +324,26 @@ impl Plugin for CarGamePlugin {
         app.add_system::<Update, _>(GameFlowUi);
 
         // Marker-driven car spawn (#105), right after scene swaps land so the
-        // car exists the same frame the level appears. Guarded: a test rig's
-        // schedules may not carry the transition system, and a read-only
-        // container (editor authoring host) takes no exclusive systems.
+        // car exists the same frame the level appears. `build` runs only in a
+        // game world (App::new's composition), so ApplySceneTransitions is
+        // always there to order against.
         let pre = app.schedule_mut::<redlilium_ecs::PreUpdate>();
-        if !pre.is_read_only() {
-            pre.add_exclusive(SpawnCarAtMarkers);
-            if pre.contains::<redlilium_ecs::ApplySceneTransitions>() {
-                pre.add_edge::<redlilium_ecs::ApplySceneTransitions, SpawnCarAtMarkers>()
-                    .expect("no cycle");
-            }
-        }
+        pre.add_exclusive(SpawnCarAtMarkers);
+        pre.add_edge::<redlilium_ecs::ApplySceneTransitions, SpawnCarAtMarkers>()
+            .expect("no cycle");
 
-        // Physics pipeline (guarded twice: a host may already run these
-        // engine systems — see `SystemsContainer::contains` — and the editor
-        // marks its Update schedule read-only, where exclusive systems cannot
-        // be added at all; there the game is hosted for *authoring*, not
-        // simulation, so the pipeline is simply skipped). The drive system
-        // sits between body sync and the step.
+        // Physics pipeline: the drive system sits between body sync and the
+        // step.
         let update = app.schedule_mut::<Update>();
-        if update.is_read_only() {
-            log::info!("host Update schedule is read-only: physics pipeline skipped (authoring)");
-        } else {
-            if !update.contains::<SyncPhysicsBodies3D>() {
-                update.add_exclusive(SyncPhysicsBodies3D);
-            }
-            if !update.contains::<StepPhysics3D>() {
-                update.add(StepPhysics3D);
-            }
-            update.add(DriveCar);
-            update
-                .add_edge::<SyncPhysicsBodies3D, DriveCar>()
-                .expect("no cycle");
-            update
-                .add_edge::<DriveCar, StepPhysics3D>()
-                .expect("no cycle");
-        }
+        update.add_exclusive(SyncPhysicsBodies3D);
+        update.add(DriveCar);
+        update.add(StepPhysics3D);
+        update
+            .add_edge::<SyncPhysicsBodies3D, DriveCar>()
+            .expect("no cycle");
+        update
+            .add_edge::<DriveCar, StepPhysics3D>()
+            .expect("no cycle");
 
         // Camera follows the post-step pose, before transforms propagate.
         let post = app.schedule_mut::<PostUpdate>();
@@ -403,23 +383,9 @@ impl Plugin for CarGamePlugin {
         // World content comes from scene assets, starting at the menu (#106).
         // A host that wants a different start scene overrides it through
         // App::boot's start_scene parameter (e.g. CAR_GAME_SCENE in main.rs),
-        // not in here. Hosts without a SceneManager (the editor's GameHost)
-        // get the level spawned directly, so the playground is visible there
-        // too (fallback dies with EDITOR_REBUILD.md stage 3).
-        if world.has_resource::<SceneManager>() {
-            world.resource_mut::<SceneManager>().switch_to(MENU_SCENE);
-        } else {
-            spawn_level(world);
-        }
+        // not in here.
+        world.resource_mut::<SceneManager>().switch_to(MENU_SCENE);
     }
-}
-
-/// Spawn the driving level with the car materialized directly — the
-/// editor-hosting fallback in `spawn_scene` (no `SceneManager`, no marker
-/// system running yet).
-pub fn spawn_level(world: &mut World) {
-    spawn_level_geometry(world);
-    spawn_car(world, Vec3::new(0.0, 0.5, 0.0));
 }
 
 /// The level as authored into the [`LEVEL_SCENE`] asset (#105): geometry plus
@@ -477,10 +443,8 @@ impl redlilium_ecs::ExclusiveSystem for SpawnCarAtMarkers {
     type Result = ();
 
     fn run(&mut self, world: &mut World) -> Result<(), SystemError> {
-        // Only materialize the car inside a scene-managed game: without a
-        // current scene (editor authoring host, bare test worlds) a marker is
-        // inert data — spawning there would bake a live car into the very
-        // scene being authored.
+        // Only materialize the car once a scene is instantiated: before that
+        // (menu, mid-transition, bare test worlds) a marker is inert data.
         let owning_scene = world
             .has_resource::<SceneManager>()
             .then(|| {
@@ -528,8 +492,7 @@ impl redlilium_ecs::ExclusiveSystem for SpawnCarAtMarkers {
 }
 
 /// Spawn the level geometry: frictionless ground slab and the obstacle ring.
-/// Shared by the scene generator ([`spawn_level_scene`]) and the direct
-/// fallback ([`spawn_level`]).
+/// Used by the scene generator ([`spawn_level_scene`]).
 pub fn spawn_level_geometry(world: &mut World) {
     let material = MaterialInstanceSource {
         guid: Guid::stable("materials/default.matinst"),
