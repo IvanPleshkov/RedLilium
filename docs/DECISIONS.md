@@ -1249,7 +1249,10 @@ slot after the slot's fence.
 ## ADR-025: Editor/Game Schedule Separation via Run Conditions
 
 **Date**: 2026-07-10
-**Status**: Accepted
+**Status**: Superseded by ADR-032 (2026-07-16) — the one-world gating model
+(`game_active`, `GameActiveCondition`/`NotGameActiveCondition`) is deleted;
+editor Play runs the game in a separate world built by the standalone
+composition.
 **Resolves**: #67, prerequisite for #45
 
 ### Context
@@ -1302,7 +1305,11 @@ Implement single-flag activation model with run conditions to gate systems:
 ## ADR-026: Default Query Masks and Entity Visibility
 
 **Date**: 2026-07-10
-**Status**: Accepted
+**Status**: Accepted; amended by ADR-032 (2026-07-16) — the
+`HIDDEN_IN_PLAY`/`INHERITED_HIDDEN_IN_PLAY` flags and every play-state
+visibility rule below are deleted (editor Play no longer shares a world with
+the game). The masks are now `DISABLED | STATIC | EDITOR` (game queries) and
+`DISABLED` (infrastructure queries); the rest of this ADR stands.
 
 ### Context
 
@@ -1370,7 +1377,11 @@ Note: At Play transition, editor entities receive HIDDEN_IN_PLAY flag (set); at 
 ## ADR-024: Resource Lifecycle Management — Hybrid Hook + Event Model
 
 **Date**: 2026-07-12
-**Status**: Accepted
+**Status**: Superseded by ADR-032 (2026-07-16) — `PlayModeAware`, the
+registry, `PlayModeTransition` events, and `ManagePlayModeTransitions` are
+deleted; a play session's lifecycle is now the play *world's* lifecycle
+(created on Play, dropped on Stop), so there are no in-world transitions for
+resources to coordinate around. `SnapshotResource` survives (warm reload).
 **Relates to**: #65, #45
 
 ### Context
@@ -1940,3 +1951,67 @@ back to a single mip on wgpu/dummy and on blit-ineligible formats). See #96.
 - #88: sharing-mode measurements gating a QFOT revisit
 - #96: GPU mip generation — a requires-graphics transfer op routed off the
   transfer queue
+
+---
+
+## ADR-032: Editor Play Runs a Separate Game World Built by the One Composition
+
+**Date**: 2026-07-16
+**Status**: Accepted
+**Supersedes**: ADR-025; ADR-024 (play-mode role); amends ADR-026
+**Relates to**: #67, #65, #58, #45
+
+### Context
+
+Play in the editor showed nothing while the standalone build worked. Root
+cause: one world and one set of schedules served two regimes with opposite
+invariants, reconciled by a spread of flags and guards (`read_only`
+containers, `GameActive` conditions, `is_read_only()` branches inside game
+code, whole-world snapshots and entity hiding on transitions). The question
+"which systems run in Play, in what order" had no answer that could not
+drift from the build.
+
+### Decision
+
+Two worlds, one composition:
+
+- **The game-world composition is a single function** — `App::new` (+ the
+  `App::boot` bootstrap). The standalone build and the editor's Play both
+  build the game through it. Parity with the build is by construction, not
+  by discipline.
+- **Play** boots a play world from the hosted module (`PlaySession`,
+  `App::boot_scoped` under the module's type generation), seeded with the
+  scene open for editing. **Pause** = the world is not ticked. **Stop** =
+  the world is dropped whole. The editing world is never touched: nothing
+  to snapshot, restore, or hide.
+- **Host parameters are the only prod/editor differences**: start scene,
+  render destination (window vs. offscreen camera target shown in the scene
+  view), input source (window vs. scene view).
+- **Plugin contract v2**: `register_types` (every hosting world — the
+  editing world must inspect/serialize game components) is split from
+  `build`/`spawn_scene` (game worlds only). The editing world hosts
+  registrations and nothing else.
+
+Deleted with the old model: `PlayControl`/`PlaySnapshot`/`PlayStartTick`/
+`ManagePlayModeTransitions`, `GameActive` + both run conditions +
+`Schedules::set_game_active`, `PlayModeAware` + registry + transition
+events, `HIDDEN_IN_PLAY` entity flags, `Plugin::on_stop`, and every
+host-sniffing branch in game code.
+
+### Consequences
+
+- ✅ Play in the editor shows exactly what the build shows (verified
+  end-to-end over the remote channel: `play`/`pause`/`resume`/`stop`)
+- ✅ Game code composes unconditionally; no host-policy branches
+- ✅ Editing world stays clean during Play — undo history, selection, and
+  scene state survive by construction
+- ✅ Engine-wide managers (`EngineContext`) are shared `Arc`s, so a play
+  world starting/dying does not reload GPU assets
+- ⚠️ Two worlds are resident during Play (entities + component storages;
+  GPU caches shared)
+- ⚠️ Pause-edit-restore (editing the running game's state with restore on
+  Stop) is gone by design; play-world inspection is a future remote-channel
+  concern
+- ⚠️ Game egui (menus) does not yet render inside the editor's play view
+  (the play world gets no `GameUi`); gameplay HUD/menu flows need the
+  standalone build until that lands

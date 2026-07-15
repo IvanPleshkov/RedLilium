@@ -1,7 +1,13 @@
 # Plugin Lifecycle Design for #45 (Approved)
 
 **Date**: 2026-07-12  
-**Status**: APPROVED by Fable 5 (Architectural Review)  
+**Status**: APPROVED by Fable 5 (Architectural Review); **partially superseded
+by ADR-032 (2026-07-16)** — the editor rebuild removed in-world Play→Stop
+transitions, so `Plugin::on_stop` and every PlayModeAware/snapshot-restore
+reference below no longer exist. What still stands: `on_unload` (reload
+cleanup before World drop), the host-owned plugin registry drop-coupled to
+the dylib, and the task-quiescence requirement. The plugin contract also
+gained `register_types` (see ADR-032).  
 **Selected Option**: A (on_stop + on_unload callbacks) + Mitigations  
 **Blocking**: #45 implementation
 
