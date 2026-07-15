@@ -1,30 +1,212 @@
 //! # Car Game
 //!
-//! The arcade-car vertical slice (#103, milestone "Vertical Slice — Arcade
-//! Car"): game code authored as a [`redlilium_runtime::Plugin`], built both as
-//! a standalone binary (`cargo run -p car-game`) and as a cdylib the editor's
+//! The arcade-car vertical slice (milestone "Vertical Slice — Arcade Car"):
+//! game code authored as a [`redlilium_runtime::Plugin`], built both as a
+//! standalone binary (`cargo run -p car-game`) and as a cdylib the editor's
 //! `GameHost` can load and warm-restart-reload (#45).
 //!
-//! The scene is a placeholder until #104/#105: a ground slab, a box standing
-//! in for the car, and a free-fly camera. The dev HUD exercises the in-game
-//! UI layer (#100): an egui window drawn from a game system through
-//! [`GameUi`], with a Quit button driving [`AppControl`].
+//! Gameplay (#104): a rapier-backed box chassis driven by WASD through
+//! impulses (arcade model — no wheel joints), followed by a smoothed
+//! third-person camera. The level is a placeholder until #105. The dev HUD
+//! exercises the in-game UI layer (#100): an egui window drawn from a game
+//! system through [`GameUi`], with a Quit button driving [`AppControl`].
 #![recursion_limit = "256"]
 
 use std::f32::consts::FRAC_PI_4;
 
 use redlilium_assets::Guid;
-use redlilium_core::math::{Quat, Vec3};
+use redlilium_core::input::KeyCode;
+use redlilium_core::math::{Quat, Vec3, nalgebra};
+use redlilium_ecs::physics::components3d::{Collider3D, RigidBody3D};
+use redlilium_ecs::physics::physics3d::{PhysicsWorld3D, RigidBody3DHandle};
+use redlilium_ecs::physics::systems3d::{StepPhysics3D, SyncPhysicsBodies3D};
 use redlilium_ecs::{
-    Camera, FreeFlyCamera, GlobalTransform, MaterialInstanceSource, MeshGenerator, MeshRenderer,
-    MeshSource, PostUpdate, Primitive, System, SystemContext, SystemError, Time, Transform, Update,
-    UpdateFreeFlyCamera, UpdateGlobalTransforms, Visibility, World,
+    Camera, Component, GlobalTransform, MaterialInstanceSource, MeshGenerator, MeshRenderer,
+    MeshSource, PostUpdate, Primitive, Read, Res, ResMut, System, SystemContext, SystemError, Time,
+    Transform, Update, UpdateGlobalTransforms, Visibility, WindowInput, World, WriteAll,
 };
 use redlilium_runtime::{App, AppControl, GameUi, Plugin};
 
-/// Dev HUD (#100 smoke surface): frame time plus a Quit button. Drawn through
-/// the [`GameUi`] resource, which only the standalone runtime host provides —
-/// hosted in the editor this system is a no-op.
+/// Rapier's public math vector (glam `DVec3` in the f64 build).
+type PhysVector = redlilium_ecs::physics::rapier3d::prelude::Vector;
+
+/// Arcade drive parameters, attached to the chassis entity.
+#[derive(Clone, Component)]
+pub struct CarController {
+    /// Forward drive force, Newtons (mass ~ collider density × volume).
+    pub engine_force: f32,
+    /// Yaw steering torque, N·m.
+    pub steer_torque: f32,
+    /// Forward speed above which the engine stops adding force, m/s.
+    pub max_speed: f32,
+}
+
+impl Default for CarController {
+    fn default() -> Self {
+        Self {
+            engine_force: 700.0,
+            steer_torque: 160.0,
+            max_speed: 18.0,
+        }
+    }
+}
+
+/// Third-person follow parameters, attached to the camera entity. The target
+/// is the (single) [`CarController`] entity.
+#[derive(Clone, Component)]
+pub struct FollowCamera {
+    /// Distance behind the car, meters.
+    pub distance: f32,
+    /// Height above the car, meters.
+    pub height: f32,
+    /// Exponential smoothing rate (higher = stiffer), 1/s.
+    pub stiffness: f32,
+}
+
+impl Default for FollowCamera {
+    fn default() -> Self {
+        Self {
+            distance: 7.0,
+            height: 3.0,
+            stiffness: 6.0,
+        }
+    }
+}
+
+/// Local forward of the chassis model. The visual box is long along Z and the
+/// camera convention is -Z forward, so the car drives toward -Z.
+const CAR_FORWARD: PhysVector = PhysVector::new(0.0, 0.0, -1.0);
+
+/// How aggressively lateral (sideways) velocity is damped, 1/s. This is the
+/// arcade stand-in for tire grip: the chassis collider is near-frictionless
+/// (a sliding box would otherwise need engine force to beat µmg), and this
+/// redirect makes the car go where its nose points instead of drifting.
+const LATERAL_GRIP: f64 = 6.0;
+
+/// WASD arcade drive (#104): apply engine/steering impulses to the chassis
+/// body. No joints or wheels — forces on a single rigid body, tuned for feel,
+/// with steering authority scaled by speed (a parked car does not yaw).
+pub struct DriveCar;
+
+impl System for DriveCar {
+    type Result = ();
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+        ctx.lock::<(
+            Res<Time>,
+            Res<WindowInput>,
+            ResMut<PhysicsWorld3D>,
+            Read<CarController>,
+            Read<RigidBody3DHandle>,
+        )>()
+        .execute(|(time, input, mut physics, cars, handles)| {
+            if input.ui_wants_input {
+                return;
+            }
+            let dt = time.delta();
+            let throttle = (input.is_key_pressed(KeyCode::W) as i8
+                - input.is_key_pressed(KeyCode::S) as i8) as f64;
+            let steer = (input.is_key_pressed(KeyCode::A) as i8
+                - input.is_key_pressed(KeyCode::D) as i8) as f64;
+
+            for (idx, car) in cars.iter() {
+                let Some(handle) = handles.get(idx) else {
+                    continue;
+                };
+                let Some(body) = physics.bodies.get_mut(handle.0) else {
+                    continue;
+                };
+                let forward = body.rotation() * CAR_FORWARD;
+                let forward_speed = body.linvel().dot(forward);
+
+                if throttle != 0.0 && forward_speed.abs() < car.max_speed as f64 {
+                    let impulse = forward * (throttle * car.engine_force as f64 * dt);
+                    body.apply_impulse(impulse, true);
+                }
+                if steer != 0.0 {
+                    // Steering authority grows with speed and flips in
+                    // reverse, like a real steered axle.
+                    let authority = (forward_speed.abs() / 3.0).min(1.0)
+                        * if forward_speed < -0.5 { -1.0 } else { 1.0 };
+                    let impulse = steer * car.steer_torque as f64 * authority * dt;
+                    body.apply_torque_impulse(PhysVector::new(0.0, impulse, 0.0), true);
+                }
+
+                // Tire grip: bleed off sideways velocity so the car follows
+                // its nose. Y is left alone (gravity/jumps).
+                let velocity = body.linvel();
+                let forward_speed = velocity.dot(forward);
+                let lateral = velocity - forward * forward_speed;
+                let lateral_xz = PhysVector::new(lateral.x, 0.0, lateral.z);
+                let bleed = 1.0 - (-LATERAL_GRIP * dt).exp();
+                body.set_linvel(velocity - lateral_xz * bleed, true);
+            }
+        });
+        Ok(())
+    }
+}
+
+/// Places the [`FollowCamera`] behind its [`CarController`] target with
+/// exponential smoothing. Runs in `PostUpdate` before transform propagation,
+/// reading the chassis pose [`StepPhysics3D`] wrote during `Update`.
+pub struct UpdateFollowCamera;
+
+impl System for UpdateFollowCamera {
+    type Result = ();
+    fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<(), SystemError> {
+        ctx.lock::<(
+            Res<Time>,
+            Read<CarController>,
+            Read<FollowCamera>,
+            WriteAll<Transform>,
+        )>()
+        .execute(|(time, cars, followers, mut transforms)| {
+            let Some((car_idx, _)) = cars.iter().next() else {
+                return;
+            };
+            let Some(car_transform) = transforms.get(car_idx).copied() else {
+                return;
+            };
+            let car_pos = car_transform.translation;
+            // Flatten the car's forward onto XZ so camera height never chases
+            // chassis pitch (ramp hops stay readable).
+            let forward3 = redlilium_core::math::quat_rotate_vec3(
+                car_transform.rotation,
+                Vec3::new(0.0, 0.0, -1.0),
+            );
+            let mut forward = Vec3::new(forward3.x, 0.0, forward3.z);
+            let norm = forward.norm();
+            if norm > 1e-4 {
+                forward /= norm;
+            } else {
+                forward = Vec3::new(0.0, 0.0, -1.0);
+            }
+
+            for (cam_idx, follow) in followers.iter() {
+                let Some(mut cam_transform) = transforms.get_mut(cam_idx) else {
+                    continue;
+                };
+                let desired =
+                    car_pos - forward * follow.distance + Vec3::new(0.0, follow.height, 0.0);
+                let blend = 1.0 - (-follow.stiffness * time.delta() as f32).exp();
+                let eye = cam_transform.translation + (desired - cam_transform.translation) * blend;
+
+                let target = car_pos + Vec3::new(0.0, 0.8, 0.0);
+                let view = nalgebra::Isometry3::look_at_rh(
+                    &nalgebra::Point3::from(eye),
+                    &nalgebra::Point3::from(target),
+                    &Vec3::new(0.0, 1.0, 0.0),
+                );
+                cam_transform.translation = eye;
+                cam_transform.rotation = view.inverse().rotation.into_inner();
+            }
+        });
+        Ok(())
+    }
+}
+
+/// Dev HUD (#100 smoke surface): frame time, speed readout, and a Quit
+/// button. Drawn through the [`GameUi`] resource, which only the standalone
+/// runtime host provides — hosted in the editor this system is a no-op.
 pub struct DevHud;
 
 impl System for DevHud {
@@ -35,12 +217,27 @@ impl System for DevHud {
             return Ok(());
         }
         let delta = world.resource::<Time>().delta();
+        // PhysicsWorld3D appears once SyncPhysicsBodies3D first runs; DevHud
+        // has no ordering edge to it, so tolerate the first frame.
+        let speed = if world.has_resource::<PhysicsWorld3D>() {
+            let physics = world.resource::<PhysicsWorld3D>();
+            physics
+                .bodies
+                .iter()
+                .find(|(_, b)| b.is_dynamic())
+                .map(|(_, b)| b.linvel().length())
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
         let egui_ctx = world.resource::<GameUi>().ctx().clone();
         redlilium_graphics::egui::egui::Window::new("Car Game — dev")
             .default_pos([10.0, 10.0])
             .resizable(false)
             .show(&egui_ctx, |ui| {
                 ui.label(format!("frame: {:.2} ms", delta * 1000.0));
+                ui.label(format!("speed: {speed:.1} m/s"));
+                ui.label("WASD — drive");
                 // A browser tab has no process to exit (#100).
                 #[cfg(not(target_arch = "wasm32"))]
                 if ui.button("Quit").clicked() {
@@ -58,67 +255,133 @@ pub struct CarGamePlugin;
 impl Plugin for CarGamePlugin {
     fn build(&self, app: &mut App) {
         log::info!("CarGamePlugin::build");
+        app.register_component::<CarController>();
+        app.register_component::<FollowCamera>();
         app.add_system::<Update, _>(DevHud);
-        // Viewport navigation until the follow camera lands (#104). The
-        // editor's schedules already carry this engine system — only the
-        // standalone runtime needs it added here.
-        let post = app.schedule_mut::<PostUpdate>();
-        if !post.contains::<UpdateFreeFlyCamera>() {
-            post.add(UpdateFreeFlyCamera);
-            post.add_edge::<UpdateFreeFlyCamera, UpdateGlobalTransforms>()
-                .expect("no cycle");
+
+        // Physics pipeline (guarded: a host may already run these engine
+        // systems — see `SystemsContainer::contains`), then the drive system
+        // between body sync and the step.
+        let update = app.schedule_mut::<Update>();
+        if !update.contains::<SyncPhysicsBodies3D>() {
+            update.add_exclusive(SyncPhysicsBodies3D);
         }
+        if !update.contains::<StepPhysics3D>() {
+            update.add(StepPhysics3D);
+        }
+        update.add(DriveCar);
+        update
+            .add_edge::<SyncPhysicsBodies3D, DriveCar>()
+            .expect("no cycle");
+        update
+            .add_edge::<DriveCar, StepPhysics3D>()
+            .expect("no cycle");
+
+        // Camera follows the post-step pose, before transforms propagate.
+        let post = app.schedule_mut::<PostUpdate>();
+        post.add(UpdateFollowCamera);
+        post.add_edge::<UpdateFollowCamera, UpdateGlobalTransforms>()
+            .expect("no cycle");
     }
 
     fn spawn_scene(&self, app: &mut App) {
         let aspect = app.initial_aspect();
         let world = app.world_mut();
 
-        // Camera: behind and above the future car, free-fly for inspection.
-        let camera = world.spawn();
-        let free_fly = FreeFlyCamera::new(Vec3::new(0.0, 0.8, 0.0), 8.0)
-            .with_yaw(std::f32::consts::PI)
-            .with_pitch(0.35);
-        let transform = free_fly.to_transform();
-        world
-            .insert(camera, Camera::perspective(FRAC_PI_4, aspect, 0.1, 500.0))
-            .unwrap();
-        world.insert(camera, free_fly).unwrap();
-        world.insert(camera, transform).unwrap();
-        world
-            .insert(camera, GlobalTransform(transform.to_matrix()))
-            .unwrap();
-        world.insert(camera, Visibility::VISIBLE).unwrap();
-
         let material = MaterialInstanceSource {
             guid: Guid::stable("materials/default.matinst"),
         };
 
-        // Ground slab.
-        spawn_box(
-            world,
-            material.clone(),
-            Transform::new(
-                Vec3::new(0.0, -0.1, 0.0),
-                Quat::identity(),
-                Vec3::new(40.0, 0.2, 40.0),
-            ),
+        // Ground slab: static body, 40×0.2×40 m.
+        let ground_transform = Transform::new(
+            Vec3::new(0.0, -0.1, 0.0),
+            Quat::identity(),
+            Vec3::new(40.0, 0.2, 40.0),
         );
+        // Frictionless ground: rapier averages the pair's coefficients, so any
+        // ground friction shows up as yaw resistance on the flat-resting
+        // chassis (at µ_avg ≈ 0.5 the steering torque physically cannot spin
+        // the car). Grip is DriveCar's lateral bleed, not contact friction.
+        let ground = spawn_box(world, material.clone(), ground_transform);
+        world.insert(ground, RigidBody3D::fixed()).unwrap();
+        world
+            .insert(
+                ground,
+                Collider3D::cuboid(20.0, 0.1, 20.0).with_friction(0.0),
+            )
+            .unwrap();
 
-        // Placeholder car: a box at the origin until #104 gives it physics.
-        spawn_box(
-            world,
-            material,
-            Transform::new(
-                Vec3::new(0.0, 0.3, 0.0),
-                Quat::identity(),
-                Vec3::new(1.0, 0.6, 2.0),
-            ),
+        // Obstacle ring: static 1 m cubes to drive around and into.
+        for i in 0..8 {
+            let angle = i as f32 / 8.0 * std::f32::consts::TAU;
+            let obstacle_transform =
+                Transform::from_translation(Vec3::new(angle.cos() * 10.0, 0.5, angle.sin() * 10.0));
+            let obstacle = spawn_box(world, material.clone(), obstacle_transform);
+            world.insert(obstacle, RigidBody3D::fixed()).unwrap();
+            world
+                .insert(obstacle, Collider3D::cuboid(0.5, 0.5, 0.5))
+                .unwrap();
+        }
+
+        // The car: dynamic box chassis, 1×0.6×2 m, dropped just above ground.
+        let car_transform = Transform::new(
+            Vec3::new(0.0, 0.5, 0.0),
+            Quat::identity(),
+            Vec3::new(1.0, 0.6, 2.0),
         );
+        let car = spawn_box(world, material, car_transform);
+        world
+            .insert(
+                car,
+                RigidBody3D::dynamic()
+                    .with_linear_damping(0.6)
+                    .with_angular_damping(3.0),
+            )
+            .unwrap();
+        // Near-frictionless collider: grip is modeled by DriveCar's lateral
+        // velocity bleed, not by contact friction (a sliding box would need
+        // engine force to beat µmg).
+        world
+            .insert(
+                car,
+                Collider3D::cuboid(0.5, 0.3, 1.0)
+                    .with_friction(0.05)
+                    .with_density(80.0),
+            )
+            .unwrap();
+        world.insert(car, CarController::default()).unwrap();
+
+        // Third-person camera.
+        let follow = FollowCamera::default();
+        let eye = Vec3::new(0.0, follow.height, follow.distance);
+        let view = nalgebra::Isometry3::look_at_rh(
+            &nalgebra::Point3::from(eye),
+            &nalgebra::Point3::from(Vec3::new(0.0, 0.8, 0.0)),
+            &Vec3::new(0.0, 1.0, 0.0),
+        );
+        let cam_transform = Transform::new(
+            eye,
+            view.inverse().rotation.into_inner(),
+            Vec3::new(1.0, 1.0, 1.0),
+        );
+        let camera = world.spawn();
+        world
+            .insert(camera, Camera::perspective(FRAC_PI_4, aspect, 0.1, 500.0))
+            .unwrap();
+        world.insert(camera, cam_transform).unwrap();
+        world
+            .insert(camera, GlobalTransform(cam_transform.to_matrix()))
+            .unwrap();
+        world.insert(camera, Visibility::VISIBLE).unwrap();
+        world.insert(camera, follow).unwrap();
     }
 }
 
-fn spawn_box(world: &mut World, material: MaterialInstanceSource, transform: Transform) {
+fn spawn_box(
+    world: &mut World,
+    material: MaterialInstanceSource,
+    transform: Transform,
+) -> redlilium_ecs::Entity {
     let entity = world.spawn();
     world.insert(entity, transform).unwrap();
     world
@@ -134,6 +397,7 @@ fn spawn_box(world: &mut World, material: MaterialInstanceSource, transform: Tra
             )),
         )
         .unwrap();
+    entity
 }
 
 // Export the ADR-020 game symbols so this cdylib is loadable by the editor's
@@ -142,3 +406,134 @@ fn spawn_box(world: &mut World, material: MaterialInstanceSource, transform: Tra
 // while only this package's own bin links the rlib, but a host binary linking
 // two such rlibs would fail with duplicate symbols.
 redlilium_runtime::redlilium_game_module!(CarGamePlugin);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redlilium_ecs::{EcsRunner, Entity, Schedules};
+
+    /// Headless world with ground + chassis, wired exactly like the plugin's
+    /// Update schedule (body sync → drive → step).
+    fn drive_rig() -> (World, Schedules, EcsRunner, Entity) {
+        let mut world = World::new();
+        redlilium_ecs::register_std_components(&mut world);
+        world.register_inspector::<CarController>();
+
+        // Ground slab.
+        let ground = world.spawn();
+        world
+            .insert(
+                ground,
+                Transform::from_translation(Vec3::new(0.0, -0.1, 0.0)),
+            )
+            .unwrap();
+        world.insert(ground, RigidBody3D::fixed()).unwrap();
+        world
+            .insert(
+                ground,
+                Collider3D::cuboid(20.0, 0.1, 20.0).with_friction(0.0),
+            )
+            .unwrap();
+
+        // Car chassis, as spawn_scene builds it.
+        let car = world.spawn();
+        world
+            .insert(car, Transform::from_translation(Vec3::new(0.0, 0.5, 0.0)))
+            .unwrap();
+        world
+            .insert(
+                car,
+                RigidBody3D::dynamic()
+                    .with_linear_damping(0.6)
+                    .with_angular_damping(3.0),
+            )
+            .unwrap();
+        world
+            .insert(
+                car,
+                Collider3D::cuboid(0.5, 0.3, 1.0)
+                    .with_friction(0.05)
+                    .with_density(80.0),
+            )
+            .unwrap();
+        world.insert(car, CarController::default()).unwrap();
+
+        world.insert_resource(WindowInput::default());
+
+        let mut schedules = Schedules::new();
+        {
+            let update = schedules.get_mut::<Update>();
+            update.add_exclusive(SyncPhysicsBodies3D);
+            update.add(DriveCar);
+            update.add(StepPhysics3D);
+            update
+                .add_edge::<SyncPhysicsBodies3D, DriveCar>()
+                .expect("no cycle");
+            update
+                .add_edge::<DriveCar, StepPhysics3D>()
+                .expect("no cycle");
+        }
+
+        (world, schedules, EcsRunner::single_thread(), car)
+    }
+
+    fn hold_keys(world: &mut World, keys: &[KeyCode]) {
+        let mut input = WindowInput::default();
+        for key in keys {
+            input.on_key_pressed(*key);
+        }
+        world.insert_resource(input);
+    }
+
+    /// The arcade loop end-to-end, headless: holding W must move the car
+    /// along its forward (-Z) while the ground keeps it from falling through.
+    #[test]
+    fn car_drives_forward_and_rests_on_ground() {
+        let (mut world, mut schedules, runner, car) = drive_rig();
+        hold_keys(&mut world, &[KeyCode::W]);
+
+        for _ in 0..180 {
+            schedules.run_frame(&mut world, &runner, 1.0 / 60.0);
+        }
+
+        let t = *world.get::<Transform>(car).unwrap();
+        assert!(
+            t.translation.z < -2.0,
+            "car must drive forward (-Z) under W, got z = {}",
+            t.translation.z
+        );
+        assert!(
+            t.translation.y > 0.0 && t.translation.y < 1.0,
+            "car must rest on the ground, got y = {}",
+            t.translation.y
+        );
+    }
+
+    /// Holding W+A must yaw the car and bend its path: after a few seconds
+    /// the heading departs from straight -Z and the car has drifted off the
+    /// Z axis in X.
+    #[test]
+    fn car_turns_under_steering() {
+        let (mut world, mut schedules, runner, car) = drive_rig();
+        hold_keys(&mut world, &[KeyCode::W, KeyCode::A]);
+
+        for _ in 0..240 {
+            schedules.run_frame(&mut world, &runner, 1.0 / 60.0);
+        }
+
+        let t = *world.get::<Transform>(car).unwrap();
+        let forward = redlilium_core::math::quat_rotate_vec3(t.rotation, Vec3::new(0.0, 0.0, -1.0));
+        assert!(
+            forward.x.abs() > 0.3,
+            "heading must yaw away from -Z under steering, forward = ({:.2}, {:.2}, {:.2})",
+            forward.x,
+            forward.y,
+            forward.z
+        );
+        assert!(
+            t.translation.x.abs() > 1.0,
+            "path must bend off the Z axis, got x = {}",
+            t.translation.x
+        );
+    }
+}
