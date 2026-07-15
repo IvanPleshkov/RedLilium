@@ -46,7 +46,17 @@ pub struct App {
 }
 
 impl App {
-    pub(crate) fn new(engine: &EngineContext, aspect: f32) -> Self {
+    /// **The** game-world composition: resources and schedules that define
+    /// what a running game is (scene transitions in `PreUpdate`, transform /
+    /// camera / asset chains in `PostUpdate`, upload + forward pass in
+    /// `Render`).
+    ///
+    /// Every host builds the game through this one function — the standalone
+    /// build and the editor's Play mode get identical worlds by construction,
+    /// not by keeping two compositions in sync. Host-specific differences
+    /// (start scene, render destination, input source) live in the host loop
+    /// and the [`boot`](Self::boot) parameters, never in here.
+    pub fn new(engine: &EngineContext, aspect: f32) -> Self {
         let mut world = World::new();
         register_std_components(&mut world);
         register_rendering_components(&mut world);
@@ -249,10 +259,26 @@ impl App {
     /// a game from a loaded module; a warm reload uses [`reload`](Self::reload)
     /// instead, which restores the scene from a snapshot rather than spawning
     /// it. The caller drives startup/frames afterward (see the host loop).
-    pub fn boot(engine: &EngineContext, plugin: &dyn crate::Plugin, aspect: f32) -> Self {
+    ///
+    /// `start_scene` is the host's start-scene override: `Some(path)` supersedes
+    /// whatever scene the game requested in `spawn_scene` (a newer
+    /// [`SceneManager::switch_to`](redlilium_ecs::SceneManager::switch_to)
+    /// wins). The standalone build passes `None` (the game decides); the
+    /// editor's Play passes the scene currently open for editing.
+    pub fn boot(
+        engine: &EngineContext,
+        plugin: &dyn crate::Plugin,
+        aspect: f32,
+        start_scene: Option<&str>,
+    ) -> Self {
         let mut app = Self::new(engine, aspect);
         plugin.build(&mut app);
         plugin.spawn_scene(&mut app);
+        if let Some(scene) = start_scene {
+            app.world_mut()
+                .resource_mut::<redlilium_ecs::SceneManager>()
+                .switch_to(scene);
+        }
         app
     }
 
@@ -441,6 +467,42 @@ mod tests {
         assert!(
             Arc::ptr_eq(&mesh_before, &mesh_after),
             "MeshManager Arc identity preserved across reload"
+        );
+    }
+
+    /// The host's start-scene override: `boot(.., None)` leaves the game's
+    /// own `switch_to` request standing; `boot(.., Some(..))` supersedes it.
+    /// This is the parameter the editor's Play uses to start from the scene
+    /// open for editing instead of the game's default.
+    #[test]
+    fn boot_start_scene_override() {
+        struct ScenePlugin;
+        impl Plugin for ScenePlugin {
+            fn build(&self, _app: &mut App) {}
+            fn spawn_scene(&self, app: &mut App) {
+                app.world_mut()
+                    .resource_mut::<redlilium_ecs::SceneManager>()
+                    .switch_to("scenes/menu.scene");
+            }
+        }
+        let engine = test_engine();
+
+        let app = App::boot(&engine, &ScenePlugin, 1.0, None);
+        assert_eq!(
+            app.world()
+                .resource::<redlilium_ecs::SceneManager>()
+                .pending(),
+            Some("scenes/menu.scene"),
+            "without an override the game's request stands"
+        );
+
+        let app = App::boot(&engine, &ScenePlugin, 1.0, Some("scenes/level1.scene"));
+        assert_eq!(
+            app.world()
+                .resource::<redlilium_ecs::SceneManager>()
+                .pending(),
+            Some("scenes/level1.scene"),
+            "the host override supersedes the game's request"
         );
     }
 

@@ -242,6 +242,12 @@ impl SceneManager {
         self.current.as_deref()
     }
 
+    /// The scene requested but not yet picked up by [`ApplySceneTransitions`],
+    /// if any.
+    pub fn pending(&self) -> Option<&str> {
+        self.pending.as_deref()
+    }
+
     /// Whether a transition is requested or a scene load is in flight.
     pub fn transitioning(&self) -> bool {
         self.pending.is_some() || self.in_flight.is_some()

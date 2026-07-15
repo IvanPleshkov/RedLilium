@@ -74,7 +74,7 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
         // A reload (ADR-020, #45) re-runs `build` but restores the scene from a
         // snapshot instead of calling `spawn_scene` (see `App::reload`).
         let plugin = self.plugin.take().expect("plugin taken once");
-        let mut app = App::boot(&engine, &plugin, ctx.aspect_ratio());
+        let mut app = App::boot(&engine, &plugin, ctx.aspect_ratio(), None);
 
         let runner = EcsRunner::single_thread();
         {
@@ -467,7 +467,7 @@ mod tests {
         let engine = EngineContext::with_vfs(device.clone(), Vfs::new());
 
         let plugin = NoopPlugin;
-        let app = App::boot(&engine, &plugin, 1.0);
+        let app = App::boot(&engine, &plugin, 1.0, None);
         let runner = EcsRunner::single_thread();
         let window_input = app.window_input();
         let blit = PresentBlit::new(&device, redlilium_graphics::TextureFormat::Rgba8Unorm);
