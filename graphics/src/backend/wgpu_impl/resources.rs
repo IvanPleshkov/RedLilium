@@ -941,6 +941,13 @@ fn build_wgpu_bind_group_entries(
             BoundResource::CombinedTextureSampler { .. } => {
                 unreachable!("CombinedTextureSampler handled above")
             }
+            BoundResource::BindlessHeap(_) => {
+                return Err(GraphicsError::FeatureNotSupported(format!(
+                    "wgpu: bindless heap bound at binding {} is not supported \
+                     (DeviceCapabilities::bindless is false, #117)",
+                    entry.binding
+                )));
+            }
             BoundResource::AccelerationStructure(_) => {
                 return Err(GraphicsError::FeatureNotSupported(format!(
                     "wgpu: acceleration structure bound at binding {} is not supported \

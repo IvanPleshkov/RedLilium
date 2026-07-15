@@ -53,6 +53,9 @@ impl DummyBackend {
             // stages are accepted (no real GPU objects), but the capability
             // is not advertised.
             mesh_shading: false,
+            // And for the bindless heap (#117): layouts naming the bindless
+            // binding types are accepted headless, capability stays off.
+            bindless: false,
         }
     }
 

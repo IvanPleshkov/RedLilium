@@ -1060,6 +1060,17 @@ fn extract_material_resources(
                     }
                     continue;
                 }
+                // The bindless heap (#117): every registered texture may be
+                // sampled by this draw, so declare them all — that is what
+                // keeps automatic layout transitions working (a freshly
+                // uploaded texture moves TransferDst → ShaderReadOnly before
+                // the first bindless draw).
+                BoundResource::BindlessHeap(slots) => {
+                    slots.for_each_live_texture(|texture| {
+                        usage.add_texture(Arc::clone(texture), TextureAccessMode::ShaderRead);
+                    });
+                    continue;
+                }
                 _ => continue,
             };
 

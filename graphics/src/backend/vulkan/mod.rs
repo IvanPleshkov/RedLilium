@@ -806,6 +806,9 @@ impl VulkanBackend {
             device_caps.wireframe,
             device_caps.ray_query,
             device_caps.mesh_shading,
+            device_caps
+                .bindless
+                .then(|| device::bindless_capacities(&instance, physical_device)),
         )?;
 
         // Seed the memory-stats cache so the panel has heap sizes immediately;
@@ -2062,6 +2065,10 @@ impl VulkanBackend {
                 // Acceleration structures need no buffer/image info; their
                 // write is issued separately below (pNext-chained).
                 BoundResource::AccelerationStructure(_) => {}
+                // The bindless heap's set is written by registration (#117),
+                // never here; user groups cannot even declare it (rejected
+                // in create_binding_group).
+                BoundResource::BindlessHeap(_) => {}
             }
         }
 
@@ -2152,6 +2159,9 @@ impl VulkanBackend {
                     unsafe { self.device.update_descriptor_sets(&[write], &[]) };
                     continue;
                 }
+                // The bindless heap's descriptors are written by registration
+                // (#117), never at group creation.
+                BoundResource::BindlessHeap(_) => continue,
             };
             writes.push(write);
         }
@@ -2161,6 +2171,99 @@ impl VulkanBackend {
                 self.device.update_descriptor_sets(&writes, &[]);
             }
         }
+    }
+
+    /// Device-clamped bindless heap capacities `(textures, samplers)` (#117);
+    /// `(0, 0)` when `DeviceCapabilities::bindless` is false.
+    pub fn bindless_capacities(&self) -> (u32, u32) {
+        self.pipeline_manager.bindless_capacities()
+    }
+
+    /// Create the bindless heap's binding-group handle (#117): the single
+    /// update-after-bind descriptor set, allocated from its dedicated pool.
+    /// Called once per device by `GraphicsDevice::bindless_heap_group`.
+    pub fn create_bindless_group(
+        &self,
+        layout: &crate::materials::BindingLayout,
+    ) -> Result<super::GpuBindingGroup, GraphicsError> {
+        let (descriptor_set, pool) = self.pipeline_manager.allocate_bindless_set(layout)?;
+        Ok(super::GpuBindingGroup::Vulkan {
+            device: self.device.clone(),
+            descriptor_set,
+            pool,
+            // The heap pool is not part of the persistent chain, but Drop
+            // frees the set into the specific `pool` handle — the chain's
+            // mutex only provides the external synchronization.
+            pools: Arc::clone(self.pipeline_manager.persistent_pools()),
+        })
+    }
+
+    /// Write one sampled-texture descriptor into the bindless heap at array
+    /// slot `index` (#117). Update-after-bind makes this legal while the
+    /// heap is bound in flight, as long as slot `index` is not dynamically
+    /// used by pending work — the engine-side allocator guarantees that
+    /// (fresh or fence-recycled slots only).
+    pub fn bindless_write_texture(
+        &self,
+        group: &super::GpuBindingGroup,
+        binding: u32,
+        index: u32,
+        texture: &GpuTexture,
+    ) -> Result<(), GraphicsError> {
+        let super::GpuBindingGroup::Vulkan { descriptor_set, .. } = group else {
+            return Err(GraphicsError::InvalidParameter(
+                "bindless_write_texture: not a Vulkan binding group".to_string(),
+            ));
+        };
+        let GpuTexture::Vulkan { view, .. } = texture else {
+            return Err(GraphicsError::InvalidParameter(
+                "bindless_write_texture: not a Vulkan texture".to_string(),
+            ));
+        };
+
+        let image_info = [vk::DescriptorImageInfo::default()
+            .image_view(*view)
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+        let write = vk::WriteDescriptorSet::default()
+            .dst_set(*descriptor_set)
+            .dst_binding(binding)
+            .dst_array_element(index)
+            .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+            .image_info(&image_info);
+        unsafe { self.device.update_descriptor_sets(&[write], &[]) };
+        Ok(())
+    }
+
+    /// Write one sampler descriptor into the bindless heap at array slot
+    /// `index` (#117). Same legality argument as
+    /// [`bindless_write_texture`](Self::bindless_write_texture).
+    pub fn bindless_write_sampler(
+        &self,
+        group: &super::GpuBindingGroup,
+        binding: u32,
+        index: u32,
+        sampler: &super::GpuSampler,
+    ) -> Result<(), GraphicsError> {
+        let super::GpuBindingGroup::Vulkan { descriptor_set, .. } = group else {
+            return Err(GraphicsError::InvalidParameter(
+                "bindless_write_sampler: not a Vulkan binding group".to_string(),
+            ));
+        };
+        let super::GpuSampler::Vulkan { sampler, .. } = sampler else {
+            return Err(GraphicsError::InvalidParameter(
+                "bindless_write_sampler: not a Vulkan sampler".to_string(),
+            ));
+        };
+
+        let image_info = [vk::DescriptorImageInfo::default().sampler(*sampler)];
+        let write = vk::WriteDescriptorSet::default()
+            .dst_set(*descriptor_set)
+            .dst_binding(binding)
+            .dst_array_element(index)
+            .descriptor_type(vk::DescriptorType::SAMPLER)
+            .image_info(&image_info);
+        unsafe { self.device.update_descriptor_sets(&[write], &[]) };
+        Ok(())
     }
 
     /// Create a GPU pipeline from a material descriptor.

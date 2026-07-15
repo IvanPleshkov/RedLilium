@@ -43,6 +43,14 @@ struct ShaderSpec {
     /// together (per variant) they form one material shader SET whose binding
     /// reflection is baked under [`baked::shader_set_key`].
     entry_points: &'static [(&'static str, ShaderStage)],
+    /// Bake every entry as SPIR-V instead of WGSL (#117), for sources Slang's
+    /// WGSL target cannot load (e.g. unbounded bindless arrays). Specs with
+    /// task/mesh entries force this implicitly (#111).
+    force_spirv: bool,
+    /// Skip the binding-layout reflection bake (#117): sources whose bindings
+    /// reflection cannot express (bindless runtime arrays) pair with
+    /// materials that declare explicit binding layouts instead.
+    skip_reflection: bool,
 }
 
 const VS_FS: &[(&str, ShaderStage)] = &[
@@ -50,57 +58,36 @@ const VS_FS: &[(&str, ShaderStage)] = &[
     ("fs_main", ShaderStage::Fragment),
 ];
 
+/// A plain vertex+fragment spec with default artifact/reflection handling.
+const fn vs_fs_spec(name: &'static str, path: &'static str) -> ShaderSpec {
+    ShaderSpec {
+        name,
+        path,
+        entry_points: VS_FS,
+        force_spirv: false,
+        skip_reflection: false,
+    }
+}
+
 const REGISTRY: &[ShaderSpec] = &[
-    ShaderSpec {
-        name: "egui",
-        path: "shaders/library/egui.slang",
-        entry_points: VS_FS,
-    },
-    ShaderSpec {
-        name: "blit",
-        path: "runtime/shaders/blit.slang",
-        entry_points: VS_FS,
-    },
-    ShaderSpec {
-        name: "entity_index",
-        path: "std-assets/shaders/entity_index.slang",
-        entry_points: VS_FS,
-    },
-    ShaderSpec {
-        name: "opaque_color",
-        path: "std-assets/shaders/opaque_color.slang",
-        entry_points: VS_FS,
-    },
-    ShaderSpec {
-        name: "opaque_textured",
-        path: "std-assets/shaders/opaque_textured.slang",
-        entry_points: VS_FS,
-    },
+    vs_fs_spec("egui", "shaders/library/egui.slang"),
+    vs_fs_spec("blit", "runtime/shaders/blit.slang"),
+    vs_fs_spec("entity_index", "std-assets/shaders/entity_index.slang"),
+    vs_fs_spec("opaque_color", "std-assets/shaders/opaque_color.slang"),
+    vs_fs_spec(
+        "opaque_textured",
+        "std-assets/shaders/opaque_textured.slang",
+    ),
     // Debug-draw lines/shapes — used by the editor's gizmos (debug_drawer), so it
     // must be baked or the default (Slang-off) editor build misses at runtime.
-    ShaderSpec {
-        name: "debug_draw",
-        path: "shaders/standard/debug_draw.slang",
-        entry_points: VS_FS,
-    },
+    vs_fs_spec("debug_draw", "shaders/standard/debug_draw.slang"),
     // Demo shaders — baked so the demos render on the default Slang-off build too.
-    ShaderSpec {
-        name: "skybox",
-        path: "demos/shaders/skybox.slang",
-        entry_points: VS_FS,
-    },
-    ShaderSpec {
-        name: "deferred_gbuffer",
-        path: "demos/shaders/deferred_gbuffer.slang",
-        entry_points: VS_FS,
-    },
-    ShaderSpec {
-        name: "deferred_resolve",
-        path: "demos/shaders/deferred_resolve.slang",
-        entry_points: VS_FS,
-    },
-    // Meshlet demo (#111): the task/mesh entries bake to SPIR-V (they have
-    // no WGSL form), the fragment entry to WGSL as usual.
+    vs_fs_spec("skybox", "demos/shaders/skybox.slang"),
+    vs_fs_spec("deferred_gbuffer", "demos/shaders/deferred_gbuffer.slang"),
+    vs_fs_spec("deferred_resolve", "demos/shaders/deferred_resolve.slang"),
+    // Meshlet demo (#111): the task/mesh entries force the whole set to
+    // SPIR-V (no WGSL form); reflection still bakes (the material relies on
+    // it).
     ShaderSpec {
         name: "meshlet",
         path: "demos/shaders/meshlet.slang",
@@ -109,6 +96,17 @@ const REGISTRY: &[ShaderSpec] = &[
             ("ms_main", ShaderStage::Mesh),
             ("fs_main", ShaderStage::Fragment),
         ],
+        force_spirv: false,
+        skip_reflection: false,
+    },
+    // Bindless demo (#117): unbounded descriptor arrays — no WGSL form and
+    // no reflectable layout; the material declares explicit binding layouts.
+    ShaderSpec {
+        name: "bindless",
+        path: "demos/shaders/bindless.slang",
+        entry_points: VS_FS,
+        force_spirv: true,
+        skip_reflection: true,
     },
 ];
 
@@ -218,11 +216,13 @@ fn bake_table() -> Result<Baked, String> {
             // A spec containing ANY task/mesh entry bakes ALL its entries to
             // SPIR-V: Slang's WGSL target refuses to even load a module with
             // mesh-shading entry points, and such materials are Vulkan-only
-            // anyway.
-            let spirv_spec = spec
-                .entry_points
-                .iter()
-                .any(|&(_, s)| matches!(s, ShaderStage::Task | ShaderStage::Mesh));
+            // anyway. `force_spirv` opts in explicitly for the same reason
+            // (e.g. bindless runtime arrays, #117).
+            let spirv_spec = spec.force_spirv
+                || spec
+                    .entry_points
+                    .iter()
+                    .any(|&(_, s)| matches!(s, ShaderStage::Task | ShaderStage::Mesh));
             for &(entry, _stage) in spec.entry_points {
                 let key = baked::shader_key(&source, entry, defines);
                 let name = format!("{} / {} / {}", spec.name, entry, defines_label(defines));
@@ -263,6 +263,13 @@ fn bake_table() -> Result<Baked, String> {
                         })?;
                     wgsl.insert(key, (compiled, name));
                 }
+            }
+
+            // Reflection is skipped for specs whose bindings it cannot
+            // express (#117): their materials declare explicit layouts, so a
+            // baked entry would be dead weight at best and wrong at worst.
+            if spec.skip_reflection {
+                continue;
             }
 
             // One reflection entry per (spec × define set): the whole shader SET

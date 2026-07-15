@@ -433,6 +433,75 @@ mod tests {
         assert_eq!(graph.pass_count(), 0);
     }
 
+    /// The bindless heap group (#117) declares every registered texture as a
+    /// shader read, so a freshly uploaded texture gets its layout transition
+    /// before the first bindless draw.
+    #[test]
+    fn bindless_heap_declares_live_textures() {
+        use std::sync::Arc;
+
+        use crate::graph::resource_usage::TextureAccessMode;
+        use crate::materials::{
+            BindingEntry, BindingGroupDescriptor, BindingLayout, BoundResource, MaterialDescriptor,
+            MaterialInstance, ShaderSource,
+        };
+        use crate::mesh::{MeshDescriptor, VertexLayout};
+
+        let instance = GraphicsInstance::new().unwrap();
+        let device = instance.create_device().unwrap();
+        let texture = device
+            .create_texture(&TextureDescriptor::new_2d(
+                4,
+                4,
+                TextureFormat::Rgba8Unorm,
+                TextureUsage::TEXTURE_BINDING,
+            ))
+            .unwrap();
+
+        // A heap stand-in built directly (the real one is device-owned and
+        // Vulkan-only; inference only walks the slot table).
+        let slots = Arc::new(crate::bindless::BindlessSlots::new(4, 4));
+        slots.allocate_texture(Arc::clone(&texture)).unwrap();
+        let layout = Arc::new(BindingLayout::new().with_bindless_textures(0));
+        let mut descriptor = BindingGroupDescriptor::new();
+        descriptor.entries.push(BindingEntry::new(
+            0,
+            BoundResource::BindlessHeap(Arc::clone(&slots)),
+        ));
+        let group = Arc::new(crate::materials::BindingGroup::new(
+            Arc::clone(&device),
+            Arc::clone(&layout),
+            descriptor,
+            crate::backend::GpuBindingGroup::Dummy,
+        ));
+
+        let material = Arc::new(crate::materials::Material::new(
+            Arc::clone(&device),
+            MaterialDescriptor::new()
+                .with_shader(ShaderSource::vertex(b"vs".to_vec(), "main"))
+                .with_vertex_layout(VertexLayout::position_only())
+                .with_binding_layout(layout),
+            crate::backend::GpuPipeline::Dummy,
+        ));
+        let material_instance = Arc::new(MaterialInstance::new(material).with_binding_group(group));
+        let mesh = device
+            .create_mesh(&MeshDescriptor::new(VertexLayout::position_only()).with_vertex_count(3))
+            .unwrap();
+
+        let mut pass = GraphicsPass::new("bindless".into());
+        pass.add_draw(mesh, material_instance);
+
+        let usage = pass.infer_resource_usage();
+        assert!(
+            usage
+                .texture_usages
+                .iter()
+                .any(|d| Arc::ptr_eq(&d.texture, &texture)
+                    && d.access == TextureAccessMode::ShaderRead),
+            "registered bindless texture must be declared as a shader read"
+        );
+    }
+
     /// Mesh-tasks draws (#111) declare the material's storage buffers as pass
     /// inputs (that is their only geometry path — there is no Mesh), so a
     /// GPU write to a meshlet buffer gets a barrier before the draw.

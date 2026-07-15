@@ -526,6 +526,9 @@ impl WgpuBackend {
             // stages, and wgpu's experimental native support has no WGSL
             // front-end for them.
             mesh_shading: false,
+            // The bindless heap is Vulkan-only (#117): WebGPU has no
+            // runtime-sized update-after-bind descriptor arrays.
+            bindless: false,
         }
     }
 

@@ -601,6 +601,21 @@ pub fn convert_binding_type(binding_type: crate::materials::BindingType) -> wgpu
                 vertex_return: false,
             }
         }
+        crate::materials::BindingType::BindlessTextures => {
+            // Unsupported on this backend (#117): the heap group can only be
+            // created on Vulkan (`bindless_heap_group` requires the
+            // capability), so no bind group with this layout ever exists
+            // here. The layout conversion still needs an answer.
+            wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            }
+        }
+        crate::materials::BindingType::BindlessSamplers => {
+            // Same story as BindlessTextures (#117).
+            wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)
+        }
     }
 }
 

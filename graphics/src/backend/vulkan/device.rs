@@ -43,6 +43,14 @@ pub struct OptionalFeatures {
     /// meshlet pipeline is task→mesh, and a device with only one bit reads
     /// as unsupported. (`multiviewMeshShader` etc. stay off.)
     pub mesh_shading: bool,
+    /// Bindless descriptor indexing (#117): the Vulkan 1.2 core feature
+    /// bits the update-after-bind texture/sampler heap stands on —
+    /// `runtimeDescriptorArray`, `descriptorBindingSampledImageUpdateAfterBind`
+    /// (covers SAMPLER bindings too, per the binding-flags VUIDs),
+    /// `descriptorBindingPartiallyBound`,
+    /// `descriptorBindingUpdateUnusedWhilePending`, and
+    /// `shaderSampledImageArrayNonUniformIndexing`. All-or-nothing.
+    pub bindless: bool,
 }
 
 /// GPU crash breadcrumb extensions the device advertises (#97).
@@ -334,6 +342,7 @@ pub fn select_physical_device(
                         memory_budget: has_ext(ash::ext::memory_budget::NAME),
                         ray_query: ray_query_supported(instance, device, &extensions),
                         mesh_shading: mesh_shading_supported(instance, device, &extensions),
+                        bindless: bindless_supported(instance, device),
                     },
                     breadcrumbs,
                     portability_subset: extensions.contains(b"VK_KHR_portability_subset".as_ref()),
@@ -411,6 +420,45 @@ fn mesh_shading_supported(
     unsafe { instance.get_physical_device_features2(device, &mut features2) };
 
     mesh.task_shader == vk::TRUE && mesh.mesh_shader == vk::TRUE
+}
+
+/// Whether the device supports the bindless-heap bundle (#117): the five
+/// Vulkan 1.2 core descriptor-indexing feature bits the update-after-bind
+/// texture/sampler heap requires (no extension — the engine's baseline is
+/// Vulkan 1.3, where descriptor indexing is core). Queried during selection
+/// so `vkCreateDevice` never sees a feature the device did not report.
+fn bindless_supported(instance: &ash::Instance, device: vk::PhysicalDevice) -> bool {
+    let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default();
+    let mut features2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut vulkan12);
+    unsafe { instance.get_physical_device_features2(device, &mut features2) };
+
+    vulkan12.runtime_descriptor_array == vk::TRUE
+        && vulkan12.descriptor_binding_sampled_image_update_after_bind == vk::TRUE
+        && vulkan12.descriptor_binding_partially_bound == vk::TRUE
+        && vulkan12.descriptor_binding_update_unused_while_pending == vk::TRUE
+        && vulkan12.shader_sampled_image_array_non_uniform_indexing == vk::TRUE
+}
+
+/// Device-clamped bindless heap capacities `(textures, samplers)` (#117):
+/// engine-side caps bounded by the update-after-bind descriptor limits. The
+/// engine caps keep the heap a predictable size (and the sampler count well
+/// under `maxSamplerAllocationCount`); the device limits are the hard bound.
+pub fn bindless_capacities(instance: &ash::Instance, device: vk::PhysicalDevice) -> (u32, u32) {
+    const MAX_TEXTURES: u32 = 16384;
+    const MAX_SAMPLERS: u32 = 256;
+
+    let mut vulkan12 = vk::PhysicalDeviceVulkan12Properties::default();
+    let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut vulkan12);
+    unsafe { instance.get_physical_device_properties2(device, &mut props2) };
+
+    (
+        MAX_TEXTURES
+            .min(vulkan12.max_per_stage_descriptor_update_after_bind_sampled_images)
+            .min(vulkan12.max_descriptor_set_update_after_bind_sampled_images),
+        MAX_SAMPLERS
+            .min(vulkan12.max_per_stage_descriptor_update_after_bind_samplers)
+            .min(vulkan12.max_descriptor_set_update_after_bind_samplers),
+    )
 }
 
 /// All extensions the device offers, as byte strings.
@@ -677,6 +725,16 @@ pub fn create_logical_device(
     let mut vulkan12_features = vk::PhysicalDeviceVulkan12Features::default()
         .timeline_semaphore(true)
         .buffer_device_address(selected.optional.ray_query);
+    // Bindless heap (#117): the five descriptor-indexing bits verified by
+    // `bindless_supported` during selection.
+    if selected.optional.bindless {
+        vulkan12_features = vulkan12_features
+            .runtime_descriptor_array(true)
+            .descriptor_binding_sampled_image_update_after_bind(true)
+            .descriptor_binding_partially_bound(true)
+            .descriptor_binding_update_unused_while_pending(true)
+            .shader_sampled_image_array_non_uniform_indexing(true);
+    }
 
     // Inline ray tracing feature structs — chained only when supported (#110).
     let mut accel_features =
@@ -794,6 +852,9 @@ pub fn device_capabilities(
         // Mesh shading (#111): VK_EXT_mesh_shader verified during selection
         // and enabled on the logical device.
         mesh_shading: selected.optional.mesh_shading,
+        // Bindless heap (#117): descriptor-indexing bits verified during
+        // selection and enabled on the logical device.
+        bindless: selected.optional.bindless,
     }
 }
 

@@ -55,6 +55,14 @@ pub enum BoundResource {
     /// keeps the TLAS (and, transitively, the BLASes of its last written
     /// instances) alive.
     AccelerationStructure(Arc<Tlas>),
+
+    /// The bindless heap's slot table (#117). Appears only in the
+    /// device-owned heap group
+    /// ([`GraphicsDevice::bindless_heap_group`](crate::GraphicsDevice::bindless_heap_group));
+    /// its descriptor set is written by registration, not by group creation.
+    /// Pass resource inference walks the live textures through it so every
+    /// bindless draw declares them as shader reads.
+    BindlessHeap(Arc<crate::bindless::BindlessSlots>),
 }
 
 impl BoundResource {

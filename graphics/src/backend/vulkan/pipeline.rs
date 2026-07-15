@@ -174,6 +174,20 @@ pub struct PipelineManager {
     /// task/mesh pipeline stages and TASK_EXT/MESH_EXT descriptor visibility
     /// — without the extension the stage flags are invalid API use.
     mesh_shading_supported: bool,
+    /// Whether the descriptor-indexing bundle was enabled (#117). Gates
+    /// `BindlessTextures`/`BindlessSamplers` layout entries — without the
+    /// feature bits the binding flags are invalid API use.
+    bindless_supported: bool,
+    /// Device-clamped bindless array capacities (0 when unsupported); the
+    /// declared `descriptorCount` of the heap's array bindings. Must match
+    /// between the heap set and every material pipeline layout — guaranteed
+    /// because both go through this manager.
+    bindless_texture_capacity: u32,
+    bindless_sampler_capacity: u32,
+    /// The dedicated update-after-bind pool the heap's single set lives in
+    /// (#117); created lazily by [`allocate_bindless_set`](Self::allocate_bindless_set),
+    /// destroyed in [`destroy`](Self::destroy).
+    bindless_pool: parking_lot::Mutex<Option<vk::DescriptorPool>>,
     /// Whether resources have been explicitly destroyed.
     destroyed: bool,
 }
@@ -192,7 +206,10 @@ impl PipelineManager {
         wireframe_supported: bool,
         ray_query_supported: bool,
         mesh_shading_supported: bool,
+        bindless_capacities: Option<(u32, u32)>,
     ) -> Result<Self, GraphicsError> {
+        let (bindless_texture_capacity, bindless_sampler_capacity) =
+            bindless_capacities.unwrap_or((0, 0));
         let mut pool_sizes = vec![
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
@@ -257,6 +274,10 @@ impl PipelineManager {
             wireframe_supported,
             ray_query_supported,
             mesh_shading_supported,
+            bindless_supported: bindless_capacities.is_some(),
+            bindless_texture_capacity,
+            bindless_sampler_capacity,
+            bindless_pool: parking_lot::Mutex::new(None),
             destroyed: false,
         })
     }
@@ -523,6 +544,25 @@ impl PipelineManager {
                     .to_string(),
             ));
         }
+        // Bindless entries require the descriptor-indexing bundle (#117);
+        // without it the binding flags below are invalid API use.
+        let is_bindless_entry = |t: BindingType| {
+            matches!(
+                t,
+                BindingType::BindlessTextures | BindingType::BindlessSamplers
+            )
+        };
+        let has_bindless = layout
+            .entries
+            .iter()
+            .any(|e| is_bindless_entry(e.binding_type));
+        if has_bindless && !self.bindless_supported {
+            return Err(GraphicsError::FeatureNotSupported(
+                "binding layout declares a bindless heap array, which requires \
+                 DeviceCapabilities::bindless (#117)"
+                    .to_string(),
+            ));
+        }
         let key = ds_layout_key(layout);
         if let Some(&cached) = self.ds_layout_cache.lock().get(&key) {
             return Ok(cached);
@@ -551,6 +591,16 @@ impl PipelineManager {
                     BindingType::AccelerationStructure => {
                         vk::DescriptorType::ACCELERATION_STRUCTURE_KHR
                     }
+                    BindingType::BindlessTextures => vk::DescriptorType::SAMPLED_IMAGE,
+                    BindingType::BindlessSamplers => vk::DescriptorType::SAMPLER,
+                };
+
+                // Bindless arrays declare their full (device-clamped) capacity;
+                // everything else is a single descriptor.
+                let count = match entry.binding_type {
+                    BindingType::BindlessTextures => self.bindless_texture_capacity,
+                    BindingType::BindlessSamplers => self.bindless_sampler_capacity,
+                    _ => 1,
                 };
 
                 let stage_flags = convert_shader_stage_flags(entry.visibility);
@@ -558,12 +608,38 @@ impl PipelineManager {
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(entry.binding)
                     .descriptor_type(descriptor_type)
-                    .descriptor_count(1)
+                    .descriptor_count(count)
                     .stage_flags(stage_flags)
             })
             .collect();
 
-        let create_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+        // Bindless bindings carry the descriptor-indexing flags (#117):
+        // partially bound (unwritten slots are legal as long as they are not
+        // dynamically used), update-after-bind (registration writes while the
+        // heap is bound in flight), and update-unused-while-pending. The
+        // flags array must parallel `bindings`, empty for ordinary entries.
+        let binding_flags: Vec<vk::DescriptorBindingFlags> = layout
+            .entries
+            .iter()
+            .map(|entry| {
+                if is_bindless_entry(entry.binding_type) {
+                    vk::DescriptorBindingFlags::PARTIALLY_BOUND
+                        | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND
+                        | vk::DescriptorBindingFlags::UPDATE_UNUSED_WHILE_PENDING
+                } else {
+                    vk::DescriptorBindingFlags::empty()
+                }
+            })
+            .collect();
+        let mut flags_info =
+            vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&binding_flags);
+
+        let mut create_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+        if has_bindless {
+            create_info = create_info
+                .flags(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
+                .push_next(&mut flags_info);
+        }
 
         let created = unsafe { self.device.create_descriptor_set_layout(&create_info, None) }
             .map_err(|e| {
@@ -611,6 +687,83 @@ impl PipelineManager {
     /// `GpuBindingGroup::Vulkan` so its `Drop` can free the set back.
     pub fn persistent_pools(&self) -> &Arc<Mutex<PersistentDescriptorPools>> {
         &self.persistent_pools
+    }
+
+    /// Device-clamped bindless array capacities `(textures, samplers)` (#117);
+    /// `(0, 0)` when the capability is unsupported.
+    pub fn bindless_capacities(&self) -> (u32, u32) {
+        (
+            self.bindless_texture_capacity,
+            self.bindless_sampler_capacity,
+        )
+    }
+
+    /// Allocate the bindless heap's descriptor set (#117) from a dedicated
+    /// update-after-bind pool (created here on first use; the persistent
+    /// chain's pools lack `UPDATE_AFTER_BIND` and cannot hold it). Returns
+    /// `(set, pool)` — the pool is what the owning `GpuBindingGroup`'s `Drop`
+    /// must free the set back to.
+    ///
+    /// `layout` must contain only bindless entries; sized for exactly one
+    /// set, so this is called once per heap (per device).
+    pub fn allocate_bindless_set(
+        &self,
+        layout: &BindingLayout,
+    ) -> Result<(vk::DescriptorSet, vk::DescriptorPool), GraphicsError> {
+        if !self.bindless_supported {
+            return Err(GraphicsError::FeatureNotSupported(
+                "the bindless heap requires DeviceCapabilities::bindless (#117)".to_string(),
+            ));
+        }
+        let vk_layout = self.create_descriptor_set_layout(layout)?;
+
+        let mut pool_guard = self.bindless_pool.lock();
+        if pool_guard.is_some() {
+            return Err(GraphicsError::InvalidParameter(
+                "the bindless heap set was already allocated (one heap per device)".to_string(),
+            ));
+        }
+
+        let pool_sizes = [
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::SAMPLED_IMAGE,
+                descriptor_count: self.bindless_texture_capacity.max(1),
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::SAMPLER,
+                descriptor_count: self.bindless_sampler_capacity.max(1),
+            },
+        ];
+        let pool_info = vk::DescriptorPoolCreateInfo::default()
+            .flags(
+                vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND
+                    | vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET,
+            )
+            .max_sets(1)
+            .pool_sizes(&pool_sizes);
+        let pool =
+            unsafe { self.device.create_descriptor_pool(&pool_info, None) }.map_err(|e| {
+                GraphicsError::ResourceCreationFailed(format!(
+                    "Failed to create bindless descriptor pool: {e:?}"
+                ))
+            })?;
+
+        let layouts = [vk_layout];
+        let alloc_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(pool)
+            .set_layouts(&layouts);
+        let set = match unsafe { self.device.allocate_descriptor_sets(&alloc_info) } {
+            Ok(sets) => sets[0],
+            Err(e) => {
+                unsafe { self.device.destroy_descriptor_pool(pool, None) };
+                return Err(GraphicsError::ResourceCreationFailed(format!(
+                    "Failed to allocate bindless descriptor set: {e:?}"
+                )));
+            }
+        };
+
+        *pool_guard = Some(pool);
+        Ok((set, pool))
     }
 
     /// Create a graphics pipeline.
@@ -942,6 +1095,13 @@ impl PipelineManager {
         // GPU is idle; any outstanding sets belong to `GpuBindingGroup`s that
         // are dropped before backend teardown (they keep the device alive).
         unsafe { self.persistent_pools.lock().destroy() };
+
+        // Destroy the bindless heap pool (#117), if one was created. Same
+        // safety argument: the heap's set belongs to a `GpuBindingGroup`
+        // dropped before backend teardown.
+        if let Some(pool) = self.bindless_pool.lock().take() {
+            unsafe { self.device.destroy_descriptor_pool(pool, None) };
+        }
 
         self.destroyed = true;
     }

@@ -2120,3 +2120,84 @@ as SPIR-V.** Vulkan-only by construction (WebGPU has no mesh shaders).
 - #110 / ADR-032: the ray-tracing sibling — shared capability-vs-tier
   reasoning, shared "advanced GPU" demo conventions
 - #99: sync validation that machine-checks the new barrier paths
+
+## ADR-034: Bindless Texture Heap via Descriptor Indexing
+
+**Date:** 2026-07-15
+**Status:** Accepted
+**Issue:** #117
+
+### Context
+
+The third "advanced GPU" pillar after ray query (ADR-032) and mesh shading
+(ADR-033): runtime-sized, update-after-bind descriptor arrays indexed
+non-uniformly from shaders — the prerequisite for GPU-driven rendering,
+per-instance materials in ray-query shaders, and textured meshlet materials.
+Three forks were settled with the owner up front: **phase-1 scope is sampled
+2D textures + samplers** (buffers already reach shaders via
+`bufferDeviceAddress`), **registration is an explicit opt-in** (render
+targets never burn slots), and **the heap is an explicit material group**,
+not a reserved set 0 (no global set-numbering migration).
+
+### Decision
+
+1. **Capability** (ADR-027): `DeviceCapabilities::bindless` — five Vulkan
+   1.2 core feature bits (`runtimeDescriptorArray`,
+   `descriptorBindingSampledImageUpdateAfterBind` — which also covers
+   SAMPLER bindings per the binding-flags VUIDs,
+   `descriptorBindingPartiallyBound`,
+   `descriptorBindingUpdateUnusedWhilePending`,
+   `shaderSampledImageArrayNonUniformIndexing`), all-or-nothing, queried at
+   selection. No extension: the engine baseline is Vulkan 1.3. wgpu/dummy:
+   false.
+2. **One device-owned heap**: a dedicated `UPDATE_AFTER_BIND` pool holding a
+   single persistent set — binding 0 = sampled-texture array, binding 1 =
+   sampler array, both `PARTIALLY_BOUND | UPDATE_AFTER_BIND |
+   UPDATE_UNUSED_WHILE_PENDING`. Capacities are engine caps (16384 / 256)
+   clamped by the update-after-bind device limits. The heap's set layout is
+   created through the same `ds_layout_cache` material pipelines use, so
+   set compatibility holds by construction.
+3. **Registration writes descriptors immediately**
+   (`GraphicsDevice::bindless_register_texture/_sampler` → slot `u32`);
+   legal while the heap is bound in flight because a fresh slot is never
+   dynamically used. **Slot recycling is fence-deferred**: an unregistered
+   slot (and its keep-alive `Arc`) waits `MAX_FRAMES_IN_FLIGHT` frame
+   advances in `BindlessSlots` before reuse.
+4. **Barriers stay automatic**: the heap group's entries carry
+   `BoundResource::BindlessHeap(Arc<BindlessSlots>)`; pass resource
+   inference declares every live (and retirement-pending) texture as
+   `ShaderRead`, so a freshly uploaded texture transitions
+   TransferDst → ShaderReadOnly before its first bindless draw.
+5. **Shaders are Slang with explicit binding layouts**: reflection cannot
+   express runtime arrays, so bindless materials pass
+   `GraphicsDevice::bindless_heap_layout()` (the shared `Arc`) plus their
+   data layouts explicitly. The bake registry gains per-spec `force_spirv`
+   (Slang's WGSL target cannot load unbounded arrays — generalizing
+   ADR-033's task/mesh auto-rule) and `skip_reflection`.
+
+### Consequences
+
+- One draw call can address every registered texture by integer — the
+  `bindless_demo` renders a 48-texture quad grid in a single instanced draw
+  and churns one texture every 90 frames (register new → repoint instance
+  data through the frame graph → unregister old), exercising deferred
+  recycling live. Validated on RTX 3070 and RX 6400, 400 frames each under
+  `REDLILIUM_SYNC_VALIDATION=1`, zero hazards.
+- Heap visibility is VERTEX|FRAGMENT|COMPUTE for now; task/mesh visibility
+  joins when a mesh material first consumes the heap (stage flags require
+  the extension).
+- Registered textures live as long as their slot: forgetting to unregister
+  pins the texture for the device's lifetime (documented; the slot table is
+  inspectable via `BindlessSlots::live_counts`).
+- Depth-format textures are excluded from the heap in phase 1 (the heap
+  records `SHADER_READ_ONLY_OPTIMAL`; sampled-depth layout conventions come
+  with a consumer).
+- Follow-ups when consumers appear: cube/3D/array texture heaps (same
+  mechanism, new binding), reflection support for runtime arrays, TASK/MESH
+  heap visibility.
+
+### Related Issues
+
+- #117: feature issue
+- #110 / ADR-032, #111 / ADR-033: the sibling pillars
+- #114–#116: meshlet follow-ups (barrier scopes, indirect, limits)

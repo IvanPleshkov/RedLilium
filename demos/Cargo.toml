@@ -74,6 +74,12 @@ path = "src/bin/ray_query_demo.rs"
 name = "meshlet_demo"
 path = "src/bin/meshlet_demo.rs"
 
+# Bindless texture heap (#117): one draw over a quad grid, textures picked
+# per instance by index. Needs descriptor indexing, so it is run by hand.
+[[bin]]
+name = "bindless_demo"
+path = "src/bin/bindless_demo.rs"
+
 [[bin]]
 name = "physics_demo"
 path = "src/bin/physics_demo/main.rs"

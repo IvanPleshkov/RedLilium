@@ -66,6 +66,7 @@
 //! ```
 
 pub mod backend;
+pub mod bindless;
 pub mod compiler;
 pub mod device;
 pub mod egui;
@@ -83,6 +84,7 @@ pub mod swapchain;
 pub mod types;
 
 // Re-export main types for convenience
+pub use bindless::{BINDLESS_SAMPLERS_BINDING, BINDLESS_TEXTURES_BINDING, BindlessSlots};
 pub use device::{
     DeviceCapabilities, DeviceTier, FrameGpuTimings, GpuMemoryStats, GraphicsDevice, HeapStats,
     ResourceCounts, SubmitTiming,

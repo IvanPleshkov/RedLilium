@@ -100,6 +100,22 @@ pub enum BindingType {
     /// [`DeviceCapabilities::ray_query`](crate::device::DeviceCapabilities);
     /// Vulkan-only — binding-group creation fails on wgpu.
     AccelerationStructure,
+
+    /// The bindless heap's runtime-sized sampled-texture array (#117):
+    /// update-after-bind, partially bound, indexed with
+    /// `NonUniformResourceIndex` in Slang. The only resource bindable at
+    /// this slot is the device-owned heap
+    /// ([`GraphicsDevice::bindless_heap_group`](crate::GraphicsDevice::bindless_heap_group))
+    /// — user binding groups cannot declare it.
+    ///
+    /// Requires
+    /// [`DeviceCapabilities::bindless`](crate::device::DeviceCapabilities);
+    /// Vulkan-only.
+    BindlessTextures,
+
+    /// The bindless heap's sampler array (#117) — the sampler-typed sibling
+    /// of [`BindlessTextures`](Self::BindlessTextures), same rules.
+    BindlessSamplers,
 }
 
 /// Describes a single binding slot in a layout.
@@ -228,6 +244,24 @@ impl BindingLayout {
         self.with_entry(BindingLayoutEntry::new(
             binding,
             BindingType::AccelerationStructure,
+        ))
+    }
+
+    /// Add the bindless heap's texture array binding (#117). Only the
+    /// device-owned heap group can be bound at this slot.
+    pub fn with_bindless_textures(self, binding: u32) -> Self {
+        self.with_entry(BindingLayoutEntry::new(
+            binding,
+            BindingType::BindlessTextures,
+        ))
+    }
+
+    /// Add the bindless heap's sampler array binding (#117). Only the
+    /// device-owned heap group can be bound at this slot.
+    pub fn with_bindless_samplers(self, binding: u32) -> Self {
+        self.with_entry(BindingLayoutEntry::new(
+            binding,
+            BindingType::BindlessSamplers,
         ))
     }
 
