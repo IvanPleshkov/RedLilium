@@ -17,7 +17,10 @@ slang-shaders = ["redlilium-graphics/slang-shaders"]
 
 [dependencies]
 redlilium-core = { path = "../core" }
-redlilium-ecs = { path = "../ecs", features = ["rendering", "serialize-ron"] }
+# `physics` so authored levels register RigidBody3D/Collider3D (#105): the
+# editor never steps physics itself, but it must round-trip the descriptor
+# components through scene save/load and show them in the inspector.
+redlilium-ecs = { path = "../ecs", features = ["rendering", "serialize-ron", "physics"] }
 redlilium-assets = { path = "../assets" }
 redlilium-graphics = { path = "../graphics" }
 redlilium-app = { path = "../app" }

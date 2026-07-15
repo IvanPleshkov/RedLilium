@@ -6,13 +6,6 @@
             entity_flags: 0,
             components: [
                 (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
-                (
                     type_name: "MeshRenderer",
                     schema_version: 1,
                     data: Map([
@@ -30,6 +23,13 @@
                                 ])),
                             ]),
                         ])),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
                     ]),
                 ),
                 (
@@ -62,13 +62,6 @@
             entity_flags: 0,
             components: [
                 (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
-                (
                     type_name: "MeshRenderer",
                     schema_version: 1,
                     data: Map([
@@ -86,6 +79,13 @@
                                 ])),
                             ]),
                         ])),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
                     ]),
                 ),
                 (
@@ -118,13 +118,6 @@
             entity_flags: 0,
             components: [
                 (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
-                (
                     type_name: "MeshRenderer",
                     schema_version: 1,
                     data: Map([
@@ -142,6 +135,13 @@
                                 ])),
                             ]),
                         ])),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
                     ]),
                 ),
                 (
@@ -174,13 +174,6 @@
             entity_flags: 0,
             components: [
                 (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
-                (
                     type_name: "MeshRenderer",
                     schema_version: 1,
                     data: Map([
@@ -198,6 +191,13 @@
                                 ])),
                             ]),
                         ])),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
                     ]),
                 ),
                 (
@@ -230,13 +230,6 @@
             entity_flags: 0,
             components: [
                 (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
-                (
                     type_name: "MeshRenderer",
                     schema_version: 1,
                     data: Map([
@@ -254,6 +247,13 @@
                                 ])),
                             ]),
                         ])),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
                     ]),
                 ),
                 (
@@ -286,13 +286,6 @@
             entity_flags: 0,
             components: [
                 (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
-                (
                     type_name: "MeshRenderer",
                     schema_version: 1,
                     data: Map([
@@ -310,6 +303,13 @@
                                 ])),
                             ]),
                         ])),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
                     ]),
                 ),
                 (
@@ -342,13 +342,6 @@
             entity_flags: 0,
             components: [
                 (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
-                (
                     type_name: "MeshRenderer",
                     schema_version: 1,
                     data: Map([
@@ -366,6 +359,13 @@
                                 ])),
                             ]),
                         ])),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
                     ]),
                 ),
                 (
@@ -398,13 +398,6 @@
             entity_flags: 0,
             components: [
                 (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
-                (
                     type_name: "MeshRenderer",
                     schema_version: 1,
                     data: Map([
@@ -422,6 +415,13 @@
                                 ])),
                             ]),
                         ])),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
                     ]),
                 ),
                 (
@@ -454,13 +454,6 @@
             entity_flags: 0,
             components: [
                 (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
-                (
                     type_name: "MeshRenderer",
                     schema_version: 1,
                     data: Map([
@@ -478,6 +471,13 @@
                                 ])),
                             ]),
                         ])),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
                     ]),
                 ),
                 (
@@ -510,13 +510,6 @@
             entity_flags: 0,
             components: [
                 (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
-                (
                     type_name: "MeshRenderer",
                     schema_version: 1,
                     data: Map([
@@ -534,6 +527,13 @@
                                 ])),
                             ]),
                         ])),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
                     ]),
                 ),
                 (
@@ -566,13 +566,6 @@
             entity_flags: 0,
             components: [
                 (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
-                (
                     type_name: "MeshRenderer",
                     schema_version: 1,
                     data: Map([
@@ -590,6 +583,13 @@
                                 ])),
                             ]),
                         ])),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
                     ]),
                 ),
                 (
@@ -622,13 +622,6 @@
             entity_flags: 0,
             components: [
                 (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
-                    ]),
-                ),
-                (
                     type_name: "MeshRenderer",
                     schema_version: 1,
                     data: Map([
@@ -646,6 +639,13 @@
                                 ])),
                             ]),
                         ])),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
                     ]),
                 ),
                 (
@@ -676,7 +676,7 @@
     resources: [],
     metadata: (
         engine_fingerprint: "",
-        timestamp: 1784128945,
+        timestamp: 1784142989,
         component_schemas: {},
     ),
 )

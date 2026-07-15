@@ -82,6 +82,13 @@ impl Default for FollowCamera {
     }
 }
 
+/// Marks the car spawn point in a level scene (#105). The scene asset carries
+/// the marker (authorable in the editor like any other component); once the
+/// scene is instantiated, [`SpawnCarAtMarkers`] materializes the drivable
+/// chassis at the marker's `Transform`.
+#[derive(Debug, Clone, Copy, Default, Component)]
+pub struct CarSpawn;
+
 /// Local forward of the chassis model. The visual box is long along Z and the
 /// camera convention is -Z forward, so the car drives toward -Z.
 const CAR_FORWARD: PhysVector = PhysVector::new(0.0, 0.0, -1.0);
@@ -313,25 +320,46 @@ impl Plugin for CarGamePlugin {
         log::info!("CarGamePlugin::build");
         app.register_component::<CarController>();
         app.register_component::<FollowCamera>();
+        app.register_component::<CarSpawn>();
         app.add_system::<Update, _>(GameFlowUi);
 
-        // Physics pipeline (guarded: a host may already run these engine
-        // systems — see `SystemsContainer::contains`), then the drive system
-        // between body sync and the step.
+        // Marker-driven car spawn (#105), right after scene swaps land so the
+        // car exists the same frame the level appears. Guarded: a test rig's
+        // schedules may not carry the transition system, and a read-only
+        // container (editor authoring host) takes no exclusive systems.
+        let pre = app.schedule_mut::<redlilium_ecs::PreUpdate>();
+        if !pre.is_read_only() {
+            pre.add_exclusive(SpawnCarAtMarkers);
+            if pre.contains::<redlilium_ecs::ApplySceneTransitions>() {
+                pre.add_edge::<redlilium_ecs::ApplySceneTransitions, SpawnCarAtMarkers>()
+                    .expect("no cycle");
+            }
+        }
+
+        // Physics pipeline (guarded twice: a host may already run these
+        // engine systems — see `SystemsContainer::contains` — and the editor
+        // marks its Update schedule read-only, where exclusive systems cannot
+        // be added at all; there the game is hosted for *authoring*, not
+        // simulation, so the pipeline is simply skipped). The drive system
+        // sits between body sync and the step.
         let update = app.schedule_mut::<Update>();
-        if !update.contains::<SyncPhysicsBodies3D>() {
-            update.add_exclusive(SyncPhysicsBodies3D);
+        if update.is_read_only() {
+            log::info!("host Update schedule is read-only: physics pipeline skipped (authoring)");
+        } else {
+            if !update.contains::<SyncPhysicsBodies3D>() {
+                update.add_exclusive(SyncPhysicsBodies3D);
+            }
+            if !update.contains::<StepPhysics3D>() {
+                update.add(StepPhysics3D);
+            }
+            update.add(DriveCar);
+            update
+                .add_edge::<SyncPhysicsBodies3D, DriveCar>()
+                .expect("no cycle");
+            update
+                .add_edge::<DriveCar, StepPhysics3D>()
+                .expect("no cycle");
         }
-        if !update.contains::<StepPhysics3D>() {
-            update.add(StepPhysics3D);
-        }
-        update.add(DriveCar);
-        update
-            .add_edge::<SyncPhysicsBodies3D, DriveCar>()
-            .expect("no cycle");
-        update
-            .add_edge::<DriveCar, StepPhysics3D>()
-            .expect("no cycle");
 
         // Camera follows the post-step pose, before transforms propagate.
         let post = app.schedule_mut::<PostUpdate>();
@@ -384,10 +412,123 @@ impl Plugin for CarGamePlugin {
     }
 }
 
-/// Spawn the driving level: frictionless ground slab, obstacle ring, and the
-/// car chassis. Shared by the `gen_scenes` generator (authoring
-/// [`LEVEL_SCENE`]) and the editor-hosting fallback in `spawn_scene`.
+/// Spawn the driving level with the car materialized directly — the
+/// editor-hosting fallback in `spawn_scene` (no `SceneManager`, no marker
+/// system running yet).
 pub fn spawn_level(world: &mut World) {
+    spawn_level_geometry(world);
+    spawn_car(world, Vec3::new(0.0, 0.5, 0.0));
+}
+
+/// The level as authored into the [`LEVEL_SCENE`] asset (#105): geometry plus
+/// the [`CarSpawn`] marker. The car itself is *not* part of the scene — it is
+/// spawned at load time by [`SpawnCarAtMarkers`], so an editor-authored level
+/// only needs cubes, colliders, and one marker.
+pub fn spawn_level_scene(world: &mut World) {
+    spawn_level_geometry(world);
+    let marker = world.spawn();
+    world
+        .insert(
+            marker,
+            Transform::from_translation(Vec3::new(0.0, 0.5, 0.0)),
+        )
+        .unwrap();
+    world.insert(marker, CarSpawn).unwrap();
+}
+
+/// Spawn the drivable chassis at `position`: dynamic box, 1×0.6×2 m.
+/// Near-frictionless collider: grip is modeled by `DriveCar`'s lateral
+/// velocity bleed (see [`LATERAL_GRIP`]).
+pub fn spawn_car(world: &mut World, position: Vec3) -> redlilium_ecs::Entity {
+    let material = MaterialInstanceSource {
+        guid: Guid::stable("materials/default.matinst"),
+    };
+    let car_transform = Transform::new(position, Quat::identity(), Vec3::new(1.0, 0.6, 2.0));
+    let car = spawn_box(world, material, car_transform);
+    world
+        .insert(
+            car,
+            RigidBody3D::dynamic()
+                .with_linear_damping(0.6)
+                .with_angular_damping(3.0),
+        )
+        .unwrap();
+    world
+        .insert(
+            car,
+            Collider3D::cuboid(0.5, 0.3, 1.0)
+                .with_friction(0.05)
+                .with_density(80.0),
+        )
+        .unwrap();
+    world.insert(car, CarController::default()).unwrap();
+    car
+}
+
+/// Exclusive `PreUpdate` system, ordered after `ApplySceneTransitions`: when
+/// the world has a [`CarSpawn`] marker but no car, spawn the chassis at the
+/// marker. The car is tagged as a [`SceneMember`] of the current scene, so a
+/// scene switch despawns it together with the level that spawned it.
+pub struct SpawnCarAtMarkers;
+
+impl redlilium_ecs::ExclusiveSystem for SpawnCarAtMarkers {
+    type Result = ();
+
+    fn run(&mut self, world: &mut World) -> Result<(), SystemError> {
+        // Only materialize the car inside a scene-managed game: without a
+        // current scene (editor authoring host, bare test worlds) a marker is
+        // inert data — spawning there would bake a live car into the very
+        // scene being authored.
+        let owning_scene = world
+            .has_resource::<SceneManager>()
+            .then(|| {
+                world
+                    .resource::<SceneManager>()
+                    .current()
+                    .map(str::to_string)
+            })
+            .flatten();
+        let Some(owning_scene) = owning_scene else {
+            return Ok(());
+        };
+        let has_car = world
+            .read_all::<CarController>()
+            .map(|cars| cars.iter().next().is_some())
+            .unwrap_or(false);
+        if has_car {
+            return Ok(());
+        }
+        let marker_pos = {
+            let Ok(markers) = world.read_all::<CarSpawn>() else {
+                return Ok(());
+            };
+            let Ok(transforms) = world.read_all::<Transform>() else {
+                return Ok(());
+            };
+            markers
+                .iter()
+                .next()
+                .and_then(|(idx, _)| transforms.get(idx).map(|t| t.translation))
+        };
+        let Some(position) = marker_pos else {
+            return Ok(());
+        };
+        let car = spawn_car(world, position);
+        let _ = world.insert(
+            car,
+            redlilium_ecs::SceneMember {
+                scene: owning_scene,
+            },
+        );
+        log::info!("car spawned at marker ({position:?})");
+        Ok(())
+    }
+}
+
+/// Spawn the level geometry: frictionless ground slab and the obstacle ring.
+/// Shared by the scene generator ([`spawn_level_scene`]) and the direct
+/// fallback ([`spawn_level`]).
+pub fn spawn_level_geometry(world: &mut World) {
     let material = MaterialInstanceSource {
         guid: Guid::stable("materials/default.matinst"),
     };
@@ -422,33 +563,6 @@ pub fn spawn_level(world: &mut World) {
             .insert(obstacle, Collider3D::cuboid(0.5, 0.5, 0.5))
             .unwrap();
     }
-
-    // The car: dynamic box chassis, 1×0.6×2 m, dropped just above ground.
-    // Near-frictionless collider: grip is modeled by DriveCar's lateral
-    // velocity bleed (see above).
-    let car_transform = Transform::new(
-        Vec3::new(0.0, 0.5, 0.0),
-        Quat::identity(),
-        Vec3::new(1.0, 0.6, 2.0),
-    );
-    let car = spawn_box(world, material, car_transform);
-    world
-        .insert(
-            car,
-            RigidBody3D::dynamic()
-                .with_linear_damping(0.6)
-                .with_angular_damping(3.0),
-        )
-        .unwrap();
-    world
-        .insert(
-            car,
-            Collider3D::cuboid(0.5, 0.3, 1.0)
-                .with_friction(0.05)
-                .with_density(80.0),
-        )
-        .unwrap();
-    world.insert(car, CarController::default()).unwrap();
 }
 
 /// Spawn the menu backdrop: a decorative ring of cubes for the camera to look
@@ -591,16 +705,20 @@ mod tests {
         redlilium_ecs::register_rendering_components(&mut world);
         world.register_inspector::<CarController>();
         world.register_inspector::<FollowCamera>();
+        world.register_inspector::<CarSpawn>();
         world.register_inspector::<SceneMember>();
         world.insert_resource(db);
         world.insert_resource(processor);
         world.insert_resource(SceneManager::default());
 
         let mut apply = ApplySceneTransitions;
+        let mut spawn_cars = SpawnCarAtMarkers;
         let mut switch_and_settle = |world: &mut World, path: &str| {
             world.resource_mut::<SceneManager>().switch_to(path);
             for _ in 0..8 {
                 redlilium_ecs::system::run_exclusive_system_once(&mut apply, world).unwrap();
+                // The plugin orders the marker spawn right after transitions.
+                redlilium_ecs::system::run_exclusive_system_once(&mut spawn_cars, world).unwrap();
                 let mut processor = world.resource_mut::<AssetProcessor>();
                 for _ in 0..16 {
                     let tasks = processor.drain_tasks();
@@ -626,7 +744,16 @@ mod tests {
         );
 
         switch_and_settle(&mut world, LEVEL_SCENE);
-        assert_eq!(cars(&world), 1, "level has the car");
+        assert_eq!(
+            cars(&world),
+            1,
+            "car spawned at the scene's CarSpawn marker (#105)"
+        );
+        assert_eq!(
+            world.read_all::<CarSpawn>().unwrap().iter().count(),
+            1,
+            "level scene carries exactly one spawn marker"
+        );
 
         // Physics authoring data must survive the scene roundtrip (the
         // descriptors used to be #[skip_serialization] — an undrivable level).

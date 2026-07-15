@@ -45,11 +45,13 @@ pub fn run() {
     let device = instance.create_device().expect("graphics device");
     log::info!("headless device: {}", device.name());
 
-    // The same local mounts as the windowed shell (see `Editor::new`), minus
-    // the browser's file watcher — external file edits are picked up by the
-    // startup scan, in-editor edits by the ChangedAssets flow.
-    let local_mounts: Vec<(&'static str, &'static str)> =
-        vec![("std", "std-assets"), ("project", "project-assets")];
+    // The same local mounts as the windowed shell (see `Editor::new`),
+    // project.toml `scan = true` mounts included (#105), minus the browser's
+    // file watcher — external file edits are picked up by the startup scan,
+    // in-editor edits by the ChangedAssets flow. Only the config is read
+    // here (no `build_vfs`): plain/sftp mounts are a windowed concern.
+    let config = crate::project::load_project(std::path::Path::new("project.toml")).ok();
+    let local_mounts = crate::project::local_mounts(config.as_ref());
     let mut vfs = Vfs::new();
     for &(name, dir) in &local_mounts {
         if let Err(e) = std::fs::create_dir_all(dir) {

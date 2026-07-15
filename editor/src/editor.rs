@@ -140,14 +140,15 @@ impl Editor {
     pub fn new() -> Self {
         let project_path = std::path::Path::new("project.toml");
         let (config, mut vfs) = crate::project::load_or_default(project_path);
-        // Local asset-pack mounts: the engine's built-ins plus the project
+        // Local asset-pack mounts: the engine's built-ins, the project
         // sandbox (user-authored / experimental assets, gitignored — so playing
-        // with materials never dirties the committed std pack). Each carries
-        // its own assets.db, is watched for external edits, and is scanned on
-        // startup.
-        let local_mounts = [("std", "std-assets"), ("project", "project-assets")];
+        // with materials never dirties the committed std pack), plus any
+        // project.toml filesystem mount opted in with `scan = true` (#105 —
+        // e.g. a game's own asset pack). Each carries its own assets.db, is
+        // watched for external edits, and is scanned on startup.
+        let local_mounts = crate::project::local_mounts(Some(&config));
         let mut asset_browser = AssetBrowser::new(&config);
-        for (name, dir) in local_mounts {
+        for &(name, dir) in &local_mounts {
             if let Err(e) = std::fs::create_dir_all(dir) {
                 log::error!("failed to create mount dir '{dir}': {e}");
             }
@@ -170,7 +171,7 @@ impl Editor {
             engine: None,
             vfs,
             asset_browser,
-            local_mounts: local_mounts.to_vec(),
+            local_mounts,
             remote: std::env::var("REDLILIUM_REMOTE")
                 .is_ok_and(|v| v == "1")
                 .then(crate::remote_commands::RemoteCommands::default),

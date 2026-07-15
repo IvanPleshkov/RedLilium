@@ -1,9 +1,10 @@
 //! Regenerates the car game's scene assets (`game/assets/scenes/*.scene`)
-//! and the mount's `assets.db`.
+//! and the mount's `assets.db` from the code-side spawn functions.
 //!
-//! Scenes are authored in code (via the same spawn functions the game uses)
-//! until the editor persists scenes (#2). Run from the repo root after
-//! changing `spawn_level` / `spawn_menu_backdrop`:
+//! **This is a reset tool.** Scenes are normally authored in the *editor*
+//! (#2/#105: open via the `game` mount, edit, Cmd+S / `save_scene`) — running
+//! this bin OVERWRITES any editor-authored content with the code-generated
+//! baseline. Run from the repo root only to bootstrap or reset the pack:
 //!
 //! ```bash
 //! cargo run -p car-game --bin gen_scenes
@@ -33,6 +34,7 @@ fn authoring_world() -> World {
     register_rendering_components(&mut world);
     world.register_inspector::<car_game::CarController>();
     world.register_inspector::<car_game::FollowCamera>();
+    world.register_inspector::<car_game::CarSpawn>();
     world
 }
 
@@ -40,7 +42,9 @@ type SpawnFn = fn(&mut World);
 
 fn main() {
     let scenes: Vec<(&str, SpawnFn)> = vec![
-        (LEVEL_SCENE, car_game::spawn_level),
+        // The level carries a CarSpawn marker, not the car (#105) — the game
+        // spawns the chassis at the marker when the scene loads.
+        (LEVEL_SCENE, car_game::spawn_level_scene),
         (MENU_SCENE, car_game::spawn_menu_backdrop),
     ];
 

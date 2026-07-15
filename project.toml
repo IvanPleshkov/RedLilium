@@ -1,9 +1,22 @@
 [project]
 name = "RedLilium Sample"
+# Scene to open on startup (#2), as "mount/path". Uncomment to open the car
+# game's level instead of the demo scene. NOTE: author game scenes with the
+# game module hosted (REDLILIUM_GAME=<cdylib>) — a plain editor doesn't know
+# game components (CarSpawn), silently drops them on save.
+# scene = "game/scenes/level1.scene"
 
 [[mount]]
 name = "shaders"
 path = "./shaders"
+
+# The car game's asset pack (#105): a full local asset mount — scanned into
+# the asset DB, watched, assets.db persisted — so levels authored in the
+# editor save straight into the pack the game ships.
+[[mount]]
+name = "game"
+path = "./game/assets"
+scan = true
 
 # Example SFTP mount (uncomment and fill in your server details):
 [[mount]]
