@@ -52,6 +52,7 @@ pub struct CreatedInstance {
 pub fn create_instance(
     entry: &ash::Entry,
     validation_enabled: bool,
+    sync_validation: bool,
 ) -> Result<CreatedInstance, GraphicsError> {
     // Negotiate the API version with the loader instead of hardcoding it.
     // `try_enumerate_instance_version` returns None on Vulkan 1.0 loaders.
@@ -147,6 +148,25 @@ pub fn create_instance(
         extensions.push(ash::ext::debug_utils::NAME.as_ptr());
     }
 
+    // Synchronization validation (#99). The legacy `VK_EXT_validation_features`
+    // path (VkValidationFeaturesEXT) is a no-op on current Khronos layers
+    // (1.3.283 / 1.4.350) — the layer ignores it — so drive the layer's own
+    // setting via `VK_EXT_layer_settings`: `khronos_validation.validate_sync`.
+    // The extension is provided by the layer, so it is absent from the driver
+    // enumeration and must be looked up against the layer by name, and enabled
+    // here or the layer ignores the settings struct chained below.
+    let syncval_on = sync_validation
+        && validation_available
+        && layer_provides(entry, VALIDATION_LAYER_NAME, ash::ext::layer_settings::NAME);
+    if syncval_on {
+        extensions.push(ash::ext::layer_settings::NAME.as_ptr());
+    } else if sync_validation && validation_available {
+        log::warn!(
+            "Sync validation requested but VK_EXT_layer_settings is not offered \
+             by the validation layer; skipping (#99)"
+        );
+    }
+
     // Enabled layers
     let layer_names: Vec<*const i8> = if validation_available {
         vec![VALIDATION_LAYER_NAME.as_ptr()]
@@ -163,12 +183,46 @@ pub fn create_instance(
         create_flags |= vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR;
     }
 
+    // Synchronization-validation opt-in (#99), set as a layer setting so the
+    // layer machine-checks the auto-derived cross-queue barriers. All of
+    // `sync_value`, `sync_settings` must outlive `create_instance` (ash pNext
+    // lifetime), hence the outer bindings even when the feature is off.
+    // Two BOOL32 layer settings turn on syncval: `validate_sync` is the master
+    // switch, and `syncval_shader_accesses_heuristic` is additionally required
+    // to detect hazards that involve a shader access (e.g. sampling an image
+    // that a render pass also writes) — without it those go unreported.
+    // pLayerName is the layer's *settings namespace* (short `khronos_validation`,
+    // as in vk_layer_settings.txt), NOT the `VK_LAYER_KHRONOS_validation`
+    // manifest name. VK_TRUE as raw bytes: ash's `.values` takes `&[u8]` and
+    // sets value_count to the byte length, but VkLayerSettingEXT counts *typed*
+    // values, so override it to 1 (one VkBool32) after building.
+    let sync_value = 1u32.to_ne_bytes();
+    let make_bool_setting = |name: &'static CStr| {
+        let mut s = vk::LayerSettingEXT::default()
+            .layer_name(VALIDATION_LAYER_NAME)
+            .setting_name(name)
+            .ty(vk::LayerSettingTypeEXT::BOOL32)
+            .values(&sync_value);
+        s.value_count = 1;
+        s
+    };
+    let sync_settings = [
+        make_bool_setting(c"validate_sync"),
+        make_bool_setting(c"syncval_shader_accesses_heuristic"),
+    ];
+    let mut sync_layer_settings =
+        vk::LayerSettingsCreateInfoEXT::default().settings(&sync_settings);
+
     // Create instance
-    let create_info = vk::InstanceCreateInfo::default()
+    let mut create_info = vk::InstanceCreateInfo::default()
         .flags(create_flags)
         .application_info(&app_info)
         .enabled_extension_names(&extensions)
         .enabled_layer_names(&layer_names);
+    if syncval_on {
+        log::info!("Vulkan synchronization validation enabled (#99)");
+        create_info = create_info.push_next(&mut sync_layer_settings);
+    }
 
     let instance = unsafe { entry.create_instance(&create_info, None) }.map_err(|e| {
         GraphicsError::InitializationFailed(format!("Failed to create Vulkan instance: {:?}", e))
@@ -205,6 +259,20 @@ fn available_instance_extensions(entry: &ash::Entry) -> Result<HashSet<CString>,
         .iter()
         .map(|p| unsafe { CStr::from_ptr(p.extension_name.as_ptr()) }.to_owned())
         .collect())
+}
+
+/// Whether `layer` advertises instance `extension`. Layer-provided extensions
+/// (e.g. `VK_EXT_validation_features`) do not appear in the driver enumeration,
+/// so they must be queried against the layer by name (#99).
+fn layer_provides(entry: &ash::Entry, layer: &CStr, extension: &CStr) -> bool {
+    unsafe { entry.enumerate_instance_extension_properties(Some(layer)) }
+        .map(|props| {
+            props.iter().any(|p| {
+                let name = unsafe { CStr::from_ptr(p.extension_name.as_ptr()) };
+                name == extension
+            })
+        })
+        .unwrap_or(false)
 }
 
 /// Spec version of the validation layer, or `None` when it is not installed.

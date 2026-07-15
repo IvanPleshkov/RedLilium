@@ -104,7 +104,17 @@ pub struct TestContext {
     pub device: Arc<GraphicsDevice>,
     /// Frame pipeline for graph execution (uses RefCell for interior mutability).
     pipeline: RefCell<FramePipeline>,
+    /// Held for the context's lifetime when synchronization validation is on
+    /// (#99): the syncval layer is not robust to many concurrent syncval-enabled
+    /// devices, and under `cargo test --workspace` the default multi-threaded
+    /// gpu_tests run crashes it (STATUS_ACCESS_VIOLATION). Serializing the
+    /// syncval tests (one live device at a time) fixes it; the workloads are
+    /// tiny so the lost parallelism is cheap. `None` when syncval is off.
+    _syncval_guard: Option<std::sync::MutexGuard<'static, ()>>,
 }
+
+/// Serializes syncval-enabled `TestContext`s (see `_syncval_guard`).
+static SYNCVAL_SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl TestContext {
     /// Create a new test context for the given backend.
@@ -155,9 +165,20 @@ impl TestContext {
             return None;
         }
 
+        // gpu_tests turn synchronization validation ON wherever validation is
+        // on (#99): tiny workloads, and the existing zero-validation-error
+        // assertions become a regression net for the auto-derived barriers.
+        // With syncval on, hold the serialize lock across the whole context so
+        // only one syncval-enabled device is live at a time (see `_syncval_guard`).
+        let _syncval_guard = validation.then(|| {
+            SYNCVAL_SERIALIZE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        });
         let params = backend
             .to_instance_parameters()
             .with_validation(validation)
+            .with_sync_validation(validation)
             .with_breadcrumbs(breadcrumbs);
         let instance = GraphicsInstance::with_parameters(params).ok()?;
         let device = instance.create_device().ok()?;
@@ -169,6 +190,7 @@ impl TestContext {
             instance,
             device,
             pipeline: RefCell::new(pipeline),
+            _syncval_guard,
         })
     }
 

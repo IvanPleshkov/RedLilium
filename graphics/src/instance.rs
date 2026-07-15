@@ -251,6 +251,12 @@ pub struct InstanceParameters {
     /// Per-pass GPU crash breadcrumbs (#97). Overridden by
     /// `REDLILIUM_BREADCRUMBS`.
     pub breadcrumbs: BreadcrumbsMode,
+    /// Enable the validation layer's synchronization-validation feature (#99):
+    /// machine-checks the auto-derived cross-queue barriers (RAW/WAR/WAW,
+    /// layout transitions, sync2 scopes). Requires `validation` and the layer.
+    /// Expensive, so off by default (editor/demos); `gpu_tests` turn it on, and
+    /// `REDLILIUM_SYNC_VALIDATION=1` opts in anywhere.
+    pub sync_validation: bool,
 }
 
 impl InstanceParameters {
@@ -300,8 +306,16 @@ impl InstanceParameters {
         self
     }
 
-    /// Apply the `REDLILIUM_ADAPTER` and `REDLILIUM_BREADCRUMBS` environment
-    /// overrides, if set.
+    /// Enable or disable synchronization validation (#99). Requires
+    /// [`with_validation`](Self::with_validation); overridden by
+    /// `REDLILIUM_SYNC_VALIDATION`.
+    pub fn with_sync_validation(mut self, sync_validation: bool) -> Self {
+        self.sync_validation = sync_validation;
+        self
+    }
+
+    /// Apply the `REDLILIUM_ADAPTER`, `REDLILIUM_BREADCRUMBS`, and
+    /// `REDLILIUM_SYNC_VALIDATION` environment overrides, if set.
     ///
     /// Called by instance creation so the overrides work regardless of how
     /// the application built its parameters.
@@ -328,6 +342,24 @@ impl InstanceParameters {
                 "" => {}
                 other => log::warn!(
                     "ignoring unrecognized REDLILIUM_BREADCRUMBS value {other:?} \
+                     (expected 1/true/on or 0/false/off)"
+                ),
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(value) = std::env::var("REDLILIUM_SYNC_VALIDATION") {
+            match value.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "on" | "yes" => {
+                    log::info!("Sync validation forced ON via REDLILIUM_SYNC_VALIDATION");
+                    self.sync_validation = true;
+                }
+                "0" | "false" | "off" | "no" => {
+                    log::info!("Sync validation forced OFF via REDLILIUM_SYNC_VALIDATION");
+                    self.sync_validation = false;
+                }
+                "" => {}
+                other => log::warn!(
+                    "ignoring unrecognized REDLILIUM_SYNC_VALIDATION value {other:?} \
                      (expected 1/true/on or 0/false/off)"
                 ),
             }

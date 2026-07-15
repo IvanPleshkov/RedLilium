@@ -428,8 +428,9 @@ impl VulkanBackend {
 
         let validation_enabled = params.validation;
 
-        // Create instance with validation layers
-        let created = instance::create_instance(&entry, validation_enabled)?;
+        // Create instance with validation layers (and sync validation, #99)
+        let created =
+            instance::create_instance(&entry, validation_enabled, params.sync_validation)?;
         let instance = created.instance;
         let debug_messenger = created.debug_messenger;
         let debug_utils = created.debug_utils;

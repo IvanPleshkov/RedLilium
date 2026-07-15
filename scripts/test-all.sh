@@ -237,24 +237,25 @@ test_unit_tests() {
 
     print_header "Running Unit Tests"
 
-    if [ "$VERBOSE" = true ]; then
-        if cargo test --workspace; then
-            print_success "All unit tests passed"
-            ((PASSED++))
-        else
-            print_error "Unit tests failed"
-            ((FAILED++))
-            return 1
-        fi
+    # Synchronization validation (#99) is ON for the graphics gpu_tests. The
+    # syncval layer is intermittently unstable (STATUS_ACCESS_VIOLATION) when
+    # its binary runs alongside the other GPU-using test binaries under one
+    # `cargo test --workspace`; run on its own it is stable. So test the
+    # workspace with graphics excluded, then graphics by itself.
+    local ok=true
+    if ! cargo test --workspace --exclude redlilium-graphics; then
+        ok=false
+    fi
+    if ! cargo test -p redlilium-graphics; then
+        ok=false
+    fi
+    if [ "$ok" = true ]; then
+        print_success "All unit tests passed"
+        ((PASSED++))
     else
-        if cargo test --workspace 2>&1; then
-            print_success "All unit tests passed"
-            ((PASSED++))
-        else
-            print_error "Unit tests failed"
-            ((FAILED++))
-            return 1
-        fi
+        print_error "Unit tests failed"
+        ((FAILED++))
+        return 1
     fi
 }
 
