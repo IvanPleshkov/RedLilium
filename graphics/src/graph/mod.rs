@@ -45,8 +45,8 @@ mod target;
 mod transfer;
 
 pub use pass::{
-    ComputePass, DispatchCommand, DrawCommand, GraphicsPass, IndirectDrawCommand, Pass,
-    TransferPass,
+    AccelerationStructureBuild, AccelerationStructureBuildPass, ComputePass, DispatchCommand,
+    DrawCommand, GraphicsPass, IndirectDrawCommand, Pass, TransferPass,
 };
 
 // Re-export compiler types for convenience
@@ -195,6 +195,22 @@ impl RenderGraph {
         self.compiled.release(); // Invalidate cache
         let index = self.passes.len() as u32;
         self.passes.push(Pass::Compute(pass));
+        PassHandle::new(index)
+    }
+
+    /// Add an acceleration-structure build pass to the graph (#110).
+    ///
+    /// The pass should be fully configured before adding.
+    /// Returns a `PassHandle` for referencing this pass.
+    ///
+    /// Note: Adding a pass invalidates any cached compiled graph.
+    pub fn add_acceleration_structure_build_pass(
+        &mut self,
+        pass: AccelerationStructureBuildPass,
+    ) -> PassHandle {
+        self.compiled.release(); // Invalidate cache
+        let index = self.passes.len() as u32;
+        self.passes.push(Pass::AccelerationStructureBuild(pass));
         PassHandle::new(index)
     }
 

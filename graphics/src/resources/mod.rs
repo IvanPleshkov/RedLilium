@@ -12,11 +12,16 @@
 //! [`GraphicsDevice`]: crate::GraphicsDevice
 //! [`Arc`]: std::sync::Arc
 
+mod acceleration_structure;
 mod buffer;
 mod ring_buffer;
 mod sampler;
 mod texture;
 
+pub(crate) use acceleration_structure::instance_buffer_size;
+pub use acceleration_structure::{
+    AccelBuildSizes, Blas, BlasDescriptor, BlasTriangles, Tlas, TlasDescriptor, TlasInstance,
+};
 pub use buffer::Buffer;
 pub use ring_buffer::{RingAllocation, RingBuffer};
 pub use sampler::Sampler;

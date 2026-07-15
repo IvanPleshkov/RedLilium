@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::backend::GpuBindingGroup;
 use crate::device::GraphicsDevice;
-use crate::resources::{Buffer, Sampler, Texture};
+use crate::resources::{Buffer, Sampler, Texture, Tlas};
 
 use super::bindings::BindingLayout;
 use super::material::Material;
@@ -50,6 +50,11 @@ pub enum BoundResource {
         /// The sampler.
         sampler: Arc<Sampler>,
     },
+
+    /// A top-level acceleration structure for ray queries (#110). The group
+    /// keeps the TLAS (and, transitively, the BLASes of its last written
+    /// instances) alive.
+    AccelerationStructure(Arc<Tlas>),
 }
 
 impl BoundResource {
@@ -80,6 +85,11 @@ impl BoundResource {
     /// Create a combined texture+sampler binding.
     pub fn combined(texture: Arc<Texture>, sampler: Arc<Sampler>) -> Self {
         Self::CombinedTextureSampler { texture, sampler }
+    }
+
+    /// Create a top-level acceleration structure binding (#110).
+    pub fn acceleration_structure(tlas: Arc<Tlas>) -> Self {
+        Self::AccelerationStructure(tlas)
     }
 }
 
@@ -214,6 +224,13 @@ impl BindingGroupDescriptor {
     /// Add a combined texture+sampler binding.
     pub fn with_combined(self, binding: u32, texture: Arc<Texture>, sampler: Arc<Sampler>) -> Self {
         self.with_entry(binding, BoundResource::combined(texture, sampler))
+    }
+
+    /// Add a top-level acceleration structure binding (#110). The layout
+    /// entry at `binding` must be
+    /// [`BindingType::AccelerationStructure`](crate::BindingType).
+    pub fn with_acceleration_structure(self, binding: u32, tlas: Arc<Tlas>) -> Self {
+        self.with_entry(binding, BoundResource::acceleration_structure(tlas))
     }
 
     /// Set a debug label.

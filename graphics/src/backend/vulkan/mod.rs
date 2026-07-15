@@ -3,12 +3,14 @@
 //! This backend provides direct Vulkan access for maximum performance and control.
 //! It includes support for validation layers in debug builds.
 
+mod accel;
 mod allocator;
 pub mod barriers;
 mod breadcrumbs;
 mod command;
 pub(crate) mod conversion;
 mod debug;
+pub use accel::AccelerationStructureKind;
 pub use debug::{reset_validation_error_count, validation_error_count};
 mod device;
 mod instance;
@@ -35,7 +37,7 @@ use crate::graph::{CompiledGraph, Pass, RenderGraph, RenderTarget};
 use crate::types::{BufferDescriptor, SamplerDescriptor, TextureDescriptor};
 use redlilium_core::profiling::profile_scope;
 
-use super::{GpuBuffer, GpuFence, GpuSampler, GpuTexture};
+use super::{GpuAccelerationStructure, GpuBuffer, GpuFence, GpuSampler, GpuTexture};
 
 /// Maximum number of frames in flight for per-slot resource tracking.
 ///
@@ -304,6 +306,11 @@ pub struct VulkanBackend {
     /// breadcrumb report runs exactly once even though device loss cascades
     /// through every subsequent submit/wait/present.
     device_lost_reported: std::sync::atomic::AtomicBool,
+    /// `VK_KHR_acceleration_structure` entry points, `Some` exactly when
+    /// [`DeviceCapabilities::ray_query`](crate::device::DeviceCapabilities) is
+    /// true (#110). Used for BLAS/TLAS creation, build-size queries, and
+    /// `vkCmdBuildAccelerationStructuresKHR` encoding.
+    accel_loader: Option<ash::khr::acceleration_structure::Device>,
     /// Capabilities queried from the selected physical device at creation
     /// (ADR-027) — the single source of truth downstream clamps against.
     device_caps: crate::device::DeviceCapabilities,
@@ -513,12 +520,22 @@ impl VulkanBackend {
 
         let graphics_queue = unsafe { device.get_device_queue(graphics_queue_family, 0) };
 
-        // Create memory allocator (wrapped in Arc for sharing with GPU resource Drop impls)
+        // Create memory allocator (wrapped in Arc for sharing with GPU resource Drop impls).
+        // Buffer device addresses are allocator-wide: with ray query enabled
+        // (#110) every allocation carries VK_MEMORY_ALLOCATE_DEVICE_ADDRESS
+        // so AS/scratch/geometry buffers can be addressed by the build APIs.
         let allocator = Arc::new(Mutex::new(allocator::create_allocator(
             &instance,
             physical_device,
             device.clone(),
+            device_caps.ray_query,
         )?));
+
+        // Acceleration-structure entry points, loaded only when the extension
+        // bundle is enabled (#110).
+        let accel_loader = device_caps
+            .ray_query
+            .then(|| ash::khr::acceleration_structure::Device::new(&instance, &device));
 
         // Create command pool (staging uploads + swapchain present). Present
         // command buffers are reset individually each frame, so this pool
@@ -777,6 +794,7 @@ impl VulkanBackend {
             depth24_stencil8_format,
             &selected.properties,
             device_caps.wireframe,
+            device_caps.ray_query,
         )?;
 
         // Seed the memory-stats cache so the panel has heap sizes immediately;
@@ -828,6 +846,7 @@ impl VulkanBackend {
             transfer_granularity: queue_plan.transfer_granularity,
             async_decline_warned: Mutex::new(HashSet::new()),
             implicit_cross_queue_images,
+            accel_loader,
             device_caps,
             adapter_info,
             surface_support,
@@ -1516,6 +1535,20 @@ impl VulkanBackend {
 
     /// Create a buffer resource.
     pub fn create_buffer(&self, descriptor: &BufferDescriptor) -> Result<GpuBuffer, GraphicsError> {
+        // The AS/device-address roles are valid only with the ray-query
+        // bundle enabled (#110): without `bufferDeviceAddress` the usage flags
+        // themselves are a Vulkan error, so fail with the engine-level cause.
+        if descriptor
+            .usage
+            .intersects(crate::types::BufferUsage::RAY_TRACING_FLAGS)
+            && !self.device_caps.ray_query
+        {
+            return Err(GraphicsError::FeatureNotSupported(
+                "acceleration-structure buffer usage requires DeviceCapabilities::ray_query \
+                 (VK_KHR_acceleration_structure + VK_KHR_ray_query, #110)"
+                    .to_string(),
+            ));
+        }
         let usage = convert_buffer_usage(descriptor.usage);
 
         // Memory location follows mappability, not copyability (ADR-021):
@@ -2010,6 +2043,9 @@ impl VulkanBackend {
                         });
                     }
                 }
+                // Acceleration structures need no buffer/image info; their
+                // write is issued separately below (pNext-chained).
+                BoundResource::AccelerationStructure(_) => {}
             }
         }
 
@@ -2072,6 +2108,33 @@ impl VulkanBackend {
                         .dst_binding(entry.binding)
                         .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                         .image_info(info)
+                }
+                BoundResource::AccelerationStructure(tlas) => {
+                    // The AS handle rides in a pNext struct whose lifetime is
+                    // this block, so its write is issued immediately instead
+                    // of joining the batched `writes` (AS bindings are rare —
+                    // one per ray-query material — so the extra call is noise).
+                    let GpuAccelerationStructure::Vulkan { handle, .. } = tlas.gpu_handle() else {
+                        log::warn!(
+                            "binding {} references a non-Vulkan acceleration structure; \
+                             descriptor left unwritten",
+                            entry.binding
+                        );
+                        continue;
+                    };
+                    let handles = [*handle];
+                    let mut as_write = vk::WriteDescriptorSetAccelerationStructureKHR::default()
+                        .acceleration_structures(&handles);
+                    let mut write = vk::WriteDescriptorSet::default()
+                        .dst_set(descriptor_set)
+                        .dst_binding(entry.binding)
+                        .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+                        .push_next(&mut as_write);
+                    // Normally set by buffer_info/image_info; the AS count
+                    // lives in the pNext struct, so set it explicitly.
+                    write.descriptor_count = 1;
+                    unsafe { self.device.update_descriptor_sets(&[write], &[]) };
+                    continue;
                 }
             };
             writes.push(write);
@@ -3043,6 +3106,9 @@ impl VulkanBackend {
             Pass::Graphics(graphics_pass) => self.encode_graphics_pass(cmd, graphics_pass),
             Pass::Transfer(transfer_pass) => self.encode_transfer_pass(cmd, transfer_pass),
             Pass::Compute(compute_pass) => self.encode_compute_pass(cmd, compute_pass),
+            Pass::AccelerationStructureBuild(build_pass) => {
+                self.encode_acceleration_structure_build_pass(cmd, build_pass)
+            }
         }
     }
 

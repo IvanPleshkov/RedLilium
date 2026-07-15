@@ -29,6 +29,13 @@ impl WgpuBackend {
             Pass::Compute(compute_pass) => {
                 self.encode_compute_pass(encoder, compute_pass)?;
             }
+            Pass::AccelerationStructureBuild(build_pass) => {
+                return Err(GraphicsError::FeatureNotSupported(format!(
+                    "pass '{}': acceleration-structure builds are not supported on the wgpu \
+                     backend (DeviceCapabilities::ray_query is false, #110)",
+                    build_pass.name()
+                )));
+            }
         }
         Ok(())
     }

@@ -519,6 +519,9 @@ impl WgpuBackend {
             // No VRAM budget API on wgpu (#98); heaps are empty, the panel
             // falls back to the engine's allocator/resource figures.
             memory_budget: false,
+            // Inline ray tracing is Vulkan-only (#110). wgpu's experimental
+            // ray-query support is a named follow-up (issue #110 phase 4).
+            ray_query: false,
         }
     }
 

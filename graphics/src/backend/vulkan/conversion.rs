@@ -31,6 +31,20 @@ pub fn convert_buffer_usage(usage: BufferUsage) -> vk::BufferUsageFlags {
     if usage.contains(BufferUsage::COPY_DST) {
         result |= vk::BufferUsageFlags::TRANSFER_DST;
     }
+    // Acceleration-structure roles (#110). Each implies SHADER_DEVICE_ADDRESS:
+    // the build APIs consume geometry, instance, storage, and scratch memory
+    // through raw device addresses.
+    if usage.contains(BufferUsage::ACCELERATION_STRUCTURE_INPUT) {
+        result |= vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
+            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
+    }
+    if usage.contains(BufferUsage::ACCELERATION_STRUCTURE_STORAGE) {
+        result |= vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
+            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
+    }
+    if usage.contains(BufferUsage::DEVICE_ADDRESS) {
+        result |= vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
+    }
 
     // MAP_READ and MAP_WRITE don't have direct Vulkan buffer usage equivalents
     // They affect memory allocation location instead

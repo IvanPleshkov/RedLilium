@@ -89,11 +89,12 @@ pub use device::{
 };
 pub use error::GraphicsError;
 pub use graph::{
-    BufferCopyRegion, BufferTextureCopyRegion, BufferTextureLayout, ColorAttachment, CompiledGraph,
-    ComputePass, DepthStencilAttachment, DrawCommand, GraphError, GraphicsPass,
-    IndirectDrawCommand, LoadOp, Pass, PassHandle, QueuePreference, RenderGraph,
-    RenderGraphCompilationMode, RenderTarget, RenderTargetConfig, StoreOp, TextureCopyLocation,
-    TextureCopyRegion, TextureOrigin, TransferConfig, TransferOperation, TransferPass,
+    AccelerationStructureBuild, AccelerationStructureBuildPass, BufferCopyRegion,
+    BufferTextureCopyRegion, BufferTextureLayout, ColorAttachment, CompiledGraph, ComputePass,
+    DepthStencilAttachment, DrawCommand, GraphError, GraphicsPass, IndirectDrawCommand, LoadOp,
+    Pass, PassHandle, QueuePreference, RenderGraph, RenderGraphCompilationMode, RenderTarget,
+    RenderTargetConfig, StoreOp, TextureCopyLocation, TextureCopyRegion, TextureOrigin,
+    TransferConfig, TransferOperation, TransferPass,
     resource_usage::{PassResourceUsage, TextureAccessMode, TextureUsageDecl},
 };
 pub use instance::{
@@ -114,7 +115,10 @@ pub use mesh::{
 };
 pub use pipeline::{FramePipeline, MAX_FRAMES_IN_FLIGHT};
 pub use resize::{ResizeEvent, ResizeManager, ResizeStrategy};
-pub use resources::{Buffer, RingAllocation, RingBuffer, Sampler, Texture};
+pub use resources::{
+    AccelBuildSizes, Blas, BlasDescriptor, BlasTriangles, Buffer, RingAllocation, RingBuffer,
+    Sampler, Texture, Tlas, TlasDescriptor, TlasInstance,
+};
 pub use scheduler::{Fence, FenceStatus, FrameSchedule, SubmitHandle};
 pub use shader::{
     ShaderLibrary, ShaderVariantSpace, VariantError, VariantKey, VariantSelector, VariantValue,

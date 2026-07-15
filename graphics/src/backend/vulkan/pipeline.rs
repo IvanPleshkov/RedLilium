@@ -166,6 +166,10 @@ pub struct PipelineManager {
     /// tripping validation — mirroring the wgpu backend's handling of a
     /// missing `POLYGON_MODE_LINE` (ADR-027 capability, VK-M10).
     wireframe_supported: bool,
+    /// Whether the ray-query bundle was enabled on the device (#110). Gates
+    /// `AccelerationStructure` bindings in descriptor set layouts — without
+    /// the extension the descriptor type itself is invalid API use.
+    ray_query_supported: bool,
     /// Whether resources have been explicitly destroyed.
     destroyed: bool,
 }
@@ -182,8 +186,9 @@ impl PipelineManager {
         depth24_stencil8_format: vk::Format,
         device_properties: &vk::PhysicalDeviceProperties,
         wireframe_supported: bool,
+        ray_query_supported: bool,
     ) -> Result<Self, GraphicsError> {
-        let pool_sizes = vec![
+        let mut pool_sizes = vec![
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
                 descriptor_count: 1000,
@@ -216,6 +221,14 @@ impl PipelineManager {
                 descriptor_count: 1000,
             },
         ];
+        // AS descriptors exist only with the extension enabled (#110); naming
+        // the type in a pool without it is itself invalid API use.
+        if ray_query_supported {
+            pool_sizes.push(vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::ACCELERATION_STRUCTURE_KHR,
+                descriptor_count: 100,
+            });
+        }
 
         // A single persistent pool chain hands out individually-freeable sets
         // for eagerly-created binding groups (freed on the group's Drop).
@@ -237,6 +250,7 @@ impl PipelineManager {
             pipeline_cache_dirty: std::sync::atomic::AtomicBool::new(false),
             ds_layout_cache: parking_lot::Mutex::new(HashMap::new()),
             wireframe_supported,
+            ray_query_supported,
             destroyed: false,
         })
     }
@@ -419,60 +433,7 @@ impl PipelineManager {
         stage: ShaderStage,
         entry_point: &str,
     ) -> Result<Vec<u32>, GraphicsError> {
-        let source = std::str::from_utf8(wgsl_source)
-            .map_err(|e| GraphicsError::ShaderCompilationFailed(format!("Invalid UTF-8: {e}")))?;
-
-        let module = naga::front::wgsl::parse_str(source).map_err(|e| {
-            GraphicsError::ShaderCompilationFailed(format!("WGSL parse error: {e}"))
-        })?;
-
-        let mut validator = naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::all(),
-        );
-        let info = validator.validate(&module).map_err(|e| {
-            GraphicsError::ShaderCompilationFailed(format!("Validation error: {e}"))
-        })?;
-
-        let naga_stage = match stage {
-            ShaderStage::Vertex => naga::ShaderStage::Vertex,
-            ShaderStage::Fragment => naga::ShaderStage::Fragment,
-            ShaderStage::Compute => naga::ShaderStage::Compute,
-        };
-
-        let _entry_point_index = module
-            .entry_points
-            .iter()
-            .position(|ep| ep.name == entry_point && ep.stage == naga_stage)
-            .ok_or_else(|| {
-                GraphicsError::ShaderCompilationFailed(format!(
-                    "Entry point '{}' not found for stage {:?}",
-                    entry_point, stage
-                ))
-            })?;
-
-        let options = naga::back::spv::Options {
-            lang_version: (1, 3),
-            flags: naga::back::spv::WriterFlags::empty(),
-            capabilities: None,
-            bounds_check_policies: naga::proc::BoundsCheckPolicies::default(),
-            binding_map: Default::default(),
-            debug_info: None,
-            zero_initialize_workgroup_memory:
-                naga::back::spv::ZeroInitializeWorkgroupMemoryMode::None,
-        };
-
-        let pipeline_options = naga::back::spv::PipelineOptions {
-            shader_stage: naga_stage,
-            entry_point: entry_point.to_string(),
-        };
-
-        let spv = naga::back::spv::write_vec(&module, &info, &options, Some(&pipeline_options))
-            .map_err(|e| {
-                GraphicsError::ShaderCompilationFailed(format!("SPIR-V generation error: {e}"))
-            })?;
-
-        Ok(spv)
+        compile_wgsl_to_spirv(wgsl_source, stage, entry_point)
     }
 
     /// Compile Slang source to SPIR-V using the Slang compiler.
@@ -520,6 +481,21 @@ impl PipelineManager {
         &self,
         layout: &BindingLayout,
     ) -> Result<vk::DescriptorSetLayout, GraphicsError> {
+        // AS bindings without the ray-query bundle would hand the driver a
+        // descriptor type from a disabled extension (#110) — fail with the
+        // engine-level cause instead.
+        if !self.ray_query_supported
+            && layout
+                .entries
+                .iter()
+                .any(|e| e.binding_type == BindingType::AccelerationStructure)
+        {
+            return Err(GraphicsError::FeatureNotSupported(
+                "binding layout declares an acceleration structure, which requires \
+                 DeviceCapabilities::ray_query (#110)"
+                    .to_string(),
+            ));
+        }
         let key = ds_layout_key(layout);
         if let Some(&cached) = self.ds_layout_cache.lock().get(&key) {
             return Ok(cached);
@@ -544,6 +520,9 @@ impl PipelineManager {
                     | BindingType::DepthTexture => vk::DescriptorType::SAMPLED_IMAGE,
                     BindingType::CombinedTextureSampler => {
                         vk::DescriptorType::COMBINED_IMAGE_SAMPLER
+                    }
+                    BindingType::AccelerationStructure => {
+                        vk::DescriptorType::ACCELERATION_STRUCTURE_KHR
                     }
                 };
 
@@ -1123,6 +1102,71 @@ fn spirv_entry_point_name(spirv: &[u32], stage: ShaderStage) -> Option<String> {
     None
 }
 
+/// Compile WGSL to SPIR-V using naga.
+///
+/// Validation runs with `Capabilities::all()`, which includes `RAY_QUERY` —
+/// WGSL ray-query shaders (`acceleration_structure` bindings, `ray_query`
+/// vars, #110) compile through this same path; naga emits the
+/// `SPV_KHR_ray_query` extension for them.
+fn compile_wgsl_to_spirv(
+    wgsl_source: &[u8],
+    stage: ShaderStage,
+    entry_point: &str,
+) -> Result<Vec<u32>, GraphicsError> {
+    let source = std::str::from_utf8(wgsl_source)
+        .map_err(|e| GraphicsError::ShaderCompilationFailed(format!("Invalid UTF-8: {e}")))?;
+
+    let module = naga::front::wgsl::parse_str(source)
+        .map_err(|e| GraphicsError::ShaderCompilationFailed(format!("WGSL parse error: {e}")))?;
+
+    let mut validator = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    );
+    let info = validator
+        .validate(&module)
+        .map_err(|e| GraphicsError::ShaderCompilationFailed(format!("Validation error: {e}")))?;
+
+    let naga_stage = match stage {
+        ShaderStage::Vertex => naga::ShaderStage::Vertex,
+        ShaderStage::Fragment => naga::ShaderStage::Fragment,
+        ShaderStage::Compute => naga::ShaderStage::Compute,
+    };
+
+    let _entry_point_index = module
+        .entry_points
+        .iter()
+        .position(|ep| ep.name == entry_point && ep.stage == naga_stage)
+        .ok_or_else(|| {
+            GraphicsError::ShaderCompilationFailed(format!(
+                "Entry point '{}' not found for stage {:?}",
+                entry_point, stage
+            ))
+        })?;
+
+    let options = naga::back::spv::Options {
+        lang_version: (1, 3),
+        flags: naga::back::spv::WriterFlags::empty(),
+        capabilities: None,
+        bounds_check_policies: naga::proc::BoundsCheckPolicies::default(),
+        binding_map: Default::default(),
+        debug_info: None,
+        zero_initialize_workgroup_memory: naga::back::spv::ZeroInitializeWorkgroupMemoryMode::None,
+    };
+
+    let pipeline_options = naga::back::spv::PipelineOptions {
+        shader_stage: naga_stage,
+        entry_point: entry_point.to_string(),
+    };
+
+    let spv = naga::back::spv::write_vec(&module, &info, &options, Some(&pipeline_options))
+        .map_err(|e| {
+            GraphicsError::ShaderCompilationFailed(format!("SPIR-V generation error: {e}"))
+        })?;
+
+    Ok(spv)
+}
+
 /// Whether the SPIR-V module declares a push-constant block.
 ///
 /// The engine's binding model has no push-constant path (pipeline layouts
@@ -1286,6 +1330,35 @@ mod tests {
         // Content differences must produce different keys.
         let c = BindingLayout::new().with_uniform_buffer(0).with_sampler(1);
         assert_ne!(ds_layout_key(&a), ds_layout_key(&c));
+    }
+
+    /// #110: the naga WGSL→SPIR-V path must accept ray-query shaders —
+    /// `acceleration_structure` bindings, `ray_query` state, the intersection
+    /// accessors. This is the shader path the ray-tracing feature stands on;
+    /// a naga upgrade that regresses it should fail here, not in a demo run.
+    #[test]
+    fn wgsl_ray_query_compiles_to_spirv() {
+        const RAY_QUERY_WGSL: &[u8] = br#"
+            @group(0) @binding(0) var tlas: acceleration_structure;
+
+            @fragment
+            fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+                var rq: ray_query;
+                rayQueryInitialize(&rq, tlas,
+                    RayDesc(0x4u, 0xFFu, 0.001, 100.0,
+                            vec3<f32>(pos.xy, 0.0), vec3<f32>(0.0, 0.0, 1.0)));
+                while (rayQueryProceed(&rq)) {}
+                let hit = rayQueryGetCommittedIntersection(&rq);
+                if (hit.kind == RAY_QUERY_INTERSECTION_TRIANGLE) {
+                    return vec4<f32>(hit.barycentrics, hit.t, 1.0);
+                }
+                return vec4<f32>(0.0);
+            }
+        "#;
+
+        let spv = compile_wgsl_to_spirv(RAY_QUERY_WGSL, ShaderStage::Fragment, "fs_main")
+            .expect("ray-query WGSL must compile to SPIR-V");
+        assert!(!spv.is_empty());
     }
 
     #[test]

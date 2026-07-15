@@ -11,7 +11,9 @@ use crate::instance::GraphicsInstance;
 use crate::materials::{Material, MaterialDescriptor};
 use crate::mesh::{CpuMesh, Mesh, MeshDescriptor};
 use crate::pipeline::FramePipeline;
-use crate::resources::{Buffer, Sampler, Texture};
+use crate::resources::{
+    Blas, BlasDescriptor, Buffer, Sampler, Texture, Tlas, TlasDescriptor, instance_buffer_size,
+};
 use crate::types::{
     BufferDescriptor, BufferUsage, CpuSampler, SamplerDescriptor, TextureDescriptor,
 };
@@ -84,6 +86,17 @@ pub struct DeviceCapabilities {
     /// moment). When false, heap `budget`/`usage` are `None` and the stats panel
     /// shows heap sizes + allocator totals only. Always false on wgpu/dummy.
     pub memory_budget: bool,
+    /// Whether inline ray tracing (ray queries against acceleration
+    /// structures) is available (#110). True only on the Vulkan backend when
+    /// `VK_KHR_acceleration_structure` + `VK_KHR_ray_query` (and the
+    /// `bufferDeviceAddress` feature they build on) are enabled. This is a
+    /// capability, not a [`DeviceTier`]: no renderer code path stands on it
+    /// yet (ADR-032) — a future ray-traced-lighting render path introduces
+    /// the tier. Gates [`GraphicsDevice::create_blas`] /
+    /// [`GraphicsDevice::create_tlas`] and
+    /// [`BindingType::AccelerationStructure`](crate::BindingType) bindings.
+    /// Always false on wgpu/dummy and on wasm.
+    pub ray_query: bool,
 }
 
 impl DeviceCapabilities {
@@ -403,6 +416,154 @@ impl GraphicsDevice {
         Ok(texture)
     }
 
+    /// Create a bottom-level acceleration structure over triangle geometry
+    /// (#110, ADR-032).
+    ///
+    /// Allocates the AS backing storage and build scratch (engine [`Buffer`]s,
+    /// tracked by the automatic barrier system) and creates the GPU handle.
+    /// The BLAS holds no geometry yet: add it to an
+    /// [`AccelerationStructureBuildPass`](crate::AccelerationStructureBuildPass)
+    /// to build it on the GPU — there is deliberately no direct build method
+    /// (GPU work goes through the frame graph).
+    ///
+    /// Requires [`DeviceCapabilities::ray_query`]; geometry buffers must carry
+    /// [`BufferUsage::ACCELERATION_STRUCTURE_INPUT`](crate::types::BufferUsage).
+    ///
+    /// # Errors
+    ///
+    /// Fails on backends without ray-query support (wgpu; Vulkan devices
+    /// lacking the extensions), on an empty descriptor, or when a geometry
+    /// buffer lacks the AS-input usage flag.
+    pub fn create_blas(
+        self: &Arc<Self>,
+        descriptor: &BlasDescriptor,
+    ) -> Result<Arc<Blas>, GraphicsError> {
+        profile_scope!("create_blas");
+
+        if descriptor.geometries.is_empty() {
+            return Err(GraphicsError::InvalidParameter(
+                "BLAS descriptor has no geometry".to_string(),
+            ));
+        }
+        for geometry in &descriptor.geometries {
+            let input_ok = |buffer: &Buffer| {
+                buffer
+                    .descriptor()
+                    .usage
+                    .contains(crate::types::BufferUsage::ACCELERATION_STRUCTURE_INPUT)
+            };
+            if !input_ok(&geometry.vertex_buffer)
+                || geometry
+                    .index_buffer
+                    .as_deref()
+                    .is_some_and(|b| !input_ok(b))
+            {
+                return Err(GraphicsError::InvalidParameter(format!(
+                    "BLAS '{}' geometry buffers must be created with \
+                     BufferUsage::ACCELERATION_STRUCTURE_INPUT",
+                    descriptor.label.as_deref().unwrap_or("unnamed")
+                )));
+            }
+        }
+
+        let backend = self.instance.backend();
+        let sizes = backend.blas_build_sizes(descriptor)?;
+        let label = descriptor.label.as_deref().unwrap_or("blas");
+        let backing = self.create_buffer(
+            &BufferDescriptor::new(
+                sizes.acceleration_structure_size,
+                BufferUsage::ACCELERATION_STRUCTURE_STORAGE,
+            )
+            .with_label(format!("{label} storage")),
+        )?;
+        let scratch = self.create_buffer(
+            &BufferDescriptor::new(
+                sizes.build_scratch_size,
+                BufferUsage::STORAGE | BufferUsage::DEVICE_ADDRESS,
+            )
+            .with_label(format!("{label} scratch")),
+        )?;
+        let gpu_handle =
+            backend.create_blas_handle(backing.gpu_handle(), sizes.acceleration_structure_size)?;
+
+        Ok(Arc::new(Blas::new(
+            Arc::clone(self),
+            descriptor.clone(),
+            backing,
+            scratch,
+            gpu_handle,
+        )))
+    }
+
+    /// Create a top-level acceleration structure over BLAS instances (#110,
+    /// ADR-032).
+    ///
+    /// Allocates backing storage, build scratch, and one host-visible
+    /// instance buffer per frame slot. Per frame: write the instance array
+    /// with [`Tlas::write_instances`], then add the TLAS to that frame's
+    /// [`AccelerationStructureBuildPass`](crate::AccelerationStructureBuildPass).
+    /// Shaders bind the built TLAS through
+    /// [`BindingType::AccelerationStructure`](crate::BindingType).
+    ///
+    /// # Errors
+    ///
+    /// Fails on backends without ray-query support or when `max_instances`
+    /// is zero.
+    pub fn create_tlas(
+        self: &Arc<Self>,
+        descriptor: &TlasDescriptor,
+    ) -> Result<Arc<Tlas>, GraphicsError> {
+        profile_scope!("create_tlas");
+
+        if descriptor.max_instances == 0 {
+            return Err(GraphicsError::InvalidParameter(
+                "TLAS max_instances cannot be zero".to_string(),
+            ));
+        }
+
+        let backend = self.instance.backend();
+        let sizes = backend.tlas_build_sizes(descriptor.max_instances)?;
+        let label = descriptor.label.as_deref().unwrap_or("tlas");
+        let backing = self.create_buffer(
+            &BufferDescriptor::new(
+                sizes.acceleration_structure_size,
+                BufferUsage::ACCELERATION_STRUCTURE_STORAGE,
+            )
+            .with_label(format!("{label} storage")),
+        )?;
+        let scratch = self.create_buffer(
+            &BufferDescriptor::new(
+                sizes.build_scratch_size,
+                BufferUsage::STORAGE | BufferUsage::DEVICE_ADDRESS,
+            )
+            .with_label(format!("{label} scratch")),
+        )?;
+        // One instance buffer per frame slot: `write_instances` rotates, so
+        // the CPU never touches data an in-flight frame's build still reads.
+        let instance_buffers = (0..crate::pipeline::MAX_FRAMES_IN_FLIGHT)
+            .map(|slot| {
+                self.create_buffer(
+                    &BufferDescriptor::new(
+                        instance_buffer_size(descriptor.max_instances),
+                        BufferUsage::ACCELERATION_STRUCTURE_INPUT | BufferUsage::MAP_WRITE,
+                    )
+                    .with_label(format!("{label} instances[{slot}]")),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let gpu_handle =
+            backend.create_tlas_handle(backing.gpu_handle(), sizes.acceleration_structure_size)?;
+
+        Ok(Arc::new(Tlas::new(
+            Arc::clone(self),
+            descriptor.clone(),
+            backing,
+            scratch,
+            instance_buffers,
+            gpu_handle,
+        )))
+    }
+
     /// Create a texture sampler.
     ///
     /// # Errors
@@ -687,6 +848,25 @@ impl GraphicsDevice {
                     entry.binding
                 )));
             };
+            // AS bindings require the ray-query capability (#110): fail here
+            // with the engine-level cause instead of an invalid descriptor
+            // type reaching the driver. The dummy backend is exempt — it
+            // fabricates no capabilities but must keep graph tests runnable.
+            if matches!(
+                decl.binding_type,
+                crate::materials::BindingType::AccelerationStructure
+            ) && !self.capabilities.ray_query
+                && !matches!(
+                    &*self.instance.backend(),
+                    crate::backend::GpuBackend::Dummy(_)
+                )
+            {
+                return Err(GraphicsError::FeatureNotSupported(format!(
+                    "binding {} declares an acceleration structure, which requires \
+                     DeviceCapabilities::ray_query (#110)",
+                    entry.binding
+                )));
+            }
             if !resource_matches_binding_type(&entry.resource, decl.binding_type) {
                 return Err(GraphicsError::InvalidParameter(format!(
                     "binding {} bound resource does not match the layout's declared type {:?}",
@@ -1061,6 +1241,9 @@ fn resource_matches_binding_type(
         }
         BoundResource::CombinedTextureSampler { .. } => {
             matches!(binding_type, BindingType::CombinedTextureSampler)
+        }
+        BoundResource::AccelerationStructure(_) => {
+            matches!(binding_type, BindingType::AccelerationStructure)
         }
     }
 }

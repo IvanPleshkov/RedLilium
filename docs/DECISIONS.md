@@ -1940,3 +1940,103 @@ back to a single mip on wgpu/dummy and on blit-ineligible formats). See #96.
 - #88: sharing-mode measurements gating a QFOT revisit
 - #96: GPU mip generation — a requires-graphics transfer op routed off the
   transfer queue
+
+## ADR-032: Inline Ray Tracing via VK_KHR_ray_query
+
+**Date**: 2026-07-15
+**Status**: Accepted
+
+### Context
+
+The engine reached the point where an advanced GPU feature is the right next
+step (#110). Two candidates: mesh shaders (meshlets) and hardware ray
+tracing. The raw-ash Vulkan backend was chosen in ADR-007 precisely to keep
+such extensions reachable; the ADR-027 capability model reserved slots for
+them. Mesh shaders need new `ShaderStage::{Task, Mesh}` variants, a SPIR-V
+bake path (Slang's WGSL output cannot express them), and meshlet
+preprocessing (meshoptimizer) from scratch. Inline ray tracing via
+`VK_KHR_ray_query` needs none of that: ray queries run inside existing
+fragment/compute shaders, and naga — the engine's WGSL→SPIR-V path on the
+Vulkan backend — already supports WGSL ray queries, emitting
+`SPV_KHR_ray_query`. Both dev GPUs (RTX 3070, RX 6400 / RDNA2) support the
+extension bundle, enabling two-vendor validation of the sync code.
+
+### Decision
+
+1. **Capability, not tier** (per the ADR-027 litmus): `ray_query` lands as a
+   `DeviceCapabilities` field — no renderer code path stands on it yet. When
+   ray-traced lighting becomes a real render path, *that* change introduces
+   the tier rung.
+2. **All-or-nothing bundle**: `VK_KHR_acceleration_structure` +
+   `VK_KHR_ray_query` + `VK_KHR_deferred_host_operations` extensions plus the
+   `accelerationStructure`, `rayQuery`, and Vulkan 1.2 `bufferDeviceAddress`
+   feature bits. Partial support reads as unsupported. The gpu-allocator is
+   created with `buffer_device_address` exactly when the bundle is enabled.
+3. **AS storage and scratch are ordinary engine `Buffer`s**, so the existing
+   buffer-access tracker covers builds and traversals with no new tracking
+   machinery. Four new `BufferAccessMode`s lower to the
+   `ACCELERATION_STRUCTURE_BUILD` stage / `ACCELERATION_STRUCTURE_{READ,WRITE}`
+   access masks (build input, TLAS-build BLAS read, build write, ray-query
+   shader read).
+4. **Builds go through the frame graph** (the Phase-0 red line): a fourth
+   pass kind, `AccelerationStructureBuildPass`, encodes
+   `vkCmdBuildAccelerationStructuresKHR`. Builds within one pass are
+   independent by contract; BLAS→TLAS ordering is expressed as pass
+   dependencies, and hazards derive from the declared access modes like every
+   other pass. The pass is legal on any compute-capable queue (never the
+   dedicated transfer queue).
+5. **TLAS instance streaming is ring-buffered**: a `Tlas` owns one
+   host-visible instance buffer per frame slot; `write_instances` rotates so
+   the CPU never overwrites data an in-flight frame's build reads. The TLAS
+   snapshots which BLASes its instances reference — that snapshot feeds both
+   barrier inference and keep-alive.
+6. **Binding model**: `BindingType::AccelerationStructure` →
+   `VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR`,
+   `BoundResource::AccelerationStructure(Arc<Tlas>)`. Material resource
+   extraction declares the TLAS **and** its referenced BLAS backings as
+   shader reads (traversal touches both).
+7. **Vulkan-only**: wgpu/dummy report `ray_query: false`; wgpu rejects AS
+   buffers/bindings/passes with a clear error; the dummy backend accepts
+   creation (placeholder handles) so graph-level tests run headlessly.
+
+### Consequences
+
+- ✅ `ray_query_demo`: fullscreen fragment-shader ray tracing (primary rays +
+  hard shadows) over GPU-built BLAS/TLAS, TLAS rebuilt per frame; validated
+  on RTX 3070 and RX 6400 with sync validation clean
+- ✅ WGSL ray-query shaders ride the existing naga path — no new bake
+  machinery; guarded by a unit test compiling one to SPIR-V
+- ✅ Barrier correctness is machine-checked: the new access modes flow
+  through the same tracker the sync validation layer (#99) already audits
+- ⚠️ BLAS geometry buffers must be created with
+  `BufferUsage::ACCELERATION_STRUCTURE_INPUT` — meshes loaded through the
+  standard path don't carry it yet (opt-in mesh AS input is #110 phase 2)
+- ⚠️ No BLAS compaction/update yet — every build is a full PREFER_FAST_TRACE
+  build (#110 phase 3); fine at demo scale, wasteful for streamed worlds
+- ⚠️ Slang cannot target WGSL ray queries, so ray-query shaders are authored
+  in WGSL directly for now; a Slang→SPIR-V bake variant is the escape hatch
+  when they need to join the baked-material world
+
+### Amendment (2026-07-15): phase decisions
+
+Three follow-up forks were decided with the project owner:
+
+1. **RT shadows integrate as a separate WGSL shadow-mask pass** — a
+   fullscreen ray-query pass reconstructs positions from depth and writes a
+   shadow-mask texture; the Slang resolve shader samples it as a plain
+   texture. The bake pipeline stays untouched; the Slang→SPIR-V bake variant
+   is deferred until ray queries need to live inside baked materials.
+2. **BLAS compaction swaps transparently in place**: `Blas` gains interior
+   mutability for its (handle, backing) pair; the old pair goes into deferred
+   retirement until the frame fence. Callers are unaffected —
+   `write_instances` picks up the new device address on the next write, while
+   in-flight builds keep the old AS alive through their Arc snapshots.
+3. **wgpu ray query is dropped** (was phase 4): browser WebGPU has no RT and
+   desktop wgpu is shadowed by the native Vulkan backend — dead weight in the
+   backlog.
+
+### Related Issues
+
+- #110: feature issue (phase 2: mesh AS input + shadow-mask pass in
+  pbr_ibl; phase 3: transparent compaction + async-compute builds)
+- #99: sync validation that machine-checks the new barrier paths

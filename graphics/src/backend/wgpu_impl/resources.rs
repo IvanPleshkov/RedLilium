@@ -59,6 +59,19 @@ impl WgpuBackend {
 
     /// Create a buffer resource.
     pub fn create_buffer(&self, descriptor: &BufferDescriptor) -> Result<GpuBuffer, GraphicsError> {
+        // Acceleration-structure roles are Vulkan-only (#110); the wgpu
+        // backend reports `ray_query: false`, so honor that here instead of
+        // silently dropping the flags in conversion.
+        if descriptor
+            .usage
+            .intersects(crate::types::BufferUsage::RAY_TRACING_FLAGS)
+        {
+            return Err(GraphicsError::FeatureNotSupported(
+                "acceleration-structure buffer usage is not supported on the wgpu backend \
+                 (DeviceCapabilities::ray_query is false, #110)"
+                    .to_string(),
+            ));
+        }
         let usage = convert_buffer_usage(descriptor.usage);
 
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -911,6 +924,13 @@ fn build_wgpu_bind_group_entries(
             }
             BoundResource::CombinedTextureSampler { .. } => {
                 unreachable!("CombinedTextureSampler handled above")
+            }
+            BoundResource::AccelerationStructure(_) => {
+                return Err(GraphicsError::FeatureNotSupported(format!(
+                    "wgpu: acceleration structure bound at binding {} is not supported \
+                     (DeviceCapabilities::ray_query is false, #110)",
+                    entry.binding
+                )));
             }
         };
         out.push(wgpu::BindGroupEntry {

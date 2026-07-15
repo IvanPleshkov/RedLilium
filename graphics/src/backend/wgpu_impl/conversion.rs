@@ -590,6 +590,15 @@ pub fn convert_binding_type(binding_type: crate::materials::BindingType) -> wgpu
                 multisampled: false,
             }
         }
+        crate::materials::BindingType::AccelerationStructure => {
+            // Unsupported on this backend (#110): binding-group creation
+            // errors before any group with this layout can be used, and the
+            // engine never enables wgpu's experimental ray-query features.
+            // The layout conversion still needs an answer, so name the type.
+            wgpu::BindingType::AccelerationStructure {
+                vertex_return: false,
+            }
+        }
     }
 }
 

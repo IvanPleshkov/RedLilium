@@ -31,6 +31,13 @@ pub struct OptionalFeatures {
     /// (it is free — a query-only extension, no feature struct); drives the GPU
     /// stats panel's driver-level VRAM figures.
     pub memory_budget: bool,
+    /// Inline ray tracing (#110): `VK_KHR_acceleration_structure` +
+    /// `VK_KHR_ray_query` (+ `VK_KHR_deferred_host_operations`, a dependency
+    /// of the former) with their feature bits AND the Vulkan 1.2
+    /// `bufferDeviceAddress` feature the AS build APIs require. All-or-nothing:
+    /// partial support (e.g. AS without ray query) reads as unsupported —
+    /// the engine has no consumer for the parts in isolation.
+    pub ray_query: bool,
 }
 
 /// GPU crash breadcrumb extensions the device advertises (#97).
@@ -320,6 +327,7 @@ pub fn select_physical_device(
                         fill_mode_non_solid: features.fill_mode_non_solid == vk::TRUE,
                         maintenance9,
                         memory_budget: has_ext(ash::ext::memory_budget::NAME),
+                        ray_query: ray_query_supported(instance, device, &extensions),
                     },
                     breadcrumbs,
                     portability_subset: extensions.contains(b"VK_KHR_portability_subset".as_ref()),
@@ -345,6 +353,37 @@ pub fn select_physical_device(
             )
         }
     })
+}
+
+/// Whether the device supports the inline-ray-tracing bundle (#110):
+/// the three extensions plus the `accelerationStructure`, `rayQuery`, and
+/// `bufferDeviceAddress` feature bits. Queried during selection so
+/// `vkCreateDevice` never sees a feature the device did not report.
+fn ray_query_supported(
+    instance: &ash::Instance,
+    device: vk::PhysicalDevice,
+    extensions: &HashSet<Vec<u8>>,
+) -> bool {
+    let has_ext = |name: &CStr| extensions.contains(name.to_bytes());
+    if !has_ext(ash::khr::acceleration_structure::NAME)
+        || !has_ext(ash::khr::ray_query::NAME)
+        || !has_ext(ash::khr::deferred_host_operations::NAME)
+    {
+        return false;
+    }
+
+    let mut accel = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default();
+    let mut ray_query = vk::PhysicalDeviceRayQueryFeaturesKHR::default();
+    let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default();
+    let mut features2 = vk::PhysicalDeviceFeatures2::default()
+        .push_next(&mut accel)
+        .push_next(&mut ray_query)
+        .push_next(&mut vulkan12);
+    unsafe { instance.get_physical_device_features2(device, &mut features2) };
+
+    accel.acceleration_structure == vk::TRUE
+        && ray_query.ray_query == vk::TRUE
+        && vulkan12.buffer_device_address == vk::TRUE
 }
 
 /// All extensions the device offers, as byte strings.
@@ -557,6 +596,14 @@ pub fn create_logical_device(
     if selected.optional.memory_budget {
         device_extensions.push(ash::ext::memory_budget::NAME.as_ptr());
     }
+    // Inline ray tracing (#110): the AS + ray-query extensions and
+    // deferred_host_operations (a hard dependency of acceleration_structure,
+    // even though the engine builds on the device timeline only).
+    if selected.optional.ray_query {
+        device_extensions.push(ash::khr::acceleration_structure::NAME.as_ptr());
+        device_extensions.push(ash::khr::ray_query::NAME.as_ptr());
+        device_extensions.push(ash::khr::deferred_host_operations::NAME.as_ptr());
+    }
     // GPU crash breadcrumbs (#97): the vendor extensions (NV checkpoints, AMD
     // buffer marker) and device-fault reporting, enabled only when breadcrumbs
     // are on so the happy path adds no extensions. The portable fallback needs
@@ -593,9 +640,17 @@ pub fn create_logical_device(
         vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
 
     // timelineSemaphore: the queue timeline that backs frame fences and (with
-    // multi-queue, #47) cross-queue waits.
-    let mut vulkan12_features =
-        vk::PhysicalDeviceVulkan12Features::default().timeline_semaphore(true);
+    // multi-queue, #47) cross-queue waits. bufferDeviceAddress rides along
+    // only with ray query (#110): the AS build APIs consume raw device
+    // addresses, and selection verified the feature bit.
+    let mut vulkan12_features = vk::PhysicalDeviceVulkan12Features::default()
+        .timeline_semaphore(true)
+        .buffer_device_address(selected.optional.ray_query);
+
+    // Inline ray tracing feature structs — chained only when supported (#110).
+    let mut accel_features =
+        vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default().acceleration_structure(true);
+    let mut ray_query_features = vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
 
     // maintenance9 feature struct — chained only when the device supports it.
     let mut maintenance9_features =
@@ -618,6 +673,11 @@ pub fn create_logical_device(
     }
     if enable_device_fault {
         create_info = create_info.push_next(&mut fault_features);
+    }
+    if selected.optional.ray_query {
+        create_info = create_info
+            .push_next(&mut accel_features)
+            .push_next(&mut ray_query_features);
     }
 
     let device = unsafe { instance.create_device(selected.physical_device, &create_info, None) }
@@ -687,6 +747,9 @@ pub fn device_capabilities(
         // VK_EXT_memory_budget, when advertised (#98). Drives per-heap
         // budget/usage in the stats panel; without it heap budget/usage are None.
         memory_budget: selected.optional.memory_budget,
+        // Inline ray tracing (#110): the extension + feature bundle verified
+        // during selection and enabled on the logical device.
+        ray_query: selected.optional.ray_query,
     }
 }
 

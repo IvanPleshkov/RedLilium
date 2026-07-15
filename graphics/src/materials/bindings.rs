@@ -92,6 +92,14 @@ pub enum BindingType {
     /// convention Slang uses when emitting WGSL), so binding N + 1 must be
     /// left unoccupied in the layout.
     CombinedTextureSampler,
+
+    /// A top-level acceleration structure traced by ray queries (#110,
+    /// ADR-032). WGSL: `var t: acceleration_structure`.
+    ///
+    /// Requires
+    /// [`DeviceCapabilities::ray_query`](crate::device::DeviceCapabilities);
+    /// Vulkan-only — binding-group creation fails on wgpu.
+    AccelerationStructure,
 }
 
 /// Describes a single binding slot in a layout.
@@ -208,6 +216,14 @@ impl BindingLayout {
         self.with_entry(BindingLayoutEntry::new(
             binding,
             BindingType::CombinedTextureSampler,
+        ))
+    }
+
+    /// Add a top-level acceleration structure binding (#110).
+    pub fn with_acceleration_structure(self, binding: u32) -> Self {
+        self.with_entry(BindingLayoutEntry::new(
+            binding,
+            BindingType::AccelerationStructure,
         ))
     }
 

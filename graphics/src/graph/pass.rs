@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use crate::materials::{BindingType, BoundResource, MaterialInstance, SampledDepthLayout};
 use crate::mesh::Mesh;
-use crate::resources::Buffer;
+use crate::resources::{Blas, Buffer, Tlas};
 use crate::types::{ScissorRect, Viewport};
 
 use super::resource_usage::{
@@ -27,6 +27,8 @@ pub enum Pass {
     Transfer(TransferPass),
     /// Compute pass (compute shaders).
     Compute(ComputePass),
+    /// Acceleration-structure build pass (BLAS/TLAS builds, #110).
+    AccelerationStructureBuild(AccelerationStructureBuildPass),
 }
 
 impl Pass {
@@ -36,6 +38,7 @@ impl Pass {
             Pass::Graphics(p) => p.name(),
             Pass::Transfer(p) => p.name(),
             Pass::Compute(p) => p.name(),
+            Pass::AccelerationStructureBuild(p) => p.name(),
         }
     }
 
@@ -108,6 +111,20 @@ impl Pass {
         matches!(self, Pass::Compute(_))
     }
 
+    /// Get this pass as an acceleration-structure build pass, if it is one.
+    pub fn as_acceleration_structure_build(&self) -> Option<&AccelerationStructureBuildPass> {
+        if let Pass::AccelerationStructureBuild(p) = self {
+            Some(p)
+        } else {
+            None
+        }
+    }
+
+    /// Check if this is an acceleration-structure build pass.
+    pub fn is_acceleration_structure_build(&self) -> bool {
+        matches!(self, Pass::AccelerationStructureBuild(_))
+    }
+
     /// Infer resource usage from the pass configuration.
     ///
     /// This examines the pass's render targets, material bindings, and transfer
@@ -117,6 +134,7 @@ impl Pass {
             Pass::Graphics(p) => p.infer_resource_usage(),
             Pass::Transfer(p) => p.infer_resource_usage(),
             Pass::Compute(p) => p.infer_resource_usage(),
+            Pass::AccelerationStructureBuild(p) => p.infer_resource_usage(),
         }
     }
 }
@@ -900,6 +918,25 @@ fn extract_material_resources(
                 }
                 BoundResource::Buffer(buffer) => buffer,
                 BoundResource::BufferRange { buffer, .. } => buffer,
+                // Ray traversal reads the TLAS memory AND the memory of every
+                // BLAS its instances reference (#110) — declare all of them so
+                // the build-to-trace hazard gets a barrier.
+                BoundResource::AccelerationStructure(tlas) => {
+                    seen.add_buffer(
+                        usage,
+                        tlas.backing_buffer(),
+                        BufferAccessMode::AccelerationStructureShaderRead,
+                    );
+                    let (_instances, _count, blases) = tlas.current_build_inputs();
+                    for blas in &blases {
+                        seen.add_buffer(
+                            usage,
+                            blas.backing_buffer(),
+                            BufferAccessMode::AccelerationStructureShaderRead,
+                        );
+                    }
+                    continue;
+                }
                 _ => continue,
             };
 
@@ -1159,6 +1196,158 @@ impl ComputePass {
         let mut seen = BufferDeclSet::new();
         for cmd in &self.dispatch_commands {
             extract_material_resources(&cmd.material, &mut usage, &mut seen);
+        }
+
+        usage
+    }
+}
+
+// ============================================================================
+// Acceleration Structure Build Pass
+// ============================================================================
+
+/// One build submitted to an [`AccelerationStructureBuildPass`] (#110).
+#[derive(Debug)]
+pub enum AccelerationStructureBuild {
+    /// Build (or rebuild) a BLAS from its descriptor's geometry buffers.
+    Blas(Arc<Blas>),
+    /// Build (or rebuild) a TLAS from the instances most recently written via
+    /// [`Tlas::write_instances`].
+    Tlas(Arc<Tlas>),
+}
+
+/// A pass that builds acceleration structures on the GPU (#110, ADR-032).
+///
+/// All builds within one pass are **independent** — they may execute without
+/// ordering between them. A build consuming another's output (the classic
+/// BLAS build → TLAS build) must go in a **separate, dependent pass**: the
+/// automatic barrier system works at pass granularity, deriving the
+/// build-to-build and build-to-trace hazards from the AS backing buffers each
+/// pass declares.
+///
+/// Runs on any compute-capable queue (graphics or async compute); a
+/// [`QueuePreference::Transfer`](crate::QueuePreference) graph containing one
+/// falls back — AS builds are not transfer work.
+///
+/// ```ignore
+/// let blas_pass = {
+///     let mut pass = AccelerationStructureBuildPass::new("blas".into());
+///     pass.add_blas_build(Arc::clone(&blas));
+///     graph.add_acceleration_structure_build_pass(pass)
+/// };
+/// tlas.write_instances(&instances)?;
+/// let tlas_pass = {
+///     let mut pass = AccelerationStructureBuildPass::new("tlas".into());
+///     pass.add_tlas_build(Arc::clone(&tlas));
+///     graph.add_acceleration_structure_build_pass(pass)
+/// };
+/// graph.add_dependency(tlas_pass, blas_pass);
+/// ```
+#[derive(Debug)]
+pub struct AccelerationStructureBuildPass {
+    name: String,
+    builds: Vec<AccelerationStructureBuild>,
+}
+
+impl AccelerationStructureBuildPass {
+    /// Create a new acceleration-structure build pass.
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            builds: Vec::new(),
+        }
+    }
+
+    /// Get the pass name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Queue a BLAS build.
+    pub fn add_blas_build(&mut self, blas: Arc<Blas>) {
+        self.builds.push(AccelerationStructureBuild::Blas(blas));
+    }
+
+    /// Queue a TLAS build. Write the frame's instances with
+    /// [`Tlas::write_instances`] **before** the graph executes.
+    pub fn add_tlas_build(&mut self, tlas: Arc<Tlas>) {
+        self.builds.push(AccelerationStructureBuild::Tlas(tlas));
+    }
+
+    /// Get all queued builds.
+    pub fn builds(&self) -> &[AccelerationStructureBuild] {
+        &self.builds
+    }
+
+    /// Check if this pass has any builds.
+    pub fn has_builds(&self) -> bool {
+        !self.builds.is_empty()
+    }
+
+    /// Infer resource usage for automatic barriers (#110).
+    ///
+    /// - BLAS build: geometry buffers as build **input**; backing + scratch
+    ///   as build **write** (scratch is read-write within the build).
+    /// - TLAS build: the active instance buffer as build input; referenced
+    ///   BLAS backings as build **read**; backing + scratch as build write.
+    pub fn infer_resource_usage(&self) -> PassResourceUsage {
+        let mut usage = PassResourceUsage::new();
+        let mut seen = BufferDeclSet::new();
+
+        for build in &self.builds {
+            match build {
+                AccelerationStructureBuild::Blas(blas) => {
+                    for geometry in &blas.descriptor().geometries {
+                        seen.add_buffer(
+                            &mut usage,
+                            &geometry.vertex_buffer,
+                            BufferAccessMode::AccelerationStructureBuildInput,
+                        );
+                        if let Some(index_buffer) = &geometry.index_buffer {
+                            seen.add_buffer(
+                                &mut usage,
+                                index_buffer,
+                                BufferAccessMode::AccelerationStructureBuildInput,
+                            );
+                        }
+                    }
+                    seen.add_buffer(
+                        &mut usage,
+                        blas.backing_buffer(),
+                        BufferAccessMode::AccelerationStructureWrite,
+                    );
+                    seen.add_buffer(
+                        &mut usage,
+                        blas.scratch_buffer(),
+                        BufferAccessMode::AccelerationStructureWrite,
+                    );
+                }
+                AccelerationStructureBuild::Tlas(tlas) => {
+                    let (instance_buffer, _count, blases) = tlas.current_build_inputs();
+                    seen.add_buffer(
+                        &mut usage,
+                        &instance_buffer,
+                        BufferAccessMode::AccelerationStructureBuildInput,
+                    );
+                    for blas in &blases {
+                        seen.add_buffer(
+                            &mut usage,
+                            blas.backing_buffer(),
+                            BufferAccessMode::AccelerationStructureBuildRead,
+                        );
+                    }
+                    seen.add_buffer(
+                        &mut usage,
+                        tlas.backing_buffer(),
+                        BufferAccessMode::AccelerationStructureWrite,
+                    );
+                    seen.add_buffer(
+                        &mut usage,
+                        tlas.scratch_buffer(),
+                        BufferAccessMode::AccelerationStructureWrite,
+                    );
+                }
+            }
         }
 
         usage
