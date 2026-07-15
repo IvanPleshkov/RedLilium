@@ -2487,3 +2487,188 @@ fn test_shader_variant_selection_end_to_end(#[case] backend: Backend) {
     // the space.
     assert!(space.select().system("HDR_OUTPU", true).build().is_err());
 }
+
+/// A fragment shader that grinds a huge loop whose every iteration depends on
+/// BOTH the loop counter and the running accumulator (and is seeded from the
+/// fragment position) — so the shader compiler can neither const-fold it, hoist
+/// it, nor drop it as a side-effect-free spin (which is what defeats a plain
+/// `while(true)` or a counter-independent loop: the driver removes it and the
+/// draw finishes instantly). At 2e9 iterations per fragment over a full draw it
+/// runs for many seconds, overrunning the Windows GPU watchdog (TDR, ~2 s) and
+/// forcing `VK_ERROR_DEVICE_LOST`. Only used by the #97 hang demo.
+const GPU_HANG_SHADER: &str = r#"
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+}
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+}
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.position = vec4<f32>(in.position, 1.0);
+    return out;
+}
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    var acc: f32 = in.position.x * 0.00013 + in.position.y * 0.00017 + 0.317;
+    for (var i: u32 = 0u; i < 2000000000u; i = i + 1u) {
+        acc = fract(acc + sin(f32(i) * 0.000001 + acc) * 0.5 + 0.0137);
+    }
+    return vec4<f32>(acc, 0.0, 0.0, 1.0);
+}
+"#;
+
+/// #97 GPU-crash-breadcrumb demo. **Intentionally hangs the GPU** (a fragment
+/// shader that spins past the TDR watchdog), so it is `#[ignore]`d — running it
+/// resets the graphics driver (a display blip on the GPU that drives the
+/// monitor). Run one mechanism at a time, e.g.:
+///
+/// ```text
+/// REDLILIUM_BREADCRUMBS=1 REDLILIUM_ADAPTER=Radeon \
+///   cargo test -p redlilium-graphics --test gpu_tests -- --ignored --nocapture \
+///   demo_device_lost_breadcrumbs
+/// ```
+///
+/// Builds a two-pass graph (`safe_pass` then `HANG_pass`) in one submit. When
+/// the GPU dies in `HANG_pass`, the backend's device-lost reporter reads the
+/// breadcrumbs and writes `redlilium-gpu-crash-<ts>.txt` next to the test exe;
+/// this test then asserts that report names `HANG_pass` as the guilty pass.
+///
+/// HARDWARE NOTE: this only produces a device loss where the GPU watchdog
+/// actually fires — i.e. a card whose driver does NOT preempt the runaway
+/// shader. Verified on AMD RX 6400 (TDR fires, `VK_AMD_buffer_marker` report is
+/// correct). On NVIDIA (Pascal+) the driver preempts the shader to keep the
+/// display alive, so no TDR / device loss occurs: the test instead spins on
+/// fence timeouts (~10 s each) and ultimately fails with no crash file. Run it
+/// on TDR-ing hardware, and prefer the secondary/headless GPU — hanging the
+/// card that drives the monitor blips the display.
+#[rstest]
+#[case::vulkan(Backend::Vulkan)]
+#[ignore = "intentionally hangs the GPU; only device-losses on non-preempting (TDR) hardware, e.g. AMD — see #97 demo doc"]
+fn demo_device_lost_breadcrumbs(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        eprintln!("Backend {backend:?} not available, skipping");
+        return;
+    };
+
+    // Remove any stale crash reports so we read this run's.
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+        .expect("test exe dir");
+    let is_crash = |p: &std::path::Path| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("redlilium-gpu-crash-") && n.ends_with(".txt"))
+    };
+    if let Ok(entries) = std::fs::read_dir(&exe_dir) {
+        for path in entries.flatten().map(|e| e.path()).filter(|p| is_crash(p)) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    const W: u32 = 64;
+    const H: u32 = 64;
+    const CLEAR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
+    let quad = create_fullscreen_quad(&ctx);
+    write_quad_vertices(&ctx, &quad, &FULLSCREEN_QUAD_VERTICES);
+
+    let safe_target = ctx.create_render_target(W, H);
+    let hang_target = ctx.create_render_target(W, H);
+
+    let safe_instance = create_material_instance(create_solid_color_material(&ctx));
+    let hang_material = ctx
+        .device
+        .create_material(
+            &MaterialDescriptor::new()
+                .with_shader(ShaderSource::vertex(
+                    GPU_HANG_SHADER.as_bytes().to_vec(),
+                    "vs_main",
+                ))
+                .with_shader(ShaderSource::fragment(
+                    GPU_HANG_SHADER.as_bytes().to_vec(),
+                    "fs_main",
+                ))
+                .with_vertex_layout(quad_vertex_layout())
+                .with_color_format(TextureFormat::Rgba8Unorm)
+                .with_label("gpu_hang_material"),
+        )
+        .expect("Failed to create hang material");
+    let hang_instance = create_material_instance(hang_material);
+
+    let mut graph = RenderGraph::new();
+    let mut safe_pass = create_simple_render_pass("safe_pass", safe_target.clone(), CLEAR);
+    safe_pass.add_draw(quad.clone(), safe_instance);
+    let safe_handle = graph.add_graphics_pass(safe_pass);
+
+    let mut hang_pass = create_simple_render_pass("HANG_pass", hang_target.clone(), CLEAR);
+    hang_pass.add_draw(quad, hang_instance);
+    let hang_handle = graph.add_graphics_pass(hang_pass);
+    graph.add_dependency(hang_handle, safe_handle);
+
+    // Both render targets must be CONSUMED or the graph prunes the passes as
+    // dead — then no fragments shade and the hang shader never runs. Readback
+    // passes keep them live (the copies never actually run: the GPU dies in
+    // HANG_pass first).
+    let rb_size = readback_buffer_size(W, H, 4);
+    let safe_rb = ctx.create_readback_buffer(rb_size);
+    let hang_rb = ctx.create_readback_buffer(rb_size);
+    let mut copy_safe = TransferPass::new("readback_safe".into());
+    copy_safe.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::readback_texture_whole(safe_target, safe_rb),
+    ));
+    let copy_safe_handle = graph.add_transfer_pass(copy_safe);
+    graph.add_dependency(copy_safe_handle, safe_handle);
+    let mut copy_hang = TransferPass::new("readback_hang".into());
+    copy_hang.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::readback_texture_whole(hang_target, hang_rb.clone()),
+    ));
+    let copy_hang_handle = graph.add_transfer_pass(copy_hang);
+    graph.add_dependency(copy_hang_handle, hang_handle);
+
+    // Executing hangs the GPU in HANG_pass; the watchdog fires a device loss.
+    // The backend's reporter writes the crash file synchronously, but the loss
+    // does not always surface inside `execute_graph` — on this path it is often
+    // only observed on the NEXT submit. So nudge the (now-lost) device with a
+    // few readbacks until the reporter has written the crash file. All of this
+    // may panic on the lost device, so each step is caught.
+    let latest_crash = |dir: &std::path::Path| -> Option<std::path::PathBuf> {
+        let mut v: Vec<_> = std::fs::read_dir(dir)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| is_crash(p))
+            .collect();
+        v.sort();
+        v.pop()
+    };
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.execute_graph(graph);
+    }));
+    for _ in 0..8 {
+        if latest_crash(&exe_dir).is_some() {
+            break;
+        }
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = ctx.read_buffer(&hang_rb, rb_size);
+        }));
+    }
+
+    // Confirm the report fingers HANG_pass.
+    let latest = latest_crash(&exe_dir)
+        .expect("device-lost reporter should have written a crash file (#97)");
+    let report = std::fs::read_to_string(&latest).expect("read crash report");
+    eprintln!("=== {} ===\n{report}", latest.display());
+
+    assert!(
+        report.contains("HANG_pass"),
+        "crash report should name the guilty pass HANG_pass:\n{report}"
+    );
+    assert!(
+        report.contains("died in pass") || report.contains("INCOMPLETE"),
+        "crash report should mark the submit incomplete:\n{report}"
+    );
+}
