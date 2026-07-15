@@ -14,7 +14,7 @@ redlilium-graphics = { path = "../graphics", default-features = false, features 
     "dummy",
     "wgpu-backend",
 ] }
-redlilium-ecs = { path = "../ecs", features = ["rendering"] }
+redlilium-ecs = { path = "../ecs", features = ["rendering", "serialize-ron"] }
 redlilium-assets = { path = "../assets" }
 redlilium-vfs = { path = "../vfs" }
 

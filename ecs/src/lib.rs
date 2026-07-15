@@ -182,6 +182,12 @@ pub use rendering::{
     MeshGenerator, MeshLoader, MeshSource, TextureLoader, TextureSettings, TextureSource,
     VertexLayoutLoader, VertexLayoutManager, VertexLayoutSource,
 };
+// Scene assets (#101): the loader, the resident data, and the by-name
+// request/instantiate helpers.
+#[cfg(all(feature = "rendering", feature = "serialize-ron"))]
+pub use self::std::scene::{
+    SceneData, SceneLoader, SceneSource, instantiate_scene, request_scene, serialize_scene_ron,
+};
 
 // Rendering components, resources, and systems (feature-gated)
 #[cfg(feature = "rendering")]

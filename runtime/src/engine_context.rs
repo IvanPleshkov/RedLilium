@@ -87,6 +87,7 @@ impl EngineContext {
             .with_loader::<MaterialLoader>()
             .with_loader::<MaterialInstanceLoader>()
             .with_loader::<TextureLoader>()
+            .with_loader::<redlilium_ecs::SceneLoader>()
             .build();
 
         Self {

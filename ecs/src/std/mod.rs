@@ -16,6 +16,10 @@ pub mod hierarchy;
 ))]
 pub mod physics;
 pub mod play_mode;
+// Scene assets (#101): needs the asset system (`rendering` pulls
+// redlilium-assets) and RON.
+#[cfg(all(feature = "rendering", feature = "serialize-ron"))]
+pub mod scene;
 // Native-only: TCP-based remote-control transport (tokio); no wasm equivalent.
 #[cfg(all(feature = "rendering", not(target_arch = "wasm32")))]
 pub mod remote;
