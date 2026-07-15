@@ -3,7 +3,7 @@ name = "xtask"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Build tooling for RedLilium (offline shader bake, #33)"
+description = "Build tooling for RedLilium (offline shader bake #33, dist packaging #107)"
 publish = false
 
 [[bin]]

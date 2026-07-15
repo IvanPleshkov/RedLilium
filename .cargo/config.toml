@@ -1,3 +1,7 @@
+# `cargo xtask <task>` — build tooling entry point (see xtask/src/main.rs).
+[alias]
+xtask = "run -p xtask --"
+
 # Slang shader compiler configuration (only used when the `slang-shaders` /
 # `slang` feature is enabled; a default build links no Slang and ignores this).
 #

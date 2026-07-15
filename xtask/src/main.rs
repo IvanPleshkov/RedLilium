@@ -1,29 +1,42 @@
 //! RedLilium build tooling.
 //!
-//! The only task is `bake-shaders`, which needs the native Slang compiler and is
-//! therefore gated behind the `slang` feature (off by default so a plain
-//! `cargo build --workspace` — preflight, fresh clones — needs no Slang SDK). See
-//! [`bake`] for the bake itself.
-//!
 //! ```text
-//! cargo run -p xtask --features slang -- bake-shaders          # regenerate
+//! cargo xtask dist [--target desktop]                          # package a shippable build (#107)
+//! cargo run -p xtask --features slang -- bake-shaders          # regenerate baked shaders
 //! cargo run -p xtask --features slang -- bake-shaders --check  # staleness gate
 //! ```
+//!
+//! `dist` needs no extra SDK (see [`dist`] for the folder layout it produces).
+//! `bake-shaders` needs the native Slang compiler and is gated behind the
+//! `slang` feature (off by default so a plain `cargo build --workspace` —
+//! preflight, fresh clones — needs no Slang SDK); see [`bake`].
 
 #[cfg(feature = "slang")]
 mod bake;
+mod dist;
 
 fn main() {
-    #[cfg(feature = "slang")]
-    bake::run();
-
-    #[cfg(not(feature = "slang"))]
-    {
-        eprintln!(
-            "xtask `bake-shaders` needs the Slang SDK and the `slang` feature.\n\
-             Provision the SDK (scripts/fetch-slang.sh) and run:\n  \
-             cargo run -p xtask --features slang -- bake-shaders [--check]"
-        );
-        std::process::exit(2);
+    let cmd = std::env::args().nth(1).unwrap_or_default();
+    match cmd.as_str() {
+        "dist" => dist::run(),
+        "bake-shaders" => {
+            #[cfg(feature = "slang")]
+            bake::run();
+            #[cfg(not(feature = "slang"))]
+            {
+                eprintln!(
+                    "xtask `bake-shaders` needs the Slang SDK and the `slang` feature.\n\
+                     Provision the SDK (scripts/fetch-slang.sh) and run:\n  \
+                     cargo run -p xtask --features slang -- bake-shaders [--check]"
+                );
+                std::process::exit(2);
+            }
+        }
+        other => {
+            eprintln!(
+                "unknown task {other:?}; available: dist [--target desktop], bake-shaders [--check]"
+            );
+            std::process::exit(2);
+        }
     }
 }
