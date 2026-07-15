@@ -2040,3 +2040,83 @@ Three follow-up forks were decided with the project owner:
 - #110: feature issue (phase 2: mesh AS input + shadow-mask pass in
   pbr_ibl; phase 3: transparent compaction + async-compute builds)
 - #99: sync validation that machine-checks the new barrier paths
+
+## ADR-033: Meshlet Rendering via VK_EXT_mesh_shader
+
+**Date:** 2026-07-15
+**Status:** Accepted
+**Issue:** #111
+
+### Context
+
+The second "advanced GPU" pillar after inline ray tracing (ADR-032):
+meshlet-based rendering with GPU-side per-meshlet culling. Unlike ray query
+— where the WGSL/naga path carried the whole feature — **naga has no
+mesh-shading support at all**: there is no WGSL syntax for task or mesh
+shaders, so the entire shader toolchain question had to be answered first.
+
+### Decision
+
+**Task + mesh pipelines via `VK_EXT_mesh_shader`, authored in Slang, baked
+as SPIR-V.** Vulkan-only by construction (WebGPU has no mesh shaders).
+
+1. **Capability, not tier** (ADR-027 litmus): `DeviceCapabilities::
+   mesh_shading` — `VK_EXT_mesh_shader` with both `taskShader` and
+   `meshShader` feature bits, all-or-nothing. No renderer path stands on it
+   yet. wgpu/dummy report `false`; wgpu additionally rejects mesh materials
+   and mesh-tasks draws with `FeatureNotSupported`.
+2. **Stages are first-class:** `ShaderStage::Task`/`Mesh`,
+   `ShaderStageFlags::TASK`/`MESH`, descriptor visibility, baked-key stage
+   tags, SPIR-V entry-point probing (TaskEXT/MeshEXT execution models).
+   Stage-combination rules live in
+   `MaterialDescriptor::validate_stage_combination`: vertex XOR mesh, task
+   implies mesh, mesh materials carry no vertex layout.
+3. **Second baked artifact kind — SPIR-V.** The default build (Slang off)
+   serves Slang sources from the offline bake, but there is no WGSL form for
+   mesh stages, so `xtask bake-shaders` emits a `BAKED_SPIRV` table (bytes =
+   Slang's SPIR-V verbatim, same `shader_key` keyspace). **A spec containing
+   any task/mesh entry bakes ALL its entries to SPIR-V** — Slang's WGSL
+   target refuses to even load a module with mesh-shading entry points, so
+   the set's fragment stage cannot bake as WGSL either. The runtime tries
+   the WGSL table first, then SPIR-V, and misses loudly. `bake-shaders
+   --check` covers the new table unchanged.
+4. **Pipelines:** `create_graphics_pipeline` takes an ordered stage list and
+   an `Option<(&VertexLayout, PrimitiveTopology)>`; mesh pipelines omit the
+   vertex-input and input-assembly states entirely (spec-ignored anyway).
+5. **Draws without a Mesh:** `MeshTasksDrawCommand { material, group_count }`
+   + `GraphicsPass::add_draw_mesh_tasks` → `vkCmdDrawMeshTasksEXT`. Geometry
+   lives in storage buffers bound through the material instance, so resource
+   inference is `extract_material_resources` alone and the existing
+   `BufferAccessTracker` provides the barriers.
+6. **Barrier stage unions gain TASK/MESH bits** — but only when the
+   extension is enabled (stage flags from a disabled extension are invalid
+   API use). The augmentation lives in `BufferAccessTracker` so the recorded
+   source scopes and the emitted destination scopes cannot disagree.
+
+### Consequences
+
+- Mesh-shading materials are Slang-only; the WGSL path fails with the
+  engine-level cause. Web never sees the feature.
+- The `meshlet_demo` partitions a UV sphere into 32 meshlets at generation
+  time (grid patches, deliberately no meshoptimizer), instances it 64×, and
+  culls per meshlet in the task stage (bounding sphere vs. frustum +
+  meshoptimizer-convention backface cone) against a **freezable cull
+  camera** — SPACE freezes it, so orbiting on shows the holes where culled
+  meshlets were. Validated on RTX 3070 and RX 6400, 300 frames each under
+  `REDLILIUM_SYNC_VALIDATION=1`, zero hazards.
+- **Known limitation:** texture layout transitions do not yet augment their
+  stage masks with TASK/MESH — a texture sampled from a task/mesh stage
+  would get a too-narrow barrier scope. No current shader does this; sync
+  validation (#99) is the backstop, and the fix mirrors the buffer-side
+  augmentation.
+- Windows bake gotcha: the Vulkan SDK's `slang.dll` shadows the pinned one
+  on PATH — prepend `$SLANG_DIR/bin` before `bake-shaders` or the
+  `BAKED_SLANG_TAG` drifts (same class of issue commit ca76afa fixed for
+  `test-all.sh`).
+
+### Related Issues
+
+- #111: feature issue
+- #110 / ADR-032: the ray-tracing sibling — shared capability-vs-tier
+  reasoning, shared "advanced GPU" demo conventions
+- #99: sync validation that machine-checks the new barrier paths

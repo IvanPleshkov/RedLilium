@@ -99,6 +99,17 @@ const REGISTRY: &[ShaderSpec] = &[
         path: "demos/shaders/deferred_resolve.slang",
         entry_points: VS_FS,
     },
+    // Meshlet demo (#111): the task/mesh entries bake to SPIR-V (they have
+    // no WGSL form), the fragment entry to WGSL as usual.
+    ShaderSpec {
+        name: "meshlet",
+        path: "demos/shaders/meshlet.slang",
+        entry_points: &[
+            ("ts_main", ShaderStage::Task),
+            ("ms_main", ShaderStage::Mesh),
+            ("fs_main", ShaderStage::Fragment),
+        ],
+    },
 ];
 
 fn workspace_root() -> PathBuf {
@@ -131,6 +142,12 @@ fn defines_label(defines: &[(&str, &str)]) -> String {
 /// key so emission is deterministic.
 type BakedTable = BTreeMap<u64, (String, String)>;
 
+/// key -> (compiled SPIR-V bytes, human-readable name), ordered by key. The
+/// artifact kind for task/mesh entry points (#111): naga cannot express mesh
+/// shading, so there is no WGSL form to bake — the runtime consumes Slang's
+/// SPIR-V directly (Vulkan is the only backend with mesh shaders).
+type BakedSpirvTable = BTreeMap<u64, (Vec<u8>, String)>;
+
 /// shader-set key -> (rendered `&[BakedGroup]` literal, human-readable name),
 /// ordered by key. One entry per (spec × define set) — the material shader SET,
 /// not a single WGSL permutation.
@@ -140,6 +157,7 @@ type ReflectionTable = BTreeMap<u64, (String, String)>;
 /// table, and the Slang build tag.
 struct Baked {
     wgsl: BakedTable,
+    spirv: BakedSpirvTable,
     reflection: ReflectionTable,
     slang_tag: String,
 }
@@ -153,6 +171,7 @@ fn bake_table() -> Result<Baked, String> {
 
     // BTreeMaps so emission is sorted by key.
     let mut wgsl: BakedTable = BTreeMap::new();
+    let mut spirv: BakedSpirvTable = BTreeMap::new();
     let mut reflection: ReflectionTable = BTreeMap::new();
     let mut slang_tag: Option<String> = None;
 
@@ -193,29 +212,57 @@ fn bake_table() -> Result<Baked, String> {
                 .collect();
             let defines: &[(&str, &str)] = &defines_owned;
 
-            // One WGSL output per entry point.
+            // One artifact per entry point: WGSL for classic stages, SPIR-V
+            // for task/mesh stages (#111 — naga has no mesh-shading support,
+            // so there is no WGSL form; only the Vulkan backend runs these).
+            // A spec containing ANY task/mesh entry bakes ALL its entries to
+            // SPIR-V: Slang's WGSL target refuses to even load a module with
+            // mesh-shading entry points, and such materials are Vulkan-only
+            // anyway.
+            let spirv_spec = spec
+                .entry_points
+                .iter()
+                .any(|&(_, s)| matches!(s, ShaderStage::Task | ShaderStage::Mesh));
             for &(entry, _stage) in spec.entry_points {
-                let compiler = fresh_compiler(&mut slang_tag)?;
-                let compiled = compiler
-                    .compile_to_wgsl(&source, entry, &[], defines)
-                    .map_err(|e| {
-                        format!(
-                            "compile {} / {} / {}: {e:?}",
-                            spec.name,
-                            entry,
-                            defines_label(defines)
-                        )
-                    })?;
-
                 let key = baked::shader_key(&source, entry, defines);
                 let name = format!("{} / {} / {}", spec.name, entry, defines_label(defines));
-                if let Some((_, prev)) = wgsl.get(&key) {
+                let prev = wgsl
+                    .get(&key)
+                    .map(|(_, n)| n)
+                    .or_else(|| spirv.get(&key).map(|(_, n)| n));
+                if let Some(prev) = prev {
                     return Err(format!(
-                        "WGSL key collision {key:#018x}: '{name}' vs '{prev}' — two permutations \
+                        "key collision {key:#018x}: '{name}' vs '{prev}' — two permutations \
                          hashed identically (bug in the registry or shader_key)"
                     ));
                 }
-                wgsl.insert(key, (compiled, name));
+
+                let compiler = fresh_compiler(&mut slang_tag)?;
+                if spirv_spec {
+                    let compiled = compiler
+                        .compile_to_spirv(&source, entry, &[], defines)
+                        .map_err(|e| {
+                            format!(
+                                "compile {} / {} / {}: {e:?}",
+                                spec.name,
+                                entry,
+                                defines_label(defines)
+                            )
+                        })?;
+                    spirv.insert(key, (compiled, name));
+                } else {
+                    let compiled = compiler
+                        .compile_to_wgsl(&source, entry, &[], defines)
+                        .map_err(|e| {
+                            format!(
+                                "compile {} / {} / {}: {e:?}",
+                                spec.name,
+                                entry,
+                                defines_label(defines)
+                            )
+                        })?;
+                    wgsl.insert(key, (compiled, name));
+                }
             }
 
             // One reflection entry per (spec × define set): the whole shader SET
@@ -247,9 +294,33 @@ fn bake_table() -> Result<Baked, String> {
     let slang_tag = slang_tag.unwrap_or_else(|| "unknown".to_string());
     Ok(Baked {
         wgsl,
+        spirv,
         reflection,
         slang_tag,
     })
+}
+
+/// Render SPIR-V bytes as a Rust byte-string literal (`b"..."`). Printable
+/// ASCII stays literal, everything else becomes `\xNN` — roughly 3.5 chars
+/// per byte, on a single line rustfmt will not reflow (it never splits
+/// string literals), unlike a `&[u8]` array literal which it would explode
+/// to one element per line.
+fn render_byte_string(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 4 + 3);
+    s.push_str("b\"");
+    for &b in bytes {
+        match b {
+            b'"' => s.push_str("\\\""),
+            b'\\' => s.push_str("\\\\"),
+            0x20..=0x7e => s.push(b as char),
+            _ => {
+                let _ = write!(s, "\\x{b:02x}");
+            }
+        }
+    }
+    s.push('"');
+    s
 }
 
 /// Render an `Option<String>` as a Rust `Option<&'static str>` literal.
@@ -338,8 +409,9 @@ fn bake_shaders() -> Result<(), String> {
     let dest = baked_dest();
     std::fs::write(&dest, out).map_err(|e| format!("write {}: {e}", dest.display()))?;
     eprintln!(
-        "baked {} WGSL permutations + {} reflection sets (slang {}) -> {}",
+        "baked {} WGSL + {} SPIR-V permutations + {} reflection sets (slang {}) -> {}",
         baked.wgsl.len(),
+        baked.spirv.len(),
         baked.reflection.len(),
         baked.slang_tag,
         dest.display()
@@ -360,8 +432,9 @@ fn check_shaders() -> Result<(), String> {
 
     if actual == expected {
         eprintln!(
-            "baked shaders are up to date ({} WGSL + {} reflection sets, slang {})",
+            "baked shaders are up to date ({} WGSL + {} SPIR-V + {} reflection sets, slang {})",
             baked.wgsl.len(),
+            baked.spirv.len(),
             baked.reflection.len(),
             baked.slang_tag
         );
@@ -405,8 +478,9 @@ fn render_generated(baked: &Baked) -> String {
          //! CI/preflight re-bakes and `git diff --exit-code`s this file, so a stale entry\n\
          //! fails the build. Entries are sorted by key for a stable, review-friendly diff.\n\
          //!\n\
-         //! `BAKED_WGSL`: key -> compiled WGSL. `BAKED_NAMES`: key -> `shader / entry /\n\
-         //! defines` (diagnostics on a miss). `BAKED_REFLECTION`: shader-set key -> baked\n\
+         //! `BAKED_WGSL`: key -> compiled WGSL. `BAKED_SPIRV`: key -> compiled SPIR-V\n\
+         //! (task/mesh stages, #111). `BAKED_NAMES`: key -> `shader / entry / defines`\n\
+         //! (diagnostics on a miss). `BAKED_REFLECTION`: shader-set key -> baked\n\
          //! binding-layout reflection (the runtime uses it on wasm, where Slang can't run).\n\
          //! All sorted ascending by key for binary search.\n\n",
     );
@@ -427,9 +501,28 @@ fn render_generated(baked: &Baked) -> String {
     }
     s.push_str("];\n\n");
 
+    s.push_str(
+        "/// key -> compiled SPIR-V (LE bytes), sorted ascending by key. Task/mesh\n\
+         /// entry points only (#111) — they have no WGSL form.\n",
+    );
+    s.push_str("pub static BAKED_SPIRV: &[(u64, &[u8])] = &[\n");
+    for (key, (bytes, _)) in &baked.spirv {
+        s.push_str(&format!(
+            "    ({key:#018x}, {}),\n",
+            render_byte_string(bytes)
+        ));
+    }
+    s.push_str("];\n\n");
+
     s.push_str("/// key -> human-readable `shader / entry / defines`, sorted ascending by key.\n");
     s.push_str("pub static BAKED_NAMES: &[(u64, &str)] = &[\n");
-    for (key, (_, name)) in &baked.wgsl {
+    let names = baked
+        .wgsl
+        .iter()
+        .map(|(k, (_, n))| (*k, n))
+        .chain(baked.spirv.iter().map(|(k, (_, n))| (*k, n)))
+        .collect::<BTreeMap<u64, &String>>();
+    for (key, name) in names {
         s.push_str(&format!("    ({key:#018x}, {name:?}),\n"));
     }
     s.push_str("];\n\n");

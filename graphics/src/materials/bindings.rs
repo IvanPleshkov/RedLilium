@@ -152,6 +152,10 @@ bitflags::bitflags! {
         const FRAGMENT = 1 << 1;
         /// Compute shader stage.
         const COMPUTE = 1 << 2;
+        /// Task (amplification) shader stage (#111, `VK_EXT_mesh_shader`).
+        const TASK = 1 << 3;
+        /// Mesh shader stage (#111, `VK_EXT_mesh_shader`).
+        const MESH = 1 << 4;
     }
 }
 

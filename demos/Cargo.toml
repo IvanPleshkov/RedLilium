@@ -68,6 +68,12 @@ path = "src/bin/textured_quad_demo.rs"
 name = "ray_query_demo"
 path = "src/bin/ray_query_demo.rs"
 
+# Meshlet rendering (#111): task+mesh pipeline with per-meshlet culling.
+# Needs a GPU with VK_EXT_mesh_shader, so it is run by hand.
+[[bin]]
+name = "meshlet_demo"
+path = "src/bin/meshlet_demo.rs"
+
 [[bin]]
 name = "physics_demo"
 path = "src/bin/physics_demo/main.rs"

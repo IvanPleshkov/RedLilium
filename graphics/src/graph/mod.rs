@@ -46,7 +46,7 @@ mod transfer;
 
 pub use pass::{
     AccelerationStructureBuild, AccelerationStructureBuildPass, ComputePass, DispatchCommand,
-    DrawCommand, GraphicsPass, IndirectDrawCommand, Pass, TransferPass,
+    DrawCommand, GraphicsPass, IndirectDrawCommand, MeshTasksDrawCommand, Pass, TransferPass,
 };
 
 // Re-export compiler types for convenience
@@ -431,6 +431,79 @@ mod tests {
         graph.reset();
 
         assert_eq!(graph.pass_count(), 0);
+    }
+
+    /// Mesh-tasks draws (#111) declare the material's storage buffers as pass
+    /// inputs (that is their only geometry path — there is no Mesh), so a
+    /// GPU write to a meshlet buffer gets a barrier before the draw.
+    #[test]
+    fn mesh_tasks_draws_declare_material_buffers() {
+        use std::sync::Arc;
+
+        use crate::graph::resource_usage::BufferAccessMode;
+        use crate::materials::{
+            BindingGroupDescriptor, BindingLayout, BindingLayoutEntry, BindingType,
+            MaterialDescriptor, MaterialInstance, ShaderSource, ShaderStage,
+        };
+
+        let instance = GraphicsInstance::new().unwrap();
+        let device = instance.create_device().unwrap();
+
+        let layout = Arc::new(BindingLayout::new().with_entry(BindingLayoutEntry::new(
+            0,
+            BindingType::StorageBufferReadOnly,
+        )));
+        let buffer = device
+            .create_buffer(&BufferDescriptor::new(256, BufferUsage::STORAGE))
+            .unwrap();
+        let group = device
+            .create_binding_group(
+                layout.clone(),
+                BindingGroupDescriptor::new().with_buffer(0, buffer.clone()),
+            )
+            .unwrap();
+
+        // Mesh material built directly around a dummy pipeline handle (no
+        // shader compilation — inference only reads the descriptor and the
+        // bound groups).
+        let descriptor = MaterialDescriptor::new()
+            .with_shader(ShaderSource::slang(
+                ShaderStage::Mesh,
+                b"ms".to_vec(),
+                "ms_main",
+                vec![],
+            ))
+            .with_shader(ShaderSource::slang(
+                ShaderStage::Fragment,
+                b"fs".to_vec(),
+                "fs_main",
+                vec![],
+            ))
+            .with_binding_layout(layout)
+            .with_label("meshlet test material");
+        descriptor.validate_stage_combination().unwrap();
+        let material = Arc::new(crate::materials::Material::new(
+            device.clone(),
+            descriptor,
+            crate::backend::GpuPipeline::Dummy,
+        ));
+        let material_instance = Arc::new(MaterialInstance::new(material).with_binding_group(group));
+
+        let mut pass = GraphicsPass::new("mesh tasks".into());
+        assert!(!pass.has_draws());
+        pass.add_draw_mesh_tasks(material_instance, [4, 2, 1]);
+        assert!(pass.has_draws());
+        assert_eq!(pass.mesh_tasks_commands()[0].group_count, [4, 2, 1]);
+
+        let usage = pass.infer_resource_usage();
+        assert!(
+            usage
+                .buffer_usages
+                .iter()
+                .any(|d| Arc::ptr_eq(&d.buffer, &buffer)
+                    && d.access == BufferAccessMode::StorageRead),
+            "meshlet storage buffer must be declared as a read"
+        );
     }
 
     #[test]

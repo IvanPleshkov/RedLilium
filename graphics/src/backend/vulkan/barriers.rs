@@ -154,12 +154,48 @@ struct BufferAccessState {
 #[derive(Debug, Default)]
 pub struct BufferAccessTracker {
     states: HashMap<BufferId, BufferAccessState>,
+    /// Extra pipeline stages OR'd into every shader-stage scope (#111):
+    /// `TASK_SHADER_EXT | MESH_SHADER_EXT` when `VK_EXT_mesh_shader` is
+    /// enabled, empty otherwise. Storage/uniform/AS reads can originate from
+    /// task/mesh stages just like vertex/fragment/compute, but stage flags
+    /// from a disabled extension are invalid API use — so the bits are added
+    /// only when the backend actually enabled the extension.
+    shader_stage_augment: vk::PipelineStageFlags2,
 }
 
 impl BufferAccessTracker {
     /// Create a new empty tracker.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Enable mesh-shading stage augmentation (#111): every shader-stage
+    /// union (any scope containing `VERTEX_SHADER`) additionally covers the
+    /// task and mesh stages. Call once at backend creation, before any
+    /// tracking.
+    pub fn set_mesh_shading(&mut self, enabled: bool) {
+        self.shader_stage_augment = if enabled {
+            vk::PipelineStageFlags2::TASK_SHADER_EXT | vk::PipelineStageFlags2::MESH_SHADER_EXT
+        } else {
+            vk::PipelineStageFlags2::empty()
+        };
+    }
+
+    /// Destination stage scope for `access`, with task/mesh bits added to
+    /// shader-stage unions when mesh shading is enabled (#111). Use this —
+    /// not `access.dst_stage()` directly — for any barrier the tracker
+    /// participates in, so the source scope recorded here and the
+    /// destination scope emitted at the call site agree.
+    pub fn dst_stage(&self, access: BufferAccessMode) -> vk::PipelineStageFlags2 {
+        let stage = access.dst_stage();
+        // Only the shader-stage unions (identified by VERTEX_SHADER — fixed-
+        // function scopes like VERTEX_INPUT/TRANSFER never contain it) can
+        // originate from task/mesh stages.
+        if stage.contains(vk::PipelineStageFlags2::VERTEX_SHADER) {
+            stage | self.shader_stage_augment
+        } else {
+            stage
+        }
     }
 
     /// Record an access and return the source scope for a barrier, if one is
@@ -182,9 +218,9 @@ impl BufferAccessTracker {
         submit_value: u64,
         waits: &mut SubmitWaits,
     ) -> Option<(vk::PipelineStageFlags2, vk::AccessFlags2)> {
-        let state = self.states.entry(id).or_default();
-        let stage = access.dst_stage();
+        let stage = self.dst_stage(access);
         let access_mask = access.dst_access_mask();
+        let state = self.states.entry(id).or_default();
 
         // Whether the last write came from another queue: its hazard is
         // resolved by a timeline wait, and its stage/access scopes are
@@ -704,6 +740,45 @@ mod tests {
     }
 
     // Buffer barrier tests
+
+    /// Mesh-shading stage augmentation (#111): with the extension enabled,
+    /// shader-stage scopes gain TASK/MESH bits; fixed-function scopes and a
+    /// tracker without the capability stay untouched (the bits would be
+    /// invalid API use there).
+    #[test]
+    fn mesh_shading_augments_shader_stage_scopes() {
+        let mesh_bits =
+            vk::PipelineStageFlags2::TASK_SHADER_EXT | vk::PipelineStageFlags2::MESH_SHADER_EXT;
+
+        let mut tracker = BufferAccessTracker::new();
+        tracker.set_mesh_shading(true);
+        assert!(tracker.dst_stage(BufferAccessMode::StorageRead).contains(
+            mesh_bits
+                | vk::PipelineStageFlags2::VERTEX_SHADER
+                | vk::PipelineStageFlags2::FRAGMENT_SHADER
+        ));
+        assert!(
+            tracker
+                .dst_stage(BufferAccessMode::AccelerationStructureShaderRead)
+                .contains(mesh_bits)
+        );
+        // Fixed-function scopes never gain shader-stage bits.
+        assert_eq!(
+            tracker.dst_stage(BufferAccessMode::VertexBuffer),
+            BufferAccessMode::VertexBuffer.dst_stage()
+        );
+        assert_eq!(
+            tracker.dst_stage(BufferAccessMode::TransferWrite),
+            BufferAccessMode::TransferWrite.dst_stage()
+        );
+
+        // Without the capability the scopes are exactly the base unions.
+        let plain = BufferAccessTracker::new();
+        assert_eq!(
+            plain.dst_stage(BufferAccessMode::StorageRead),
+            BufferAccessMode::StorageRead.dst_stage()
+        );
+    }
 
     /// Shorthand: barrier scopes for "transfer write -> vertex read".
     fn transfer_to_vertex() -> (

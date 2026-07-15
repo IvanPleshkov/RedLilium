@@ -38,6 +38,11 @@ pub struct OptionalFeatures {
     /// partial support (e.g. AS without ray query) reads as unsupported —
     /// the engine has no consumer for the parts in isolation.
     pub ray_query: bool,
+    /// Mesh shading (#111): `VK_EXT_mesh_shader` with its `taskShader` and
+    /// `meshShader` feature bits. Both stages or nothing: the engine's
+    /// meshlet pipeline is task→mesh, and a device with only one bit reads
+    /// as unsupported. (`multiviewMeshShader` etc. stay off.)
+    pub mesh_shading: bool,
 }
 
 /// GPU crash breadcrumb extensions the device advertises (#97).
@@ -328,6 +333,7 @@ pub fn select_physical_device(
                         maintenance9,
                         memory_budget: has_ext(ash::ext::memory_budget::NAME),
                         ray_query: ray_query_supported(instance, device, &extensions),
+                        mesh_shading: mesh_shading_supported(instance, device, &extensions),
                     },
                     breadcrumbs,
                     portability_subset: extensions.contains(b"VK_KHR_portability_subset".as_ref()),
@@ -384,6 +390,27 @@ fn ray_query_supported(
     accel.acceleration_structure == vk::TRUE
         && ray_query.ray_query == vk::TRUE
         && vulkan12.buffer_device_address == vk::TRUE
+}
+
+/// Whether the device supports mesh shading (#111): `VK_EXT_mesh_shader`
+/// plus both the `taskShader` and `meshShader` feature bits. Queried during
+/// selection so `vkCreateDevice` never sees a feature the device did not
+/// report. (SPIR-V 1.4, which the extension requires, is core in the 1.2+
+/// devices the engine targets.)
+fn mesh_shading_supported(
+    instance: &ash::Instance,
+    device: vk::PhysicalDevice,
+    extensions: &HashSet<Vec<u8>>,
+) -> bool {
+    if !extensions.contains(ash::ext::mesh_shader::NAME.to_bytes()) {
+        return false;
+    }
+
+    let mut mesh = vk::PhysicalDeviceMeshShaderFeaturesEXT::default();
+    let mut features2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut mesh);
+    unsafe { instance.get_physical_device_features2(device, &mut features2) };
+
+    mesh.task_shader == vk::TRUE && mesh.mesh_shader == vk::TRUE
 }
 
 /// All extensions the device offers, as byte strings.
@@ -604,6 +631,10 @@ pub fn create_logical_device(
         device_extensions.push(ash::khr::ray_query::NAME.as_ptr());
         device_extensions.push(ash::khr::deferred_host_operations::NAME.as_ptr());
     }
+    // Mesh shading (#111): task + mesh shader stages.
+    if selected.optional.mesh_shading {
+        device_extensions.push(ash::ext::mesh_shader::NAME.as_ptr());
+    }
     // GPU crash breadcrumbs (#97): the vendor extensions (NV checkpoints, AMD
     // buffer marker) and device-fault reporting, enabled only when breadcrumbs
     // are on so the happy path adds no extensions. The portable fallback needs
@@ -652,6 +683,13 @@ pub fn create_logical_device(
         vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default().acceleration_structure(true);
     let mut ray_query_features = vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
 
+    // Mesh shading feature struct — chained only when supported (#111). Both
+    // stages on; the multiview/primitive-fragment-shading-rate interactions
+    // stay off (no engine consumer).
+    let mut mesh_shader_features = vk::PhysicalDeviceMeshShaderFeaturesEXT::default()
+        .task_shader(true)
+        .mesh_shader(true);
+
     // maintenance9 feature struct — chained only when the device supports it.
     let mut maintenance9_features =
         super::maintenance9::PhysicalDeviceMaintenance9FeaturesKHR::enabled();
@@ -678,6 +716,9 @@ pub fn create_logical_device(
         create_info = create_info
             .push_next(&mut accel_features)
             .push_next(&mut ray_query_features);
+    }
+    if selected.optional.mesh_shading {
+        create_info = create_info.push_next(&mut mesh_shader_features);
     }
 
     let device = unsafe { instance.create_device(selected.physical_device, &create_info, None) }
@@ -750,6 +791,9 @@ pub fn device_capabilities(
         // Inline ray tracing (#110): the extension + feature bundle verified
         // during selection and enabled on the logical device.
         ray_query: selected.optional.ray_query,
+        // Mesh shading (#111): VK_EXT_mesh_shader verified during selection
+        // and enabled on the logical device.
+        mesh_shading: selected.optional.mesh_shading,
     }
 }
 

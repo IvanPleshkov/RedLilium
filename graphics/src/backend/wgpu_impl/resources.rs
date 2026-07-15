@@ -221,6 +221,21 @@ impl WgpuBackend {
             return self.create_compute_pipeline_from_descriptor(descriptor);
         }
 
+        // Mesh shading is Vulkan-only (#111): WebGPU has no task/mesh stages
+        // and there is no WGSL form to compile. Honor `mesh_shading: false`
+        // here instead of silently skipping the stages below.
+        if descriptor
+            .shaders
+            .iter()
+            .any(|s| matches!(s.stage, ShaderStage::Task | ShaderStage::Mesh))
+        {
+            return Err(GraphicsError::FeatureNotSupported(
+                "task/mesh shader stages require DeviceCapabilities::mesh_shading, which \
+                 the wgpu backend does not support (#111)"
+                    .into(),
+            ));
+        }
+
         // Compile shader modules
         let mut vertex_module = None;
         let mut fragment_module = None;
@@ -244,7 +259,8 @@ impl WgpuBackend {
                     fragment_module = Some(module);
                     fragment_entry = &shader.entry_point;
                 }
-                ShaderStage::Compute => {}
+                // Compute is dispatched above; task/mesh were rejected above.
+                ShaderStage::Compute | ShaderStage::Task | ShaderStage::Mesh => {}
             }
         }
 

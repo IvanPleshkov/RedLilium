@@ -19,6 +19,11 @@ use super::transfer::{TransferConfig, TransferOperation};
 ///
 /// Passes describe units of GPU work with their resource dependencies.
 /// Each variant has its own configuration specific to that pass type.
+// The size skew is deliberate: passes live in a pooled per-frame Vec
+// (`RenderGraph` reuses capacity across frames), so boxing the large
+// `GraphicsPass` variant would trade one add-time memcpy for a per-pass
+// heap allocation every frame.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Pass {
     /// Graphics pass (vertex/fragment shaders, rasterization).
@@ -267,6 +272,81 @@ impl std::fmt::Debug for DrawCommand {
 }
 
 // ============================================================================
+// Mesh-Tasks Draw Command
+// ============================================================================
+
+/// A mesh-shading draw (#111): dispatches `group_count` task (or mesh, when
+/// the material has no task stage) workgroups through a material whose
+/// pipeline is task?+mesh+fragment. There is no [`Mesh`] — geometry lives in
+/// storage buffers bound through the material instance, and the mesh shader
+/// fetches it. Requires
+/// [`DeviceCapabilities::mesh_shading`](crate::DeviceCapabilities::mesh_shading).
+pub struct MeshTasksDrawCommand {
+    /// The material instance with bound resources (meshlet buffers included).
+    pub material: Arc<MaterialInstance>,
+    /// Workgroup counts `[x, y, z]` for `vkCmdDrawMeshTasksEXT`.
+    pub group_count: [u32; 3],
+    /// Optional scissor rectangle for clipping.
+    pub scissor_rect: Option<ScissorRect>,
+    /// Per-bind-group dynamic byte offsets (see
+    /// [`DrawCommand::dynamic_offsets`]).
+    pub dynamic_offsets: Vec<Vec<u32>>,
+}
+
+impl MeshTasksDrawCommand {
+    /// Create a new mesh-tasks draw command.
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if the material has no mesh stage — a classic vertex material
+    /// cannot be dispatched as mesh tasks.
+    pub fn new(material: Arc<MaterialInstance>, group_count: [u32; 3]) -> Self {
+        #[cfg(debug_assertions)]
+        {
+            use crate::materials::ShaderStage;
+            debug_assert!(
+                material
+                    .material()
+                    .shaders()
+                    .iter()
+                    .any(|s| s.stage == ShaderStage::Mesh),
+                "MeshTasksDrawCommand requires a material with a mesh shader stage \
+                 (material {:?})",
+                material.label()
+            );
+        }
+        Self {
+            material,
+            group_count,
+            scissor_rect: None,
+            dynamic_offsets: Vec::new(),
+        }
+    }
+
+    /// Set the scissor rectangle for clipping.
+    pub fn with_scissor_rect(mut self, rect: ScissorRect) -> Self {
+        self.scissor_rect = Some(rect);
+        self
+    }
+
+    /// Set per-bind-group dynamic uniform offsets (see
+    /// [`DrawCommand::dynamic_offsets`]).
+    pub fn with_dynamic_offsets(mut self, offsets: Vec<Vec<u32>>) -> Self {
+        self.dynamic_offsets = offsets;
+        self
+    }
+}
+
+impl std::fmt::Debug for MeshTasksDrawCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MeshTasksDrawCommand")
+            .field("material", &self.material.label())
+            .field("group_count", &self.group_count)
+            .finish()
+    }
+}
+
+// ============================================================================
 // Indirect Draw Command
 // ============================================================================
 
@@ -475,6 +555,7 @@ pub struct GraphicsPass {
     scissor_rect: Option<ScissorRect>,
     draw_commands: Vec<DrawCommand>,
     indirect_draw_commands: Vec<IndirectDrawCommand>,
+    mesh_tasks_commands: Vec<MeshTasksDrawCommand>,
 }
 
 impl GraphicsPass {
@@ -487,6 +568,7 @@ impl GraphicsPass {
             scissor_rect: None,
             draw_commands: Vec::new(),
             indirect_draw_commands: Vec::new(),
+            mesh_tasks_commands: Vec::new(),
         }
     }
 
@@ -595,11 +677,43 @@ impl GraphicsPass {
     pub fn clear_draws(&mut self) {
         self.draw_commands.clear();
         self.indirect_draw_commands.clear();
+        self.mesh_tasks_commands.clear();
     }
 
-    /// Check if this pass has any draw commands (direct or indirect).
+    /// Check if this pass has any draw commands (direct, indirect, or mesh
+    /// tasks).
     pub fn has_draws(&self) -> bool {
-        !self.draw_commands.is_empty() || !self.indirect_draw_commands.is_empty()
+        !self.draw_commands.is_empty()
+            || !self.indirect_draw_commands.is_empty()
+            || !self.mesh_tasks_commands.is_empty()
+    }
+
+    // ========================================================================
+    // Mesh-Tasks Draw Commands (#111)
+    // ========================================================================
+
+    /// Add a mesh-shading draw (#111): dispatch `group_count` task/mesh
+    /// workgroups through a task?+mesh+fragment material. Requires
+    /// [`DeviceCapabilities::mesh_shading`](crate::DeviceCapabilities::mesh_shading);
+    /// there is no [`Mesh`] — the mesh shader fetches geometry from storage
+    /// buffers bound through the material instance.
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if the material has no mesh shader stage.
+    pub fn add_draw_mesh_tasks(&mut self, material: Arc<MaterialInstance>, group_count: [u32; 3]) {
+        self.mesh_tasks_commands
+            .push(MeshTasksDrawCommand::new(material, group_count));
+    }
+
+    /// Add a pre-built mesh-tasks draw command.
+    pub fn add_mesh_tasks_command(&mut self, command: MeshTasksDrawCommand) {
+        self.mesh_tasks_commands.push(command);
+    }
+
+    /// Get all mesh-tasks draw commands.
+    pub fn mesh_tasks_commands(&self) -> &[MeshTasksDrawCommand] {
+        &self.mesh_tasks_commands
     }
 
     // ========================================================================
@@ -814,6 +928,15 @@ impl GraphicsPass {
                 &cmd.indirect_buffer,
                 BufferAccessMode::IndirectRead,
             );
+        }
+
+        // Infer from mesh-tasks draws (#111): material resources only — the
+        // meshlet geometry lives in storage buffers bound through the
+        // material instance, so `extract_material_resources` covers it (a
+        // compute pass writing those buffers gets its barrier from the
+        // StorageRead/StorageReadWrite declarations).
+        for cmd in &self.mesh_tasks_commands {
+            extract_material_resources(&cmd.material, &mut usage, &mut seen);
         }
 
         // Diagnostic: a texture bound as a depth/stencil attachment AND sampled

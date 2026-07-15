@@ -97,6 +97,16 @@ pub struct DeviceCapabilities {
     /// [`BindingType::AccelerationStructure`](crate::BindingType) bindings.
     /// Always false on wgpu/dummy and on wasm.
     pub ray_query: bool,
+    /// Whether mesh-shading pipelines (task + mesh shader stages, #111) are
+    /// available. True only on the Vulkan backend when `VK_EXT_mesh_shader`
+    /// (with its `taskShader` + `meshShader` feature bits) is enabled. Like
+    /// [`ray_query`](Self::ray_query) this is a capability, not a
+    /// [`DeviceTier`]: no renderer path stands on it yet. Gates materials
+    /// with [`ShaderStage::Task`]/[`ShaderStage::Mesh`](crate::ShaderStage)
+    /// stages and [`GraphicsPass::add_draw_mesh_tasks`](crate::GraphicsPass)
+    /// draws. Always false on wgpu/dummy and on wasm (WebGPU has no mesh
+    /// shaders).
+    pub mesh_shading: bool,
 }
 
 impl DeviceCapabilities {
@@ -686,6 +696,28 @@ impl GraphicsDevice {
         // reflection, baked lookups and pipeline compilation below all see
         // the same effective defines.
         let descriptor = &descriptor.resolve_variant()?;
+
+        // Stage-combination sanity (#111): catch a task stage without a mesh
+        // stage, mesh+vertex mixes, and mesh materials with vertex layouts
+        // here, with the material named — not as driver validation errors.
+        descriptor.validate_stage_combination()?;
+
+        // Mesh-shading materials require the capability (#111). The dummy
+        // backend is exempt — it fabricates no capabilities but must keep
+        // descriptor-level tests runnable headless.
+        if descriptor.uses_mesh_shading()
+            && !self.capabilities.mesh_shading
+            && !matches!(
+                &*self.instance.backend(),
+                crate::backend::GpuBackend::Dummy(_)
+            )
+        {
+            return Err(GraphicsError::FeatureNotSupported(format!(
+                "material {:?} uses task/mesh shader stages, which require \
+                 DeviceCapabilities::mesh_shading (#111)",
+                descriptor.label
+            )));
+        }
 
         // Auto-reflect binding layouts from Slang shaders when none are specified
         #[cfg(feature = "slang-shaders")]

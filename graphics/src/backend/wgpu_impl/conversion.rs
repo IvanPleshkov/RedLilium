@@ -478,6 +478,8 @@ pub fn convert_shader_stages(flags: crate::materials::ShaderStageFlags) -> wgpu:
     if flags.contains(crate::materials::ShaderStageFlags::COMPUTE) {
         result |= wgpu::ShaderStages::COMPUTE;
     }
+    // TASK/MESH visibility (#111) has no wgpu equivalent; materials carrying
+    // it are rejected in create_pipeline before any layout reaches here.
 
     result
 }

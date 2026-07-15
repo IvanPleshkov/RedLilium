@@ -170,6 +170,10 @@ pub struct PipelineManager {
     /// `AccelerationStructure` bindings in descriptor set layouts — without
     /// the extension the descriptor type itself is invalid API use.
     ray_query_supported: bool,
+    /// Whether `VK_EXT_mesh_shader` was enabled on the device (#111). Gates
+    /// task/mesh pipeline stages and TASK_EXT/MESH_EXT descriptor visibility
+    /// — without the extension the stage flags are invalid API use.
+    mesh_shading_supported: bool,
     /// Whether resources have been explicitly destroyed.
     destroyed: bool,
 }
@@ -187,6 +191,7 @@ impl PipelineManager {
         device_properties: &vk::PhysicalDeviceProperties,
         wireframe_supported: bool,
         ray_query_supported: bool,
+        mesh_shading_supported: bool,
     ) -> Result<Self, GraphicsError> {
         let mut pool_sizes = vec![
             vk::DescriptorPoolSize {
@@ -251,6 +256,7 @@ impl PipelineManager {
             ds_layout_cache: parking_lot::Mutex::new(HashMap::new()),
             wireframe_supported,
             ray_query_supported,
+            mesh_shading_supported,
             destroyed: false,
         })
     }
@@ -388,17 +394,38 @@ impl PipelineManager {
                     .iter()
                     .map(|(k, v)| (k.as_str(), v.as_str()))
                     .collect();
-                let wgsl = crate::shader::baked::lookup(source_str, entry_point, &defines)
-                    .ok_or_else(|| {
-                        GraphicsError::ShaderCompilationFailed(format!(
-                            "no baked WGSL for a Slang shader (entry '{entry_point}', defines \
-                             {defines:?}); Slang cannot compile at runtime without the \
-                             'slang-shaders' feature — add it to the xtask registry and run \
-                             `cargo run -p xtask --features slang -- bake-shaders`, then rebuild",
-                        ))
-                    })?;
-                let spv = self.compile_wgsl_to_spirv(wgsl.as_bytes(), stage, entry_point)?;
-                (spv, entry_point.to_string())
+                // Classic stages are baked as WGSL; task/mesh stages — and
+                // every stage of a shader set that contains them (#111) —
+                // are baked as SPIR-V (Slang's output verbatim), because
+                // Slang's WGSL target refuses to load a module with
+                // mesh-shading entry points. Try WGSL first, then SPIR-V.
+                if let Some(wgsl) = crate::shader::baked::lookup(source_str, entry_point, &defines)
+                {
+                    let spv = self.compile_wgsl_to_spirv(wgsl.as_bytes(), stage, entry_point)?;
+                    (spv, entry_point.to_string())
+                } else if let Some(bytes) =
+                    crate::shader::baked::lookup_spirv(source_str, entry_point, &defines)
+                {
+                    if bytes.len() % 4 != 0 {
+                        return Err(GraphicsError::ShaderCompilationFailed(
+                            "baked SPIR-V is not aligned to u32".into(),
+                        ));
+                    }
+                    let spv: Vec<u32> = bytes
+                        .chunks_exact(4)
+                        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .collect();
+                    let actual = spirv_entry_point_name(&spv, stage)
+                        .unwrap_or_else(|| entry_point.to_string());
+                    (spv, actual)
+                } else {
+                    return Err(GraphicsError::ShaderCompilationFailed(format!(
+                        "no baked WGSL or SPIR-V for a Slang shader (stage {stage:?}, entry \
+                         '{entry_point}', defines {defines:?}); Slang cannot compile at runtime \
+                         without the 'slang-shaders' feature — add it to the xtask registry and \
+                         run `cargo run -p xtask --features slang -- bake-shaders`, then rebuild",
+                    )));
+                }
             }
         };
 
@@ -587,23 +614,37 @@ impl PipelineManager {
     }
 
     /// Create a graphics pipeline.
+    ///
+    /// `stages` is the ordered `(stage, module, entry point)` list — either
+    /// the classic vertex(+fragment) pair with `vertex_input = Some((layout,
+    /// topology))`, or a mesh-shading set (task? + mesh + fragment, #111)
+    /// with `vertex_input = None`: mesh pipelines have no vertex input or
+    /// input assembly (geometry is fetched by the mesh shader), and the spec
+    /// ignores those states when a mesh stage is present — they are omitted
+    /// entirely here.
     #[allow(clippy::too_many_arguments)]
     pub fn create_graphics_pipeline(
         &self,
-        vertex_module: vk::ShaderModule,
-        fragment_module: Option<vk::ShaderModule>,
-        vertex_entry: &str,
-        fragment_entry: &str,
-        vertex_layout: &VertexLayout,
-        topology: PrimitiveTopology,
+        stages: &[(vk::ShaderStageFlags, vk::ShaderModule, &str)],
+        vertex_input: Option<(&VertexLayout, PrimitiveTopology)>,
         pipeline_layout: vk::PipelineLayout,
         color_formats: &[TextureFormat],
         depth: Option<crate::materials::DepthState>,
         blend_state: Option<&crate::materials::BlendState>,
         raster: crate::materials::RasterState,
         sample_count: u32,
-        _dynamic_rendering: &ash::Device,
     ) -> Result<vk::Pipeline, GraphicsError> {
+        // Stage flags from an extension that was never enabled are invalid
+        // API use before the driver even sees the SPIR-V (#111).
+        if stages.iter().any(|(stage, _, _)| {
+            stage.intersects(vk::ShaderStageFlags::TASK_EXT | vk::ShaderStageFlags::MESH_EXT)
+        }) && !self.mesh_shading_supported
+        {
+            return Err(GraphicsError::FeatureNotSupported(
+                "task/mesh pipeline stages require DeviceCapabilities::mesh_shading (#111)".into(),
+            ));
+        }
+
         // Derived once from the optional depth state; used by both the depth-
         // stencil state and the dynamic-rendering attachment formats below.
         let depth_format = depth.map(|d| d.format);
@@ -611,36 +652,38 @@ impl PipelineManager {
         let depth_compare = depth
             .map(|d| d.compare)
             .unwrap_or(crate::materials::CompareFunction::LessEqual);
-        let vertex_entry_c = CString::new(vertex_entry).map_err(|e| {
-            GraphicsError::InvalidParameter(format!(
-                "Invalid vertex entry point name (contains null byte): {}",
-                e
-            ))
-        })?;
-        let fragment_entry_c = CString::new(fragment_entry).map_err(|e| {
-            GraphicsError::InvalidParameter(format!(
-                "Invalid fragment entry point name (contains null byte): {}",
-                e
-            ))
-        })?;
 
-        let mut shader_stages = vec![
-            vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::VERTEX)
-                .module(vertex_module)
-                .name(&vertex_entry_c),
-        ];
+        let entry_names: Vec<CString> = stages
+            .iter()
+            .map(|(_, _, entry)| {
+                CString::new(*entry).map_err(|e| {
+                    GraphicsError::InvalidParameter(format!(
+                        "Invalid entry point name (contains null byte): {}",
+                        e
+                    ))
+                })
+            })
+            .collect::<Result<_, _>>()?;
 
-        if let Some(frag_module) = fragment_module {
-            shader_stages.push(
+        let shader_stages: Vec<vk::PipelineShaderStageCreateInfo> = stages
+            .iter()
+            .zip(&entry_names)
+            .map(|(&(stage, module, _), name)| {
                 vk::PipelineShaderStageCreateInfo::default()
-                    .stage(vk::ShaderStageFlags::FRAGMENT)
-                    .module(frag_module)
-                    .name(&fragment_entry_c),
-            );
-        }
+                    .stage(stage)
+                    .module(module)
+                    .name(name)
+            })
+            .collect();
 
-        // Build vertex input state from material's vertex layout
+        // Build vertex input state from the material's vertex layout (classic
+        // pipelines only; the vectors stay empty — and the states unattached —
+        // for mesh pipelines).
+        let empty_layout = VertexLayout::new();
+        let (vertex_layout, topology) = match vertex_input {
+            Some((layout, topology)) => (layout, topology),
+            None => (&empty_layout, PrimitiveTopology::TriangleList),
+        };
         let binding_descriptions: Vec<vk::VertexInputBindingDescription> = vertex_layout
             .buffers
             .iter()
@@ -787,10 +830,8 @@ impl PipelineManager {
             .depth_attachment_format(depth_attachment_format)
             .stencil_attachment_format(stencil_attachment_format);
 
-        let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+        let mut pipeline_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&shader_stages)
-            .vertex_input_state(&vertex_input_state)
-            .input_assembly_state(&input_assembly_state)
             .viewport_state(&viewport_state)
             .rasterization_state(&rasterization_state)
             .multisample_state(&multisample_state)
@@ -799,6 +840,11 @@ impl PipelineManager {
             .dynamic_state(&dynamic_state)
             .layout(pipeline_layout)
             .push_next(&mut rendering_info);
+        if vertex_input.is_some() {
+            pipeline_info = pipeline_info
+                .vertex_input_state(&vertex_input_state)
+                .input_assembly_state(&input_assembly_state);
+        }
 
         let pipelines = unsafe {
             self.device
@@ -996,6 +1042,12 @@ fn convert_shader_stage_flags(flags: crate::materials::ShaderStageFlags) -> vk::
     if flags.contains(crate::materials::ShaderStageFlags::COMPUTE) {
         result |= vk::ShaderStageFlags::COMPUTE;
     }
+    if flags.contains(crate::materials::ShaderStageFlags::TASK) {
+        result |= vk::ShaderStageFlags::TASK_EXT;
+    }
+    if flags.contains(crate::materials::ShaderStageFlags::MESH) {
+        result |= vk::ShaderStageFlags::MESH_EXT;
+    }
     result
 }
 
@@ -1082,6 +1134,9 @@ fn spirv_entry_point_name(spirv: &[u32], stage: ShaderStage) -> Option<String> {
         ShaderStage::Vertex => 0,
         ShaderStage::Fragment => 4,
         ShaderStage::Compute => 5,
+        // SPV_EXT_mesh_shader execution models (#111).
+        ShaderStage::Task => 5364, // TaskEXT
+        ShaderStage::Mesh => 5365, // MeshEXT
     };
 
     for (opcode, operands) in spirv_instructions(spirv) {
@@ -1131,6 +1186,14 @@ fn compile_wgsl_to_spirv(
         ShaderStage::Vertex => naga::ShaderStage::Vertex,
         ShaderStage::Fragment => naga::ShaderStage::Fragment,
         ShaderStage::Compute => naga::ShaderStage::Compute,
+        // naga/WGSL has no mesh-shading support at all (#111) — the reason
+        // task/mesh stages are authored in Slang and baked as SPIR-V.
+        ShaderStage::Task | ShaderStage::Mesh => {
+            return Err(GraphicsError::FeatureNotSupported(format!(
+                "WGSL cannot express {stage:?} shaders; author mesh-shading stages in \
+                 Slang (#111)"
+            )));
+        }
     };
 
     let _entry_point_index = module
@@ -1330,6 +1393,20 @@ mod tests {
         // Content differences must produce different keys.
         let c = BindingLayout::new().with_uniform_buffer(0).with_sampler(1);
         assert_ne!(ds_layout_key(&a), ds_layout_key(&c));
+    }
+
+    /// #111: WGSL has no mesh-shading syntax, so task/mesh stages through the
+    /// naga path must fail with the engine-level cause (author in Slang), not
+    /// a confusing missing-entry-point error.
+    #[test]
+    fn wgsl_mesh_stages_are_rejected() {
+        for stage in [ShaderStage::Task, ShaderStage::Mesh] {
+            let result = compile_wgsl_to_spirv(b"", stage, "main");
+            assert!(
+                matches!(result, Err(GraphicsError::FeatureNotSupported(_))),
+                "{stage:?} through the WGSL path must be FeatureNotSupported"
+            );
+        }
     }
 
     /// #110: the naga WGSL→SPIR-V path must accept ray-query shaders —

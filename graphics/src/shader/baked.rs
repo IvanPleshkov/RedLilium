@@ -80,6 +80,24 @@ pub fn lookup(source: &str, entry_point: &str, defines: &[(&str, &str)]) -> Opti
         .map(|i| baked_generated::BAKED_WGSL[i].1)
 }
 
+/// Look up baked SPIR-V for `(source, entry_point, defines)` — the artifact
+/// kind for task/mesh entry points (#111), which have no WGSL form (naga
+/// cannot express mesh shading, so there is nothing to bake as WGSL). The
+/// bytes are the little-endian SPIR-V words exactly as Slang emitted them at
+/// bake time. `None` means the permutation was never baked — the caller must
+/// fail loudly (see [`name_for_key`]).
+pub fn lookup_spirv(
+    source: &str,
+    entry_point: &str,
+    defines: &[(&str, &str)],
+) -> Option<&'static [u8]> {
+    let key = shader_key(source, entry_point, defines);
+    baked_generated::BAKED_SPIRV
+        .binary_search_by_key(&key, |(k, _)| *k)
+        .ok()
+        .map(|i| baked_generated::BAKED_SPIRV[i].1)
+}
+
 /// Human-readable name (`shader / entry / defines`) for a key, for diagnostics
 /// on a miss. Present for every baked permutation so a miss can name the shader
 /// that needs (re)baking rather than a bare hex hash.
@@ -102,6 +120,8 @@ fn stage_tag(stage: ShaderStage) -> u8 {
         ShaderStage::Vertex => 0,
         ShaderStage::Fragment => 1,
         ShaderStage::Compute => 2,
+        ShaderStage::Task => 3,
+        ShaderStage::Mesh => 4,
     }
 }
 
@@ -252,5 +272,37 @@ mod tests {
                 .all(|w| w[0].0 < w[1].0),
             "BAKED_NAMES not strictly ascending by key"
         );
+        assert!(
+            super::baked_generated::BAKED_SPIRV
+                .windows(2)
+                .all(|w| w[0].0 < w[1].0),
+            "BAKED_SPIRV not strictly ascending by key"
+        );
+    }
+
+    /// Every baked SPIR-V entry (#111) must be word-aligned little-endian
+    /// SPIR-V starting with the magic number, and its key must be named in
+    /// `BAKED_NAMES` (miss diagnostics rely on it). A full validator does not
+    /// run here (naga has no mesh-shading support — the very reason these are
+    /// baked as SPIR-V), so the driver's validation layer is the backstop.
+    #[test]
+    fn all_baked_spirv_is_word_aligned_with_magic() {
+        for (key, bytes) in super::baked_generated::BAKED_SPIRV {
+            assert!(
+                bytes.len() % 4 == 0 && bytes.len() >= 20,
+                "baked SPIR-V {key:#018x} is not a whole number of words"
+            );
+            let magic = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            assert_eq!(
+                magic, 0x0723_0203,
+                "baked SPIR-V {key:#018x} lacks the SPIR-V magic number"
+            );
+            assert!(
+                super::baked_generated::BAKED_NAMES
+                    .binary_search_by_key(key, |(k, _)| *k)
+                    .is_ok(),
+                "baked SPIR-V {key:#018x} has no BAKED_NAMES entry"
+            );
+        }
     }
 }

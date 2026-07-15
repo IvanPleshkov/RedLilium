@@ -49,6 +49,10 @@ impl DummyBackend {
             // it advertises no ray-query support — engine-level gating (#110)
             // must behave as on a device without the feature.
             ray_query: false,
+            // Same policy for mesh shading (#111): pipelines with task/mesh
+            // stages are accepted (no real GPU objects), but the capability
+            // is not advertised.
+            mesh_shading: false,
         }
     }
 

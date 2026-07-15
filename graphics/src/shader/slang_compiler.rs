@@ -204,6 +204,8 @@ impl SlangCompiler {
             ShaderStage::Vertex => ShaderStageFlags::VERTEX,
             ShaderStage::Fragment => ShaderStageFlags::FRAGMENT,
             ShaderStage::Compute => ShaderStageFlags::COMPUTE,
+            ShaderStage::Task => ShaderStageFlags::TASK,
+            ShaderStage::Mesh => ShaderStageFlags::MESH,
         };
 
         // Group parameters by binding space (group).

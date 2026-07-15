@@ -522,6 +522,10 @@ impl WgpuBackend {
             // Inline ray tracing is Vulkan-only (#110). wgpu's experimental
             // ray-query support is a named follow-up (issue #110 phase 4).
             ray_query: false,
+            // Mesh shading is Vulkan-only (#111): WebGPU has no mesh-shader
+            // stages, and wgpu's experimental native support has no WGSL
+            // front-end for them.
+            mesh_shading: false,
         }
     }
 

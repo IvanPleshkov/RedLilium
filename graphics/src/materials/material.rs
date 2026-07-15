@@ -27,6 +27,18 @@ pub enum ShaderStage {
     Fragment,
     /// Compute shader.
     Compute,
+    /// Task (amplification) shader — optional meshlet-culling stage ahead of
+    /// the mesh stage. Requires [`DeviceCapabilities::mesh_shading`] and Slang
+    /// authoring (WGSL has no mesh-shading syntax).
+    ///
+    /// [`DeviceCapabilities::mesh_shading`]: crate::DeviceCapabilities::mesh_shading
+    Task,
+    /// Mesh shader — replaces the vertex stage (and vertex input entirely) in
+    /// a meshlet pipeline. Requires [`DeviceCapabilities::mesh_shading`] and
+    /// Slang authoring (WGSL has no mesh-shading syntax).
+    ///
+    /// [`DeviceCapabilities::mesh_shading`]: crate::DeviceCapabilities::mesh_shading
+    Mesh,
 }
 
 /// Source language of the shader code.
@@ -428,6 +440,50 @@ impl MaterialDescriptor {
         self
     }
 
+    /// Whether this material uses the mesh-shading pipeline (has a
+    /// [`ShaderStage::Mesh`] stage). Such materials have no vertex input:
+    /// geometry is fetched by the mesh shader from storage buffers, and draws
+    /// are issued with
+    /// [`GraphicsPass::add_draw_mesh_tasks`](crate::GraphicsPass::add_draw_mesh_tasks).
+    pub fn uses_mesh_shading(&self) -> bool {
+        self.shaders.iter().any(|s| s.stage == ShaderStage::Mesh)
+    }
+
+    /// Validate the stage combination (#111). A graphics material is either
+    /// vertex+fragment or task?+mesh+fragment; mixing the two vertex-input
+    /// models, a task stage without a mesh stage, or a mesh material with a
+    /// non-empty vertex layout are all descriptor bugs caught here rather
+    /// than as driver errors at pipeline-creation time.
+    pub fn validate_stage_combination(&self) -> Result<(), crate::error::GraphicsError> {
+        let has = |stage: ShaderStage| self.shaders.iter().any(|s| s.stage == stage);
+        let err = |msg: String| Err(crate::error::GraphicsError::InvalidParameter(msg));
+
+        if has(ShaderStage::Task) && !has(ShaderStage::Mesh) {
+            return err(format!(
+                "material {:?}: a task stage requires a mesh stage (task shaders only \
+                 amplify mesh-shader dispatches)",
+                self.label
+            ));
+        }
+        if has(ShaderStage::Mesh) {
+            if has(ShaderStage::Vertex) {
+                return err(format!(
+                    "material {:?}: mesh and vertex stages are mutually exclusive (the mesh \
+                     stage replaces vertex input entirely)",
+                    self.label
+                ));
+            }
+            if !self.vertex_layout.attributes.is_empty() || !self.vertex_layout.buffers.is_empty() {
+                return err(format!(
+                    "material {:?}: mesh pipelines have no vertex input; remove the vertex \
+                     layout (mesh shaders fetch geometry from storage buffers)",
+                    self.label
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve [`variant`](Self::variant) into per-stage defines: a clone of
     /// this descriptor whose Slang [`ShaderSource::defines`] carry the
     /// variant's defines merged with any ad-hoc per-stage ones.
@@ -768,6 +824,65 @@ mod tests {
 
         let fs = ShaderSource::fragment(b"code".to_vec(), "fs_main");
         assert_eq!(fs.stage, ShaderStage::Fragment);
+    }
+
+    /// Mesh-shading stage rules (#111): a graphics material is either
+    /// vertex(+fragment) or task?+mesh+fragment; a mesh material has no
+    /// vertex layout.
+    #[test]
+    fn mesh_stage_combination_validation() {
+        let slang =
+            |stage: ShaderStage| ShaderSource::slang(stage, b"src".to_vec(), "main", vec![]);
+
+        let full = MaterialDescriptor::new()
+            .with_shader(slang(ShaderStage::Task))
+            .with_shader(slang(ShaderStage::Mesh))
+            .with_shader(slang(ShaderStage::Fragment));
+        assert!(full.uses_mesh_shading());
+        assert!(full.validate_stage_combination().is_ok());
+
+        // The task stage is optional.
+        assert!(
+            MaterialDescriptor::new()
+                .with_shader(slang(ShaderStage::Mesh))
+                .with_shader(slang(ShaderStage::Fragment))
+                .validate_stage_combination()
+                .is_ok()
+        );
+
+        // A task stage without a mesh stage amplifies nothing.
+        assert!(
+            MaterialDescriptor::new()
+                .with_shader(slang(ShaderStage::Task))
+                .with_shader(slang(ShaderStage::Fragment))
+                .validate_stage_combination()
+                .is_err()
+        );
+
+        // Mesh and vertex stages are mutually exclusive.
+        assert!(
+            MaterialDescriptor::new()
+                .with_shader(ShaderSource::vertex(b"vs".to_vec(), "main"))
+                .with_shader(slang(ShaderStage::Mesh))
+                .validate_stage_combination()
+                .is_err()
+        );
+
+        // A mesh material must not declare a vertex layout.
+        assert!(
+            MaterialDescriptor::new()
+                .with_shader(slang(ShaderStage::Mesh))
+                .with_vertex_layout(VertexLayout::position_only())
+                .validate_stage_combination()
+                .is_err()
+        );
+
+        // Classic materials are unaffected.
+        let classic = MaterialDescriptor::new()
+            .with_shader(ShaderSource::vertex(b"vs".to_vec(), "main"))
+            .with_vertex_layout(VertexLayout::position_only());
+        assert!(!classic.uses_mesh_shading());
+        assert!(classic.validate_stage_combination().is_ok());
     }
 
     #[test]

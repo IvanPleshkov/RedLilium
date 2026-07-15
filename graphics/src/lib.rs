@@ -92,9 +92,9 @@ pub use graph::{
     AccelerationStructureBuild, AccelerationStructureBuildPass, BufferCopyRegion,
     BufferTextureCopyRegion, BufferTextureLayout, ColorAttachment, CompiledGraph, ComputePass,
     DepthStencilAttachment, DrawCommand, GraphError, GraphicsPass, IndirectDrawCommand, LoadOp,
-    Pass, PassHandle, QueuePreference, RenderGraph, RenderGraphCompilationMode, RenderTarget,
-    RenderTargetConfig, StoreOp, TextureCopyLocation, TextureCopyRegion, TextureOrigin,
-    TransferConfig, TransferOperation, TransferPass,
+    MeshTasksDrawCommand, Pass, PassHandle, QueuePreference, RenderGraph,
+    RenderGraphCompilationMode, RenderTarget, RenderTargetConfig, StoreOp, TextureCopyLocation,
+    TextureCopyRegion, TextureOrigin, TransferConfig, TransferOperation, TransferPass,
     resource_usage::{PassResourceUsage, TextureAccessMode, TextureUsageDecl},
 };
 pub use instance::{

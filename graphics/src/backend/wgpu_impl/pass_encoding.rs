@@ -195,6 +195,17 @@ impl WgpuBackend {
             render_pass.set_scissor_rect(0, 0, width, height);
         }
 
+        // Mesh-tasks draws are Vulkan-only (#111); their materials cannot
+        // even be created on wgpu, so a command here is a graph-construction
+        // bug — fail loudly rather than render an incomplete frame.
+        if !pass.mesh_tasks_commands().is_empty() {
+            return Err(GraphicsError::FeatureNotSupported(format!(
+                "pass '{}' contains mesh-tasks draws, which require \
+                 DeviceCapabilities::mesh_shading (Vulkan-only, #111)",
+                pass.name()
+            )));
+        }
+
         // Encode each draw command
         for draw_cmd in pass.draw_commands() {
             let material_arc = draw_cmd.material.material();
