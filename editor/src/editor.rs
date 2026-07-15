@@ -69,6 +69,9 @@ pub struct Editor {
     local_mounts: Vec<(&'static str, &'static str)>,
     /// Remote-control protocol state (`REDLILIUM_REMOTE=1`, docs/REMOTE.md).
     remote: Option<crate::remote_commands::RemoteCommands>,
+    /// Scene to open on startup (#2): `[project] scene` from `project.toml`,
+    /// a VFS path `"mount/path"`. `None` → demo scene.
+    startup_scene: Option<String>,
     console: ConsolePanel,
 
     // UI (the egui controller is an ECS resource — see on_init)
@@ -171,6 +174,7 @@ impl Editor {
             remote: std::env::var("REDLILIUM_REMOTE")
                 .is_ok_and(|v| v == "1")
                 .then(crate::remote_commands::RemoteCommands::default),
+            startup_scene: config.project.scene.clone(),
             console,
             dock_state: dock::create_default_layout(),
             inspector_state: InspectorState::new(),
@@ -639,6 +643,36 @@ impl Editor {
         self.asset_browser.notify_asset_deleted(source, path);
         log::info!("Deleted asset {vfs_path}");
     }
+
+    /// File > Save (#2): serialize the world's scene content to the
+    /// [`CurrentScene`](crate::core::CurrentScene) asset — or to a fresh
+    /// `scenes/new[.N].scene` in the `project` mount on the first save — and
+    /// mark the history clean. The file lands through the async VFS writer;
+    /// a *new* file is registered in the asset DB by the watcher when the
+    /// write hits disk (the same route as prefab export).
+    fn save_current_scene(&mut self) {
+        let Some(ew) = self.world.as_mut() else {
+            return;
+        };
+        let ron = match redlilium_ecs::serialize_scene_ron(&ew.world) {
+            Ok(ron) => ron,
+            Err(e) => {
+                log::error!("scene save failed to serialize: {e}");
+                return;
+            }
+        };
+        let current = ew.world.resource::<crate::core::CurrentScene>().0.clone();
+        let vfs_path = current.unwrap_or_else(|| {
+            let path = crate::core::unique_asset_path(&ew.world, "project", "scenes", "scene");
+            let vfs_path = format!("project/{path}");
+            ew.world.resource_mut::<crate::core::CurrentScene>().0 = Some(vfs_path.clone());
+            vfs_path
+        });
+        self.asset_browser
+            .dispatch_write(&self.vfs, &vfs_path, ron.into_bytes());
+        ew.history.mark_saved();
+        log::info!("saved scene {vfs_path}");
+    }
 }
 
 impl AppHandler for Editor {
@@ -665,17 +699,41 @@ impl AppHandler for Editor {
             redlilium_runtime::EngineContext::with_vfs(ctx.device().clone(), self.vfs.clone());
         crate::core::scan_local_mounts(&engine, &self.local_mounts);
 
-        // Create the editor world with a demo scene
+        // Create the editor world: the project's startup scene (#2) when
+        // configured and readable, the demo scene otherwise.
         let aspect = ctx.aspect_ratio();
-        let editor_world = create_editor_world(
-            &EditorWorldParams {
-                remote: self.remote.is_some(),
-                egui: true,
-            },
-            &engine,
-            &mut scene_view,
-            aspect,
-        );
+        let params = EditorWorldParams {
+            remote: self.remote.is_some(),
+            egui: true,
+        };
+        let startup_scene = self.startup_scene.take().and_then(|path| {
+            match pollster::block_on(self.vfs.read(&path))
+                .map_err(|e| e.to_string())
+                .and_then(|data| {
+                    redlilium_ecs::serialize::decode::<redlilium_ecs::serialize::SerializedWorld>(
+                        &data,
+                        redlilium_ecs::serialize::Format::Ron,
+                    )
+                    .map_err(|e| e.to_string())
+                }) {
+                Ok(scene) => Some((path, scene)),
+                Err(e) => {
+                    log::error!("startup scene '{path}' failed to load: {e}");
+                    None
+                }
+            }
+        });
+        let editor_world = match &startup_scene {
+            Some((path, scene)) => crate::core::create_editor_world_with_scene(
+                &params,
+                &engine,
+                &mut scene_view,
+                aspect,
+                path,
+                scene,
+            ),
+            None => create_editor_world(&params, &engine, &mut scene_view, aspect),
+        };
         self.engine = Some(engine);
         self.world = Some(editor_world);
 
@@ -796,8 +854,7 @@ impl AppHandler for Editor {
             let ew = self.world.as_mut().unwrap();
             match action {
                 MenuAction::Save => {
-                    ew.history.mark_saved();
-                    log::info!("Saved");
+                    self.save_current_scene();
                 }
                 MenuAction::Undo => {
                     if let Err(e) = ew.history.undo(&mut ew.world) {
@@ -1207,8 +1264,7 @@ impl AppHandler for Editor {
                             let ew = self.world.as_mut().unwrap();
                             match action {
                                 MenuAction::Save => {
-                                    ew.history.mark_saved();
-                                    log::info!("Saved");
+                                    self.save_current_scene();
                                 }
                                 MenuAction::Undo => {
                                     if let Err(e) = ew.history.undo(&mut ew.world) {

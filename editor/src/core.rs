@@ -76,6 +76,13 @@ impl EditorWorld {
     }
 }
 
+/// The scene asset the editor's world content came from / was last saved to
+/// (#2), as a VFS path `"mount/path"` (e.g. `"game/scenes/level1.scene"`).
+/// A world resource: File > Save writes here without asking, and remote
+/// `save_scene` defaults here; `None` until the first save/load picks a path.
+#[derive(Default)]
+pub struct CurrentScene(pub Option<String>);
+
 /// What to build into a new editor world — the windowed shell wants the egui
 /// overlay system, the headless shell wants the remote channel unconditionally.
 pub struct EditorWorldParams {
@@ -138,6 +145,34 @@ pub fn create_editor_world(
     ew
 }
 
+/// [`create_editor_world`], but the content comes from a `.scene` asset (#2)
+/// instead of the demo scene: instantiate `scene` and record `path` as the
+/// world's [`CurrentScene`]. On instantiation failure the world comes up
+/// empty (not demo content — a broken scene should look broken, not silently
+/// morph into the demo), with the error logged.
+pub fn create_editor_world_with_scene(
+    params: &EditorWorldParams,
+    engine: &EngineContext,
+    scene_view: &mut SceneViewState,
+    aspect: f32,
+    path: &str,
+    scene: &redlilium_ecs::serialize::SerializedWorld,
+) -> EditorWorld {
+    let mut ew = create_editor_world_base(params, engine, scene_view);
+    ew.editor_camera = spawn_editor_camera(&mut ew.world, aspect);
+    match ew.world.deserialize_world_into(scene) {
+        Ok(spawned) => {
+            log::info!("opened scene '{path}' ({} entities)", spawned.len());
+            // Fresh reference holders, steady-state managers — same reason
+            // as scene transitions (#106).
+            redlilium_ecs::rescan_asset_managers(&mut ew.world);
+        }
+        Err(e) => log::error!("failed to instantiate scene '{path}': {e}"),
+    }
+    ew.world.resource_mut::<CurrentScene>().0 = Some(path.to_string());
+    ew
+}
+
 /// [`create_editor_world`] minus the editor camera and the demo scene: all
 /// resources and schedules, **zero entities**. The game-reload path builds a
 /// replacement world with this and then restores every entity (editor camera
@@ -160,6 +195,9 @@ pub fn create_editor_world_base(
     // Mounts with un-persisted asset-DB edits (written by the undoable
     // asset-edit actions); drained + persisted once per frame.
     world.insert_resource(redlilium_ecs::DirtyMounts::new());
+    // The scene asset this world's content belongs to (#2); set by the
+    // startup scene load / save / remote load_scene.
+    world.insert_resource(CurrentScene::default());
     // Remote-control channel (docs/REMOTE.md): served by RemoteServe on
     // the IO runtime; the editor pumps commands each frame. Opt-in.
     if params.remote {

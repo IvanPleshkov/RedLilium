@@ -72,6 +72,8 @@ Claude): текстовый протокол, через который можн
 | `new_asset` | `source`, `kind`, `dir?`, `name?` | `guid`, `path` — файл + запись в DB |
 | `save_prefab` | `entity`, `path` | ack — поддерево записано как `.prefab` (RON) |
 | `spawn_prefab` | `path`, `parent?` | `entities` после применения (undoable) |
+| `save_scene` | `path?` (default — текущая сцена) | `path` — контент мира (без editor-сущностей) записан как `.scene`; путь становится текущей сценой |
+| `load_scene` | `path` | ack после применения (undoable) — замена контента мира на сцену; editor-сущности переживают, undo возвращает прежний контент |
 | `pick` | `x`, `y` | `entity: Some("i@t")` \| `None` — сущность под точкой |
 | `pick_rect` | `x`, `y`, `w`, `h` | `entities` — все сущности в регионе |
 | `set_gizmo_mode` | `mode: "translate"|"rotate"|"scale"` | ack — переключение режима трансформ-гизмо (не undoable) |

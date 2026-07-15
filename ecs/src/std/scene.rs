@@ -142,13 +142,55 @@ pub fn instantiate_scene(
     world.deserialize_world_into(&scene.0)
 }
 
-/// Serialize `world` into scene RON — the bytes a `.scene` asset stores.
-/// Until the editor grows scene persistence (#2) this is how scene files are
-/// authored (tests, tooling).
+/// Capture `world`'s *scene content* as a [`SerializedWorld`] — what a
+/// `.scene` asset stores (#2). Two deliberate differences from the raw
+/// [`World::serialize_world`] snapshot:
+///
+/// - **Editor entities are excluded** (`Entity::EDITOR` /
+///   `Entity::INHERITED_EDITOR` flags — the editor camera and friends are
+///   editor machinery, not scene content). References from scene entities to
+///   an excluded entity resolve to `Entity::DANGLING` on instantiation.
+/// - **Snapshot resources are dropped**: a scene is entity content; restoring
+///   resource state into an arbitrary host world (editor, running game) is a
+///   play-mode/reload concern, not a scene's.
+pub fn scene_from_world(world: &World) -> Result<SerializedWorld, SerializeError> {
+    let mut scene = world.serialize_world()?;
+    scene.entities.retain(|e| {
+        e.entity_flags & (crate::Entity::EDITOR | crate::Entity::INHERITED_EDITOR) == 0
+    });
+    scene.resources.clear();
+    Ok(scene)
+}
+
+/// Serialize `world`'s scene content ([`scene_from_world`]) into scene RON —
+/// the bytes a `.scene` asset stores. Used by the editor's scene save (#2)
+/// and by offline tooling (`gen_scenes`, tests).
 pub fn serialize_scene_ron(world: &World) -> Result<String, SerializeError> {
-    let scene = world.serialize_world()?;
+    let scene = scene_from_world(world)?;
     ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default())
         .map_err(|e| SerializeError::FormatError(format!("scene: ron: {e}")))
+}
+
+/// Bump the GPU asset managers' generations so the next `MeshLoad` re-scans
+/// all asset refs. Call after instantiating entities *out of band* (scene
+/// swaps, editor scene load): the new entities' refs may point at assets that
+/// are already resident (or never requested), so no manager generation moves
+/// on its own and the gated scan would skip them forever — invisible content.
+/// Residents are reused; only missing pieces load.
+pub fn rescan_asset_managers(world: &mut World) {
+    if world.has_resource::<crate::MeshManager>() {
+        world.resource_mut::<crate::MeshManager>().request_rescan();
+    }
+    if world.has_resource::<crate::MaterialInstanceManager>() {
+        world
+            .resource_mut::<crate::MaterialInstanceManager>()
+            .request_rescan();
+    }
+    if world.has_resource::<crate::TextureManager>() {
+        world
+            .resource_mut::<crate::TextureManager>()
+            .request_rescan();
+    }
 }
 
 // ---- Scene manager (#102) ----
@@ -274,31 +316,95 @@ impl crate::ExclusiveSystem for ApplySceneTransitions {
                     );
                 }
                 world.resource_mut::<SceneManager>().current = Some(path);
-                // The spawned entities carry unresolved AssetRefs, but the
-                // assets they point at may already be resident — no
-                // manager-generation change, so MeshLoad's rescan gate would
-                // skip them forever (invisible scene). Bump the generations
-                // so the next MeshLoad rescans; residents are reused, only
-                // the missing pieces load.
-                if world.has_resource::<crate::MeshManager>() {
-                    world.resource_mut::<crate::MeshManager>().request_rescan();
-                }
-                if world.has_resource::<crate::MaterialInstanceManager>() {
-                    world
-                        .resource_mut::<crate::MaterialInstanceManager>()
-                        .request_rescan();
-                }
-                if world.has_resource::<crate::TextureManager>() {
-                    world
-                        .resource_mut::<crate::TextureManager>()
-                        .request_rescan();
-                }
+                rescan_asset_managers(world);
             }
             Err(e) => {
                 log::error!("scene '{path}' failed to instantiate: {e}");
             }
         }
         Ok(())
+    }
+}
+
+// ---- Editor scene load (#2) ----
+
+/// Undoable "open scene" for the editor: replace the world's scene content
+/// (every non-editor entity) with a loaded scene. Editor entities (camera)
+/// and all resources are untouched; apply captures the previous content via
+/// [`scene_from_world`], so undo restores it exactly. Push through the
+/// `ActionQueue<World>` like every other edit.
+pub struct ReplaceSceneAction {
+    /// The scene to instantiate.
+    scene: SerializedWorld,
+    /// Human-readable description ("Open scene 'x'"), built once.
+    description: String,
+    /// Non-editor content captured by `apply`, restored by `undo`.
+    previous: Option<SerializedWorld>,
+}
+
+impl ReplaceSceneAction {
+    /// `label` names the scene in the undo history (usually its asset path).
+    pub fn new(scene: SerializedWorld, label: &str) -> Self {
+        Self {
+            scene,
+            description: format!("Open scene '{label}'"),
+            previous: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for ReplaceSceneAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReplaceSceneAction")
+            .field("description", &self.description)
+            .field("entities", &self.scene.entities.len())
+            .field("has_backup", &self.previous.is_some())
+            .finish()
+    }
+}
+
+/// Despawn every non-editor entity and instantiate `scene` in its place.
+/// The shared forward/undo direction of [`ReplaceSceneAction`].
+fn swap_scene_content(
+    world: &mut World,
+    scene: &SerializedWorld,
+) -> redlilium_core::abstract_editor::EditActionResult {
+    use redlilium_core::abstract_editor::EditActionError;
+
+    let stale: Vec<crate::Entity> = world
+        .iter_entities()
+        .filter(|&e| {
+            world.get_entity_flags(e) & (crate::Entity::EDITOR | crate::Entity::INHERITED_EDITOR)
+                == 0
+        })
+        .collect();
+    for entity in stale {
+        world.despawn(entity);
+    }
+    world
+        .deserialize_world_into(scene)
+        .map_err(|e| EditActionError::Custom(e.to_string()))?;
+    rescan_asset_managers(world);
+    Ok(())
+}
+
+impl redlilium_core::abstract_editor::EditAction<World> for ReplaceSceneAction {
+    fn apply(&mut self, world: &mut World) -> redlilium_core::abstract_editor::EditActionResult {
+        self.previous = Some(scene_from_world(world).map_err(|e| {
+            redlilium_core::abstract_editor::EditActionError::Custom(e.to_string())
+        })?);
+        swap_scene_content(world, &self.scene)
+    }
+
+    fn undo(&mut self, world: &mut World) -> redlilium_core::abstract_editor::EditActionResult {
+        let previous = self.previous.as_ref().ok_or_else(|| {
+            redlilium_core::abstract_editor::EditActionError::Custom("no backup to restore".into())
+        })?;
+        swap_scene_content(world, previous)
+    }
+
+    fn description(&self) -> &str {
+        &self.description
     }
 }
 
@@ -554,5 +660,117 @@ mod tests {
             matches!(handle.get(), Some(Err(_))),
             "missing file must resolve to an error"
         );
+    }
+
+    /// #2: a scene asset stores *scene content* — editor machinery (the
+    /// editor camera and its children) and snapshot resources must not leak
+    /// into the file.
+    #[test]
+    fn scene_save_excludes_editor_entities_and_resources() {
+        let mut world = World::new();
+        crate::register_std_components(&mut world);
+        for i in 0..2 {
+            let e = world.spawn();
+            world
+                .insert(
+                    e,
+                    Transform::from_translation(Vec3::new(i as f32, 0.0, 0.0)),
+                )
+                .unwrap();
+        }
+        let camera = world.spawn();
+        world
+            .insert(
+                camera,
+                Transform::from_translation(Vec3::new(99.0, 0.0, 0.0)),
+            )
+            .unwrap();
+        let child = world.spawn();
+        crate::std::hierarchy::set_parent(&mut world, child, camera);
+        crate::mark_editor(&mut world, camera);
+
+        let scene = scene_from_world(&world).expect("serialize scene");
+        assert_eq!(
+            scene.entities.len(),
+            2,
+            "editor camera and its child are not scene content"
+        );
+        assert!(scene.resources.is_empty(), "scenes carry no resource state");
+        assert!(
+            scene.entities.iter().all(|e| e.entity_flags == 0),
+            "saved entities carry no editor flags"
+        );
+    }
+
+    /// #2: `ReplaceSceneAction` swaps the world's scene content, leaves
+    /// editor entities alone, and restores the previous content on undo.
+    #[test]
+    fn replace_scene_action_swaps_and_undoes() {
+        use redlilium_core::abstract_editor::EditAction;
+
+        // The scene to open: one entity at x = 9.
+        let scene = {
+            let mut w = World::new();
+            crate::register_std_components(&mut w);
+            let e = w.spawn();
+            w.insert(e, Transform::from_translation(Vec3::new(9.0, 0.0, 0.0)))
+                .unwrap();
+            scene_from_world(&w).expect("serialize scene")
+        };
+
+        // The editor world: two content entities + the editor camera.
+        let mut world = World::new();
+        crate::register_std_components(&mut world);
+        for i in 1..=2 {
+            let e = world.spawn();
+            world
+                .insert(
+                    e,
+                    Transform::from_translation(Vec3::new(i as f32, 0.0, 0.0)),
+                )
+                .unwrap();
+        }
+        let camera = world.spawn();
+        world
+            .insert(
+                camera,
+                Transform::from_translation(Vec3::new(99.0, 0.0, 0.0)),
+            )
+            .unwrap();
+        crate::mark_editor(&mut world, camera);
+
+        let content_xs = |world: &World| -> Vec<f32> {
+            let mut xs: Vec<f32> = world
+                .read_all::<Transform>()
+                .unwrap()
+                .iter()
+                .filter(|(idx, _)| {
+                    world.entity_at_index(*idx).is_some_and(|e| {
+                        world.get_entity_flags(e)
+                            & (crate::Entity::EDITOR | crate::Entity::INHERITED_EDITOR)
+                            == 0
+                    })
+                })
+                .map(|(_, t)| t.translation.x)
+                .collect();
+            xs.sort_by(f32::total_cmp);
+            xs
+        };
+
+        let mut action = ReplaceSceneAction::new(scene, "scenes/test.scene");
+        action.apply(&mut world).expect("apply");
+        assert_eq!(content_xs(&world), vec![9.0], "scene content replaced");
+        assert!(world.is_alive(camera), "editor camera survives the swap");
+
+        action.undo(&mut world).expect("undo");
+        assert_eq!(
+            content_xs(&world),
+            vec![1.0, 2.0],
+            "undo restores the previous content"
+        );
+        assert!(world.is_alive(camera), "editor camera survives undo");
+
+        action.apply(&mut world).expect("redo");
+        assert_eq!(content_xs(&world), vec![9.0], "redo swaps again");
     }
 }

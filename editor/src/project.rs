@@ -16,6 +16,10 @@ pub struct ProjectConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProjectInfo {
     pub name: String,
+    /// Scene asset to open on startup (#2), as a VFS path `"mount/path"`
+    /// (e.g. `"game/scenes/level1.scene"`). Absent → the built-in demo scene.
+    #[serde(default)]
+    pub scene: Option<String>,
 }
 
 /// A single VFS mount point definition.
@@ -162,6 +166,7 @@ pub fn load_or_default(path: &Path) -> (ProjectConfig, Vfs) {
             ProjectConfig {
                 project: ProjectInfo {
                     name: "Untitled".into(),
+                    scene: None,
                 },
                 mount: vec![MountConfig {
                     name: "assets".into(),
@@ -179,4 +184,25 @@ pub fn load_or_default(path: &Path) -> (ProjectConfig, Vfs) {
 
     let vfs = build_vfs(&config);
     (config, vfs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The optional `[project] scene` key (#2): parsed when present, `None`
+    /// when absent (old project files stay valid).
+    #[test]
+    fn project_scene_key_is_optional() {
+        let with: ProjectConfig =
+            toml::from_str("[project]\nname = \"x\"\nscene = \"game/scenes/level1.scene\"\n")
+                .expect("parse");
+        assert_eq!(
+            with.project.scene.as_deref(),
+            Some("game/scenes/level1.scene")
+        );
+
+        let without: ProjectConfig = toml::from_str("[project]\nname = \"x\"\n").expect("parse");
+        assert_eq!(without.project.scene, None);
+    }
 }

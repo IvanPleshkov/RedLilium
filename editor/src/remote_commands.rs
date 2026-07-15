@@ -53,6 +53,8 @@ const COMMANDS: &[&str] = &[
     "new_asset",
     "save_prefab",
     "spawn_prefab",
+    "save_scene",
+    "load_scene",
     "pick",
     "pick_rect",
     "reload_game",
@@ -971,6 +973,72 @@ fn dispatch(
                 }
                 Err(e) => send_err(world, conn, id, &format!("write {path}: {e}")),
             }
+        }
+        // Persist the world's scene content as a `.scene` asset (#2) — the
+        // wire twin of File > Save. `path` (VFS `"mount/path"`) is optional
+        // and defaults to the world's current scene; the chosen path is
+        // recorded back as current and returned.
+        "save_scene" => {
+            let path = str_param("path")
+                .or_else(|| world.resource::<crate::core::CurrentScene>().0.clone());
+            let Some(path) = path else {
+                return send_err(world, conn, id, "missing 'path' (and no current scene)");
+            };
+            let ron = match redlilium_ecs::serialize_scene_ron(world) {
+                Ok(ron) => ron,
+                Err(e) => return send_err(world, conn, id, &format!("serialize: {e}")),
+            };
+            let write = pollster::block_on(
+                world
+                    .resource::<AssetProcessor>()
+                    .vfs()
+                    .write(&path, ron.into_bytes()),
+            );
+            match write {
+                Ok(()) => {
+                    world.resource_mut::<crate::core::CurrentScene>().0 = Some(path.clone());
+                    log::info!("remote: saved scene {path}");
+                    #[derive(Serialize)]
+                    struct SceneResp {
+                        id: i64,
+                        ok: bool,
+                        path: String,
+                    }
+                    send(world, conn, &SceneResp { id, ok: true, path });
+                }
+                Err(e) => send_err(world, conn, id, &format!("write {path}: {e}")),
+            }
+        }
+        // Open a `.scene` asset (#2): an undoable replace of the world's
+        // scene content (editor entities survive; undo restores the previous
+        // content). The response lands after the queued action executes.
+        "load_scene" => {
+            let Some(path) = str_param("path") else {
+                return send_err(world, conn, id, "missing 'path'");
+            };
+            let data =
+                match pollster::block_on(world.resource::<AssetProcessor>().vfs().read(&path)) {
+                    Ok(data) => data,
+                    Err(e) => return send_err(world, conn, id, &format!("read {path}: {e}")),
+                };
+            let scene = match redlilium_ecs::serialize::decode::<
+                redlilium_ecs::serialize::SerializedWorld,
+            >(&data, redlilium_ecs::serialize::Format::Ron)
+            {
+                Ok(scene) => scene,
+                Err(e) => return send_err(world, conn, id, &format!("decode {path}: {e}")),
+            };
+            let action = redlilium_ecs::ReplaceSceneAction::new(scene, &path);
+            let result = push_action(world, Box::new(action));
+            world.resource_mut::<crate::core::CurrentScene>().0 = Some(path);
+            rc.parked.push(Parked::Write {
+                conn,
+                id,
+                entity: None,
+                component: None,
+                spawned: None,
+                result,
+            });
         }
         // Entity under a point / all entities in a region, in scene-image
         // coordinates (what `screenshot` shows). Resolved by the entity-index
