@@ -55,7 +55,8 @@ mod ui;
 
 pub use abi::{
     ABI_FINGERPRINT, ABI_FINGERPRINT_SYMBOL, AbiFingerprintFn, GAME_MODULE_SYMBOL, GameModule,
-    GameModuleError, GameModuleFn, LOGGER_INIT_SYMBOL, LoggerInitFn, abi_fingerprint,
+    GameModuleError, GameModuleFn, LOGGER_INIT_SYMBOL, LoggerInitFn, TYPEID_PROBE_SYMBOL,
+    TypeIdProbeFn, abi_fingerprint, engine_typeid_probe,
 };
 pub use app::App;
 pub use engine_context::EngineContext;
