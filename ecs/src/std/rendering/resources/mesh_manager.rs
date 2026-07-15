@@ -175,6 +175,15 @@ impl MeshManager {
         }
     }
 
+    /// Force MeshLoad to re-scan all asset refs without reloading anything:
+    /// fresh reference holders (scene instantiation) resolve against the
+    /// existing residents. Works even when the cache is empty — the
+    /// generation bumps unconditionally, so the gated scan runs and requests
+    /// whatever is missing.
+    pub(crate) fn request_rescan(&mut self) {
+        self.cache.bump_generation();
+    }
+
     /// Force MeshLoad to re-scan all asset refs by bumping generation.
     /// Called on snapshot restore to ensure unresolved refs get re-requested.
     pub(crate) fn force_rescan(&mut self) {

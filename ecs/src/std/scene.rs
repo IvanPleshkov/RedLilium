@@ -274,6 +274,25 @@ impl crate::ExclusiveSystem for ApplySceneTransitions {
                     );
                 }
                 world.resource_mut::<SceneManager>().current = Some(path);
+                // The spawned entities carry unresolved AssetRefs, but the
+                // assets they point at may already be resident — no
+                // manager-generation change, so MeshLoad's rescan gate would
+                // skip them forever (invisible scene). Bump the generations
+                // so the next MeshLoad rescans; residents are reused, only
+                // the missing pieces load.
+                if world.has_resource::<crate::MeshManager>() {
+                    world.resource_mut::<crate::MeshManager>().request_rescan();
+                }
+                if world.has_resource::<crate::MaterialInstanceManager>() {
+                    world
+                        .resource_mut::<crate::MaterialInstanceManager>()
+                        .request_rescan();
+                }
+                if world.has_resource::<crate::TextureManager>() {
+                    world
+                        .resource_mut::<crate::TextureManager>()
+                        .request_rescan();
+                }
             }
             Err(e) => {
                 log::error!("scene '{path}' failed to instantiate: {e}");
@@ -467,11 +486,22 @@ mod tests {
         };
         let total_entities = |world: &World| world.iter_entities().count();
 
+        // A resident-asset manager: its generation must bump on every scene
+        // swap so MeshLoad's rescan gate re-resolves the fresh entities'
+        // asset refs (they may point at already-resident assets).
+        world.insert_resource(crate::MeshManager::new());
+        let gen_before = world.resource::<crate::MeshManager>().generation();
+
         switch_and_settle(&mut world, "scenes/menu.scene");
         assert_eq!(members_of(&world, "scenes/menu.scene"), 1);
         assert_eq!(
             world.resource::<SceneManager>().current(),
             Some("scenes/menu.scene")
+        );
+        assert_ne!(
+            world.resource::<crate::MeshManager>().generation(),
+            gen_before,
+            "scene swap must force an asset-ref rescan (manager generation bump)"
         );
         let baseline = total_entities(&world); // persistent + 1 member
 

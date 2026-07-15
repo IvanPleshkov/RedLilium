@@ -91,6 +91,16 @@ impl<K: Eq + Hash, T> ResidentCache<K, T> {
         self.resident.iter()
     }
 
+    /// Bump the generation without touching resident state: consumers that
+    /// gate their demand-scan on the generation will rescan and resolve fresh
+    /// references against the *existing* residents. For flows that introduce
+    /// new reference holders while the manager is in steady state (scene
+    /// instantiation) — unlike [`invalidate`](Self::invalidate), nothing
+    /// reloads.
+    pub fn bump_generation(&mut self) {
+        self.generation += 1;
+    }
+
     /// Bumped on every change of the manager's state that consumers must react
     /// to: publish (load / reload) and invalidate.
     pub fn generation(&self) -> u64 {

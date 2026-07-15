@@ -338,6 +338,11 @@ impl MaterialInstanceManager {
 
     /// Force MeshLoad to re-scan all asset refs by bumping generation.
     /// Called on snapshot restore to ensure unresolved refs get re-requested.
+    /// See `MeshManager::request_rescan` — rescan without reloading.
+    pub(crate) fn request_rescan(&mut self) {
+        self.cache.bump_generation();
+    }
+
     pub(crate) fn force_rescan(&mut self) {
         // Invalidate all RESIDENT material instances (the actual resolved instances)
         // so the generation bumps. This forces MeshLoad to re-scan all asset refs

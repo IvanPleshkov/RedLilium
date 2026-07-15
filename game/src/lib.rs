@@ -369,7 +369,12 @@ impl Plugin for CarGamePlugin {
         // Hosts without a SceneManager (the editor's GameHost) get the level
         // spawned directly, so the playground is visible there too.
         if world.has_resource::<SceneManager>() {
-            world.resource_mut::<SceneManager>().switch_to(MENU_SCENE);
+            // Dev aid: CAR_GAME_SCENE=scenes/level1.scene skips the menu.
+            #[cfg(not(target_arch = "wasm32"))]
+            let start = std::env::var("CAR_GAME_SCENE").unwrap_or_else(|_| MENU_SCENE.to_string());
+            #[cfg(target_arch = "wasm32")]
+            let start = MENU_SCENE.to_string();
+            world.resource_mut::<SceneManager>().switch_to(start);
         } else {
             spawn_level(world);
         }
@@ -592,6 +597,41 @@ mod tests {
 
         switch_and_settle(&mut world, LEVEL_SCENE);
         assert_eq!(cars(&world), 1, "level has the car");
+
+        // Physics authoring data must survive the scene roundtrip (the
+        // descriptors used to be #[skip_serialization] — an undrivable level).
+        assert_eq!(
+            world.read_all::<RigidBody3D>().unwrap().iter().count(),
+            10,
+            "ground + 8 obstacles + car carry rigid bodies"
+        );
+
+        // Transform propagation must pick up scene-instantiated entities:
+        // after one propagation pass the ground's world matrix reflects its
+        // authored scale, not the identity the required-component default
+        // inserted (a level of identity matrices renders as an "empty" pile
+        // of unit cubes at the origin).
+        {
+            let mut schedules = Schedules::new();
+            schedules
+                .get_mut::<PostUpdate>()
+                .add(UpdateGlobalTransforms);
+            schedules.run_frame(&mut world, &EcsRunner::single_thread(), 1.0 / 60.0);
+        }
+        let ground_scaled = {
+            let transforms = world.read_all::<Transform>().unwrap();
+            let globals = world.read_all::<GlobalTransform>().unwrap();
+            transforms.iter().any(|(idx, t)| {
+                t.scale.x == 40.0
+                    && globals
+                        .get(idx)
+                        .is_some_and(|g| (g.0[(0, 0)] - 40.0).abs() < 1e-3)
+            })
+        };
+        assert!(
+            ground_scaled,
+            "ground GlobalTransform must reflect the authored 40x scale after propagation"
+        );
 
         switch_and_settle(&mut world, MENU_SCENE);
         assert_eq!(cars(&world), 0, "car despawns with its scene");

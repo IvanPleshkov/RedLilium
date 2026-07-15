@@ -6,10 +6,59 @@
             entity_flags: 0,
             components: [
                 (
+                    type_name: "RigidBody3D",
+                    schema_version: 1,
+                    data: Map([
+                        ("body_type", String("Fixed")),
+                        ("linear_damping", F32(0.0)),
+                        ("angular_damping", F32(0.0)),
+                        ("gravity_scale", F32(1.0)),
+                    ]),
+                ),
+                (
                     type_name: "Visibility",
                     schema_version: 1,
                     data: Map([
                         ("0", Bool(true)),
+                    ]),
+                ),
+                (
+                    type_name: "MeshRenderer",
+                    schema_version: 1,
+                    data: Map([
+                        ("primitives", List([
+                            Map([
+                                ("mesh", Map([
+                                    ("Generated", Map([
+                                        ("Cube", Map([
+                                            ("half_bits", U64(1056964608)),
+                                        ])),
+                                    ])),
+                                ])),
+                                ("material", Map([
+                                    ("guid", String("5232225d-f91b-5bb1-b975-d2d536eb9668")),
+                                ])),
+                            ]),
+                        ])),
+                    ]),
+                ),
+                (
+                    type_name: "Collider3D",
+                    schema_version: 1,
+                    data: Map([
+                        ("shape", Map([
+                            ("Cuboid", Map([
+                                ("half_extents", List([
+                                    F32(20.0),
+                                    F32(0.1),
+                                    F32(20.0),
+                                ])),
+                            ])),
+                        ])),
+                        ("friction", F32(0.0)),
+                        ("restitution", F32(0.0)),
+                        ("density", F32(1.0)),
+                        ("is_sensor", Bool(false)),
                     ]),
                 ),
                 (
@@ -34,6 +83,30 @@
                         ])),
                     ]),
                 ),
+            ],
+        ),
+        (
+            entity_index: 1,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "RigidBody3D",
+                    schema_version: 1,
+                    data: Map([
+                        ("body_type", String("Fixed")),
+                        ("linear_damping", F32(0.0)),
+                        ("angular_damping", F32(0.0)),
+                        ("gravity_scale", F32(1.0)),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
                 (
                     type_name: "MeshRenderer",
                     schema_version: 1,
@@ -54,18 +127,23 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 1,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
-                    type_name: "Visibility",
+                    type_name: "Collider3D",
                     schema_version: 1,
                     data: Map([
-                        ("0", Bool(true)),
+                        ("shape", Map([
+                            ("Cuboid", Map([
+                                ("half_extents", List([
+                                    F32(0.5),
+                                    F32(0.5),
+                                    F32(0.5),
+                                ])),
+                            ])),
+                        ])),
+                        ("friction", F32(0.5)),
+                        ("restitution", F32(0.0)),
+                        ("density", F32(1.0)),
+                        ("is_sensor", Bool(false)),
                     ]),
                 ),
                 (
@@ -90,6 +168,30 @@
                         ])),
                     ]),
                 ),
+            ],
+        ),
+        (
+            entity_index: 2,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "RigidBody3D",
+                    schema_version: 1,
+                    data: Map([
+                        ("body_type", String("Fixed")),
+                        ("linear_damping", F32(0.0)),
+                        ("angular_damping", F32(0.0)),
+                        ("gravity_scale", F32(1.0)),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
                 (
                     type_name: "MeshRenderer",
                     schema_version: 1,
@@ -110,18 +212,23 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 2,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
-                    type_name: "Visibility",
+                    type_name: "Collider3D",
                     schema_version: 1,
                     data: Map([
-                        ("0", Bool(true)),
+                        ("shape", Map([
+                            ("Cuboid", Map([
+                                ("half_extents", List([
+                                    F32(0.5),
+                                    F32(0.5),
+                                    F32(0.5),
+                                ])),
+                            ])),
+                        ])),
+                        ("friction", F32(0.5)),
+                        ("restitution", F32(0.0)),
+                        ("density", F32(1.0)),
+                        ("is_sensor", Bool(false)),
                     ]),
                 ),
                 (
@@ -146,6 +253,30 @@
                         ])),
                     ]),
                 ),
+            ],
+        ),
+        (
+            entity_index: 3,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "RigidBody3D",
+                    schema_version: 1,
+                    data: Map([
+                        ("body_type", String("Fixed")),
+                        ("linear_damping", F32(0.0)),
+                        ("angular_damping", F32(0.0)),
+                        ("gravity_scale", F32(1.0)),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
                 (
                     type_name: "MeshRenderer",
                     schema_version: 1,
@@ -166,18 +297,23 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 3,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
-                    type_name: "Visibility",
+                    type_name: "Collider3D",
                     schema_version: 1,
                     data: Map([
-                        ("0", Bool(true)),
+                        ("shape", Map([
+                            ("Cuboid", Map([
+                                ("half_extents", List([
+                                    F32(0.5),
+                                    F32(0.5),
+                                    F32(0.5),
+                                ])),
+                            ])),
+                        ])),
+                        ("friction", F32(0.5)),
+                        ("restitution", F32(0.0)),
+                        ("density", F32(1.0)),
+                        ("is_sensor", Bool(false)),
                     ]),
                 ),
                 (
@@ -202,6 +338,30 @@
                         ])),
                     ]),
                 ),
+            ],
+        ),
+        (
+            entity_index: 4,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "RigidBody3D",
+                    schema_version: 1,
+                    data: Map([
+                        ("body_type", String("Fixed")),
+                        ("linear_damping", F32(0.0)),
+                        ("angular_damping", F32(0.0)),
+                        ("gravity_scale", F32(1.0)),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
                 (
                     type_name: "MeshRenderer",
                     schema_version: 1,
@@ -222,18 +382,23 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 4,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
-                    type_name: "Visibility",
+                    type_name: "Collider3D",
                     schema_version: 1,
                     data: Map([
-                        ("0", Bool(true)),
+                        ("shape", Map([
+                            ("Cuboid", Map([
+                                ("half_extents", List([
+                                    F32(0.5),
+                                    F32(0.5),
+                                    F32(0.5),
+                                ])),
+                            ])),
+                        ])),
+                        ("friction", F32(0.5)),
+                        ("restitution", F32(0.0)),
+                        ("density", F32(1.0)),
+                        ("is_sensor", Bool(false)),
                     ]),
                 ),
                 (
@@ -258,6 +423,30 @@
                         ])),
                     ]),
                 ),
+            ],
+        ),
+        (
+            entity_index: 5,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "RigidBody3D",
+                    schema_version: 1,
+                    data: Map([
+                        ("body_type", String("Fixed")),
+                        ("linear_damping", F32(0.0)),
+                        ("angular_damping", F32(0.0)),
+                        ("gravity_scale", F32(1.0)),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
                 (
                     type_name: "MeshRenderer",
                     schema_version: 1,
@@ -278,18 +467,23 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 5,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
-                    type_name: "Visibility",
+                    type_name: "Collider3D",
                     schema_version: 1,
                     data: Map([
-                        ("0", Bool(true)),
+                        ("shape", Map([
+                            ("Cuboid", Map([
+                                ("half_extents", List([
+                                    F32(0.5),
+                                    F32(0.5),
+                                    F32(0.5),
+                                ])),
+                            ])),
+                        ])),
+                        ("friction", F32(0.5)),
+                        ("restitution", F32(0.0)),
+                        ("density", F32(1.0)),
+                        ("is_sensor", Bool(false)),
                     ]),
                 ),
                 (
@@ -314,6 +508,30 @@
                         ])),
                     ]),
                 ),
+            ],
+        ),
+        (
+            entity_index: 6,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "RigidBody3D",
+                    schema_version: 1,
+                    data: Map([
+                        ("body_type", String("Fixed")),
+                        ("linear_damping", F32(0.0)),
+                        ("angular_damping", F32(0.0)),
+                        ("gravity_scale", F32(1.0)),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
                 (
                     type_name: "MeshRenderer",
                     schema_version: 1,
@@ -334,18 +552,23 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 6,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
-                    type_name: "Visibility",
+                    type_name: "Collider3D",
                     schema_version: 1,
                     data: Map([
-                        ("0", Bool(true)),
+                        ("shape", Map([
+                            ("Cuboid", Map([
+                                ("half_extents", List([
+                                    F32(0.5),
+                                    F32(0.5),
+                                    F32(0.5),
+                                ])),
+                            ])),
+                        ])),
+                        ("friction", F32(0.5)),
+                        ("restitution", F32(0.0)),
+                        ("density", F32(1.0)),
+                        ("is_sensor", Bool(false)),
                     ]),
                 ),
                 (
@@ -370,6 +593,30 @@
                         ])),
                     ]),
                 ),
+            ],
+        ),
+        (
+            entity_index: 7,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "RigidBody3D",
+                    schema_version: 1,
+                    data: Map([
+                        ("body_type", String("Fixed")),
+                        ("linear_damping", F32(0.0)),
+                        ("angular_damping", F32(0.0)),
+                        ("gravity_scale", F32(1.0)),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
                 (
                     type_name: "MeshRenderer",
                     schema_version: 1,
@@ -390,18 +637,23 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 7,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
-                    type_name: "Visibility",
+                    type_name: "Collider3D",
                     schema_version: 1,
                     data: Map([
-                        ("0", Bool(true)),
+                        ("shape", Map([
+                            ("Cuboid", Map([
+                                ("half_extents", List([
+                                    F32(0.5),
+                                    F32(0.5),
+                                    F32(0.5),
+                                ])),
+                            ])),
+                        ])),
+                        ("friction", F32(0.5)),
+                        ("restitution", F32(0.0)),
+                        ("density", F32(1.0)),
+                        ("is_sensor", Bool(false)),
                     ]),
                 ),
                 (
@@ -426,6 +678,30 @@
                         ])),
                     ]),
                 ),
+            ],
+        ),
+        (
+            entity_index: 8,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "RigidBody3D",
+                    schema_version: 1,
+                    data: Map([
+                        ("body_type", String("Fixed")),
+                        ("linear_damping", F32(0.0)),
+                        ("angular_damping", F32(0.0)),
+                        ("gravity_scale", F32(1.0)),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
                 (
                     type_name: "MeshRenderer",
                     schema_version: 1,
@@ -446,18 +722,23 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 8,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
-                    type_name: "Visibility",
+                    type_name: "Collider3D",
                     schema_version: 1,
                     data: Map([
-                        ("0", Bool(true)),
+                        ("shape", Map([
+                            ("Cuboid", Map([
+                                ("half_extents", List([
+                                    F32(0.5),
+                                    F32(0.5),
+                                    F32(0.5),
+                                ])),
+                            ])),
+                        ])),
+                        ("friction", F32(0.5)),
+                        ("restitution", F32(0.0)),
+                        ("density", F32(1.0)),
+                        ("is_sensor", Bool(false)),
                     ]),
                 ),
                 (
@@ -482,6 +763,39 @@
                         ])),
                     ]),
                 ),
+            ],
+        ),
+        (
+            entity_index: 9,
+            entity_spawn_tick: 0,
+            entity_flags: 0,
+            components: [
+                (
+                    type_name: "CarController",
+                    schema_version: 1,
+                    data: Map([
+                        ("engine_force", F32(700.0)),
+                        ("steer_torque", F32(160.0)),
+                        ("max_speed", F32(18.0)),
+                    ]),
+                ),
+                (
+                    type_name: "RigidBody3D",
+                    schema_version: 1,
+                    data: Map([
+                        ("body_type", String("Dynamic")),
+                        ("linear_damping", F32(0.6)),
+                        ("angular_damping", F32(3.0)),
+                        ("gravity_scale", F32(1.0)),
+                    ]),
+                ),
+                (
+                    type_name: "Visibility",
+                    schema_version: 1,
+                    data: Map([
+                        ("0", Bool(true)),
+                    ]),
+                ),
                 (
                     type_name: "MeshRenderer",
                     schema_version: 1,
@@ -502,27 +816,23 @@
                         ])),
                     ]),
                 ),
-            ],
-        ),
-        (
-            entity_index: 9,
-            entity_spawn_tick: 0,
-            entity_flags: 0,
-            components: [
                 (
-                    type_name: "CarController",
+                    type_name: "Collider3D",
                     schema_version: 1,
                     data: Map([
-                        ("engine_force", F32(700.0)),
-                        ("steer_torque", F32(160.0)),
-                        ("max_speed", F32(18.0)),
-                    ]),
-                ),
-                (
-                    type_name: "Visibility",
-                    schema_version: 1,
-                    data: Map([
-                        ("0", Bool(true)),
+                        ("shape", Map([
+                            ("Cuboid", Map([
+                                ("half_extents", List([
+                                    F32(0.5),
+                                    F32(0.3),
+                                    F32(1.0),
+                                ])),
+                            ])),
+                        ])),
+                        ("friction", F32(0.05)),
+                        ("restitution", F32(0.0)),
+                        ("density", F32(80.0)),
+                        ("is_sensor", Bool(false)),
                     ]),
                 ),
                 (
@@ -547,33 +857,13 @@
                         ])),
                     ]),
                 ),
-                (
-                    type_name: "MeshRenderer",
-                    schema_version: 1,
-                    data: Map([
-                        ("primitives", List([
-                            Map([
-                                ("mesh", Map([
-                                    ("Generated", Map([
-                                        ("Cube", Map([
-                                            ("half_bits", U64(1056964608)),
-                                        ])),
-                                    ])),
-                                ])),
-                                ("material", Map([
-                                    ("guid", String("5232225d-f91b-5bb1-b975-d2d536eb9668")),
-                                ])),
-                            ]),
-                        ])),
-                    ]),
-                ),
             ],
         ),
     ],
     resources: [],
     metadata: (
         engine_fingerprint: "",
-        timestamp: 1784128273,
+        timestamp: 1784128945,
         component_schemas: {},
     ),
 )
