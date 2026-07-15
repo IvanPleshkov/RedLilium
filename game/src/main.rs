@@ -14,6 +14,10 @@ fn main() {
         GameConfig {
             title: "Car Game".to_string(),
             mounts: vec![("std", "std-assets"), ("game", "game/assets")],
+            // Dev aid: CAR_GAME_SCENE=scenes/level1.scene skips the menu.
+            // A host parameter, not game logic — the plugin always starts
+            // at the menu; the override rides App::boot's start_scene.
+            start_scene: std::env::var("CAR_GAME_SCENE").ok(),
             ..Default::default()
         },
         CarGamePlugin,

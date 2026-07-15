@@ -239,8 +239,9 @@ impl App {
         self
     }
 
-    /// Build another plugin into this app.
+    /// Build another plugin into this app (type registration + systems).
     pub fn add_plugin(&mut self, plugin: &dyn crate::Plugin) -> &mut Self {
+        plugin.register_types(&mut self.world);
         plugin.build(self);
         self
     }
@@ -272,6 +273,7 @@ impl App {
         start_scene: Option<&str>,
     ) -> Self {
         let mut app = Self::new(engine, aspect);
+        plugin.register_types(&mut app.world);
         plugin.build(&mut app);
         plugin.spawn_scene(&mut app);
         if let Some(scene) = start_scene {
@@ -357,6 +359,7 @@ impl App {
                 window_input: app.window_input.clone(),
                 aspect: app.aspect,
             };
+            plugin.register_types(&mut temp_app.world);
             plugin.build(&mut temp_app);
             // Move changes back to outer scope
             app.world = std::mem::take(&mut temp_app.world);
@@ -404,14 +407,16 @@ mod tests {
         tag: u32,
     }
 
-    /// The reload contract in miniature: `build` only registers, `spawn_scene`
-    /// populates. A reload re-runs `build` and restores the snapshot, so the
-    /// scene must survive without `spawn_scene` running again.
+    /// The reload contract in miniature: `register_types` registers,
+    /// `spawn_scene` populates, `build` adds nothing here. A reload re-runs
+    /// registration and restores the snapshot, so the scene must survive
+    /// without `spawn_scene` running again.
     struct BlipPlugin;
     impl Plugin for BlipPlugin {
-        fn build(&self, app: &mut App) {
-            app.register_component::<Blip>();
+        fn register_types(&self, world: &mut redlilium_ecs::World) {
+            world.register_inspector::<Blip>();
         }
+        fn build(&self, _app: &mut App) {}
         fn spawn_scene(&self, app: &mut App) {
             let world = app.world_mut();
             let e = world.spawn();
@@ -435,9 +440,7 @@ mod tests {
         let plugin = BlipPlugin;
 
         // First boot: registration + initial-scene spawn.
-        let mut app = App::new(&engine, 1.0);
-        plugin.build(&mut app);
-        plugin.spawn_scene(&mut app);
+        let app = App::boot(&engine, &plugin, 1.0, None);
         {
             let blips = app.world().read_all::<Blip>().unwrap();
             assert_eq!(blips.iter().count(), 1, "one Blip before reload");
@@ -515,9 +518,7 @@ mod tests {
         let engine = test_engine();
         let plugin = BlipPlugin;
 
-        let mut app = App::new(&engine, 1.0);
-        plugin.build(&mut app);
-        plugin.spawn_scene(&mut app);
+        let app = App::boot(&engine, &plugin, 1.0, None);
 
         // Capture the scene
         let snapshot = app.capture().unwrap();

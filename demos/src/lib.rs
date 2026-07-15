@@ -85,12 +85,15 @@ impl System for PanicOnce {
 pub struct SpinDemo;
 
 impl Plugin for SpinDemo {
+    fn register_types(&self, world: &mut redlilium_ecs::World) {
+        world.register_inspector::<Spin>();
+    }
+
     fn build(&self, app: &mut App) {
         // Routed through the host's logger via the load-time handoff (#56);
         // without it this line would vanish into the cdylib's own
         // never-initialized `log` static. The reload harness asserts it.
         log::info!("SpinDemo::build (game log via host logger handoff)");
-        app.register_component::<Spin>();
         app.add_system::<Update, _>(SpinSystem);
         // #57 verification hook: an env-gated system that panics (once)
         // *inside this cdylib's image*, so the reload harness can prove the

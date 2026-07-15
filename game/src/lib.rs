@@ -310,17 +310,21 @@ impl System for GameFlowUi {
     }
 }
 
-/// The car game plugin: `build` registers systems, `spawn_scene` spawns the
-/// persistent camera and enters the menu (skipped on reload — the scene comes
-/// from a snapshot).
+/// The car game plugin: `register_types` declares the game's components (for
+/// every hosting world, including the editor's), `build` adds systems (game
+/// worlds only), `spawn_scene` spawns the persistent camera and enters the
+/// menu (skipped on reload — the scene comes from a snapshot).
 pub struct CarGamePlugin;
 
 impl Plugin for CarGamePlugin {
+    fn register_types(&self, world: &mut World) {
+        world.register_inspector::<CarController>();
+        world.register_inspector::<FollowCamera>();
+        world.register_inspector::<CarSpawn>();
+    }
+
     fn build(&self, app: &mut App) {
         log::info!("CarGamePlugin::build");
-        app.register_component::<CarController>();
-        app.register_component::<FollowCamera>();
-        app.register_component::<CarSpawn>();
         app.add_system::<Update, _>(GameFlowUi);
 
         // Marker-driven car spawn (#105), right after scene swaps land so the
@@ -397,15 +401,13 @@ impl Plugin for CarGamePlugin {
         world.insert(camera, follow).unwrap();
 
         // World content comes from scene assets, starting at the menu (#106).
-        // Hosts without a SceneManager (the editor's GameHost) get the level
-        // spawned directly, so the playground is visible there too.
+        // A host that wants a different start scene overrides it through
+        // App::boot's start_scene parameter (e.g. CAR_GAME_SCENE in main.rs),
+        // not in here. Hosts without a SceneManager (the editor's GameHost)
+        // get the level spawned directly, so the playground is visible there
+        // too (fallback dies with EDITOR_REBUILD.md stage 3).
         if world.has_resource::<SceneManager>() {
-            // Dev aid: CAR_GAME_SCENE=scenes/level1.scene skips the menu.
-            #[cfg(not(target_arch = "wasm32"))]
-            let start = std::env::var("CAR_GAME_SCENE").unwrap_or_else(|_| MENU_SCENE.to_string());
-            #[cfg(target_arch = "wasm32")]
-            let start = MENU_SCENE.to_string();
-            world.resource_mut::<SceneManager>().switch_to(start);
+            world.resource_mut::<SceneManager>().switch_to(MENU_SCENE);
         } else {
             spawn_level(world);
         }

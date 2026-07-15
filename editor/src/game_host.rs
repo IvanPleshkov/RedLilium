@@ -123,6 +123,7 @@ impl GameHost {
         let mut schedules = std::mem::take(&mut ew.schedules);
         let window_input = ew.window_input.clone();
         world.with_registration_source(self.generation, |scoped| {
+            module.plugin().register_types(scoped);
             let mut app = App::from_parts(
                 std::mem::take(scoped),
                 std::mem::take(&mut schedules),

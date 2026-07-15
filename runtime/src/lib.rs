@@ -18,9 +18,14 @@
 //! struct MyGame;
 //!
 //! impl Plugin for MyGame {
+//!     fn register_types(&self, world: &mut redlilium_ecs::World) {
+//!         // Type registrations only — runs in every hosting world
+//!         // (game AND editor), so scenes with game components can be
+//!         // inspected and serialized anywhere.
+//!         world.register_inspector::<MyComponent>();
+//!     }
 //!     fn build(&self, app: &mut App) {
-//!         // Registration only: components, resources, events, systems.
-//!         app.register_component::<MyComponent>();
+//!         // Resources, events, systems — game worlds only.
 //!         app.add_system::<redlilium_ecs::Update, _>(MySystem);
 //!     }
 //!     fn spawn_scene(&self, app: &mut App) {
@@ -60,15 +65,20 @@ use redlilium_app::AppArgs;
 
 /// User game code, structured as a plugin.
 ///
-/// The contract deliberately splits *registration* from *initial-scene spawn*,
-/// because warm-restart reload (ADR-020, #45) re-runs registration against a
-/// fresh world but takes the scene from a snapshot, not from a fresh spawn:
+/// The contract splits three obligations with different audiences:
 ///
-/// - [`build`](Plugin::build) — register components, resources, events, and add
-///   systems to schedules. It runs **once per world generation**: on first boot
+/// - [`register_types`](Plugin::register_types) — make the game's *types*
+///   known to a world: component registrations (inspection, serialization)
+///   and similar type-level metadata. This is the only part of the plugin
+///   that runs against **every** world that must understand game data — the
+///   game world itself, and the editor's editing world (which authors scenes
+///   containing game components but hosts none of the game's systems).
+/// - [`build`](Plugin::build) — resources, events, and systems: what makes
+///   the game *run*. It executes only in a **game world** (the standalone
+///   build and the editor's Play), once per world generation: on first boot
 ///   and again after every reload. Keep it idempotent and free of scene
 ///   population — anything spawned here would be duplicated by the restored
-///   snapshot on reload.
+///   snapshot on reload (ADR-020, #45).
 /// - [`spawn_scene`](Plugin::spawn_scene) — populate the initial scene through
 ///   [`App::world_mut`]. It runs **only when there is no snapshot to restore**
 ///   (first boot); a reload restores entities from the captured snapshot
@@ -83,8 +93,22 @@ use redlilium_app::AppArgs;
 /// The host calls `build` after the graphics device exists and before the first
 /// frame. Plugins can compose other plugins via [`App::add_plugin`].
 pub trait Plugin {
-    /// Register components, resources, events, and systems. Runs once per world
-    /// generation (first boot and every reload); must not spawn scene entities.
+    /// Register the game's types (components, inspectors) with a world.
+    ///
+    /// Called for **both** game worlds and editing worlds — every host that
+    /// needs to inspect, serialize, or author the game's components. Must not
+    /// add systems, insert resources, or spawn entities: a world receiving
+    /// only `register_types` understands the game's data without running any
+    /// of it. Hosts standing up a *game* world ([`App::boot`], [`App::reload`],
+    /// [`App::add_plugin`]) call this automatically before [`build`](Plugin::build).
+    /// Default: no-op.
+    fn register_types(&self, world: &mut redlilium_ecs::World) {
+        let _ = world;
+    }
+
+    /// Register resources, events, and systems. Runs only in a game world,
+    /// once per world generation (first boot and every reload); must not
+    /// spawn scene entities.
     fn build(&self, app: &mut App);
 
     /// Populate the initial scene. Called only on first boot — a reload
@@ -151,6 +175,11 @@ pub struct GameConfig {
     pub embedded_packs: Vec<(&'static str, EmbeddedPack)>,
     /// Clear color for the main camera target and the swapchain.
     pub clear_color: [f32; 4],
+    /// Host override of the start scene (mount-relative path): `Some(path)`
+    /// supersedes whatever scene the game's `spawn_scene` requested (see
+    /// [`App::boot`]). The game binary typically fills this from a CLI flag
+    /// or env var; `None` lets the game decide.
+    pub start_scene: Option<String>,
 }
 
 impl Default for GameConfig {
@@ -160,6 +189,7 @@ impl Default for GameConfig {
             mounts: vec![("std", "std-assets"), ("project", "project-assets")],
             embedded_packs: Vec::new(),
             clear_color: [0.02, 0.02, 0.03, 1.0],
+            start_scene: None,
         }
     }
 }

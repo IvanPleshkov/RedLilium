@@ -74,7 +74,12 @@ impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
         // A reload (ADR-020, #45) re-runs `build` but restores the scene from a
         // snapshot instead of calling `spawn_scene` (see `App::reload`).
         let plugin = self.plugin.take().expect("plugin taken once");
-        let mut app = App::boot(&engine, &plugin, ctx.aspect_ratio(), None);
+        let mut app = App::boot(
+            &engine,
+            &plugin,
+            ctx.aspect_ratio(),
+            self.config.start_scene.as_deref(),
+        );
 
         let runner = EcsRunner::single_thread();
         {
