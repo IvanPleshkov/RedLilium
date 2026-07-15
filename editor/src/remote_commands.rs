@@ -59,7 +59,22 @@ const COMMANDS: &[&str] = &[
     "pick_rect",
     "reload_game",
     "set_gizmo_mode",
+    "play",
+    "pause",
+    "resume",
+    "stop",
 ];
+
+/// A play-session lifecycle request (`play` / `pause` / `resume` / `stop`),
+/// applied by the shell between frames — dispatch cannot create or drop the
+/// play world from inside the editing world's frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayRequest {
+    Play,
+    Pause,
+    Resume,
+    Stop,
+}
 
 /// Per-editor remote protocol state (parked writes/waits, screenshot job).
 #[derive(Default)]
@@ -71,6 +86,8 @@ pub struct RemoteCommands {
     /// A game-module reload was requested; the shell executes it between
     /// frames (dispatch cannot — the reload replaces the whole world).
     reload_game: bool,
+    /// A play-session request; the shell applies it between frames.
+    play_request: Option<PlayRequest>,
 }
 
 impl RemoteCommands {
@@ -90,6 +107,12 @@ impl RemoteCommands {
     /// reload (see `game_host::reload_game`) between frames.
     pub fn take_reload(&mut self) -> bool {
         std::mem::take(&mut self.reload_game)
+    }
+
+    /// Take the play-session request, if one arrived. The shell applies it
+    /// between frames (see `crate::play::PlaySession`).
+    pub fn take_play_request(&mut self) -> Option<PlayRequest> {
+        self.play_request.take()
     }
 }
 
@@ -832,6 +855,20 @@ fn dispatch(
         // in the editor log. Requires a hosted game and the Stopped state.
         "reload_game" => {
             rc.reload_game = true;
+            send(world, conn, &OkResp { id, ok: true });
+        }
+        // Play-session lifecycle (EDITOR_REBUILD.md §4.3): the shell boots a
+        // game world (the standalone composition) from the hosted module,
+        // seeded with the current scene; `stop` drops it. `ok: true` means
+        // *queued* — applied between frames; requires REDLILIUM_GAME. While
+        // playing, `screenshot` captures the play world's camera.
+        "play" | "pause" | "resume" | "stop" => {
+            rc.play_request = Some(match cmd.as_str() {
+                "play" => PlayRequest::Play,
+                "pause" => PlayRequest::Pause,
+                "resume" => PlayRequest::Resume,
+                _ => PlayRequest::Stop,
+            });
             send(world, conn, &OkResp { id, ok: true });
         }
         // The generic path: any action in the ActionRegistry, invoked by name

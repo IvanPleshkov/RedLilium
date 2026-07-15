@@ -52,8 +52,12 @@ pub struct Editor {
     // (see `on_resume`); `None` until then. The engine is single-world by
     // design — one scene is resident at a time.
     world: Option<EditorWorld>,
-    /// Hosted game module (#58). Declared after `world` so it drops after it:
-    /// the mapped game image must outlive every world its plugin touched.
+    /// Live play session (EDITOR_REBUILD.md §4.3): a full game world booted
+    /// from the hosted module on Play, dropped on Stop. Declared before
+    /// `game_host` so it drops first — its systems live in the mapped image.
+    play: Option<crate::play::PlaySession>,
+    /// Hosted game module (#58). Declared after the worlds so it drops after
+    /// them: the mapped game image must outlive every world its plugin touched.
     game_host: Option<crate::game_host::GameHost>,
     runner: EcsRunner,
     /// Persistent engine state (GPU managers, asset DB/processor) — outlives
@@ -160,6 +164,7 @@ impl Editor {
 
         Self {
             world: None,
+            play: None,
             game_host: None,
             // Multi-threaded runner, enabled after Track 2 MT-hardening
             // (#52-#55: barriers, explicit edges, raw-access-aware detector).
@@ -523,32 +528,79 @@ impl Editor {
             .is_some_and(|ew| ew.history.has_unsaved_changes())
     }
 
-    /// Apply a play action (Play/Pause/Resume/Stop) to the game.
-    ///
-    /// Note: the actual state transition happens in ManagePlayModeTransitions system,
-    /// which runs at the start of the next game update. Do NOT sync_play_state here
-    /// as the transition hasn't been applied yet; it will sync naturally in on_update.
+    /// Apply a play action (Play/Pause/Resume/Stop): manage the play-session
+    /// lifecycle (EDITOR_REBUILD.md §4.3). Play boots a full game world from
+    /// the hosted module; Stop drops it. The editing world is not involved.
     fn apply_play_action(&mut self, action: crate::toolbar::PlayAction) {
-        if let Some(ew) = self.world.as_mut() {
-            let mut play_control = ew.world.resource_mut::<redlilium_ecs::PlayControl>();
-            match action {
-                crate::toolbar::PlayAction::Play => play_control.play(),
-                crate::toolbar::PlayAction::Pause => play_control.pause(),
-                crate::toolbar::PlayAction::Resume => play_control.resume(),
-                crate::toolbar::PlayAction::Stop => play_control.stop(),
+        match action {
+            crate::toolbar::PlayAction::Play => self.start_play(),
+            crate::toolbar::PlayAction::Pause => {
+                if let Some(play) = self.play.as_mut() {
+                    play.pause();
+                }
+            }
+            crate::toolbar::PlayAction::Resume => {
+                if let Some(play) = self.play.as_mut() {
+                    play.resume();
+                }
+            }
+            crate::toolbar::PlayAction::Stop => {
+                self.play = None;
             }
         }
+        self.sync_play_state();
     }
 
-    /// Sync toolbar's play_state to match PlayControl's current state.
+    /// Boot the play world: the standalone game composition, seeded with the
+    /// scene open for editing. `SceneManager` addresses scenes mount-relative,
+    /// while `CurrentScene` is a VFS `"mount/rel"` path — strip the mount.
+    fn start_play(&mut self) {
+        if self.play.is_some() {
+            return;
+        }
+        let Some(host) = self.game_host.as_ref() else {
+            log::error!("Play: no game module hosted (launch with REDLILIUM_GAME=<cdylib>)");
+            return;
+        };
+        let (Some(engine), Some(ew)) = (self.engine.as_ref(), self.world.as_ref()) else {
+            return;
+        };
+        let start_scene = ew
+            .world
+            .resource::<crate::core::CurrentScene>()
+            .0
+            .as_deref()
+            .and_then(|p| p.split_once('/'))
+            .map(|(_, rel)| rel.to_string());
+        let aspect = self
+            .scene_view
+            .as_ref()
+            .map(|sv| sv.aspect_ratio())
+            .unwrap_or(16.0 / 9.0);
+        self.play = Some(crate::play::PlaySession::start(
+            host,
+            engine,
+            &self.runner,
+            aspect,
+            start_scene.as_deref(),
+        ));
+    }
+
+    /// Sync the toolbar's play state from the play session.
     fn sync_play_state(&mut self) {
-        if let Some(ew) = self.world.as_ref() {
-            let pc_state = ew.world.resource::<redlilium_ecs::PlayControl>().state();
-            self.play_state = match pc_state {
-                redlilium_ecs::PlayState::Stopped => crate::toolbar::PlayState::Editing,
-                redlilium_ecs::PlayState::Playing => crate::toolbar::PlayState::Playing,
-                redlilium_ecs::PlayState::Paused => crate::toolbar::PlayState::Paused,
-            };
+        self.play_state = match self.play.as_ref() {
+            None => crate::toolbar::PlayState::Editing,
+            Some(play) if play.is_paused() => crate::toolbar::PlayState::Paused,
+            Some(_) => crate::toolbar::PlayState::Playing,
+        };
+    }
+
+    /// The sink for game-directed input: the play world while a session runs
+    /// unpaused, the editing world otherwise.
+    fn input_sink(&self) -> Arc<redlilium_ecs::sync::RwLock<redlilium_ecs::WindowInput>> {
+        match self.play.as_ref() {
+            Some(play) if !play.is_paused() => play.window_input(),
+            _ => self.active_world().window_input.clone(),
         }
     }
 
@@ -997,11 +1049,28 @@ impl AppHandler for Editor {
             }
         }
 
+        // Remote play-session lifecycle — same semantics as the toolbar.
+        if let Some(request) = self.remote.as_mut().and_then(|rc| rc.take_play_request()) {
+            use crate::remote_commands::PlayRequest;
+            self.apply_play_action(match request {
+                PlayRequest::Play => crate::toolbar::PlayAction::Play,
+                PlayRequest::Pause => crate::toolbar::PlayAction::Pause,
+                PlayRequest::Resume => crate::toolbar::PlayAction::Resume,
+                PlayRequest::Stop => crate::toolbar::PlayAction::Stop,
+            });
+        }
+
         // Execute a queued game-module reload between frames (#58): it
         // replaces the whole EditorWorld, so it cannot run inside dispatch.
         if let Some(rc) = &mut self.remote
             && rc.take_reload()
         {
+            // A reload swaps the mapped image every world's game systems
+            // point into — the play world must die first.
+            if self.play.take().is_some() {
+                log::info!("reload_game: play session stopped");
+                self.sync_play_state();
+            }
             match (&mut self.game_host, self.world.take()) {
                 (Some(host), Some(old)) => {
                     let engine = self.engine.as_ref().expect("engine outlives worlds");
@@ -1063,7 +1132,19 @@ impl AppHandler for Editor {
                 .run_frame(&mut ew.world, runner, ctx.delta_time() as f64);
         }
 
-        // Sync play state after systems have run (ManagePlayModeTransitions applies state changes)
+        // Tick the play world in the same shell frame, after the editing
+        // world (EDITOR_REBUILD.md §4.3).
+        if let Some(play) = self.play.as_mut() {
+            let view = self
+                .scene_view_rect_phys
+                .map(|[_, _, w, h]| (w, h))
+                .unwrap_or((1280.0, 720.0));
+            play.tick(&self.runner, ctx.delta_time() as f64, view);
+            if play.exit_requested() {
+                log::info!("play: game requested exit — stopping session");
+                self.play = None;
+            }
+        }
         self.sync_play_state();
 
         // Asset-browser deferred operations (export/import, file ops).
@@ -1108,10 +1189,16 @@ impl AppHandler for Editor {
                 .scene_view_rect_phys
                 .map_or((256, 256), |[_, _, w, h]| (w as u32, h as u32));
             scene_view.sync_camera_output(&mut ew.world, ew.editor_camera, w, h);
-            let color = ew
-                .world
-                .get::<redlilium_ecs::CameraTarget>(ew.editor_camera)
-                .map(|t| t.color.clone());
+            // While a play session runs, the scene view shows the play
+            // world's camera; the editing world's target resumes on Stop
+            // (same egui texture id, swapped underneath).
+            let color = match self.play.as_ref() {
+                Some(play) => play.scene_color(),
+                None => ew
+                    .world
+                    .get::<redlilium_ecs::CameraTarget>(ew.editor_camera)
+                    .map(|t| t.color.clone()),
+            };
             if let Some(color) = color {
                 let mut egui = ew.world.resource_mut::<EguiController>();
                 match self.scene_texture_id {
@@ -1655,13 +1742,38 @@ impl AppHandler for Editor {
             }
         }
 
+        // The play world renders into its own graph, submitted BEFORE the
+        // main graph: cross-submit synchronization on one queue is automatic,
+        // and the egui pass sampling the play texture lives in the main graph.
+        if let Some(play) = self.play.as_mut() {
+            let (w, h) = self
+                .scene_view_rect_phys
+                .map_or((ctx.width(), ctx.height()), |[_, _, w, h]| {
+                    (w as u32, h as u32)
+                });
+            let format = self
+                .scene_view
+                .as_ref()
+                .map(|sv| sv.color_format())
+                .unwrap_or(TextureFormat::Bgra8UnormSrgb);
+            let play_graph = ctx.acquire_graph();
+            let (play_graph, play_transfers) = play.render(&self.runner, play_graph, w, h, format);
+            for transfer in play_transfers {
+                ctx.submit(transfer);
+            }
+            ctx.submit(play_graph);
+        }
+
         // Remote screenshot: copy this frame's scene target through the graph.
+        // While playing it captures the play world's camera — what the scene
+        // view shows.
         if let (Some(rc), Some(sv), Some(ew)) = (
             &mut self.remote,
             self.scene_view.as_ref(),
             self.world.as_ref(),
         ) {
-            crate::remote_commands::inject_screenshot_pass(rc, &ew.world, sv.device(), &mut graph);
+            let shot_world = self.play.as_ref().map(|p| p.world()).unwrap_or(&ew.world);
+            crate::remote_commands::inject_screenshot_pass(rc, shot_world, sv.device(), &mut graph);
         }
 
         if render_active && let Some(ew) = self.world.as_ref() {
@@ -1701,10 +1813,19 @@ impl AppHandler for Editor {
             egui.on_mouse_move(x, y);
         });
         if self.world.is_some() {
-            let ew = self.active_world();
+            // Play world coordinates are scene-view-local (its "window" is
+            // the scene view); the editing world keeps raw window coordinates
+            // (gizmo/picking expect them).
+            let playing = self.play.as_ref().is_some_and(|p| !p.is_paused());
+            let (mut mx, mut my) = (x, y);
+            if playing && let Some([ox, oy, _, _]) = self.scene_view_rect_phys {
+                mx -= ox as f64;
+                my -= oy as f64;
+            }
+            let sink = self.input_sink();
             {
-                let mut input = ew.window_input.write();
-                input.on_mouse_move(x, y);
+                let mut input = sink.write();
+                input.on_mouse_move(mx, my);
             }
         }
     }
@@ -1743,9 +1864,9 @@ impl AppHandler for Editor {
                 MouseButton::Middle => 2,
                 _ => return,
             };
-            let ew = self.active_world();
+            let sink = self.input_sink();
             {
-                let mut input = ew.window_input.write();
+                let mut input = sink.write();
                 input.on_mouse_button(idx, pressed);
             }
 
@@ -1786,9 +1907,9 @@ impl AppHandler for Editor {
             egui.on_mouse_scroll(MouseScrollDelta::LineDelta(dx, dy));
         });
         if self.world.is_some() && self.cursor_in_scene_view() && !self.egui_wants_pointer {
-            let ew = self.active_world();
+            let sink = self.input_sink();
             {
-                let mut input = ew.window_input.write();
+                let mut input = sink.write();
                 input.on_scroll(dx, dy);
             }
         }
@@ -1825,9 +1946,11 @@ impl AppHandler for Editor {
             && let PhysicalKey::Code(winit_key) = event.physical_key
             && let Some(key) = redlilium_app::input::map_winit_key(winit_key)
         {
-            let ew = self.active_world();
+            // While playing (unpaused) the game is the sink — WASD drives the
+            // car, not the editor camera.
+            let sink = self.input_sink();
             {
-                let mut input = ew.window_input.write();
+                let mut input = sink.write();
                 if event.state.is_pressed() {
                     input.on_key_pressed(key);
                 } else {

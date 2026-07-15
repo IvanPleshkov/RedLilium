@@ -19,6 +19,7 @@ mod headless;
 mod history_panel;
 mod log_capture;
 mod menu;
+mod play;
 mod project;
 mod remote_commands;
 mod scene_view;

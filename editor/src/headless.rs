@@ -33,6 +33,11 @@ const FIXED_DT: f64 = 1.0 / 60.0;
 /// asset stage draining and the next manager registering demand.
 const CALM_TICKS: u32 = 3;
 
+/// Scene color format (no surface to negotiate with); sRGB so screenshot
+/// PNGs come out gamma-correct. The play world's camera target uses the same
+/// format.
+const COLOR_FORMAT: TextureFormat = TextureFormat::Bgra8UnormSrgb;
+
 pub fn run() {
     redlilium_core::init();
     redlilium_graphics::init();
@@ -62,7 +67,7 @@ pub fn run() {
 
     // The scene color format is a constant here (no surface to negotiate
     // with); sRGB so screenshot PNGs come out gamma-correct.
-    let color_format = TextureFormat::Bgra8UnormSrgb;
+    let color_format = COLOR_FORMAT;
     let mut scene_view = SceneViewState::new(device.clone(), color_format);
     // Picking works in scene-image space: the entity-index target matches the
     // scene size and the viewport covers it fully, so remote pick coordinates
@@ -85,9 +90,12 @@ pub fn run() {
     // Persistent engine state + the startup mount scan (ADR-020).
     let engine = redlilium_runtime::EngineContext::with_vfs(device.clone(), vfs.clone());
     crate::core::scan_local_mounts(&engine, &local_mounts);
-    // Declared before `ew` so it drops after it — the mapped game image must
-    // outlive every world its plugin touched (ADR-020, #58).
+    // Declared before `ew` and `play` so it drops after them — the mapped game
+    // image must outlive every world its plugin touched (ADR-020, #58).
     let mut game_host: Option<crate::game_host::GameHost> = None;
+    // The play session (EDITOR_REBUILD.md §4.3): a full game world booted from
+    // the hosted module on `play`, dropped on `stop`.
+    let mut play: Option<crate::play::PlaySession> = None;
     let mut ew = create_editor_world(
         &EditorWorldParams {
             remote: true,
@@ -133,7 +141,10 @@ pub fn run() {
     let mut render_failures = 0u32;
     let mut shutdown = false;
     while !shutdown {
-        let busy = rc.has_pending() || !remote_commands::assets_idle(&ew.world);
+        // A live, unpaused play session keeps the loop free-running: the game
+        // must tick whether or not remote work is parked.
+        let playing = play.as_ref().is_some_and(|p| !p.is_paused());
+        let busy = playing || rc.has_pending() || !remote_commands::assets_idle(&ew.world);
         calm = if busy { 0 } else { calm + 1 };
         if calm >= CALM_TICKS {
             // Quiescent: sleep on the transport until the next command. The
@@ -156,10 +167,67 @@ pub fn run() {
             &local_mounts,
             width,
             height,
+            play.as_mut(),
         );
         shutdown = outcome.shutdown;
 
+        // Play-session lifecycle (EDITOR_REBUILD.md §4.3), applied between
+        // frames like the reload below.
+        if let Some(request) = rc.take_play_request() {
+            use remote_commands::PlayRequest;
+            match request {
+                PlayRequest::Play => match (&play, game_host.as_ref()) {
+                    (Some(_), _) => log::warn!("play: session already running"),
+                    (None, None) => log::error!(
+                        "play: no game module hosted (launch with REDLILIUM_GAME=<cdylib>)"
+                    ),
+                    (None, Some(host)) => {
+                        // SceneManager addresses scenes mount-relative; the
+                        // editing session's CurrentScene is a VFS path
+                        // ("mount/rel") — strip the mount.
+                        let start_scene = ew
+                            .world
+                            .resource::<crate::core::CurrentScene>()
+                            .0
+                            .as_deref()
+                            .and_then(|p| p.split_once('/'))
+                            .map(|(_, rel)| rel.to_string());
+                        play = Some(crate::play::PlaySession::start(
+                            host,
+                            &engine,
+                            &runner,
+                            width as f32 / height as f32,
+                            start_scene.as_deref(),
+                        ));
+                    }
+                },
+                PlayRequest::Pause => match play.as_mut() {
+                    Some(p) => p.pause(),
+                    None => log::warn!("pause: no play session"),
+                },
+                PlayRequest::Resume => match play.as_mut() {
+                    Some(p) => p.resume(),
+                    None => log::warn!("resume: no play session"),
+                },
+                PlayRequest::Stop => {
+                    if play.take().is_none() {
+                        log::warn!("stop: no play session");
+                    }
+                }
+            }
+        }
+        // The game requested an exit (AppControl) — same as `stop`.
+        if play.as_ref().is_some_and(|p| p.exit_requested()) {
+            log::info!("play: game requested exit — stopping session");
+            play = None;
+        }
+
         if rc.take_reload() {
+            // A reload swaps the mapped image every world's game systems point
+            // into — the play world must die first.
+            if play.take().is_some() {
+                log::info!("reload_game: play session stopped");
+            }
             match game_host.as_mut() {
                 None => log::error!(
                     "reload_game: no game module hosted (launch with REDLILIUM_GAME=<cdylib>)"
@@ -193,8 +261,14 @@ pub fn run() {
         if outcome.rendered {
             render_failures = 0;
             // Even a busy headless editor has no vsync to pace it — yield a
-            // little so asset waits don't spin a core at full tilt.
-            std::thread::sleep(Duration::from_millis(1));
+            // little so asset waits don't spin a core at full tilt. A playing
+            // game is paced to roughly its fixed dt (real-time-ish).
+            let pace = if play.as_ref().is_some_and(|p| !p.is_paused()) {
+                16
+            } else {
+                1
+            };
+            std::thread::sleep(Duration::from_millis(pace));
         } else {
             // Rendering failed (device error, wedged fence). Without vsync or
             // an asset-idle signal this loop would spin at ~1 kHz retrying
@@ -218,7 +292,9 @@ pub fn run() {
 }
 
 /// One editor frame: the same sequence as the windowed shell's
-/// `on_update` + `on_draw`, minus input, picking, and egui.
+/// `on_update` + `on_draw`, minus input, picking, and egui. A live play
+/// session ticks and renders in the same shell frame, after the editing
+/// world (EDITOR_REBUILD.md §4.3).
 #[allow(clippy::too_many_arguments)]
 fn tick(
     ew: &mut EditorWorld,
@@ -229,6 +305,7 @@ fn tick(
     local_mounts: &[(&'static str, &'static str)],
     width: u32,
     height: u32,
+    mut play: Option<&mut crate::play::PlaySession>,
 ) -> TickOutcome {
     ew.persist_dirty_mounts(local_mounts);
     ew.debug_drawer.read().advance_tick();
@@ -269,6 +346,11 @@ fn tick(
 
     ew.schedules.run_frame(&mut ew.world, runner, FIXED_DT);
 
+    // The play world ticks after the editing world, in the same shell frame.
+    if let Some(play) = play.as_deref_mut() {
+        play.tick(runner, FIXED_DT, (width as f32, height as f32));
+    }
+
     // Render into the camera's off-screen target (created on first tick).
     // On fence-wait failure skip rendering this tick — the fence stays in its
     // slot and the next tick retries the wait.
@@ -297,7 +379,25 @@ fn tick(
     for transfer in transfer_graphs {
         schedule.submit(transfer);
     }
-    remote_commands::inject_screenshot_pass(rc, &ew.world, scene_view.device(), &mut graph);
+
+    // The play world renders into its own graph, submitted BEFORE the main
+    // graph: cross-submit synchronization is automatic (same queue), and the
+    // screenshot pass below — which reads the play texture while playing —
+    // lives in the main graph.
+    if let Some(play) = play.as_deref_mut() {
+        let play_graph = schedule.acquire_graph();
+        let (play_graph, play_transfers) =
+            play.render(runner, play_graph, width, height, COLOR_FORMAT);
+        for transfer in play_transfers {
+            schedule.submit(transfer);
+        }
+        schedule.submit(play_graph);
+    }
+
+    // While playing, `screenshot` captures the play world's camera — what the
+    // user of a windowed editor would see in the scene view.
+    let shot_world = play.as_deref().map(|p| p.world()).unwrap_or(&ew.world);
+    remote_commands::inject_screenshot_pass(rc, shot_world, scene_view.device(), &mut graph);
 
     // Entity-index pass + readback, only while a remote pick is in flight
     // (mirrors the windowed shell's on_draw picking block).

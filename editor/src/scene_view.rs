@@ -595,6 +595,11 @@ impl SceneViewState {
         &self.device
     }
 
+    /// The scene color format (the surface format the view was created with).
+    pub fn color_format(&self) -> TextureFormat {
+        self.color_format
+    }
+
     /// Set the forward `FrameRing`'s buffer (the resource it wraps), so
     /// per-primitive materials can bind it. Call once, before creating entities.
     pub fn set_frame_ring_buffer(&mut self, buffer: Arc<Buffer>) {

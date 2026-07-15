@@ -113,6 +113,30 @@ impl GameHost {
         self.generation
     }
 
+    /// Boot a play world from the hosted module: the standalone composition
+    /// ([`redlilium_runtime::App::boot`]), with the game's registrations
+    /// scoped to this host's generation — the same one the editing world
+    /// knows the types under.
+    ///
+    /// The returned world's systems point into the module's mapped image:
+    /// the host must outlive every world built from it (a reload requires
+    /// the play session stopped first).
+    pub fn boot_play_world(
+        &self,
+        engine: &EngineContext,
+        aspect: f32,
+        start_scene: Option<&str>,
+    ) -> redlilium_runtime::App {
+        let module = self.module.as_ref().expect("module present outside swap");
+        redlilium_runtime::App::boot_scoped(
+            engine,
+            module.plugin(),
+            aspect,
+            start_scene,
+            self.generation,
+        )
+    }
+
     /// Run `Plugin::register_types` against `ew`'s world, scoped to this
     /// host's generation. This is the editing world's *entire* exposure to
     /// the game module: type registrations for inspection and serialization.

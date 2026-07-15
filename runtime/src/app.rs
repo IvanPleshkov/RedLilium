@@ -272,10 +272,59 @@ impl App {
         aspect: f32,
         start_scene: Option<&str>,
     ) -> Self {
+        Self::boot_impl(engine, plugin, aspect, start_scene, None)
+    }
+
+    /// [`boot`](Self::boot) with the game's registrations scoped to `source`.
+    ///
+    /// The editor boots play worlds under the hosted module's [`SourceId`]
+    /// generation: the editing world already knows the game's types under
+    /// that generation, and the engine-wide generation registry refuses one
+    /// `TypeId` under two generations — one generation per mapped image.
+    /// Standalone hosts (one compilation, no dylib) use plain [`boot`].
+    pub fn boot_scoped(
+        engine: &EngineContext,
+        plugin: &dyn crate::Plugin,
+        aspect: f32,
+        start_scene: Option<&str>,
+        source: redlilium_ecs::SourceId,
+    ) -> Self {
+        Self::boot_impl(engine, plugin, aspect, start_scene, Some(source))
+    }
+
+    fn boot_impl(
+        engine: &EngineContext,
+        plugin: &dyn crate::Plugin,
+        aspect: f32,
+        start_scene: Option<&str>,
+        source: Option<redlilium_ecs::SourceId>,
+    ) -> Self {
         let mut app = Self::new(engine, aspect);
-        plugin.register_types(&mut app.world);
-        plugin.build(&mut app);
-        plugin.spawn_scene(&mut app);
+        match source {
+            None => {
+                plugin.register_types(&mut app.world);
+                plugin.build(&mut app);
+                plugin.spawn_scene(&mut app);
+            }
+            Some(source) => {
+                // Same scoped-build dance as `reload`: the plugin sees an App
+                // whose world carries the registration source.
+                let mut world = std::mem::take(&mut app.world);
+                world.with_registration_source(source, |scoped| {
+                    let mut temp_app = App {
+                        world: std::mem::take(scoped),
+                        schedules: std::mem::take(&mut app.schedules),
+                        window_input: app.window_input.clone(),
+                        aspect: app.aspect,
+                    };
+                    plugin.register_types(&mut temp_app.world);
+                    plugin.build(&mut temp_app);
+                    plugin.spawn_scene(&mut temp_app);
+                    app.world = std::mem::take(&mut temp_app.world);
+                    app.schedules = std::mem::take(&mut temp_app.schedules);
+                });
+            }
+        }
         if let Some(scene) = start_scene {
             app.world_mut()
                 .resource_mut::<redlilium_ecs::SceneManager>()
@@ -381,8 +430,9 @@ impl App {
     }
 
     /// Handle to the [`WindowInput`] resource, kept by the host to forward
-    /// platform input events.
-    pub(crate) fn window_input(&self) -> Arc<RwLock<WindowInput>> {
+    /// platform input events (the standalone window loop and the editor's
+    /// scene view both feed the game through this).
+    pub fn window_input(&self) -> Arc<RwLock<WindowInput>> {
         self.window_input.clone()
     }
 
