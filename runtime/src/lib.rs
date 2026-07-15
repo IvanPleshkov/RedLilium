@@ -128,6 +128,12 @@ pub trait Plugin {
     }
 }
 
+/// One embedded asset pack: `(pack-relative path, verbatim bytes)` for every
+/// file, exactly as it sits in the mount's source directory. Verbatim matters:
+/// `.slang` bytes are hashed to look up baked WGSL, so embedded content must
+/// be byte-identical to what `xtask bake-shaders` hashed (see #33).
+pub type EmbeddedPack = &'static [(&'static str, &'static [u8])];
+
 /// Host configuration for [`run`].
 pub struct GameConfig {
     /// Window title.
@@ -136,6 +142,13 @@ pub struct GameConfig {
     /// is loaded into the merged in-memory database at startup. Paths are
     /// relative to the working directory.
     pub mounts: Vec<(&'static str, &'static str)>,
+    /// Embedded packs for targets without a local disk (wasm), keyed by the
+    /// mount *source dir* from [`mounts`](Self::mounts). On wasm a mount with
+    /// an entry here is served from memory (its `assets.db` included); without
+    /// one it falls back to the built-in `std-assets` embed or an empty
+    /// provider. Ignored on native (filesystem mounts). Games typically fill
+    /// this from a build-script-generated table (#108) — see `game/build.rs`.
+    pub embedded_packs: Vec<(&'static str, EmbeddedPack)>,
     /// Clear color for the main camera target and the swapchain.
     pub clear_color: [f32; 4],
 }
@@ -145,6 +158,7 @@ impl Default for GameConfig {
         Self {
             title: "RedLilium Game".to_string(),
             mounts: vec![("std", "std-assets"), ("project", "project-assets")],
+            embedded_packs: Vec::new(),
             clear_color: [0.02, 0.02, 0.03, 1.0],
         }
     }

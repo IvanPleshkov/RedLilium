@@ -65,7 +65,11 @@ impl<P: Plugin + 'static> RuntimeHandler<P> {
 
 impl<P: Plugin + 'static> AppHandler for RuntimeHandler<P> {
     fn on_init(&mut self, ctx: &mut AppContext) {
-        let engine = EngineContext::new(ctx.device().clone(), &self.config.mounts);
+        let engine = EngineContext::new(
+            ctx.device().clone(),
+            &self.config.mounts,
+            &self.config.embedded_packs,
+        );
         // First boot: register the game's types, then populate the initial scene.
         // A reload (ADR-020, #45) re-runs `build` but restores the scene from a
         // snapshot instead of calling `spawn_scene` (see `App::reload`).

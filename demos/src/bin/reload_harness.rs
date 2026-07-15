@@ -55,7 +55,7 @@ fn main() {
     let device = instance.create_device().expect("graphics device");
     // The persistent engine state that must survive the reload. No mounts: the
     // harness does not render, so unresolved asset handles are harmless.
-    let engine = EngineContext::new(device, &[]);
+    let engine = EngineContext::new(device, &[], &[]);
 
     // Child mode: run only the #57 panic phase (see the end of main).
     if std::env::args().any(|a| a == "--panic-child") {

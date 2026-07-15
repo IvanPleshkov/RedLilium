@@ -18,7 +18,20 @@
 //! Shaders need no extra files: the default (Slang-off) build embeds the
 //! baked WGSL table in the binary.
 //!
-//! `--target web` is #108 and not implemented yet.
+//! `cargo xtask dist --target web` (#108) produces
+//!
+//! ```text
+//! target/dist/car-game-web/
+//!   index.html          copied from game/web/index.html
+//!   pkg/                wasm-pack output (car_game.js, car_game_bg.wasm, ...)
+//! target/dist/car-game-web.zip
+//! ```
+//!
+//! Assets need no folder on web: both packs are compiled into the wasm binary
+//! (std-assets by the runtime, game/assets via `game/build.rs` →
+//! `GameConfig::embedded_packs`). Serve the folder from any static file
+//! server (`python3 -m http.server`) — `file://` won't do, wasm modules
+//! require HTTP.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -43,11 +56,13 @@ pub fn run() {
             }
         }
         "web" => {
-            eprintln!("dist --target web is not implemented yet (#108)");
-            std::process::exit(2);
+            if let Err(e) = dist_web() {
+                eprintln!("dist failed: {e}");
+                std::process::exit(1);
+            }
         }
         other => {
-            eprintln!("unknown dist target {other:?}; available: desktop");
+            eprintln!("unknown dist target {other:?}; available: desktop, web");
             std::process::exit(2);
         }
     }
@@ -120,6 +135,61 @@ fn dist_desktop() -> Result<(), String> {
 
     println!(
         "dist: done — run the game with the dist folder as cwd:\n  cd {} && ./{bin_name}",
+        dist.display()
+    );
+    Ok(())
+}
+
+fn dist_web() -> Result<(), String> {
+    let root = workspace_root();
+    let dist_root = root.join("target/dist");
+    let dist_name = "car-game-web";
+    let dist = dist_root.join(dist_name);
+    if dist.exists() {
+        std::fs::remove_dir_all(&dist).map_err(|e| format!("cleaning {dist:?}: {e}"))?;
+    }
+    std::fs::create_dir_all(&dist).map_err(|e| format!("creating {dist:?}: {e}"))?;
+
+    // 1. wasm-pack release build straight into the dist folder. Both asset
+    //    packs ride inside the wasm binary (embedded mounts), so pkg/ + the
+    //    HTML shell is the whole game.
+    println!("dist: building {GAME_PACKAGE} (wasm-pack, release)...");
+    let status = Command::new("wasm-pack")
+        .current_dir(&root)
+        .args(["build", "game", "--target", "web", "--out-dir"])
+        .arg(dist.join("pkg"))
+        .status()
+        .map_err(|e| {
+            format!("failed to run wasm-pack: {e} (install: https://rustwasm.github.io/wasm-pack/)")
+        })?;
+    if !status.success() {
+        return Err("wasm-pack build failed".to_string());
+    }
+    // wasm-pack emits npm-packaging noise the static site doesn't serve.
+    for junk in ["package.json", ".gitignore", "README.md"] {
+        let _ = std::fs::remove_file(dist.join("pkg").join(junk));
+    }
+
+    // 2. The HTML shell.
+    let html_src = root.join("game/web/index.html");
+    std::fs::copy(&html_src, dist.join("index.html"))
+        .map_err(|e| format!("copying {html_src:?}: {e}"))?;
+
+    // 3. Zip (best effort, same as desktop).
+    let zip_name = format!("{dist_name}.zip");
+    let zip_path = dist_root.join(&zip_name);
+    if zip_path.exists() {
+        std::fs::remove_file(&zip_path).map_err(|e| format!("removing old {zip_name}: {e}"))?;
+    }
+    match zip_dir(&dist_root, dist_name, &zip_name) {
+        Ok(()) => println!("dist: wrote {}", zip_path.display()),
+        Err(e) => eprintln!("dist: zip skipped ({e}); the folder is still complete"),
+    }
+
+    println!(
+        "dist: done — serve the folder over HTTP (wasm won't load from file://):\n  \
+         cd {} && python3 -m http.server 8080\n  \
+         then open http://localhost:8080/",
         dist.display()
     );
     Ok(())

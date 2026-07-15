@@ -1,7 +1,7 @@
 //! RedLilium build tooling.
 //!
 //! ```text
-//! cargo xtask dist [--target desktop]                          # package a shippable build (#107)
+//! cargo xtask dist [--target desktop|web]                      # package a shippable build (#107, #108)
 //! cargo run -p xtask --features slang -- bake-shaders          # regenerate baked shaders
 //! cargo run -p xtask --features slang -- bake-shaders --check  # staleness gate
 //! ```
@@ -34,7 +34,7 @@ fn main() {
         }
         other => {
             eprintln!(
-                "unknown task {other:?}; available: dist [--target desktop], bake-shaders [--check]"
+                "unknown task {other:?}; available: dist [--target desktop|web], bake-shaders [--check]"
             );
             std::process::exit(2);
         }

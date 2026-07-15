@@ -543,6 +543,7 @@ dependencies = [
  "redlilium-graphics",
  "redlilium-runtime",
  "redlilium-vfs",
+ "wasm-bindgen",
 ]
 
 [[package]]
