@@ -308,7 +308,16 @@ test_shader_bake_check() {
 
     print_header "Checking Baked Shaders Are Fresh (WASM)"
 
-    if cargo run -q -p xtask --features slang -- bake-shaders --check 2>&1; then
+    # Load the PINNED Slang runtime, not another one on PATH. On Windows the
+    # Slang DLLs (slang.dll + slang-rt / slang-llvm / …) resolve via PATH at
+    # process start — before any code runs, so it cannot be fixed from inside
+    # xtask — and a Vulkan SDK on PATH ships its own newer Slang that would
+    # shadow "$slang_dir", making the bake compile with the wrong compiler (a
+    # version mismatch / non-reproducible WGSL). Put the pinned bin first. No
+    # effect where the loader uses rpath instead of PATH (macOS/Linux).
+    local slang_bin
+    slang_bin="$(cd "$slang_dir/bin" 2>/dev/null && pwd || echo "$slang_dir/bin")"
+    if PATH="$slang_bin:$PATH" cargo run -q -p xtask --features slang -- bake-shaders --check 2>&1; then
         print_success "Baked shaders match their sources"
         ((PASSED++))
     else
