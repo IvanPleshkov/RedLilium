@@ -32,7 +32,7 @@ use redlilium_graphics::{
 use super::{MaterialAssetManager, ShaderManager, TextureManager};
 use crate::PlayModeAware;
 use crate::std::rendering::loaders::{
-    MaterialInstanceLoader, MaterialInstanceSource, Shader, TextureSource,
+    MaterialInstanceData, MaterialInstanceLoader, MaterialInstanceSource, Shader, TextureSource,
 };
 use crate::std::rendering::shading::{PropValue, pack_props, texture_props};
 
@@ -130,6 +130,20 @@ impl MaterialInstanceManager {
         if self.cache.get(&guid).is_some() || self.cache.is_failed(&guid) {
             return;
         }
+        self.demanded.insert(guid);
+    }
+
+    /// Publish a programmatically built instance record under `guid` — the
+    /// host/tool integration point (mirrors `MeshManager::insert_external` and
+    /// `TextureManager::publish_virtual`; e.g. a preview viewer synthesizing
+    /// per-material instances from streamed scene data). Seeds the DATA phase
+    /// directly instead of loading a DB record; resolution then flows through
+    /// [`drive`](Self::drive) normally — parent template, texture props, static
+    /// binding, hot reload. Re-publishing replaces the record and re-resolves,
+    /// so `AssetRef` holders pick up the new values.
+    pub fn publish_virtual(&mut self, guid: Guid, data: MaterialInstanceData) {
+        self.data.publish(guid, Arc::new(data));
+        self.cache.invalidate(&guid);
         self.demanded.insert(guid);
     }
 
