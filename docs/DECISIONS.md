@@ -2038,8 +2038,9 @@ extension bundle, enabling two-vendor validation of the sync code.
 - ⚠️ BLAS geometry buffers must be created with
   `BufferUsage::ACCELERATION_STRUCTURE_INPUT` — meshes loaded through the
   standard path don't carry it yet (opt-in mesh AS input is #110 phase 2)
-- ⚠️ No BLAS compaction/update yet — every build is a full PREFER_FAST_TRACE
-  build (#110 phase 3); fine at demo scale, wasteful for streamed worlds
+- ✅ BLAS compaction landed (#110 phase 3): `BlasDescriptor::with_compaction()`
+  swaps a built structure for a smaller compacted copy transparently a few
+  frames later (RTX 3070: 59–70% smaller, sync validation clean)
 - ⚠️ Slang cannot target WGSL ray queries, so ray-query shaders are authored
   in WGSL directly for now; a Slang→SPIR-V bake variant is the escape hatch
   when they need to join the baked-material world
@@ -2061,6 +2062,27 @@ Three follow-up forks were decided with the project owner:
 3. **wgpu ray query is dropped** (was phase 4): browser WebGPU has no RT and
    desktop wgpu is shadowed by the native Vulkan backend — dead weight in the
    backlog.
+
+### Update (phase 3 implemented)
+
+Both remaining phases landed together:
+
+- **Async-compute AS builds** ride the existing per-graph queue routing — an
+  `AccelerationStructureBuildPass`-only graph with
+  `QueuePreference::AsyncCompute` runs on the async compute queue, its
+  cross-queue hazards resolved as timeline waits by the trackers (no new sync
+  code). `ray_query_demo` builds its BLASes there.
+- **Transparent compaction** works as decided: a per-frame-slot
+  `ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR` query (per-query reset, so it is
+  safe on a single per-slot pool even when the build ran on async compute) reads
+  the compacted size back a few frames after the build; a graphics-side driver
+  then encodes `vkCmdCopyAccelerationStructureKHR(COMPACT)` through the frame
+  graph via `RenderGraph::flush_acceleration_structure_compaction` and swaps the
+  `Blas`'s interior-mutable (backing, handle) pair once the copy is guaranteed
+  complete, holding the original one further frames-in-flight window (in-flight
+  TLAS instance buffers may still carry its device address). The swap/retire
+  clock is a monotonic frame counter advanced in `advance_frame`, so it is
+  correct regardless of how often the flush runs.
 
 ### Related Issues
 
