@@ -19,7 +19,7 @@ use std::sync::Arc;
 use redlilium_app::{App, AppArgs, AppContext, AppHandler, DefaultAppArgs, DrawContext};
 use redlilium_core::math::{
     Mat4, Vec3, look_at_rh, mat4_from_scale_rotation_translation, mat4_to_cols_array_2d,
-    perspective_rh, quat_from_rotation_y,
+    perspective_rh_reversed, quat_from_rotation_y,
 };
 use redlilium_core::mesh::{CpuMesh, IndexFormat, VertexLayout};
 use redlilium_graphics::{
@@ -74,10 +74,12 @@ fn sky(dir: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    // Reconstruct the primary ray from the inverse view-projection ([0,1]
-    // depth: z = 1 is the far plane).
-    let far = camera.inv_view_proj * vec4<f32>(in.ndc, 1.0, 1.0);
-    let dir = normalize(far.xyz / far.w - camera.origin.xyz);
+    // Reconstruct the primary ray from the inverse view-projection by
+    // unprojecting the z = 1 clip plane. Depth-convention independent: z = 1
+    // is the far plane classic, the near plane reversed-Z (ADR-038) — either
+    // point lies on the same camera ray, so the direction is identical.
+    let plane = camera.inv_view_proj * vec4<f32>(in.ndc, 1.0, 1.0);
+    let dir = normalize(plane.xyz / plane.w - camera.origin.xyz);
 
     var rq: ray_query;
     rayQueryInitialize(&rq, tlas,
@@ -455,7 +457,7 @@ impl RayQueryDemo {
 
     fn update_camera(&mut self, ctx: &AppContext) {
         let aspect = ctx.aspect_ratio();
-        let proj = perspective_rh(60.0_f32.to_radians(), aspect, 0.1, 100.0);
+        let proj = perspective_rh_reversed(60.0_f32.to_radians(), aspect, 0.1, 100.0);
         let eye = Vec3::new(5.0, 3.5, 6.5);
         let view = look_at_rh(&eye, &Vec3::new(0.0, 0.7, 0.0), &Vec3::new(0.0, 1.0, 0.0));
         let inv_view_proj = (proj * view)

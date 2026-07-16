@@ -106,10 +106,10 @@ pub use instance::{
 };
 pub use materials::{
     BindingGroup, BindingGroupDescriptor, BindingLayout, BindingLayoutEntry, BindingType,
-    BlendComponent, BlendFactor, BlendOperation, BlendState, BoundResource, CullMode, DepthState,
-    FrontFace, Material, MaterialDescriptor, MaterialInstance, PolygonMode, RasterState,
-    SampledDepthLayout, ShaderSource, ShaderSourceLanguage, ShaderStage, ShaderStageFlags,
-    UpdateRate,
+    BlendComponent, BlendFactor, BlendOperation, BlendState, BoundResource, CullMode,
+    DepthConvention, DepthState, FrontFace, Material, MaterialDescriptor, MaterialInstance,
+    PolygonMode, RasterState, SampledDepthLayout, ShaderSource, ShaderSourceLanguage, ShaderStage,
+    ShaderStageFlags, UpdateRate,
 };
 pub use mesh::{
     CpuMesh, IndexFormat, Mesh, MeshDescriptor, PrimitiveTopology, VertexAttribute,

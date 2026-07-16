@@ -12,8 +12,8 @@ use redlilium_core::math::mat4_to_cols_array_2d;
 use redlilium_ecs::{Camera, Entity, GlobalTransform, MeshRenderer, Visibility, World, shaders};
 use redlilium_graphics::{
     BindingGroup, BindingGroupDescriptor, Buffer, BufferDescriptor, BufferTextureCopyRegion,
-    BufferTextureLayout, BufferUsage, ColorAttachment, DepthStencilAttachment, DrawCommand,
-    GraphicsDevice, GraphicsPass, LoadOp, Material, MaterialInstance, RenderTarget,
+    BufferTextureLayout, BufferUsage, ColorAttachment, DepthConvention, DepthStencilAttachment,
+    DrawCommand, GraphicsDevice, GraphicsPass, LoadOp, Material, MaterialInstance, RenderTarget,
     RenderTargetConfig, RingBuffer, ScissorRect, StoreOp, TextureCopyLocation, TextureDescriptor,
     TextureFormat, TextureOrigin, TextureUsage, TransferConfig, TransferOperation, TransferPass,
     Viewport,
@@ -281,8 +281,11 @@ impl SceneViewState {
                     .with_store_op(StoreOp::Store),
                 )
                 .with_depth_stencil(
+                    // Reversed-Z clear (ADR-038) — must match the editor
+                    // camera's reversed projection and the picking material's
+                    // GreaterEqual compare.
                     DepthStencilAttachment::from_texture(self.depth_texture.clone())
-                        .with_clear_depth(1.0),
+                        .with_clear_depth(DepthConvention::default().clear_depth()),
                 ),
         );
 

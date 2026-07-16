@@ -754,8 +754,8 @@ impl Editor {
         if let Ok(mut cameras) = ew.world.write_all::<Camera>()
             && let Some(mut cam) = cameras.get_mut(ew.editor_camera.index())
         {
-            cam.projection_matrix =
-                redlilium_core::math::perspective_rh(FRAC_PI_4, aspect, 0.1, 500.0);
+            cam.projection_matrix = redlilium_core::math::DepthConvention::default()
+                .perspective(FRAC_PI_4, aspect, 0.1, 500.0);
         }
     }
 

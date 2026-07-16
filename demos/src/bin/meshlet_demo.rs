@@ -22,7 +22,9 @@
 use std::sync::Arc;
 
 use redlilium_app::{App, AppArgs, AppContext, AppHandler, DefaultAppArgs, DrawContext};
-use redlilium_core::math::{Mat4, Vec3, look_at_rh, mat4_to_cols_array_2d, perspective_rh};
+use redlilium_core::math::{
+    DepthConvention, Mat4, Vec3, look_at_rh, mat4_to_cols_array_2d, perspective_rh_reversed,
+};
 use redlilium_graphics::{
     BindingGroupDescriptor, BufferDescriptor, BufferUsage, ColorAttachment, DepthStencilAttachment,
     FrameSchedule, GraphicsPass, MaterialDescriptor, MaterialInstance, RenderTargetConfig,
@@ -263,8 +265,10 @@ fn build_instances() -> Vec<GpuInstance> {
 }
 
 /// World-space frustum planes from a view-projection matrix
-/// (Gribb–Hartmann; the engine's projections use [0,1] depth, so the near
-/// plane is row 2 alone). Inside when `dot(n, p) + d >= 0`.
+/// (Gribb–Hartmann; the engine's projections use [0,1] depth, so the two z
+/// bounds are row 2 alone and row 3 − row 2). Convention-independent: under
+/// reversed-Z (ADR-038) the same two planes swap near/far roles, and all six
+/// are tested uniformly. Inside when `dot(n, p) + d >= 0`.
 fn frustum_planes(vp: &Mat4) -> [[f32; 4]; 6] {
     let row = |i: usize| vp.row(i).transpose();
     let (r0, r1, r2, r3) = (row(0), row(1), row(2), row(3));
@@ -441,7 +445,7 @@ impl MeshletDemo {
         let angle = self.time * 0.3;
         let eye = Vec3::new(angle.cos() * 18.0, 9.0, angle.sin() * 18.0);
         let view = look_at_rh(&eye, &Vec3::new(0.0, 0.0, 0.0), &Vec3::new(0.0, 1.0, 0.0));
-        let proj = perspective_rh(60.0_f32.to_radians(), aspect, 0.1, 200.0);
+        let proj = perspective_rh_reversed(60.0_f32.to_radians(), aspect, 0.1, 200.0);
         (proj * view, eye)
     }
 
@@ -570,7 +574,7 @@ impl AppHandler for MeshletDemo {
                     DepthStencilAttachment::from_texture(
                         self.depth_texture.as_ref().unwrap().clone(),
                     )
-                    .with_clear_depth(1.0),
+                    .with_clear_depth(DepthConvention::default().clear_depth()),
                 ),
         );
         render_pass.add_mesh_tasks_command(

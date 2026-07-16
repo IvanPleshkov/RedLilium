@@ -23,8 +23,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use redlilium_graphics::{
-    ColorAttachment, DepthStencilAttachment, GraphicsPass, PassHandle, RenderGraph,
-    RenderTargetConfig,
+    ColorAttachment, DepthConvention, DepthStencilAttachment, GraphicsPass, PassHandle,
+    RenderGraph, RenderTargetConfig,
 };
 
 use crate::{Entity, World};
@@ -195,8 +195,12 @@ impl CameraRenderPipeline for ForwardPipeline {
                         .with_clear_color(clear[0], clear[1], clear[2], clear[3]),
                 )
                 .with_depth_stencil(
+                    // Engine-default reversed-Z (ADR-038): clear 0.0, materials
+                    // compare GreaterEqual, cameras built with reversed
+                    // projections. The std path supports no per-camera opt-out;
+                    // a Classic camera needs its own pipeline.
                     DepthStencilAttachment::from_texture(view.target.depth.clone())
-                        .with_clear_depth(1.0),
+                        .with_clear_depth(DepthConvention::default().clear_depth()),
                 ),
         );
         {

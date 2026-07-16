@@ -9,8 +9,8 @@ use redlilium_core::profiling::{
     profile_function, profile_memory_stats, profile_message, profile_scope,
 };
 use redlilium_graphics::{
-    ColorAttachment, DepthStencilAttachment, DrawCommand, FrameSchedule, GraphicsPass, LoadOp,
-    RenderTarget, RenderTargetConfig, TransferPass, egui::EguiController,
+    ColorAttachment, DepthConvention, DepthStencilAttachment, DrawCommand, FrameSchedule,
+    GraphicsPass, LoadOp, RenderTarget, RenderTargetConfig, TransferPass, egui::EguiController,
 };
 use winit::event::KeyEvent;
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -315,7 +315,7 @@ impl AppHandler for PbrIblDemo {
                     )
                     .with_depth_stencil(
                         DepthStencilAttachment::from_texture(gbuffer.depth.clone())
-                            .with_clear_depth(1.0),
+                            .with_clear_depth(DepthConvention::default().clear_depth()),
                     ),
             );
         }

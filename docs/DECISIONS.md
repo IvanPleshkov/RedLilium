@@ -2529,3 +2529,96 @@ editing world.
   remain for play sessions — unchanged from today, now explicitly scoped
 - ⚠️ Editor-tool and engine changes cost a process restart (Tier 2);
   undo history does not survive it
+
+---
+
+## ADR-038: Reversed-Z as the Engine Depth Convention
+
+**Date:** 2026-07-17
+**Status:** Accepted
+**Issues:** #125 (prerequisite for #130 and every depth-consuming feature)
+
+### Context
+
+The engine used the classic [0,1] depth convention throughout: near → 0,
+far → 1, clear 1.0, compare `LessEqual`. A float depth buffer spends almost
+all of its precision near zero — exactly where a classic projection also
+maps the near plane, wasting the precision where it is least needed and
+causing z-fighting at distance (at znear 0.01 / zfar 10000, two points one
+unit apart at ~9000 collapse onto the same f32 depth value). Reversed-Z
+(near → 1, far → 0) aligns the float exponent ramp with the hyperbolic
+depth curve, distributing precision near-uniformly in view space. It is the
+standard convention in modern engines.
+
+The flip had to land **before** any depth-consuming feature (shadow maps
+#130, depth prepass, SSAO) baked the classic convention into shaders and
+lookups — retrofitting later would touch every consumer at once.
+
+### Decision
+
+**Reversed-Z is the engine default; classic is a per-target opt-out.**
+
+1. **One enum answers everything**: `DepthConvention { ReversedZ (default),
+   Classic }` in `core::math`, next to the projection helpers. It derives
+   the projection matrix flavor (`.perspective()` / `.orthographic()`), the
+   clear depth (`.clear_depth()`: 0.0 / 1.0), and the default compare op
+   (`.compare()`: `GreaterEqual` / `LessEqual`). No scattered `if reversed`
+   logic anywhere — every convention-sensitive site routes through these
+   methods or documents why it is convention-independent.
+2. **core math**: `perspective_rh_reversed` / `orthographic_rh_reversed`
+   alongside the unchanged classic helpers (the reversed z-row is the
+   classic one with znear/zfar swapped; x/y rows identical).
+3. **graphics**: `DepthState::new()` now defaults to `GreaterEqual`;
+   `DepthState::for_convention(convention, format)` is the explicit form.
+   Depth-clear values derive from `convention.clear_depth()` at pass-build
+   sites. Anything created via `with_depth_format` (std materials,
+   `PipelineCache`, entity-index picking, `debug_drawer`) picked up the
+   flip automatically.
+4. **ecs `Camera`**: constructors bake the convention into the projection
+   matrix at construction — the component stays Pod, matrices only, no
+   convention field. `perspective`/`orthographic` default to reversed;
+   `_classic` and `_with(convention, ...)` variants are the opt-out.
+5. **One convention per depth target** (documented on the enum): every
+   camera/pass writing or testing against a given depth buffer must use
+   one convention — projection, clear, and compare flip as a unit. Mixing
+   is a logic error the engine does not detect. The std render path is
+   reversed-only; a Classic camera needs its own pipeline (ADR-035 makes
+   that expressible per-camera).
+
+### Migration (part of the same change)
+
+- Demos: meshlet, physics, pbr_ibl, ray_query flipped to reversed
+  defaults. `textured_quad_demo` deliberately stays **Classic** end-to-end
+  (classic ortho + clear 1.0 + `LessEqual`) as the living opt-out proof.
+- Convention-independent sites, audited and annotated instead of changed:
+  pbr_ibl reconstructs position from a G-buffer attachment (not depth);
+  its skybox draws into a pass with **no depth attachment** (the hardcoded
+  clip z is arbitrary); ray_query unprojects the z=1 clip plane, and the
+  resulting primary-ray direction is identical under either convention;
+  meshlet's Gribb–Hartmann frustum extraction yields the same six planes
+  (near/far swap labels, all are tested uniformly).
+- Editor viewport + entity-index picking pass flipped (picking shares the
+  camera's projection, so clear/compare follow the default).
+- GPU tests flipped to reversed expectations (depth-only pass, depth
+  co-use); core gained projection unit tests including a precision
+  regression test demonstrating the classic far-field collapse.
+
+### Consequences
+
+- ✅ Depth precision is near-uniform in view space; large far/near scenes
+  stop z-fighting; #130 shadow maps inherit a settled convention
+- ✅ The opt-out is proven end-to-end by a shipping demo, not a code path
+  that "should work"
+- ⚠️ Depth-consuming shader code written from now on must derive
+  linearization from the convention (or read `DepthConvention` docs) —
+  classic-convention formulas copied from tutorials are silently wrong
+- ⚠️ The engine cannot detect a convention mix on one target; review must
+  enforce the flip-as-a-unit rule
+- ⚠️ Hardware acceptance (RTX 3070 + RX 6400, 300 frames sync validation)
+  is the final gate for pbr_ibl / meshlet / ray_query / editor
+
+### Related Issues
+
+- #125: feature issue
+- #130 / ADR-035: first depth consumer (shadow maps), was blocked on this
+- #47 / ADR-029: graph-derived ordering the depth passes rely on

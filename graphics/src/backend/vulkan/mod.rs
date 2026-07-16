@@ -183,6 +183,12 @@ pub struct VulkanBackend {
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
     /// Debug utils extension instance.
     debug_utils: Option<ash::ext::debug_utils::Instance>,
+    /// Debug-utils **device** functions (#123): `vkSetDebugUtilsObjectNameEXT`
+    /// for naming GPU objects and `vkCmd{Begin,End}DebugUtilsLabelEXT` for
+    /// per-pass label regions. `Some` whenever the instance enabled
+    /// `VK_EXT_debug_utils` (RenderDoc injects it even without validation);
+    /// every naming/label call is a no-op when `None`.
+    debug_utils_device: Option<ash::ext::debug_utils::Device>,
     /// Selected physical device.
     physical_device: vk::PhysicalDevice,
     /// Resolved Vulkan format for `TextureFormat::Depth24PlusStencil8`:
@@ -399,6 +405,44 @@ impl std::fmt::Debug for VulkanBackend {
 /// copy whose `offset + extent` equals the subresource dimensions). Partial or
 /// non-base image copies — none generated today — read as unsafe so the graph
 /// falls back to async compute.
+/// Name a Vulkan object via `VK_EXT_debug_utils` (#123), usable before the
+/// `VulkanBackend` struct exists (device creation) and from sub-modules that
+/// hold only the loader. A no-op when `loader` is `None` or `name` is empty /
+/// not a valid C string — naming never fails a real operation.
+pub(super) fn set_debug_object_name<H: vk::Handle>(
+    loader: Option<&ash::ext::debug_utils::Device>,
+    handle: H,
+    name: &str,
+) {
+    let Some(loader) = loader else {
+        return;
+    };
+    if name.is_empty() {
+        return;
+    }
+    let Ok(cname) = std::ffi::CString::new(name) else {
+        return;
+    };
+    let info = vk::DebugUtilsObjectNameInfoEXT::default()
+        .object_handle(handle)
+        .object_name(&cname);
+    unsafe {
+        let _ = loader.set_debug_utils_object_name(&info);
+    }
+}
+
+/// A stable per-pass-type colour for the pass's debug label region (#123):
+/// RenderDoc tints each region so pass kinds are distinguishable at a glance.
+/// Blue = graphics, green = transfer, orange = compute, purple = AS build.
+fn pass_label_color(pass: &Pass) -> [f32; 4] {
+    match pass {
+        Pass::Graphics(_) => [0.26, 0.52, 0.96, 1.0],
+        Pass::Transfer(_) => [0.30, 0.69, 0.31, 1.0],
+        Pass::Compute(_) => [0.96, 0.60, 0.16, 1.0],
+        Pass::AccelerationStructureBuild(_) => [0.61, 0.35, 0.71, 1.0],
+    }
+}
+
 fn op_ok_on_coarse_transfer(op: &crate::graph::TransferOperation) -> bool {
     use crate::graph::TransferOperation as Op;
     match op {
@@ -547,6 +591,12 @@ impl VulkanBackend {
             device_caps.ray_query,
         )?));
 
+        // Debug-utils device functions for object naming + pass labels (#123),
+        // loaded whenever the instance enabled the extension.
+        let debug_utils_device = debug_utils
+            .as_ref()
+            .map(|_| ash::ext::debug_utils::Device::new(&instance, &device));
+
         // Acceleration-structure entry points, loaded only when the extension
         // bundle is enabled (#110).
         let accel_loader = device_caps
@@ -598,6 +648,11 @@ impl VulkanBackend {
             })
         };
         let queue_timeline = create_timeline(&device)?;
+        set_debug_object_name(
+            debug_utils_device.as_ref(),
+            queue_timeline,
+            "graphics-queue timeline",
+        );
 
         // The secondary queues (async compute #47, dedicated transfer #89),
         // when planned: each gets its own timeline and per-slot command pools
@@ -627,6 +682,20 @@ impl VulkanBackend {
             };
         let async_compute = create_secondary(queue_plan.async_compute)?;
         let transfer_queue = create_secondary(queue_plan.transfer)?;
+        if let Some(q) = &async_compute {
+            set_debug_object_name(
+                debug_utils_device.as_ref(),
+                q.timeline,
+                "async-compute-queue timeline",
+            );
+        }
+        if let Some(q) = &transfer_queue {
+            set_debug_object_name(
+                debug_utils_device.as_ref(),
+                q.timeline,
+                "transfer-queue timeline",
+            );
+        }
 
         // Per-pass GPU timestamps (#95). Build one query pool per (queue, slot)
         // for every queue whose family exposes `timestampValidBits > 0`. The
@@ -687,6 +756,7 @@ impl VulkanBackend {
                 &device,
                 selected.properties.limits.timestamp_period,
                 &infos,
+                debug_utils_device.as_ref(),
             )
             .map(Mutex::new)
         } else {
@@ -850,6 +920,7 @@ impl VulkanBackend {
             instance,
             debug_messenger,
             debug_utils,
+            debug_utils_device,
             physical_device,
             device,
             graphics_queue,
@@ -937,6 +1008,36 @@ impl VulkanBackend {
     fn abort_timestamps(&self, queue: QueueId, slot: usize) {
         if let Some(m) = &self.timestamps {
             m.lock().abort_submit(queue, slot);
+        }
+    }
+
+    /// Name a Vulkan object for RenderDoc / validation output (#123). A no-op
+    /// when `VK_EXT_debug_utils` is absent or the name is empty/not a valid
+    /// C string — naming never fails a real operation.
+    fn set_object_name<H: vk::Handle>(&self, handle: H, name: &str) {
+        set_debug_object_name(self.debug_utils_device.as_ref(), handle, name);
+    }
+
+    /// Open a labelled command-buffer region (#123): RenderDoc groups the
+    /// commands until the matching [`end_debug_label`](Self::end_debug_label)
+    /// and tints them `color`. A no-op without `VK_EXT_debug_utils`.
+    fn begin_debug_label(&self, cmd: vk::CommandBuffer, name: &str, color: [f32; 4]) {
+        let Some(debug_utils) = &self.debug_utils_device else {
+            return;
+        };
+        let Ok(cname) = std::ffi::CString::new(name) else {
+            return;
+        };
+        let label = vk::DebugUtilsLabelEXT::default()
+            .label_name(&cname)
+            .color(color);
+        unsafe { debug_utils.cmd_begin_debug_utils_label(cmd, &label) };
+    }
+
+    /// Close the region opened by [`begin_debug_label`](Self::begin_debug_label).
+    fn end_debug_label(&self, cmd: vk::CommandBuffer) {
+        if let Some(debug_utils) = &self.debug_utils_device {
+            unsafe { debug_utils.cmd_end_debug_utils_label(cmd) };
         }
     }
 
@@ -1678,6 +1779,9 @@ impl VulkanBackend {
         let buffer = unsafe { self.device.create_buffer(&buffer_info, None) }.map_err(|e| {
             GraphicsError::ResourceCreationFailed(format!("Failed to create buffer: {:?}", e))
         })?;
+        // Name the object for RenderDoc / validation (#123); no-op when the
+        // descriptor has no label or debug utils is absent.
+        self.set_object_name(buffer, descriptor.label.as_deref().unwrap_or(""));
 
         // Get memory requirements
         let mem_requirements = unsafe { self.device.get_buffer_memory_requirements(buffer) };
@@ -1838,6 +1942,7 @@ impl VulkanBackend {
         let image = unsafe { self.device.create_image(&image_info, None) }.map_err(|e| {
             GraphicsError::ResourceCreationFailed(format!("Failed to create image: {:?}", e))
         })?;
+        self.set_object_name(image, descriptor.label.as_deref().unwrap_or(""));
 
         // Get memory requirements
         let mem_requirements = unsafe { self.device.get_image_memory_requirements(image) };
@@ -1919,6 +2024,9 @@ impl VulkanBackend {
         let view = unsafe { self.device.create_image_view(&view_info, None) }.map_err(|e| {
             GraphicsError::ResourceCreationFailed(format!("Failed to create image view: {:?}", e))
         })?;
+        if let Some(label) = &descriptor.label {
+            self.set_object_name(view, &format!("{label} view"));
+        }
 
         Ok(GpuTexture::Vulkan {
             device: self.device.clone(),
@@ -1973,6 +2081,7 @@ impl VulkanBackend {
         let sampler = unsafe { self.device.create_sampler(&sampler_info, None) }.map_err(|e| {
             GraphicsError::ResourceCreationFailed(format!("Failed to create sampler: {:?}", e))
         })?;
+        self.set_object_name(sampler, descriptor.label.as_deref().unwrap_or(""));
 
         Ok(GpuSampler::Vulkan {
             device: self.device.clone(),
@@ -2429,6 +2538,10 @@ impl VulkanBackend {
                 descriptor.raster,
                 descriptor.sample_count,
             )?;
+            if let Some(label) = &descriptor.label {
+                self.set_object_name(pipeline, label);
+                self.set_object_name(pipeline_layout, &format!("{label} layout"));
+            }
 
             Ok(super::GpuPipeline::Vulkan {
                 device: self.device.clone(),
@@ -2489,6 +2602,10 @@ impl VulkanBackend {
             &compute_entry,
             pipeline_layout,
         )?;
+        if let Some(label) = &descriptor.label {
+            self.set_object_name(pipeline, label);
+            self.set_object_name(pipeline_layout, &format!("{label} layout"));
+        }
 
         // Shader module is baked into the pipeline; destroy it now.
         unsafe {
@@ -2786,6 +2903,7 @@ impl VulkanBackend {
             })?;
 
         let cmd = command_buffers[0];
+        self.set_object_name(cmd, &format!("frame-cb {queue_id:?} slot{slot}"));
 
         // Begin command buffer
         let begin_info = vk::CommandBufferBeginInfo::default()
@@ -3306,14 +3424,20 @@ impl VulkanBackend {
 
     fn encode_pass(&self, cmd: vk::CommandBuffer, pass: &Pass) -> Result<(), GraphicsError> {
         profile_scope!("encode_pass");
-        match pass {
+        // Wrap the pass's GPU commands in a named, colour-coded debug region
+        // (#123) so RenderDoc and validation output group them by frame-graph
+        // pass name. A no-op without VK_EXT_debug_utils.
+        self.begin_debug_label(cmd, pass.name(), pass_label_color(pass));
+        let result = match pass {
             Pass::Graphics(graphics_pass) => self.encode_graphics_pass(cmd, graphics_pass),
             Pass::Transfer(transfer_pass) => self.encode_transfer_pass(cmd, transfer_pass),
             Pass::Compute(compute_pass) => self.encode_compute_pass(cmd, compute_pass),
             Pass::AccelerationStructureBuild(build_pass) => {
                 self.encode_acceleration_structure_build_pass(cmd, build_pass)
             }
-        }
+        };
+        self.end_debug_label(cmd);
+        result
     }
 
     fn encode_graphics_pass(
@@ -4440,5 +4564,33 @@ impl VulkanBackend {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::{
+        AccelerationStructureBuildPass, ComputePass, GraphicsPass, Pass, TransferPass,
+    };
+
+    /// #123: each pass type gets a distinct, stable debug-label colour so
+    /// RenderDoc regions are visually separable.
+    #[test]
+    fn pass_label_colors_are_distinct_per_type() {
+        let colors = [
+            pass_label_color(&Pass::Graphics(GraphicsPass::new("g".into()))),
+            pass_label_color(&Pass::Transfer(TransferPass::new("t".into()))),
+            pass_label_color(&Pass::Compute(ComputePass::new("c".into()))),
+            pass_label_color(&Pass::AccelerationStructureBuild(
+                AccelerationStructureBuildPass::new("a".into()),
+            )),
+        ];
+        for i in 0..colors.len() {
+            assert_eq!(colors[i][3], 1.0, "alpha must be opaque");
+            for j in (i + 1)..colors.len() {
+                assert_ne!(colors[i], colors[j], "pass colours must differ by type");
+            }
+        }
     }
 }

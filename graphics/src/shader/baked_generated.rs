@@ -32,10 +32,6 @@ pub static BAKED_WGSL: &[(u64, &str)] = &[
         "@binding(0) @group(1) var gbuffer_albedo_0 : texture_2d<f32>;\n\n@binding(3) @group(1) var gbuffer_sampler_0 : sampler;\n\n@binding(1) @group(1) var gbuffer_normal_metallic_0 : texture_2d<f32>;\n\n@binding(2) @group(1) var gbuffer_position_roughness_0 : texture_2d<f32>;\n\nstruct SLANG_ParameterGroup_ResolveUniforms_std140_0\n{\n    @align(16) camera_pos_0 : vec4<f32>,\n    @align(16) screen_size_0 : vec4<f32>,\n};\n\n@binding(0) @group(0) var<uniform> ResolveUniforms_0 : SLANG_ParameterGroup_ResolveUniforms_std140_0;\n@binding(0) @group(2) var irradiance_map_0 : texture_cube<f32>;\n\n@binding(3) @group(2) var ibl_sampler_0 : sampler;\n\n@binding(1) @group(2) var prefilter_map_0 : texture_cube<f32>;\n\n@binding(2) @group(2) var brdf_lut_0 : texture_2d<f32>;\n\nfn calculate_f0_0( albedo_0 : vec3<f32>,  metallic_0 : f32) -> vec3<f32>\n{\n    return mix(vec3<f32>(0.03999999910593033f), albedo_0, vec3<f32>(metallic_0));\n}\n\nfn distribution_ggx_0( n_0 : vec3<f32>,  h_0 : vec3<f32>,  roughness_0 : f32) -> f32\n{\n    var a_0 : f32 = roughness_0 * roughness_0;\n    var a2_0 : f32 = a_0 * a_0;\n    var _S1 : f32 = max(dot(n_0, h_0), 0.0f);\n    var denom_0 : f32 = _S1 * _S1 * (a2_0 - 1.0f) + 1.0f;\n    return a2_0 / (3.14159274101257324f * denom_0 * denom_0);\n}\n\nfn geometry_schlick_ggx_0( n_dot_v_0 : f32,  roughness_1 : f32) -> f32\n{\n    var r_0 : f32 = roughness_1 + 1.0f;\n    var k_0 : f32 = r_0 * r_0 / 8.0f;\n    return n_dot_v_0 / (n_dot_v_0 * (1.0f - k_0) + k_0);\n}\n\nfn geometry_smith_0( n_1 : vec3<f32>,  v_0 : vec3<f32>,  l_0 : vec3<f32>,  roughness_2 : f32) -> f32\n{\n    return geometry_schlick_ggx_0(max(dot(n_1, v_0), 0.0f), roughness_2) * geometry_schlick_ggx_0(max(dot(n_1, l_0), 0.0f), roughness_2);\n}\n\nfn saturate_f_0( x_0 : f32) -> f32\n{\n    return saturate(x_0);\n}\n\nfn fresnel_schlick_0( cos_theta_0 : f32,  f0_0 : vec3<f32>) -> vec3<f32>\n{\n    return f0_0 + (vec3<f32>(1.0f) - f0_0) * vec3<f32>(pow(saturate_f_0(1.0f - cos_theta_0), 5.0f));\n}\n\nfn cook_torrance_specular_0( n_2 : vec3<f32>,  v_1 : vec3<f32>,  l_1 : vec3<f32>,  h_1 : vec3<f32>,  roughness_3 : f32,  f0_1 : vec3<f32>) -> vec3<f32>\n{\n    return vec3<f32>((distribution_ggx_0(n_2, h_1, roughness_3) * geometry_smith_0(n_2, v_1, l_1, roughness_3))) * fresnel_schlick_0(max(dot(h_1, v_1), 0.0f), f0_1) / vec3<f32>((4.0f * max(dot(n_2, v_1), 0.0f) * max(dot(n_2, l_1), 0.0f) + 0.00009999999747379f));\n}\n\nfn lambertian_diffuse_0( albedo_1 : vec3<f32>) -> vec3<f32>\n{\n    return albedo_1 * vec3<f32>(0.31830987334251404f);\n}\n\nfn pbr_direct_lighting_0( n_3 : vec3<f32>,  v_2 : vec3<f32>,  l_2 : vec3<f32>,  albedo_2 : vec3<f32>,  metallic_1 : f32,  roughness_4 : f32,  light_color_0 : vec3<f32>) -> vec3<f32>\n{\n    var h_2 : vec3<f32> = normalize(v_2 + l_2);\n    var f0_2 : vec3<f32> = calculate_f0_0(albedo_2, metallic_1);\n    return ((vec3<f32>(1.0f) - fresnel_schlick_0(max(dot(h_2, v_2), 0.0f), f0_2)) * vec3<f32>((1.0f - metallic_1)) * lambertian_diffuse_0(albedo_2) + cook_torrance_specular_0(n_3, v_2, l_2, h_2, roughness_4, f0_2)) * light_color_0 * vec3<f32>(max(dot(n_3, l_2), 0.0f));\n}\n\nfn fresnel_schlick_roughness_0( cos_theta_1 : f32,  f0_3 : vec3<f32>,  roughness_5 : f32) -> vec3<f32>\n{\n    return f0_3 + (max(vec3<f32>((1.0f - roughness_5)), f0_3) - f0_3) * vec3<f32>(pow(saturate_f_0(1.0f - cos_theta_1), 5.0f));\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) uv_0 : vec2<f32>,\n};\n\n@fragment\nfn fs_main( _S2 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var albedo_sample_0 : vec4<f32> = (textureSample((gbuffer_albedo_0), (gbuffer_sampler_0), (_S2.uv_0)));\n    var normal_metallic_sample_0 : vec4<f32> = (textureSample((gbuffer_normal_metallic_0), (gbuffer_sampler_0), (_S2.uv_0)));\n    var position_roughness_sample_0 : vec4<f32> = (textureSample((gbuffer_position_roughness_0), (gbuffer_sampler_0), (_S2.uv_0)));\n    if((albedo_sample_0.w) < 0.5f)\n    {\n        discard;\n    }\n    var albedo_3 : vec3<f32> = albedo_sample_0.xyz;\n    var normal_0 : vec3<f32> = normalize(normal_metallic_sample_0.xyz * vec3<f32>(2.0f) - vec3<f32>(1.0f));\n    var metallic_2 : f32 = normal_metallic_sample_0.w;\n    var _S3 : f32 = max(position_roughness_sample_0.w, 0.03999999910593033f);\n    var v_3 : vec3<f32> = normalize(ResolveUniforms_0.camera_pos_0.xyz - position_roughness_sample_0.xyz);\n    var _S4 : f32 = max(dot(normal_0, v_3), 0.0f);\n    var _S5 : vec3<f32> = vec3<f32>((1.0f - metallic_2));\n    var f_ibl_0 : vec3<f32> = fresnel_schlick_roughness_0(_S4, calculate_f0_0(albedo_3, metallic_2), _S3);\n    var brdf_sample_0 : vec2<f32> = (textureSample((brdf_lut_0), (ibl_sampler_0), (vec2<f32>(_S4, _S3)))).xy;\n    var _S6 : pixelOutput_0 = pixelOutput_0( vec4<f32>(clamp((vec3<f32>(1.0f) - f_ibl_0) * _S5 * ((textureSample((irradiance_map_0), (ibl_sampler_0), (normal_0))).xyz * albedo_3) + (textureSampleLevel((prefilter_map_0), (ibl_sampler_0), (reflect((vec3<f32>(0) - v_3), normal_0)), (_S3 * 4.0f))).xyz * (f_ibl_0 * vec3<f32>(brdf_sample_0.x) + vec3<f32>(brdf_sample_0.y)) + (pbr_direct_lighting_0(normal_0, v_3, normalize(vec3<f32>(1.0f, 1.0f, 0.5f)), albedo_3, metallic_2, _S3, vec3<f32>(1.0f, 0.98000001907348633f, 0.94999998807907104f) * vec3<f32>(3.0f)) + _S5 * albedo_3 * vec3<f32>(0.31830987334251404f) * (vec3<f32>(0.30000001192092896f, 0.40000000596046448f, 0.5f) * vec3<f32>(0.5f)) * vec3<f32>(max(dot(normal_0, normalize(vec3<f32>(-0.5f, -0.30000001192092896f, -1.0f))), 0.0f))), vec3<f32>(0.0f), vec3<f32>(10.0f)), 1.0f) );\n    return _S6;\n}\n\n",
     ),
     (
-        0x33e6ae374148a7dd,
-        "struct _MatrixStorage_float4x4_ColMajorstd140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct SLANG_ParameterGroup_SkyboxUniforms_std140_0\n{\n    @align(16) inv_view_proj_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) camera_pos_0 : vec4<f32>,\n    @align(16) mip_level_0 : f32,\n    @align(16) _pad_0 : vec3<f32>,\n};\n\n@binding(0) @group(0) var<uniform> SkyboxUniforms_0 : SLANG_ParameterGroup_SkyboxUniforms_std140_0;\n@binding(1) @group(0) var env_map_0 : texture_cube<f32>;\n\n@binding(2) @group(0) var env_sampler_0 : sampler;\n\nfn tonemap_reinhard_0( color_0 : vec3<f32>) -> vec3<f32>\n{\n    return color_0 / (color_0 + vec3<f32>(1.0f));\n}\n\nfn gamma_correct_0( color_1 : vec3<f32>) -> vec3<f32>\n{\n    return pow(color_1, vec3<f32>(0.45454543828964233f));\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) view_dir_0 : vec3<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var _S2 : pixelOutput_0 = pixelOutput_0( vec4<f32>(gamma_correct_0(tonemap_reinhard_0((textureSampleLevel((env_map_0), (env_sampler_0), (_S1.view_dir_0), (SkyboxUniforms_0.mip_level_0))).xyz)), 1.0f) );\n    return _S2;\n}\n\n",
-    ),
-    (
         0x3504a027b18b737b,
         "struct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) color_0 : vec4<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var _S2 : pixelOutput_0 = pixelOutput_0( _S1.color_0 );\n    return _S2;\n}\n\n",
     ),
@@ -58,10 +54,6 @@ pub static BAKED_WGSL: &[(u64, &str)] = &[
     (
         0x4f96de5e6099bd03,
         "struct _MatrixStorage_float4x4_ColMajorstd140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct SLANG_ParameterGroup_CameraUniforms_std140_0\n{\n    @align(16) view_proj_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) view_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) proj_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) camera_pos_0 : vec4<f32>,\n    @align(16) instance_base_0 : u32,\n};\n\n@binding(0) @group(0) var<uniform> CameraUniforms_0 : SLANG_ParameterGroup_CameraUniforms_std140_0;\nstruct _MatrixStorage_float4x4_ColMajorstd430_0\n{\n    @align(16) data_1 : array<vec4<f32>, i32(4)>,\n};\n\nstruct InstanceData_std430_0\n{\n    @align(16) model_0 : _MatrixStorage_float4x4_ColMajorstd430_0,\n    @align(16) base_color_0 : vec4<f32>,\n    @align(16) metallic_roughness_0 : vec4<f32>,\n    @align(16) _pad0_0 : vec4<f32>,\n    @align(16) _pad1_0 : vec4<f32>,\n};\n\n@binding(1) @group(0) var<storage, read> instances_0 : array<InstanceData_std430_0>;\n\nstruct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) world_position_0 : vec3<f32>,\n    @location(1) world_normal_0 : vec3<f32>,\n    @location(2) uv_0 : vec2<f32>,\n    @location(3) base_color_1 : vec4<f32>,\n    @location(4) metallic_0 : f32,\n    @location(5) roughness_0 : f32,\n};\n\nstruct vertexInput_0\n{\n    @location(0) position_1 : vec3<f32>,\n    @location(1) normal_0 : vec3<f32>,\n    @location(2) uv_1 : vec2<f32>,\n};\n\n@vertex\nfn vs_main( _S1 : vertexInput_0, @builtin(instance_index) instance_id_0 : u32) -> VsOutput_0\n{\n    var instance_0 : InstanceData_std430_0 = instances_0[CameraUniforms_0.instance_base_0 + instance_id_0];\n    var _S2 : mat4x4<f32> = mat4x4<f32>(instance_0.model_0.data_1[i32(0)][i32(0)], instance_0.model_0.data_1[i32(1)][i32(0)], instance_0.model_0.data_1[i32(2)][i32(0)], instance_0.model_0.data_1[i32(3)][i32(0)], instance_0.model_0.data_1[i32(0)][i32(1)], instance_0.model_0.data_1[i32(1)][i32(1)], instance_0.model_0.data_1[i32(2)][i32(1)], instance_0.model_0.data_1[i32(3)][i32(1)], instance_0.model_0.data_1[i32(0)][i32(2)], instance_0.model_0.data_1[i32(1)][i32(2)], instance_0.model_0.data_1[i32(2)][i32(2)], instance_0.model_0.data_1[i32(3)][i32(2)], instance_0.model_0.data_1[i32(0)][i32(3)], instance_0.model_0.data_1[i32(1)][i32(3)], instance_0.model_0.data_1[i32(2)][i32(3)], instance_0.model_0.data_1[i32(3)][i32(3)]);\n    var world_pos_0 : vec4<f32> = (((vec4<f32>(_S1.position_1, 1.0f)) * (mat4x4<f32>(_S2))));\n    var normal_matrix_0 : mat3x3<f32> = mat3x3<f32>(_S2[i32(0)].xyz, _S2[i32(1)].xyz, _S2[i32(2)].xyz);\n    var output_0 : VsOutput_0;\n    output_0.position_0 = (((world_pos_0) * (mat4x4<f32>(mat4x4<f32>(CameraUniforms_0.view_proj_0.data_0[i32(0)][i32(0)], CameraUniforms_0.view_proj_0.data_0[i32(1)][i32(0)], CameraUniforms_0.view_proj_0.data_0[i32(2)][i32(0)], CameraUniforms_0.view_proj_0.data_0[i32(3)][i32(0)], CameraUniforms_0.view_proj_0.data_0[i32(0)][i32(1)], CameraUniforms_0.view_proj_0.data_0[i32(1)][i32(1)], CameraUniforms_0.view_proj_0.data_0[i32(2)][i32(1)], CameraUniforms_0.view_proj_0.data_0[i32(3)][i32(1)], CameraUniforms_0.view_proj_0.data_0[i32(0)][i32(2)], CameraUniforms_0.view_proj_0.data_0[i32(1)][i32(2)], CameraUniforms_0.view_proj_0.data_0[i32(2)][i32(2)], CameraUniforms_0.view_proj_0.data_0[i32(3)][i32(2)], CameraUniforms_0.view_proj_0.data_0[i32(0)][i32(3)], CameraUniforms_0.view_proj_0.data_0[i32(1)][i32(3)], CameraUniforms_0.view_proj_0.data_0[i32(2)][i32(3)], CameraUniforms_0.view_proj_0.data_0[i32(3)][i32(3)])))));\n    output_0.world_position_0 = world_pos_0.xyz;\n    output_0.world_normal_0 = normalize((((_S1.normal_0) * (normal_matrix_0))));\n    output_0.uv_0 = _S1.uv_1;\n    output_0.base_color_1 = instance_0.base_color_0;\n    output_0.metallic_0 = instance_0.metallic_roughness_0.x;\n    output_0.roughness_0 = instance_0.metallic_roughness_0.y;\n    return output_0;\n}\n\n",
-    ),
-    (
-        0x57bb53bb931c96cd,
-        "struct _MatrixStorage_float4x4_ColMajorstd140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct SLANG_ParameterGroup_SkyboxUniforms_std140_0\n{\n    @align(16) inv_view_proj_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) camera_pos_0 : vec4<f32>,\n    @align(16) mip_level_0 : f32,\n    @align(16) _pad_0 : vec3<f32>,\n};\n\n@binding(0) @group(0) var<uniform> SkyboxUniforms_0 : SLANG_ParameterGroup_SkyboxUniforms_std140_0;\nstruct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) view_dir_0 : vec3<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var x_0 : f32 = f32((((vertex_id_0 & (u32(1)))) << (u32(2)))) - 1.0f;\n    var y_0 : f32 = f32((((vertex_id_0 & (u32(2)))) << (u32(1)))) - 1.0f;\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(x_0, y_0, 0.99989998340606689f, 1.0f);\n    var world_pos_0 : vec4<f32> = (((vec4<f32>(x_0, y_0, 1.0f, 1.0f)) * (mat4x4<f32>(mat4x4<f32>(SkyboxUniforms_0.inv_view_proj_0.data_0[i32(0)][i32(0)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(1)][i32(0)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(2)][i32(0)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(3)][i32(0)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(0)][i32(1)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(1)][i32(1)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(2)][i32(1)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(3)][i32(1)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(0)][i32(2)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(1)][i32(2)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(2)][i32(2)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(3)][i32(2)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(0)][i32(3)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(1)][i32(3)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(2)][i32(3)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(3)][i32(3)])))));\n    output_0.view_dir_0 = normalize(world_pos_0.xyz / vec3<f32>(world_pos_0.w) - SkyboxUniforms_0.camera_pos_0.xyz);\n    return output_0;\n}\n\n",
     ),
     (
         0x5a0484e3568dd6ba,
@@ -128,8 +120,16 @@ pub static BAKED_WGSL: &[(u64, &str)] = &[
         "@binding(0) @group(1) var egui_texture_0 : texture_2d<f32>;\n\n@binding(1) @group(1) var egui_sampler_0 : sampler;\n\nfn srgb_to_linear_0( srgb_0 : vec3<f32>) -> vec3<f32>\n{\n    return mix(srgb_0 / vec3<f32>(12.92000007629394531f), pow((srgb_0 + vec3<f32>(0.05499999970197678f)) / vec3<f32>(1.0549999475479126f), vec3<f32>(2.40000009536743164f)), step(vec3<f32>(0.04044999927282333f), srgb_0));\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) tex_coords_0 : vec2<f32>,\n    @location(1) color_0 : vec4<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var texture_color_linear_0 : vec4<f32> = (textureSample((egui_texture_0), (egui_sampler_0), (_S1.tex_coords_0)));\n    var _S2 : f32 = texture_color_linear_0.w;\n    var _S3 : pixelOutput_0 = pixelOutput_0( vec4<f32>(texture_color_linear_0.xyz * vec3<f32>(_S2), _S2) * vec4<f32>(srgb_to_linear_0(_S1.color_0.xyz), _S1.color_0.w) );\n    return _S3;\n}\n\n",
     ),
     (
+        0xee72ec1fbd0d47d3,
+        "struct _MatrixStorage_float4x4_ColMajorstd140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct SLANG_ParameterGroup_SkyboxUniforms_std140_0\n{\n    @align(16) inv_view_proj_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) camera_pos_0 : vec4<f32>,\n    @align(16) mip_level_0 : f32,\n    @align(16) _pad_0 : vec3<f32>,\n};\n\n@binding(0) @group(0) var<uniform> SkyboxUniforms_0 : SLANG_ParameterGroup_SkyboxUniforms_std140_0;\nstruct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) view_dir_0 : vec3<f32>,\n};\n\n@vertex\nfn vs_main(@builtin(vertex_index) vertex_id_0 : u32) -> VsOutput_0\n{\n    var x_0 : f32 = f32((((vertex_id_0 & (u32(1)))) << (u32(2)))) - 1.0f;\n    var y_0 : f32 = f32((((vertex_id_0 & (u32(2)))) << (u32(1)))) - 1.0f;\n    var output_0 : VsOutput_0;\n    output_0.position_0 = vec4<f32>(x_0, y_0, 0.99989998340606689f, 1.0f);\n    var world_pos_0 : vec4<f32> = (((vec4<f32>(x_0, y_0, 1.0f, 1.0f)) * (mat4x4<f32>(mat4x4<f32>(SkyboxUniforms_0.inv_view_proj_0.data_0[i32(0)][i32(0)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(1)][i32(0)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(2)][i32(0)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(3)][i32(0)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(0)][i32(1)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(1)][i32(1)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(2)][i32(1)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(3)][i32(1)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(0)][i32(2)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(1)][i32(2)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(2)][i32(2)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(3)][i32(2)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(0)][i32(3)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(1)][i32(3)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(2)][i32(3)], SkyboxUniforms_0.inv_view_proj_0.data_0[i32(3)][i32(3)])))));\n    output_0.view_dir_0 = normalize(world_pos_0.xyz / vec3<f32>(world_pos_0.w) - SkyboxUniforms_0.camera_pos_0.xyz);\n    return output_0;\n}\n\n",
+    ),
+    (
         0xf06d553ad9ca4fe1,
         "struct _MatrixStorage_float4x4_ColMajorstd140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct ModelParams_std140_0\n{\n    @align(16) model_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n};\n\n@binding(0) @group(1) var<uniform> gModel_0 : ModelParams_std140_0;\nstruct CameraParams_std140_0\n{\n    @align(16) view_projection_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n};\n\n@binding(0) @group(0) var<uniform> gCamera_0 : CameraParams_std140_0;\nstruct VsOutput_0\n{\n    @builtin(position) clip_position_0 : vec4<f32>,\n    @location(0) world_normal_0 : vec3<f32>,\n    @location(1) uv_0 : vec2<f32>,\n};\n\nstruct vertexInput_0\n{\n    @location(0) position_0 : vec3<f32>,\n    @location(1) normal_0 : vec3<f32>,\n    @location(2) uv_1 : vec2<f32>,\n};\n\n@vertex\nfn vs_main( _S1 : vertexInput_0) -> VsOutput_0\n{\n    var output_0 : VsOutput_0;\n    output_0.clip_position_0 = ((((((vec4<f32>(_S1.position_0, 1.0f)) * (mat4x4<f32>(mat4x4<f32>(gModel_0.model_0.data_0[i32(0)][i32(0)], gModel_0.model_0.data_0[i32(1)][i32(0)], gModel_0.model_0.data_0[i32(2)][i32(0)], gModel_0.model_0.data_0[i32(3)][i32(0)], gModel_0.model_0.data_0[i32(0)][i32(1)], gModel_0.model_0.data_0[i32(1)][i32(1)], gModel_0.model_0.data_0[i32(2)][i32(1)], gModel_0.model_0.data_0[i32(3)][i32(1)], gModel_0.model_0.data_0[i32(0)][i32(2)], gModel_0.model_0.data_0[i32(1)][i32(2)], gModel_0.model_0.data_0[i32(2)][i32(2)], gModel_0.model_0.data_0[i32(3)][i32(2)], gModel_0.model_0.data_0[i32(0)][i32(3)], gModel_0.model_0.data_0[i32(1)][i32(3)], gModel_0.model_0.data_0[i32(2)][i32(3)], gModel_0.model_0.data_0[i32(3)][i32(3)])))))) * (mat4x4<f32>(mat4x4<f32>(gCamera_0.view_projection_0.data_0[i32(0)][i32(0)], gCamera_0.view_projection_0.data_0[i32(1)][i32(0)], gCamera_0.view_projection_0.data_0[i32(2)][i32(0)], gCamera_0.view_projection_0.data_0[i32(3)][i32(0)], gCamera_0.view_projection_0.data_0[i32(0)][i32(1)], gCamera_0.view_projection_0.data_0[i32(1)][i32(1)], gCamera_0.view_projection_0.data_0[i32(2)][i32(1)], gCamera_0.view_projection_0.data_0[i32(3)][i32(1)], gCamera_0.view_projection_0.data_0[i32(0)][i32(2)], gCamera_0.view_projection_0.data_0[i32(1)][i32(2)], gCamera_0.view_projection_0.data_0[i32(2)][i32(2)], gCamera_0.view_projection_0.data_0[i32(3)][i32(2)], gCamera_0.view_projection_0.data_0[i32(0)][i32(3)], gCamera_0.view_projection_0.data_0[i32(1)][i32(3)], gCamera_0.view_projection_0.data_0[i32(2)][i32(3)], gCamera_0.view_projection_0.data_0[i32(3)][i32(3)])))));\n    output_0.world_normal_0 = (((vec4<f32>(_S1.normal_0, 0.0f)) * (mat4x4<f32>(mat4x4<f32>(gModel_0.model_0.data_0[i32(0)][i32(0)], gModel_0.model_0.data_0[i32(1)][i32(0)], gModel_0.model_0.data_0[i32(2)][i32(0)], gModel_0.model_0.data_0[i32(3)][i32(0)], gModel_0.model_0.data_0[i32(0)][i32(1)], gModel_0.model_0.data_0[i32(1)][i32(1)], gModel_0.model_0.data_0[i32(2)][i32(1)], gModel_0.model_0.data_0[i32(3)][i32(1)], gModel_0.model_0.data_0[i32(0)][i32(2)], gModel_0.model_0.data_0[i32(1)][i32(2)], gModel_0.model_0.data_0[i32(2)][i32(2)], gModel_0.model_0.data_0[i32(3)][i32(2)], gModel_0.model_0.data_0[i32(0)][i32(3)], gModel_0.model_0.data_0[i32(1)][i32(3)], gModel_0.model_0.data_0[i32(2)][i32(3)], gModel_0.model_0.data_0[i32(3)][i32(3)]))))).xyz;\n    output_0.uv_0 = _S1.uv_1;\n    return output_0;\n}\n\n",
+    ),
+    (
+        0xf357733891f27be3,
+        "struct _MatrixStorage_float4x4_ColMajorstd140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct SLANG_ParameterGroup_SkyboxUniforms_std140_0\n{\n    @align(16) inv_view_proj_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) camera_pos_0 : vec4<f32>,\n    @align(16) mip_level_0 : f32,\n    @align(16) _pad_0 : vec3<f32>,\n};\n\n@binding(0) @group(0) var<uniform> SkyboxUniforms_0 : SLANG_ParameterGroup_SkyboxUniforms_std140_0;\n@binding(1) @group(0) var env_map_0 : texture_cube<f32>;\n\n@binding(2) @group(0) var env_sampler_0 : sampler;\n\nfn tonemap_reinhard_0( color_0 : vec3<f32>) -> vec3<f32>\n{\n    return color_0 / (color_0 + vec3<f32>(1.0f));\n}\n\nfn gamma_correct_0( color_1 : vec3<f32>) -> vec3<f32>\n{\n    return pow(color_1, vec3<f32>(0.45454543828964233f));\n}\n\nstruct pixelOutput_0\n{\n    @location(0) output_0 : vec4<f32>,\n};\n\nstruct pixelInput_0\n{\n    @location(0) view_dir_0 : vec3<f32>,\n};\n\n@fragment\nfn fs_main( _S1 : pixelInput_0, @builtin(position) position_0 : vec4<f32>) -> pixelOutput_0\n{\n    var _S2 : pixelOutput_0 = pixelOutput_0( vec4<f32>(gamma_correct_0(tonemap_reinhard_0((textureSampleLevel((env_map_0), (env_sampler_0), (_S1.view_dir_0), (SkyboxUniforms_0.mip_level_0))).xyz)), 1.0f) );\n    return _S2;\n}\n\n",
     ),
     (
         0xf4418a1910db7cf3,
@@ -158,7 +158,6 @@ pub static BAKED_NAMES: &[(u64, &str)] = &[
         0x33056731bb7b1e0f,
         "deferred_resolve / fs_main / [HDR_OUTPUT]",
     ),
-    (0x33e6ae374148a7dd, "skybox / fs_main / []"),
     (0x3504a027b18b737b, "debug_draw / fs_main / []"),
     (0x372a2ff95b932bb0, "deferred_resolve / fs_main / []"),
     (0x398a25d3582968bd, "entity_index / fs_main / []"),
@@ -166,7 +165,6 @@ pub static BAKED_NAMES: &[(u64, &str)] = &[
     (0x3cd445cedfea47df, "depth_only / vs_main / []"),
     (0x4f96de5e6099bd03, "deferred_gbuffer / vs_main / []"),
     (0x54f9997540610987, "meshlet / ts_main / []"),
-    (0x57bb53bb931c96cd, "skybox / vs_main / []"),
     (0x5a0484e3568dd6ba, "egui / vs_main / [HDR_OUTPUT]"),
     (0x62641e520ef56d29, "opaque_textured / fs_main / []"),
     (0x635dba31fed8212d, "entity_index / vs_main / []"),
@@ -195,10 +193,12 @@ pub static BAKED_NAMES: &[(u64, &str)] = &[
     (0xe04dc0dbaf2b11fe, "meshlet / ms_main / []"),
     (0xe2584ce62daf47d9, "opaque_textured / vs_main / []"),
     (0xeb0347465565078a, "egui / fs_main / [HDR_OUTPUT]"),
+    (0xee72ec1fbd0d47d3, "skybox / vs_main / []"),
     (
         0xf06d553ad9ca4fe1,
         "opaque_textured / vs_main / [ALPHA_CUTOUT]",
     ),
+    (0xf357733891f27be3, "skybox / fs_main / []"),
     (0xf4418a1910db7cf3, "deferred_gbuffer / fs_main / []"),
     (0xff00a868f4c65b33, "bindless / vs_main / []"),
 ];
@@ -305,33 +305,6 @@ pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
                 ],
             },
         ],
-    ),
-    (
-        0x1b3c1b35792b76f5,
-        &[crate::shader::baked::BakedGroup {
-            rate: None,
-            label: None,
-            entries: &[
-                crate::shader::baked::BakedEntry {
-                    binding: 0,
-                    ty: crate::materials::BindingType::UniformBuffer,
-                    vis: 3,
-                    label: Some("SkyboxUniforms"),
-                },
-                crate::shader::baked::BakedEntry {
-                    binding: 1,
-                    ty: crate::materials::BindingType::TextureCube,
-                    vis: 3,
-                    label: Some("env_map"),
-                },
-                crate::shader::baked::BakedEntry {
-                    binding: 2,
-                    ty: crate::materials::BindingType::Sampler,
-                    vis: 3,
-                    label: Some("env_sampler"),
-                },
-            ],
-        }],
     ),
     (
         0x30a61c3a4c913055,
@@ -559,6 +532,33 @@ pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
                 ],
             },
         ],
+    ),
+    (
+        0x69d73351801c9f5b,
+        &[crate::shader::baked::BakedGroup {
+            rate: None,
+            label: None,
+            entries: &[
+                crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 3,
+                    label: Some("SkyboxUniforms"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 1,
+                    ty: crate::materials::BindingType::TextureCube,
+                    vis: 3,
+                    label: Some("env_map"),
+                },
+                crate::shader::baked::BakedEntry {
+                    binding: 2,
+                    ty: crate::materials::BindingType::Sampler,
+                    vis: 3,
+                    label: Some("env_sampler"),
+                },
+            ],
+        }],
     ),
     (
         0x6d27c9474f202f12,

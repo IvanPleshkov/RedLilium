@@ -6,7 +6,7 @@
 use std::f32::consts::PI;
 
 use redlilium_core::math::{
-    Mat4, Quat, Vec3, look_at_rh, mat4_from_translation, mat4_to_cols_array_2d, perspective_rh,
+    DepthConvention, Mat4, Quat, Vec3, look_at_rh, mat4_from_translation, mat4_to_cols_array_2d,
     to_scale_rotation_translation,
 };
 use redlilium_ecs::{
@@ -136,7 +136,8 @@ impl EcsScene {
     /// Updates the camera's projection matrix (e.g., on resize).
     pub fn update_camera_projection(&mut self, aspect_ratio: f32) {
         if let Some(mut camera) = self.world.get_mut::<Camera>(self.camera_entity) {
-            camera.projection_matrix = perspective_rh(PI / 4.0, aspect_ratio, 0.1, 100.0);
+            camera.projection_matrix =
+                DepthConvention::default().perspective(PI / 4.0, aspect_ratio, 0.1, 100.0);
         }
     }
 
