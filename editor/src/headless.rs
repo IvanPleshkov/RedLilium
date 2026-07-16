@@ -202,7 +202,7 @@ pub fn run() {
                     }
                 },
                 PlayRequest::Pause => match play.as_mut() {
-                    Some(p) => p.pause(),
+                    Some(p) => p.pause(&ew.world),
                     None => log::warn!("pause: no play session"),
                 },
                 PlayRequest::Resume => match play.as_mut() {
@@ -394,10 +394,11 @@ fn tick(
         schedule.submit(play_graph);
     }
 
-    // While playing, `screenshot` captures the play world's camera — what the
-    // user of a windowed editor would see in the scene view.
-    let shot_world = play.as_deref().map(|p| p.world()).unwrap_or(&ew.world);
-    remote_commands::inject_screenshot_pass(rc, shot_world, scene_view.device(), &mut graph);
+    // While a session is live, `screenshot` captures its view camera — the
+    // game camera during Play, the flyover camera during pause. Exactly what
+    // the windowed scene view shows.
+    let source = play.as_deref().and_then(|p| p.scene_color());
+    remote_commands::inject_screenshot_pass(rc, &ew.world, scene_view.device(), &mut graph, source);
 
     // Entity-index pass + readback, only while a remote pick is in flight
     // (mirrors the windowed shell's on_draw picking block).

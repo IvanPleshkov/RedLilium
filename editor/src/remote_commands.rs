@@ -549,6 +549,7 @@ pub fn inject_screenshot_pass(
     world: &World,
     device: &Arc<GraphicsDevice>,
     graph: &mut RenderGraph,
+    source: Option<Arc<redlilium_graphics::Texture>>,
 ) {
     let Some(job) = &mut rc.screenshot else {
         return;
@@ -556,19 +557,30 @@ pub fn inject_screenshot_pass(
     if job.layout.is_some() {
         return; // already injected
     }
-    let Some(scene_handle) = world
-        .has_resource::<ScenePass>()
-        .then(|| world.resource::<ScenePass>().0)
-        .flatten()
-    else {
-        return; // no scene pass this frame — try again next frame
-    };
-    let Some(color) = world
-        .read_all::<CameraTarget>()
-        .ok()
-        .and_then(|t| t.iter().next().map(|(_, target)| target.color.clone()))
-    else {
-        return;
+    // The texture to capture. `Some` = the play session's view camera (the
+    // game camera, or the pause flyover) — it was rendered in an earlier
+    // submit of this frame, so cross-submit sync covers the copy and no
+    // intra-graph edge is needed. `None` = the editing world's scene camera:
+    // first CameraTarget, ordered after this frame's scene pass.
+    let (color, after) = match source {
+        Some(color) => (color, None),
+        None => {
+            let Some(scene_handle) = world
+                .has_resource::<ScenePass>()
+                .then(|| world.resource::<ScenePass>().0)
+                .flatten()
+            else {
+                return; // no scene pass this frame — try again next frame
+            };
+            let Some(color) = world
+                .read_all::<CameraTarget>()
+                .ok()
+                .and_then(|t| t.iter().next().map(|(_, target)| target.color.clone()))
+            else {
+                return;
+            };
+            (color, Some(scene_handle))
+        }
     };
 
     let size = color.size();
@@ -602,7 +614,9 @@ pub fn inject_screenshot_pass(
         TransferOperation::readback_buffer(buffer.clone(), 0..total as usize, job.result.clone()),
     ]));
     let handle = graph.add_transfer_pass(pass);
-    graph.add_dependency(handle, scene_handle);
+    if let Some(scene_handle) = after {
+        graph.add_dependency(handle, scene_handle);
+    }
 
     job.layout = Some((w, h, padded_bpr, bgra));
     job._buffer = Some(buffer);

@@ -535,8 +535,8 @@ impl Editor {
         match action {
             crate::toolbar::PlayAction::Play => self.start_play(),
             crate::toolbar::PlayAction::Pause => {
-                if let Some(play) = self.play.as_mut() {
-                    play.pause();
+                if let (Some(play), Some(ew)) = (self.play.as_mut(), self.world.as_ref()) {
+                    play.pause(&ew.world);
                 }
             }
             crate::toolbar::PlayAction::Resume => {
@@ -595,12 +595,13 @@ impl Editor {
         };
     }
 
-    /// The sink for game-directed input: the play world while a session runs
-    /// unpaused, the editing world otherwise.
+    /// The sink for scene-view/game input: the play world for the whole
+    /// session — the game while it runs, the pause overlay's flyover camera
+    /// while paused. The editing world only when no session exists.
     fn input_sink(&self) -> Arc<redlilium_ecs::sync::RwLock<redlilium_ecs::WindowInput>> {
         match self.play.as_ref() {
-            Some(play) if !play.is_paused() => play.window_input(),
-            _ => self.active_world().window_input.clone(),
+            Some(play) => play.window_input(),
+            None => self.active_world().window_input.clone(),
         }
     }
 
@@ -1750,15 +1751,22 @@ impl AppHandler for Editor {
         }
 
         // Remote screenshot: copy this frame's scene target through the graph.
-        // While playing it captures the play world's camera — what the scene
-        // view shows.
+        // While a session is live it captures the session's view camera (the
+        // game camera during Play, the flyover during pause) — exactly what
+        // the scene view shows.
         if let (Some(rc), Some(sv), Some(ew)) = (
             &mut self.remote,
             self.scene_view.as_ref(),
             self.world.as_ref(),
         ) {
-            let shot_world = self.play.as_ref().map(|p| p.world()).unwrap_or(&ew.world);
-            crate::remote_commands::inject_screenshot_pass(rc, shot_world, sv.device(), &mut graph);
+            let source = self.play.as_ref().and_then(|p| p.scene_color());
+            crate::remote_commands::inject_screenshot_pass(
+                rc,
+                &ew.world,
+                sv.device(),
+                &mut graph,
+                source,
+            );
         }
 
         if render_active && let Some(ew) = self.world.as_ref() {
@@ -1799,11 +1807,13 @@ impl AppHandler for Editor {
         });
         if self.world.is_some() {
             // Play world coordinates are scene-view-local (its "window" is
-            // the scene view); the editing world keeps raw window coordinates
+            // the scene view) — during Play and during the pause flyover
+            // alike; the editing world keeps raw window coordinates
             // (gizmo/picking expect them).
-            let playing = self.play.as_ref().is_some_and(|p| !p.is_paused());
             let (mut mx, mut my) = (x, y);
-            if playing && let Some([ox, oy, _, _]) = self.scene_view_rect_phys {
+            if self.play.is_some()
+                && let Some([ox, oy, _, _]) = self.scene_view_rect_phys
+            {
                 mx -= ox as f64;
                 my -= oy as f64;
             }
@@ -1820,15 +1830,18 @@ impl AppHandler for Editor {
             egui.on_mouse_button(button, pressed);
         });
 
-        // Phase 6: Block edit operations during Play mode (game input still flows through)
-        let is_playing = self.play_state == PlayState::Playing;
+        // Editing gestures (picking, box-select, undo merge breaks) target
+        // the editing world; while a play session exists the scene view shows
+        // the play world — during Play *and* the pause flyover — so they are
+        // blocked for the whole session, not just while unpaused.
+        let in_session = self.play.is_some();
 
         // Releasing the primary button ends an edit gesture: the next recorded
         // action starts a fresh undo entry (drag-long edits keep coalescing
         // while the button is held).
         if button == MouseButton::Left
             && !pressed
-            && !is_playing
+            && !in_session
             && !self.gizmo_wants_cursor()
             && let Some(ew) = &mut self.world
         {
@@ -1855,10 +1868,11 @@ impl AppHandler for Editor {
                 input.on_mouse_button(idx, pressed);
             }
 
-            // LMB gestures over the scene view (blocked during Play). The
-            // routing decision — egui / gizmo / select — is a pure function
-            // in `gestures.rs`; this block only acts on it.
-            if button == MouseButton::Left && self.scene_view_rect_phys.is_some() && !is_playing {
+            // LMB gestures over the scene view (blocked while a play session
+            // exists — the image is the play world's). The routing decision —
+            // egui / gizmo / select — is a pure function in `gestures.rs`;
+            // this block only acts on it.
+            if button == MouseButton::Left && self.scene_view_rect_phys.is_some() && !in_session {
                 use crate::gestures::ReleaseAction;
                 if pressed {
                     // Routing arms (or refuses) the gesture; selection is not
