@@ -48,6 +48,7 @@ mod play;
 mod project;
 mod remote_commands;
 mod scene_view;
+mod session;
 mod status_bar;
 mod theme;
 mod toolbar;
@@ -113,10 +114,17 @@ fn launch(
     // remote channel (docs/REMOTE.md).
     if std::env::var("REDLILIUM_HEADLESS").is_ok_and(|v| v == "1") {
         headless::run(game, behavior);
-        return;
+    } else {
+        let args = DefaultAppArgs::parse()
+            .with_title_str("RedLilium Editor")
+            .with_custom_titlebar(true);
+        App::run(editor::Editor::with_game(game, behavior), args);
     }
-    let args = DefaultAppArgs::parse()
-        .with_title_str("RedLilium Editor")
-        .with_custom_titlebar(true);
-    App::run(editor::Editor::with_game(game, behavior), args);
+    // Tier-2 exec-restart (ADR-033): by now the loop has exited and every
+    // world, GPU resource, and mapped game image is torn down — the one
+    // safe point to replace the process image. The successor picks up the
+    // session carry written by the shell.
+    if session::restart_requested() {
+        session::exec_restart();
+    }
 }

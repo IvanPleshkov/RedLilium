@@ -143,21 +143,34 @@ pub fn create_editor_world(
     ew
 }
 
-/// [`create_editor_world`], but the content comes from a `.scene` asset (#2)
-/// instead of the demo scene: instantiate `scene` and record `path` as the
-/// world's [`CurrentScene`]. On instantiation failure the world comes up
-/// empty (not demo content — a broken scene should look broken, not silently
-/// morph into the demo), with the error logged.
-pub fn create_editor_world_with_scene(
+/// [`create_editor_world`] minus the demo scene: editor camera only, for a
+/// world whose content arrives later via [`instantiate_scene`]. The split
+/// exists so the shells can host the game module (registering its component
+/// types) **between** world creation and scene instantiation — instantiating
+/// a scene that uses game components before `register_types` silently drops
+/// them (restore skips unknown types by design).
+pub fn create_editor_world_empty(
     params: &EditorWorldParams,
     engine: &EngineContext,
     scene_view: &mut SceneViewState,
     aspect: f32,
-    path: &str,
-    scene: &redlilium_ecs::serialize::SerializedWorld,
 ) -> EditorWorld {
     let mut ew = create_editor_world_base(params, engine, scene_view);
     ew.editor_camera = spawn_editor_camera(&mut ew.world, aspect);
+    ew
+}
+
+/// Instantiate a `.scene` asset (#2) into `ew` and record `path` as the
+/// world's [`CurrentScene`]. Call only after every plugin's `register_types`
+/// ran against this world (see [`create_editor_world_empty`]). On
+/// instantiation failure the world stays empty (not demo content — a broken
+/// scene should look broken, not silently morph into the demo), with the
+/// error logged.
+pub fn instantiate_scene(
+    ew: &mut EditorWorld,
+    path: &str,
+    scene: &redlilium_ecs::serialize::SerializedWorld,
+) {
     match ew.world.deserialize_world_into(scene) {
         Ok(spawned) => {
             log::info!("opened scene '{path}' ({} entities)", spawned.len());
@@ -168,7 +181,6 @@ pub fn create_editor_world_with_scene(
         Err(e) => log::error!("failed to instantiate scene '{path}': {e}"),
     }
     ew.world.resource_mut::<CurrentScene>().0 = Some(path.to_string());
-    ew
 }
 
 /// [`create_editor_world`] minus the editor camera and the demo scene: all

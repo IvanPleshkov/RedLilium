@@ -76,32 +76,49 @@ pub struct GameBuildStatus {
     pub schema_diverged: bool,
 }
 
+/// What the user asked for through the game-build indicator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GameBuildAction {
+    /// Rebuild the game cdylib (Tier 1).
+    Rebuild,
+    /// Exec-restart the editor with session carry (Tier 2).
+    Restart,
+}
+
 /// Draw the game-build indicator: a rebuild button when sources went stale,
-/// progress while cargo runs, and the restart/diverged warnings. Returns
-/// `true` when the user asked for a rebuild.
-pub fn draw_game_build_indicator(ui: &mut egui::Ui, status: GameBuildStatus) -> bool {
+/// progress while cargo runs, a restart button when only a process restart
+/// helps, and the schema-divergence warning.
+pub fn draw_game_build_indicator(
+    ui: &mut egui::Ui,
+    status: GameBuildStatus,
+) -> Option<GameBuildAction> {
     if status.restart_required {
-        ui.colored_label(
-            egui::Color32::from_rgb(220, 80, 80),
-            "\u{27F3} restart editor",
-        )
-        .on_hover_text(
-            "The rebuilt game was compiled against a changed engine (fingerprint mismatch) — \
-             restart the editor to pick everything up",
-        );
-        return false;
+        if ui
+            .button("\u{27F3} Restart editor")
+            .on_hover_text(
+                "The rebuilt game was compiled against a changed engine (fingerprint \
+                 mismatch) — restart the editor to pick everything up (scene and camera \
+                 pose carry over)",
+            )
+            .clicked()
+        {
+            return Some(GameBuildAction::Restart);
+        }
+        return None;
     }
     if status.rebuilding {
         ui.spinner();
         ui.colored_label(egui::Color32::from_rgb(200, 180, 50), "building game…");
-        return false;
+        return None;
     }
-    let mut requested = false;
-    if status.stale {
-        requested = ui
+    let mut action = None;
+    if status.stale
+        && ui
             .button("\u{27F3} Rebuild game")
             .on_hover_text("Game sources changed — rebuild the cdylib for the next Play")
-            .clicked();
+            .clicked()
+    {
+        action = Some(GameBuildAction::Rebuild);
     }
     if status.schema_diverged {
         ui.colored_label(egui::Color32::from_rgb(200, 180, 50), "\u{26A0} schemas")
@@ -110,7 +127,7 @@ pub fn draw_game_build_indicator(ui: &mut egui::Ui, status: GameBuildStatus) -> 
                  play runs the new code, authoring the changed fields needs an editor restart",
             );
     }
-    requested
+    action
 }
 
 /// Draw the gizmo mode switch (W/E/R shortcuts do the same); returns the

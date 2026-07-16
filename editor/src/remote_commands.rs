@@ -63,6 +63,7 @@ const COMMANDS: &[&str] = &[
     "pause",
     "resume",
     "stop",
+    "restart",
 ];
 
 /// A play-session lifecycle request (`play` / `pause` / `resume` / `stop`),
@@ -110,6 +111,9 @@ pub struct RemoteCommands {
     reload_game: bool,
     /// A play-session request; the shell applies it between frames.
     play_request: Option<PlayRequest>,
+    /// A Tier-2 exec-restart was requested (ADR-033); the shell writes the
+    /// session carry, winds the loop down, and execs the fresh binary.
+    restart: bool,
     /// Hosted-game status for the `state` response (shell-refreshed).
     pub game_status: Option<GameStatus>,
 }
@@ -137,6 +141,12 @@ impl RemoteCommands {
     /// between frames (see `crate::play::PlaySession`).
     pub fn take_play_request(&mut self) -> Option<PlayRequest> {
         self.play_request.take()
+    }
+
+    /// Take the Tier-2 restart request, if one arrived (see
+    /// `crate::session`).
+    pub fn take_restart(&mut self) -> bool {
+        std::mem::take(&mut self.restart)
     }
 }
 
@@ -893,6 +903,14 @@ fn dispatch(
         // in the editor log. Requires a hosted game and the Stopped state.
         "reload_game" => {
             rc.reload_game = true;
+            send(world, conn, &OkResp { id, ok: true });
+        }
+        // Tier-2 exec-restart (ADR-033): the shell writes the session carry
+        // (open scene + camera pose), winds the loop down, and execs the
+        // fresh binary. `ok: true` means *queued*; the connection then drops
+        // — reconnect via the re-published `.redlilium/editor.port`.
+        "restart" => {
+            rc.restart = true;
             send(world, conn, &OkResp { id, ok: true });
         }
         // Play-session lifecycle (EDITOR_REBUILD.md §4.3): the shell boots a

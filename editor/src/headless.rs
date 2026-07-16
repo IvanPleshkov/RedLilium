@@ -99,15 +99,53 @@ pub fn run(
     // The play session (EDITOR_REBUILD.md §4.3): a full game world booted from
     // the hosted module on `play`, dropped on `stop`.
     let mut play: Option<crate::play::PlaySession> = None;
-    let mut ew = create_editor_world(
-        &EditorWorldParams {
-            remote: true,
-            egui: false,
-        },
-        &engine,
-        &mut scene_view,
-        width as f32 / height as f32,
-    );
+    // Tier-2 session carry (ADR-033): a predecessor process that
+    // exec-restarted left its open scene + camera pose; consume it.
+    let carry = crate::session::take();
+    let params = EditorWorldParams {
+        remote: true,
+        egui: false,
+    };
+    let carried_scene = carry
+        .as_ref()
+        .and_then(|c| c.scene.clone())
+        .and_then(|path| {
+            match pollster::block_on(vfs.read(&path))
+                .map_err(|e| e.to_string())
+                .and_then(|data| {
+                    redlilium_ecs::serialize::decode::<redlilium_ecs::serialize::SerializedWorld>(
+                        &data,
+                        redlilium_ecs::serialize::Format::Ron,
+                    )
+                    .map_err(|e| e.to_string())
+                }) {
+                Ok(scene) => Some((path, scene)),
+                Err(e) => {
+                    log::warn!("carried scene '{path}' failed to load: {e}");
+                    None
+                }
+            }
+        });
+    // A carried scene may use game components — instantiate it AFTER the
+    // game module is hosted below (register_types first, scene second),
+    // else its game components are silently dropped.
+    let mut ew = match &carried_scene {
+        Some(_) => crate::core::create_editor_world_empty(
+            &params,
+            &engine,
+            &mut scene_view,
+            width as f32 / height as f32,
+        ),
+        None => create_editor_world(
+            &params,
+            &engine,
+            &mut scene_view,
+            width as f32 / height as f32,
+        ),
+    };
+    if let Some(pose) = carry.and_then(|c| c.camera) {
+        crate::session::apply_camera_pose(&mut ew, pose);
+    }
     ew.world.insert_resource(DebugDrawerRenderer::new(
         device.clone(),
         color_format,
@@ -146,6 +184,11 @@ pub fn run(
             Ok(host) => game_host = Some(host),
             Err(e) => log::error!("failed to load game module '{path}': {e}"),
         }
+    }
+
+    // The carried scene, now that the hosted game's types are registered.
+    if let Some((path, scene)) = &carried_scene {
+        crate::core::instantiate_scene(&mut ew, path, scene);
     }
 
     let mut pipeline = device.create_pipeline(2);
@@ -267,6 +310,17 @@ pub fn run(
         if play.as_ref().is_some_and(|p| p.exit_requested()) {
             log::info!("play: game requested exit — stopping session");
             play = None;
+        }
+
+        // Tier-2 exec-restart (ADR-033): write the carry, wind the loop
+        // down; `crate::launch` execs the fresh binary after teardown.
+        if rc.take_restart() {
+            if play.take().is_some() {
+                log::info!("restart: play session stopped");
+            }
+            crate::session::write(&crate::session::capture(&ew));
+            crate::session::request_restart();
+            shutdown = true;
         }
 
         if rc.take_reload() {

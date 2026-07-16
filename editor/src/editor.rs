@@ -66,6 +66,13 @@ pub struct Editor {
     behavior_spec: Option<crate::behavior_reload::BehaviorReloadSpec>,
     /// Tier-1 behavior-reload driver: source watcher + background rebuild.
     behavior: Option<crate::behavior_reload::BehaviorReload>,
+    /// A Tier-2 exec-restart is pending: on loop exit the session carry is
+    /// written and `crate::launch` execs the fresh binary. Cleared if the
+    /// unsaved-changes dialog is cancelled.
+    restart_pending: bool,
+    /// Camera pose carried from the predecessor process (ADR-033 Tier 2),
+    /// applied in `on_init` once the editor camera exists.
+    carried_camera: Option<crate::session::CameraPose>,
     runner: EcsRunner,
     /// Persistent engine state (GPU managers, asset DB/processor) — outlives
     /// any world (ADR-020). Created with the graphics device in `on_init`.
@@ -182,6 +189,16 @@ impl Editor {
         }
         let console = ConsolePanel::new(crate::log_capture::log_buffer());
 
+        // Tier-2 session carry (ADR-033): a predecessor process that
+        // exec-restarted left its open scene + camera pose; it overrides the
+        // project.toml startup scene for this one launch.
+        let carry = crate::session::take();
+        let startup_scene = carry
+            .as_ref()
+            .map(|c| c.scene.clone())
+            .unwrap_or_else(|| config.project.scene.clone());
+        let carried_camera = carry.and_then(|c| c.camera);
+
         Self {
             world: None,
             play: None,
@@ -189,6 +206,7 @@ impl Editor {
             static_game: None,
             behavior_spec: None,
             behavior: None,
+            restart_pending: false,
             // Multi-threaded runner, enabled after Track 2 MT-hardening
             // (#52-#55: barriers, explicit edges, raw-access-aware detector).
             runner: EcsRunner::multi_thread(
@@ -203,7 +221,8 @@ impl Editor {
             remote: std::env::var("REDLILIUM_REMOTE")
                 .is_ok_and(|v| v == "1")
                 .then(crate::remote_commands::RemoteCommands::default),
-            startup_scene: config.project.scene.clone(),
+            startup_scene,
+            carried_camera,
             console,
             dock_state: dock::create_default_layout(),
             inspector_state: InspectorState::new(),
@@ -554,6 +573,18 @@ impl Editor {
     /// Apply a play action (Play/Pause/Resume/Stop): manage the play-session
     /// lifecycle (EDITOR_REBUILD.md §4.3). Play boots a full game world from
     /// the hosted module; Stop drops it. The editing world is not involved.
+    /// Begin a Tier-2 exec-restart (ADR-033): routed through the
+    /// unsaved-changes dialog so nothing is lost silently; on close the
+    /// session carry is written and `crate::launch` execs the fresh binary.
+    fn request_restart(&mut self) {
+        self.restart_pending = true;
+        if self.has_unsaved_changes() {
+            self.show_close_dialog = true;
+        } else {
+            self.should_close = true;
+        }
+    }
+
     /// Warm-restart the editing world against a freshly rebuilt game cdylib
     /// (legacy `REDLILIUM_GAME` hosting, #58). Caller has stopped the play
     /// session already.
@@ -870,15 +901,13 @@ impl AppHandler for Editor {
                 }
             }
         });
+        // A startup scene may use game components — instantiate it AFTER the
+        // game module is hosted below (register_types first, scene second),
+        // else its game components are silently dropped.
         let editor_world = match &startup_scene {
-            Some((path, scene)) => crate::core::create_editor_world_with_scene(
-                &params,
-                &engine,
-                &mut scene_view,
-                aspect,
-                path,
-                scene,
-            ),
+            Some(_) => {
+                crate::core::create_editor_world_empty(&params, &engine, &mut scene_view, aspect)
+            }
             None => create_editor_world(&params, &engine, &mut scene_view, aspect),
         };
         self.engine = Some(engine);
@@ -939,6 +968,21 @@ impl AppHandler for Editor {
         {
             self.behavior = Some(crate::behavior_reload::BehaviorReload::new(spec));
         }
+        // Startup scene (project.toml or session carry), instantiated now
+        // that the hosted game's types are registered — before hosting, its
+        // game components would be silently dropped.
+        if let Some((path, scene)) = &startup_scene
+            && let Some(ew) = self.world.as_mut()
+        {
+            crate::core::instantiate_scene(ew, path, scene);
+        }
+        // Tier-2 carried camera pose (ADR-033): the predecessor process's
+        // editor camera, applied now that the fresh camera exists.
+        if let Some(pose) = self.carried_camera.take()
+            && let Some(ew) = self.world.as_mut()
+        {
+            crate::session::apply_camera_pose(ew, pose);
+        }
 
         // Create native menu after the event loop / NSApplication is initialized
         #[cfg(target_os = "macos")]
@@ -971,6 +1015,15 @@ impl AppHandler for Editor {
 
     fn on_update(&mut self, ctx: &mut AppContext) -> bool {
         if self.should_close {
+            // Tier-2 exec-restart (ADR-033): the loop is winding down — write
+            // the carry; `crate::launch` execs the fresh binary after
+            // teardown. A plain close skips this.
+            if self.restart_pending {
+                if let Some(ew) = self.world.as_ref() {
+                    crate::session::write(&crate::session::capture(ew));
+                }
+                crate::session::request_restart();
+            }
             return false;
         }
 
@@ -1169,6 +1222,11 @@ impl AppHandler for Editor {
                 PlayRequest::Resume => crate::toolbar::PlayAction::Resume,
                 PlayRequest::Stop => crate::toolbar::PlayAction::Stop,
             });
+        }
+
+        // Tier-2 exec-restart (ADR-033), remote-requested.
+        if self.remote.as_mut().is_some_and(|rc| rc.take_restart()) {
+            self.request_restart();
         }
 
         // Execute a queued game-module reload between frames (#58): it
@@ -1372,7 +1430,7 @@ impl AppHandler for Editor {
                             ui.add_space(8.0);
                             crate::toolbar::draw_play_mode_indicator(ui, self.play_state);
 
-                            // Tier-1 behavior-reload indicator (ADR-033).
+                            // Tier-1/Tier-2 build indicator (ADR-033).
                             if let Some(b) = &self.behavior {
                                 ui.add_space(8.0);
                                 let status = crate::toolbar::GameBuildStatus {
@@ -1381,14 +1439,21 @@ impl AppHandler for Editor {
                                     restart_required: b.restart_required(),
                                     schema_diverged: b.schema_diverged(),
                                 };
-                                if crate::toolbar::draw_game_build_indicator(ui, status)
-                                    && self
-                                        .behavior
-                                        .as_mut()
-                                        .expect("checked above")
-                                        .request_rebuild()
-                                {
-                                    log::info!("toolbar: Tier-1 rebuild started");
+                                match crate::toolbar::draw_game_build_indicator(ui, status) {
+                                    Some(crate::toolbar::GameBuildAction::Rebuild) => {
+                                        if self
+                                            .behavior
+                                            .as_mut()
+                                            .expect("checked above")
+                                            .request_rebuild()
+                                        {
+                                            log::info!("toolbar: Tier-1 rebuild started");
+                                        }
+                                    }
+                                    Some(crate::toolbar::GameBuildAction::Restart) => {
+                                        self.request_restart();
+                                    }
+                                    None => {}
                                 }
                             }
 
@@ -1640,6 +1705,9 @@ impl AppHandler for Editor {
                             }
                             if ui.button("Cancel").clicked() {
                                 self.show_close_dialog = false;
+                                // A cancelled close also cancels a pending
+                                // Tier-2 restart (ADR-033).
+                                self.restart_pending = false;
                             }
                         });
                     });
