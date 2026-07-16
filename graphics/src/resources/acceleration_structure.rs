@@ -94,6 +94,16 @@ pub struct BlasDescriptor {
     /// Triangle geometry ranges. All are built together into one BLAS;
     /// shaders see them as `geometry_index` 0..n within the instance.
     pub geometries: Vec<BlasTriangles>,
+    /// Opt into GPU-side compaction (#110 phase 3, ADR-032). When set, the
+    /// build carries `ALLOW_COMPACTION` and the engine transparently swaps the
+    /// structure for a smaller compacted copy a few frames after the build —
+    /// callers are unaffected. Requires a per-frame
+    /// [`RenderGraph::flush_acceleration_structure_compaction`](crate::RenderGraph::flush_acceleration_structure_compaction)
+    /// to drive the copy. Best for static geometry built once; a rebuild does
+    /// not re-compact.
+    ///
+    /// [`RenderGraph::flush_acceleration_structure_compaction`]: crate::RenderGraph::flush_acceleration_structure_compaction
+    pub allow_compaction: bool,
 }
 
 impl BlasDescriptor {
@@ -102,12 +112,20 @@ impl BlasDescriptor {
         Self {
             label: None,
             geometries,
+            allow_compaction: false,
         }
     }
 
     /// Set the debug label.
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
         self.label = Some(label.into());
+        self
+    }
+
+    /// Opt into transparent GPU-side compaction (#110 phase 3). See
+    /// [`allow_compaction`](Self::allow_compaction).
+    pub fn with_compaction(mut self) -> Self {
+        self.allow_compaction = true;
         self
     }
 }
@@ -193,6 +211,89 @@ pub struct AccelBuildSizes {
     pub build_scratch_size: u64,
 }
 
+/// The interior-mutable (backing buffer, AS handle) pair of a [`Blas`] (#110
+/// phase 3). Compaction swaps this in place for a smaller compacted structure;
+/// the AS handle is an `Arc` so an in-flight build's snapshot keeps the old
+/// structure alive until its frame fence guarantees the GPU is done with it.
+#[derive(Clone)]
+pub(crate) struct BlasBacking {
+    pub backing: Arc<Buffer>,
+    pub gpu_handle: Arc<GpuAccelerationStructure>,
+}
+
+/// Where a compactable BLAS is in its transparent-compaction lifecycle (#110
+/// phase 3, ADR-032). The whole dance is multi-frame: the compacted size is
+/// read back from a GPU query a few frames after the build, then a
+/// `vkCmdCopyAccelerationStructureKHR(COMPACT)` produces the smaller structure,
+/// and only after *that* copy is guaranteed complete does the swap happen — so
+/// no in-flight build/traversal ever reads a half-written compacted structure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompactionPhase {
+    /// Created with `allow_compaction`; the next build encode must write the
+    /// compacted-size query.
+    NeedsQuery,
+    /// The size query has been written into a frame's command buffer; the
+    /// result reads back when that frame retires.
+    AwaitingSize,
+    /// The compacted size is known; the next maintenance flush allocates the
+    /// compacted backing and encodes the copy.
+    SizeReady(u64),
+    /// The copy has been encoded in some frame; swap the backing and retire the
+    /// original once frame `swap_at` is guaranteed complete on the GPU.
+    Copying { swap_at: u64 },
+    /// Compaction complete — the BLAS backing now points at the compacted
+    /// structure.
+    Done,
+}
+
+/// Per-BLAS compaction state, shared between the [`Blas`] (single strong owner)
+/// and the compaction subsystem, which reaches it only through `Weak` handles
+/// so a user-dropped BLAS falls cleanly out of the pipeline (#110 phase 3).
+pub(crate) struct BlasCompaction {
+    phase: Mutex<CompactionPhase>,
+}
+
+impl BlasCompaction {
+    fn new() -> Self {
+        Self {
+            phase: Mutex::new(CompactionPhase::NeedsQuery),
+        }
+    }
+
+    /// Current lifecycle phase.
+    pub(crate) fn phase(&self) -> CompactionPhase {
+        *self.phase.lock()
+    }
+
+    /// Set the lifecycle phase.
+    pub(crate) fn set_phase(&self, phase: CompactionPhase) {
+        *self.phase.lock() = phase;
+    }
+
+    /// Deliver a compacted size read back from the GPU query. A no-op unless the
+    /// BLAS is still awaiting its size (a dropped/rebuilt BLAS is skipped).
+    pub(crate) fn deliver_size(&self, size: u64) {
+        let mut phase = self.phase.lock();
+        if *phase == CompactionPhase::AwaitingSize {
+            *phase = CompactionPhase::SizeReady(size);
+        }
+    }
+}
+
+/// A queued BLAS compaction copy (#110 phase 3): copy a built structure into a
+/// freshly allocated, exactly compacted-sized structure. Produced by the
+/// maintenance flush and encoded as `vkCmdCopyAccelerationStructureKHR` in
+/// `COMPACT` mode. Carries explicit handles/buffers so the copy pass is
+/// self-contained — it never touches the BLAS's interior-mutable pair, which
+/// the swap replaces only *after* this copy is guaranteed complete.
+#[derive(Debug, Clone)]
+pub struct CompactionCopy {
+    pub(crate) src_handle: Arc<GpuAccelerationStructure>,
+    pub(crate) dst_handle: Arc<GpuAccelerationStructure>,
+    pub(crate) src_backing: Arc<Buffer>,
+    pub(crate) dst_backing: Arc<Buffer>,
+}
+
 /// A bottom-level acceleration structure over triangle geometry (#110).
 ///
 /// Created by [`GraphicsDevice::create_blas`]; built on the GPU by adding it
@@ -200,12 +301,20 @@ pub struct AccelBuildSizes {
 /// A BLAS holds strong references to its geometry buffers — they stay alive
 /// (and re-buildable) for the BLAS's lifetime.
 ///
+/// With [`BlasDescriptor::with_compaction`] the structure is transparently
+/// swapped for a smaller compacted copy a few frames after its build; the
+/// (backing, handle) pair therefore lives behind interior mutability, but
+/// `write_instances`/traversal always see a valid structure — see
+/// [`CompactionPhase`].
+///
 /// [`GraphicsDevice::create_blas`]: crate::GraphicsDevice::create_blas
 pub struct Blas {
     descriptor: BlasDescriptor,
-    backing: Arc<Buffer>,
+    /// Interior-mutable (backing, handle) pair; compaction swaps it in place.
+    live: Mutex<BlasBacking>,
     scratch: Arc<Buffer>,
-    gpu_handle: GpuAccelerationStructure,
+    /// Compaction state, `Some` exactly when the descriptor opted in.
+    compaction: Option<Arc<BlasCompaction>>,
     device: Arc<GraphicsDevice>,
 }
 
@@ -218,12 +327,18 @@ impl Blas {
         scratch: Arc<Buffer>,
         gpu_handle: GpuAccelerationStructure,
     ) -> Self {
+        let compaction = descriptor
+            .allow_compaction
+            .then(|| Arc::new(BlasCompaction::new()));
         Self {
-            descriptor,
-            backing,
+            live: Mutex::new(BlasBacking {
+                backing,
+                gpu_handle: Arc::new(gpu_handle),
+            }),
             scratch,
-            gpu_handle,
+            compaction,
             device,
+            descriptor,
         }
     }
 
@@ -233,9 +348,10 @@ impl Blas {
     }
 
     /// The buffer backing the AS storage. Public so passes can declare
-    /// build/traversal accesses on it; its contents are opaque.
-    pub fn backing_buffer(&self) -> &Arc<Buffer> {
-        &self.backing
+    /// build/traversal accesses on it; its contents are opaque. Returns the
+    /// *current* backing — after a compaction swap this is the compacted one.
+    pub fn backing_buffer(&self) -> Arc<Buffer> {
+        Arc::clone(&self.live.lock().backing)
     }
 
     /// The build scratch buffer.
@@ -243,9 +359,32 @@ impl Blas {
         &self.scratch
     }
 
-    /// Get the GPU handle.
-    pub fn gpu_handle(&self) -> &GpuAccelerationStructure {
-        &self.gpu_handle
+    /// Get the current GPU handle (the compacted structure after a swap).
+    pub fn gpu_handle(&self) -> Arc<GpuAccelerationStructure> {
+        Arc::clone(&self.live.lock().gpu_handle)
+    }
+
+    /// Current GPU device address — what TLAS instance data references this
+    /// BLAS by. Reads through the interior-mutable pair so a post-compaction
+    /// [`Tlas::write_instances`] picks up the compacted structure's address.
+    pub fn device_address(&self) -> u64 {
+        self.live.lock().gpu_handle.device_address()
+    }
+
+    /// Snapshot the current (backing, handle) pair (compaction internal).
+    pub(crate) fn backing_snapshot(&self) -> BlasBacking {
+        self.live.lock().clone()
+    }
+
+    /// Swap in a new (backing, handle) pair, returning the old one for deferred
+    /// retirement (compaction internal, #110 phase 3).
+    pub(crate) fn swap_backing(&self, new: BlasBacking) -> BlasBacking {
+        std::mem::replace(&mut *self.live.lock(), new)
+    }
+
+    /// The compaction state, `Some` when the BLAS opted into compaction.
+    pub(crate) fn compaction(&self) -> Option<&Arc<BlasCompaction>> {
+        self.compaction.as_ref()
     }
 
     /// Get the parent device.
@@ -264,6 +403,7 @@ impl std::fmt::Debug for Blas {
         f.debug_struct("Blas")
             .field("label", &self.descriptor.label)
             .field("geometries", &self.descriptor.geometries.len())
+            .field("compaction", &self.compaction.is_some())
             .finish()
     }
 }
@@ -367,7 +507,7 @@ impl Tlas {
             // SBT record offset 0 (no RT pipelines) and no instance flags:
             // opacity comes from the BLAS geometry flags.
             data.extend_from_slice(&0u32.to_le_bytes());
-            data.extend_from_slice(&instance.blas.gpu_handle().device_address().to_le_bytes());
+            data.extend_from_slice(&instance.blas.device_address().to_le_bytes());
         }
 
         if !data.is_empty() {
@@ -504,6 +644,50 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// #110 phase 3: a compactable BLAS starts in `NeedsQuery`, and
+    /// `deliver_size` only advances a BLAS that is actually `AwaitingSize`.
+    #[test]
+    fn compaction_phase_transitions() {
+        let device = dummy_device();
+        let blas = device
+            .create_blas(
+                &BlasDescriptor::new(vec![BlasTriangles {
+                    vertex_buffer: device
+                        .create_buffer(&BufferDescriptor::new(
+                            36,
+                            BufferUsage::ACCELERATION_STRUCTURE_INPUT,
+                        ))
+                        .unwrap(),
+                    vertex_offset: 0,
+                    vertex_stride: 12,
+                    vertex_count: 3,
+                    index_buffer: None,
+                    index_offset: 0,
+                    index_format: IndexFormat::Uint32,
+                    triangle_count: 1,
+                    opaque: true,
+                }])
+                .with_compaction(),
+            )
+            .unwrap();
+        let compaction = blas.compaction().expect("compaction state");
+        assert_eq!(compaction.phase(), CompactionPhase::NeedsQuery);
+        // A size delivered before the query is armed is ignored.
+        compaction.deliver_size(128);
+        assert_eq!(compaction.phase(), CompactionPhase::NeedsQuery);
+        // Once awaiting, the size lands.
+        compaction.set_phase(CompactionPhase::AwaitingSize);
+        compaction.deliver_size(128);
+        assert_eq!(compaction.phase(), CompactionPhase::SizeReady(128));
+    }
+
+    /// #110 phase 3: a BLAS that did not opt in carries no compaction state.
+    #[test]
+    fn non_compactable_blas_has_no_state() {
+        let device = dummy_device();
+        assert!(test_blas(&device).compaction().is_none());
+    }
+
     /// #110: write_instances rotates slots and enforces max_instances; the
     /// build-input snapshot reflects the latest write.
     #[test]
@@ -574,7 +758,7 @@ mod tests {
         assert_eq!(usage.buffer_usages.len(), 4);
         assert!(usage.buffer_usages.iter().any(|u| {
             u.access == BufferAccessMode::AccelerationStructureBuildRead
-                && Arc::ptr_eq(&u.buffer, blas.backing_buffer())
+                && Arc::ptr_eq(&u.buffer, &blas.backing_buffer())
         }));
     }
 }

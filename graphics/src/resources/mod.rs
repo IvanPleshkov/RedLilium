@@ -18,9 +18,12 @@ mod ring_buffer;
 mod sampler;
 mod texture;
 
-pub(crate) use acceleration_structure::instance_buffer_size;
 pub use acceleration_structure::{
-    AccelBuildSizes, Blas, BlasDescriptor, BlasTriangles, Tlas, TlasDescriptor, TlasInstance,
+    AccelBuildSizes, Blas, BlasDescriptor, BlasTriangles, CompactionCopy, Tlas, TlasDescriptor,
+    TlasInstance,
+};
+pub(crate) use acceleration_structure::{
+    BlasBacking, BlasCompaction, CompactionPhase, instance_buffer_size,
 };
 pub use buffer::Buffer;
 pub use ring_buffer::{RingAllocation, RingBuffer};

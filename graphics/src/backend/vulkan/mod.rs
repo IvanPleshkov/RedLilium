@@ -8,6 +8,7 @@ mod allocator;
 pub mod barriers;
 mod breadcrumbs;
 mod command;
+mod compaction;
 pub(crate) mod conversion;
 mod debug;
 pub use accel::AccelerationStructureKind;
@@ -230,6 +231,12 @@ pub struct VulkanBackend {
     frame_command_pools: [vk::CommandPool; MAX_FRAMES_IN_FLIGHT],
     /// Current frame slot index for command buffer tracking.
     current_slot: AtomicUsize,
+    /// Monotonic frame counter, incremented once per
+    /// [`advance_frame`](Self::advance_frame). Unlike `current_slot` it never
+    /// wraps, so it drives the multi-frame BLAS-compaction lifecycle (#110
+    /// phase 3): work submitted in frame `N` is guaranteed complete by the time
+    /// this reaches `N + MAX_FRAMES_IN_FLIGHT`.
+    frame_index: AtomicU64,
     /// Layout tracker for automatic barrier placement.
     /// Uses interior mutability since execute_graph takes &self.
     layout_tracker: Mutex<TextureLayoutTracker>,
@@ -311,6 +318,11 @@ pub struct VulkanBackend {
     /// true (#110). Used for BLAS/TLAS creation, build-size queries, and
     /// `vkCmdBuildAccelerationStructuresKHR` encoding.
     accel_loader: Option<ash::khr::acceleration_structure::Device>,
+    /// Compacted-size query pools for transparent BLAS compaction (#110 phase
+    /// 3, ADR-032). `Some` alongside `accel_loader` unless pool creation
+    /// failed. Behind a `Mutex` for the same single-render-thread reason as the
+    /// timestamp pools.
+    compaction_queries: Option<Mutex<compaction::CompactionQueryManager>>,
     /// `VK_EXT_mesh_shader` entry points, `Some` exactly when
     /// [`DeviceCapabilities::mesh_shading`](crate::device::DeviceCapabilities)
     /// is true (#111). Used for `vkCmdDrawMeshTasksEXT` encoding.
@@ -540,6 +552,14 @@ impl VulkanBackend {
         let accel_loader = device_caps
             .ray_query
             .then(|| ash::khr::acceleration_structure::Device::new(&instance, &device));
+
+        // Compacted-size query pools for transparent BLAS compaction (#110
+        // phase 3), created alongside the AS entry points.
+        let compaction_queries = accel_loader
+            .is_some()
+            .then(|| compaction::CompactionQueryManager::new(&device))
+            .flatten()
+            .map(Mutex::new);
 
         // Mesh-shader entry points, loaded only when the extension is
         // enabled (#111).
@@ -842,6 +862,7 @@ impl VulkanBackend {
             swapchain_loader,
             frame_command_pools,
             current_slot: AtomicUsize::new(0),
+            frame_index: AtomicU64::new(0),
             layout_tracker,
             buffer_tracker: Mutex::new({
                 let mut tracker = BufferAccessTracker::new();
@@ -865,6 +886,7 @@ impl VulkanBackend {
             async_decline_warned: Mutex::new(HashSet::new()),
             implicit_cross_queue_images,
             accel_loader,
+            compaction_queries,
             mesh_loader,
             device_caps,
             adapter_info,
@@ -923,6 +945,17 @@ impl VulkanBackend {
     fn abort_breadcrumbs(&self, queue: QueueId, slot: usize) {
         if let Some(m) = &self.breadcrumbs {
             m.lock().abort_submit(queue, slot);
+        }
+    }
+
+    /// Roll back the slot's compacted-size queries after an abandoned submit
+    /// (#110 phase 3): the query writes are lost with the command buffer, so
+    /// return the awaiting BLASes to `NeedsQuery` for a retry. The pool is
+    /// per-slot (queries are reset per-query on their own command buffer), so
+    /// unlike the timestamp abort this takes no queue.
+    fn abort_compaction(&self, slot: usize) {
+        if let Some(m) = &self.compaction_queries {
+            m.lock().abort_slot(slot);
         }
     }
 
@@ -1150,6 +1183,9 @@ impl VulkanBackend {
         // Advance to next slot
         self.current_slot
             .store((current + 1) % MAX_FRAMES_IN_FLIGHT, Ordering::SeqCst);
+        // Monotonic frame counter driving the BLAS-compaction lifecycle (#110
+        // phase 3) — never wraps, unlike the slot index.
+        self.frame_index.fetch_add(1, Ordering::SeqCst);
 
         // The layout tracker is global and persists across frames (see
         // TextureLayoutTracker docs) — no per-frame reset, so persistent
@@ -1169,6 +1205,13 @@ impl VulkanBackend {
         // wait that lets the staging chunks retire guarantees these queries are
         // available, so `vkGetQueryPoolResults` needs no WAIT bit.
         if let Some(m) = &self.timestamps {
+            m.lock().read_slot(&self.device, oldest);
+        }
+
+        // Read back the retiring slot's BLAS compacted-size queries (#110 phase
+        // 3) and deliver them to the awaiting BLASes — same fence-guaranteed
+        // availability as the timestamps, so no WAIT bit.
+        if let Some(m) = &self.compaction_queries {
             m.lock().read_slot(&self.device, oldest);
         }
 
@@ -1217,6 +1260,14 @@ impl VulkanBackend {
         // Done here (not only at teardown) so the cache survives abnormal
         // exits; a no-op on frames without pipeline compilation.
         self.pipeline_manager.persist_cache_if_dirty();
+    }
+
+    /// Monotonic frame counter (#110 phase 3): how many times
+    /// [`advance_frame`](Self::advance_frame) has run. Drives the BLAS
+    /// compaction lifecycle — work submitted this frame is guaranteed complete
+    /// once this advances by `MAX_FRAMES_IN_FLIGHT`.
+    pub fn frame_index(&self) -> u64 {
+        self.frame_index.load(Ordering::SeqCst)
     }
 
     /// Get the layout tracker for direct access (for testing).
@@ -1509,6 +1560,11 @@ impl Drop for VulkanBackend {
 
             // Destroy the timestamp query pools (#95), if any.
             if let Some(m) = &self.timestamps {
+                m.lock().destroy(&self.device);
+            }
+
+            // Destroy the BLAS compacted-size query pools (#110 phase 3), if any.
+            if let Some(m) = &self.compaction_queries {
                 m.lock().destroy(&self.device);
             }
 
@@ -2821,6 +2877,7 @@ impl VulkanBackend {
                     if breadcrumbs.is_some() {
                         self.abort_breadcrumbs(queue_id, slot);
                     }
+                    self.abort_compaction(slot);
                     return Err(e);
                 }
                 if let Some(rec) = recording.as_mut() {
@@ -2856,6 +2913,7 @@ impl VulkanBackend {
             // re-arm the query pool / breadcrumbs for a fresh reset.
             self.abort_timestamps(queue_id, slot);
             self.abort_breadcrumbs(queue_id, slot);
+            self.abort_compaction(slot);
             return Err(GraphicsError::Internal(format!(
                 "Failed to end command buffer: {:?}",
                 e
@@ -2992,6 +3050,7 @@ impl VulkanBackend {
                 // re-arm the pools so their next use resets before writing.
                 self.abort_timestamps(queue_id, slot);
                 self.abort_breadcrumbs(queue_id, slot);
+                self.abort_compaction(slot);
                 return Err(match e {
                     vk::Result::ERROR_DEVICE_LOST => GraphicsError::DeviceLost,
                     other => GraphicsError::Internal(format!(

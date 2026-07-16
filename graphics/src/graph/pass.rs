@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use crate::materials::{BindingType, BoundResource, MaterialInstance, SampledDepthLayout};
 use crate::mesh::Mesh;
-use crate::resources::{Blas, Buffer, Tlas};
+use crate::resources::{Blas, Buffer, CompactionCopy, Tlas};
 use crate::types::{ScissorRect, Viewport};
 
 use super::resource_usage::{
@@ -1054,7 +1054,7 @@ fn extract_material_resources(
                     for blas in &blases {
                         seen.add_buffer(
                             usage,
-                            blas.backing_buffer(),
+                            &blas.backing_buffer(),
                             BufferAccessMode::AccelerationStructureShaderRead,
                         );
                     }
@@ -1348,6 +1348,10 @@ pub enum AccelerationStructureBuild {
     /// Build (or rebuild) a TLAS from the instances most recently written via
     /// [`Tlas::write_instances`].
     Tlas(Arc<Tlas>),
+    /// Copy a built BLAS into a smaller compacted structure (#110 phase 3).
+    /// Engine-internal — produced by the maintenance flush, never the public
+    /// build API.
+    Compact(CompactionCopy),
 }
 
 /// A pass that builds acceleration structures on the GPU (#110, ADR-032).
@@ -1408,6 +1412,14 @@ impl AccelerationStructureBuildPass {
         self.builds.push(AccelerationStructureBuild::Tlas(tlas));
     }
 
+    /// Queue a BLAS compaction copy (#110 phase 3). Engine-internal — the
+    /// maintenance flush produces these; callers use
+    /// [`BlasDescriptor::with_compaction`](crate::BlasDescriptor::with_compaction)
+    /// and let compaction happen transparently.
+    pub(crate) fn add_compaction_copy(&mut self, copy: CompactionCopy) {
+        self.builds.push(AccelerationStructureBuild::Compact(copy));
+    }
+
     /// Get all queued builds.
     pub fn builds(&self) -> &[AccelerationStructureBuild] {
         &self.builds
@@ -1447,7 +1459,7 @@ impl AccelerationStructureBuildPass {
                     }
                     seen.add_buffer(
                         &mut usage,
-                        blas.backing_buffer(),
+                        &blas.backing_buffer(),
                         BufferAccessMode::AccelerationStructureWrite,
                     );
                     seen.add_buffer(
@@ -1466,7 +1478,7 @@ impl AccelerationStructureBuildPass {
                     for blas in &blases {
                         seen.add_buffer(
                             &mut usage,
-                            blas.backing_buffer(),
+                            &blas.backing_buffer(),
                             BufferAccessMode::AccelerationStructureBuildRead,
                         );
                     }
@@ -1478,6 +1490,20 @@ impl AccelerationStructureBuildPass {
                     seen.add_buffer(
                         &mut usage,
                         tlas.scratch_buffer(),
+                        BufferAccessMode::AccelerationStructureWrite,
+                    );
+                }
+                AccelerationStructureBuild::Compact(copy) => {
+                    // Compaction copy: read the original structure, write the
+                    // freshly allocated compacted one. No scratch, no geometry.
+                    seen.add_buffer(
+                        &mut usage,
+                        &copy.src_backing,
+                        BufferAccessMode::AccelerationStructureBuildRead,
+                    );
+                    seen.add_buffer(
+                        &mut usage,
+                        &copy.dst_backing,
                         BufferAccessMode::AccelerationStructureWrite,
                     );
                 }
