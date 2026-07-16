@@ -149,6 +149,7 @@ impl TimestampManager {
         device: &ash::Device,
         period_ns: f32,
         queue_infos: &[QueueTimestampInfo],
+        debug_utils: Option<&ash::ext::debug_utils::Device>,
     ) -> Option<Self> {
         if period_ns <= 0.0 {
             return None;
@@ -163,16 +164,23 @@ impl TimestampManager {
             }
             let mut slots = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
             let mut ok = true;
-            for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            for slot_idx in 0..MAX_FRAMES_IN_FLIGHT {
                 let create_info = vk::QueryPoolCreateInfo::default()
                     .query_type(vk::QueryType::TIMESTAMP)
                     .query_count(QUERIES_PER_POOL);
                 match unsafe { device.create_query_pool(&create_info, None) } {
-                    Ok(pool) => slots.push(PoolSlot {
-                        pool,
-                        next: 0,
-                        submits: Vec::new(),
-                    }),
+                    Ok(pool) => {
+                        super::set_debug_object_name(
+                            debug_utils,
+                            pool,
+                            &format!("timestamp pool {:?} slot{slot_idx}", info.queue),
+                        );
+                        slots.push(PoolSlot {
+                            pool,
+                            next: 0,
+                            submits: Vec::new(),
+                        });
+                    }
                     Err(e) => {
                         log::warn!(
                             "timestamp query pool creation failed: {e:?}; disabling for queue {:?}",
