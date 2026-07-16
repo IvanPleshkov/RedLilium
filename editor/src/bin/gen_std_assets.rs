@@ -148,7 +148,12 @@ fn main() {
 
     // --- Shaders + texture: committed content this tool records but does not
     // author. Hash their on-disk bytes so the record matches a scan. ---
-    for slang in ["opaque_color", "entity_index", "opaque_textured"] {
+    for slang in [
+        "opaque_color",
+        "entity_index",
+        "opaque_textured",
+        "depth_only",
+    ] {
         let path = format!("shaders/{slang}.slang");
         add(
             &mut db,

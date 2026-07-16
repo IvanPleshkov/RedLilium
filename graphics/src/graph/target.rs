@@ -499,4 +499,17 @@ mod tests {
         assert_eq!(target.height(), 1080);
         assert_eq!(target.format(), TextureFormat::Rgba8Unorm);
     }
+
+    /// A zero-color (depth-only) config is valid: dimensions and
+    /// has_attachments come from the depth attachment (#129).
+    #[test]
+    fn test_depth_only_config() {
+        let depth = create_depth_texture();
+        let config = RenderTargetConfig::new()
+            .with_depth_stencil(DepthStencilAttachment::from_texture(depth).with_clear_depth(1.0));
+
+        assert!(config.color_attachments.is_empty());
+        assert!(config.has_attachments());
+        assert_eq!(config.dimensions(), Some((1920, 1080)));
+    }
 }

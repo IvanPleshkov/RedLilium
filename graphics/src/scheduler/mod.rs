@@ -509,6 +509,16 @@ fn debug_assert_pipeline_state_matches_targets(graph: &RenderGraph) {
                 if desc.depth.is_some() { "Some" } else { "None" },
                 if pass_has_depth { "present" } else { "absent" },
             );
+            debug_assert_eq!(
+                desc.color_formats.len(),
+                targets.color_attachments.len(),
+                "pass '{}': material '{label}' declares {} color format(s) but the pass has {} \
+                 color attachment(s) — counts must match (zero-color depth-only passes need \
+                 zero-color materials, #129)",
+                gp.name(),
+                desc.color_formats.len(),
+                targets.color_attachments.len(),
+            );
         }
     }
 }

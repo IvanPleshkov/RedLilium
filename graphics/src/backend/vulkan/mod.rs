@@ -3413,7 +3413,8 @@ impl VulkanBackend {
                 }
             });
 
-        // Determine render area from first attachment
+        // Determine render area from the attachments (first color, else the
+        // depth attachment for zero-color depth-only passes).
         let render_area = render_targets
             .dimensions()
             .map(|(w, h)| vk::Rect2D {

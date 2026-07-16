@@ -206,11 +206,11 @@ impl CameraRenderPipeline for ForwardPipeline {
                 ctx.scene,
                 &ring_buffer,
                 &mut pipelines,
-                &DrawArgs {
+                &DrawArgs::opaque(
                     camera_offset,
-                    color_format: view.target.color.format(),
-                    depth_format: view.target.depth.format(),
-                },
+                    view.target.color.format(),
+                    view.target.depth.format(),
+                ),
             );
         }
         Some(graph.add_graphics_pass(pass))

@@ -22,7 +22,7 @@
             path: "materials/opaque.material",
             kind: "material",
             source_hash: 14695981039346656037,
-            settings: Some("(shading_model:\"opaque\",properties:[(\"base_color\",Vec4((0.6,0.6,0.65,1.0)))])"),
+            settings: Some("(shading_model:\"opaque\",properties:[(\"base_color\",Vec4((0.6,0.6,0.65,1.0)))],features:[])"),
             references: {},
         ),
         (
@@ -30,7 +30,7 @@
             path: "materials/textured.material",
             kind: "material",
             source_hash: 14695981039346656037,
-            settings: Some("(shading_model:\"opaque_textured\",properties:[(\"base_texture\",Texture(File((\"45e8ee34-1ce3-5c4f-be88-63b6f1386887\"))))])"),
+            settings: Some("(shading_model:\"opaque_textured\",properties:[(\"base_texture\",Texture(File((\"45e8ee34-1ce3-5c4f-be88-63b6f1386887\"))))],features:[])"),
             references: {},
         ),
         (
@@ -60,6 +60,14 @@
             references: {
                 "layout": ("994670d7-d68d-5d80-8c4c-085610f8f6ad"),
             },
+        ),
+        (
+            guid: ("a59d3276-9c78-53c9-bee5-b7b25009a34a"),
+            path: "shaders/depth_only.slang",
+            kind: "shader",
+            source_hash: 7313635257514219428,
+            settings: None,
+            references: {},
         ),
         (
             guid: ("9bb48e6a-9664-51cb-841f-40c1362100fe"),

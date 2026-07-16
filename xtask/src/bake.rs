@@ -78,6 +78,16 @@ const REGISTRY: &[ShaderSpec] = &[
         "opaque_textured",
         "std-assets/shaders/opaque_textured.slang",
     ),
+    // Depth-only pass shader (#129): vertex stage only — zero color
+    // attachments make the fragment stage unnecessary. Reflection still
+    // bakes (the draw path classifies its camera/model sets by rate).
+    ShaderSpec {
+        name: "depth_only",
+        path: "std-assets/shaders/depth_only.slang",
+        entry_points: &[("vs_main", ShaderStage::Vertex)],
+        force_spirv: false,
+        skip_reflection: false,
+    },
     // Debug-draw lines/shapes — used by the editor's gizmos (debug_drawer), so it
     // must be baked or the default (Slang-off) editor build misses at runtime.
     vs_fs_spec("debug_draw", "shaders/standard/debug_draw.slang"),

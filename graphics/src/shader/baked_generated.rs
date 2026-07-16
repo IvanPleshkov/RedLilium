@@ -52,6 +52,10 @@ pub static BAKED_WGSL: &[(u64, &str)] = &[
         "struct _MatrixStorage_float4x4_ColMajorstd140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct SLANG_ParameterGroup_DebugUniforms_std140_0\n{\n    @align(16) view_proj_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n};\n\n@binding(0) @group(0) var<uniform> DebugUniforms_0 : SLANG_ParameterGroup_DebugUniforms_std140_0;\nstruct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) color_0 : vec4<f32>,\n};\n\nstruct vertexInput_0\n{\n    @location(0) position_1 : vec3<f32>,\n    @location(1) color_1 : vec4<f32>,\n};\n\n@vertex\nfn vs_main( _S1 : vertexInput_0) -> VsOutput_0\n{\n    var output_0 : VsOutput_0;\n    output_0.position_0 = (((vec4<f32>(_S1.position_1, 1.0f)) * (mat4x4<f32>(mat4x4<f32>(DebugUniforms_0.view_proj_0.data_0[i32(0)][i32(0)], DebugUniforms_0.view_proj_0.data_0[i32(1)][i32(0)], DebugUniforms_0.view_proj_0.data_0[i32(2)][i32(0)], DebugUniforms_0.view_proj_0.data_0[i32(3)][i32(0)], DebugUniforms_0.view_proj_0.data_0[i32(0)][i32(1)], DebugUniforms_0.view_proj_0.data_0[i32(1)][i32(1)], DebugUniforms_0.view_proj_0.data_0[i32(2)][i32(1)], DebugUniforms_0.view_proj_0.data_0[i32(3)][i32(1)], DebugUniforms_0.view_proj_0.data_0[i32(0)][i32(2)], DebugUniforms_0.view_proj_0.data_0[i32(1)][i32(2)], DebugUniforms_0.view_proj_0.data_0[i32(2)][i32(2)], DebugUniforms_0.view_proj_0.data_0[i32(3)][i32(2)], DebugUniforms_0.view_proj_0.data_0[i32(0)][i32(3)], DebugUniforms_0.view_proj_0.data_0[i32(1)][i32(3)], DebugUniforms_0.view_proj_0.data_0[i32(2)][i32(3)], DebugUniforms_0.view_proj_0.data_0[i32(3)][i32(3)])))));\n    output_0.color_0 = _S1.color_1;\n    return output_0;\n}\n\n",
     ),
     (
+        0x3cd445cedfea47df,
+        "struct _MatrixStorage_float4x4_ColMajorstd140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct ModelParams_std140_0\n{\n    @align(16) model_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n};\n\n@binding(0) @group(1) var<uniform> gModel_0 : ModelParams_std140_0;\nstruct CameraParams_std140_0\n{\n    @align(16) view_projection_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n};\n\n@binding(0) @group(0) var<uniform> gCamera_0 : CameraParams_std140_0;\nstruct VsOutput_0\n{\n    @builtin(position) clip_position_0 : vec4<f32>,\n};\n\nstruct vertexInput_0\n{\n    @location(0) position_0 : vec3<f32>,\n    @location(1) normal_0 : vec3<f32>,\n};\n\n@vertex\nfn vs_main( _S1 : vertexInput_0) -> VsOutput_0\n{\n    var output_0 : VsOutput_0;\n    output_0.clip_position_0 = ((((((vec4<f32>(_S1.position_0, 1.0f)) * (mat4x4<f32>(mat4x4<f32>(gModel_0.model_0.data_0[i32(0)][i32(0)], gModel_0.model_0.data_0[i32(1)][i32(0)], gModel_0.model_0.data_0[i32(2)][i32(0)], gModel_0.model_0.data_0[i32(3)][i32(0)], gModel_0.model_0.data_0[i32(0)][i32(1)], gModel_0.model_0.data_0[i32(1)][i32(1)], gModel_0.model_0.data_0[i32(2)][i32(1)], gModel_0.model_0.data_0[i32(3)][i32(1)], gModel_0.model_0.data_0[i32(0)][i32(2)], gModel_0.model_0.data_0[i32(1)][i32(2)], gModel_0.model_0.data_0[i32(2)][i32(2)], gModel_0.model_0.data_0[i32(3)][i32(2)], gModel_0.model_0.data_0[i32(0)][i32(3)], gModel_0.model_0.data_0[i32(1)][i32(3)], gModel_0.model_0.data_0[i32(2)][i32(3)], gModel_0.model_0.data_0[i32(3)][i32(3)])))))) * (mat4x4<f32>(mat4x4<f32>(gCamera_0.view_projection_0.data_0[i32(0)][i32(0)], gCamera_0.view_projection_0.data_0[i32(1)][i32(0)], gCamera_0.view_projection_0.data_0[i32(2)][i32(0)], gCamera_0.view_projection_0.data_0[i32(3)][i32(0)], gCamera_0.view_projection_0.data_0[i32(0)][i32(1)], gCamera_0.view_projection_0.data_0[i32(1)][i32(1)], gCamera_0.view_projection_0.data_0[i32(2)][i32(1)], gCamera_0.view_projection_0.data_0[i32(3)][i32(1)], gCamera_0.view_projection_0.data_0[i32(0)][i32(2)], gCamera_0.view_projection_0.data_0[i32(1)][i32(2)], gCamera_0.view_projection_0.data_0[i32(2)][i32(2)], gCamera_0.view_projection_0.data_0[i32(3)][i32(2)], gCamera_0.view_projection_0.data_0[i32(0)][i32(3)], gCamera_0.view_projection_0.data_0[i32(1)][i32(3)], gCamera_0.view_projection_0.data_0[i32(2)][i32(3)], gCamera_0.view_projection_0.data_0[i32(3)][i32(3)])))));\n    return output_0;\n}\n\n",
+    ),
+    (
         0x4f96de5e6099bd03,
         "struct _MatrixStorage_float4x4_ColMajorstd140_0\n{\n    @align(16) data_0 : array<vec4<f32>, i32(4)>,\n};\n\nstruct SLANG_ParameterGroup_CameraUniforms_std140_0\n{\n    @align(16) view_proj_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) view_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) proj_0 : _MatrixStorage_float4x4_ColMajorstd140_0,\n    @align(16) camera_pos_0 : vec4<f32>,\n    @align(16) instance_base_0 : u32,\n};\n\n@binding(0) @group(0) var<uniform> CameraUniforms_0 : SLANG_ParameterGroup_CameraUniforms_std140_0;\nstruct _MatrixStorage_float4x4_ColMajorstd430_0\n{\n    @align(16) data_1 : array<vec4<f32>, i32(4)>,\n};\n\nstruct InstanceData_std430_0\n{\n    @align(16) model_0 : _MatrixStorage_float4x4_ColMajorstd430_0,\n    @align(16) base_color_0 : vec4<f32>,\n    @align(16) metallic_roughness_0 : vec4<f32>,\n    @align(16) _pad0_0 : vec4<f32>,\n    @align(16) _pad1_0 : vec4<f32>,\n};\n\n@binding(1) @group(0) var<storage, read> instances_0 : array<InstanceData_std430_0>;\n\nstruct VsOutput_0\n{\n    @builtin(position) position_0 : vec4<f32>,\n    @location(0) world_position_0 : vec3<f32>,\n    @location(1) world_normal_0 : vec3<f32>,\n    @location(2) uv_0 : vec2<f32>,\n    @location(3) base_color_1 : vec4<f32>,\n    @location(4) metallic_0 : f32,\n    @location(5) roughness_0 : f32,\n};\n\nstruct vertexInput_0\n{\n    @location(0) position_1 : vec3<f32>,\n    @location(1) normal_0 : vec3<f32>,\n    @location(2) uv_1 : vec2<f32>,\n};\n\n@vertex\nfn vs_main( _S1 : vertexInput_0, @builtin(instance_index) instance_id_0 : u32) -> VsOutput_0\n{\n    var instance_0 : InstanceData_std430_0 = instances_0[CameraUniforms_0.instance_base_0 + instance_id_0];\n    var _S2 : mat4x4<f32> = mat4x4<f32>(instance_0.model_0.data_1[i32(0)][i32(0)], instance_0.model_0.data_1[i32(1)][i32(0)], instance_0.model_0.data_1[i32(2)][i32(0)], instance_0.model_0.data_1[i32(3)][i32(0)], instance_0.model_0.data_1[i32(0)][i32(1)], instance_0.model_0.data_1[i32(1)][i32(1)], instance_0.model_0.data_1[i32(2)][i32(1)], instance_0.model_0.data_1[i32(3)][i32(1)], instance_0.model_0.data_1[i32(0)][i32(2)], instance_0.model_0.data_1[i32(1)][i32(2)], instance_0.model_0.data_1[i32(2)][i32(2)], instance_0.model_0.data_1[i32(3)][i32(2)], instance_0.model_0.data_1[i32(0)][i32(3)], instance_0.model_0.data_1[i32(1)][i32(3)], instance_0.model_0.data_1[i32(2)][i32(3)], instance_0.model_0.data_1[i32(3)][i32(3)]);\n    var world_pos_0 : vec4<f32> = (((vec4<f32>(_S1.position_1, 1.0f)) * (mat4x4<f32>(_S2))));\n    var normal_matrix_0 : mat3x3<f32> = mat3x3<f32>(_S2[i32(0)].xyz, _S2[i32(1)].xyz, _S2[i32(2)].xyz);\n    var output_0 : VsOutput_0;\n    output_0.position_0 = (((world_pos_0) * (mat4x4<f32>(mat4x4<f32>(CameraUniforms_0.view_proj_0.data_0[i32(0)][i32(0)], CameraUniforms_0.view_proj_0.data_0[i32(1)][i32(0)], CameraUniforms_0.view_proj_0.data_0[i32(2)][i32(0)], CameraUniforms_0.view_proj_0.data_0[i32(3)][i32(0)], CameraUniforms_0.view_proj_0.data_0[i32(0)][i32(1)], CameraUniforms_0.view_proj_0.data_0[i32(1)][i32(1)], CameraUniforms_0.view_proj_0.data_0[i32(2)][i32(1)], CameraUniforms_0.view_proj_0.data_0[i32(3)][i32(1)], CameraUniforms_0.view_proj_0.data_0[i32(0)][i32(2)], CameraUniforms_0.view_proj_0.data_0[i32(1)][i32(2)], CameraUniforms_0.view_proj_0.data_0[i32(2)][i32(2)], CameraUniforms_0.view_proj_0.data_0[i32(3)][i32(2)], CameraUniforms_0.view_proj_0.data_0[i32(0)][i32(3)], CameraUniforms_0.view_proj_0.data_0[i32(1)][i32(3)], CameraUniforms_0.view_proj_0.data_0[i32(2)][i32(3)], CameraUniforms_0.view_proj_0.data_0[i32(3)][i32(3)])))));\n    output_0.world_position_0 = world_pos_0.xyz;\n    output_0.world_normal_0 = normalize((((_S1.normal_0) * (normal_matrix_0))));\n    output_0.uv_0 = _S1.uv_1;\n    output_0.base_color_1 = instance_0.base_color_0;\n    output_0.metallic_0 = instance_0.metallic_roughness_0.x;\n    output_0.roughness_0 = instance_0.metallic_roughness_0.y;\n    return output_0;\n}\n\n",
     ),
@@ -159,6 +163,7 @@ pub static BAKED_NAMES: &[(u64, &str)] = &[
     (0x372a2ff95b932bb0, "deferred_resolve / fs_main / []"),
     (0x398a25d3582968bd, "entity_index / fs_main / []"),
     (0x3c17f254ff226f8b, "debug_draw / vs_main / []"),
+    (0x3cd445cedfea47df, "depth_only / vs_main / []"),
     (0x4f96de5e6099bd03, "deferred_gbuffer / vs_main / []"),
     (0x54f9997540610987, "meshlet / ts_main / []"),
     (0x57bb53bb931c96cd, "skybox / vs_main / []"),
@@ -754,5 +759,30 @@ pub static BAKED_REFLECTION: &[(u64, &[crate::shader::baked::BakedGroup])] = &[
                 label: Some("DebugUniforms"),
             }],
         }],
+    ),
+    (
+        0xf0279f4d560ed2cf,
+        &[
+            crate::shader::baked::BakedGroup {
+                rate: Some(crate::materials::UpdateRate::External),
+                label: None,
+                entries: &[crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 1,
+                    label: Some("gCamera"),
+                }],
+            },
+            crate::shader::baked::BakedGroup {
+                rate: Some(crate::materials::UpdateRate::Dynamic),
+                label: None,
+                entries: &[crate::shader::baked::BakedEntry {
+                    binding: 0,
+                    ty: crate::materials::BindingType::UniformBuffer,
+                    vis: 1,
+                    label: Some("gModel"),
+                }],
+            },
+        ],
     ),
 ];

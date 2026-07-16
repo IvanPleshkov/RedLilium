@@ -194,11 +194,11 @@ pub use rendering::{
     FrameTarget, HotReload, MainViewport, MaterialAssetManager, MaterialInstanceData,
     MaterialInstanceLoad, MaterialInstanceLoader, MaterialInstanceManager, MaterialInstanceSource,
     MaterialLoader, MeshLoad, MeshManager, MeshRenderer, NewAssetSpec, OutputFormat, PipelineCache,
-    PipelineRegistry, PipelineTargets, Primitive, PropValue, RecordCtx, RenderPath, RenderSchedule,
-    SceneDrawer, ScenePass, SetAssetReferenceAction, SetAssetSettingsAction, Shader, ShaderLoader,
-    ShaderManager, ShaderSource, ShadingRegistry, SizePolicy, TextureManager, VisibleScene,
-    asset_drop_target, inspect_asset_settings, new_asset_spec, reference_accepted_kind,
-    register_rendering_components, shaders,
+    PipelineRegistry, PipelineTargets, Primitive, PropValue, RecordCtx, RenderPath, RenderPhase,
+    RenderSchedule, SceneDrawer, ScenePass, SetAssetReferenceAction, SetAssetSettingsAction,
+    Shader, ShaderLoader, ShaderManager, ShaderSource, ShadingRegistry, SizePolicy, TextureManager,
+    VisibleScene, asset_drop_target, inspect_asset_settings, new_asset_spec,
+    reference_accepted_kind, register_rendering_components, shaders,
 };
 
 /// Register all standard component types with the world.

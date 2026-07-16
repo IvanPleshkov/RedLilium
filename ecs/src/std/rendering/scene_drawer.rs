@@ -29,6 +29,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use redlilium_assets::Guid;
 use redlilium_core::math::{Mat4, mat4_to_cols_array_2d};
 use redlilium_graphics::{
     BindingGroup, BindingGroupDescriptor, BindingLayout, Buffer, DrawCommand, GraphicsDevice,
@@ -38,7 +39,20 @@ use redlilium_graphics::{
 use crate::World;
 use crate::std::components::{GlobalTransform, Visibility};
 
+use super::loaders::Shader;
 use super::{FrameRing, MeshRenderer, PipelineCache, ResolvedInstance, shaders};
+
+/// Which slice of the scene a recorded view draws (#129). Phases filter the
+/// [`VisibleScene`] — they do not re-gather it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RenderPhase {
+    /// The regular color pass: every visible primitive.
+    #[default]
+    Opaque,
+    /// A shadow-casting depth pass: only entities with
+    /// [`MeshRenderer::casts_shadows`].
+    ShadowCaster,
+}
 
 /// The frame's visible renderables, gathered once per frame by the render
 /// dispatcher and replayed by every recorded view — see the module docs.
@@ -52,6 +66,8 @@ struct SceneItem {
     /// (pushed once per frame; every view selects it via a per-draw dynamic
     /// offset).
     model_offset: u32,
+    /// Whether the entity draws in [`RenderPhase::ShadowCaster`] passes.
+    casts_shadows: bool,
     /// The resolved (mesh, material instance) pairs. Primitives whose asset
     /// refs have not resolved yet are skipped for this frame.
     primitives: Vec<(Arc<Mesh>, Arc<ResolvedInstance>)>,
@@ -94,6 +110,7 @@ impl VisibleScene {
             let model_offset = ring.push(bytemuck::bytes_of(&shaders::ModelUniforms { model }));
             items.push(SceneItem {
                 model_offset,
+                casts_shadows: renderer.casts_shadows,
                 primitives,
             });
         }
@@ -113,10 +130,55 @@ pub struct DrawArgs {
     /// selected per draw via the external set's dynamic offset).
     pub camera_offset: u32,
     /// Color format of the pass's render target (a pipeline-specialization
-    /// key).
-    pub color_format: TextureFormat,
+    /// key). `None` for zero-color-attachment (depth-only) passes — which
+    /// require a [`depth_override`](Self::depth_override).
+    pub color_format: Option<TextureFormat>,
     /// Depth format of the pass's depth attachment.
     pub depth_format: TextureFormat,
+    /// Which slice of the scene this view draws.
+    pub phase: RenderPhase,
+    /// Draw every primitive with this shared **depth-only** shader (vertex
+    /// stage only, zero color attachments) instead of its own material —
+    /// shadow maps, depth prepass (#129). The shader must declare the
+    /// standard external (camera) + dynamic (model) rate-classified sets;
+    /// see `std-assets/shaders/depth_only.slang`.
+    pub depth_override: Option<(Guid, Arc<Shader>)>,
+}
+
+impl DrawArgs {
+    /// Arguments for a regular color pass drawing every visible primitive
+    /// with its own material.
+    pub fn opaque(
+        camera_offset: u32,
+        color_format: TextureFormat,
+        depth_format: TextureFormat,
+    ) -> Self {
+        Self {
+            camera_offset,
+            color_format: Some(color_format),
+            depth_format,
+            phase: RenderPhase::Opaque,
+            depth_override: None,
+        }
+    }
+
+    /// Arguments for a depth-only pass (zero color attachments) drawing the
+    /// given phase with the shared depth shader.
+    pub fn depth_only(
+        camera_offset: u32,
+        depth_format: TextureFormat,
+        phase: RenderPhase,
+        shader_guid: Guid,
+        shader: Arc<Shader>,
+    ) -> Self {
+        Self {
+            camera_offset,
+            color_format: None,
+            depth_format,
+            phase,
+            depth_override: Some((shader_guid, shader)),
+        }
+    }
 }
 
 /// Records the [`VisibleScene`]'s draws into a pass — the shared draw loop
@@ -189,21 +251,41 @@ impl SceneDrawer {
             .lock()
             .expect("scene drawer binding cache poisoned");
         for item in &scene.items {
+            if args.phase == RenderPhase::ShadowCaster && !item.casts_shadows {
+                continue;
+            }
             for (mesh, instance) in &item.primitives {
-                // Specialize the pipeline for this shader + variant + the
-                // mesh's vertex layout + the target formats (built once,
-                // then cached). The variant is the material's feature
-                // half (Decision 5); when the forward path grows system
-                // axes (lighting modes), this is where it completes
-                // them via with_features + .system().
-                let Ok(pipeline) = pipelines.get_or_build(
-                    instance.shader_guid,
-                    &instance.shader,
-                    &instance.variant,
-                    mesh.layout(),
-                    args.color_format,
-                    args.depth_format,
-                ) else {
+                // Specialize the pipeline for this pass' shader + the mesh's
+                // vertex layout + the target formats (built once, then
+                // cached): the primitive's own material for a color pass, or
+                // the shared vertex-only depth shader for a depth-only pass.
+                // The variant is the material's feature half (Decision 5);
+                // when the forward path grows system axes (lighting modes),
+                // this is where it completes them via with_features +
+                // .system().
+                let pipeline = match (&args.depth_override, args.color_format) {
+                    (Some((guid, shader)), _) => pipelines.get_or_build_depth_only(
+                        *guid,
+                        shader,
+                        mesh.layout(),
+                        args.depth_format,
+                    ),
+                    (None, Some(color_format)) => pipelines.get_or_build(
+                        instance.shader_guid,
+                        &instance.shader,
+                        &instance.variant,
+                        mesh.layout(),
+                        color_format,
+                        args.depth_format,
+                    ),
+                    (None, None) => {
+                        // A zero-color pass without a depth override cannot
+                        // draw materials (they all have fragment output).
+                        log::debug!("scene drawer: color-less pass without depth override");
+                        break;
+                    }
+                };
+                let Ok(pipeline) = pipeline else {
                     continue;
                 };
                 // Assemble the sets in declaration order by their rates.

@@ -25,6 +25,14 @@ pub(crate) fn inspect_mesh_renderer_ui(
 
     let mut edited = renderer.clone();
     let mut changed = false;
+    ui.horizontal(|ui| {
+        if ui
+            .checkbox(&mut edited.casts_shadows, "casts shadows")
+            .changed()
+        {
+            changed = true;
+        }
+    });
     for (index, primitive) in edited.primitives.iter_mut().enumerate() {
         egui::CollapsingHeader::new(format!("Primitive {index}"))
             .default_open(single)

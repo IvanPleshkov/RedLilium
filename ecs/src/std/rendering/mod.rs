@@ -74,7 +74,7 @@ pub use resources::{
     ResolvedMaterial, ResolvedTexture, ShaderManager, VertexLayoutManager,
 };
 pub use resources::{FrameRing, MainViewport, MeshManager, RenderSchedule, TextureManager};
-pub use scene_drawer::{DrawArgs, SceneDrawer, VisibleScene};
+pub use scene_drawer::{DrawArgs, RenderPhase, SceneDrawer, VisibleScene};
 #[cfg(feature = "rendering")]
 pub use shading::{
     FeatureValue, PropDef, PropValue, ShadingModel, ShadingRegistry, pack_props, texture_props,
