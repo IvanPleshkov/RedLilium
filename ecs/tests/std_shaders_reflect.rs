@@ -2,7 +2,7 @@
 //! reflection: every std material shader declares its sets as rate-classified
 //! `ParameterBlock`s (`[UpdateRate]`, docs/MATERIAL_ASSETS.md Decision 7) in
 //! the canonical order camera (external) / model (dynamic) / material
-//! (static) — which is exactly how `ForwardRender` assembles the bind groups.
+//! (static) — which is exactly how `SceneDrawer` assembles the bind groups.
 
 // Needs runtime Slang reflection, so it is gated on `slang-shaders` (default off,
 // no SDK required for a normal build). Run:

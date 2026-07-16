@@ -1,7 +1,7 @@
 //! Pixel-level e2e for the camera graphics stack (ADR-029, #74).
 //!
 //! Two cameras with `CameraOutput` specs run through the real Render
-//! schedule (`EnsureCameraTargets` → `ForwardRender`); the offscreen
+//! schedule (`EnsureCameraTargets` → `CameraRender`); the offscreen
 //! camera's color output — published as a **virtual texture asset** — is
 //! read back through the frame graph and must contain that camera's clear
 //! color. This proves the whole chain on the GPU: spec → derived target →
@@ -16,9 +16,9 @@ use std::sync::{Arc, Mutex};
 use redlilium_assets::Guid;
 use redlilium_ecs::rendering::loaders::TextureSource;
 use redlilium_ecs::{
-    Camera, CameraOutput, CameraTarget, EcsRunner, EnsureCameraTargets, ForwardRender, FrameRing,
-    MainViewport, PipelineCache, Render, RenderSchedule, ScenePass, Schedules, SizePolicy,
-    TextureManager, World,
+    Camera, CameraOutput, CameraRender, CameraTarget, EcsRunner, EnsureCameraTargets, FrameRing,
+    MainViewport, PipelineCache, PipelineRegistry, Render, RenderSchedule, ScenePass, Schedules,
+    SizePolicy, TextureManager, World,
 };
 use redlilium_graphics::{
     BufferDescriptor, BufferUsage, GraphicsInstance, RenderGraph, TransferConfig,
@@ -45,6 +45,7 @@ fn offscreen_camera_clear_lands_in_virtual_texture() {
     world.insert_resource(TextureManager::new(device.clone()));
     world.insert_resource(RenderSchedule::empty());
     world.insert_resource(ScenePass::default());
+    world.insert_resource(PipelineRegistry::default());
     world.insert_resource(PipelineCache::new(device.clone()));
     world.insert_resource(FrameRing::new(&device, 1 << 16, "test_frame_ring").expect("frame ring"));
     world.insert_resource(MainViewport::new(SIZE, SIZE));
@@ -75,9 +76,9 @@ fn offscreen_camera_clear_lands_in_virtual_texture() {
     {
         let render = schedules.get_mut::<Render>();
         render.add_exclusive(EnsureCameraTargets);
-        render.add(ForwardRender::default());
+        render.add(CameraRender);
         render
-            .add_edge::<EnsureCameraTargets, ForwardRender>()
+            .add_edge::<EnsureCameraTargets, CameraRender>()
             .expect("no cycle");
     }
     let runner = EcsRunner::single_thread();

@@ -1744,12 +1744,24 @@ identity**:
   deferred tiers per ADR-027) are declared but not yet implemented —
   `CameraOutput` is the natural home for that knob when its consumer exists
 
+### Amendment (2026-07-16, ADR-035): the render-path knob is a separate component
+
+The consumer now exists (ADR-035), and the knob lands as a **separate
+serializable `RenderPath` component**, not a `CameraOutput` field as this
+ADR anticipated. Rationale: `CameraOutput` is the contract with *consumers*
+of the camera's image (where it goes, its size and format); the render path
+is the camera's internal production recipe, and its settings payload grows
+independently (shadow parameters, quality tiers, HDR chains). Everything
+else in this ADR — serialize the intent, derive the resource, graph-derived
+ordering — carries over unchanged to the pipeline layer.
+
 ### Related Issues
 
 - #74: framework hoist reframed (the frame driver shrinks; camera stack ADR)
 - #47: automatic graph ordering makes multi-camera safe
 - #6: per-camera quality = system variant axes (future)
 - #2: scene save/load consumes the serializable spec
+- #128 / ADR-035: per-camera render pipelines (the declared path knob lands)
 
 ## ADR-030: Per-Resource Sharing Mode for Cross-Queue Textures
 
@@ -2201,3 +2213,100 @@ not a reserved set 0 (no global set-numbering migration).
 - #117: feature issue
 - #110 / ADR-032, #111 / ADR-033: the sibling pillars
 - #114–#116: meshlet follow-ups (barrier scopes, indirect, limits)
+
+## ADR-035: Per-Camera Render Pipelines — Serializable Path, Registered Pipeline, Derived Views
+
+**Date:** 2026-07-16
+**Status:** Accepted
+**Issues:** #128–#131 (milestone "Per-camera render pipelines")
+
+### Context
+
+ADR-029 gave every camera a serializable output spec (`CameraOutput`) and a
+derived GPU target (`CameraTarget`), but the *production* side stayed
+hardcoded: `ForwardRender` walks all cameras and emits one fixed
+unlit forward pass each. Per-camera render paths were explicitly declared
+and deferred. The first concrete consumer has arrived — shadow mapping
+needs a camera whose frame is produced differently (a depth-only auxiliary
+view feeding the main pass) — and game code will eventually want paths the
+engine does not ship.
+
+### Decision
+
+Fill the "how to render" axis with four pieces, reusing ADR-029's
+discipline (serialize the intent, derive the resource, let the graph order
+passes):
+
+1. **`RenderPath` — the serializable choice** (component):
+   `{ pipeline: <stable name>, settings }`. A camera without one defaults
+   to `"forward"`. It deliberately lives *next to* `CameraOutput`, not
+   inside it (see the ADR-029 amendment): `CameraOutput` is the contract
+   with consumers of the image, `RenderPath` is the camera's internal
+   production recipe with its own growing settings payload.
+
+2. **`CameraRenderPipeline` — the registered implementation** (trait +
+   `PipelineRegistry` resource): `ensure_targets()` derives auxiliary
+   resources beyond color+depth (shadow maps, HDR intermediates) into the
+   runtime-only `PipelineTargets` component (`#[skip_serialization]`,
+   name → texture), with the same re-derive-on-disagreement discipline as
+   `EnsureCameraTargets`; `record()` writes the camera's passes into the
+   frame graph and returns the main pass handle (the `ScenePass`/overlay
+   contract is unchanged). The engine registers `"forward"` (today's
+   `ForwardRender` body, extracted); game plugins register their own —
+   trait objects cross the plugin dylib boundary, so the ADR-020 /
+   DESIGN_45 ABI contract applies. Scene files reference pipelines by
+   name only — the registry is the GPU-code analogue of virtual texture
+   publication: stable identity in assets, code-owned resource behind it.
+
+3. **`SceneDrawer` — the shared scene walk**: the mesh gathering, ring
+   uniform pushes, `PipelineCache` specialization, and binding-group
+   assembly currently inlined in `ForwardRender`, extracted and
+   parameterized by (view-projection, `RenderPhase`, material override,
+   viewport). The visible set is gathered once per frame; each recorded
+   view replays the prepared list — auxiliary views must not re-walk the
+   World. `RenderPhase` starts as `Opaque` | `ShadowCaster` (with a
+   `casts_shadows` flag on `MeshRenderer`); a depth-only pass renders with
+   a shared vertex-only override shader and an empty color-format set.
+
+4. **Views are derived, never authored**: a pipeline may produce any
+   number of auxiliary views (shadow cascades, cube faces) as passes in
+   the same graph. They are frame-internal data — **not** camera entities;
+   spawning entities for shadow views would mix authored scene data with
+   per-frame derivations and leak into the editor's undo model.
+   Cross-pass ordering is never declared: the shadow pass's depth write
+   and the main pass's `ShaderRead` of the map order themselves through
+   the graph's resource-dependency derivation (#47), exactly like
+   cross-camera ordering in ADR-029.
+
+Choosing a pipeline is per-camera *authoring*, orthogonal to ADR-027
+tiers: a tier gates which pipelines a device can offer; `RenderPath`
+selects among the offered ones. Per-camera *quality* within one pipeline
+remains #6 variant-axis territory.
+
+### Consequences
+
+- ✅ Stage 1 (#128) is a pure refactor — the forward path moves, frame
+  output is bit-identical; the editor camera takes the default path
+- ✅ Shadow mapping (#129/#130) becomes a pipeline, not a special case:
+  depth-only phase + `"forward-shadows"` registration; the graphics crate
+  already carries the needed vocabulary (`BindingType::DepthTexture`,
+  `ComparisonSampler`, depth-attachment co-use from #40/#60)
+- ✅ Game-defined paths (portals, stylized renderers) register without
+  engine changes
+- ⚠️ Zero-color-attachment passes must be validated on all three backends
+  (`MaterialDescriptor` allows it; the encoders have never exercised it)
+- ⚠️ #130 waits on #125: reversed-Z must settle the depth convention
+  before a second depth consumer lands
+- ⚠️ Lights are inert until #130 ships the first lit shader — the
+  vertical slice is directional light + lambert + one un-cascaded map;
+  cascades, spot/point, and a camera-shared shadow cache are #131
+- ⚠️ A registry name with no registered pipeline degrades to `"forward"`
+  with a warning (scene files stay loadable when a plugin is absent)
+
+### Related Issues
+
+- #128: framework (RenderPath, registry, SceneDrawer, dispatcher)
+- #129: depth-only phase groundwork
+- #130: forward-shadows vertical slice (blocked by #125, #129)
+- #131: follow-ups (cascades, spot/point, shared shadow cache)
+- #6, #47, #74, #125: neighboring axes referenced above

@@ -6,17 +6,21 @@
 //! # Components
 //!
 //! - [`MeshRenderer`] — list of (mesh, material) primitives on an entity
-//! - [`CameraTarget`] — Render target textures for a camera entity
+//! - [`CameraOutput`] / [`RenderPath`] — a camera's serializable specs:
+//!   *where* the image goes and *how* it is produced (ADR-029/ADR-035)
+//! - [`CameraTarget`] / [`PipelineTargets`] — the runtime-derived GPU targets
 //!
 //! # Resources
 //!
 //! - [`TextureManager`] — Owns and shares resident GPU textures (asset-based)
 //! - [`RenderSchedule`] — Holds the current frame's [`FrameSchedule`](redlilium_graphics::FrameSchedule)
+//! - [`PipelineRegistry`] — Resolves [`RenderPath`] names to registered
+//!   [`CameraRenderPipeline`]s
 //!
 //! # Systems
 //!
-//! - [`ForwardRenderSystem`] — Collects renderable entities and submits
-//!   draw commands for each camera with a render target
+//! - [`CameraRender`] — the per-camera dispatcher: resolves each camera's
+//!   pipeline and has it record the camera's passes into the frame graph
 //!
 //! # Feature Gate
 //!
@@ -33,7 +37,9 @@ pub mod components;
 #[cfg(feature = "rendering")]
 pub mod loaders;
 pub(crate) mod material_inspector;
+pub mod pipeline;
 pub mod resources;
+pub mod scene_drawer;
 pub mod shaders;
 #[cfg(feature = "rendering")]
 pub mod shading;
@@ -47,7 +53,8 @@ pub use asset_drag::{AssetDragPayload, asset_drop_target};
 pub use asset_inspect::{NewAssetSpec, new_asset_spec};
 pub use asset_inspect::{inspect_asset_settings, reference_accepted_kind};
 pub use components::{
-    CameraOutput, CameraTarget, CameraTargetSpec, MeshRenderer, OutputFormat, Primitive, SizePolicy,
+    CameraOutput, CameraTarget, CameraTargetSpec, FORWARD_PIPELINE, MeshRenderer, OutputFormat,
+    PipelineTargets, Primitive, RenderPath, SizePolicy,
 };
 #[cfg(feature = "rendering")]
 pub use loaders::{
@@ -55,6 +62,9 @@ pub use loaders::{
     MaterialLoader, MaterialSource, MeshGenerator, MeshLoader, MeshSource, Shader, ShaderLoader,
     ShaderSource, TextureLoader, TextureSettings, TextureSource, VertexLayoutLoader,
     VertexLayoutSource,
+};
+pub use pipeline::{
+    CameraRenderPipeline, CameraView, ForwardPipeline, PipelineRegistry, RecordCtx,
 };
 #[cfg(feature = "rendering")]
 pub use redlilium_assets::{AssetRef, AssetRefSource};
@@ -64,6 +74,7 @@ pub use resources::{
     ResolvedMaterial, ResolvedTexture, ShaderManager, VertexLayoutManager,
 };
 pub use resources::{FrameRing, MainViewport, MeshManager, RenderSchedule, TextureManager};
+pub use scene_drawer::{DrawArgs, SceneDrawer, VisibleScene};
 #[cfg(feature = "rendering")]
 pub use shading::{
     FeatureValue, PropDef, PropValue, ShadingModel, ShadingRegistry, pack_props, texture_props,
@@ -71,7 +82,7 @@ pub use shading::{
 #[cfg(feature = "rendering")]
 pub use systems::HotReload;
 pub use systems::{
-    DebugRender, EguiRender, EnsureCameraTargets, FlushUploads, ForwardRender, FrameTarget,
+    CameraRender, DebugRender, EguiRender, EnsureCameraTargets, FlushUploads, FrameTarget,
     MaterialInstanceLoad, MeshLoad, ScenePass,
 };
 
@@ -83,8 +94,11 @@ use crate::World;
 /// to enable rendering support.
 pub fn register_rendering_components(world: &mut World) {
     world.register_inspector::<MeshRenderer>();
-    // Serializable spec (ADR-029); its derived CameraTarget below is
+    // Serializable specs (ADR-029: where the image goes; ADR-035: how it is
+    // produced); their derived CameraTarget/PipelineTargets below are
     // runtime-only storage.
     world.register_inspector::<CameraOutput>();
+    world.register_inspector::<RenderPath>();
     world.register_component::<CameraTarget>();
+    world.register_component::<PipelineTargets>();
 }

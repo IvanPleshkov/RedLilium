@@ -1,32 +1,30 @@
 //! Render systems — they run in the [`Render`](crate::Render) schedule and
 //! contribute passes to the frame graph held in the [`RenderSchedule`] resource.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use redlilium_core::math::{Mat4, mat4_to_cols_array_2d};
-use redlilium_graphics::{
-    BindingGroup, BindingGroupDescriptor, BindingLayout, Buffer, ColorAttachment,
-    DepthStencilAttachment, DrawCommand, GraphicsDevice, GraphicsError, GraphicsPass,
-    MaterialInstance, PassHandle, RenderTarget, RenderTargetConfig,
-};
+use redlilium_core::math::mat4_to_cols_array_2d;
+use redlilium_graphics::{PassHandle, RenderTarget};
 
 use redlilium_graphics::egui::EguiController;
 
 use redlilium_assets::{AssetDb, AssetProcessor};
 
-use crate::std::components::{Camera, GlobalTransform, Visibility};
+use crate::std::components::Camera;
 use crate::system::SystemError;
 use crate::{DebugDrawer, DebugDrawerRenderer, ExclusiveSystem, System, SystemContext, World};
 
+use super::pipeline::{CameraRenderPipeline, CameraView, PipelineRegistry, RecordCtx};
+use super::scene_drawer::VisibleScene;
 use super::{
-    CameraOutput, CameraTarget, CameraTargetSpec, FrameRing, MainViewport, MaterialAssetManager,
-    MaterialInstanceManager, MeshManager, MeshRenderer, PipelineCache, RenderSchedule,
-    ShaderManager, ShadingRegistry, SizePolicy, TextureManager, VertexLayoutManager, shaders,
+    CameraOutput, CameraTarget, CameraTargetSpec, FORWARD_PIPELINE, FrameRing, MainViewport,
+    MaterialAssetManager, MaterialInstanceManager, MeshManager, PipelineCache, RenderPath,
+    RenderSchedule, ShaderManager, ShadingRegistry, SizePolicy, TextureManager,
+    VertexLayoutManager,
 };
 
-/// Holds the forward scene pass's graph handle so other passes (an egui overlay,
-/// debug lines) can depend on it. Written by [`ForwardRender`] each frame (set to
+/// Holds the scene's main pass handle so other passes (an egui overlay,
+/// debug lines) can depend on it. Written by [`CameraRender`] each frame (set to
 /// `None` if it produced no pass).
 #[derive(Default)]
 pub struct ScenePass(pub Option<PassHandle>);
@@ -41,8 +39,12 @@ pub struct ScenePass(pub Option<PassHandle>);
 /// ([`TextureManager::publish_virtual`]) so materials can sample them.
 ///
 /// Cameras **without** `CameraOutput` are untouched — their targets stay
-/// host-managed. Runs as an exclusive barrier (it inserts components),
-/// ordered before [`ForwardRender`].
+/// host-managed. After the color+depth derivation it invokes each
+/// [`RenderPath`] camera's pipeline
+/// [`ensure_targets`](CameraRenderPipeline::ensure_targets) hook so pipelines
+/// derive their auxiliary targets (ADR-035) under the same discipline. Runs
+/// as an exclusive barrier (it inserts components), ordered before
+/// [`CameraRender`].
 #[derive(Default)]
 pub struct EnsureCameraTargets;
 
@@ -134,10 +136,6 @@ impl ExclusiveSystem for EnsureCameraTargets {
                 }
             }
         }
-        if work.is_empty() {
-            return Ok(());
-        }
-
         // Phase 2: create textures and update components.
         let device = world.resource::<TextureManager>().device().clone();
         for item in work {
@@ -204,6 +202,29 @@ impl ExclusiveSystem for EnsureCameraTargets {
                 }
             }
         }
+
+        // ADR-035: pipelines derive their auxiliary targets (PipelineTargets)
+        // after the color+depth pair exists. Resolve under read borrows, then
+        // hand each pipeline the world exclusively.
+        if world.has_resource::<PipelineRegistry>() {
+            let hooks: Vec<(crate::Entity, Arc<dyn CameraRenderPipeline>)> = {
+                let Ok(paths) = world.read_all::<RenderPath>() else {
+                    return Ok(());
+                };
+                let registry = world.resource::<PipelineRegistry>();
+                paths
+                    .iter()
+                    .filter_map(|(idx, path)| {
+                        let entity = world.entity_at_index(idx)?;
+                        world.get::<Camera>(entity)?;
+                        Some((entity, registry.resolve(&path.pipeline)?))
+                    })
+                    .collect()
+            };
+            for (entity, pipeline) in hooks {
+                pipeline.ensure_targets(world, entity);
+            }
+        }
         Ok(())
     }
 }
@@ -234,65 +255,23 @@ impl System for FlushUploads {
     }
 }
 
-/// Renders the forward scene into the (editor) camera's [`CameraTarget`]: fills
-/// the [`FrameRing`] resource with per-draw uniforms (group 0 transform, group 1
-/// material props — same buffer, different offsets) and emits a draw per visible
-/// primitive, then adds the pass to the frame graph and records its handle in
-/// [`ScenePass`] so dependent passes (egui, debug) can order after it.
+/// The per-camera render dispatcher (ADR-035, #128): resolves each camera's
+/// [`RenderPath`] against the [`PipelineRegistry`] and has the pipeline record
+/// the camera's passes into the frame graph, then records the primary main
+/// pass handle in [`ScenePass`] so dependent passes (egui, debug) can order
+/// after it.
 ///
 /// Camera + CameraTarget are read via `read_all` (the editor camera is
-/// EDITOR-flagged, which the filtered `read` iterator skips).
-///
-/// # Binding groups are created eagerly (issue #40)
-///
-/// A `BindingGroup` is now a device resource whose GPU descriptor set is built
-/// once at creation, so steady-state frames must issue **zero**
-/// `create_binding_group` calls. The camera (external) and model (dynamic) sets
-/// bind the frame ring buffer at offset 0 and select the per-view / per-entity
-/// slot with a per-draw dynamic offset — so the group is frame-invariant and
-/// cached here by the material's set-layout identity. The empty (unclassified)
-/// set is likewise one cached group per layout. The static material-property
-/// set is cached inside its [`ResolvedInstance`]. After warm-up every set is a
-/// cache hit.
+/// EDITOR-flagged, which the filtered `read` iterator skips). The frame's
+/// visible renderables are gathered **once** ([`VisibleScene::gather`]) and
+/// every recorded view replays the prepared list.
 #[derive(Default)]
-pub struct ForwardRender {
-    /// Frame-invariant camera/model/empty groups, keyed by the material's
-    /// set-layout pointer (stable — pipelines are cached, and each cached group
-    /// keeps its layout `Arc` alive so the pointer can't be reused while cached).
-    binding_cache: std::sync::Mutex<ForwardBindingCache>,
-}
+pub struct CameraRender;
 
-/// Cache of the frame-invariant binding groups assembled by [`ForwardRender`].
-/// Values keyed by `Arc::as_ptr(layout) as usize` (a `Send` key).
-#[derive(Default)]
-struct ForwardBindingCache {
-    camera: HashMap<usize, Arc<BindingGroup>>,
-    model: HashMap<usize, Arc<BindingGroup>>,
-    empty: HashMap<usize, Arc<BindingGroup>>,
-}
-
-impl ForwardBindingCache {
-    /// Get (or create + cache) a binding group for `layout`, building its
-    /// descriptor with `make_desc` on the first miss.
-    fn get_or_create(
-        map: &mut HashMap<usize, Arc<BindingGroup>>,
-        device: &Arc<GraphicsDevice>,
-        layout: &Arc<BindingLayout>,
-        make_desc: impl FnOnce() -> BindingGroupDescriptor,
-    ) -> Result<Arc<BindingGroup>, GraphicsError> {
-        let key = Arc::as_ptr(layout) as usize;
-        if let Some(group) = map.get(&key) {
-            return Ok(group.clone());
-        }
-        let group = device.create_binding_group(Arc::clone(layout), make_desc())?;
-        map.insert(key, group.clone());
-        Ok(group)
-    }
-}
-
-impl System for ForwardRender {
-    /// The scene pass's handle (so a dependent render system can order after it
-    /// via [`SystemContext::system_result`](crate::SystemContext::system_result)).
+impl System for CameraRender {
+    /// The scene's main pass handle (so a dependent render system can order
+    /// after it via
+    /// [`SystemContext::system_result`](crate::SystemContext::system_result)).
     type Result = Option<PassHandle>;
     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<Self::Result, SystemError> {
         let world = ctx.raw_world();
@@ -300,36 +279,37 @@ impl System for ForwardRender {
             || !world.has_resource::<FrameRing>()
             || !world.has_resource::<ScenePass>()
             || !world.has_resource::<PipelineCache>()
+            || !world.has_resource::<PipelineRegistry>()
         {
             return Ok(None);
         }
         world.resource_mut::<ScenePass>().0 = None;
 
         // Every entity with a Camera AND a CameraTarget renders (ADR-029):
-        // one pass per camera into its own target. Offscreen cameras are
-        // emitted first, the primary (screen) camera last — so ScenePass, the
-        // handle overlays (debug lines, egui) attach to, is the last writer
-        // of the surface the host composites. Cross-camera ordering by
-        // resource use (a camera sampling another's output) is derived by the
-        // graph compiler automatically.
-        struct CameraView {
-            vp: [[f32; 4]; 4],
-            color: Arc<redlilium_graphics::Texture>,
-            depth: Arc<redlilium_graphics::Texture>,
-            clear: [f32; 4],
-            primary: bool,
+        // its RenderPath's pipeline records into its own target. Offscreen
+        // cameras are emitted first, the primary (screen) camera last — so
+        // ScenePass, the handle overlays (debug lines, egui) attach to, is
+        // the last writer of the surface the host composites. Cross-camera
+        // (and cross-pass) ordering by resource use is derived by the graph
+        // compiler automatically.
+        struct PlannedView {
+            view: CameraView,
+            pipeline: Arc<dyn CameraRenderPipeline>,
         }
-        let mut cameras: Vec<CameraView> = {
+        let mut views: Vec<PlannedView> = {
             let (Ok(cams), Ok(targets)) =
                 (world.read_all::<Camera>(), world.read_all::<CameraTarget>())
             else {
                 return Ok(None);
             };
             let outputs = world.read_all::<CameraOutput>().ok();
+            let paths = world.read_all::<RenderPath>().ok();
+            let registry = world.resource::<PipelineRegistry>();
             targets
                 .iter()
                 .filter_map(|(idx, target)| {
                     let cam = cams.get(idx)?;
+                    let entity = world.entity_at_index(idx)?;
                     // Primary = renders the surface the host composites: a
                     // Screen spec, or a host-managed target (no spec at all —
                     // the editor's scene view).
@@ -337,225 +317,59 @@ impl System for ForwardRender {
                         .as_ref()
                         .and_then(|o| o.get(idx))
                         .is_none_or(|out| matches!(out.target, CameraTargetSpec::Screen));
-                    Some(CameraView {
-                        vp: mat4_to_cols_array_2d(&cam.view_projection()),
-                        color: target.color.clone(),
-                        depth: target.depth.clone(),
-                        clear: target.clear_color,
-                        primary,
+                    // No RenderPath component = the forward default (the same
+                    // defaulting discipline as CameraOutput::screen()).
+                    let name = paths
+                        .as_ref()
+                        .and_then(|p| p.get(idx))
+                        .map_or(FORWARD_PIPELINE, |path| path.pipeline.as_str());
+                    let pipeline = registry.resolve(name)?;
+                    Some(PlannedView {
+                        view: CameraView {
+                            entity,
+                            view_projection: mat4_to_cols_array_2d(&cam.view_projection()),
+                            target: target.clone(),
+                            primary,
+                        },
+                        pipeline,
                     })
                 })
                 .collect()
         };
-        if cameras.is_empty() {
+        if views.is_empty() {
             return Ok(None);
         }
-        cameras.sort_by_key(|view| view.primary);
+        views.sort_by_key(|planned| planned.view.primary);
 
-        let mut passes: Vec<(bool, GraphicsPass)> = Vec::with_capacity(cameras.len());
+        // Gather the frame's visible set once; every view records from it.
+        let Some(scene) = VisibleScene::gather(world) else {
+            return Ok(None);
+        };
 
-        // Fill the ring + emit draws (scoped so the guards drop before we touch
-        // the graph resource).
-        {
-            let mut ring = world.resource_mut::<FrameRing>();
-            let mut pipelines = world.resource_mut::<PipelineCache>();
-            let (Ok(renderers), Ok(globals), Ok(visibilities)) = (
-                world.read::<MeshRenderer>(),
-                world.read::<GlobalTransform>(),
-                world.read::<Visibility>(),
-            ) else {
-                return Ok(None);
-            };
-            // Binding sets are assembled per the shader's declared update rates
-            // (docs/MATERIAL_ASSETS.md Decision 7):
-            // - external: the camera block — pushed into the shared ring once
-            //   per view, bound at its fixed offset;
-            // - dynamic: the model block — one ring binding, the per-draw
-            //   dynamic offset selects the entity's slot;
-            // - static: the instance's material props group, built once by the
-            //   instance manager.
-            let ring_buffer: Arc<Buffer> = ring.buffer().clone();
-            let camera_size = std::mem::size_of::<shaders::CameraUniforms>() as u64;
-            let model_size = std::mem::size_of::<shaders::ModelUniforms>() as u64;
-            let mut cache = self
-                .binding_cache
-                .lock()
-                .expect("forward binding cache poisoned");
-            for view in &cameras {
-                let camera = shaders::CameraUniforms {
-                    view_projection: view.vp,
-                };
-                // The camera set is `external` (a dynamic uniform now): bind offset 0,
-                // supply this view's ring offset per draw.
-                let camera_off = ring.push(bytemuck::bytes_of(&camera));
-                let color_fmt = view.color.format();
-                let depth_fmt = view.depth.format();
-                let mut pass = GraphicsPass::new(
-                    if view.primary {
-                        "scene_view"
-                    } else {
-                        "camera_view"
-                    }
-                    .into(),
-                );
-                pass.set_render_targets(
-                    RenderTargetConfig::new()
-                        .with_color(
-                            ColorAttachment::from_texture(view.color.clone()).with_clear_color(
-                                view.clear[0],
-                                view.clear[1],
-                                view.clear[2],
-                                view.clear[3],
-                            ),
-                        )
-                        .with_depth_stencil(
-                            DepthStencilAttachment::from_texture(view.depth.clone())
-                                .with_clear_depth(1.0),
-                        ),
-                );
-                for (idx, renderer) in renderers.iter() {
-                    if let Some(vis) = visibilities.get(idx)
-                        && !vis.is_visible()
-                    {
-                        continue;
-                    }
-                    let model = globals
-                        .get(idx)
-                        .map(|g| mat4_to_cols_array_2d(&g.0))
-                        .unwrap_or_else(|| mat4_to_cols_array_2d(&Mat4::identity()));
-                    let model_off =
-                        ring.push(bytemuck::bytes_of(&shaders::ModelUniforms { model }));
-                    for primitive in &renderer.primitives {
-                        // The mesh and the material instance load asynchronously — skip
-                        // until both are resident.
-                        let (Some(mesh), Some(instance)) = (primitive.mesh(), primitive.material())
-                        else {
-                            continue;
-                        };
-                        // Specialize the pipeline for this shader + variant + the
-                        // mesh's vertex layout + the target formats (built once,
-                        // then cached). The variant is the material's feature
-                        // half (Decision 5); when the forward path grows system
-                        // axes (lighting modes), this is where it completes
-                        // them via with_features + .system().
-                        let Ok(pipeline) = pipelines.get_or_build(
-                            instance.shader_guid,
-                            &instance.shader,
-                            &instance.variant,
-                            mesh.layout(),
-                            color_fmt,
-                            depth_fmt,
-                        ) else {
-                            continue;
-                        };
-                        // Assemble the sets in declaration order by their rates.
-                        let rates = pipeline.set_update_rates().to_vec();
-                        if rates.iter().all(Option::is_none) {
-                            log::debug!(
-                                "shader {:?} declares no rate-classified sets; skipping draw",
-                                instance.shader_guid
-                            );
-                            continue;
-                        }
-                        let device = pipeline.device();
-                        let mut gfx_instance = MaterialInstance::new(Arc::clone(&pipeline));
-                        let mut offsets: Vec<Vec<u32>> = Vec::with_capacity(rates.len());
-                        // Assemble one binding group per set, all frame-invariant and
-                        // cached (see the type-level doc). A creation failure skips the
-                        // draw rather than the whole frame.
-                        let mut assembled = true;
-                        for (set_idx, rate) in rates.iter().enumerate() {
-                            use redlilium_graphics::UpdateRate;
-                            let Some(layout) = pipeline.binding_layouts().get(set_idx) else {
-                                // A rate-classified set with no reflected layout is a
-                                // reflection bug; skip the draw to avoid a bad bind.
-                                assembled = false;
-                                break;
-                            };
-                            let group = match rate {
-                                Some(UpdateRate::External) => ForwardBindingCache::get_or_create(
-                                    &mut cache.camera,
-                                    device,
-                                    layout,
-                                    || {
-                                        BindingGroupDescriptor::new().with_buffer_range(
-                                            0,
-                                            ring_buffer.clone(),
-                                            0,
-                                            camera_size,
-                                        )
-                                    },
-                                ),
-                                Some(UpdateRate::Dynamic) => ForwardBindingCache::get_or_create(
-                                    &mut cache.model,
-                                    device,
-                                    layout,
-                                    || {
-                                        BindingGroupDescriptor::new().with_buffer_range(
-                                            0,
-                                            ring_buffer.clone(),
-                                            0,
-                                            model_size,
-                                        )
-                                    },
-                                ),
-                                Some(UpdateRate::Static) => {
-                                    instance.props_group(device, Arc::clone(layout))
-                                }
-                                None => ForwardBindingCache::get_or_create(
-                                    &mut cache.empty,
-                                    device,
-                                    layout,
-                                    BindingGroupDescriptor::new,
-                                ),
-                            };
-                            let group = match group {
-                                Ok(g) => g,
-                                Err(e) => {
-                                    log::warn!(
-                                        "forward render: failed to build binding group: {e}"
-                                    );
-                                    assembled = false;
-                                    break;
-                                }
-                            };
-                            gfx_instance = gfx_instance.with_binding_group(group);
-                            // External + Dynamic sets bind at offset 0 and select their
-                            // slot via a per-draw dynamic offset.
-                            offsets.push(match rate {
-                                Some(UpdateRate::External) => vec![camera_off],
-                                Some(UpdateRate::Dynamic) => vec![model_off],
-                                _ => Vec::new(),
-                            });
-                        }
-                        if !assembled {
-                            continue;
-                        }
-                        pass.add_draw_command(
-                            DrawCommand::new(mesh, Arc::new(gfx_instance))
-                                .with_dynamic_offsets(offsets),
-                        );
-                    }
-                }
-                passes.push((view.primary, pass));
-            }
-        }
-
-        // Add every camera's pass to the frame graph; ScenePass (and this
-        // system's result) is the primary camera's pass — the one overlays
-        // attach to and the host composites.
+        // Take the graph out of the resource so pipelines can freely borrow
+        // world resources (FrameRing, PipelineCache) while recording into it.
+        let Some(mut graph) = world.resource_mut::<RenderSchedule>().take() else {
+            return Ok(None);
+        };
+        let record_ctx = RecordCtx {
+            world,
+            scene: &scene,
+        };
+        // ScenePass (and this system's result) is the primary camera's main
+        // pass — the one overlays attach to and the host composites.
         let mut primary_handle = None;
-        {
-            let mut schedule = world.resource_mut::<RenderSchedule>();
-            if let Some(graph) = schedule.graph_mut() {
-                for (primary, pass) in passes {
-                    let handle = graph.add_graphics_pass(pass);
-                    if primary || primary_handle.is_none() {
-                        primary_handle = Some(handle);
-                    }
-                }
+        for planned in &views {
+            let handle = planned
+                .pipeline
+                .record(&record_ctx, &planned.view, &mut graph);
+            if let Some(handle) = handle
+                && (planned.view.primary || primary_handle.is_none())
+            {
+                primary_handle = Some(handle);
             }
         }
+        world.resource_mut::<RenderSchedule>().set(graph);
+
         if let Some(handle) = primary_handle {
             world.resource_mut::<ScenePass>().0 = Some(handle);
         }
@@ -564,9 +378,9 @@ impl System for ForwardRender {
 }
 
 /// Renders debug-drawer lines as a separate pass that loads the camera's
-/// [`CameraTarget`] and is ordered after the forward scene pass — whose handle it
+/// [`CameraTarget`] and is ordered after the scene's main pass — whose handle it
 /// reads the native way, via [`system_result`](SystemContext::system_result)
-/// (requires a `ForwardRender -> DebugRender` edge). Updates [`ScenePass`] to its
+/// (requires a `CameraRender -> DebugRender` edge). Updates [`ScenePass`] to its
 /// own handle so it becomes the CameraTarget's last writer (egui depends on that).
 pub struct DebugRender;
 
@@ -574,8 +388,8 @@ impl System for DebugRender {
     type Result = ();
     fn run<'a>(&'a self, ctx: &'a SystemContext<'a>) -> Result<Self::Result, SystemError> {
         let world = ctx.raw_world();
-        // The forward pass we order after (its handle comes from system_result).
-        let Some(scene_handle) = *ctx.system_result::<ForwardRender>() else {
+        // The scene pass we order after (its handle comes from system_result).
+        let Some(scene_handle) = *ctx.system_result::<CameraRender>() else {
             return Ok(());
         };
         if !world.has_resource::<DebugDrawer>()

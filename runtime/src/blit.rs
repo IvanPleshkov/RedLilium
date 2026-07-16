@@ -1,7 +1,7 @@
 //! Final present pass: samples the main camera's off-screen target onto the
 //! swapchain with a fullscreen triangle.
 //!
-//! [`ForwardRender`](redlilium_ecs::ForwardRender) draws into a
+//! [`CameraRender`](redlilium_ecs::CameraRender) draws into a
 //! [`CameraTarget`](redlilium_ecs::CameraTarget) texture (render-to-texture,
 //! ADR-009); in the editor the egui overlay composites that texture, in the
 //! game runtime this blit does.

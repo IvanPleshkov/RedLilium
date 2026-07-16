@@ -16,14 +16,14 @@ use redlilium_core::abstract_editor::{ActionQueue, DEFAULT_MAX_UNDO, EditActionH
 use redlilium_core::math::Vec3;
 use redlilium_debug_drawer::DebugDrawer;
 use redlilium_ecs::{
-    AssetGpuFlush, AssetPump, Camera, DebugRender, DrawGrid, DrawSelectionAabb, EguiRender, Entity,
-    FlushUploads, ForwardRender, FrameRing, FreeFlyCamera, GameTime, GlobalTransform, GridConfig,
-    HotReload, ManagePlayModeTransitions, MaterialInstanceLoad, MaterialInstanceManager,
-    MaterialInstanceSource, MeshGenerator, MeshLoad, MeshManager, MeshRenderer, MeshSource, Name,
-    PlayControl, PlayModeAwareRegistry, PlayStartTick, PostUpdate, PreUpdate, Primitive, RealTime,
-    Render, RenderSchedule, ScenePass, Schedules, TextureManager, Transform, Update,
-    UpdateCameraMatrices, UpdateFreeFlyCamera, UpdateGlobalTransforms, Visibility, WindowInput,
-    World, register_std_components,
+    AssetGpuFlush, AssetPump, Camera, CameraRender, DebugRender, DrawGrid, DrawSelectionAabb,
+    EguiRender, Entity, FlushUploads, FrameRing, FreeFlyCamera, GameTime, GlobalTransform,
+    GridConfig, HotReload, ManagePlayModeTransitions, MaterialInstanceLoad,
+    MaterialInstanceManager, MaterialInstanceSource, MeshGenerator, MeshLoad, MeshManager,
+    MeshRenderer, MeshSource, Name, PipelineRegistry, PlayControl, PlayModeAwareRegistry,
+    PlayStartTick, PostUpdate, PreUpdate, Primitive, RealTime, Render, RenderSchedule, ScenePass,
+    Schedules, TextureManager, Transform, Update, UpdateCameraMatrices, UpdateFreeFlyCamera,
+    UpdateGlobalTransforms, Visibility, WindowInput, World, register_std_components,
 };
 use redlilium_runtime::EngineContext;
 
@@ -178,9 +178,11 @@ pub fn create_editor_world_base(
         .expect("Failed to create scene frame ring");
     scene_view.set_frame_ring_buffer(frame_ring.buffer().clone());
     world.insert_resource(frame_ring);
-    // The ForwardRender system records its scene-pass handle here so the egui
-    // overlay + debug pass can depend on it.
+    // The CameraRender dispatcher records its scene-pass handle here so the
+    // egui overlay + debug pass can depend on it; the registry resolves each
+    // camera's RenderPath (ADR-035).
     world.insert_resource(ScenePass::default());
+    world.insert_resource(PipelineRegistry::default());
 
     // Insert WindowInput resource
     let window_input_handle = world.insert_resource(WindowInput::default());
@@ -438,7 +440,7 @@ pub fn build_editor_schedules(egui: bool) -> Schedules {
     schedules
         .get_mut::<Render>()
         .add_exclusive(redlilium_ecs::EnsureCameraTargets);
-    schedules.get_mut::<Render>().add(ForwardRender::default());
+    schedules.get_mut::<Render>().add(CameraRender);
     schedules.get_mut::<Render>().add(DebugRender);
     // Both FlushUploads and AssetGpuFlush use raw RenderSchedule access, so
     // they must not run in parallel under the multi-threaded runner.
@@ -448,22 +450,22 @@ pub fn build_editor_schedules(egui: bool) -> Schedules {
         .expect("FlushUploads -> AssetGpuFlush edge");
     schedules
         .get_mut::<Render>()
-        .add_edge::<FlushUploads, ForwardRender>()
-        .expect("FlushUploads -> ForwardRender edge");
+        .add_edge::<FlushUploads, CameraRender>()
+        .expect("FlushUploads -> CameraRender edge");
     // Asset GPU uploads (e.g. freshly loaded meshes) must land before the
     // scene draw that uses them.
     schedules
         .get_mut::<Render>()
-        .add_edge::<AssetGpuFlush, ForwardRender>()
-        .expect("AssetGpuFlush -> ForwardRender edge");
+        .add_edge::<AssetGpuFlush, CameraRender>()
+        .expect("AssetGpuFlush -> CameraRender edge");
     schedules
         .get_mut::<Render>()
-        .add_edge::<redlilium_ecs::EnsureCameraTargets, ForwardRender>()
-        .expect("EnsureCameraTargets -> ForwardRender edge");
+        .add_edge::<redlilium_ecs::EnsureCameraTargets, CameraRender>()
+        .expect("EnsureCameraTargets -> CameraRender edge");
     schedules
         .get_mut::<Render>()
-        .add_edge::<ForwardRender, DebugRender>()
-        .expect("ForwardRender -> DebugRender edge");
+        .add_edge::<CameraRender, DebugRender>()
+        .expect("CameraRender -> DebugRender edge");
     // Gizmo overlay draws over the scene+debug image (#85).
     schedules
         .get_mut::<Render>()
