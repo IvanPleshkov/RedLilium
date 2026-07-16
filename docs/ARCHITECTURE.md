@@ -634,7 +634,7 @@ the asset database live in the host-owned `EngineContext` and are shared by
 all worlds as the same `Arc`s, so a play world starting and dying does not
 reload assets.
 
-### The game owns the editor binary (ADR-033)
+### The game owns the editor binary (ADR-037)
 
 `redlilium-editor` is a **library**. A game project ships a small editor
 binary that statically links its plugin:

@@ -99,7 +99,7 @@ pub fn run(
     // The play session (EDITOR_REBUILD.md §4.3): a full game world booted from
     // the hosted module on `play`, dropped on `stop`.
     let mut play: Option<crate::play::PlaySession> = None;
-    // Tier-2 session carry (ADR-033): a predecessor process that
+    // Tier-2 session carry (ADR-037): a predecessor process that
     // exec-restarted left its open scene + camera pose; consume it.
     let carry = crate::session::take();
     let params = EditorWorldParams {
@@ -166,16 +166,16 @@ pub fn run(
 
     let aspect = width as f32 / height as f32;
     if let Some(plugin) = game {
-        // Statically linked by the owning binary (ADR-033).
+        // Statically linked by the owning binary (ADR-037).
         if std::env::var("REDLILIUM_GAME").is_ok() {
             log::warn!(
-                "REDLILIUM_GAME ignored: this editor binary statically hosts its game (ADR-033)"
+                "REDLILIUM_GAME ignored: this editor binary statically hosts its game (ADR-037)"
             );
         }
         game_host = Some(crate::game_host::GameHost::from_static(
             plugin, &engine, &mut ew,
         ));
-        log::info!("game statically hosted (ADR-033)");
+        log::info!("game statically hosted (ADR-037)");
     } else if let Ok(path) = std::env::var("REDLILIUM_GAME") {
         // SAFETY: the operator points this at a game cdylib built in the same
         // `cargo build` as this editor (the fingerprint gate enforces engine
@@ -194,7 +194,7 @@ pub fn run(
     let mut pipeline = device.create_pipeline(2);
     let mut rc = RemoteCommands::default();
 
-    // Tier-1 behavior reload (ADR-033): only meaningful over a hosted game.
+    // Tier-1 behavior reload (ADR-037): only meaningful over a hosted game.
     let mut behavior = behavior_spec
         .filter(|_| game_host.is_some())
         .map(crate::behavior_reload::BehaviorReload::new);
@@ -312,7 +312,7 @@ pub fn run(
             play = None;
         }
 
-        // Tier-2 exec-restart (ADR-033): write the carry, wind the loop
+        // Tier-2 exec-restart (ADR-037): write the carry, wind the loop
         // down; `crate::launch` execs the fresh binary after teardown.
         if rc.take_restart() {
             if play.take().is_some() {
@@ -325,7 +325,7 @@ pub fn run(
 
         if rc.take_reload() {
             match (behavior.as_mut(), game_host.as_mut()) {
-                // Tier-1 (ADR-033): kick the background rebuild; the swap
+                // Tier-1 (ADR-037): kick the background rebuild; the swap
                 // lands via `apply_behavior_build` when it finishes green.
                 (Some(b), Some(_)) => {
                     if b.request_rebuild() {
@@ -336,7 +336,7 @@ pub fn run(
                 }
                 (None, Some(host)) if !host.is_dylib() => log::error!(
                     "reload_game: statically hosted game without behavior_reload — \
-                     restart the editor binary instead (Tier 2, ADR-033)"
+                     restart the editor binary instead (Tier 2, ADR-037)"
                 ),
                 (None, None) => log::error!(
                     "reload_game: no game module hosted (launch with REDLILIUM_GAME=<cdylib>)"

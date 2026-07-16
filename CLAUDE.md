@@ -161,7 +161,7 @@ cargo build --workspace
 # Run the window demo
 cargo run -p redlilium-demos --bin window_demo
 
-# Run the car game's editor (statically hosted game, ADR-033; no REDLILIUM_GAME needed)
+# Run the car game's editor (statically hosted game, ADR-037; no REDLILIUM_GAME needed)
 cargo run -p car-game-editor
 
 # Run tests for a specific crate

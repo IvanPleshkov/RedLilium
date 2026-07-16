@@ -59,10 +59,10 @@ pub struct Editor {
     /// Hosted game module (#58). Declared after the worlds so it drops after
     /// them: the mapped game image must outlive every world its plugin touched.
     game_host: Option<crate::game_host::GameHost>,
-    /// A statically linked game handed in by the owning binary (ADR-033),
+    /// A statically linked game handed in by the owning binary (ADR-037),
     /// held until `on_init` hosts it (the editing world doesn't exist yet).
     static_game: Option<Box<dyn redlilium_runtime::Plugin>>,
-    /// Tier-1 behavior-reload config (ADR-033), held until `on_init`.
+    /// Tier-1 behavior-reload config (ADR-037), held until `on_init`.
     behavior_spec: Option<crate::behavior_reload::BehaviorReloadSpec>,
     /// Tier-1 behavior-reload driver: source watcher + background rebuild.
     behavior: Option<crate::behavior_reload::BehaviorReload>,
@@ -70,7 +70,7 @@ pub struct Editor {
     /// written and `crate::launch` execs the fresh binary. Cleared if the
     /// unsaved-changes dialog is cancelled.
     restart_pending: bool,
-    /// Camera pose carried from the predecessor process (ADR-033 Tier 2),
+    /// Camera pose carried from the predecessor process (ADR-037 Tier 2),
     /// applied in `on_init` once the editor camera exists.
     carried_camera: Option<crate::session::CameraPose>,
     runner: EcsRunner,
@@ -156,7 +156,7 @@ struct PendingPrefabImport {
 
 impl Editor {
     /// The windowed shell, optionally owning a statically linked game and
-    /// its Tier-1 behavior-reload config (ADR-033) — hosted in `on_init`
+    /// its Tier-1 behavior-reload config (ADR-037) — hosted in `on_init`
     /// once the editing world exists.
     pub fn with_game(
         game: Option<Box<dyn redlilium_runtime::Plugin>>,
@@ -189,7 +189,7 @@ impl Editor {
         }
         let console = ConsolePanel::new(crate::log_capture::log_buffer());
 
-        // Tier-2 session carry (ADR-033): a predecessor process that
+        // Tier-2 session carry (ADR-037): a predecessor process that
         // exec-restarted left its open scene + camera pose; it overrides the
         // project.toml startup scene for this one launch.
         let carry = crate::session::take();
@@ -573,7 +573,7 @@ impl Editor {
     /// Apply a play action (Play/Pause/Resume/Stop): manage the play-session
     /// lifecycle (EDITOR_REBUILD.md §4.3). Play boots a full game world from
     /// the hosted module; Stop drops it. The editing world is not involved.
-    /// Begin a Tier-2 exec-restart (ADR-033): routed through the
+    /// Begin a Tier-2 exec-restart (ADR-037): routed through the
     /// unsaved-changes dialog so nothing is lost silently; on close the
     /// session carry is written and `crate::launch` execs the fresh binary.
     fn request_restart(&mut self) {
@@ -941,17 +941,17 @@ impl AppHandler for Editor {
         let ew = self.world.as_mut().unwrap();
         ew.schedules.run_startup(&mut ew.world, runner);
 
-        // Host the game: statically linked by the owning binary (ADR-033),
+        // Host the game: statically linked by the owning binary (ADR-037),
         // or a cdylib via the engine-repo override (#58).
         if let Some(plugin) = self.static_game.take() {
             if std::env::var("REDLILIUM_GAME").is_ok() {
                 log::warn!(
-                    "REDLILIUM_GAME ignored: this editor binary statically hosts its game (ADR-033)"
+                    "REDLILIUM_GAME ignored: this editor binary statically hosts its game (ADR-037)"
                 );
             }
             let engine = self.engine.as_ref().expect("engine created above");
             self.game_host = Some(crate::game_host::GameHost::from_static(plugin, engine, ew));
-            log::info!("game statically hosted (ADR-033)");
+            log::info!("game statically hosted (ADR-037)");
         } else if let Ok(path) = std::env::var("REDLILIUM_GAME") {
             let engine = self.engine.as_ref().expect("engine created above");
             // SAFETY: the operator points this at a game cdylib built in the
@@ -962,7 +962,7 @@ impl AppHandler for Editor {
                 Err(e) => log::error!("failed to load game module '{path}': {e}"),
             }
         }
-        // Tier-1 behavior reload (ADR-033): only meaningful over a hosted game.
+        // Tier-1 behavior reload (ADR-037): only meaningful over a hosted game.
         if self.game_host.is_some()
             && let Some(spec) = self.behavior_spec.take()
         {
@@ -976,7 +976,7 @@ impl AppHandler for Editor {
         {
             crate::core::instantiate_scene(ew, path, scene);
         }
-        // Tier-2 carried camera pose (ADR-033): the predecessor process's
+        // Tier-2 carried camera pose (ADR-037): the predecessor process's
         // editor camera, applied now that the fresh camera exists.
         if let Some(pose) = self.carried_camera.take()
             && let Some(ew) = self.world.as_mut()
@@ -1015,7 +1015,7 @@ impl AppHandler for Editor {
 
     fn on_update(&mut self, ctx: &mut AppContext) -> bool {
         if self.should_close {
-            // Tier-2 exec-restart (ADR-033): the loop is winding down — write
+            // Tier-2 exec-restart (ADR-037): the loop is winding down — write
             // the carry; `crate::launch` execs the fresh binary after
             // teardown. A plain close skips this.
             if self.restart_pending {
@@ -1141,7 +1141,7 @@ impl AppHandler for Editor {
         // that Changed<T> filters can detect the mutations this frame).
         self.world.as_mut().unwrap().drain_actions();
 
-        // Tier-1 behavior reload (ADR-033): drain watcher/build events; a
+        // Tier-1 behavior reload (ADR-037): drain watcher/build events; a
         // finished green build swaps the behavior module between frames (the
         // play world from the old image dies first).
         if let Some(result) = self.behavior.as_mut().and_then(|b| b.poll()) {
@@ -1224,7 +1224,7 @@ impl AppHandler for Editor {
             });
         }
 
-        // Tier-2 exec-restart (ADR-033), remote-requested.
+        // Tier-2 exec-restart (ADR-037), remote-requested.
         if self.remote.as_mut().is_some_and(|rc| rc.take_restart()) {
             self.request_restart();
         }
@@ -1235,7 +1235,7 @@ impl AppHandler for Editor {
             && rc.take_reload()
         {
             if let Some(b) = self.behavior.as_mut() {
-                // Tier-1 (ADR-033): background rebuild; the swap lands via
+                // Tier-1 (ADR-037): background rebuild; the swap lands via
                 // `apply_behavior_build` when it finishes green.
                 if b.request_rebuild() {
                     log::info!("reload_game: Tier-1 rebuild started");
@@ -1245,7 +1245,7 @@ impl AppHandler for Editor {
             } else if self.game_host.as_ref().is_some_and(|host| !host.is_dylib()) {
                 log::error!(
                     "reload_game: statically hosted game without behavior_reload — \
-                     restart the editor binary instead (Tier 2, ADR-033)"
+                     restart the editor binary instead (Tier 2, ADR-037)"
                 );
             } else {
                 // Legacy dylib hosting: warm-restart the editing world. The
@@ -1430,7 +1430,7 @@ impl AppHandler for Editor {
                             ui.add_space(8.0);
                             crate::toolbar::draw_play_mode_indicator(ui, self.play_state);
 
-                            // Tier-1/Tier-2 build indicator (ADR-033).
+                            // Tier-1/Tier-2 build indicator (ADR-037).
                             if let Some(b) = &self.behavior {
                                 ui.add_space(8.0);
                                 let status = crate::toolbar::GameBuildStatus {
@@ -1706,7 +1706,7 @@ impl AppHandler for Editor {
                             if ui.button("Cancel").clicked() {
                                 self.show_close_dialog = false;
                                 // A cancelled close also cancels a pending
-                                // Tier-2 restart (ADR-033).
+                                // Tier-2 restart (ADR-037).
                                 self.restart_pending = false;
                             }
                         });

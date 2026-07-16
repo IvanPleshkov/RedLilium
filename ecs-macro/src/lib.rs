@@ -75,7 +75,7 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
     // compiled from the same source produce the same hash; a reshaped
     // component (field added/removed/retyped/reordered) shifts it. This is
     // the name-keyed, cross-image schema identity (`TypeId`s are useless
-    // across images) — the editor's Tier-1 behavior diff reads it (ADR-033).
+    // across images) — the editor's Tier-1 behavior diff reads it (ADR-037).
     // `#[skip_serialization]` components keep the trait's empty default
     // (nothing serialized → no schema to compare).
     let schema_hash_body = if skip_serialization {

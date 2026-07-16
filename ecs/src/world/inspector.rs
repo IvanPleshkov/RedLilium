@@ -679,7 +679,7 @@ impl World {
     ///
     /// Schema drift (a component whose stored schema hash differs from this
     /// world's) is tolerated by design and logged as a warning: field-name-
-    /// keyed restore defaults added fields and drops removed ones (ADR-033 —
+    /// keyed restore defaults added fields and drops removed ones (ADR-037 —
     /// cross-image scene seeding depends on this).
     ///
     /// Returns the newly spawned entities in snapshot order. On error, every
@@ -690,7 +690,7 @@ impl World {
         &mut self,
         snapshot: &crate::serialize::SerializedWorld,
     ) -> Result<Vec<Entity>, crate::serialize::DeserializeError> {
-        // 0. Schema-drift check (Phase 6, re-scoped by ADR-033): hashes are
+        // 0. Schema-drift check (Phase 6, re-scoped by ADR-037): hashes are
         // **advisory**, not a gate. Name-keyed field deserialization is
         // deliberately tolerant of schema evolution (added fields default,
         // removed fields drop), and cross-image flows — a scene authored in

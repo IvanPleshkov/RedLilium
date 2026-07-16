@@ -2156,7 +2156,7 @@ fn schema_hash_consistent_across_serialize() {
     assert_eq!(hash1, hash2);
 }
 
-// Phase 6, Step 3 (re-scoped by ADR-033): schema drift is detected but
+// Phase 6, Step 3 (re-scoped by ADR-037): schema drift is detected but
 // TOLERATED — name-keyed restore proceeds (added fields default, removed
 // fields drop) with a warning, because cross-image scene seeding (editing
 // world → play world under a rebuilt game) depends on that tolerance.

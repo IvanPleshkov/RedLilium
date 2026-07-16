@@ -15,7 +15,7 @@
 //!   **unstaged** layout-changing edit shift the id. It stays deterministic:
 //!   identical engine content → identical id.
 //!
-//!   Scoped to engine dirs deliberately (ADR-033): a commit touching only
+//!   Scoped to engine dirs deliberately (ADR-037): a commit touching only
 //!   `editor/`, `demos/`, or a game crate does NOT shift the id — the engine
 //!   rlibs inside an existing game cdylib are still the ones the host runs,
 //!   so invalidating the module would be a false positive (this was the

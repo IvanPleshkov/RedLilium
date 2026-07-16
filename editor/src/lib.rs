@@ -1,11 +1,11 @@
 //! # RedLilium Editor
 //!
-//! The editor as a **library** (ADR-033): a game project owns its editor
+//! The editor as a **library** (ADR-037): a game project owns its editor
 //! binary and launches it with [`run`], statically linking its
 //! [`Plugin`](redlilium_runtime::Plugin). The editing world hosts the game's
 //! type registrations from the static image, so authoring (inspector, scene
 //! save/load, undo) never depends on a dylib; Play boots a separate game
-//! world from the same plugin (ADR-032).
+//! world from the same plugin (ADR-036).
 //!
 //! ```ignore
 //! // the game's editor binary, in its entirety
@@ -57,10 +57,10 @@ use redlilium_app::{App, AppArgs, DefaultAppArgs};
 
 /// Launch the editor with `game` statically hosted: its `register_types`
 /// feed the editing world (authoring), its full composition boots play
-/// worlds (ADR-032). Blocks until the editor exits.
+/// worlds (ADR-036). Blocks until the editor exits.
 ///
 /// Shorthand for [`hosting`]`(game).run()` — use [`hosting`] to opt into
-/// Tier-1 behavior reload (ADR-033).
+/// Tier-1 behavior reload (ADR-037).
 pub fn run(game: impl redlilium_runtime::Plugin + 'static) {
     hosting(game).run();
 }
@@ -71,7 +71,7 @@ pub fn run_without_game() {
     launch(None, None);
 }
 
-/// Configure the editor around a statically hosted `game` (ADR-033).
+/// Configure the editor around a statically hosted `game` (ADR-037).
 pub fn hosting(game: impl redlilium_runtime::Plugin + 'static) -> EditorLaunch {
     EditorLaunch {
         game: Box::new(game),
@@ -86,7 +86,7 @@ pub struct EditorLaunch {
 }
 
 impl EditorLaunch {
-    /// Enable Tier-1 behavior reload (ADR-033): the editor watches the game
+    /// Enable Tier-1 behavior reload (ADR-037): the editor watches the game
     /// package's sources (stale marker), rebuilds its cdylib on request with
     /// the drift-free fixed invocation, and hot-swaps it for play worlds.
     /// `game_package` is the cargo package name (e.g. `"car-game"`); the
@@ -120,7 +120,7 @@ fn launch(
             .with_custom_titlebar(true);
         App::run(editor::Editor::with_game(game, behavior), args);
     }
-    // Tier-2 exec-restart (ADR-033): by now the loop has exited and every
+    // Tier-2 exec-restart (ADR-037): by now the loop has exited and every
     // world, GPU resource, and mapped game image is torn down — the one
     // safe point to replace the process image. The successor picks up the
     // session carry written by the shell.

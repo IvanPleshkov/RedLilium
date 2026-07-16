@@ -1,4 +1,4 @@
-//! Tier-2 session carry (ADR-033, #127): the state an editor process writes
+//! Tier-2 session carry (ADR-037, #127): the state an editor process writes
 //! down right before an exec-restart so its successor comes up where the
 //! user left off — the open scene and the editor camera's pose.
 //!

@@ -1,7 +1,7 @@
-//! The car game's editor binary (ADR-033): the game owns the editor, not the
+//! The car game's editor binary (ADR-037): the game owns the editor, not the
 //! other way around. The plugin is statically linked, so the editing world
 //! always knows the game's types (authoring never depends on a dylib), and
-//! Play boots the full game composition from the same plugin (ADR-032).
+//! Play boots the full game composition from the same plugin (ADR-036).
 //!
 //! Tier-1 behavior reload is on: the editor watches `game/src`, rebuilds the
 //! `car-game` cdylib on request (`reload_game` / the titlebar button), and

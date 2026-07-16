@@ -66,7 +66,7 @@ pub fn draw_play_controls(ui: &mut egui::Ui, play_state: PlayState) -> Option<Pl
     }
 }
 
-/// Tier-1 build status for the titlebar indicator (ADR-033) — a compact
+/// Tier-1 build status for the titlebar indicator (ADR-037) — a compact
 /// mirror of `remote_commands::GameStatus`'s behavior-reload fields.
 #[derive(Debug, Clone, Copy)]
 pub struct GameBuildStatus {

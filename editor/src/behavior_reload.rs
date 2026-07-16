@@ -1,4 +1,4 @@
-//! Tier-1 behavior reload (ADR-033, #127): the editor rebuilds the game
+//! Tier-1 behavior reload (ADR-037, #127): the editor rebuilds the game
 //! cdylib **itself** and hot-swaps it for play worlds, while authoring stays
 //! on the statically linked plugin.
 //!
@@ -19,7 +19,7 @@
 //!   is reported.
 //!
 //! Everything here is deliberately asynchronous and *marking, not acting*
-//! (ADR-033 §3): the source watcher only sets a `stale` flag; the rebuild
+//! (ADR-037 §3): the source watcher only sets a `stale` flag; the rebuild
 //! runs on an explicit request; a red build leaves the old module running.
 //! Threads report through mpsc channels drained once per frame by the shell.
 

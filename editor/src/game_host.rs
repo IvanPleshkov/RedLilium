@@ -43,7 +43,7 @@ const QUIESCE_TIMEOUT: Duration = Duration::from_secs(5);
 /// `EditorWorld` and tear worlds down first (reload does this internally;
 /// shutdown relies on drop order in the shell).
 pub struct GameHost {
-    /// Tier-1 behavior override (ADR-033): a cdylib of the same game whose
+    /// Tier-1 behavior override (ADR-037): a cdylib of the same game whose
     /// plugin boots play worlds, while authoring stays on `module`. Declared
     /// before `module` so it drops first (its play worlds are torn down by
     /// the shells before any swap/drop).
@@ -118,7 +118,7 @@ impl GameHost {
     }
 
     /// Host a statically linked plugin (no dylib): the production path for a
-    /// game-owned editor binary (ADR-033), and the reload-flow test seam. The
+    /// game-owned editor binary (ADR-037), and the reload-flow test seam. The
     /// generation machinery runs identically to the dylib path.
     pub fn from_static(
         plugin: Box<dyn redlilium_runtime::Plugin>,
@@ -144,7 +144,7 @@ impl GameHost {
     }
 
     /// Load a freshly built game cdylib as the **behavior module** (Tier 1,
-    /// ADR-033): subsequent play worlds boot from it; authoring stays on the
+    /// ADR-037): subsequent play worlds boot from it; authoring stays on the
     /// static module and the editing world is not touched. Returns how the
     /// dylib's component schemas compare to the authoring image's.
     ///
@@ -217,7 +217,7 @@ impl GameHost {
 
     /// Whether the **authoring** module came from a cdylib (`REDLILIUM_GAME`
     /// hosting) rather than a static link — decides which reload flow
-    /// `reload_game` runs (warm restart vs Tier-1 rebuild, ADR-033).
+    /// `reload_game` runs (warm restart vs Tier-1 rebuild, ADR-037).
     pub fn is_dylib(&self) -> bool {
         self.source_path.is_some()
     }
@@ -276,7 +276,7 @@ impl GameHost {
         aspect: f32,
         start_scene: Option<&str>,
     ) -> redlilium_runtime::App {
-        // Tier-1 override first (ADR-033): behavior dylib when loaded, the
+        // Tier-1 override first (ADR-037): behavior dylib when loaded, the
         // authoring module otherwise — both under the authoring generation
         // (identical `TypeId`s across the two images; see `load_behavior`).
         let plugin = match &self.behavior {
@@ -620,7 +620,7 @@ mod tests {
         }
     }
 
-    /// Tier-1 (ADR-033): the schema diff distinguishes an unchanged data
+    /// Tier-1 (ADR-037): the schema diff distinguishes an unchanged data
     /// model from a reshaped one, and play worlds boot from the behavior
     /// override while the editing world never sees it.
     #[test]

@@ -146,7 +146,7 @@ pub trait Component: Clone + Send + Sync + 'static {
     /// reordered) shifts it. Consumers: snapshot restore logs schema drift
     /// (tolerated — see `World::deserialize_world_into`), and the editor's
     /// Tier-1 behavior diff compares a static plugin image against a rebuilt
-    /// game cdylib (ADR-033).
+    /// game cdylib (ADR-037).
     ///
     /// The default implementation returns an empty string (no schema
     /// tracking) — that's what `#[skip_serialization]` components keep.

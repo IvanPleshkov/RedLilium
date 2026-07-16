@@ -77,7 +77,7 @@ pub enum PlayRequest {
     Stop,
 }
 
-/// The hosted game's status, surfaced in the `state` response (ADR-033).
+/// The hosted game's status, surfaced in the `state` response (ADR-037).
 /// The shell refreshes this snapshot once per frame before dispatch.
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct GameStatus {
@@ -111,7 +111,7 @@ pub struct RemoteCommands {
     reload_game: bool,
     /// A play-session request; the shell applies it between frames.
     play_request: Option<PlayRequest>,
-    /// A Tier-2 exec-restart was requested (ADR-033); the shell writes the
+    /// A Tier-2 exec-restart was requested (ADR-037); the shell writes the
     /// session carry, winds the loop down, and execs the fresh binary.
     restart: bool,
     /// Hosted-game status for the `state` response (shell-refreshed).
@@ -905,7 +905,7 @@ fn dispatch(
             rc.reload_game = true;
             send(world, conn, &OkResp { id, ok: true });
         }
-        // Tier-2 exec-restart (ADR-033): the shell writes the session carry
+        // Tier-2 exec-restart (ADR-037): the shell writes the session carry
         // (open scene + camera pose), winds the loop down, and execs the
         // fresh binary. `ok: true` means *queued*; the connection then drops
         // — reconnect via the re-published `.redlilium/editor.port`.
@@ -1286,7 +1286,7 @@ fn cmd_state(world: &World, conn: u64, id: i64, game: Option<GameStatus>) {
         scene: Option<String>,
         entities: Vec<EntityRow>,
         selection: Vec<String>,
-        /// Hosted-game status (ADR-033): stale/rebuilding/restart markers.
+        /// Hosted-game status (ADR-037): stale/rebuilding/restart markers.
         game: Option<GameStatus>,
     }
     let entities: Vec<EntityRow> = world

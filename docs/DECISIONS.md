@@ -966,9 +966,9 @@ Contract for shader authors:
 ## ADR-020: Game Code Authoring — Rust Plugins over a Shared Engine Dylib
 
 **Date**: 2026-07-05
-**Status**: Accepted; hosting model inverted by ADR-033 (2026-07-16) — the
+**Status**: Accepted; hosting model inverted by ADR-037 (2026-07-16) — the
 game project owns the editor binary (this ADR's Alternative 3, re-evaluated
-under the ADR-032 two-world model), and the cdylib narrows to play-world
+under the ADR-036 two-world model), and the cdylib narrows to play-world
 behavior reload. The plugin contract, `redlilium-runtime`, and the ABI
 fingerprint machinery stand.
 
@@ -1253,7 +1253,7 @@ slot after the slot's fence.
 ## ADR-025: Editor/Game Schedule Separation via Run Conditions
 
 **Date**: 2026-07-10
-**Status**: Superseded by ADR-032 (2026-07-16) — the one-world gating model
+**Status**: Superseded by ADR-036 (2026-07-16) — the one-world gating model
 (`game_active`, `GameActiveCondition`/`NotGameActiveCondition`) is deleted;
 editor Play runs the game in a separate world built by the standalone
 composition.
@@ -1309,7 +1309,7 @@ Implement single-flag activation model with run conditions to gate systems:
 ## ADR-026: Default Query Masks and Entity Visibility
 
 **Date**: 2026-07-10
-**Status**: Accepted; amended by ADR-032 (2026-07-16) — the
+**Status**: Accepted; amended by ADR-036 (2026-07-16) — the
 `HIDDEN_IN_PLAY`/`INHERITED_HIDDEN_IN_PLAY` flags and every play-state
 visibility rule below are deleted (editor Play no longer shares a world with
 the game). The masks are now `DISABLED | STATIC | EDITOR` (game queries) and
@@ -1381,7 +1381,7 @@ Note: At Play transition, editor entities receive HIDDEN_IN_PLAY flag (set); at 
 ## ADR-024: Resource Lifecycle Management — Hybrid Hook + Event Model
 
 **Date**: 2026-07-12
-**Status**: Superseded by ADR-032 (2026-07-16) — `PlayModeAware`, the
+**Status**: Superseded by ADR-036 (2026-07-16) — `PlayModeAware`, the
 registry, `PlayModeTransition` events, and `ManagePlayModeTransitions` are
 deleted; a play session's lifecycle is now the play *world's* lifecycle
 (created on Play, dropped on Stop), so there are no in-world transitions for
@@ -1958,7 +1958,7 @@ back to a single mip on wgpu/dummy and on blit-ineligible formats). See #96.
 
 ---
 
-## ADR-032: Editor Play Runs a Separate Game World Built by the One Composition
+## ADR-036: Editor Play Runs a Separate Game World Built by the One Composition
 
 **Date**: 2026-07-16
 **Status**: Accepted
@@ -2020,13 +2020,13 @@ host-sniffing branch in game code.
   (the play world gets no `GameUi`); gameplay HUD/menu flows need the
   standalone build until that lands
 
-## ADR-033: The Game Owns the Editor Binary; the Dylib Narrows to Play Behavior
+## ADR-037: The Game Owns the Editor Binary; the Dylib Narrows to Play Behavior
 
 **Date**: 2026-07-16
 **Status**: Accepted
 **Supersedes**: ADR-020 hosting model (point 3) — reverses its rejection of
-Alternative 3 under the ADR-032 two-world model
-**Relates to**: ADR-032, #45
+Alternative 3 under the ADR-036 two-world model
+**Relates to**: ADR-036, #45
 
 ### Context
 
@@ -2048,7 +2048,7 @@ structural, not incidental:
   anyway — the user compiles either way.
 
 ADR-020 rejected "editor as a library in the game project" because *every*
-game change would restart the editor process. ADR-032 changed the calculus:
+game change would restart the editor process. ADR-036 changed the calculus:
 the editing world consumes only `register_types` (game *data* definitions,
 which change rarely); game *behavior* runs only in play worlds, which are
 cold-booted on every Play by construction. What must be hot is behavior,
