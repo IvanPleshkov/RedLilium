@@ -98,7 +98,7 @@ pub fn draw_game_build_indicator(
             .on_hover_text(
                 "The rebuilt game was compiled against a changed engine (fingerprint \
                  mismatch) — restart the editor to pick everything up (scene and camera \
-                 pose carry over)",
+                 pose carry over, undo history is cleared)",
             )
             .clicked()
         {
