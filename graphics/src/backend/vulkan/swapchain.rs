@@ -222,11 +222,21 @@ impl VulkanSwapchain {
             ))
         })?;
 
+        for (i, &image) in images.iter().enumerate() {
+            vulkan_backend.set_object_name(image, &format!("swapchain image[{i}]"));
+        }
+
         // Create image views
         let image_views: Vec<vk::ImageView> = images
             .iter()
-            .map(|&image| vulkan_backend.create_swapchain_image_view(image, surface_format.format))
-            .collect::<Result<Vec<_>, _>>()?;
+            .enumerate()
+            .map(|(i, &image)| {
+                let view =
+                    vulkan_backend.create_swapchain_image_view(image, surface_format.format)?;
+                vulkan_backend.set_object_name(view, &format!("swapchain image-view[{i}]"));
+                Ok(view)
+            })
+            .collect::<Result<Vec<_>, GraphicsError>>()?;
 
         let image_view_wrappers: Vec<Arc<VulkanImageView>> = image_views
             .iter()
@@ -245,7 +255,7 @@ impl VulkanSwapchain {
         let mut render_finished_semaphores = Vec::with_capacity(images.len());
         let mut in_flight_fences = Vec::with_capacity(frames_in_flight);
 
-        for _ in 0..frames_in_flight {
+        for i in 0..frames_in_flight {
             let image_available = unsafe {
                 vulkan_backend
                     .device()
@@ -257,6 +267,9 @@ impl VulkanSwapchain {
                     e
                 ))
             })?;
+            // Name the per-frame sync objects (#123): breadcrumb and validation
+            // output is far more readable with named semaphores/fences.
+            vulkan_backend.set_object_name(image_available, &format!("swapchain acquire sem[{i}]"));
             image_available_semaphores.push(image_available);
 
             let image_render_finished = unsafe {
@@ -270,6 +283,10 @@ impl VulkanSwapchain {
                     e
                 ))
             })?;
+            vulkan_backend.set_object_name(
+                image_render_finished,
+                &format!("swapchain render-finished sem[{i}]"),
+            );
             image_render_finished_semaphores.push(image_render_finished);
 
             let fence = unsafe { vulkan_backend.device().create_fence(&fence_info, None) }
@@ -279,11 +296,12 @@ impl VulkanSwapchain {
                         e
                     ))
                 })?;
+            vulkan_backend.set_object_name(fence, &format!("swapchain in-flight fence[{i}]"));
             in_flight_fences.push(fence);
         }
 
         // Present-wait semaphores: one per swapchain image (see field doc).
-        for _ in 0..images.len() {
+        for i in 0..images.len() {
             let render_finished = unsafe {
                 vulkan_backend
                     .device()
@@ -295,6 +313,7 @@ impl VulkanSwapchain {
                     e
                 ))
             })?;
+            vulkan_backend.set_object_name(render_finished, &format!("swapchain present sem[{i}]"));
             render_finished_semaphores.push(render_finished);
         }
 
@@ -315,6 +334,9 @@ impl VulkanSwapchain {
                 e
             ))
         })?;
+        for (i, cb) in present_command_buffers.iter().enumerate() {
+            vulkan_backend.set_object_name(*cb, &format!("present-cb[{i}]"));
+        }
 
         log::info!(
             "Created Vulkan swapchain: {}x{} with {} images, {} frames in flight",

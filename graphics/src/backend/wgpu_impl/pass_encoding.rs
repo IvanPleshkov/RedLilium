@@ -19,25 +19,25 @@ impl WgpuBackend {
         pass: &Pass,
     ) -> Result<(), GraphicsError> {
         profile_scope!("encode_pass");
-        match pass {
-            Pass::Graphics(graphics_pass) => {
-                self.encode_graphics_pass(encoder, graphics_pass)?;
-            }
-            Pass::Transfer(transfer_pass) => {
-                self.encode_transfer_pass(encoder, transfer_pass)?;
-            }
-            Pass::Compute(compute_pass) => {
-                self.encode_compute_pass(encoder, compute_pass)?;
-            }
+        // Group the pass's commands under its frame-graph name so RenderDoc /
+        // profilers show it as a labelled region (#123). Render and compute
+        // passes also carry a wgpu label; this additionally covers transfer
+        // batches and gives uniform grouping. Balanced pop before every return.
+        encoder.push_debug_group(pass.name());
+        let result = match pass {
+            Pass::Graphics(graphics_pass) => self.encode_graphics_pass(encoder, graphics_pass),
+            Pass::Transfer(transfer_pass) => self.encode_transfer_pass(encoder, transfer_pass),
+            Pass::Compute(compute_pass) => self.encode_compute_pass(encoder, compute_pass),
             Pass::AccelerationStructureBuild(build_pass) => {
-                return Err(GraphicsError::FeatureNotSupported(format!(
+                Err(GraphicsError::FeatureNotSupported(format!(
                     "pass '{}': acceleration-structure builds are not supported on the wgpu \
                      backend (DeviceCapabilities::ray_query is false, #110)",
                     build_pass.name()
-                )));
+                )))
             }
-        }
-        Ok(())
+        };
+        encoder.pop_debug_group();
+        result
     }
 
     fn encode_graphics_pass(

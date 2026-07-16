@@ -143,8 +143,13 @@ pub fn create_instance(
         log::info!("No Vulkan surface extensions available; headless mode (offscreen only)");
     }
 
-    // Add debug utils extension if validation is enabled
-    if validation_available && has(ash::ext::debug_utils::NAME) {
+    // Enable VK_EXT_debug_utils whenever the loader offers it, independent of
+    // validation (#123): it powers object naming and pass label regions for
+    // RenderDoc, which injects the extension even with no validation layers.
+    // The debug *messenger* below stays validation-gated. No-op cost when
+    // absent — every naming/label call is guarded.
+    let debug_utils_enabled = has(ash::ext::debug_utils::NAME);
+    if debug_utils_enabled {
         extensions.push(ash::ext::debug_utils::NAME.as_ptr());
     }
 
@@ -228,14 +233,14 @@ pub fn create_instance(
         GraphicsError::InitializationFailed(format!("Failed to create Vulkan instance: {:?}", e))
     })?;
 
-    // Setup debug messenger if validation is enabled
-    let (debug_messenger, debug_utils) = if validation_available && has(ash::ext::debug_utils::NAME)
-    {
-        let debug_utils = ash::ext::debug_utils::Instance::new(entry, &instance);
-        let messenger = debug::create_debug_messenger(&debug_utils)?;
-        (Some(messenger), Some(debug_utils))
-    } else {
-        (None, None)
+    // The debug-utils instance loader exists whenever the extension is enabled
+    // (object naming needs it regardless of validation, #123); the debug
+    // messenger is created only when validation is active.
+    let debug_utils =
+        debug_utils_enabled.then(|| ash::ext::debug_utils::Instance::new(entry, &instance));
+    let debug_messenger = match (validation_available, &debug_utils) {
+        (true, Some(du)) => Some(debug::create_debug_messenger(du)?),
+        _ => None,
     };
 
     Ok(CreatedInstance {
