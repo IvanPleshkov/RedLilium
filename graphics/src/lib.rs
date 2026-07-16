@@ -65,6 +65,7 @@
 //! pipeline.wait_idle();  // Graceful shutdown
 //! ```
 
+mod as_compaction;
 pub mod backend;
 pub mod bindless;
 pub mod compiler;

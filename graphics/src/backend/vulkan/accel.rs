@@ -11,11 +11,22 @@ use ash::vk;
 
 use crate::error::GraphicsError;
 use crate::mesh::IndexFormat;
-use crate::resources::{AccelBuildSizes, BlasDescriptor};
+use crate::resources::{AccelBuildSizes, BlasDescriptor, CompactionPhase};
 
 use crate::backend::{GpuAccelerationStructure, GpuBuffer};
 
 use super::VulkanBackend;
+
+/// BLAS build flags. `PREFER_FAST_TRACE` always; `ALLOW_COMPACTION` when the
+/// BLAS opted into compaction (#110 phase 3) — this flag must match between the
+/// size query and the build, so both go through here.
+fn blas_build_flags(allow_compaction: bool) -> vk::BuildAccelerationStructureFlagsKHR {
+    let mut flags = vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE;
+    if allow_compaction {
+        flags |= vk::BuildAccelerationStructureFlagsKHR::ALLOW_COMPACTION;
+    }
+    flags
+}
 
 /// Which level of acceleration structure to create.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,7 +170,7 @@ impl VulkanBackend {
 
         let build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
             .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
-            .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+            .flags(blas_build_flags(descriptor.allow_compaction))
             .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
             .geometries(&geometries);
 
@@ -272,6 +283,14 @@ impl VulkanBackend {
         let accel = self.accel()?;
         let scratch_alignment = self.min_scratch_alignment();
 
+        // Compactable BLASes built this pass whose compacted size still needs a
+        // query written. Collected here and served after all builds, behind one
+        // build→read barrier (#110 phase 3).
+        let mut pending_size_queries: Vec<(
+            vk::AccelerationStructureKHR,
+            std::sync::Arc<crate::resources::BlasCompaction>,
+        )> = Vec::new();
+
         for build in pass.builds() {
             match build {
                 AccelerationStructureBuild::Blas(blas) => {
@@ -285,7 +304,7 @@ impl VulkanBackend {
                         })
                         .collect();
 
-                    let handle = match blas.gpu_handle() {
+                    let handle = match blas.gpu_handle().as_ref() {
                         GpuAccelerationStructure::Vulkan { handle, .. } => *handle,
                         _ => {
                             return Err(GraphicsError::InvalidParameter(
@@ -301,7 +320,7 @@ impl VulkanBackend {
 
                     let build_info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
                         .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
-                        .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+                        .flags(blas_build_flags(blas.descriptor().allow_compaction))
                         .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
                         .dst_acceleration_structure(handle)
                         .scratch_data(vk::DeviceOrHostAddressKHR {
@@ -312,6 +331,14 @@ impl VulkanBackend {
                     unsafe {
                         accel.cmd_build_acceleration_structures(cmd, &[build_info], &[&ranges])
                     };
+
+                    // Queue a compacted-size query for a freshly built
+                    // compactable BLAS (#110 phase 3).
+                    if let Some(compaction) = blas.compaction()
+                        && compaction.phase() == CompactionPhase::NeedsQuery
+                    {
+                        pending_size_queries.push((handle, std::sync::Arc::clone(compaction)));
+                    }
                 }
                 AccelerationStructureBuild::Tlas(tlas) => {
                     let (instance_buffer, instance_count, _blases) = tlas.current_build_inputs();
@@ -348,6 +375,70 @@ impl VulkanBackend {
                         accel.cmd_build_acceleration_structures(cmd, &[build_info], &[&ranges])
                     };
                 }
+                AccelerationStructureBuild::Compact(copy) => {
+                    // Copy the original structure into the freshly allocated,
+                    // exactly compacted-sized one (#110 phase 3). The
+                    // build→read barrier and dst-write barrier are handled by
+                    // the automatic barrier system from the pass's declared
+                    // AS read/write on the two backing buffers.
+                    let src = match copy.src_handle.as_ref() {
+                        GpuAccelerationStructure::Vulkan { handle, .. } => *handle,
+                        _ => {
+                            return Err(GraphicsError::InvalidParameter(
+                                "compaction copy source is a non-Vulkan acceleration structure"
+                                    .to_string(),
+                            ));
+                        }
+                    };
+                    let dst = match copy.dst_handle.as_ref() {
+                        GpuAccelerationStructure::Vulkan { handle, .. } => *handle,
+                        _ => {
+                            return Err(GraphicsError::InvalidParameter(
+                                "compaction copy destination is a non-Vulkan acceleration structure"
+                                    .to_string(),
+                            ));
+                        }
+                    };
+                    let info = vk::CopyAccelerationStructureInfoKHR::default()
+                        .src(src)
+                        .dst(dst)
+                        .mode(vk::CopyAccelerationStructureModeKHR::COMPACT);
+                    unsafe { accel.cmd_copy_acceleration_structure(cmd, &info) };
+                }
+            }
+        }
+
+        // Serve the collected compacted-size queries after a build→read barrier
+        // so the properties are read only once the builds complete (#110 phase
+        // 3). Each query is reset on this command buffer inside `reserve`.
+        if !pending_size_queries.is_empty()
+            && let Some(manager) = &self.compaction_queries
+        {
+            let barrier = vk::MemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR)
+                .src_access_mask(vk::AccessFlags2::ACCELERATION_STRUCTURE_WRITE_KHR)
+                .dst_stage_mask(vk::PipelineStageFlags2::ACCELERATION_STRUCTURE_BUILD_KHR)
+                .dst_access_mask(vk::AccessFlags2::ACCELERATION_STRUCTURE_READ_KHR);
+            let deps =
+                vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&barrier));
+            unsafe { self.device.cmd_pipeline_barrier2(cmd, &deps) };
+
+            let slot = self.current_slot.load(std::sync::atomic::Ordering::Relaxed);
+            let mut manager = manager.lock();
+            for (handle, compaction) in &pending_size_queries {
+                if let Some((pool, query)) = manager.reserve(&self.device, slot, cmd, compaction) {
+                    unsafe {
+                        accel.cmd_write_acceleration_structures_properties(
+                            cmd,
+                            std::slice::from_ref(handle),
+                            vk::QueryType::ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR,
+                            pool,
+                            query,
+                        )
+                    };
+                    compaction.set_phase(CompactionPhase::AwaitingSize);
+                }
+                // A full pool leaves the BLAS in NeedsQuery to retry next frame.
             }
         }
 

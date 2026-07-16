@@ -267,6 +267,9 @@ pub struct GraphicsDevice {
     /// `None` until then; never populated when `capabilities.bindless` is
     /// false.
     bindless: parking_lot::Mutex<Option<BindlessShared>>,
+    /// Transparent BLAS compaction driver (#110 phase 3): tracks compactable
+    /// BLASes and drives their swap/retirement each frame.
+    as_compaction: parking_lot::Mutex<crate::as_compaction::AsCompactionDriver>,
 }
 
 /// The lazily created bindless heap (#117): the slot table and the one
@@ -292,6 +295,7 @@ impl GraphicsDevice {
             materials: RwLock::new(Vec::new()),
             meshes: RwLock::new(Vec::new()),
             bindless: parking_lot::Mutex::new(None),
+            as_compaction: parking_lot::Mutex::new(Default::default()),
         }
     }
 
@@ -521,13 +525,19 @@ impl GraphicsDevice {
         let gpu_handle =
             backend.create_blas_handle(backing.gpu_handle(), sizes.acceleration_structure_size)?;
 
-        Ok(Arc::new(Blas::new(
+        let blas = Arc::new(Blas::new(
             Arc::clone(self),
             descriptor.clone(),
             backing,
             scratch,
             gpu_handle,
-        )))
+        ));
+        // Register for transparent compaction (#110 phase 3) so the per-frame
+        // maintenance flush finds it once its compacted size comes back.
+        if descriptor.allow_compaction {
+            self.as_compaction.lock().register(&blas);
+        }
+        Ok(blas)
     }
 
     /// Create a top-level acceleration structure over BLAS instances (#110,
@@ -1464,6 +1474,27 @@ impl GraphicsDevice {
         }
     }
 
+    /// Current monotonic frame index (#110 phase 3), advanced once per
+    /// [`advance_frame`](Self::advance_frame). `0` on non-Vulkan backends,
+    /// which have no compaction pipeline.
+    pub(crate) fn frame_index(&self) -> u64 {
+        #[cfg(feature = "vulkan-backend")]
+        if let crate::backend::GpuBackend::Vulkan(vb) = &*self.instance.backend() {
+            return vb.frame_index();
+        }
+        0
+    }
+
+    /// Drive transparent BLAS compaction into `graph` (#110 phase 3): for every
+    /// compactable BLAS whose GPU-side compacted size has come back, allocate
+    /// the compacted structure and add its copy to the frame's graph. Public
+    /// entry point is
+    /// [`RenderGraph::flush_acceleration_structure_compaction`](crate::graph::RenderGraph::flush_acceleration_structure_compaction).
+    pub(crate) fn flush_blas_compaction(self: &Arc<Self>, graph: &mut crate::graph::RenderGraph) {
+        let frame_index = self.frame_index();
+        self.as_compaction.lock().flush(self, graph, frame_index);
+    }
+
     /// Advance per-frame backend state.
     ///
     /// This should be called after a frame fence has been waited on. For the
@@ -1479,6 +1510,12 @@ impl GraphicsDevice {
             // SAFETY: This is called after waiting on a frame fence, which guarantees
             // the GPU has finished with resources from the oldest frame slot.
             unsafe { vulkan_backend.advance_frame() };
+            // Drive transparent BLAS compaction at the new frame index (#110
+            // phase 3): swap in completed compacted structures and free
+            // originals whose retirement window has passed.
+            self.as_compaction
+                .lock()
+                .advance(vulkan_backend.frame_index());
         }
 
         // Recycle bindless slots whose retirement window has passed (#117).

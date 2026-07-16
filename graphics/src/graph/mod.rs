@@ -214,6 +214,22 @@ impl RenderGraph {
         PassHandle::new(index)
     }
 
+    /// Drive transparent BLAS compaction (#110 phase 3, ADR-032).
+    ///
+    /// For every BLAS created with
+    /// [`BlasDescriptor::with_compaction`](crate::BlasDescriptor::with_compaction)
+    /// whose GPU-side compacted size has come back (a few frames after its
+    /// build), this adds a compaction-copy pass to the graph; the structure is
+    /// swapped for the smaller copy once that copy is guaranteed complete, with
+    /// no caller-visible change. Call once per frame after building the frame's
+    /// other passes, like an upload flush — a no-op when nothing is ready.
+    pub fn flush_acceleration_structure_compaction(
+        &mut self,
+        device: &std::sync::Arc<crate::device::GraphicsDevice>,
+    ) {
+        device.flush_blas_compaction(self);
+    }
+
     /// Add a dependency between passes.
     ///
     /// The `dependent` pass will execute after the `dependency` pass.
@@ -412,6 +428,24 @@ mod tests {
         assert_eq!(graph.pass_count(), 1);
         assert_eq!(graph.passes()[0].name(), "upload");
         assert!(graph.passes()[0].is_transfer());
+    }
+
+    /// #110 phase 3: an acceleration-structure-build-only graph carries no
+    /// graphics passes and is not transfer-only, so an `AsyncCompute`
+    /// preference clears the `route_graph` gates and the build runs on the
+    /// async compute queue (falling back to graphics on devices without one).
+    #[test]
+    fn as_build_only_graph_is_async_eligible() {
+        let mut graph = RenderGraph::new();
+        graph.set_queue_preference(QueuePreference::AsyncCompute);
+        graph.add_acceleration_structure_build_pass(AccelerationStructureBuildPass::new(
+            "blas build".into(),
+        ));
+        assert_eq!(graph.queue_preference(), QueuePreference::AsyncCompute);
+        // The two gates `route_graph` checks before honoring the async hint.
+        assert!(!graph.has_graphics_passes());
+        assert!(!graph.is_transfer_only());
+        assert!(!graph.requires_graphics_queue());
     }
 
     #[test]

@@ -25,8 +25,8 @@ use redlilium_core::mesh::{CpuMesh, IndexFormat, VertexLayout};
 use redlilium_graphics::{
     AccelerationStructureBuildPass, BindingGroupDescriptor, BindingLayout, Blas, BlasDescriptor,
     BlasTriangles, BufferDescriptor, BufferUsage, ColorAttachment, DrawCommand, FrameSchedule,
-    GraphicsPass, MaterialDescriptor, MaterialInstance, Mesh, RenderTargetConfig, RingBuffer,
-    ShaderSource, ShaderStage, Tlas, TlasDescriptor, TlasInstance, TransferConfig,
+    GraphicsPass, MaterialDescriptor, MaterialInstance, Mesh, QueuePreference, RenderTargetConfig,
+    RingBuffer, ShaderSource, ShaderStage, Tlas, TlasDescriptor, TlasInstance, TransferConfig,
     TransferOperation, TransferPass,
 };
 
@@ -280,7 +280,8 @@ impl RayQueryDemo {
                     IndexFormat::Uint32,
                     2,
                 )])
-                .with_label("floor blas"),
+                .with_label("floor blas")
+                .with_compaction(),
             )
             .expect("create floor BLAS");
         let cube_geometry = BlasTriangles {
@@ -295,7 +296,11 @@ impl RayQueryDemo {
             opaque: true,
         };
         let cube_blas = device
-            .create_blas(&BlasDescriptor::new(vec![cube_geometry]).with_label("cube blas"))
+            .create_blas(
+                &BlasDescriptor::new(vec![cube_geometry])
+                    .with_label("cube blas")
+                    .with_compaction(),
+            )
             .expect("create cube BLAS");
 
         // --- TLAS for the floor + up to 8 cubes.
@@ -532,26 +537,30 @@ impl AppHandler for RayQueryDemo {
             return ctx.render(graph);
         }
 
-        // 1) First frame: upload geometry, then build both BLASes.
-        let mut upload_handle = None;
-        if !self.pending_uploads.is_empty() {
+        // 1) First frame: upload geometry and build both BLASes on the
+        // **async compute queue** (#110 phase 3 — AS builds are legal on any
+        // compute queue; falls back to graphics on devices without one). The
+        // main graph's TLAS build reads the BLAS backings, so the cross-queue
+        // build→build hazard is resolved automatically by the trackers' timeline
+        // waits (no manual dependency across graphs).
+        if !self.blases_built {
+            let mut async_graph = ctx.acquire_graph();
+            async_graph.set_queue_preference(QueuePreference::AsyncCompute);
+
             let ops = std::mem::take(&mut self.pending_uploads);
             let mut transfer_pass = TransferPass::new("geometry uploads".into());
             transfer_pass.set_transfer_config(TransferConfig::new().with_operations(ops));
-            upload_handle = Some(graph.add_transfer_pass(transfer_pass));
-        }
-        let mut blas_handle = None;
-        if !self.blases_built {
+            let upload = async_graph.add_transfer_pass(transfer_pass);
+
             let mut pass = AccelerationStructureBuildPass::new("blas build".into());
             pass.add_blas_build(Arc::clone(self.floor_blas.as_ref().unwrap()));
             pass.add_blas_build(Arc::clone(self.cube_blas.as_ref().unwrap()));
-            let handle = graph.add_acceleration_structure_build_pass(pass);
-            if let Some(upload) = upload_handle {
-                graph.add_dependency(handle, upload);
-            }
-            blas_handle = Some(handle);
+            let build = async_graph.add_acceleration_structure_build_pass(pass);
+            async_graph.add_dependency(build, upload);
+
+            ctx.submit(async_graph);
             self.blases_built = true;
-            log::info!("BLAS builds queued through the frame graph");
+            log::info!("BLAS builds queued on the async compute queue (compaction enabled)");
         }
 
         // 2) Every frame: write this frame's instances and rebuild the TLAS.
@@ -563,9 +572,11 @@ impl AppHandler for RayQueryDemo {
             pass.add_tlas_build(Arc::clone(&tlas));
             graph.add_acceleration_structure_build_pass(pass)
         };
-        if let Some(blas) = blas_handle {
-            graph.add_dependency(tlas_handle, blas);
-        }
+
+        // Drive transparent BLAS compaction: a few frames after the build the
+        // compacted size comes back and this adds the compaction copy; the
+        // structure is swapped for the smaller one with no visible change.
+        graph.flush_acceleration_structure_compaction(ctx.device());
 
         // 3) Fullscreen ray-traced pass into the swapchain.
         let mut render_pass = GraphicsPass::new("ray trace".into());
