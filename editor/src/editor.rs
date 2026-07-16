@@ -59,6 +59,9 @@ pub struct Editor {
     /// Hosted game module (#58). Declared after the worlds so it drops after
     /// them: the mapped game image must outlive every world its plugin touched.
     game_host: Option<crate::game_host::GameHost>,
+    /// A statically linked game handed in by the owning binary (ADR-033),
+    /// held until `on_init` hosts it (the editing world doesn't exist yet).
+    static_game: Option<Box<dyn redlilium_runtime::Plugin>>,
     runner: EcsRunner,
     /// Persistent engine state (GPU managers, asset DB/processor) — outlives
     /// any world (ADR-020). Created with the graphics device in `on_init`.
@@ -141,6 +144,14 @@ struct PendingPrefabImport {
 }
 
 impl Editor {
+    /// The windowed shell, optionally owning a statically linked game
+    /// (ADR-033) — hosted in `on_init` once the editing world exists.
+    pub fn with_game(game: Option<Box<dyn redlilium_runtime::Plugin>>) -> Self {
+        let mut editor = Self::new();
+        editor.static_game = game;
+        editor
+    }
+
     pub fn new() -> Self {
         let project_path = std::path::Path::new("project.toml");
         let (config, mut vfs) = crate::project::load_or_default(project_path);
@@ -166,6 +177,7 @@ impl Editor {
             world: None,
             play: None,
             game_host: None,
+            static_game: None,
             // Multi-threaded runner, enabled after Track 2 MT-hardening
             // (#52-#55: barriers, explicit edges, raw-access-aware detector).
             runner: EcsRunner::multi_thread(
@@ -846,8 +858,18 @@ impl AppHandler for Editor {
         let ew = self.world.as_mut().unwrap();
         ew.schedules.run_startup(&mut ew.world, runner);
 
-        // Host a game module if requested (#58).
-        if let Ok(path) = std::env::var("REDLILIUM_GAME") {
+        // Host the game: statically linked by the owning binary (ADR-033),
+        // or a cdylib via the engine-repo override (#58).
+        if let Some(plugin) = self.static_game.take() {
+            if std::env::var("REDLILIUM_GAME").is_ok() {
+                log::warn!(
+                    "REDLILIUM_GAME ignored: this editor binary statically hosts its game (ADR-033)"
+                );
+            }
+            let engine = self.engine.as_ref().expect("engine created above");
+            self.game_host = Some(crate::game_host::GameHost::from_static(plugin, engine, ew));
+            log::info!("game statically hosted (ADR-033)");
+        } else if let Ok(path) = std::env::var("REDLILIUM_GAME") {
             let engine = self.engine.as_ref().expect("engine created above");
             // SAFETY: the operator points this at a game cdylib built in the
             // same `cargo build` as this editor (fingerprint-gated; see

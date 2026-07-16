@@ -1,0 +1,10 @@
+[package]
+name = "car-game-editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The car game's editor binary (ADR-033): statically hosts CarGamePlugin in the RedLilium editor"
+
+[dependencies]
+car-game = { path = "../game" }
+redlilium-editor = { path = "../editor" }

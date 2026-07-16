@@ -87,10 +87,9 @@ impl GameHost {
         Ok(host)
     }
 
-    /// Host a statically linked plugin (no dylib). The generation machinery
-    /// runs identically — tests use this to exercise the reload flow without
-    /// building a cdylib.
-    #[cfg_attr(not(test), allow(dead_code))] // test seam + future built-in games
+    /// Host a statically linked plugin (no dylib): the production path for a
+    /// game-owned editor binary (ADR-033), and the reload-flow test seam. The
+    /// generation machinery runs identically to the dylib path.
     pub fn from_static(
         plugin: Box<dyn redlilium_runtime::Plugin>,
         engine: &EngineContext,

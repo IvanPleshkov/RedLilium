@@ -38,7 +38,7 @@ const CALM_TICKS: u32 = 3;
 /// format.
 const COLOR_FORMAT: TextureFormat = TextureFormat::Bgra8UnormSrgb;
 
-pub fn run() {
+pub fn run(game: Option<Box<dyn redlilium_runtime::Plugin>>) {
     redlilium_core::init();
     redlilium_graphics::init();
 
@@ -124,7 +124,18 @@ pub fn run() {
     ew.schedules.run_startup(&mut ew.world, &runner);
 
     let aspect = width as f32 / height as f32;
-    if let Ok(path) = std::env::var("REDLILIUM_GAME") {
+    if let Some(plugin) = game {
+        // Statically linked by the owning binary (ADR-033).
+        if std::env::var("REDLILIUM_GAME").is_ok() {
+            log::warn!(
+                "REDLILIUM_GAME ignored: this editor binary statically hosts its game (ADR-033)"
+            );
+        }
+        game_host = Some(crate::game_host::GameHost::from_static(
+            plugin, &engine, &mut ew,
+        ));
+        log::info!("game statically hosted (ADR-033)");
+    } else if let Ok(path) = std::env::var("REDLILIUM_GAME") {
         // SAFETY: the operator points this at a game cdylib built in the same
         // `cargo build` as this editor (the fingerprint gate enforces engine
         // parity; the same-build contract is documented on GameModule::load).

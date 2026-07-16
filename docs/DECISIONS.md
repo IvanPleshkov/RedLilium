@@ -966,7 +966,11 @@ Contract for shader authors:
 ## ADR-020: Game Code Authoring — Rust Plugins over a Shared Engine Dylib
 
 **Date**: 2026-07-05
-**Status**: Accepted
+**Status**: Accepted; hosting model inverted by ADR-033 (2026-07-16) — the
+game project owns the editor binary (this ADR's Alternative 3, re-evaluated
+under the ADR-032 two-world model), and the cdylib narrows to play-world
+behavior reload. The plugin contract, `redlilium-runtime`, and the ABI
+fingerprint machinery stand.
 
 ### Context
 
@@ -2015,3 +2019,115 @@ host-sniffing branch in game code.
 - ⚠️ Game egui (menus) does not yet render inside the editor's play view
   (the play world gets no `GameUi`); gameplay HUD/menu flows need the
   standalone build until that lands
+
+## ADR-033: The Game Owns the Editor Binary; the Dylib Narrows to Play Behavior
+
+**Date**: 2026-07-16
+**Status**: Accepted
+**Supersedes**: ADR-020 hosting model (point 3) — reverses its rejection of
+Alternative 3 under the ADR-032 two-world model
+**Relates to**: ADR-032, #45
+
+### Context
+
+The generic-editor-hosts-a-dylib model accumulated friction that is
+structural, not incidental:
+
+- **The build recipe lives in the operator's head.** Host and cdylib must
+  come from one cargo invocation (feature unification changes `-C metadata`
+  → every engine `TypeId`). The fingerprint + TypeId probe *gate* the
+  mismatch; nothing *prevents* it. In practice every editor-side commit
+  invalidated the running game module.
+- **Open soundness debt.** Two engine images mean duplicated statics;
+  `runtime/src/abi.rs` documents hazards that "must be resolved before"
+  game code runs under the multi-threaded runner alongside host code.
+- **No typed extension surface.** Game-specific editor tools (inspectors,
+  gizmos, panels) across a dylib boundary would need an ABI-stable editor
+  plugin interface. Rust has no stable ABI, so a shipped editor binary
+  loading arbitrary user games is not a sound long-term product shape
+  anyway — the user compiles either way.
+
+ADR-020 rejected "editor as a library in the game project" because *every*
+game change would restart the editor process. ADR-032 changed the calculus:
+the editing world consumes only `register_types` (game *data* definitions,
+which change rarely); game *behavior* runs only in play worlds, which are
+cold-booted on every Play by construction. What must be hot is behavior,
+and behavior is exactly what the dylib can carry without touching the
+editing world.
+
+### Decision
+
+1. **Editor becomes a library.** `redlilium-editor` exposes
+   `run(plugin, …)` (windowed + headless). The game project owns a small
+   editor binary (`car-game-editor`) that statically links the game plugin
+   and the editor. Editing-world registrations come from the static image:
+   authoring (inspector, scene save/load, undo) never depends on a dylib
+   and cannot be invalidated by one. Game code injects its own editor
+   tools through the same typed API — "editor plugins" are ordinary cargo
+   dependencies. The engine repo keeps a plain `redlilium-editor` binary
+   for engine development (no game, or `REDLILIUM_GAME` override).
+
+2. **Warm reload is tiered by what changed.**
+   - **Tier 1 — behavior (the hot loop).** Play worlds boot from a cdylib
+     of the same game crate. The editor *owns the rebuild*: it invokes
+     cargo itself with a fixed invocation that includes its own package
+     (unification therefore matches the running binary by construction);
+     the fingerprint + probe gates remain as the backstop. After loading,
+     the editor diffs component schemas (dylib `register_types` into a
+     scratch world vs. the static image): equal → reload valid, play uses
+     new code with the editing world untouched; different → soft
+     degradation — play still runs the new code, authoring of the new
+     fields needs a Tier-2 restart.
+   - **Tier 2 — data / editor tools / engine.** Exec-restart with session
+     carry: the editor persists session state (open scene, camera pose,
+     selection, optionally a play-world snapshot), rebuilds, and execs the
+     new binary. Undo history dies per restart — accepted. Remote agents
+     reconnect via `.redlilium/editor.port`.
+   - **Horizon (non-binding):** play world in a child game process
+     (crash isolation; our protocols are already data-keyed), and
+     function-level patching as a sub-second tier. Nothing in this design
+     may preclude the child-process shape.
+
+3. **Source watching marks, never acts.** A file watcher sets a "game
+   module stale" indicator (UI badge + remote `state` field). Rebuild and
+   restart are explicit commands; module swap happens only on a green
+   build (a red build leaves the old module running, compile errors go to
+   the log/remote channel). Auto-rebuild is per-session opt-in, never
+   project-wide config — a code-editing agent must not be able to yank a
+   parallel editor session it does not own. Agents editing game code work
+   in git worktrees.
+
+4. **`project.toml` stays project config** (mounts, start scene). It does
+   not name a game: the game is known statically. `REDLILIUM_GAME` remains
+   a dev override for hosting a foreign dylib in the engine-repo editor.
+
+### Alternatives Considered
+
+- **Editor keeps owning the build of a configured game** (project.toml
+  names the crate): codifies the invocation but keeps authoring hostage to
+  the dylib and offers no typed tool surface. Rejected — the inversion
+  subsumes it (the editor still owns the *cdylib* rebuild in Tier 1).
+- **Static-only with exec-restart as the only reload**: simplest, deletes
+  all ABI machinery, but puts a full editor relink + process boot in the
+  hottest loop (behavior tuning). Rejected while iteration speed is the
+  point of the editor; it survives as Tier 2.
+- **Shared engine dylib** (ADR-020 point 4): still the only fix for
+  duplicated statics if cross-image execution ever widens; deferred, the
+  hazards stay scoped to play sessions.
+
+### Consequences
+
+- ✅ Authoring is never blocked or invalidated by module drift; worst case
+  is a stale inspector with a clear "restart to author new fields" state
+- ✅ Behavior iteration keeps the seconds-scale dylib loop; the editing
+  world is not even warm-restarted (registrations are static)
+- ✅ Typed, in-process API for game-specific editor tooling
+- ✅ The invocation-discipline failure class disappears from the user's
+  hands (the editor is the only party that builds the cdylib)
+- ⚠️ Static and dylib copies of game types coexist (distinct `TypeId`s,
+  same names) — they must never meet in one world; editing world = static,
+  play worlds = dylib. Name-keyed serialization is the bridge, as today
+- ⚠️ Cross-image hazards (duplicated statics, in-image panic shields)
+  remain for play sessions — unchanged from today, now explicitly scoped
+- ⚠️ Editor-tool and engine changes cost a process restart (Tier 2);
+  undo history does not survive it
