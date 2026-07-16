@@ -47,7 +47,88 @@ pub fn mat4_from_scale_rotation_translation(
     result
 }
 
+/// Depth mapping convention for projection matrices and depth attachments
+/// (ADR-038, #125).
+///
+/// The engine default is [`ReversedZ`](Self::ReversedZ): near plane → depth 1,
+/// far plane → depth 0, clear to 0.0, compare `GreaterEqual`. With a float
+/// depth buffer this distributes precision near-uniformly across the view
+/// range instead of cramming it at the near plane. [`Classic`](Self::Classic)
+/// (near → 0, far → 1, clear 1.0, `LessEqual`) is the opt-out.
+///
+/// Everything depth-related derives from this enum in one place: the
+/// projection matrix flavor ([`perspective`](Self::perspective) /
+/// [`orthographic`](Self::orthographic)) and the default clear depth
+/// ([`clear_depth`](Self::clear_depth)); the graphics crate maps it to the
+/// default depth compare op. Do not scatter `if reversed` logic — route it
+/// through these methods.
+///
+/// # One convention per depth target
+///
+/// The convention must stay **consistent within one render target**: every
+/// camera/pass writing or testing against a given depth buffer must use the
+/// same convention (projection + clear + compare as a unit). Mixing
+/// conventions on one depth buffer is a logic error the engine does not
+/// detect — it renders garbage, not a validation failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum DepthConvention {
+    /// Near → 1, far → 0, clear 0.0, compare `GreaterEqual`. Engine default.
+    #[default]
+    ReversedZ,
+    /// Near → 0, far → 1, clear 1.0, compare `LessEqual`. Opt-out.
+    Classic,
+}
+
+impl DepthConvention {
+    /// The depth value a fresh depth attachment is cleared to under this
+    /// convention: 0.0 for reversed-Z ("everything is behind"), 1.0 classic.
+    pub fn clear_depth(self) -> f32 {
+        match self {
+            Self::ReversedZ => 0.0,
+            Self::Classic => 1.0,
+        }
+    }
+
+    /// The default depth comparison for this convention: `GreaterEqual` for
+    /// reversed-Z (closer fragments have *larger* depth), `LessEqual` classic.
+    pub fn compare(self) -> crate::sampler::CompareFunction {
+        match self {
+            Self::ReversedZ => crate::sampler::CompareFunction::GreaterEqual,
+            Self::Classic => crate::sampler::CompareFunction::LessEqual,
+        }
+    }
+
+    /// Right-handed perspective projection ([0, 1] depth) under this convention.
+    pub fn perspective(self, yfov: f32, aspect: f32, znear: f32, zfar: f32) -> Mat4 {
+        match self {
+            Self::ReversedZ => perspective_rh_reversed(yfov, aspect, znear, zfar),
+            Self::Classic => perspective_rh(yfov, aspect, znear, zfar),
+        }
+    }
+
+    /// Right-handed orthographic projection ([0, 1] depth) under this convention.
+    #[allow(clippy::too_many_arguments)]
+    pub fn orthographic(
+        self,
+        left: f32,
+        right: f32,
+        bottom: f32,
+        top: f32,
+        near: f32,
+        far: f32,
+    ) -> Mat4 {
+        match self {
+            Self::ReversedZ => orthographic_rh_reversed(left, right, bottom, top, near, far),
+            Self::Classic => orthographic_rh(left, right, bottom, top, near, far),
+        }
+    }
+}
+
 /// Build a right-handed perspective projection with depth range [0, 1] (wgpu/Vulkan convention).
+///
+/// Classic depth mapping (near → 0, far → 1). The engine default is
+/// reversed-Z — prefer [`DepthConvention::perspective`] or
+/// [`perspective_rh_reversed`] unless the target explicitly opts out.
 pub fn perspective_rh(yfov: f32, aspect: f32, znear: f32, zfar: f32) -> Mat4 {
     let f = 1.0 / (yfov / 2.0).tan();
     let nf = 1.0 / (znear - zfar);
@@ -61,7 +142,30 @@ pub fn perspective_rh(yfov: f32, aspect: f32, znear: f32, zfar: f32) -> Mat4 {
     result
 }
 
+/// Build a right-handed **reversed-Z** perspective projection with depth range
+/// [0, 1]: near plane → depth 1, far plane → depth 0 (ADR-038, #125).
+///
+/// Same as [`perspective_rh`] with the z-row remapped so depth decreases with
+/// distance. Pair with clear depth 0.0 and a `GreaterEqual` depth compare.
+pub fn perspective_rh_reversed(yfov: f32, aspect: f32, znear: f32, zfar: f32) -> Mat4 {
+    let f = 1.0 / (yfov / 2.0).tan();
+    // Classic z-row with znear and zfar swapped: depth(znear) = 1, depth(zfar) = 0.
+    let fn_ = 1.0 / (zfar - znear);
+    #[rustfmt::skip]
+    let result = Mat4::new(
+        f / aspect, 0.0,  0.0,              0.0,
+        0.0,        f,    0.0,              0.0,
+        0.0,        0.0,  znear * fn_,      znear * zfar * fn_,
+        0.0,        0.0,  -1.0,             0.0,
+    );
+    result
+}
+
 /// Build a right-handed orthographic projection with depth range [0, 1] (wgpu/Vulkan convention).
+///
+/// Classic depth mapping (near → 0, far → 1). The engine default is
+/// reversed-Z — prefer [`DepthConvention::orthographic`] or
+/// [`orthographic_rh_reversed`] unless the target explicitly opts out.
 pub fn orthographic_rh(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> Mat4 {
     let rml = right - left;
     let tmb = top - bottom;
@@ -71,6 +175,32 @@ pub fn orthographic_rh(left: f32, right: f32, bottom: f32, top: f32, near: f32, 
         2.0 / rml, 0.0,       0.0,         -(right + left) / rml,
         0.0,       2.0 / tmb, 0.0,         -(top + bottom) / tmb,
         0.0,       0.0,       -1.0 / fmn,  -near / fmn,
+        0.0,       0.0,       0.0,          1.0,
+    );
+    result
+}
+
+/// Build a right-handed **reversed-Z** orthographic projection with depth range
+/// [0, 1]: near plane → depth 1, far plane → depth 0 (ADR-038, #125).
+///
+/// Same as [`orthographic_rh`] with the z-row remapped so depth decreases with
+/// distance. Pair with clear depth 0.0 and a `GreaterEqual` depth compare.
+pub fn orthographic_rh_reversed(
+    left: f32,
+    right: f32,
+    bottom: f32,
+    top: f32,
+    near: f32,
+    far: f32,
+) -> Mat4 {
+    let rml = right - left;
+    let tmb = top - bottom;
+    let fmn = far - near;
+    #[rustfmt::skip]
+    let result = Mat4::new(
+        2.0 / rml, 0.0,       0.0,         -(right + left) / rml,
+        0.0,       2.0 / tmb, 0.0,         -(top + bottom) / tmb,
+        0.0,       0.0,       1.0 / fmn,    far / fmn,
         0.0,       0.0,       0.0,          1.0,
     );
     result
@@ -295,6 +425,112 @@ mod tests {
         // Compare rotations by rotating a test vector
         let test = Vec3::new(1.0, 0.0, 0.0);
         assert!((quat_rotate_vec3(r, test) - quat_rotate_vec3(r2, test)).norm() < 1e-5);
+    }
+
+    /// NDC depth of a view-space point at distance `dist` in front of the camera.
+    fn projected_depth(proj: &Mat4, dist: f32) -> f32 {
+        let clip = proj * Vec4::new(0.0, 0.0, -dist, 1.0);
+        clip.z / clip.w
+    }
+
+    #[test]
+    fn perspective_classic_depth_range() {
+        let proj = perspective_rh(1.0, 1.0, 0.1, 100.0);
+        assert!(projected_depth(&proj, 0.1).abs() < 1e-5);
+        assert!((projected_depth(&proj, 100.0) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn perspective_reversed_depth_range() {
+        let proj = perspective_rh_reversed(1.0, 1.0, 0.1, 100.0);
+        assert!((projected_depth(&proj, 0.1) - 1.0).abs() < 1e-5);
+        assert!(projected_depth(&proj, 100.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn perspective_reversed_matches_classic_xy() {
+        // Reversed-Z only remaps depth; x/y projection is identical.
+        let classic = perspective_rh(1.0, 16.0 / 9.0, 0.1, 100.0);
+        let reversed = perspective_rh_reversed(1.0, 16.0 / 9.0, 0.1, 100.0);
+        let p = Vec4::new(1.5, -2.0, -10.0, 1.0);
+        let c = classic * p;
+        let r = reversed * p;
+        assert!((c.x - r.x).abs() < 1e-6);
+        assert!((c.y - r.y).abs() < 1e-6);
+        assert!((c.w - r.w).abs() < 1e-6);
+    }
+
+    #[test]
+    fn orthographic_classic_depth_range() {
+        let proj = orthographic_rh(-1.0, 1.0, -1.0, 1.0, 0.1, 100.0);
+        assert!(projected_depth(&proj, 0.1).abs() < 1e-5);
+        assert!((projected_depth(&proj, 100.0) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn orthographic_reversed_depth_range() {
+        let proj = orthographic_rh_reversed(-1.0, 1.0, -1.0, 1.0, 0.1, 100.0);
+        assert!((projected_depth(&proj, 0.1) - 1.0).abs() < 1e-5);
+        assert!(projected_depth(&proj, 100.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn convention_dispatch() {
+        assert_eq!(DepthConvention::default(), DepthConvention::ReversedZ);
+        assert_eq!(DepthConvention::ReversedZ.clear_depth(), 0.0);
+        assert_eq!(DepthConvention::Classic.clear_depth(), 1.0);
+        assert_eq!(
+            DepthConvention::ReversedZ.compare(),
+            crate::sampler::CompareFunction::GreaterEqual
+        );
+        assert_eq!(
+            DepthConvention::Classic.compare(),
+            crate::sampler::CompareFunction::LessEqual
+        );
+        assert_eq!(
+            DepthConvention::ReversedZ.perspective(1.0, 1.0, 0.1, 100.0),
+            perspective_rh_reversed(1.0, 1.0, 0.1, 100.0)
+        );
+        assert_eq!(
+            DepthConvention::Classic.perspective(1.0, 1.0, 0.1, 100.0),
+            perspective_rh(1.0, 1.0, 0.1, 100.0)
+        );
+        assert_eq!(
+            DepthConvention::ReversedZ.orthographic(-1.0, 1.0, -1.0, 1.0, 0.1, 100.0),
+            orthographic_rh_reversed(-1.0, 1.0, -1.0, 1.0, 0.1, 100.0)
+        );
+        assert_eq!(
+            DepthConvention::Classic.orthographic(-1.0, 1.0, -1.0, 1.0, 0.1, 100.0),
+            orthographic_rh(-1.0, 1.0, -1.0, 1.0, 0.1, 100.0)
+        );
+    }
+
+    #[test]
+    fn reversed_precision_beats_classic_far_field() {
+        // The rationale for reversed-Z (ADR-038): with a float depth buffer and
+        // a large far/near ratio, classic depth collapses distant points onto
+        // indistinguishable values while reversed keeps them apart. Two points
+        // 1 unit apart near the far plane of a 0.01..10000 frustum:
+        let classic = perspective_rh(1.0, 1.0, 0.01, 10000.0);
+        let reversed = perspective_rh_reversed(1.0, 1.0, 0.01, 10000.0);
+        let (a, b) = (9000.0, 9001.0);
+        let sep_classic =
+            (projected_depth(&classic, a) as f64 - projected_depth(&classic, b) as f64).abs();
+        let sep_reversed =
+            (projected_depth(&reversed, a) as f64 - projected_depth(&reversed, b) as f64).abs();
+        // f32 resolution around classic depth (~1.0) is ~1.2e-7; around the
+        // reversed value (~1.1e-6) it is ~1e-13 (subnormal-adjacent exponent).
+        // The classic separation must sit below its representable step while
+        // the reversed separation sits far above its own.
+        let f32_step_classic = 2.0_f64.powi(-23); // ulp near 1.0
+        assert!(
+            sep_classic < f32_step_classic * 4.0,
+            "classic separation {sep_classic} unexpectedly large"
+        );
+        assert!(
+            sep_reversed > sep_classic * 100.0,
+            "reversed separation {sep_reversed} not better than classic {sep_classic}"
+        );
     }
 
     #[test]

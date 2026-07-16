@@ -2138,7 +2138,8 @@ fn test_binding_group_dropped_while_in_flight(#[case] backend: Backend) {
 
 /// WGSL shader that samples a depth texture and writes the sampled depth as
 /// the red channel. The vertex shader forces clip z = 0.1 so the fragment
-/// passes the LessEqual depth test against the pre-cleared depth of 0.25.
+/// passes the reversed-Z GreaterEqual depth test against the pre-cleared
+/// depth of 0.05.
 const DEPTH_CO_USE_SHADER: &str = r#"
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -2177,12 +2178,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 /// (`with_depth_write(false)`).
 ///
 /// Three sequential graphs (the layout tracker persists across executes):
-/// 1. Prepass: clear depth to 0.25 (no draws) — leaves the texture in the
+/// 1. Prepass: clear depth to 0.05 (no draws) — leaves the texture in the
 ///    depth-attachment layout.
 /// 2. Co-use pass: the SAME depth texture as a read-only attachment (Load) +
 ///    a material that samples it and outputs the depth as red. The quad is at
-///    clip z = 0.1, passing the LessEqual test against 0.25, so every
-///    fragment writes red = sampled depth (~0.25).
+///    clip z = 0.1, passing the GreaterEqual test against 0.05, so every
+///    fragment writes red = sampled depth (~0.05).
 /// 3. Readback of the color target.
 ///
 /// On Vulkan the context runs with validation layers and asserts **zero**
@@ -2209,7 +2210,9 @@ fn test_depth_co_use_read_only_attachment(#[case] backend: Backend) {
 
     const W: u32 = 16;
     const H: u32 = 16;
-    const PRE_CLEAR_DEPTH: f32 = 0.25;
+    // Below the quad's z = 0.1 so the reversed-Z default compare
+    // (GreaterEqual) passes: 0.1 >= 0.05.
+    const PRE_CLEAR_DEPTH: f32 = 0.05;
 
     // The depth texture is both a render attachment and sampled in a shader.
     let depth = ctx.create_texture_2d(
@@ -2332,8 +2335,8 @@ fn test_depth_co_use_read_only_attachment(#[case] backend: Backend) {
     let data = ctx.read_buffer(&readback, readback_size);
     let center = get_pixel(&data, W, W / 2, H / 2);
     eprintln!("depth co-use center pixel ({backend:?}): {center:?}");
-    // Red channel = sampled depth = 0.25; the depth test consumed the same
-    // image (fragments at z=0.1 pass LessEqual against 0.25).
+    // Red channel = sampled depth = 0.05; the depth test consumed the same
+    // image (fragments at z=0.1 pass GreaterEqual against 0.05).
     let expected = ExpectedPixel::from_float(PRE_CLEAR_DEPTH, 0.0, 0.0, 1.0);
     assert!(
         verify_pixel(&data, W, W / 2, H / 2, expected, 3),
@@ -2728,8 +2731,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 /// empty, no fragment stage) — the shape every shadow-map/depth-prepass pass
 /// uses. A second pass samples the produced depth image into a color target:
 /// the centered quad's footprint must read back its forced depth (0.3), the
-/// corners the clear depth (1.0). On Vulkan the whole workload must produce
-/// zero validation errors.
+/// corners the reversed-Z clear depth (0.0). On Vulkan the whole workload must
+/// produce zero validation errors.
 #[rstest]
 #[case::dummy(Backend::Dummy)]
 #[case::vulkan(Backend::Vulkan)]
@@ -2748,7 +2751,8 @@ fn test_depth_only_pass_zero_color_attachments(#[case] backend: Backend) {
     const W: u32 = 16;
     const H: u32 = 16;
     const QUAD_DEPTH: f32 = 0.3;
-    const CLEAR_DEPTH: f32 = 1.0;
+    // Reversed-Z clear: the quad's 0.3 passes the default GreaterEqual test.
+    const CLEAR_DEPTH: f32 = 0.0;
 
     let depth = ctx.create_texture_2d(
         W,

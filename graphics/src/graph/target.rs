@@ -283,6 +283,12 @@ impl DepthStencilAttachment {
     }
 
     /// Clear depth to a specific value.
+    ///
+    /// The value must match the depth convention of everything rendering into
+    /// this target: 0.0 for reversed-Z (the engine default), 1.0 for the
+    /// classic opt-out. Prefer deriving it —
+    /// `with_clear_depth(convention.clear_depth())` — over hardcoding; see
+    /// `redlilium_core::math::DepthConvention` (ADR-038).
     pub fn with_clear_depth(mut self, depth: f32) -> Self {
         self.depth_load_op = LoadOp::clear_depth(depth);
         self

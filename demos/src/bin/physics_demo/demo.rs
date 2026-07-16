@@ -5,7 +5,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use redlilium_app::{AppContext, AppHandler, DrawContext};
-use redlilium_core::math::{Vec3, perspective_rh};
+use redlilium_core::math::{DepthConvention, Vec3};
 use redlilium_core::profiling::{profile_function, profile_scope};
 use redlilium_graphics::{
     ColorAttachment, DepthStencilAttachment, FrameSchedule, GraphicsPass, RenderTarget,
@@ -282,8 +282,12 @@ impl AppHandler for PhysicsDemoApp {
         if let (Some(world), Some(cam_entity)) = (&mut self.world, self.camera_entity) {
             let mut cameras = world.write::<Camera>().unwrap();
             if let Some(mut cam) = cameras.get_mut(cam_entity.index()) {
-                cam.projection_matrix =
-                    perspective_rh(std::f32::consts::FRAC_PI_4, ctx.aspect_ratio(), 0.1, 200.0);
+                cam.projection_matrix = DepthConvention::default().perspective(
+                    std::f32::consts::FRAC_PI_4,
+                    ctx.aspect_ratio(),
+                    0.1,
+                    200.0,
+                );
             }
         }
     }
@@ -399,7 +403,7 @@ impl AppHandler for PhysicsDemoApp {
                     )
                     .with_depth_stencil(
                         DepthStencilAttachment::from_texture(renderer.depth_texture().clone())
-                            .with_clear_depth(1.0),
+                            .with_clear_depth(DepthConvention::default().clear_depth()),
                     ),
             );
             renderer.add_draws(&mut shape_pass);

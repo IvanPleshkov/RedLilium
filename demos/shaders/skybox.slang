@@ -37,6 +37,9 @@ VsOutput vs_main(uint vertex_id : SV_VertexID) {
     float x = float((vertex_id & 1) << 2) - 1.0;
     float y = float((vertex_id & 2) << 1) - 1.0;
 
+    // Arbitrary in-range clip depth: the skybox pass has no depth attachment
+    // (the resolve pass composites lit geometry over this background), so the
+    // value is depth-convention independent (#125/ADR-038).
     output.position = float4(x, y, 0.9999, 1.0);
 
     // Compute view direction from clip space

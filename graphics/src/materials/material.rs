@@ -13,6 +13,7 @@ use crate::device::GraphicsDevice;
 use crate::mesh::VertexLayout;
 use crate::types::TextureFormat;
 pub use redlilium_core::material::PolygonMode;
+pub use redlilium_core::math::DepthConvention;
 use redlilium_core::mesh::PrimitiveTopology;
 pub use redlilium_core::sampler::CompareFunction;
 
@@ -311,14 +312,20 @@ pub struct RasterState {
 /// `Option<DepthStencilState>`).
 ///
 /// Shaped to grow: stencil and depth-bias are out of scope for #39 but will land
-/// here (bias with shadows) without another migration. `compare` is exposed so
-/// reverse-Z (`GreaterEqual`) becomes expressible — flipping the *engine*
-/// convention (projection + clear) is a separate change.
+/// here (bias with shadows) without another migration.
+///
+/// The engine's depth convention is **reversed-Z** ([`DepthConvention`],
+/// ADR-038): [`new`](Self::new) defaults `compare` to `GreaterEqual` and pairs
+/// with a reversed projection and clear depth 0.0. Opting a target out to
+/// classic depth ([`for_convention`](Self::for_convention) with
+/// [`DepthConvention::Classic`]) must flip projection, clear, and compare
+/// together — one convention per depth target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DepthState {
     /// Depth attachment format.
     pub format: TextureFormat,
-    /// Depth comparison function (default `LessEqual`; `GreaterEqual` for reverse-Z).
+    /// Depth comparison function (default `GreaterEqual` — reversed-Z;
+    /// `LessEqual` for the classic opt-out).
     pub compare: CompareFunction,
     /// Whether the pipeline writes depth. `false` for testing against a
     /// **read-only** depth attachment (e.g. sampling the depth it tests
@@ -327,11 +334,19 @@ pub struct DepthState {
 }
 
 impl DepthState {
-    /// A depth attachment with the engine's default test (`LessEqual`, writes on).
+    /// A depth attachment with the engine's default test (reversed-Z:
+    /// `GreaterEqual`, writes on).
     pub fn new(format: TextureFormat) -> Self {
+        Self::for_convention(DepthConvention::default(), format)
+    }
+
+    /// A depth attachment whose compare derives from an explicit
+    /// [`DepthConvention`] (writes on). The convention must match the
+    /// projection matrix and clear depth used with the same target.
+    pub fn for_convention(convention: DepthConvention, format: TextureFormat) -> Self {
         Self {
             format,
-            compare: CompareFunction::LessEqual,
+            compare: convention.compare(),
             write: true,
         }
     }
@@ -610,8 +625,9 @@ impl MaterialDescriptor {
         self
     }
 
-    /// Set the depth comparison function (e.g. `GreaterEqual` for reverse-Z). No
-    /// effect unless a depth format is set (call [`with_depth_format`](Self::with_depth_format) first).
+    /// Set the depth comparison function (e.g. `LessEqual` for a classic-depth
+    /// opt-out target; the default is reversed-Z `GreaterEqual`). No effect
+    /// unless a depth format is set (call [`with_depth_format`](Self::with_depth_format) first).
     pub fn with_depth_compare(mut self, compare: CompareFunction) -> Self {
         if let Some(d) = &mut self.depth {
             d.compare = compare;

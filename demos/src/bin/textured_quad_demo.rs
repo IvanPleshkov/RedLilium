@@ -16,11 +16,11 @@ use redlilium_app::{App, AppArgs, AppContext, AppHandler, DefaultAppArgs, DrawCo
 use redlilium_core::math::{Mat4, Vec3, look_at_rh, mat4_to_cols_array_2d, orthographic_rh};
 use redlilium_core::mesh::generators;
 use redlilium_graphics::{
-    AddressMode, BindingGroupDescriptor, BufferUsage, ColorAttachment, DepthStencilAttachment,
-    DrawCommand, FilterMode, FrameSchedule, GraphicsPass, Material, MaterialDescriptor,
-    MaterialInstance, Mesh, RenderTargetConfig, RingBuffer, SamplerDescriptor, ShaderSource,
-    ShaderStage, TextureDescriptor, TextureFormat, TextureUsage, TransferConfig, TransferOperation,
-    TransferPass, VertexLayout,
+    AddressMode, BindingGroupDescriptor, BufferUsage, ColorAttachment, DepthConvention, DepthState,
+    DepthStencilAttachment, DrawCommand, FilterMode, FrameSchedule, GraphicsPass, Material,
+    MaterialDescriptor, MaterialInstance, Mesh, RenderTargetConfig, RingBuffer, SamplerDescriptor,
+    ShaderSource, ShaderStage, TextureDescriptor, TextureFormat, TextureUsage, TransferConfig,
+    TransferOperation, TransferPass, VertexLayout,
     resize::{ResizeManager, ResizeStrategy},
 };
 
@@ -220,7 +220,15 @@ impl TexturedQuadDemo {
                     ))
                     .with_vertex_layout(vertex_layout.clone())
                     .with_color_format(ctx.surface_format())
-                    .with_depth_format(TextureFormat::Depth32Float)
+                    // This demo deliberately runs the CLASSIC depth convention
+                    // (#125 opt-out proof): classic projection above, clear
+                    // depth 1.0 in the pass, and LessEqual here — the three
+                    // must flip together (one convention per depth target,
+                    // ADR-038). Everything else in the engine is reversed-Z.
+                    .with_depth(Some(DepthState::for_convention(
+                        DepthConvention::Classic,
+                        TextureFormat::Depth32Float,
+                    )))
                     // Binding 0 (MVP) is a per-draw dynamic offset into a ring.
                     .with_dynamic_uniform(0, 0)
                     .with_label("quad_material"),
@@ -300,6 +308,8 @@ impl TexturedQuadDemo {
         // Scale to show the quad at a reasonable size (not fullscreen)
         let scale = 1.5;
 
+        // Classic-convention projection — see the material creation comment
+        // (#125 opt-out proof).
         let proj = if aspect > 1.0 {
             // Wider than tall
             orthographic_rh(-scale * aspect, scale * aspect, -scale, scale, -1.0, 1.0)
@@ -395,7 +405,10 @@ impl AppHandler for TexturedQuadDemo {
                             .with_clear_color(0.1, 0.1, 0.15, 1.0), // Dark background
                     )
                     .with_depth_stencil(
-                        DepthStencilAttachment::from_texture(depth.clone()).with_clear_depth(1.0),
+                        // Classic clear (1.0) — this demo is the #125 classic
+                        // opt-out proof; see the material creation comment.
+                        DepthStencilAttachment::from_texture(depth.clone())
+                            .with_clear_depth(DepthConvention::Classic.clear_depth()),
                     ),
             );
         }
