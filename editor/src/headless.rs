@@ -38,7 +38,10 @@ const CALM_TICKS: u32 = 3;
 /// format.
 const COLOR_FORMAT: TextureFormat = TextureFormat::Bgra8UnormSrgb;
 
-pub fn run(game: Option<Box<dyn redlilium_runtime::Plugin>>) {
+pub fn run(
+    game: Option<Box<dyn redlilium_runtime::Plugin>>,
+    behavior_spec: Option<crate::behavior_reload::BehaviorReloadSpec>,
+) {
     redlilium_core::init();
     redlilium_graphics::init();
 
@@ -148,14 +151,22 @@ pub fn run(game: Option<Box<dyn redlilium_runtime::Plugin>>) {
     let mut pipeline = device.create_pipeline(2);
     let mut rc = RemoteCommands::default();
 
+    // Tier-1 behavior reload (ADR-033): only meaningful over a hosted game.
+    let mut behavior = behavior_spec
+        .filter(|_| game_host.is_some())
+        .map(crate::behavior_reload::BehaviorReload::new);
+
     let mut calm = 0u32;
     let mut render_failures = 0u32;
     let mut shutdown = false;
     while !shutdown {
         // A live, unpaused play session keeps the loop free-running: the game
-        // must tick whether or not remote work is parked.
+        // must tick whether or not remote work is parked. So does a running
+        // background rebuild — its completion is polled, not signalled.
         let playing = play.as_ref().is_some_and(|p| !p.is_paused());
-        let busy = playing || rc.has_pending() || !remote_commands::assets_idle(&ew.world);
+        let rebuilding = behavior.as_ref().is_some_and(|b| b.rebuilding());
+        let busy =
+            playing || rebuilding || rc.has_pending() || !remote_commands::assets_idle(&ew.world);
         calm = if busy { 0 } else { calm + 1 };
         if calm >= CALM_TICKS {
             // Quiescent: sleep on the transport until the next command. The
@@ -169,6 +180,20 @@ pub fn run(game: Option<Box<dyn redlilium_runtime::Plugin>>) {
             }
         }
 
+        // Refresh the hosted-game status snapshot the `state` command reports.
+        rc.game_status = Some(remote_commands::GameStatus {
+            hosted: match &game_host {
+                None => "none",
+                Some(host) if host.is_dylib() => "dylib",
+                Some(_) => "static",
+            },
+            behavior_override: game_host.as_ref().is_some_and(|h| h.has_behavior()),
+            stale: behavior.as_ref().is_some_and(|b| b.stale()),
+            rebuilding,
+            restart_required: behavior.as_ref().is_some_and(|b| b.restart_required()),
+            schema_diverged: behavior.as_ref().is_some_and(|b| b.schema_diverged()),
+        });
+
         let outcome = tick(
             &mut ew,
             &mut rc,
@@ -181,6 +206,17 @@ pub fn run(game: Option<Box<dyn redlilium_runtime::Plugin>>) {
             play.as_mut(),
         );
         shutdown = outcome.shutdown;
+
+        // A finished Tier-1 rebuild lands between frames: the play world from
+        // the previous behavior module dies before the image swap.
+        if let Some(result) = behavior.as_mut().and_then(|b| b.poll()) {
+            crate::behavior_reload::apply_behavior_build(
+                result,
+                behavior.as_mut().expect("polled above"),
+                game_host.as_mut().expect("behavior implies host"),
+                &mut play,
+            );
+        }
 
         // Play-session lifecycle (EDITOR_REBUILD.md §4.3), applied between
         // frames like the reload below.
@@ -234,16 +270,32 @@ pub fn run(game: Option<Box<dyn redlilium_runtime::Plugin>>) {
         }
 
         if rc.take_reload() {
-            // A reload swaps the mapped image every world's game systems point
-            // into — the play world must die first.
-            if play.take().is_some() {
-                log::info!("reload_game: play session stopped");
-            }
-            match game_host.as_mut() {
-                None => log::error!(
+            match (behavior.as_mut(), game_host.as_mut()) {
+                // Tier-1 (ADR-033): kick the background rebuild; the swap
+                // lands via `apply_behavior_build` when it finishes green.
+                (Some(b), Some(_)) => {
+                    if b.request_rebuild() {
+                        log::info!("reload_game: Tier-1 rebuild started");
+                    } else {
+                        log::info!("reload_game: rebuild already running");
+                    }
+                }
+                (None, Some(host)) if !host.is_dylib() => log::error!(
+                    "reload_game: statically hosted game without behavior_reload — \
+                     restart the editor binary instead (Tier 2, ADR-033)"
+                ),
+                (None, None) => log::error!(
                     "reload_game: no game module hosted (launch with REDLILIUM_GAME=<cdylib>)"
                 ),
-                Some(host) => {
+                // `behavior` is only constructed over a hosted game.
+                (Some(_), None) => unreachable!("behavior reload without a game host"),
+                // Legacy dylib hosting: warm-restart the editing world.
+                (None, Some(host)) => {
+                    // A reload swaps the mapped image every world's game
+                    // systems point into — the play world must die first.
+                    if play.take().is_some() {
+                        log::info!("reload_game: play session stopped");
+                    }
                     let opts = crate::game_host::ReloadOptions {
                         params: EditorWorldParams {
                             remote: true,

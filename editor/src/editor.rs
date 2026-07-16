@@ -62,6 +62,10 @@ pub struct Editor {
     /// A statically linked game handed in by the owning binary (ADR-033),
     /// held until `on_init` hosts it (the editing world doesn't exist yet).
     static_game: Option<Box<dyn redlilium_runtime::Plugin>>,
+    /// Tier-1 behavior-reload config (ADR-033), held until `on_init`.
+    behavior_spec: Option<crate::behavior_reload::BehaviorReloadSpec>,
+    /// Tier-1 behavior-reload driver: source watcher + background rebuild.
+    behavior: Option<crate::behavior_reload::BehaviorReload>,
     runner: EcsRunner,
     /// Persistent engine state (GPU managers, asset DB/processor) — outlives
     /// any world (ADR-020). Created with the graphics device in `on_init`.
@@ -144,11 +148,16 @@ struct PendingPrefabImport {
 }
 
 impl Editor {
-    /// The windowed shell, optionally owning a statically linked game
-    /// (ADR-033) — hosted in `on_init` once the editing world exists.
-    pub fn with_game(game: Option<Box<dyn redlilium_runtime::Plugin>>) -> Self {
+    /// The windowed shell, optionally owning a statically linked game and
+    /// its Tier-1 behavior-reload config (ADR-033) — hosted in `on_init`
+    /// once the editing world exists.
+    pub fn with_game(
+        game: Option<Box<dyn redlilium_runtime::Plugin>>,
+        behavior_spec: Option<crate::behavior_reload::BehaviorReloadSpec>,
+    ) -> Self {
         let mut editor = Self::new();
         editor.static_game = game;
+        editor.behavior_spec = behavior_spec;
         editor
     }
 
@@ -178,6 +187,8 @@ impl Editor {
             play: None,
             game_host: None,
             static_game: None,
+            behavior_spec: None,
+            behavior: None,
             // Multi-threaded runner, enabled after Track 2 MT-hardening
             // (#52-#55: barriers, explicit edges, raw-access-aware detector).
             runner: EcsRunner::multi_thread(
@@ -543,6 +554,49 @@ impl Editor {
     /// Apply a play action (Play/Pause/Resume/Stop): manage the play-session
     /// lifecycle (EDITOR_REBUILD.md §4.3). Play boots a full game world from
     /// the hosted module; Stop drops it. The editing world is not involved.
+    /// Warm-restart the editing world against a freshly rebuilt game cdylib
+    /// (legacy `REDLILIUM_GAME` hosting, #58). Caller has stopped the play
+    /// session already.
+    fn reload_from_disk(&mut self) {
+        match (&mut self.game_host, self.world.take()) {
+            (Some(host), Some(old)) => {
+                let engine = self.engine.as_ref().expect("engine outlives worlds");
+                let scene_view = self.scene_view.as_mut().expect("scene view present");
+                let opts = crate::game_host::ReloadOptions {
+                    params: EditorWorldParams {
+                        remote: self.remote.is_some(),
+                        egui: true,
+                    },
+                    aspect: scene_view.aspect_ratio(),
+                };
+                let (fresh, result) = crate::game_host::reload_game(
+                    host,
+                    old,
+                    engine,
+                    scene_view,
+                    &self.runner,
+                    &opts,
+                    crate::game_host::swap_from_disk,
+                );
+                self.world = Some(fresh);
+                self.last_selection = Vec::new();
+                match result {
+                    Ok(()) => log::info!("game module reloaded (scene restored)"),
+                    Err(e) => log::error!("game reload failed: {e}"),
+                }
+            }
+            (host, old) => {
+                self.world = old;
+                if host.is_none() {
+                    log::error!(
+                        "reload_game: no game module hosted \
+                         (launch with REDLILIUM_GAME=<cdylib>)"
+                    );
+                }
+            }
+        }
+    }
+
     fn apply_play_action(&mut self, action: crate::toolbar::PlayAction) {
         match action {
             crate::toolbar::PlayAction::Play => self.start_play(),
@@ -879,6 +933,12 @@ impl AppHandler for Editor {
                 Err(e) => log::error!("failed to load game module '{path}': {e}"),
             }
         }
+        // Tier-1 behavior reload (ADR-033): only meaningful over a hosted game.
+        if self.game_host.is_some()
+            && let Some(spec) = self.behavior_spec.take()
+        {
+            self.behavior = Some(crate::behavior_reload::BehaviorReload::new(spec));
+        }
 
         // Create native menu after the event loop / NSApplication is initialized
         #[cfg(target_os = "macos")]
@@ -1028,6 +1088,34 @@ impl AppHandler for Editor {
         // that Changed<T> filters can detect the mutations this frame).
         self.world.as_mut().unwrap().drain_actions();
 
+        // Tier-1 behavior reload (ADR-033): drain watcher/build events; a
+        // finished green build swaps the behavior module between frames (the
+        // play world from the old image dies first).
+        if let Some(result) = self.behavior.as_mut().and_then(|b| b.poll()) {
+            crate::behavior_reload::apply_behavior_build(
+                result,
+                self.behavior.as_mut().expect("polled above"),
+                self.game_host.as_mut().expect("behavior implies host"),
+                &mut self.play,
+            );
+            self.sync_play_state();
+        }
+        // Refresh the hosted-game status the remote `state` command reports.
+        if let Some(rc) = &mut self.remote {
+            rc.game_status = Some(crate::remote_commands::GameStatus {
+                hosted: match &self.game_host {
+                    None => "none",
+                    Some(host) if host.is_dylib() => "dylib",
+                    Some(_) => "static",
+                },
+                behavior_override: self.game_host.as_ref().is_some_and(|h| h.has_behavior()),
+                stale: self.behavior.as_ref().is_some_and(|b| b.stale()),
+                rebuilding: self.behavior.as_ref().is_some_and(|b| b.rebuilding()),
+                restart_required: self.behavior.as_ref().is_some_and(|b| b.restart_required()),
+                schema_diverged: self.behavior.as_ref().is_some_and(|b| b.schema_diverged()),
+            });
+        }
+
         // Remote protocol pump: completes last frame's parked responses (their
         // actions just drained), then executes newly arrived commands.
         if let Some(rc) = &mut self.remote
@@ -1088,48 +1176,28 @@ impl AppHandler for Editor {
         if let Some(rc) = &mut self.remote
             && rc.take_reload()
         {
-            // A reload swaps the mapped image every world's game systems
-            // point into — the play world must die first.
-            if self.play.take().is_some() {
-                log::info!("reload_game: play session stopped");
-                self.sync_play_state();
-            }
-            match (&mut self.game_host, self.world.take()) {
-                (Some(host), Some(old)) => {
-                    let engine = self.engine.as_ref().expect("engine outlives worlds");
-                    let scene_view = self.scene_view.as_mut().expect("scene view present");
-                    let opts = crate::game_host::ReloadOptions {
-                        params: EditorWorldParams {
-                            remote: self.remote.is_some(),
-                            egui: true,
-                        },
-                        aspect: scene_view.aspect_ratio(),
-                    };
-                    let (fresh, result) = crate::game_host::reload_game(
-                        host,
-                        old,
-                        engine,
-                        scene_view,
-                        &self.runner,
-                        &opts,
-                        crate::game_host::swap_from_disk,
-                    );
-                    self.world = Some(fresh);
-                    self.last_selection = Vec::new();
-                    match result {
-                        Ok(()) => log::info!("game module reloaded (scene restored)"),
-                        Err(e) => log::error!("game reload failed: {e}"),
-                    }
+            if let Some(b) = self.behavior.as_mut() {
+                // Tier-1 (ADR-033): background rebuild; the swap lands via
+                // `apply_behavior_build` when it finishes green.
+                if b.request_rebuild() {
+                    log::info!("reload_game: Tier-1 rebuild started");
+                } else {
+                    log::info!("reload_game: rebuild already running");
                 }
-                (host, old) => {
-                    self.world = old;
-                    if host.is_none() {
-                        log::error!(
-                            "reload_game: no game module hosted \
-                             (launch with REDLILIUM_GAME=<cdylib>)"
-                        );
-                    }
+            } else if self.game_host.as_ref().is_some_and(|host| !host.is_dylib()) {
+                log::error!(
+                    "reload_game: statically hosted game without behavior_reload — \
+                     restart the editor binary instead (Tier 2, ADR-033)"
+                );
+            } else {
+                // Legacy dylib hosting: warm-restart the editing world. The
+                // reload swaps the mapped image every world's game systems
+                // point into — the play world must die first.
+                if self.play.take().is_some() {
+                    log::info!("reload_game: play session stopped");
+                    self.sync_play_state();
                 }
+                self.reload_from_disk();
             }
         }
 
@@ -1303,6 +1371,26 @@ impl AppHandler for Editor {
                             // Phase 6: Play mode indicator badge
                             ui.add_space(8.0);
                             crate::toolbar::draw_play_mode_indicator(ui, self.play_state);
+
+                            // Tier-1 behavior-reload indicator (ADR-033).
+                            if let Some(b) = &self.behavior {
+                                ui.add_space(8.0);
+                                let status = crate::toolbar::GameBuildStatus {
+                                    stale: b.stale(),
+                                    rebuilding: b.rebuilding(),
+                                    restart_required: b.restart_required(),
+                                    schema_diverged: b.schema_diverged(),
+                                };
+                                if crate::toolbar::draw_game_build_indicator(ui, status)
+                                    && self
+                                        .behavior
+                                        .as_mut()
+                                        .expect("checked above")
+                                        .request_rebuild()
+                                {
+                                    log::info!("toolbar: Tier-1 rebuild started");
+                                }
+                            }
 
                             // Gizmo mode switch (#85 v2); mirrors W/E/R.
                             ui.add_space(16.0);

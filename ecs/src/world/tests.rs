@@ -2156,9 +2156,10 @@ fn schema_hash_consistent_across_serialize() {
     assert_eq!(hash1, hash2);
 }
 
-// Phase 6, Step 3: Field reorder detection test
-// Simulates the scenario where component schema changes (e.g. field reordering)
-// and verify that deserialize catches it with SchemaMismatch error.
+// Phase 6, Step 3 (re-scoped by ADR-033): schema drift is detected but
+// TOLERATED — name-keyed restore proceeds (added fields default, removed
+// fields drop) with a warning, because cross-image scene seeding (editing
+// world → play world under a rebuilt game) depends on that tolerance.
 
 #[derive(Clone, Debug)]
 struct ReorderedFieldComponent;
@@ -2182,14 +2183,17 @@ impl crate::Component for ReorderedFieldComponent {
 
     fn serialize_component(
         &self,
-        _ctx: &mut crate::serialize::SerializeContext<'_>,
+        ctx: &mut crate::serialize::SerializeContext<'_>,
     ) -> Result<crate::serialize::Value, crate::serialize::SerializeError> {
-        Ok(crate::serialize::Value::Null)
+        ctx.begin_struct(Self::NAME)?;
+        ctx.end_struct()
     }
 
     fn deserialize_component(
-        _ctx: &mut crate::serialize::DeserializeContext<'_>,
+        ctx: &mut crate::serialize::DeserializeContext<'_>,
     ) -> Result<Self, crate::serialize::DeserializeError> {
+        ctx.begin_struct(Self::NAME)?;
+        ctx.end_struct()?;
         Ok(ReorderedFieldComponent)
     }
 }
@@ -2216,20 +2220,23 @@ impl crate::Component for ReorderedFieldComponentV2 {
 
     fn serialize_component(
         &self,
-        _ctx: &mut crate::serialize::SerializeContext<'_>,
+        ctx: &mut crate::serialize::SerializeContext<'_>,
     ) -> Result<crate::serialize::Value, crate::serialize::SerializeError> {
-        Ok(crate::serialize::Value::Null)
+        ctx.begin_struct(Self::NAME)?;
+        ctx.end_struct()
     }
 
     fn deserialize_component(
-        _ctx: &mut crate::serialize::DeserializeContext<'_>,
+        ctx: &mut crate::serialize::DeserializeContext<'_>,
     ) -> Result<Self, crate::serialize::DeserializeError> {
+        ctx.begin_struct(Self::NAME)?;
+        ctx.end_struct()?;
         Ok(ReorderedFieldComponentV2)
     }
 }
 
 #[test]
-fn schema_mismatch_on_field_reorder_detected() {
+fn schema_drift_is_tolerated_on_restore() {
     // Setup: Snapshot with ReorderedFieldComponent (version 1 hash)
     let mut world1 = World::new();
     world1.register_inspector::<ReorderedFieldComponent>();
@@ -2237,14 +2244,8 @@ fn schema_mismatch_on_field_reorder_detected() {
     world1.insert(entity, ReorderedFieldComponent).unwrap();
 
     let snapshot = world1.serialize_world().expect("serialize");
-    assert!(
-        snapshot
-            .metadata
-            .component_schemas
-            .contains_key("ReorderedFieldComponent")
-    );
 
-    // Verify: snapshot has v1 hash
+    // Verify: snapshot carries the v1 hash.
     let stored_hash = snapshot
         .metadata
         .component_schemas
@@ -2252,24 +2253,20 @@ fn schema_mismatch_on_field_reorder_detected() {
         .unwrap();
     assert_eq!(stored_hash, "field_order_v1_abc");
 
-    // Act: Try to restore to world with ReorderedFieldComponentV2 (different hash)
+    // Act: restore into a world whose component has a DIFFERENT hash.
     let mut world2 = World::new();
     world2.register_inspector::<ReorderedFieldComponentV2>();
 
-    let result = world2.deserialize_world_into(&snapshot);
+    let restored = world2
+        .deserialize_world_into(&snapshot)
+        .expect("drifted schema restores tolerantly (with a warning), not an error");
 
-    // Assert: Schema mismatch error (not silent corruption)
-    match result {
-        Err(crate::serialize::DeserializeError::SchemaMismatch {
-            component,
-            expected,
-            found,
-        }) => {
-            assert_eq!(component, "ReorderedFieldComponent");
-            assert_eq!(expected, "field_order_v2_bca");
-            assert_eq!(found, "field_order_v1_abc");
-        }
-        Ok(_) => panic!("Expected SchemaMismatch error, got success"),
-        Err(e) => panic!("Expected SchemaMismatch, got {:?}", e),
-    }
+    // The component deserialized by name despite the drift.
+    assert_eq!(restored.len(), 1);
+    assert!(
+        world2
+            .get::<ReorderedFieldComponentV2>(restored[0])
+            .is_some(),
+        "component restored by name under the drifted schema"
+    );
 }

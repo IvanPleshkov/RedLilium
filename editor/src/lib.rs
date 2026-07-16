@@ -30,6 +30,7 @@
 mod asset_browser;
 mod asset_inspector;
 mod background_vfs;
+mod behavior_reload;
 mod console;
 mod core;
 mod dock;
@@ -56,26 +57,66 @@ use redlilium_app::{App, AppArgs, DefaultAppArgs};
 /// Launch the editor with `game` statically hosted: its `register_types`
 /// feed the editing world (authoring), its full composition boots play
 /// worlds (ADR-032). Blocks until the editor exits.
+///
+/// Shorthand for [`hosting`]`(game).run()` — use [`hosting`] to opt into
+/// Tier-1 behavior reload (ADR-033).
 pub fn run(game: impl redlilium_runtime::Plugin + 'static) {
-    launch(Some(Box::new(game)));
+    hosting(game).run();
 }
 
 /// Launch the editor with no statically linked game (engine development).
 /// A game cdylib may still be hosted via `REDLILIUM_GAME=<path>`.
 pub fn run_without_game() {
-    launch(None);
+    launch(None, None);
 }
 
-fn launch(game: Option<Box<dyn redlilium_runtime::Plugin>>) {
+/// Configure the editor around a statically hosted `game` (ADR-033).
+pub fn hosting(game: impl redlilium_runtime::Plugin + 'static) -> EditorLaunch {
+    EditorLaunch {
+        game: Box::new(game),
+        behavior_reload: None,
+    }
+}
+
+/// Builder for a game-owned editor binary — see [`hosting`].
+pub struct EditorLaunch {
+    game: Box<dyn redlilium_runtime::Plugin>,
+    behavior_reload: Option<behavior_reload::BehaviorReloadSpec>,
+}
+
+impl EditorLaunch {
+    /// Enable Tier-1 behavior reload (ADR-033): the editor watches the game
+    /// package's sources (stale marker), rebuilds its cdylib on request with
+    /// the drift-free fixed invocation, and hot-swaps it for play worlds.
+    /// `game_package` is the cargo package name (e.g. `"car-game"`); the
+    /// package must keep `crate-type = ["cdylib", "rlib"]` and cargo's
+    /// default lib-name transform.
+    pub fn behavior_reload(mut self, game_package: impl Into<String>) -> Self {
+        self.behavior_reload = Some(behavior_reload::BehaviorReloadSpec {
+            game_package: game_package.into(),
+        });
+        self
+    }
+
+    /// Launch (blocks until the editor exits).
+    pub fn run(self) {
+        launch(Some(self.game), self.behavior_reload);
+    }
+}
+
+fn launch(
+    game: Option<Box<dyn redlilium_runtime::Plugin>>,
+    behavior: Option<behavior_reload::BehaviorReloadSpec>,
+) {
     log_capture::install();
     // Headless shell: no window/swapchain, frames tick on demand from the
     // remote channel (docs/REMOTE.md).
     if std::env::var("REDLILIUM_HEADLESS").is_ok_and(|v| v == "1") {
-        headless::run(game);
+        headless::run(game, behavior);
         return;
     }
     let args = DefaultAppArgs::parse()
         .with_title_str("RedLilium Editor")
         .with_custom_titlebar(true);
-    App::run(editor::Editor::with_game(game), args);
+    App::run(editor::Editor::with_game(game, behavior), args);
 }

@@ -139,13 +139,17 @@ pub trait Component: Clone + Send + Sync + 'static {
 
     /// Compute a deterministic schema hash for this component type.
     ///
-    /// Phase 5 feature: used to detect field reordering or type changes during
-    /// snapshot restore. The hash should be computed from the component's field
-    /// names and types (e.g., blake3("translation:Vec3|rotation:Quat|scale:Vec3")).
+    /// The name-keyed, cross-image schema identity: `#[derive(Component)]`
+    /// generates it from the schema version plus the visible fields' names
+    /// and type tokens in declaration order, so two images compiled from the
+    /// same source agree and any reshape (field added/removed/retyped/
+    /// reordered) shifts it. Consumers: snapshot restore logs schema drift
+    /// (tolerated — see `World::deserialize_world_into`), and the editor's
+    /// Tier-1 behavior diff compares a static plugin image against a rebuilt
+    /// game cdylib (ADR-033).
     ///
-    /// The default implementation returns an empty string (no schema validation).
-    /// Components that implement serialization should override this to return
-    /// a hash of their field structure, enabling safe reload detection.
+    /// The default implementation returns an empty string (no schema
+    /// tracking) — that's what `#[skip_serialization]` components keep.
     fn schema_hash() -> String {
         String::new()
     }

@@ -2124,9 +2124,15 @@ editing world.
 - ✅ Typed, in-process API for game-specific editor tooling
 - ✅ The invocation-discipline failure class disappears from the user's
   hands (the editor is the only party that builds the cdylib)
-- ⚠️ Static and dylib copies of game types coexist (distinct `TypeId`s,
-  same names) — they must never meet in one world; editing world = static,
-  play worlds = dylib. Name-keyed serialization is the bridge, as today
+- ⚠️ Static and dylib copies of the game coexist — with **identical**
+  `TypeId`s: the cdylib and the rlib linked into the editor come from one
+  rustc invocation of the game crate, so both images agree on every game
+  `TypeId` (empirically confirmed; a fresh-generation attempt aborts on the
+  registry's cross-generation conflict check). Behavior modules therefore
+  register under the authoring generation (idempotent), and dylib-image
+  liveness is enforced structurally (the play session stops before any
+  swap), not by the generation registry. Editing world = static, play
+  worlds = dylib; name-keyed serialization bridges the schema-diverged case
 - ⚠️ Cross-image hazards (duplicated statics, in-image panic shields)
   remain for play sessions — unchanged from today, now explicitly scoped
 - ⚠️ Editor-tool and engine changes cost a process restart (Tier 2);

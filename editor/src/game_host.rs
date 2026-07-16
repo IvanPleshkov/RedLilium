@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use redlilium_ecs::{Camera, EcsRunner, Entity, SourceId, World};
-use redlilium_runtime::{EngineContext, GameModule};
+use redlilium_runtime::{EngineContext, GameModule, GameModuleError};
 
 use crate::core::{EditorWorld, EditorWorldParams, create_editor_world_base, spawn_editor_camera};
 use crate::scene_view::SceneViewState;
@@ -43,6 +43,11 @@ const QUIESCE_TIMEOUT: Duration = Duration::from_secs(5);
 /// `EditorWorld` and tear worlds down first (reload does this internally;
 /// shutdown relies on drop order in the shell).
 pub struct GameHost {
+    /// Tier-1 behavior override (ADR-033): a cdylib of the same game whose
+    /// plugin boots play worlds, while authoring stays on `module`. Declared
+    /// before `module` so it drops first (its play worlds are torn down by
+    /// the shells before any swap/drop).
+    behavior: Option<BehaviorModule>,
     /// `None` only transiently inside [`swap`](Self::swap).
     module: Option<GameModule>,
     generation: SourceId,
@@ -51,6 +56,30 @@ pub struct GameHost {
     source_path: Option<PathBuf>,
     /// The unique temp copy currently mapped (removed on swap/drop).
     temp_path: Option<PathBuf>,
+}
+
+/// The Tier-1 module: play worlds boot from it; the editing world never
+/// sees it. It shares the authoring generation — the cdylib and the static
+/// rlib come from one rustc invocation, so their `TypeId`s are identical
+/// (see [`GameHost::load_behavior`]).
+struct BehaviorModule {
+    module: GameModule,
+    /// Mapped temp copy (`None` for the static test seam).
+    temp_path: Option<PathBuf>,
+}
+
+/// How the behavior module's component schemas compare to the authoring
+/// (static) image's — by name, via the serializer's schema hashes; `TypeId`s
+/// are image-specific and useless across the boundary.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SchemaVerdict {
+    /// Same components, same schema hashes: authoring fully covers the
+    /// behavior module — the Tier-1 hot loop.
+    Matching,
+    /// These components differ (missing on one side or hash mismatch): play
+    /// runs the new code, but authoring the changed fields needs a Tier-2
+    /// editor restart.
+    Diverged(Vec<String>),
 }
 
 impl GameHost {
@@ -73,6 +102,7 @@ impl GameHost {
             unsafe { GameModule::load_fresh_copy(&path) }.map_err(|e| e.to_string())?;
         let generation = engine.generation_registry().write().allocate_generation();
         let host = Self {
+            behavior: None,
             module: Some(module),
             generation,
             source_path: Some(path),
@@ -97,6 +127,7 @@ impl GameHost {
     ) -> Self {
         let generation = engine.generation_registry().write().allocate_generation();
         let host = Self {
+            behavior: None,
             module: Some(GameModule::from_static(plugin)),
             generation,
             source_path: None,
@@ -110,6 +141,125 @@ impl GameHost {
     #[cfg_attr(not(test), allow(dead_code))] // test seam; production reads logs
     pub fn generation(&self) -> SourceId {
         self.generation
+    }
+
+    /// Load a freshly built game cdylib as the **behavior module** (Tier 1,
+    /// ADR-033): subsequent play worlds boot from it; authoring stays on the
+    /// static module and the editing world is not touched. Returns how the
+    /// dylib's component schemas compare to the authoring image's.
+    ///
+    /// The behavior module registers under the **authoring generation**, not
+    /// a fresh one: the cdylib and the static rlib come from the same rustc
+    /// invocation of the game crate, so their `TypeId`s are **identical** —
+    /// a separate generation would make the registry's cross-generation
+    /// conflict check fire on the first play-world registration (an
+    /// uncatchable cross-image panic → process abort). Same `TypeId`s, same
+    /// generation: registration is idempotent. Dylib-image liveness is
+    /// enforced structurally instead (shells stop the play session before
+    /// any swap; the host outlives every world).
+    ///
+    /// # Errors
+    ///
+    /// [`GameModuleError::FingerprintMismatch`] /
+    /// [`GameModuleError::EngineMetadataDrift`] mean the cdylib was built
+    /// against a **different engine** than this running binary — the caller
+    /// must surface "restart required" (Tier 2); swapping would be unsound.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`GameModule::load`]; the fingerprint + TypeId-probe
+    /// gates run inside. The editor building the cdylib itself with the
+    /// fixed invocation (`behavior_reload::run_build`) is what makes the
+    /// same-build contract hold in practice.
+    pub unsafe fn load_behavior(
+        &mut self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<SchemaVerdict, GameModuleError> {
+        let (module, temp_path) = unsafe { GameModule::load_fresh_copy(path.as_ref()) }?;
+        let verdict = self.schema_verdict(module.plugin());
+        self.drop_behavior();
+        log::info!(
+            "behavior module loaded (generation {:?}, schemas {})",
+            self.generation,
+            match &verdict {
+                SchemaVerdict::Matching => "matching".to_owned(),
+                SchemaVerdict::Diverged(names) => format!("DIVERGED: {names:?}"),
+            }
+        );
+        self.behavior = Some(BehaviorModule {
+            module,
+            temp_path: Some(temp_path),
+        });
+        Ok(verdict)
+    }
+
+    /// [`load_behavior`](Self::load_behavior) for a statically linked
+    /// replacement plugin — the test seam for the Tier-1 flow.
+    #[cfg_attr(not(test), allow(dead_code))] // test seam
+    pub fn set_behavior_static(
+        &mut self,
+        plugin: Box<dyn redlilium_runtime::Plugin>,
+    ) -> SchemaVerdict {
+        let module = GameModule::from_static(plugin);
+        let verdict = self.schema_verdict(module.plugin());
+        self.drop_behavior();
+        self.behavior = Some(BehaviorModule {
+            module,
+            temp_path: None,
+        });
+        verdict
+    }
+
+    /// Whether play worlds currently boot from a behavior override.
+    pub fn has_behavior(&self) -> bool {
+        self.behavior.is_some()
+    }
+
+    /// Whether the **authoring** module came from a cdylib (`REDLILIUM_GAME`
+    /// hosting) rather than a static link — decides which reload flow
+    /// `reload_game` runs (warm restart vs Tier-1 rebuild, ADR-033).
+    pub fn is_dylib(&self) -> bool {
+        self.source_path.is_some()
+    }
+
+    /// Compare the authoring module's component schemas with `behavior`'s,
+    /// by name (serializer schema hashes — the cross-image comparison; see
+    /// [`SchemaVerdict`]). Each side's `register_types` runs in a throwaway
+    /// scratch world, dropped before this returns (nothing outlives either
+    /// image).
+    fn schema_verdict(&self, behavior: &dyn redlilium_runtime::Plugin) -> SchemaVerdict {
+        let authoring = self
+            .module
+            .as_ref()
+            .expect("module present outside swap")
+            .plugin();
+        let a = plugin_schemas(authoring);
+        let b = plugin_schemas(behavior);
+        let mut diverged: Vec<String> = a
+            .iter()
+            .filter(|(name, hash)| b.get(*name) != Some(hash))
+            .map(|(name, _)| name.clone())
+            .chain(b.keys().filter(|name| !a.contains_key(*name)).cloned())
+            .collect();
+        diverged.sort();
+        diverged.dedup();
+        if diverged.is_empty() {
+            SchemaVerdict::Matching
+        } else {
+            SchemaVerdict::Diverged(diverged)
+        }
+    }
+
+    fn drop_behavior(&mut self) {
+        if let Some(behavior) = self.behavior.take() {
+            let temp = behavior.temp_path.clone();
+            // The module (and everything pointing into its image) drops
+            // before its backing file is unlinked.
+            drop(behavior);
+            if let Some(temp) = temp {
+                let _ = std::fs::remove_file(&temp);
+            }
+        }
     }
 
     /// Boot a play world from the hosted module: the standalone composition
@@ -126,14 +276,18 @@ impl GameHost {
         aspect: f32,
         start_scene: Option<&str>,
     ) -> redlilium_runtime::App {
-        let module = self.module.as_ref().expect("module present outside swap");
-        redlilium_runtime::App::boot_scoped(
-            engine,
-            module.plugin(),
-            aspect,
-            start_scene,
-            self.generation,
-        )
+        // Tier-1 override first (ADR-033): behavior dylib when loaded, the
+        // authoring module otherwise — both under the authoring generation
+        // (identical `TypeId`s across the two images; see `load_behavior`).
+        let plugin = match &self.behavior {
+            Some(behavior) => behavior.module.plugin(),
+            None => self
+                .module
+                .as_ref()
+                .expect("module present outside swap")
+                .plugin(),
+        };
+        redlilium_runtime::App::boot_scoped(engine, plugin, aspect, start_scene, self.generation)
     }
 
     /// Run `Plugin::register_types` against `ew`'s world, scoped to this
@@ -191,6 +345,9 @@ impl GameHost {
 
 impl Drop for GameHost {
     fn drop(&mut self) {
+        // Behavior module (and its temp file) first — its play worlds are
+        // already gone (shell drop order).
+        self.drop_behavior();
         // Drop the mapped module before unlinking its temp file (unlinking a
         // mapped image is fine on unix, refused on Windows — order it anyway).
         self.module = None;
@@ -339,6 +496,23 @@ fn restore_into(
     Ok(())
 }
 
+/// A plugin's component schemas by name: `register_types` into a throwaway
+/// world, then the serializer's name → schema-hash map (the only identity
+/// that survives an image boundary; `TypeId`s do not).
+fn plugin_schemas(
+    plugin: &dyn redlilium_runtime::Plugin,
+) -> std::collections::HashMap<String, redlilium_ecs::serialize::SchemaHash> {
+    let mut scratch = World::new();
+    plugin.register_types(&mut scratch);
+    match scratch.serialize_world() {
+        Ok(snapshot) => snapshot.metadata.component_schemas,
+        Err(e) => {
+            log::warn!("schema enumeration failed ({e}); treating as empty");
+            Default::default()
+        }
+    }
+}
+
 /// The restored editor camera: the EDITOR-flagged entity carrying a `Camera`.
 fn find_editor_camera(world: &World) -> Option<Entity> {
     world.iter_entities().find(|&e| {
@@ -397,6 +571,110 @@ mod tests {
     fn blip_tags(world: &World) -> Vec<u32> {
         let blips = world.read_all::<GameBlip>().unwrap();
         blips.iter().map(|(_, b)| b.tag).collect()
+    }
+
+    mod reshaped {
+        use redlilium_ecs::Component;
+
+        /// Same component name as `super::GameBlip`, different field layout —
+        /// models "the rebuilt game changed a component's schema".
+        #[derive(Clone, Component)]
+        pub struct GameBlip {
+            #[allow(dead_code)]
+            pub tag: u32,
+            #[allow(dead_code)]
+            pub heading: f32,
+        }
+    }
+
+    /// "The rebuilt module" with an unchanged data model.
+    struct SameSchemaGame;
+    impl Plugin for SameSchemaGame {
+        fn register_types(&self, world: &mut World) {
+            world.register_inspector::<GameBlip>();
+        }
+        fn build(&self, _app: &mut redlilium_runtime::App) {}
+    }
+
+    /// "The rebuilt module" whose `GameBlip` grew a field.
+    struct ReshapedGame;
+    impl Plugin for ReshapedGame {
+        fn register_types(&self, world: &mut World) {
+            world.register_inspector::<reshaped::GameBlip>();
+        }
+        fn build(&self, _app: &mut redlilium_runtime::App) {}
+    }
+
+    /// Marker resource for proving which plugin composed a play world.
+    struct ProbeTag(u32);
+
+    /// A game whose `build` stamps the play world with `tag`.
+    struct ProbeGame(u32);
+    impl Plugin for ProbeGame {
+        fn register_types(&self, world: &mut World) {
+            world.register_inspector::<GameBlip>();
+        }
+        fn build(&self, app: &mut redlilium_runtime::App) {
+            let tag = ProbeTag(self.0);
+            app.world_mut().insert_resource(tag);
+        }
+    }
+
+    /// Tier-1 (ADR-033): the schema diff distinguishes an unchanged data
+    /// model from a reshaped one, and play worlds boot from the behavior
+    /// override while the editing world never sees it.
+    #[test]
+    fn behavior_override_boots_play_and_diffs_schemas() {
+        let instance = GraphicsInstance::new().expect("graphics instance");
+        let device = instance.create_device().expect("graphics device");
+        let engine = EngineContext::with_vfs(device.clone(), Vfs::new());
+        let mut scene_view = SceneViewState::new(device.clone(), TextureFormat::Bgra8UnormSrgb);
+        let params = EditorWorldParams {
+            remote: false,
+            egui: false,
+        };
+        let mut ew = create_editor_world(&params, &engine, &mut scene_view, 1.0);
+        let editor_entities = ew.world.iter_entities().count();
+
+        let mut host = GameHost::from_static(Box::new(ProbeGame(1)), &engine, &mut ew);
+        assert!(!host.has_behavior());
+
+        // Play boots from the authoring module before any override.
+        let app = host.boot_play_world(&engine, 1.0, None);
+        let (world, _schedules) = app.into_parts();
+        assert_eq!(world.resource::<ProbeTag>().0, 1, "authoring composition");
+        drop(world);
+
+        // Same data model → Matching; play now composes from the override.
+        let verdict = host.set_behavior_static(Box::new(ProbeGame(2)));
+        assert_eq!(verdict, SchemaVerdict::Matching, "unchanged schemas");
+        assert!(host.has_behavior());
+        let app = host.boot_play_world(&engine, 1.0, None);
+        let (world, _schedules) = app.into_parts();
+        assert_eq!(world.resource::<ProbeTag>().0, 2, "behavior composition");
+        drop(world);
+
+        // Reshaped component → Diverged, naming the component.
+        let verdict = host.set_behavior_static(Box::new(ReshapedGame));
+        match verdict {
+            SchemaVerdict::Diverged(names) => {
+                assert!(
+                    names.iter().any(|n| n.contains("GameBlip")),
+                    "diverged set names the reshaped component: {names:?}"
+                );
+            }
+            SchemaVerdict::Matching => panic!("reshaped schema must diverge"),
+        }
+        // An identical registration set again → Matching (stateless diff).
+        let verdict = host.set_behavior_static(Box::new(SameSchemaGame));
+        assert_eq!(verdict, SchemaVerdict::Matching);
+
+        // The editing world was never touched by any of it.
+        assert_eq!(
+            ew.world.iter_entities().count(),
+            editor_entities,
+            "editing world untouched by behavior swaps"
+        );
     }
 
     /// #58/#59 end-to-end (static-module seam; the dylib load/temp-copy path

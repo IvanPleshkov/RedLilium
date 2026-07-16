@@ -66,6 +66,53 @@ pub fn draw_play_controls(ui: &mut egui::Ui, play_state: PlayState) -> Option<Pl
     }
 }
 
+/// Tier-1 build status for the titlebar indicator (ADR-033) — a compact
+/// mirror of `remote_commands::GameStatus`'s behavior-reload fields.
+#[derive(Debug, Clone, Copy)]
+pub struct GameBuildStatus {
+    pub stale: bool,
+    pub rebuilding: bool,
+    pub restart_required: bool,
+    pub schema_diverged: bool,
+}
+
+/// Draw the game-build indicator: a rebuild button when sources went stale,
+/// progress while cargo runs, and the restart/diverged warnings. Returns
+/// `true` when the user asked for a rebuild.
+pub fn draw_game_build_indicator(ui: &mut egui::Ui, status: GameBuildStatus) -> bool {
+    if status.restart_required {
+        ui.colored_label(
+            egui::Color32::from_rgb(220, 80, 80),
+            "\u{27F3} restart editor",
+        )
+        .on_hover_text(
+            "The rebuilt game was compiled against a changed engine (fingerprint mismatch) — \
+             restart the editor to pick everything up",
+        );
+        return false;
+    }
+    if status.rebuilding {
+        ui.spinner();
+        ui.colored_label(egui::Color32::from_rgb(200, 180, 50), "building game…");
+        return false;
+    }
+    let mut requested = false;
+    if status.stale {
+        requested = ui
+            .button("\u{27F3} Rebuild game")
+            .on_hover_text("Game sources changed — rebuild the cdylib for the next Play")
+            .clicked();
+    }
+    if status.schema_diverged {
+        ui.colored_label(egui::Color32::from_rgb(200, 180, 50), "\u{26A0} schemas")
+            .on_hover_text(
+                "Behavior module's component schemas diverged from the editor's static image: \
+                 play runs the new code, authoring the changed fields needs an editor restart",
+            );
+    }
+    requested
+}
+
 /// Draw the gizmo mode switch (W/E/R shortcuts do the same); returns the
 /// newly selected mode when the user clicks a different one.
 pub fn draw_gizmo_mode_controls(

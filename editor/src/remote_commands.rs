@@ -76,6 +76,28 @@ pub enum PlayRequest {
     Stop,
 }
 
+/// The hosted game's status, surfaced in the `state` response (ADR-033).
+/// The shell refreshes this snapshot once per frame before dispatch.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct GameStatus {
+    /// `"static"` (game-owned editor binary), `"dylib"` (`REDLILIUM_GAME`),
+    /// or `"none"`.
+    pub hosted: &'static str,
+    /// Play worlds boot from a Tier-1 behavior dylib (vs the hosted module).
+    pub behavior_override: bool,
+    /// Game sources changed since the behavior module was (re)built.
+    pub stale: bool,
+    /// A `cargo build` is running in the background.
+    pub rebuilding: bool,
+    /// The last build relinked the editor binary itself — a Tier-2 process
+    /// restart is required; no swap happened.
+    pub restart_required: bool,
+    /// The behavior module's component schemas diverge from the authoring
+    /// (static) image: play runs the new code, authoring the new fields
+    /// needs a restart.
+    pub schema_diverged: bool,
+}
+
 /// Per-editor remote protocol state (parked writes/waits, screenshot job).
 #[derive(Default)]
 pub struct RemoteCommands {
@@ -88,6 +110,8 @@ pub struct RemoteCommands {
     reload_game: bool,
     /// A play-session request; the shell applies it between frames.
     play_request: Option<PlayRequest>,
+    /// Hosted-game status for the `state` response (shell-refreshed).
+    pub game_status: Option<GameStatus>,
 }
 
 impl RemoteCommands {
@@ -691,7 +715,7 @@ fn dispatch(
                 },
             );
         }
-        "state" => cmd_state(world, conn, id),
+        "state" => cmd_state(world, conn, id, rc.game_status),
         "inspect" => {
             let Some(entity) = str_param("entity").and_then(|s| find_entity(world, &s)) else {
                 return send_err(world, conn, id, "unknown entity");
@@ -1227,7 +1251,7 @@ fn entity_spec(e: Entity) -> String {
     format!("{}@{}", e.index(), e.spawn_tick())
 }
 
-fn cmd_state(world: &World, conn: u64, id: i64) {
+fn cmd_state(world: &World, conn: u64, id: i64, game: Option<GameStatus>) {
     #[derive(Serialize)]
     struct EntityRow {
         entity: String,
@@ -1244,6 +1268,8 @@ fn cmd_state(world: &World, conn: u64, id: i64) {
         scene: Option<String>,
         entities: Vec<EntityRow>,
         selection: Vec<String>,
+        /// Hosted-game status (ADR-033): stale/rebuilding/restart markers.
+        game: Option<GameStatus>,
     }
     let entities: Vec<EntityRow> = world
         .iter_entities()
@@ -1277,6 +1303,7 @@ fn cmd_state(world: &World, conn: u64, id: i64) {
             scene: world.resource::<crate::core::CurrentScene>().0.clone(),
             entities,
             selection,
+            game,
         },
     );
 }
