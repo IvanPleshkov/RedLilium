@@ -30,8 +30,9 @@ use rstest::rstest;
 use std::sync::{Arc, Mutex};
 
 use common::{
-    Backend, ExpectedPixel, FULLSCREEN_QUAD_VERTICES, LEFT_HALF_QUAD_VERTICES, TestContext,
-    create_fullscreen_quad, create_left_half_quad, create_material_instance, create_mrt_pass,
+    Backend, CENTERED_QUAD_VERTICES, ExpectedPixel, FULLSCREEN_QUAD_VERTICES,
+    LEFT_HALF_QUAD_VERTICES, TestContext, create_centered_quad, create_fullscreen_quad,
+    create_left_half_quad, create_material_instance, create_mrt_pass,
     create_render_pass_with_depth, create_simple_render_pass, create_solid_color_material,
     create_solid_color_material_with_raster, create_texture_sample_instance,
     create_texture_sample_material, generate_test_pattern, get_pixel, quad_vertex_layout,
@@ -2671,4 +2672,213 @@ fn demo_device_lost_breadcrumbs(#[case] backend: Backend) {
         report.contains("died in pass") || report.contains("INCOMPLETE"),
         "crash report should mark the submit incomplete:\n{report}"
     );
+}
+
+// ============================================================================
+// Depth-only pass: zero color attachments + vertex-only pipeline (issue #129)
+// ============================================================================
+
+/// Vertex-only WGSL shader for the depth-only pass: forces every fragment to
+/// clip z = 0.3 so the depth image records a recognizable value. No fragment
+/// stage exists — with zero color attachments there is nothing to shade.
+const DEPTH_ONLY_VS: &str = r#"
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+}
+
+@vertex
+fn vs_main(in: VertexInput) -> @builtin(position) vec4<f32> {
+    return vec4<f32>(in.position.xy, 0.3, 1.0);
+}
+"#;
+
+/// Fullscreen visualizer: samples the depth image and writes it as red.
+const DEPTH_VISUALIZE_SHADER: &str = r#"
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+}
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@group(0) @binding(0) var depth_texture: texture_depth_2d;
+@group(0) @binding(1) var depth_sampler: sampler;
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.position = vec4<f32>(in.position.xy, 0.0, 1.0);
+    out.uv = in.uv;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let d = textureSample(depth_texture, depth_sampler, in.uv);
+    return vec4<f32>(d, 0.0, 0.0, 1.0);
+}
+"#;
+
+/// Depth-only rendering end-to-end (#129): a graphics pass with **zero color
+/// attachments** drawing through a **vertex-only** pipeline (`color_formats`
+/// empty, no fragment stage) — the shape every shadow-map/depth-prepass pass
+/// uses. A second pass samples the produced depth image into a color target:
+/// the centered quad's footprint must read back its forced depth (0.3), the
+/// corners the clear depth (1.0). On Vulkan the whole workload must produce
+/// zero validation errors.
+#[rstest]
+#[case::dummy(Backend::Dummy)]
+#[case::vulkan(Backend::Vulkan)]
+#[case::webgpu(Backend::WebGpu)]
+fn test_depth_only_pass_zero_color_attachments(#[case] backend: Backend) {
+    let Some(ctx) = TestContext::new_with_validation(backend) else {
+        eprintln!("Backend {:?} not available, skipping", backend);
+        return;
+    };
+
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        redlilium_graphics::backend::vulkan::reset_validation_error_count();
+    }
+
+    const W: u32 = 16;
+    const H: u32 = 16;
+    const QUAD_DEPTH: f32 = 0.3;
+    const CLEAR_DEPTH: f32 = 1.0;
+
+    let depth = ctx.create_texture_2d(
+        W,
+        H,
+        TextureFormat::Depth32Float,
+        TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
+    );
+    let color = ctx.create_render_target(W, H);
+
+    // Vertex-only, zero-color material — the depth-only pipeline shape.
+    let depth_material = ctx
+        .device
+        .create_material(
+            &MaterialDescriptor::new()
+                .with_shader(ShaderSource::vertex(
+                    DEPTH_ONLY_VS.as_bytes().to_vec(),
+                    "vs_main",
+                ))
+                .with_vertex_layout(quad_vertex_layout())
+                .with_depth_format(TextureFormat::Depth32Float)
+                .with_label("depth_only_material"),
+        )
+        .expect("vertex-only material with zero color formats must be legal");
+    let depth_instance = Arc::new(MaterialInstance::new(depth_material));
+
+    let centered = create_centered_quad(&ctx);
+    write_quad_vertices(&ctx, &centered, &CENTERED_QUAD_VERTICES);
+
+    // Graph 1: the depth-only pass — a depth attachment and nothing else.
+    let mut g1 = RenderGraph::new();
+    let mut depth_pass = GraphicsPass::new("depth_only".into());
+    depth_pass.set_render_targets(RenderTargetConfig::new().with_depth_stencil(
+        DepthStencilAttachment::from_texture(depth.clone()).with_clear_depth(CLEAR_DEPTH),
+    ));
+    depth_pass.add_draw(centered, depth_instance);
+    g1.add_graphics_pass(depth_pass);
+    ctx.execute_graph(g1);
+
+    // Graph 2: visualize the depth image into a color target.
+    let binding_layout = Arc::new(
+        BindingLayout::new()
+            .with_entry(BindingLayoutEntry::new(0, BindingType::DepthTexture))
+            .with_sampler(1)
+            .with_label("depth_visualize_bindings"),
+    );
+    let vis_material = ctx
+        .device
+        .create_material(
+            &MaterialDescriptor::new()
+                .with_shader(ShaderSource::vertex(
+                    DEPTH_VISUALIZE_SHADER.as_bytes().to_vec(),
+                    "vs_main",
+                ))
+                .with_shader(ShaderSource::fragment(
+                    DEPTH_VISUALIZE_SHADER.as_bytes().to_vec(),
+                    "fs_main",
+                ))
+                .with_vertex_layout(quad_vertex_layout())
+                .with_binding_layout(binding_layout)
+                .with_color_format(TextureFormat::Rgba8Unorm)
+                .with_label("depth_visualize_material"),
+        )
+        .expect("Failed to create depth visualizer material");
+    let sampler = ctx
+        .device
+        .create_sampler(&SamplerDescriptor::nearest().with_label("depth_visualize_sampler"))
+        .expect("Failed to create sampler");
+    let vis_group = ctx
+        .device
+        .create_binding_group(
+            vis_material.binding_layouts()[0].clone(),
+            BindingGroupDescriptor::new()
+                .with_texture(0, depth.clone())
+                .with_sampler(1, sampler)
+                .with_label("depth_visualize_group"),
+        )
+        .expect("Failed to create depth visualizer binding group");
+    let vis_instance = Arc::new(MaterialInstance::new(vis_material).with_binding_group(vis_group));
+
+    let fullscreen = create_fullscreen_quad(&ctx);
+    write_quad_vertices(&ctx, &fullscreen, &FULLSCREEN_QUAD_VERTICES);
+
+    let mut g2 = RenderGraph::new();
+    let mut vis_pass = GraphicsPass::new("depth_visualize".into());
+    vis_pass.set_render_targets(RenderTargetConfig::new().with_color(
+        ColorAttachment::from_texture(color.clone()).with_clear_color(0.0, 1.0, 0.0, 1.0),
+    ));
+    vis_pass.add_draw(fullscreen, vis_instance);
+    g2.add_graphics_pass(vis_pass);
+    ctx.execute_graph(g2);
+
+    // Graph 3: read the color target back.
+    let readback_size = readback_buffer_size(W, H, 4);
+    let readback = ctx.create_readback_buffer(readback_size);
+    let mut g3 = RenderGraph::new();
+    let mut copy = TransferPass::new("depth_only_readback".into());
+    copy.set_transfer_config(TransferConfig::new().with_operation(
+        TransferOperation::readback_texture_whole(color, readback.clone()),
+    ));
+    g3.add_transfer_pass(copy);
+    ctx.execute_graph(g3);
+
+    // Dummy backend performs no real rendering — reaching here without a
+    // panic (pipeline creation + pass encoding accepted zero color
+    // attachments) is the assertion.
+    if backend == Backend::Dummy {
+        return;
+    }
+
+    let data = ctx.read_buffer(&readback, readback_size);
+    let center = get_pixel(&data, W, W / 2, H / 2);
+    let corner = get_pixel(&data, W, 1, 1);
+    eprintln!("depth-only center {center:?} corner {corner:?} ({backend:?})");
+    let expected_center = ExpectedPixel::from_float(QUAD_DEPTH, 0.0, 0.0, 1.0);
+    let expected_corner = ExpectedPixel::from_float(CLEAR_DEPTH, 0.0, 0.0, 1.0);
+    assert!(
+        verify_pixel(&data, W, W / 2, H / 2, expected_center, 3),
+        "center must read the quad's depth {QUAD_DEPTH} as red, got {center:?} ({backend:?})"
+    );
+    assert!(
+        verify_pixel(&data, W, 1, 1, expected_corner, 3),
+        "corner must read the clear depth {CLEAR_DEPTH} as red, got {corner:?} ({backend:?})"
+    );
+
+    #[cfg(feature = "vulkan-backend")]
+    if backend == Backend::Vulkan {
+        let errors = redlilium_graphics::backend::vulkan::validation_error_count();
+        assert_eq!(
+            errors, 0,
+            "Vulkan validation reported {errors} error(s) during the depth-only workload"
+        );
+    }
 }

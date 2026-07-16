@@ -84,6 +84,11 @@ impl Texture {
         self.descriptor.format
     }
 
+    /// Get the texture usage flags.
+    pub fn usage(&self) -> crate::types::TextureUsage {
+        self.descriptor.usage
+    }
+
     /// Get the mip level count.
     pub fn mip_level_count(&self) -> u32 {
         self.descriptor.mip_level_count

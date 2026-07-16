@@ -1759,12 +1759,24 @@ identity**:
   deferred tiers per ADR-027) are declared but not yet implemented —
   `CameraOutput` is the natural home for that knob when its consumer exists
 
+### Amendment (2026-07-16, ADR-035): the render-path knob is a separate component
+
+The consumer now exists (ADR-035), and the knob lands as a **separate
+serializable `RenderPath` component**, not a `CameraOutput` field as this
+ADR anticipated. Rationale: `CameraOutput` is the contract with *consumers*
+of the camera's image (where it goes, its size and format); the render path
+is the camera's internal production recipe, and its settings payload grows
+independently (shadow parameters, quality tiers, HDR chains). Everything
+else in this ADR — serialize the intent, derive the resource, graph-derived
+ordering — carries over unchanged to the pipeline layer.
+
 ### Related Issues
 
 - #74: framework hoist reframed (the frame driver shrinks; camera stack ADR)
 - #47: automatic graph ordering makes multi-camera safe
 - #6: per-camera quality = system variant axes (future)
 - #2: scene save/load consumes the serializable spec
+- #128 / ADR-035: per-camera render pipelines (the declared path knob lands)
 
 ## ADR-030: Per-Resource Sharing Mode for Cross-Queue Textures
 
@@ -1955,6 +1967,364 @@ back to a single mip on wgpu/dummy and on blit-ineligible formats). See #96.
 - #88: sharing-mode measurements gating a QFOT revisit
 - #96: GPU mip generation — a requires-graphics transfer op routed off the
   transfer queue
+
+## ADR-032: Inline Ray Tracing via VK_KHR_ray_query
+
+**Date**: 2026-07-15
+**Status**: Accepted
+
+### Context
+
+The engine reached the point where an advanced GPU feature is the right next
+step (#110). Two candidates: mesh shaders (meshlets) and hardware ray
+tracing. The raw-ash Vulkan backend was chosen in ADR-007 precisely to keep
+such extensions reachable; the ADR-027 capability model reserved slots for
+them. Mesh shaders need new `ShaderStage::{Task, Mesh}` variants, a SPIR-V
+bake path (Slang's WGSL output cannot express them), and meshlet
+preprocessing (meshoptimizer) from scratch. Inline ray tracing via
+`VK_KHR_ray_query` needs none of that: ray queries run inside existing
+fragment/compute shaders, and naga — the engine's WGSL→SPIR-V path on the
+Vulkan backend — already supports WGSL ray queries, emitting
+`SPV_KHR_ray_query`. Both dev GPUs (RTX 3070, RX 6400 / RDNA2) support the
+extension bundle, enabling two-vendor validation of the sync code.
+
+### Decision
+
+1. **Capability, not tier** (per the ADR-027 litmus): `ray_query` lands as a
+   `DeviceCapabilities` field — no renderer code path stands on it yet. When
+   ray-traced lighting becomes a real render path, *that* change introduces
+   the tier rung.
+2. **All-or-nothing bundle**: `VK_KHR_acceleration_structure` +
+   `VK_KHR_ray_query` + `VK_KHR_deferred_host_operations` extensions plus the
+   `accelerationStructure`, `rayQuery`, and Vulkan 1.2 `bufferDeviceAddress`
+   feature bits. Partial support reads as unsupported. The gpu-allocator is
+   created with `buffer_device_address` exactly when the bundle is enabled.
+3. **AS storage and scratch are ordinary engine `Buffer`s**, so the existing
+   buffer-access tracker covers builds and traversals with no new tracking
+   machinery. Four new `BufferAccessMode`s lower to the
+   `ACCELERATION_STRUCTURE_BUILD` stage / `ACCELERATION_STRUCTURE_{READ,WRITE}`
+   access masks (build input, TLAS-build BLAS read, build write, ray-query
+   shader read).
+4. **Builds go through the frame graph** (the Phase-0 red line): a fourth
+   pass kind, `AccelerationStructureBuildPass`, encodes
+   `vkCmdBuildAccelerationStructuresKHR`. Builds within one pass are
+   independent by contract; BLAS→TLAS ordering is expressed as pass
+   dependencies, and hazards derive from the declared access modes like every
+   other pass. The pass is legal on any compute-capable queue (never the
+   dedicated transfer queue).
+5. **TLAS instance streaming is ring-buffered**: a `Tlas` owns one
+   host-visible instance buffer per frame slot; `write_instances` rotates so
+   the CPU never overwrites data an in-flight frame's build reads. The TLAS
+   snapshots which BLASes its instances reference — that snapshot feeds both
+   barrier inference and keep-alive.
+6. **Binding model**: `BindingType::AccelerationStructure` →
+   `VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR`,
+   `BoundResource::AccelerationStructure(Arc<Tlas>)`. Material resource
+   extraction declares the TLAS **and** its referenced BLAS backings as
+   shader reads (traversal touches both).
+7. **Vulkan-only**: wgpu/dummy report `ray_query: false`; wgpu rejects AS
+   buffers/bindings/passes with a clear error; the dummy backend accepts
+   creation (placeholder handles) so graph-level tests run headlessly.
+
+### Consequences
+
+- ✅ `ray_query_demo`: fullscreen fragment-shader ray tracing (primary rays +
+  hard shadows) over GPU-built BLAS/TLAS, TLAS rebuilt per frame; validated
+  on RTX 3070 and RX 6400 with sync validation clean
+- ✅ WGSL ray-query shaders ride the existing naga path — no new bake
+  machinery; guarded by a unit test compiling one to SPIR-V
+- ✅ Barrier correctness is machine-checked: the new access modes flow
+  through the same tracker the sync validation layer (#99) already audits
+- ⚠️ BLAS geometry buffers must be created with
+  `BufferUsage::ACCELERATION_STRUCTURE_INPUT` — meshes loaded through the
+  standard path don't carry it yet (opt-in mesh AS input is #110 phase 2)
+- ⚠️ No BLAS compaction/update yet — every build is a full PREFER_FAST_TRACE
+  build (#110 phase 3); fine at demo scale, wasteful for streamed worlds
+- ⚠️ Slang cannot target WGSL ray queries, so ray-query shaders are authored
+  in WGSL directly for now; a Slang→SPIR-V bake variant is the escape hatch
+  when they need to join the baked-material world
+
+### Amendment (2026-07-15): phase decisions
+
+Three follow-up forks were decided with the project owner:
+
+1. **RT shadows integrate as a separate WGSL shadow-mask pass** — a
+   fullscreen ray-query pass reconstructs positions from depth and writes a
+   shadow-mask texture; the Slang resolve shader samples it as a plain
+   texture. The bake pipeline stays untouched; the Slang→SPIR-V bake variant
+   is deferred until ray queries need to live inside baked materials.
+2. **BLAS compaction swaps transparently in place**: `Blas` gains interior
+   mutability for its (handle, backing) pair; the old pair goes into deferred
+   retirement until the frame fence. Callers are unaffected —
+   `write_instances` picks up the new device address on the next write, while
+   in-flight builds keep the old AS alive through their Arc snapshots.
+3. **wgpu ray query is dropped** (was phase 4): browser WebGPU has no RT and
+   desktop wgpu is shadowed by the native Vulkan backend — dead weight in the
+   backlog.
+
+### Related Issues
+
+- #110: feature issue (phase 2: mesh AS input + shadow-mask pass in
+  pbr_ibl; phase 3: transparent compaction + async-compute builds)
+- #99: sync validation that machine-checks the new barrier paths
+
+## ADR-033: Meshlet Rendering via VK_EXT_mesh_shader
+
+**Date:** 2026-07-15
+**Status:** Accepted
+**Issue:** #111
+
+### Context
+
+The second "advanced GPU" pillar after inline ray tracing (ADR-032):
+meshlet-based rendering with GPU-side per-meshlet culling. Unlike ray query
+— where the WGSL/naga path carried the whole feature — **naga has no
+mesh-shading support at all**: there is no WGSL syntax for task or mesh
+shaders, so the entire shader toolchain question had to be answered first.
+
+### Decision
+
+**Task + mesh pipelines via `VK_EXT_mesh_shader`, authored in Slang, baked
+as SPIR-V.** Vulkan-only by construction (WebGPU has no mesh shaders).
+
+1. **Capability, not tier** (ADR-027 litmus): `DeviceCapabilities::
+   mesh_shading` — `VK_EXT_mesh_shader` with both `taskShader` and
+   `meshShader` feature bits, all-or-nothing. No renderer path stands on it
+   yet. wgpu/dummy report `false`; wgpu additionally rejects mesh materials
+   and mesh-tasks draws with `FeatureNotSupported`.
+2. **Stages are first-class:** `ShaderStage::Task`/`Mesh`,
+   `ShaderStageFlags::TASK`/`MESH`, descriptor visibility, baked-key stage
+   tags, SPIR-V entry-point probing (TaskEXT/MeshEXT execution models).
+   Stage-combination rules live in
+   `MaterialDescriptor::validate_stage_combination`: vertex XOR mesh, task
+   implies mesh, mesh materials carry no vertex layout.
+3. **Second baked artifact kind — SPIR-V.** The default build (Slang off)
+   serves Slang sources from the offline bake, but there is no WGSL form for
+   mesh stages, so `xtask bake-shaders` emits a `BAKED_SPIRV` table (bytes =
+   Slang's SPIR-V verbatim, same `shader_key` keyspace). **A spec containing
+   any task/mesh entry bakes ALL its entries to SPIR-V** — Slang's WGSL
+   target refuses to even load a module with mesh-shading entry points, so
+   the set's fragment stage cannot bake as WGSL either. The runtime tries
+   the WGSL table first, then SPIR-V, and misses loudly. `bake-shaders
+   --check` covers the new table unchanged.
+4. **Pipelines:** `create_graphics_pipeline` takes an ordered stage list and
+   an `Option<(&VertexLayout, PrimitiveTopology)>`; mesh pipelines omit the
+   vertex-input and input-assembly states entirely (spec-ignored anyway).
+5. **Draws without a Mesh:** `MeshTasksDrawCommand { material, group_count }`
+   + `GraphicsPass::add_draw_mesh_tasks` → `vkCmdDrawMeshTasksEXT`. Geometry
+   lives in storage buffers bound through the material instance, so resource
+   inference is `extract_material_resources` alone and the existing
+   `BufferAccessTracker` provides the barriers.
+6. **Barrier stage unions gain TASK/MESH bits** — but only when the
+   extension is enabled (stage flags from a disabled extension are invalid
+   API use). The augmentation lives in `BufferAccessTracker` so the recorded
+   source scopes and the emitted destination scopes cannot disagree.
+
+### Consequences
+
+- Mesh-shading materials are Slang-only; the WGSL path fails with the
+  engine-level cause. Web never sees the feature.
+- The `meshlet_demo` partitions a UV sphere into 32 meshlets at generation
+  time (grid patches, deliberately no meshoptimizer), instances it 64×, and
+  culls per meshlet in the task stage (bounding sphere vs. frustum +
+  meshoptimizer-convention backface cone) against a **freezable cull
+  camera** — SPACE freezes it, so orbiting on shows the holes where culled
+  meshlets were. Validated on RTX 3070 and RX 6400, 300 frames each under
+  `REDLILIUM_SYNC_VALIDATION=1`, zero hazards.
+- **Known limitation:** texture layout transitions do not yet augment their
+  stage masks with TASK/MESH — a texture sampled from a task/mesh stage
+  would get a too-narrow barrier scope. No current shader does this; sync
+  validation (#99) is the backstop, and the fix mirrors the buffer-side
+  augmentation.
+- Windows bake gotcha: the Vulkan SDK's `slang.dll` shadows the pinned one
+  on PATH — prepend `$SLANG_DIR/bin` before `bake-shaders` or the
+  `BAKED_SLANG_TAG` drifts (same class of issue commit ca76afa fixed for
+  `test-all.sh`).
+
+### Related Issues
+
+- #111: feature issue
+- #110 / ADR-032: the ray-tracing sibling — shared capability-vs-tier
+  reasoning, shared "advanced GPU" demo conventions
+- #99: sync validation that machine-checks the new barrier paths
+
+## ADR-034: Bindless Texture Heap via Descriptor Indexing
+
+**Date:** 2026-07-15
+**Status:** Accepted
+**Issue:** #117
+
+### Context
+
+The third "advanced GPU" pillar after ray query (ADR-032) and mesh shading
+(ADR-033): runtime-sized, update-after-bind descriptor arrays indexed
+non-uniformly from shaders — the prerequisite for GPU-driven rendering,
+per-instance materials in ray-query shaders, and textured meshlet materials.
+Three forks were settled with the owner up front: **phase-1 scope is sampled
+2D textures + samplers** (buffers already reach shaders via
+`bufferDeviceAddress`), **registration is an explicit opt-in** (render
+targets never burn slots), and **the heap is an explicit material group**,
+not a reserved set 0 (no global set-numbering migration).
+
+### Decision
+
+1. **Capability** (ADR-027): `DeviceCapabilities::bindless` — five Vulkan
+   1.2 core feature bits (`runtimeDescriptorArray`,
+   `descriptorBindingSampledImageUpdateAfterBind` — which also covers
+   SAMPLER bindings per the binding-flags VUIDs,
+   `descriptorBindingPartiallyBound`,
+   `descriptorBindingUpdateUnusedWhilePending`,
+   `shaderSampledImageArrayNonUniformIndexing`), all-or-nothing, queried at
+   selection. No extension: the engine baseline is Vulkan 1.3. wgpu/dummy:
+   false.
+2. **One device-owned heap**: a dedicated `UPDATE_AFTER_BIND` pool holding a
+   single persistent set — binding 0 = sampled-texture array, binding 1 =
+   sampler array, both `PARTIALLY_BOUND | UPDATE_AFTER_BIND |
+   UPDATE_UNUSED_WHILE_PENDING`. Capacities are engine caps (16384 / 256)
+   clamped by the update-after-bind device limits. The heap's set layout is
+   created through the same `ds_layout_cache` material pipelines use, so
+   set compatibility holds by construction.
+3. **Registration writes descriptors immediately**
+   (`GraphicsDevice::bindless_register_texture/_sampler` → slot `u32`);
+   legal while the heap is bound in flight because a fresh slot is never
+   dynamically used. **Slot recycling is fence-deferred**: an unregistered
+   slot (and its keep-alive `Arc`) waits `MAX_FRAMES_IN_FLIGHT` frame
+   advances in `BindlessSlots` before reuse.
+4. **Barriers stay automatic**: the heap group's entries carry
+   `BoundResource::BindlessHeap(Arc<BindlessSlots>)`; pass resource
+   inference declares every live (and retirement-pending) texture as
+   `ShaderRead`, so a freshly uploaded texture transitions
+   TransferDst → ShaderReadOnly before its first bindless draw.
+5. **Shaders are Slang with explicit binding layouts**: reflection cannot
+   express runtime arrays, so bindless materials pass
+   `GraphicsDevice::bindless_heap_layout()` (the shared `Arc`) plus their
+   data layouts explicitly. The bake registry gains per-spec `force_spirv`
+   (Slang's WGSL target cannot load unbounded arrays — generalizing
+   ADR-033's task/mesh auto-rule) and `skip_reflection`.
+
+### Consequences
+
+- One draw call can address every registered texture by integer — the
+  `bindless_demo` renders a 48-texture quad grid in a single instanced draw
+  and churns one texture every 90 frames (register new → repoint instance
+  data through the frame graph → unregister old), exercising deferred
+  recycling live. Validated on RTX 3070 and RX 6400, 400 frames each under
+  `REDLILIUM_SYNC_VALIDATION=1`, zero hazards.
+- Heap visibility is VERTEX|FRAGMENT|COMPUTE for now; task/mesh visibility
+  joins when a mesh material first consumes the heap (stage flags require
+  the extension).
+- Registered textures live as long as their slot: forgetting to unregister
+  pins the texture for the device's lifetime (documented; the slot table is
+  inspectable via `BindlessSlots::live_counts`).
+- Depth-format textures are excluded from the heap in phase 1 (the heap
+  records `SHADER_READ_ONLY_OPTIMAL`; sampled-depth layout conventions come
+  with a consumer).
+- Follow-ups when consumers appear: cube/3D/array texture heaps (same
+  mechanism, new binding), reflection support for runtime arrays, TASK/MESH
+  heap visibility.
+
+### Related Issues
+
+- #117: feature issue
+- #110 / ADR-032, #111 / ADR-033: the sibling pillars
+- #114–#116: meshlet follow-ups (barrier scopes, indirect, limits)
+
+## ADR-035: Per-Camera Render Pipelines — Serializable Path, Registered Pipeline, Derived Views
+
+**Date:** 2026-07-16
+**Status:** Accepted
+**Issues:** #128–#131 (milestone "Per-camera render pipelines")
+
+### Context
+
+ADR-029 gave every camera a serializable output spec (`CameraOutput`) and a
+derived GPU target (`CameraTarget`), but the *production* side stayed
+hardcoded: `ForwardRender` walks all cameras and emits one fixed
+unlit forward pass each. Per-camera render paths were explicitly declared
+and deferred. The first concrete consumer has arrived — shadow mapping
+needs a camera whose frame is produced differently (a depth-only auxiliary
+view feeding the main pass) — and game code will eventually want paths the
+engine does not ship.
+
+### Decision
+
+Fill the "how to render" axis with four pieces, reusing ADR-029's
+discipline (serialize the intent, derive the resource, let the graph order
+passes):
+
+1. **`RenderPath` — the serializable choice** (component):
+   `{ pipeline: <stable name>, settings }`. A camera without one defaults
+   to `"forward"`. It deliberately lives *next to* `CameraOutput`, not
+   inside it (see the ADR-029 amendment): `CameraOutput` is the contract
+   with consumers of the image, `RenderPath` is the camera's internal
+   production recipe with its own growing settings payload.
+
+2. **`CameraRenderPipeline` — the registered implementation** (trait +
+   `PipelineRegistry` resource): `ensure_targets()` derives auxiliary
+   resources beyond color+depth (shadow maps, HDR intermediates) into the
+   runtime-only `PipelineTargets` component (`#[skip_serialization]`,
+   name → texture), with the same re-derive-on-disagreement discipline as
+   `EnsureCameraTargets`; `record()` writes the camera's passes into the
+   frame graph and returns the main pass handle (the `ScenePass`/overlay
+   contract is unchanged). The engine registers `"forward"` (today's
+   `ForwardRender` body, extracted); game plugins register their own —
+   trait objects cross the plugin dylib boundary, so the ADR-020 /
+   DESIGN_45 ABI contract applies. Scene files reference pipelines by
+   name only — the registry is the GPU-code analogue of virtual texture
+   publication: stable identity in assets, code-owned resource behind it.
+
+3. **`SceneDrawer` — the shared scene walk**: the mesh gathering, ring
+   uniform pushes, `PipelineCache` specialization, and binding-group
+   assembly currently inlined in `ForwardRender`, extracted and
+   parameterized by (view-projection, `RenderPhase`, material override,
+   viewport). The visible set is gathered once per frame; each recorded
+   view replays the prepared list — auxiliary views must not re-walk the
+   World. `RenderPhase` starts as `Opaque` | `ShadowCaster` (with a
+   `casts_shadows` flag on `MeshRenderer`); a depth-only pass renders with
+   a shared vertex-only override shader and an empty color-format set.
+
+4. **Views are derived, never authored**: a pipeline may produce any
+   number of auxiliary views (shadow cascades, cube faces) as passes in
+   the same graph. They are frame-internal data — **not** camera entities;
+   spawning entities for shadow views would mix authored scene data with
+   per-frame derivations and leak into the editor's undo model.
+   Cross-pass ordering is never declared: the shadow pass's depth write
+   and the main pass's `ShaderRead` of the map order themselves through
+   the graph's resource-dependency derivation (#47), exactly like
+   cross-camera ordering in ADR-029.
+
+Choosing a pipeline is per-camera *authoring*, orthogonal to ADR-027
+tiers: a tier gates which pipelines a device can offer; `RenderPath`
+selects among the offered ones. Per-camera *quality* within one pipeline
+remains #6 variant-axis territory.
+
+### Consequences
+
+- ✅ Stage 1 (#128) is a pure refactor — the forward path moves, frame
+  output is bit-identical; the editor camera takes the default path
+- ✅ Shadow mapping (#129/#130) becomes a pipeline, not a special case:
+  depth-only phase + `"forward-shadows"` registration; the graphics crate
+  already carries the needed vocabulary (`BindingType::DepthTexture`,
+  `ComparisonSampler`, depth-attachment co-use from #40/#60)
+- ✅ Game-defined paths (portals, stylized renderers) register without
+  engine changes
+- ⚠️ Zero-color-attachment passes must be validated on all three backends
+  (`MaterialDescriptor` allows it; the encoders have never exercised it)
+- ⚠️ #130 waits on #125: reversed-Z must settle the depth convention
+  before a second depth consumer lands
+- ⚠️ Lights are inert until #130 ships the first lit shader — the
+  vertical slice is directional light + lambert + one un-cascaded map;
+  cascades, spot/point, and a camera-shared shadow cache are #131
+- ⚠️ A registry name with no registered pipeline degrades to `"forward"`
+  with a warning (scene files stay loadable when a plugin is absent)
+
+### Related Issues
+
+- #128: framework (RenderPath, registry, SceneDrawer, dispatcher)
+- #129: depth-only phase groundwork
+- #130: forward-shadows vertical slice (blocked by #125, #129)
+- #131: follow-ups (cascades, spot/point, shared shadow cache)
+- #6, #47, #74, #125: neighboring axes referenced above
 
 ---
 

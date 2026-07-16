@@ -92,6 +92,30 @@ pub enum BindingType {
     /// convention Slang uses when emitting WGSL), so binding N + 1 must be
     /// left unoccupied in the layout.
     CombinedTextureSampler,
+
+    /// A top-level acceleration structure traced by ray queries (#110,
+    /// ADR-032). WGSL: `var t: acceleration_structure`.
+    ///
+    /// Requires
+    /// [`DeviceCapabilities::ray_query`](crate::device::DeviceCapabilities);
+    /// Vulkan-only — binding-group creation fails on wgpu.
+    AccelerationStructure,
+
+    /// The bindless heap's runtime-sized sampled-texture array (#117):
+    /// update-after-bind, partially bound, indexed with
+    /// `NonUniformResourceIndex` in Slang. The only resource bindable at
+    /// this slot is the device-owned heap
+    /// ([`GraphicsDevice::bindless_heap_group`](crate::GraphicsDevice::bindless_heap_group))
+    /// — user binding groups cannot declare it.
+    ///
+    /// Requires
+    /// [`DeviceCapabilities::bindless`](crate::device::DeviceCapabilities);
+    /// Vulkan-only.
+    BindlessTextures,
+
+    /// The bindless heap's sampler array (#117) — the sampler-typed sibling
+    /// of [`BindlessTextures`](Self::BindlessTextures), same rules.
+    BindlessSamplers,
 }
 
 /// Describes a single binding slot in a layout.
@@ -144,6 +168,10 @@ bitflags::bitflags! {
         const FRAGMENT = 1 << 1;
         /// Compute shader stage.
         const COMPUTE = 1 << 2;
+        /// Task (amplification) shader stage (#111, `VK_EXT_mesh_shader`).
+        const TASK = 1 << 3;
+        /// Mesh shader stage (#111, `VK_EXT_mesh_shader`).
+        const MESH = 1 << 4;
     }
 }
 
@@ -208,6 +236,32 @@ impl BindingLayout {
         self.with_entry(BindingLayoutEntry::new(
             binding,
             BindingType::CombinedTextureSampler,
+        ))
+    }
+
+    /// Add a top-level acceleration structure binding (#110).
+    pub fn with_acceleration_structure(self, binding: u32) -> Self {
+        self.with_entry(BindingLayoutEntry::new(
+            binding,
+            BindingType::AccelerationStructure,
+        ))
+    }
+
+    /// Add the bindless heap's texture array binding (#117). Only the
+    /// device-owned heap group can be bound at this slot.
+    pub fn with_bindless_textures(self, binding: u32) -> Self {
+        self.with_entry(BindingLayoutEntry::new(
+            binding,
+            BindingType::BindlessTextures,
+        ))
+    }
+
+    /// Add the bindless heap's sampler array binding (#117). Only the
+    /// device-owned heap group can be bound at this slot.
+    pub fn with_bindless_samplers(self, binding: u32) -> Self {
+        self.with_entry(BindingLayoutEntry::new(
+            binding,
+            BindingType::BindlessSamplers,
         ))
     }
 

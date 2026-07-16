@@ -29,6 +29,13 @@ impl WgpuBackend {
             Pass::Compute(compute_pass) => {
                 self.encode_compute_pass(encoder, compute_pass)?;
             }
+            Pass::AccelerationStructureBuild(build_pass) => {
+                return Err(GraphicsError::FeatureNotSupported(format!(
+                    "pass '{}': acceleration-structure builds are not supported on the wgpu \
+                     backend (DeviceCapabilities::ray_query is false, #110)",
+                    build_pass.name()
+                )));
+            }
         }
         Ok(())
     }
@@ -186,6 +193,17 @@ impl WgpuBackend {
             render_pass.set_scissor_rect(c.x, c.y, c.width, c.height);
         } else if let Some((width, height)) = default_dims {
             render_pass.set_scissor_rect(0, 0, width, height);
+        }
+
+        // Mesh-tasks draws are Vulkan-only (#111); their materials cannot
+        // even be created on wgpu, so a command here is a graph-construction
+        // bug — fail loudly rather than render an incomplete frame.
+        if !pass.mesh_tasks_commands().is_empty() {
+            return Err(GraphicsError::FeatureNotSupported(format!(
+                "pass '{}' contains mesh-tasks draws, which require \
+                 DeviceCapabilities::mesh_shading (Vulkan-only, #111)",
+                pass.name()
+            )));
         }
 
         // Encode each draw command

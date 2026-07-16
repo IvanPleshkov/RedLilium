@@ -31,6 +31,26 @@ pub struct OptionalFeatures {
     /// (it is free — a query-only extension, no feature struct); drives the GPU
     /// stats panel's driver-level VRAM figures.
     pub memory_budget: bool,
+    /// Inline ray tracing (#110): `VK_KHR_acceleration_structure` +
+    /// `VK_KHR_ray_query` (+ `VK_KHR_deferred_host_operations`, a dependency
+    /// of the former) with their feature bits AND the Vulkan 1.2
+    /// `bufferDeviceAddress` feature the AS build APIs require. All-or-nothing:
+    /// partial support (e.g. AS without ray query) reads as unsupported —
+    /// the engine has no consumer for the parts in isolation.
+    pub ray_query: bool,
+    /// Mesh shading (#111): `VK_EXT_mesh_shader` with its `taskShader` and
+    /// `meshShader` feature bits. Both stages or nothing: the engine's
+    /// meshlet pipeline is task→mesh, and a device with only one bit reads
+    /// as unsupported. (`multiviewMeshShader` etc. stay off.)
+    pub mesh_shading: bool,
+    /// Bindless descriptor indexing (#117): the Vulkan 1.2 core feature
+    /// bits the update-after-bind texture/sampler heap stands on —
+    /// `runtimeDescriptorArray`, `descriptorBindingSampledImageUpdateAfterBind`
+    /// (covers SAMPLER bindings too, per the binding-flags VUIDs),
+    /// `descriptorBindingPartiallyBound`,
+    /// `descriptorBindingUpdateUnusedWhilePending`, and
+    /// `shaderSampledImageArrayNonUniformIndexing`. All-or-nothing.
+    pub bindless: bool,
 }
 
 /// GPU crash breadcrumb extensions the device advertises (#97).
@@ -320,6 +340,9 @@ pub fn select_physical_device(
                         fill_mode_non_solid: features.fill_mode_non_solid == vk::TRUE,
                         maintenance9,
                         memory_budget: has_ext(ash::ext::memory_budget::NAME),
+                        ray_query: ray_query_supported(instance, device, &extensions),
+                        mesh_shading: mesh_shading_supported(instance, device, &extensions),
+                        bindless: bindless_supported(instance, device),
                     },
                     breadcrumbs,
                     portability_subset: extensions.contains(b"VK_KHR_portability_subset".as_ref()),
@@ -345,6 +368,97 @@ pub fn select_physical_device(
             )
         }
     })
+}
+
+/// Whether the device supports the inline-ray-tracing bundle (#110):
+/// the three extensions plus the `accelerationStructure`, `rayQuery`, and
+/// `bufferDeviceAddress` feature bits. Queried during selection so
+/// `vkCreateDevice` never sees a feature the device did not report.
+fn ray_query_supported(
+    instance: &ash::Instance,
+    device: vk::PhysicalDevice,
+    extensions: &HashSet<Vec<u8>>,
+) -> bool {
+    let has_ext = |name: &CStr| extensions.contains(name.to_bytes());
+    if !has_ext(ash::khr::acceleration_structure::NAME)
+        || !has_ext(ash::khr::ray_query::NAME)
+        || !has_ext(ash::khr::deferred_host_operations::NAME)
+    {
+        return false;
+    }
+
+    let mut accel = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default();
+    let mut ray_query = vk::PhysicalDeviceRayQueryFeaturesKHR::default();
+    let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default();
+    let mut features2 = vk::PhysicalDeviceFeatures2::default()
+        .push_next(&mut accel)
+        .push_next(&mut ray_query)
+        .push_next(&mut vulkan12);
+    unsafe { instance.get_physical_device_features2(device, &mut features2) };
+
+    accel.acceleration_structure == vk::TRUE
+        && ray_query.ray_query == vk::TRUE
+        && vulkan12.buffer_device_address == vk::TRUE
+}
+
+/// Whether the device supports mesh shading (#111): `VK_EXT_mesh_shader`
+/// plus both the `taskShader` and `meshShader` feature bits. Queried during
+/// selection so `vkCreateDevice` never sees a feature the device did not
+/// report. (SPIR-V 1.4, which the extension requires, is core in the 1.2+
+/// devices the engine targets.)
+fn mesh_shading_supported(
+    instance: &ash::Instance,
+    device: vk::PhysicalDevice,
+    extensions: &HashSet<Vec<u8>>,
+) -> bool {
+    if !extensions.contains(ash::ext::mesh_shader::NAME.to_bytes()) {
+        return false;
+    }
+
+    let mut mesh = vk::PhysicalDeviceMeshShaderFeaturesEXT::default();
+    let mut features2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut mesh);
+    unsafe { instance.get_physical_device_features2(device, &mut features2) };
+
+    mesh.task_shader == vk::TRUE && mesh.mesh_shader == vk::TRUE
+}
+
+/// Whether the device supports the bindless-heap bundle (#117): the five
+/// Vulkan 1.2 core descriptor-indexing feature bits the update-after-bind
+/// texture/sampler heap requires (no extension — the engine's baseline is
+/// Vulkan 1.3, where descriptor indexing is core). Queried during selection
+/// so `vkCreateDevice` never sees a feature the device did not report.
+fn bindless_supported(instance: &ash::Instance, device: vk::PhysicalDevice) -> bool {
+    let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default();
+    let mut features2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut vulkan12);
+    unsafe { instance.get_physical_device_features2(device, &mut features2) };
+
+    vulkan12.runtime_descriptor_array == vk::TRUE
+        && vulkan12.descriptor_binding_sampled_image_update_after_bind == vk::TRUE
+        && vulkan12.descriptor_binding_partially_bound == vk::TRUE
+        && vulkan12.descriptor_binding_update_unused_while_pending == vk::TRUE
+        && vulkan12.shader_sampled_image_array_non_uniform_indexing == vk::TRUE
+}
+
+/// Device-clamped bindless heap capacities `(textures, samplers)` (#117):
+/// engine-side caps bounded by the update-after-bind descriptor limits. The
+/// engine caps keep the heap a predictable size (and the sampler count well
+/// under `maxSamplerAllocationCount`); the device limits are the hard bound.
+pub fn bindless_capacities(instance: &ash::Instance, device: vk::PhysicalDevice) -> (u32, u32) {
+    const MAX_TEXTURES: u32 = 16384;
+    const MAX_SAMPLERS: u32 = 256;
+
+    let mut vulkan12 = vk::PhysicalDeviceVulkan12Properties::default();
+    let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut vulkan12);
+    unsafe { instance.get_physical_device_properties2(device, &mut props2) };
+
+    (
+        MAX_TEXTURES
+            .min(vulkan12.max_per_stage_descriptor_update_after_bind_sampled_images)
+            .min(vulkan12.max_descriptor_set_update_after_bind_sampled_images),
+        MAX_SAMPLERS
+            .min(vulkan12.max_per_stage_descriptor_update_after_bind_samplers)
+            .min(vulkan12.max_descriptor_set_update_after_bind_samplers),
+    )
 }
 
 /// All extensions the device offers, as byte strings.
@@ -557,6 +671,18 @@ pub fn create_logical_device(
     if selected.optional.memory_budget {
         device_extensions.push(ash::ext::memory_budget::NAME.as_ptr());
     }
+    // Inline ray tracing (#110): the AS + ray-query extensions and
+    // deferred_host_operations (a hard dependency of acceleration_structure,
+    // even though the engine builds on the device timeline only).
+    if selected.optional.ray_query {
+        device_extensions.push(ash::khr::acceleration_structure::NAME.as_ptr());
+        device_extensions.push(ash::khr::ray_query::NAME.as_ptr());
+        device_extensions.push(ash::khr::deferred_host_operations::NAME.as_ptr());
+    }
+    // Mesh shading (#111): task + mesh shader stages.
+    if selected.optional.mesh_shading {
+        device_extensions.push(ash::ext::mesh_shader::NAME.as_ptr());
+    }
     // GPU crash breadcrumbs (#97): the vendor extensions (NV checkpoints, AMD
     // buffer marker) and device-fault reporting, enabled only when breadcrumbs
     // are on so the happy path adds no extensions. The portable fallback needs
@@ -593,9 +719,34 @@ pub fn create_logical_device(
         vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
 
     // timelineSemaphore: the queue timeline that backs frame fences and (with
-    // multi-queue, #47) cross-queue waits.
-    let mut vulkan12_features =
-        vk::PhysicalDeviceVulkan12Features::default().timeline_semaphore(true);
+    // multi-queue, #47) cross-queue waits. bufferDeviceAddress rides along
+    // only with ray query (#110): the AS build APIs consume raw device
+    // addresses, and selection verified the feature bit.
+    let mut vulkan12_features = vk::PhysicalDeviceVulkan12Features::default()
+        .timeline_semaphore(true)
+        .buffer_device_address(selected.optional.ray_query);
+    // Bindless heap (#117): the five descriptor-indexing bits verified by
+    // `bindless_supported` during selection.
+    if selected.optional.bindless {
+        vulkan12_features = vulkan12_features
+            .runtime_descriptor_array(true)
+            .descriptor_binding_sampled_image_update_after_bind(true)
+            .descriptor_binding_partially_bound(true)
+            .descriptor_binding_update_unused_while_pending(true)
+            .shader_sampled_image_array_non_uniform_indexing(true);
+    }
+
+    // Inline ray tracing feature structs — chained only when supported (#110).
+    let mut accel_features =
+        vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default().acceleration_structure(true);
+    let mut ray_query_features = vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
+
+    // Mesh shading feature struct — chained only when supported (#111). Both
+    // stages on; the multiview/primitive-fragment-shading-rate interactions
+    // stay off (no engine consumer).
+    let mut mesh_shader_features = vk::PhysicalDeviceMeshShaderFeaturesEXT::default()
+        .task_shader(true)
+        .mesh_shader(true);
 
     // maintenance9 feature struct — chained only when the device supports it.
     let mut maintenance9_features =
@@ -618,6 +769,14 @@ pub fn create_logical_device(
     }
     if enable_device_fault {
         create_info = create_info.push_next(&mut fault_features);
+    }
+    if selected.optional.ray_query {
+        create_info = create_info
+            .push_next(&mut accel_features)
+            .push_next(&mut ray_query_features);
+    }
+    if selected.optional.mesh_shading {
+        create_info = create_info.push_next(&mut mesh_shader_features);
     }
 
     let device = unsafe { instance.create_device(selected.physical_device, &create_info, None) }
@@ -687,6 +846,15 @@ pub fn device_capabilities(
         // VK_EXT_memory_budget, when advertised (#98). Drives per-heap
         // budget/usage in the stats panel; without it heap budget/usage are None.
         memory_budget: selected.optional.memory_budget,
+        // Inline ray tracing (#110): the extension + feature bundle verified
+        // during selection and enabled on the logical device.
+        ray_query: selected.optional.ray_query,
+        // Mesh shading (#111): VK_EXT_mesh_shader verified during selection
+        // and enabled on the logical device.
+        mesh_shading: selected.optional.mesh_shading,
+        // Bindless heap (#117): descriptor-indexing bits verified during
+        // selection and enabled on the logical device.
+        bindless: selected.optional.bindless,
     }
 }
 

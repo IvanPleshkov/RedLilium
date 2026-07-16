@@ -3,12 +3,14 @@
 //! This backend provides direct Vulkan access for maximum performance and control.
 //! It includes support for validation layers in debug builds.
 
+mod accel;
 mod allocator;
 pub mod barriers;
 mod breadcrumbs;
 mod command;
 pub(crate) mod conversion;
 mod debug;
+pub use accel::AccelerationStructureKind;
 pub use debug::{reset_validation_error_count, validation_error_count};
 mod device;
 mod instance;
@@ -35,7 +37,7 @@ use crate::graph::{CompiledGraph, Pass, RenderGraph, RenderTarget};
 use crate::types::{BufferDescriptor, SamplerDescriptor, TextureDescriptor};
 use redlilium_core::profiling::profile_scope;
 
-use super::{GpuBuffer, GpuFence, GpuSampler, GpuTexture};
+use super::{GpuAccelerationStructure, GpuBuffer, GpuFence, GpuSampler, GpuTexture};
 
 /// Maximum number of frames in flight for per-slot resource tracking.
 ///
@@ -304,6 +306,15 @@ pub struct VulkanBackend {
     /// breadcrumb report runs exactly once even though device loss cascades
     /// through every subsequent submit/wait/present.
     device_lost_reported: std::sync::atomic::AtomicBool,
+    /// `VK_KHR_acceleration_structure` entry points, `Some` exactly when
+    /// [`DeviceCapabilities::ray_query`](crate::device::DeviceCapabilities) is
+    /// true (#110). Used for BLAS/TLAS creation, build-size queries, and
+    /// `vkCmdBuildAccelerationStructuresKHR` encoding.
+    accel_loader: Option<ash::khr::acceleration_structure::Device>,
+    /// `VK_EXT_mesh_shader` entry points, `Some` exactly when
+    /// [`DeviceCapabilities::mesh_shading`](crate::device::DeviceCapabilities)
+    /// is true (#111). Used for `vkCmdDrawMeshTasksEXT` encoding.
+    mesh_loader: Option<ash::ext::mesh_shader::Device>,
     /// Capabilities queried from the selected physical device at creation
     /// (ADR-027) — the single source of truth downstream clamps against.
     device_caps: crate::device::DeviceCapabilities,
@@ -513,12 +524,28 @@ impl VulkanBackend {
 
         let graphics_queue = unsafe { device.get_device_queue(graphics_queue_family, 0) };
 
-        // Create memory allocator (wrapped in Arc for sharing with GPU resource Drop impls)
+        // Create memory allocator (wrapped in Arc for sharing with GPU resource Drop impls).
+        // Buffer device addresses are allocator-wide: with ray query enabled
+        // (#110) every allocation carries VK_MEMORY_ALLOCATE_DEVICE_ADDRESS
+        // so AS/scratch/geometry buffers can be addressed by the build APIs.
         let allocator = Arc::new(Mutex::new(allocator::create_allocator(
             &instance,
             physical_device,
             device.clone(),
+            device_caps.ray_query,
         )?));
+
+        // Acceleration-structure entry points, loaded only when the extension
+        // bundle is enabled (#110).
+        let accel_loader = device_caps
+            .ray_query
+            .then(|| ash::khr::acceleration_structure::Device::new(&instance, &device));
+
+        // Mesh-shader entry points, loaded only when the extension is
+        // enabled (#111).
+        let mesh_loader = device_caps
+            .mesh_shading
+            .then(|| ash::ext::mesh_shader::Device::new(&instance, &device));
 
         // Create command pool (staging uploads + swapchain present). Present
         // command buffers are reset individually each frame, so this pool
@@ -777,6 +804,11 @@ impl VulkanBackend {
             depth24_stencil8_format,
             &selected.properties,
             device_caps.wireframe,
+            device_caps.ray_query,
+            device_caps.mesh_shading,
+            device_caps
+                .bindless
+                .then(|| device::bindless_capacities(&instance, physical_device)),
         )?;
 
         // Seed the memory-stats cache so the panel has heap sizes immediately;
@@ -811,7 +843,11 @@ impl VulkanBackend {
             frame_command_pools,
             current_slot: AtomicUsize::new(0),
             layout_tracker,
-            buffer_tracker: Mutex::new(BufferAccessTracker::new()),
+            buffer_tracker: Mutex::new({
+                let mut tracker = BufferAccessTracker::new();
+                tracker.set_mesh_shading(device_caps.mesh_shading);
+                tracker
+            }),
             retired_tracker_handles: Arc::new(Mutex::new(RetiredTrackerHandles::default())),
             pipeline_manager,
             depth24_stencil8_format,
@@ -828,6 +864,8 @@ impl VulkanBackend {
             transfer_granularity: queue_plan.transfer_granularity,
             async_decline_warned: Mutex::new(HashSet::new()),
             implicit_cross_queue_images,
+            accel_loader,
+            mesh_loader,
             device_caps,
             adapter_info,
             surface_support,
@@ -1516,6 +1554,20 @@ impl VulkanBackend {
 
     /// Create a buffer resource.
     pub fn create_buffer(&self, descriptor: &BufferDescriptor) -> Result<GpuBuffer, GraphicsError> {
+        // The AS/device-address roles are valid only with the ray-query
+        // bundle enabled (#110): without `bufferDeviceAddress` the usage flags
+        // themselves are a Vulkan error, so fail with the engine-level cause.
+        if descriptor
+            .usage
+            .intersects(crate::types::BufferUsage::RAY_TRACING_FLAGS)
+            && !self.device_caps.ray_query
+        {
+            return Err(GraphicsError::FeatureNotSupported(
+                "acceleration-structure buffer usage requires DeviceCapabilities::ray_query \
+                 (VK_KHR_acceleration_structure + VK_KHR_ray_query, #110)"
+                    .to_string(),
+            ));
+        }
         let usage = convert_buffer_usage(descriptor.usage);
 
         // Memory location follows mappability, not copyability (ADR-021):
@@ -2010,6 +2062,13 @@ impl VulkanBackend {
                         });
                     }
                 }
+                // Acceleration structures need no buffer/image info; their
+                // write is issued separately below (pNext-chained).
+                BoundResource::AccelerationStructure(_) => {}
+                // The bindless heap's set is written by registration (#117),
+                // never here; user groups cannot even declare it (rejected
+                // in create_binding_group).
+                BoundResource::BindlessHeap(_) => {}
             }
         }
 
@@ -2073,6 +2132,36 @@ impl VulkanBackend {
                         .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                         .image_info(info)
                 }
+                BoundResource::AccelerationStructure(tlas) => {
+                    // The AS handle rides in a pNext struct whose lifetime is
+                    // this block, so its write is issued immediately instead
+                    // of joining the batched `writes` (AS bindings are rare —
+                    // one per ray-query material — so the extra call is noise).
+                    let GpuAccelerationStructure::Vulkan { handle, .. } = tlas.gpu_handle() else {
+                        log::warn!(
+                            "binding {} references a non-Vulkan acceleration structure; \
+                             descriptor left unwritten",
+                            entry.binding
+                        );
+                        continue;
+                    };
+                    let handles = [*handle];
+                    let mut as_write = vk::WriteDescriptorSetAccelerationStructureKHR::default()
+                        .acceleration_structures(&handles);
+                    let mut write = vk::WriteDescriptorSet::default()
+                        .dst_set(descriptor_set)
+                        .dst_binding(entry.binding)
+                        .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+                        .push_next(&mut as_write);
+                    // Normally set by buffer_info/image_info; the AS count
+                    // lives in the pNext struct, so set it explicitly.
+                    write.descriptor_count = 1;
+                    unsafe { self.device.update_descriptor_sets(&[write], &[]) };
+                    continue;
+                }
+                // The bindless heap's descriptors are written by registration
+                // (#117), never at group creation.
+                BoundResource::BindlessHeap(_) => continue,
             };
             writes.push(write);
         }
@@ -2082,6 +2171,99 @@ impl VulkanBackend {
                 self.device.update_descriptor_sets(&writes, &[]);
             }
         }
+    }
+
+    /// Device-clamped bindless heap capacities `(textures, samplers)` (#117);
+    /// `(0, 0)` when `DeviceCapabilities::bindless` is false.
+    pub fn bindless_capacities(&self) -> (u32, u32) {
+        self.pipeline_manager.bindless_capacities()
+    }
+
+    /// Create the bindless heap's binding-group handle (#117): the single
+    /// update-after-bind descriptor set, allocated from its dedicated pool.
+    /// Called once per device by `GraphicsDevice::bindless_heap_group`.
+    pub fn create_bindless_group(
+        &self,
+        layout: &crate::materials::BindingLayout,
+    ) -> Result<super::GpuBindingGroup, GraphicsError> {
+        let (descriptor_set, pool) = self.pipeline_manager.allocate_bindless_set(layout)?;
+        Ok(super::GpuBindingGroup::Vulkan {
+            device: self.device.clone(),
+            descriptor_set,
+            pool,
+            // The heap pool is not part of the persistent chain, but Drop
+            // frees the set into the specific `pool` handle — the chain's
+            // mutex only provides the external synchronization.
+            pools: Arc::clone(self.pipeline_manager.persistent_pools()),
+        })
+    }
+
+    /// Write one sampled-texture descriptor into the bindless heap at array
+    /// slot `index` (#117). Update-after-bind makes this legal while the
+    /// heap is bound in flight, as long as slot `index` is not dynamically
+    /// used by pending work — the engine-side allocator guarantees that
+    /// (fresh or fence-recycled slots only).
+    pub fn bindless_write_texture(
+        &self,
+        group: &super::GpuBindingGroup,
+        binding: u32,
+        index: u32,
+        texture: &GpuTexture,
+    ) -> Result<(), GraphicsError> {
+        let super::GpuBindingGroup::Vulkan { descriptor_set, .. } = group else {
+            return Err(GraphicsError::InvalidParameter(
+                "bindless_write_texture: not a Vulkan binding group".to_string(),
+            ));
+        };
+        let GpuTexture::Vulkan { view, .. } = texture else {
+            return Err(GraphicsError::InvalidParameter(
+                "bindless_write_texture: not a Vulkan texture".to_string(),
+            ));
+        };
+
+        let image_info = [vk::DescriptorImageInfo::default()
+            .image_view(*view)
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+        let write = vk::WriteDescriptorSet::default()
+            .dst_set(*descriptor_set)
+            .dst_binding(binding)
+            .dst_array_element(index)
+            .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+            .image_info(&image_info);
+        unsafe { self.device.update_descriptor_sets(&[write], &[]) };
+        Ok(())
+    }
+
+    /// Write one sampler descriptor into the bindless heap at array slot
+    /// `index` (#117). Same legality argument as
+    /// [`bindless_write_texture`](Self::bindless_write_texture).
+    pub fn bindless_write_sampler(
+        &self,
+        group: &super::GpuBindingGroup,
+        binding: u32,
+        index: u32,
+        sampler: &super::GpuSampler,
+    ) -> Result<(), GraphicsError> {
+        let super::GpuBindingGroup::Vulkan { descriptor_set, .. } = group else {
+            return Err(GraphicsError::InvalidParameter(
+                "bindless_write_sampler: not a Vulkan binding group".to_string(),
+            ));
+        };
+        let super::GpuSampler::Vulkan { sampler, .. } = sampler else {
+            return Err(GraphicsError::InvalidParameter(
+                "bindless_write_sampler: not a Vulkan sampler".to_string(),
+            ));
+        };
+
+        let image_info = [vk::DescriptorImageInfo::default().sampler(*sampler)];
+        let write = vk::WriteDescriptorSet::default()
+            .dst_set(*descriptor_set)
+            .dst_binding(binding)
+            .dst_array_element(index)
+            .descriptor_type(vk::DescriptorType::SAMPLER)
+            .image_info(&image_info);
+        unsafe { self.device.update_descriptor_sets(&[write], &[]) };
+        Ok(())
     }
 
     /// Create a GPU pipeline from a material descriptor.
@@ -2112,77 +2294,101 @@ impl VulkanBackend {
     ) -> Result<super::GpuPipeline, GraphicsError> {
         use crate::materials::ShaderStage;
 
-        let mut vertex_module = None;
-        let mut fragment_module = None;
-        let mut vertex_entry = String::from("vs_main");
-        let mut fragment_entry = String::from("fs_main");
-
-        for shader in &descriptor.shaders {
-            let (module, actual_entry) = self.pipeline_manager.compile_shader(
-                &shader.source,
-                shader.stage,
-                &shader.entry_point,
-                shader.language,
-                &shader.defines,
-            )?;
-            match shader.stage {
-                ShaderStage::Vertex => {
-                    vertex_module = Some(module);
-                    vertex_entry = actual_entry;
-                }
-                ShaderStage::Fragment => {
-                    fragment_module = Some(module);
-                    fragment_entry = actual_entry;
-                }
-                ShaderStage::Compute => {}
+        // Compile every graphics stage; `(vk stage, module, actual entry)`
+        // in descriptor order. Stage-combination validity (vertex XOR mesh,
+        // task implies mesh) was checked in `create_material`.
+        let mut compiled: Vec<(vk::ShaderStageFlags, vk::ShaderModule, String)> = Vec::new();
+        let compile_result: Result<(), GraphicsError> = (|| {
+            for shader in &descriptor.shaders {
+                let vk_stage = match shader.stage {
+                    ShaderStage::Vertex => vk::ShaderStageFlags::VERTEX,
+                    ShaderStage::Fragment => vk::ShaderStageFlags::FRAGMENT,
+                    ShaderStage::Task => vk::ShaderStageFlags::TASK_EXT,
+                    ShaderStage::Mesh => vk::ShaderStageFlags::MESH_EXT,
+                    ShaderStage::Compute => continue,
+                };
+                let (module, actual_entry) = self.pipeline_manager.compile_shader(
+                    &shader.source,
+                    shader.stage,
+                    &shader.entry_point,
+                    shader.language,
+                    &shader.defines,
+                )?;
+                compiled.push((vk_stage, module, actual_entry));
             }
+            Ok(())
+        })();
+        // Modules compiled before a failing stage must not leak.
+        if let Err(e) = compile_result {
+            for (_, module, _) in &compiled {
+                unsafe { self.device.destroy_shader_module(*module, None) };
+            }
+            return Err(e);
         }
 
-        let vertex_module = vertex_module.ok_or_else(|| {
-            GraphicsError::ShaderCompilationFailed("No vertex shader provided".into())
-        })?;
-
-        // Descriptor set layouts
-        let descriptor_set_layouts: Vec<vk::DescriptorSetLayout> = descriptor
-            .binding_layouts
+        let is_mesh = compiled
             .iter()
-            .map(|layout| self.pipeline_manager.create_descriptor_set_layout(layout))
-            .collect::<Result<_, _>>()?;
-
-        let pipeline_layout = self
-            .pipeline_manager
-            .create_pipeline_layout(&descriptor_set_layouts)?;
-
-        let pipeline = self.pipeline_manager.create_graphics_pipeline(
-            vertex_module,
-            fragment_module,
-            &vertex_entry,
-            &fragment_entry,
-            &descriptor.vertex_layout,
-            descriptor.topology,
-            pipeline_layout,
-            &descriptor.color_formats,
-            descriptor.depth,
-            descriptor.blend_state.as_ref(),
-            descriptor.raster,
-            descriptor.sample_count,
-            &self.device,
-        )?;
-
-        // Shader modules are baked into the pipeline; destroy them now.
-        unsafe {
-            self.device.destroy_shader_module(vertex_module, None);
-            if let Some(frag) = fragment_module {
-                self.device.destroy_shader_module(frag, None);
+            .any(|(stage, _, _)| *stage == vk::ShaderStageFlags::MESH_EXT);
+        if !is_mesh
+            && !compiled
+                .iter()
+                .any(|(stage, _, _)| *stage == vk::ShaderStageFlags::VERTEX)
+        {
+            for (_, module, _) in &compiled {
+                unsafe { self.device.destroy_shader_module(*module, None) };
             }
+            return Err(GraphicsError::ShaderCompilationFailed(
+                "No vertex shader provided".into(),
+            ));
         }
 
-        Ok(super::GpuPipeline::Vulkan {
-            device: self.device.clone(),
-            pipeline,
-            pipeline_layout,
-            descriptor_set_layouts,
-        })
+        let result = (|| {
+            // Descriptor set layouts
+            let descriptor_set_layouts: Vec<vk::DescriptorSetLayout> = descriptor
+                .binding_layouts
+                .iter()
+                .map(|layout| self.pipeline_manager.create_descriptor_set_layout(layout))
+                .collect::<Result<_, _>>()?;
+
+            let pipeline_layout = self
+                .pipeline_manager
+                .create_pipeline_layout(&descriptor_set_layouts)?;
+
+            let stages: Vec<(vk::ShaderStageFlags, vk::ShaderModule, &str)> = compiled
+                .iter()
+                .map(|(stage, module, entry)| (*stage, *module, entry.as_str()))
+                .collect();
+            // Mesh pipelines have no vertex input (#111); classic ones carry
+            // the material's layout + topology.
+            let vertex_input =
+                (!is_mesh).then_some((&*descriptor.vertex_layout, descriptor.topology));
+
+            let pipeline = self.pipeline_manager.create_graphics_pipeline(
+                &stages,
+                vertex_input,
+                pipeline_layout,
+                &descriptor.color_formats,
+                descriptor.depth,
+                descriptor.blend_state.as_ref(),
+                descriptor.raster,
+                descriptor.sample_count,
+            )?;
+
+            Ok(super::GpuPipeline::Vulkan {
+                device: self.device.clone(),
+                pipeline,
+                pipeline_layout,
+                descriptor_set_layouts,
+            })
+        })();
+
+        // Shader modules are baked into the pipeline; destroy them now
+        // (success or failure alike).
+        for (_, module, _) in &compiled {
+            unsafe { self.device.destroy_shader_module(*module, None) };
+        }
+
+        result
     }
 
     fn create_compute_pipeline_from_descriptor(
@@ -2907,7 +3113,9 @@ impl VulkanBackend {
                     *buffer,
                     src_stage,
                     src_access,
-                    decl.access.dst_stage(),
+                    // Tracker-augmented (task/mesh bits when enabled, #111) so
+                    // the emitted destination scope matches what was recorded.
+                    buffer_tracker.dst_stage(decl.access),
                     decl.access.dst_access_mask(),
                 );
             }
@@ -3043,6 +3251,9 @@ impl VulkanBackend {
             Pass::Graphics(graphics_pass) => self.encode_graphics_pass(cmd, graphics_pass),
             Pass::Transfer(transfer_pass) => self.encode_transfer_pass(cmd, transfer_pass),
             Pass::Compute(compute_pass) => self.encode_compute_pass(cmd, compute_pass),
+            Pass::AccelerationStructureBuild(build_pass) => {
+                self.encode_acceleration_structure_build_pass(cmd, build_pass)
+            }
         }
     }
 
@@ -3202,7 +3413,8 @@ impl VulkanBackend {
                 }
             });
 
-        // Determine render area from first attachment
+        // Determine render area from the attachments (first color, else the
+        // depth attachment for zero-color depth-only passes).
         let render_area = render_targets
             .dimensions()
             .map(|(w, h)| vk::Rect2D {
@@ -3360,6 +3572,11 @@ impl VulkanBackend {
         // Encode draw commands
         for draw_cmd in pass.draw_commands() {
             self.encode_draw_command(cmd, draw_cmd, default_scissor, render_area.extent)?;
+        }
+
+        // Encode mesh-tasks draws (#111)
+        for draw_cmd in pass.mesh_tasks_commands() {
+            self.encode_mesh_tasks_command(cmd, draw_cmd, default_scissor, render_area.extent)?;
         }
 
         // End dynamic rendering
@@ -3556,6 +3773,130 @@ impl VulkanBackend {
         }
 
         // Restore pass-level scissor if we set a per-draw one
+        if custom_scissor {
+            unsafe {
+                self.device.cmd_set_scissor(cmd, 0, &[pass_scissor]);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Encode a mesh-tasks draw (#111): bind the task?+mesh+fragment pipeline
+    /// and its descriptor sets, then `vkCmdDrawMeshTasksEXT`. No vertex or
+    /// index buffers exist — the mesh shader fetches geometry from the
+    /// storage buffers bound through the material instance.
+    fn encode_mesh_tasks_command(
+        &self,
+        cmd: vk::CommandBuffer,
+        draw_cmd: &crate::graph::MeshTasksDrawCommand,
+        pass_scissor: vk::Rect2D,
+        target_extent: vk::Extent2D,
+    ) -> Result<(), GraphicsError> {
+        let Some(mesh_loader) = &self.mesh_loader else {
+            return Err(GraphicsError::FeatureNotSupported(
+                "mesh-tasks draws require DeviceCapabilities::mesh_shading \
+                 (VK_EXT_mesh_shader, #111)"
+                    .into(),
+            ));
+        };
+
+        let material_arc = draw_cmd.material.material();
+        let super::GpuPipeline::Vulkan {
+            pipeline,
+            pipeline_layout,
+            descriptor_set_layouts,
+            ..
+        } = material_arc.gpu_handle()
+        else {
+            log::warn!("Material has no Vulkan pipeline");
+            return Ok(());
+        };
+        let pipeline = *pipeline;
+        let pipeline_layout = *pipeline_layout;
+
+        // Collect the cached descriptor sets — reuses scratch capacity.
+        let scratch = &mut *self.encoder_scratch.lock();
+        let VulkanEncoderScratch {
+            descriptor_sets: scratch_ds_sets,
+            ..
+        } = scratch;
+
+        let material_instance = &draw_cmd.material;
+        let binding_groups = material_instance.binding_groups();
+        if binding_groups.len() != descriptor_set_layouts.len() {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "material instance provides {} binding group(s) but the material's pipeline \
+                 layout declares {} descriptor set(s)",
+                binding_groups.len(),
+                descriptor_set_layouts.len()
+            )));
+        }
+
+        scratch_ds_sets.clear();
+        for (group_idx, group) in binding_groups.iter().enumerate() {
+            if let Some(mat_layout) = material_arc.binding_layouts().get(group_idx)
+                && !Arc::ptr_eq(group.layout(), mat_layout)
+                && !binding_layouts_compatible(group.layout(), mat_layout)
+            {
+                return Err(GraphicsError::InvalidParameter(format!(
+                    "binding group {group_idx} was created against a layout incompatible \
+                     with the material's descriptor set {group_idx}"
+                )));
+            }
+            let super::GpuBindingGroup::Vulkan { descriptor_set, .. } = group.gpu_handle() else {
+                return Err(GraphicsError::InvalidParameter(format!(
+                    "binding group {group_idx} has no Vulkan descriptor set \
+                     (resource from a different backend)"
+                )));
+            };
+            scratch_ds_sets.push(*descriptor_set);
+        }
+
+        unsafe {
+            self.device
+                .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
+        }
+
+        if !scratch_ds_sets.is_empty() {
+            let dynamic_offsets: Vec<u32> =
+                draw_cmd.dynamic_offsets.iter().flatten().copied().collect();
+            unsafe {
+                self.device.cmd_bind_descriptor_sets(
+                    cmd,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    pipeline_layout,
+                    0,
+                    scratch_ds_sets,
+                    &dynamic_offsets,
+                );
+            }
+        }
+
+        // Per-draw scissor, clamped like the classic draw path.
+        let custom_scissor = draw_cmd.scissor_rect.is_some();
+        if let Some(scissor) = &draw_cmd.scissor_rect {
+            let c = scissor.clamped(target_extent.width, target_extent.height);
+            let vk_scissor = vk::Rect2D {
+                offset: vk::Offset2D {
+                    x: c.x as i32,
+                    y: c.y as i32,
+                },
+                extent: vk::Extent2D {
+                    width: c.width,
+                    height: c.height,
+                },
+            };
+            unsafe {
+                self.device.cmd_set_scissor(cmd, 0, &[vk_scissor]);
+            }
+        }
+
+        let [x, y, z] = draw_cmd.group_count;
+        unsafe {
+            mesh_loader.cmd_draw_mesh_tasks(cmd, x, y, z);
+        }
+
         if custom_scissor {
             unsafe {
                 self.device.cmd_set_scissor(cmd, 0, &[pass_scissor]);

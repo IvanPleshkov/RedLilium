@@ -205,7 +205,8 @@ tests in `slang_compiler.rs` + `ecs/tests/std_shaders_reflect.rs`):
 
 `create_material` stores the per-set rates on the `Material`
 (`set_update_rates()`) and auto-promotes a `dynamic` block's uniform buffer to
-a dynamic-offset binding. `ForwardRender` assembles bind groups purely from
+a dynamic-offset binding. The `SceneDrawer` (shared by camera pipelines,
+ADR-035) assembles bind groups purely from
 the rates: external → the camera block pushed once per view into the shared
 ring (bound at fixed offset), dynamic → the model block (per-draw ring
 offset), static → the instance's props group. The std opaque shaders declare

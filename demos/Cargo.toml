@@ -62,6 +62,24 @@ path = "src/bin/pbr_ibl/main.rs"
 name = "textured_quad_demo"
 path = "src/bin/textured_quad_demo.rs"
 
+# Hardware inline ray tracing (#110): fullscreen ray-query rendering with
+# GPU-built BLAS/TLAS. Needs a GPU with VK_KHR_ray_query, so it is run by hand.
+[[bin]]
+name = "ray_query_demo"
+path = "src/bin/ray_query_demo.rs"
+
+# Meshlet rendering (#111): task+mesh pipeline with per-meshlet culling.
+# Needs a GPU with VK_EXT_mesh_shader, so it is run by hand.
+[[bin]]
+name = "meshlet_demo"
+path = "src/bin/meshlet_demo.rs"
+
+# Bindless texture heap (#117): one draw over a quad grid, textures picked
+# per instance by index. Needs descriptor indexing, so it is run by hand.
+[[bin]]
+name = "bindless_demo"
+path = "src/bin/bindless_demo.rs"
+
 [[bin]]
 name = "physics_demo"
 path = "src/bin/physics_demo/main.rs"

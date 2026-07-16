@@ -6,11 +6,11 @@ use log::debug;
 use redlilium_ecs::sync::RwLock;
 
 use redlilium_ecs::{
-    AssetGpuFlush, AssetPump, Component, EnsureCameraTargets, FlushUploads, ForwardRender,
-    FrameRing, GameTime, HotReload, MaterialInstanceLoad, MeshLoad, PostUpdate, PreUpdate,
-    RealTime, Render, RenderSchedule, Resource, ScenePass, ScheduleLabel, Schedules, System,
-    SystemsContainer, UnloadStrategy, UpdateCameraMatrices, UpdateGlobalTransforms, WindowInput,
-    World, register_rendering_components, register_std_components,
+    AssetGpuFlush, AssetPump, CameraRender, Component, EnsureCameraTargets, FlushUploads,
+    FrameRing, GameTime, HotReload, MaterialInstanceLoad, MeshLoad, PipelineRegistry, PostUpdate,
+    PreUpdate, RealTime, Render, RenderSchedule, Resource, ScenePass, ScheduleLabel, Schedules,
+    System, SystemsContainer, UnloadStrategy, UpdateCameraMatrices, UpdateGlobalTransforms,
+    WindowInput, World, register_rendering_components, register_std_components,
 };
 
 use crate::EngineContext;
@@ -24,7 +24,7 @@ use crate::EngineContext;
 /// - `PostUpdate`: `UpdateGlobalTransforms` → `UpdateCameraMatrices`, plus
 ///   the asset-loading systems (`HotReload`, `MeshLoad`, `MaterialInstanceLoad`,
 ///   `AssetPump`).
-/// - `Render`: `FlushUploads` / `AssetGpuFlush` → `ForwardRender`.
+/// - `Render`: `FlushUploads` / `AssetGpuFlush` → `CameraRender`.
 ///
 /// Game systems slot into any schedule via [`add_system`](Self::add_system)
 /// (or [`schedule_mut`](Self::schedule_mut) for dependency edges); full
@@ -60,10 +60,12 @@ impl App {
         register_rendering_components(&mut world);
         engine.inject_into(&mut world);
 
-        // Per-world render plumbing: the frame graph slot, the forward pass
-        // handle, and the per-draw dynamic-uniform ring.
+        // Per-world render plumbing: the frame graph slot, the scene pass
+        // handle, the pipeline registry (ADR-035; game plugins register their
+        // own paths through it), and the per-draw dynamic-uniform ring.
         world.insert_resource(RenderSchedule::empty());
         world.insert_resource(ScenePass::default());
+        world.insert_resource(PipelineRegistry::default());
         let frame_ring = FrameRing::new(engine.device(), 1 << 20, "game_frame_ring")
             .expect("failed to create game frame ring");
         world.insert_resource(frame_ring);
@@ -117,20 +119,20 @@ impl App {
             render.add(FlushUploads);
             render.add(AssetGpuFlush);
             // Derives CameraTargets from CameraOutput specs (ADR-029) before
-            // the forward pass consumes them.
+            // the camera dispatcher consumes them.
             render.add_exclusive(EnsureCameraTargets);
-            render.add(ForwardRender::default());
+            render.add(CameraRender);
             render
                 .add_edge::<FlushUploads, AssetGpuFlush>()
                 .expect("no cycle");
             render
-                .add_edge::<FlushUploads, ForwardRender>()
+                .add_edge::<FlushUploads, CameraRender>()
                 .expect("no cycle");
             render
-                .add_edge::<AssetGpuFlush, ForwardRender>()
+                .add_edge::<AssetGpuFlush, CameraRender>()
                 .expect("no cycle");
             render
-                .add_edge::<EnsureCameraTargets, ForwardRender>()
+                .add_edge::<EnsureCameraTargets, CameraRender>()
                 .expect("no cycle");
         }
 

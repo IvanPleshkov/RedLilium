@@ -44,6 +44,18 @@ impl DummyBackend {
             gpu_timestamps: false,
             mip_generation: false,
             memory_budget: false,
+            // The dummy backend accepts BLAS/TLAS creation (returns dummy
+            // handles) so graph-level tests can exercise AS-build passes, but
+            // it advertises no ray-query support — engine-level gating (#110)
+            // must behave as on a device without the feature.
+            ray_query: false,
+            // Same policy for mesh shading (#111): pipelines with task/mesh
+            // stages are accepted (no real GPU objects), but the capability
+            // is not advertised.
+            mesh_shading: false,
+            // And for the bindless heap (#117): layouts naming the bindless
+            // binding types are accepted headless, capability stays off.
+            bindless: false,
         }
     }
 

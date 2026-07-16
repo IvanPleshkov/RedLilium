@@ -3,8 +3,10 @@
 //! Each submodule provides a shader, uniform struct, and factory functions
 //! for a common material type.
 
+pub mod depth_only;
 pub mod entity_index;
 pub mod opaque_color;
 
+pub use depth_only::{DEPTH_ONLY_SHADER_PATH, depth_only_guid, depth_only_shader};
 pub use entity_index::{EntityIndexUniforms, create_entity_index_material};
 pub use opaque_color::{CameraUniforms, ModelUniforms};

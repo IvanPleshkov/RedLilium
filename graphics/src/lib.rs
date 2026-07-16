@@ -66,6 +66,7 @@
 //! ```
 
 pub mod backend;
+pub mod bindless;
 pub mod compiler;
 pub mod device;
 pub mod egui;
@@ -83,15 +84,17 @@ pub mod swapchain;
 pub mod types;
 
 // Re-export main types for convenience
+pub use bindless::{BINDLESS_SAMPLERS_BINDING, BINDLESS_TEXTURES_BINDING, BindlessSlots};
 pub use device::{
     DeviceCapabilities, DeviceTier, FrameGpuTimings, GpuMemoryStats, GraphicsDevice, HeapStats,
     ResourceCounts, SubmitTiming,
 };
 pub use error::GraphicsError;
 pub use graph::{
-    BufferCopyRegion, BufferTextureCopyRegion, BufferTextureLayout, ColorAttachment, CompiledGraph,
-    ComputePass, DepthStencilAttachment, DrawCommand, GraphError, GraphicsPass,
-    IndirectDrawCommand, LoadOp, Pass, PassHandle, QueuePreference, RenderGraph,
+    AccelerationStructureBuild, AccelerationStructureBuildPass, BufferCopyRegion,
+    BufferTextureCopyRegion, BufferTextureLayout, ColorAttachment, CompiledGraph, ComputePass,
+    DepthStencilAttachment, DrawCommand, GraphError, GraphicsPass, IndirectDrawCommand, LoadOp,
+    MeshTasksDrawCommand, Pass, PassHandle, QueuePreference, RenderGraph,
     RenderGraphCompilationMode, RenderTarget, RenderTargetConfig, StoreOp, TextureCopyLocation,
     TextureCopyRegion, TextureOrigin, TransferConfig, TransferOperation, TransferPass,
     resource_usage::{PassResourceUsage, TextureAccessMode, TextureUsageDecl},
@@ -114,7 +117,10 @@ pub use mesh::{
 };
 pub use pipeline::{FramePipeline, MAX_FRAMES_IN_FLIGHT};
 pub use resize::{ResizeEvent, ResizeManager, ResizeStrategy};
-pub use resources::{Buffer, RingAllocation, RingBuffer, Sampler, Texture};
+pub use resources::{
+    AccelBuildSizes, Blas, BlasDescriptor, BlasTriangles, Buffer, RingAllocation, RingBuffer,
+    Sampler, Texture, Tlas, TlasDescriptor, TlasInstance,
+};
 pub use scheduler::{Fence, FenceStatus, FrameSchedule, SubmitHandle};
 pub use shader::{
     ShaderLibrary, ShaderVariantSpace, VariantError, VariantKey, VariantSelector, VariantValue,

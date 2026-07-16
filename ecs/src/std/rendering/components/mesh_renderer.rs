@@ -70,10 +70,20 @@ impl Primitive {
 // ---------------------------------------------------------------------------
 
 /// Renderable component: an ordered list of [`Primitive`]s sharing one transform.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct MeshRenderer {
     /// The primitives to draw, in order.
     pub primitives: Vec<Primitive>,
+    /// Whether this entity is drawn into shadow-casting depth passes
+    /// (`RenderPhase::ShadowCaster`, ADR-035/#129). On by default; turn off
+    /// for objects that should not occlude light (fake geometry, effects).
+    pub casts_shadows: bool,
+}
+
+impl Default for MeshRenderer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MeshRenderer {
@@ -81,6 +91,7 @@ impl MeshRenderer {
     pub fn new() -> Self {
         Self {
             primitives: Vec::new(),
+            casts_shadows: true,
         }
     }
 
@@ -88,17 +99,27 @@ impl MeshRenderer {
     pub fn single(primitive: Primitive) -> Self {
         Self {
             primitives: vec![primitive],
+            casts_shadows: true,
         }
     }
 
     /// Create from a list of primitives.
     pub fn from_primitives(primitives: Vec<Primitive>) -> Self {
-        Self { primitives }
+        Self {
+            primitives,
+            casts_shadows: true,
+        }
     }
 
     /// Append a primitive.
     pub fn with_primitive(mut self, primitive: Primitive) -> Self {
         self.primitives.push(primitive);
+        self
+    }
+
+    /// Set whether the entity casts shadows.
+    pub fn with_casts_shadows(mut self, casts_shadows: bool) -> Self {
+        self.casts_shadows = casts_shadows;
         self
     }
 }
@@ -180,6 +201,7 @@ impl crate::Component for MeshRenderer {
 
         ctx.begin_struct(Self::NAME)?;
         ctx.write_field("primitives", Value::List(prims))?;
+        ctx.write_field("casts_shadows", Value::Bool(self.casts_shadows))?;
         ctx.end_struct()
     }
 
@@ -218,8 +240,17 @@ impl crate::Component for MeshRenderer {
             primitives.push(Primitive::new(mesh, material));
         }
 
+        // Absent in scenes written before #129 — default to casting.
+        let casts_shadows = match ctx.read_field("casts_shadows") {
+            Ok(Value::Bool(b)) => b,
+            _ => true,
+        };
+
         ctx.end_struct()?;
-        Ok(Self { primitives })
+        Ok(Self {
+            primitives,
+            casts_shadows,
+        })
     }
 }
 
@@ -310,6 +341,23 @@ mod tests {
             restored.primitives[0].material.source(),
             renderer.primitives[0].material.source()
         );
+    }
+
+    /// `casts_shadows` roundtrips; scenes written before #129 (no field)
+    /// default to casting.
+    #[test]
+    fn casts_shadows_roundtrips_and_defaults_on() {
+        let renderer = sample_renderer().with_casts_shadows(false);
+        let restored = deserialize(&serialize(&renderer));
+        assert!(!restored.casts_shadows, "explicit false survives roundtrip");
+
+        // A pre-#129 payload: primitives only, no casts_shadows field.
+        let Value::Map(mut fields) = serialize(&sample_renderer()) else {
+            panic!("expected Map");
+        };
+        fields.retain(|(k, _)| k != "casts_shadows");
+        let restored = deserialize(&Value::Map(fields));
+        assert!(restored.casts_shadows, "legacy scenes default to casting");
     }
 
     /// Prefabs written before #5 encode sources as RON strings — they must

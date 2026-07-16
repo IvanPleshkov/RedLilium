@@ -1321,9 +1321,9 @@ impl AppHandler for Editor {
         // go into this graph; ordering is an explicit intra-graph dependency.
         let mut graph = ctx.acquire_graph();
 
-        // The `Render` schedule (FlushUploads + ForwardRender) is run further
+        // The `Render` schedule (FlushUploads + CameraRender) is run further
         // below, AFTER ensure_camera_target + the scene mesh uploads, so the
-        // ForwardRender system renders into this frame's CameraTarget with the
+        // CameraRender dispatcher renders into this frame's CameraTarget with the
         // meshes already uploaded.
 
         // Sync the scene camera's CameraOutput spec to the SceneView panel
@@ -1859,7 +1859,7 @@ impl AppHandler for Editor {
             .as_mut()
             .and_then(|sv| sv.take_pending_rect_pick());
 
-        // The forward fill is done by the ForwardRender system; here we fill only
+        // The forward fill is done by the SceneDrawer; here we fill only
         // the picking ring and upload scene meshes (before the scene pass).
         if let (Some(scene_view), Some(ew)) = (&mut self.scene_view, self.world.as_ref())
             && scene_view.has_viewport()
@@ -1883,7 +1883,7 @@ impl AppHandler for Editor {
             });
         }
 
-        // Run the `Render` schedule (FlushUploads -> ForwardRender -> DebugRender ->
+        // Run the `Render` schedule (FlushUploads -> CameraRender -> DebugRender ->
         // EguiRender). Always run it so the egui overlay is drawn even when the
         // scene view is hidden; the scene/debug systems no-op without a viewport.
         // EguiRender adds the egui pass and depends it on the last CameraTarget

@@ -478,6 +478,8 @@ pub fn convert_shader_stages(flags: crate::materials::ShaderStageFlags) -> wgpu:
     if flags.contains(crate::materials::ShaderStageFlags::COMPUTE) {
         result |= wgpu::ShaderStages::COMPUTE;
     }
+    // TASK/MESH visibility (#111) has no wgpu equivalent; materials carrying
+    // it are rejected in create_pipeline before any layout reaches here.
 
     result
 }
@@ -589,6 +591,30 @@ pub fn convert_binding_type(binding_type: crate::materials::BindingType) -> wgpu
                 view_dimension: wgpu::TextureViewDimension::D2,
                 multisampled: false,
             }
+        }
+        crate::materials::BindingType::AccelerationStructure => {
+            // Unsupported on this backend (#110): binding-group creation
+            // errors before any group with this layout can be used, and the
+            // engine never enables wgpu's experimental ray-query features.
+            // The layout conversion still needs an answer, so name the type.
+            wgpu::BindingType::AccelerationStructure {
+                vertex_return: false,
+            }
+        }
+        crate::materials::BindingType::BindlessTextures => {
+            // Unsupported on this backend (#117): the heap group can only be
+            // created on Vulkan (`bindless_heap_group` requires the
+            // capability), so no bind group with this layout ever exists
+            // here. The layout conversion still needs an answer.
+            wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            }
+        }
+        crate::materials::BindingType::BindlessSamplers => {
+            // Same story as BindlessTextures (#117).
+            wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)
         }
     }
 }

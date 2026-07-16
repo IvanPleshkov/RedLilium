@@ -274,6 +274,57 @@ impl std::fmt::Debug for GpuBindingGroup {
     }
 }
 
+/// Handle to a GPU ray-tracing acceleration structure (#110).
+///
+/// Only the Vulkan backend creates real objects; the dummy backend returns
+/// placeholder handles (address 0) so graph-level tests can exercise
+/// AS-build passes headlessly, and wgpu never constructs one
+/// (`DeviceCapabilities::ray_query` is false there).
+pub enum GpuAccelerationStructure {
+    /// Dummy backend (no GPU object).
+    Dummy,
+    /// Vulkan acceleration structure.
+    #[cfg(feature = "vulkan-backend")]
+    Vulkan {
+        /// `VK_KHR_acceleration_structure` entry points, held so `Drop` can
+        /// destroy the handle.
+        accel_loader: ash::khr::acceleration_structure::Device,
+        handle: vk::AccelerationStructureKHR,
+        /// `vkGetAccelerationStructureDeviceAddressKHR`, queried once at
+        /// creation — what TLAS instance data references a BLAS by.
+        device_address: u64,
+    },
+}
+
+impl GpuAccelerationStructure {
+    /// GPU device address of this acceleration structure (0 on dummy).
+    pub fn device_address(&self) -> u64 {
+        match self {
+            Self::Dummy => 0,
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan { device_address, .. } => *device_address,
+        }
+    }
+}
+
+impl std::fmt::Debug for GpuAccelerationStructure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dummy => write!(f, "GpuAccelerationStructure::Dummy"),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan {
+                handle,
+                device_address,
+                ..
+            } => f
+                .debug_struct("GpuAccelerationStructure::Vulkan")
+                .field("handle", handle)
+                .field("device_address", device_address)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
 /// Handle to a GPU fence for CPU-GPU synchronization.
 ///
 /// # Backend Differences
@@ -899,6 +950,24 @@ impl Drop for GpuTexture {
 }
 
 #[cfg(feature = "vulkan-backend")]
+impl Drop for GpuAccelerationStructure {
+    fn drop(&mut self) {
+        if let GpuAccelerationStructure::Vulkan {
+            accel_loader,
+            handle,
+            ..
+        } = self
+        {
+            // Direct destroy, same Arc-keep-alive convention as the other
+            // resources: passes hold Arc<Blas>/Arc<Tlas> until the frame
+            // fence wait guarantees the GPU is done. The backing buffer is a
+            // separate `Buffer` with its own Drop.
+            unsafe { accel_loader.destroy_acceleration_structure(*handle, None) };
+        }
+    }
+}
+
+#[cfg(feature = "vulkan-backend")]
 impl Drop for GpuSampler {
     fn drop(&mut self) {
         if let GpuSampler::Vulkan { device, sampler } = self {
@@ -991,6 +1060,24 @@ impl std::fmt::Debug for GpuBackend {
 // GpuBackend is Send + Sync because all variant backends are Send + Sync
 unsafe impl Send for GpuBackend {}
 unsafe impl Sync for GpuBackend {}
+
+/// Placeholder AS sizes the dummy backend reports (#110) — nonzero so the
+/// device layer's zero-size buffer validation stays exercised in tests.
+const DUMMY_ACCEL_SIZES: crate::resources::AccelBuildSizes = crate::resources::AccelBuildSizes {
+    acceleration_structure_size: 256,
+    build_scratch_size: 256,
+};
+
+/// The error every acceleration-structure entry point returns on backends
+/// without ray-query support (#110).
+#[cfg(feature = "wgpu-backend")]
+fn accel_unsupported() -> GraphicsError {
+    GraphicsError::FeatureNotSupported(
+        "acceleration structures require DeviceCapabilities::ray_query \
+         (Vulkan backend with VK_KHR_acceleration_structure + VK_KHR_ray_query, #110)"
+            .to_string(),
+    )
+}
 
 impl GpuBackend {
     /// Get the backend name.
@@ -1101,6 +1188,78 @@ impl GpuBackend {
             Self::Wgpu(backend) => backend.create_sampler(descriptor),
             #[cfg(feature = "vulkan-backend")]
             Self::Vulkan(backend) => backend.create_sampler(descriptor),
+        }
+    }
+
+    /// Sizes needed to create and build a BLAS over `descriptor`'s geometry
+    /// (#110). Scratch size comes back pre-padded for the device's scratch
+    /// alignment. Vulkan-only; the dummy backend reports placeholder sizes.
+    pub fn blas_build_sizes(
+        &self,
+        descriptor: &crate::resources::BlasDescriptor,
+    ) -> Result<crate::resources::AccelBuildSizes, GraphicsError> {
+        match self {
+            Self::Dummy(_) => Ok(DUMMY_ACCEL_SIZES),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(_) => Err(accel_unsupported()),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => backend.blas_build_sizes(descriptor),
+        }
+    }
+
+    /// Sizes needed to create and build a TLAS holding up to `max_instances`
+    /// instances (#110). See [`Self::blas_build_sizes`].
+    pub fn tlas_build_sizes(
+        &self,
+        max_instances: u32,
+    ) -> Result<crate::resources::AccelBuildSizes, GraphicsError> {
+        match self {
+            Self::Dummy(_) => Ok(DUMMY_ACCEL_SIZES),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(_) => Err(accel_unsupported()),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => backend.tlas_build_sizes(max_instances),
+        }
+    }
+
+    /// Create a BLAS handle over `backing` (an
+    /// `ACCELERATION_STRUCTURE_STORAGE` buffer of at least
+    /// `acceleration_structure_size` bytes) (#110).
+    pub fn create_blas_handle(
+        &self,
+        backing: &GpuBuffer,
+        size: u64,
+    ) -> Result<GpuAccelerationStructure, GraphicsError> {
+        match self {
+            Self::Dummy(_) => Ok(GpuAccelerationStructure::Dummy),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(_) => Err(accel_unsupported()),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => backend.create_acceleration_structure(
+                backing,
+                size,
+                vulkan::AccelerationStructureKind::BottomLevel,
+            ),
+        }
+    }
+
+    /// Create a TLAS handle over `backing` (#110); see
+    /// [`Self::create_blas_handle`].
+    pub fn create_tlas_handle(
+        &self,
+        backing: &GpuBuffer,
+        size: u64,
+    ) -> Result<GpuAccelerationStructure, GraphicsError> {
+        match self {
+            Self::Dummy(_) => Ok(GpuAccelerationStructure::Dummy),
+            #[cfg(feature = "wgpu-backend")]
+            Self::Wgpu(_) => Err(accel_unsupported()),
+            #[cfg(feature = "vulkan-backend")]
+            Self::Vulkan(backend) => backend.create_acceleration_structure(
+                backing,
+                size,
+                vulkan::AccelerationStructureKind::TopLevel,
+            ),
         }
     }
 

@@ -63,7 +63,7 @@ pub struct SceneViewState {
 
     // --- Per-draw dynamic-uniform rings ---
     /// Buffer of the scene forward `FrameRing` — now an ECS resource (filled by
-    /// fill_transform_rings via the world, pushed to by the ForwardRender system
+    /// fill_transform_rings via the world, pushed to by the SceneDrawer
     /// later). Held here so the per-primitive material can bind it (group 0
     /// transform + group 1 material props, same buffer, different dyn offsets).
     /// Set by `set_frame_ring_buffer` after the resource is created.
@@ -73,7 +73,7 @@ pub struct SceneViewState {
     entity_index_ring: RingBuffer,
     /// Per-entity entity-index (picking) ring offset, recorded by
     /// [`fill_picking_rings`]. The forward-pass offsets now live in the
-    /// ForwardRender system (computed inline per draw).
+    /// SceneDrawer (computed inline per draw).
     picking_offsets: std::collections::HashMap<u32, u32>,
     /// Pending mesh-data uploads (from [`create_entity_resources`]), flushed into
     /// the frame graph by [`flush_uploads`](Self::flush_uploads).
@@ -168,7 +168,7 @@ impl SceneViewState {
 
     /// Fill the picking (entity-index) ring for this frame and record each
     /// entity's offset. Editor-side (picking is editor-only); the forward fill
-    /// lives in `fill_transform_rings` (heading for the ForwardRender system).
+    /// lives in `fill_transform_rings` (now the SceneDrawer).
     pub fn fill_picking_rings(&mut self, world: &World) {
         self.picking_offsets.clear();
 

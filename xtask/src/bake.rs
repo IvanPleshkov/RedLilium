@@ -43,6 +43,14 @@ struct ShaderSpec {
     /// together (per variant) they form one material shader SET whose binding
     /// reflection is baked under [`baked::shader_set_key`].
     entry_points: &'static [(&'static str, ShaderStage)],
+    /// Bake every entry as SPIR-V instead of WGSL (#117), for sources Slang's
+    /// WGSL target cannot load (e.g. unbounded bindless arrays). Specs with
+    /// task/mesh entries force this implicitly (#111).
+    force_spirv: bool,
+    /// Skip the binding-layout reflection bake (#117): sources whose bindings
+    /// reflection cannot express (bindless runtime arrays) pair with
+    /// materials that declare explicit binding layouts instead.
+    skip_reflection: bool,
 }
 
 const VS_FS: &[(&str, ShaderStage)] = &[
@@ -50,54 +58,65 @@ const VS_FS: &[(&str, ShaderStage)] = &[
     ("fs_main", ShaderStage::Fragment),
 ];
 
+/// A plain vertex+fragment spec with default artifact/reflection handling.
+const fn vs_fs_spec(name: &'static str, path: &'static str) -> ShaderSpec {
+    ShaderSpec {
+        name,
+        path,
+        entry_points: VS_FS,
+        force_spirv: false,
+        skip_reflection: false,
+    }
+}
+
 const REGISTRY: &[ShaderSpec] = &[
+    vs_fs_spec("egui", "shaders/library/egui.slang"),
+    vs_fs_spec("blit", "runtime/shaders/blit.slang"),
+    vs_fs_spec("entity_index", "std-assets/shaders/entity_index.slang"),
+    vs_fs_spec("opaque_color", "std-assets/shaders/opaque_color.slang"),
+    vs_fs_spec(
+        "opaque_textured",
+        "std-assets/shaders/opaque_textured.slang",
+    ),
+    // Depth-only pass shader (#129): vertex stage only — zero color
+    // attachments make the fragment stage unnecessary. Reflection still
+    // bakes (the draw path classifies its camera/model sets by rate).
     ShaderSpec {
-        name: "egui",
-        path: "shaders/library/egui.slang",
-        entry_points: VS_FS,
-    },
-    ShaderSpec {
-        name: "blit",
-        path: "runtime/shaders/blit.slang",
-        entry_points: VS_FS,
-    },
-    ShaderSpec {
-        name: "entity_index",
-        path: "std-assets/shaders/entity_index.slang",
-        entry_points: VS_FS,
-    },
-    ShaderSpec {
-        name: "opaque_color",
-        path: "std-assets/shaders/opaque_color.slang",
-        entry_points: VS_FS,
-    },
-    ShaderSpec {
-        name: "opaque_textured",
-        path: "std-assets/shaders/opaque_textured.slang",
-        entry_points: VS_FS,
+        name: "depth_only",
+        path: "std-assets/shaders/depth_only.slang",
+        entry_points: &[("vs_main", ShaderStage::Vertex)],
+        force_spirv: false,
+        skip_reflection: false,
     },
     // Debug-draw lines/shapes — used by the editor's gizmos (debug_drawer), so it
     // must be baked or the default (Slang-off) editor build misses at runtime.
-    ShaderSpec {
-        name: "debug_draw",
-        path: "shaders/standard/debug_draw.slang",
-        entry_points: VS_FS,
-    },
+    vs_fs_spec("debug_draw", "shaders/standard/debug_draw.slang"),
     // Demo shaders — baked so the demos render on the default Slang-off build too.
+    vs_fs_spec("skybox", "demos/shaders/skybox.slang"),
+    vs_fs_spec("deferred_gbuffer", "demos/shaders/deferred_gbuffer.slang"),
+    vs_fs_spec("deferred_resolve", "demos/shaders/deferred_resolve.slang"),
+    // Meshlet demo (#111): the task/mesh entries force the whole set to
+    // SPIR-V (no WGSL form); reflection still bakes (the material relies on
+    // it).
     ShaderSpec {
-        name: "skybox",
-        path: "demos/shaders/skybox.slang",
-        entry_points: VS_FS,
+        name: "meshlet",
+        path: "demos/shaders/meshlet.slang",
+        entry_points: &[
+            ("ts_main", ShaderStage::Task),
+            ("ms_main", ShaderStage::Mesh),
+            ("fs_main", ShaderStage::Fragment),
+        ],
+        force_spirv: false,
+        skip_reflection: false,
     },
+    // Bindless demo (#117): unbounded descriptor arrays — no WGSL form and
+    // no reflectable layout; the material declares explicit binding layouts.
     ShaderSpec {
-        name: "deferred_gbuffer",
-        path: "demos/shaders/deferred_gbuffer.slang",
+        name: "bindless",
+        path: "demos/shaders/bindless.slang",
         entry_points: VS_FS,
-    },
-    ShaderSpec {
-        name: "deferred_resolve",
-        path: "demos/shaders/deferred_resolve.slang",
-        entry_points: VS_FS,
+        force_spirv: true,
+        skip_reflection: true,
     },
 ];
 
@@ -131,6 +150,12 @@ fn defines_label(defines: &[(&str, &str)]) -> String {
 /// key so emission is deterministic.
 type BakedTable = BTreeMap<u64, (String, String)>;
 
+/// key -> (compiled SPIR-V bytes, human-readable name), ordered by key. The
+/// artifact kind for task/mesh entry points (#111): naga cannot express mesh
+/// shading, so there is no WGSL form to bake — the runtime consumes Slang's
+/// SPIR-V directly (Vulkan is the only backend with mesh shaders).
+type BakedSpirvTable = BTreeMap<u64, (Vec<u8>, String)>;
+
 /// shader-set key -> (rendered `&[BakedGroup]` literal, human-readable name),
 /// ordered by key. One entry per (spec × define set) — the material shader SET,
 /// not a single WGSL permutation.
@@ -140,6 +165,7 @@ type ReflectionTable = BTreeMap<u64, (String, String)>;
 /// table, and the Slang build tag.
 struct Baked {
     wgsl: BakedTable,
+    spirv: BakedSpirvTable,
     reflection: ReflectionTable,
     slang_tag: String,
 }
@@ -153,6 +179,7 @@ fn bake_table() -> Result<Baked, String> {
 
     // BTreeMaps so emission is sorted by key.
     let mut wgsl: BakedTable = BTreeMap::new();
+    let mut spirv: BakedSpirvTable = BTreeMap::new();
     let mut reflection: ReflectionTable = BTreeMap::new();
     let mut slang_tag: Option<String> = None;
 
@@ -193,29 +220,66 @@ fn bake_table() -> Result<Baked, String> {
                 .collect();
             let defines: &[(&str, &str)] = &defines_owned;
 
-            // One WGSL output per entry point.
+            // One artifact per entry point: WGSL for classic stages, SPIR-V
+            // for task/mesh stages (#111 — naga has no mesh-shading support,
+            // so there is no WGSL form; only the Vulkan backend runs these).
+            // A spec containing ANY task/mesh entry bakes ALL its entries to
+            // SPIR-V: Slang's WGSL target refuses to even load a module with
+            // mesh-shading entry points, and such materials are Vulkan-only
+            // anyway. `force_spirv` opts in explicitly for the same reason
+            // (e.g. bindless runtime arrays, #117).
+            let spirv_spec = spec.force_spirv
+                || spec
+                    .entry_points
+                    .iter()
+                    .any(|&(_, s)| matches!(s, ShaderStage::Task | ShaderStage::Mesh));
             for &(entry, _stage) in spec.entry_points {
-                let compiler = fresh_compiler(&mut slang_tag)?;
-                let compiled = compiler
-                    .compile_to_wgsl(&source, entry, &[], defines)
-                    .map_err(|e| {
-                        format!(
-                            "compile {} / {} / {}: {e:?}",
-                            spec.name,
-                            entry,
-                            defines_label(defines)
-                        )
-                    })?;
-
                 let key = baked::shader_key(&source, entry, defines);
                 let name = format!("{} / {} / {}", spec.name, entry, defines_label(defines));
-                if let Some((_, prev)) = wgsl.get(&key) {
+                let prev = wgsl
+                    .get(&key)
+                    .map(|(_, n)| n)
+                    .or_else(|| spirv.get(&key).map(|(_, n)| n));
+                if let Some(prev) = prev {
                     return Err(format!(
-                        "WGSL key collision {key:#018x}: '{name}' vs '{prev}' — two permutations \
+                        "key collision {key:#018x}: '{name}' vs '{prev}' — two permutations \
                          hashed identically (bug in the registry or shader_key)"
                     ));
                 }
-                wgsl.insert(key, (compiled, name));
+
+                let compiler = fresh_compiler(&mut slang_tag)?;
+                if spirv_spec {
+                    let compiled = compiler
+                        .compile_to_spirv(&source, entry, &[], defines)
+                        .map_err(|e| {
+                            format!(
+                                "compile {} / {} / {}: {e:?}",
+                                spec.name,
+                                entry,
+                                defines_label(defines)
+                            )
+                        })?;
+                    spirv.insert(key, (compiled, name));
+                } else {
+                    let compiled = compiler
+                        .compile_to_wgsl(&source, entry, &[], defines)
+                        .map_err(|e| {
+                            format!(
+                                "compile {} / {} / {}: {e:?}",
+                                spec.name,
+                                entry,
+                                defines_label(defines)
+                            )
+                        })?;
+                    wgsl.insert(key, (compiled, name));
+                }
+            }
+
+            // Reflection is skipped for specs whose bindings it cannot
+            // express (#117): their materials declare explicit layouts, so a
+            // baked entry would be dead weight at best and wrong at worst.
+            if spec.skip_reflection {
+                continue;
             }
 
             // One reflection entry per (spec × define set): the whole shader SET
@@ -247,9 +311,33 @@ fn bake_table() -> Result<Baked, String> {
     let slang_tag = slang_tag.unwrap_or_else(|| "unknown".to_string());
     Ok(Baked {
         wgsl,
+        spirv,
         reflection,
         slang_tag,
     })
+}
+
+/// Render SPIR-V bytes as a Rust byte-string literal (`b"..."`). Printable
+/// ASCII stays literal, everything else becomes `\xNN` — roughly 3.5 chars
+/// per byte, on a single line rustfmt will not reflow (it never splits
+/// string literals), unlike a `&[u8]` array literal which it would explode
+/// to one element per line.
+fn render_byte_string(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 4 + 3);
+    s.push_str("b\"");
+    for &b in bytes {
+        match b {
+            b'"' => s.push_str("\\\""),
+            b'\\' => s.push_str("\\\\"),
+            0x20..=0x7e => s.push(b as char),
+            _ => {
+                let _ = write!(s, "\\x{b:02x}");
+            }
+        }
+    }
+    s.push('"');
+    s
 }
 
 /// Render an `Option<String>` as a Rust `Option<&'static str>` literal.
@@ -338,8 +426,9 @@ fn bake_shaders() -> Result<(), String> {
     let dest = baked_dest();
     std::fs::write(&dest, out).map_err(|e| format!("write {}: {e}", dest.display()))?;
     eprintln!(
-        "baked {} WGSL permutations + {} reflection sets (slang {}) -> {}",
+        "baked {} WGSL + {} SPIR-V permutations + {} reflection sets (slang {}) -> {}",
         baked.wgsl.len(),
+        baked.spirv.len(),
         baked.reflection.len(),
         baked.slang_tag,
         dest.display()
@@ -360,8 +449,9 @@ fn check_shaders() -> Result<(), String> {
 
     if actual == expected {
         eprintln!(
-            "baked shaders are up to date ({} WGSL + {} reflection sets, slang {})",
+            "baked shaders are up to date ({} WGSL + {} SPIR-V + {} reflection sets, slang {})",
             baked.wgsl.len(),
+            baked.spirv.len(),
             baked.reflection.len(),
             baked.slang_tag
         );
@@ -405,8 +495,9 @@ fn render_generated(baked: &Baked) -> String {
          //! CI/preflight re-bakes and `git diff --exit-code`s this file, so a stale entry\n\
          //! fails the build. Entries are sorted by key for a stable, review-friendly diff.\n\
          //!\n\
-         //! `BAKED_WGSL`: key -> compiled WGSL. `BAKED_NAMES`: key -> `shader / entry /\n\
-         //! defines` (diagnostics on a miss). `BAKED_REFLECTION`: shader-set key -> baked\n\
+         //! `BAKED_WGSL`: key -> compiled WGSL. `BAKED_SPIRV`: key -> compiled SPIR-V\n\
+         //! (task/mesh stages, #111). `BAKED_NAMES`: key -> `shader / entry / defines`\n\
+         //! (diagnostics on a miss). `BAKED_REFLECTION`: shader-set key -> baked\n\
          //! binding-layout reflection (the runtime uses it on wasm, where Slang can't run).\n\
          //! All sorted ascending by key for binary search.\n\n",
     );
@@ -427,9 +518,28 @@ fn render_generated(baked: &Baked) -> String {
     }
     s.push_str("];\n\n");
 
+    s.push_str(
+        "/// key -> compiled SPIR-V (LE bytes), sorted ascending by key. Task/mesh\n\
+         /// entry points only (#111) — they have no WGSL form.\n",
+    );
+    s.push_str("pub static BAKED_SPIRV: &[(u64, &[u8])] = &[\n");
+    for (key, (bytes, _)) in &baked.spirv {
+        s.push_str(&format!(
+            "    ({key:#018x}, {}),\n",
+            render_byte_string(bytes)
+        ));
+    }
+    s.push_str("];\n\n");
+
     s.push_str("/// key -> human-readable `shader / entry / defines`, sorted ascending by key.\n");
     s.push_str("pub static BAKED_NAMES: &[(u64, &str)] = &[\n");
-    for (key, (_, name)) in &baked.wgsl {
+    let names = baked
+        .wgsl
+        .iter()
+        .map(|(k, (_, n))| (*k, n))
+        .chain(baked.spirv.iter().map(|(k, (_, n))| (*k, n)))
+        .collect::<BTreeMap<u64, &String>>();
+    for (key, name) in names {
         s.push_str(&format!("    ({key:#018x}, {name:?}),\n"));
     }
     s.push_str("];\n\n");

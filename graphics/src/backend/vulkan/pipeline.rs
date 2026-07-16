@@ -166,6 +166,28 @@ pub struct PipelineManager {
     /// tripping validation — mirroring the wgpu backend's handling of a
     /// missing `POLYGON_MODE_LINE` (ADR-027 capability, VK-M10).
     wireframe_supported: bool,
+    /// Whether the ray-query bundle was enabled on the device (#110). Gates
+    /// `AccelerationStructure` bindings in descriptor set layouts — without
+    /// the extension the descriptor type itself is invalid API use.
+    ray_query_supported: bool,
+    /// Whether `VK_EXT_mesh_shader` was enabled on the device (#111). Gates
+    /// task/mesh pipeline stages and TASK_EXT/MESH_EXT descriptor visibility
+    /// — without the extension the stage flags are invalid API use.
+    mesh_shading_supported: bool,
+    /// Whether the descriptor-indexing bundle was enabled (#117). Gates
+    /// `BindlessTextures`/`BindlessSamplers` layout entries — without the
+    /// feature bits the binding flags are invalid API use.
+    bindless_supported: bool,
+    /// Device-clamped bindless array capacities (0 when unsupported); the
+    /// declared `descriptorCount` of the heap's array bindings. Must match
+    /// between the heap set and every material pipeline layout — guaranteed
+    /// because both go through this manager.
+    bindless_texture_capacity: u32,
+    bindless_sampler_capacity: u32,
+    /// The dedicated update-after-bind pool the heap's single set lives in
+    /// (#117); created lazily by [`allocate_bindless_set`](Self::allocate_bindless_set),
+    /// destroyed in [`destroy`](Self::destroy).
+    bindless_pool: parking_lot::Mutex<Option<vk::DescriptorPool>>,
     /// Whether resources have been explicitly destroyed.
     destroyed: bool,
 }
@@ -182,8 +204,13 @@ impl PipelineManager {
         depth24_stencil8_format: vk::Format,
         device_properties: &vk::PhysicalDeviceProperties,
         wireframe_supported: bool,
+        ray_query_supported: bool,
+        mesh_shading_supported: bool,
+        bindless_capacities: Option<(u32, u32)>,
     ) -> Result<Self, GraphicsError> {
-        let pool_sizes = vec![
+        let (bindless_texture_capacity, bindless_sampler_capacity) =
+            bindless_capacities.unwrap_or((0, 0));
+        let mut pool_sizes = vec![
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
                 descriptor_count: 1000,
@@ -216,6 +243,14 @@ impl PipelineManager {
                 descriptor_count: 1000,
             },
         ];
+        // AS descriptors exist only with the extension enabled (#110); naming
+        // the type in a pool without it is itself invalid API use.
+        if ray_query_supported {
+            pool_sizes.push(vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::ACCELERATION_STRUCTURE_KHR,
+                descriptor_count: 100,
+            });
+        }
 
         // A single persistent pool chain hands out individually-freeable sets
         // for eagerly-created binding groups (freed on the group's Drop).
@@ -237,6 +272,12 @@ impl PipelineManager {
             pipeline_cache_dirty: std::sync::atomic::AtomicBool::new(false),
             ds_layout_cache: parking_lot::Mutex::new(HashMap::new()),
             wireframe_supported,
+            ray_query_supported,
+            mesh_shading_supported,
+            bindless_supported: bindless_capacities.is_some(),
+            bindless_texture_capacity,
+            bindless_sampler_capacity,
+            bindless_pool: parking_lot::Mutex::new(None),
             destroyed: false,
         })
     }
@@ -374,17 +415,38 @@ impl PipelineManager {
                     .iter()
                     .map(|(k, v)| (k.as_str(), v.as_str()))
                     .collect();
-                let wgsl = crate::shader::baked::lookup(source_str, entry_point, &defines)
-                    .ok_or_else(|| {
-                        GraphicsError::ShaderCompilationFailed(format!(
-                            "no baked WGSL for a Slang shader (entry '{entry_point}', defines \
-                             {defines:?}); Slang cannot compile at runtime without the \
-                             'slang-shaders' feature — add it to the xtask registry and run \
-                             `cargo run -p xtask --features slang -- bake-shaders`, then rebuild",
-                        ))
-                    })?;
-                let spv = self.compile_wgsl_to_spirv(wgsl.as_bytes(), stage, entry_point)?;
-                (spv, entry_point.to_string())
+                // Classic stages are baked as WGSL; task/mesh stages — and
+                // every stage of a shader set that contains them (#111) —
+                // are baked as SPIR-V (Slang's output verbatim), because
+                // Slang's WGSL target refuses to load a module with
+                // mesh-shading entry points. Try WGSL first, then SPIR-V.
+                if let Some(wgsl) = crate::shader::baked::lookup(source_str, entry_point, &defines)
+                {
+                    let spv = self.compile_wgsl_to_spirv(wgsl.as_bytes(), stage, entry_point)?;
+                    (spv, entry_point.to_string())
+                } else if let Some(bytes) =
+                    crate::shader::baked::lookup_spirv(source_str, entry_point, &defines)
+                {
+                    if bytes.len() % 4 != 0 {
+                        return Err(GraphicsError::ShaderCompilationFailed(
+                            "baked SPIR-V is not aligned to u32".into(),
+                        ));
+                    }
+                    let spv: Vec<u32> = bytes
+                        .chunks_exact(4)
+                        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .collect();
+                    let actual = spirv_entry_point_name(&spv, stage)
+                        .unwrap_or_else(|| entry_point.to_string());
+                    (spv, actual)
+                } else {
+                    return Err(GraphicsError::ShaderCompilationFailed(format!(
+                        "no baked WGSL or SPIR-V for a Slang shader (stage {stage:?}, entry \
+                         '{entry_point}', defines {defines:?}); Slang cannot compile at runtime \
+                         without the 'slang-shaders' feature — add it to the xtask registry and \
+                         run `cargo run -p xtask --features slang -- bake-shaders`, then rebuild",
+                    )));
+                }
             }
         };
 
@@ -419,60 +481,7 @@ impl PipelineManager {
         stage: ShaderStage,
         entry_point: &str,
     ) -> Result<Vec<u32>, GraphicsError> {
-        let source = std::str::from_utf8(wgsl_source)
-            .map_err(|e| GraphicsError::ShaderCompilationFailed(format!("Invalid UTF-8: {e}")))?;
-
-        let module = naga::front::wgsl::parse_str(source).map_err(|e| {
-            GraphicsError::ShaderCompilationFailed(format!("WGSL parse error: {e}"))
-        })?;
-
-        let mut validator = naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::all(),
-        );
-        let info = validator.validate(&module).map_err(|e| {
-            GraphicsError::ShaderCompilationFailed(format!("Validation error: {e}"))
-        })?;
-
-        let naga_stage = match stage {
-            ShaderStage::Vertex => naga::ShaderStage::Vertex,
-            ShaderStage::Fragment => naga::ShaderStage::Fragment,
-            ShaderStage::Compute => naga::ShaderStage::Compute,
-        };
-
-        let _entry_point_index = module
-            .entry_points
-            .iter()
-            .position(|ep| ep.name == entry_point && ep.stage == naga_stage)
-            .ok_or_else(|| {
-                GraphicsError::ShaderCompilationFailed(format!(
-                    "Entry point '{}' not found for stage {:?}",
-                    entry_point, stage
-                ))
-            })?;
-
-        let options = naga::back::spv::Options {
-            lang_version: (1, 3),
-            flags: naga::back::spv::WriterFlags::empty(),
-            capabilities: None,
-            bounds_check_policies: naga::proc::BoundsCheckPolicies::default(),
-            binding_map: Default::default(),
-            debug_info: None,
-            zero_initialize_workgroup_memory:
-                naga::back::spv::ZeroInitializeWorkgroupMemoryMode::None,
-        };
-
-        let pipeline_options = naga::back::spv::PipelineOptions {
-            shader_stage: naga_stage,
-            entry_point: entry_point.to_string(),
-        };
-
-        let spv = naga::back::spv::write_vec(&module, &info, &options, Some(&pipeline_options))
-            .map_err(|e| {
-                GraphicsError::ShaderCompilationFailed(format!("SPIR-V generation error: {e}"))
-            })?;
-
-        Ok(spv)
+        compile_wgsl_to_spirv(wgsl_source, stage, entry_point)
     }
 
     /// Compile Slang source to SPIR-V using the Slang compiler.
@@ -520,6 +529,40 @@ impl PipelineManager {
         &self,
         layout: &BindingLayout,
     ) -> Result<vk::DescriptorSetLayout, GraphicsError> {
+        // AS bindings without the ray-query bundle would hand the driver a
+        // descriptor type from a disabled extension (#110) — fail with the
+        // engine-level cause instead.
+        if !self.ray_query_supported
+            && layout
+                .entries
+                .iter()
+                .any(|e| e.binding_type == BindingType::AccelerationStructure)
+        {
+            return Err(GraphicsError::FeatureNotSupported(
+                "binding layout declares an acceleration structure, which requires \
+                 DeviceCapabilities::ray_query (#110)"
+                    .to_string(),
+            ));
+        }
+        // Bindless entries require the descriptor-indexing bundle (#117);
+        // without it the binding flags below are invalid API use.
+        let is_bindless_entry = |t: BindingType| {
+            matches!(
+                t,
+                BindingType::BindlessTextures | BindingType::BindlessSamplers
+            )
+        };
+        let has_bindless = layout
+            .entries
+            .iter()
+            .any(|e| is_bindless_entry(e.binding_type));
+        if has_bindless && !self.bindless_supported {
+            return Err(GraphicsError::FeatureNotSupported(
+                "binding layout declares a bindless heap array, which requires \
+                 DeviceCapabilities::bindless (#117)"
+                    .to_string(),
+            ));
+        }
         let key = ds_layout_key(layout);
         if let Some(&cached) = self.ds_layout_cache.lock().get(&key) {
             return Ok(cached);
@@ -545,6 +588,19 @@ impl PipelineManager {
                     BindingType::CombinedTextureSampler => {
                         vk::DescriptorType::COMBINED_IMAGE_SAMPLER
                     }
+                    BindingType::AccelerationStructure => {
+                        vk::DescriptorType::ACCELERATION_STRUCTURE_KHR
+                    }
+                    BindingType::BindlessTextures => vk::DescriptorType::SAMPLED_IMAGE,
+                    BindingType::BindlessSamplers => vk::DescriptorType::SAMPLER,
+                };
+
+                // Bindless arrays declare their full (device-clamped) capacity;
+                // everything else is a single descriptor.
+                let count = match entry.binding_type {
+                    BindingType::BindlessTextures => self.bindless_texture_capacity,
+                    BindingType::BindlessSamplers => self.bindless_sampler_capacity,
+                    _ => 1,
                 };
 
                 let stage_flags = convert_shader_stage_flags(entry.visibility);
@@ -552,12 +608,38 @@ impl PipelineManager {
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(entry.binding)
                     .descriptor_type(descriptor_type)
-                    .descriptor_count(1)
+                    .descriptor_count(count)
                     .stage_flags(stage_flags)
             })
             .collect();
 
-        let create_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+        // Bindless bindings carry the descriptor-indexing flags (#117):
+        // partially bound (unwritten slots are legal as long as they are not
+        // dynamically used), update-after-bind (registration writes while the
+        // heap is bound in flight), and update-unused-while-pending. The
+        // flags array must parallel `bindings`, empty for ordinary entries.
+        let binding_flags: Vec<vk::DescriptorBindingFlags> = layout
+            .entries
+            .iter()
+            .map(|entry| {
+                if is_bindless_entry(entry.binding_type) {
+                    vk::DescriptorBindingFlags::PARTIALLY_BOUND
+                        | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND
+                        | vk::DescriptorBindingFlags::UPDATE_UNUSED_WHILE_PENDING
+                } else {
+                    vk::DescriptorBindingFlags::empty()
+                }
+            })
+            .collect();
+        let mut flags_info =
+            vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&binding_flags);
+
+        let mut create_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
+        if has_bindless {
+            create_info = create_info
+                .flags(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
+                .push_next(&mut flags_info);
+        }
 
         let created = unsafe { self.device.create_descriptor_set_layout(&create_info, None) }
             .map_err(|e| {
@@ -607,24 +689,115 @@ impl PipelineManager {
         &self.persistent_pools
     }
 
+    /// Device-clamped bindless array capacities `(textures, samplers)` (#117);
+    /// `(0, 0)` when the capability is unsupported.
+    pub fn bindless_capacities(&self) -> (u32, u32) {
+        (
+            self.bindless_texture_capacity,
+            self.bindless_sampler_capacity,
+        )
+    }
+
+    /// Allocate the bindless heap's descriptor set (#117) from a dedicated
+    /// update-after-bind pool (created here on first use; the persistent
+    /// chain's pools lack `UPDATE_AFTER_BIND` and cannot hold it). Returns
+    /// `(set, pool)` — the pool is what the owning `GpuBindingGroup`'s `Drop`
+    /// must free the set back to.
+    ///
+    /// `layout` must contain only bindless entries; sized for exactly one
+    /// set, so this is called once per heap (per device).
+    pub fn allocate_bindless_set(
+        &self,
+        layout: &BindingLayout,
+    ) -> Result<(vk::DescriptorSet, vk::DescriptorPool), GraphicsError> {
+        if !self.bindless_supported {
+            return Err(GraphicsError::FeatureNotSupported(
+                "the bindless heap requires DeviceCapabilities::bindless (#117)".to_string(),
+            ));
+        }
+        let vk_layout = self.create_descriptor_set_layout(layout)?;
+
+        let mut pool_guard = self.bindless_pool.lock();
+        if pool_guard.is_some() {
+            return Err(GraphicsError::InvalidParameter(
+                "the bindless heap set was already allocated (one heap per device)".to_string(),
+            ));
+        }
+
+        let pool_sizes = [
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::SAMPLED_IMAGE,
+                descriptor_count: self.bindless_texture_capacity.max(1),
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::SAMPLER,
+                descriptor_count: self.bindless_sampler_capacity.max(1),
+            },
+        ];
+        let pool_info = vk::DescriptorPoolCreateInfo::default()
+            .flags(
+                vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND
+                    | vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET,
+            )
+            .max_sets(1)
+            .pool_sizes(&pool_sizes);
+        let pool =
+            unsafe { self.device.create_descriptor_pool(&pool_info, None) }.map_err(|e| {
+                GraphicsError::ResourceCreationFailed(format!(
+                    "Failed to create bindless descriptor pool: {e:?}"
+                ))
+            })?;
+
+        let layouts = [vk_layout];
+        let alloc_info = vk::DescriptorSetAllocateInfo::default()
+            .descriptor_pool(pool)
+            .set_layouts(&layouts);
+        let set = match unsafe { self.device.allocate_descriptor_sets(&alloc_info) } {
+            Ok(sets) => sets[0],
+            Err(e) => {
+                unsafe { self.device.destroy_descriptor_pool(pool, None) };
+                return Err(GraphicsError::ResourceCreationFailed(format!(
+                    "Failed to allocate bindless descriptor set: {e:?}"
+                )));
+            }
+        };
+
+        *pool_guard = Some(pool);
+        Ok((set, pool))
+    }
+
     /// Create a graphics pipeline.
+    ///
+    /// `stages` is the ordered `(stage, module, entry point)` list — either
+    /// the classic vertex(+fragment) pair with `vertex_input = Some((layout,
+    /// topology))`, or a mesh-shading set (task? + mesh + fragment, #111)
+    /// with `vertex_input = None`: mesh pipelines have no vertex input or
+    /// input assembly (geometry is fetched by the mesh shader), and the spec
+    /// ignores those states when a mesh stage is present — they are omitted
+    /// entirely here.
     #[allow(clippy::too_many_arguments)]
     pub fn create_graphics_pipeline(
         &self,
-        vertex_module: vk::ShaderModule,
-        fragment_module: Option<vk::ShaderModule>,
-        vertex_entry: &str,
-        fragment_entry: &str,
-        vertex_layout: &VertexLayout,
-        topology: PrimitiveTopology,
+        stages: &[(vk::ShaderStageFlags, vk::ShaderModule, &str)],
+        vertex_input: Option<(&VertexLayout, PrimitiveTopology)>,
         pipeline_layout: vk::PipelineLayout,
         color_formats: &[TextureFormat],
         depth: Option<crate::materials::DepthState>,
         blend_state: Option<&crate::materials::BlendState>,
         raster: crate::materials::RasterState,
         sample_count: u32,
-        _dynamic_rendering: &ash::Device,
     ) -> Result<vk::Pipeline, GraphicsError> {
+        // Stage flags from an extension that was never enabled are invalid
+        // API use before the driver even sees the SPIR-V (#111).
+        if stages.iter().any(|(stage, _, _)| {
+            stage.intersects(vk::ShaderStageFlags::TASK_EXT | vk::ShaderStageFlags::MESH_EXT)
+        }) && !self.mesh_shading_supported
+        {
+            return Err(GraphicsError::FeatureNotSupported(
+                "task/mesh pipeline stages require DeviceCapabilities::mesh_shading (#111)".into(),
+            ));
+        }
+
         // Derived once from the optional depth state; used by both the depth-
         // stencil state and the dynamic-rendering attachment formats below.
         let depth_format = depth.map(|d| d.format);
@@ -632,36 +805,38 @@ impl PipelineManager {
         let depth_compare = depth
             .map(|d| d.compare)
             .unwrap_or(crate::materials::CompareFunction::LessEqual);
-        let vertex_entry_c = CString::new(vertex_entry).map_err(|e| {
-            GraphicsError::InvalidParameter(format!(
-                "Invalid vertex entry point name (contains null byte): {}",
-                e
-            ))
-        })?;
-        let fragment_entry_c = CString::new(fragment_entry).map_err(|e| {
-            GraphicsError::InvalidParameter(format!(
-                "Invalid fragment entry point name (contains null byte): {}",
-                e
-            ))
-        })?;
 
-        let mut shader_stages = vec![
-            vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::VERTEX)
-                .module(vertex_module)
-                .name(&vertex_entry_c),
-        ];
+        let entry_names: Vec<CString> = stages
+            .iter()
+            .map(|(_, _, entry)| {
+                CString::new(*entry).map_err(|e| {
+                    GraphicsError::InvalidParameter(format!(
+                        "Invalid entry point name (contains null byte): {}",
+                        e
+                    ))
+                })
+            })
+            .collect::<Result<_, _>>()?;
 
-        if let Some(frag_module) = fragment_module {
-            shader_stages.push(
+        let shader_stages: Vec<vk::PipelineShaderStageCreateInfo> = stages
+            .iter()
+            .zip(&entry_names)
+            .map(|(&(stage, module, _), name)| {
                 vk::PipelineShaderStageCreateInfo::default()
-                    .stage(vk::ShaderStageFlags::FRAGMENT)
-                    .module(frag_module)
-                    .name(&fragment_entry_c),
-            );
-        }
+                    .stage(stage)
+                    .module(module)
+                    .name(name)
+            })
+            .collect();
 
-        // Build vertex input state from material's vertex layout
+        // Build vertex input state from the material's vertex layout (classic
+        // pipelines only; the vectors stay empty — and the states unattached —
+        // for mesh pipelines).
+        let empty_layout = VertexLayout::new();
+        let (vertex_layout, topology) = match vertex_input {
+            Some((layout, topology)) => (layout, topology),
+            None => (&empty_layout, PrimitiveTopology::TriangleList),
+        };
         let binding_descriptions: Vec<vk::VertexInputBindingDescription> = vertex_layout
             .buffers
             .iter()
@@ -808,10 +983,8 @@ impl PipelineManager {
             .depth_attachment_format(depth_attachment_format)
             .stencil_attachment_format(stencil_attachment_format);
 
-        let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+        let mut pipeline_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&shader_stages)
-            .vertex_input_state(&vertex_input_state)
-            .input_assembly_state(&input_assembly_state)
             .viewport_state(&viewport_state)
             .rasterization_state(&rasterization_state)
             .multisample_state(&multisample_state)
@@ -820,6 +993,11 @@ impl PipelineManager {
             .dynamic_state(&dynamic_state)
             .layout(pipeline_layout)
             .push_next(&mut rendering_info);
+        if vertex_input.is_some() {
+            pipeline_info = pipeline_info
+                .vertex_input_state(&vertex_input_state)
+                .input_assembly_state(&input_assembly_state);
+        }
 
         let pipelines = unsafe {
             self.device
@@ -917,6 +1095,13 @@ impl PipelineManager {
         // GPU is idle; any outstanding sets belong to `GpuBindingGroup`s that
         // are dropped before backend teardown (they keep the device alive).
         unsafe { self.persistent_pools.lock().destroy() };
+
+        // Destroy the bindless heap pool (#117), if one was created. Same
+        // safety argument: the heap's set belongs to a `GpuBindingGroup`
+        // dropped before backend teardown.
+        if let Some(pool) = self.bindless_pool.lock().take() {
+            unsafe { self.device.destroy_descriptor_pool(pool, None) };
+        }
 
         self.destroyed = true;
     }
@@ -1017,6 +1202,12 @@ fn convert_shader_stage_flags(flags: crate::materials::ShaderStageFlags) -> vk::
     if flags.contains(crate::materials::ShaderStageFlags::COMPUTE) {
         result |= vk::ShaderStageFlags::COMPUTE;
     }
+    if flags.contains(crate::materials::ShaderStageFlags::TASK) {
+        result |= vk::ShaderStageFlags::TASK_EXT;
+    }
+    if flags.contains(crate::materials::ShaderStageFlags::MESH) {
+        result |= vk::ShaderStageFlags::MESH_EXT;
+    }
     result
 }
 
@@ -1103,6 +1294,9 @@ fn spirv_entry_point_name(spirv: &[u32], stage: ShaderStage) -> Option<String> {
         ShaderStage::Vertex => 0,
         ShaderStage::Fragment => 4,
         ShaderStage::Compute => 5,
+        // SPV_EXT_mesh_shader execution models (#111).
+        ShaderStage::Task => 5364, // TaskEXT
+        ShaderStage::Mesh => 5365, // MeshEXT
     };
 
     for (opcode, operands) in spirv_instructions(spirv) {
@@ -1121,6 +1315,79 @@ fn spirv_entry_point_name(spirv: &[u32], stage: ShaderStage) -> Option<String> {
         }
     }
     None
+}
+
+/// Compile WGSL to SPIR-V using naga.
+///
+/// Validation runs with `Capabilities::all()`, which includes `RAY_QUERY` —
+/// WGSL ray-query shaders (`acceleration_structure` bindings, `ray_query`
+/// vars, #110) compile through this same path; naga emits the
+/// `SPV_KHR_ray_query` extension for them.
+fn compile_wgsl_to_spirv(
+    wgsl_source: &[u8],
+    stage: ShaderStage,
+    entry_point: &str,
+) -> Result<Vec<u32>, GraphicsError> {
+    let source = std::str::from_utf8(wgsl_source)
+        .map_err(|e| GraphicsError::ShaderCompilationFailed(format!("Invalid UTF-8: {e}")))?;
+
+    let module = naga::front::wgsl::parse_str(source)
+        .map_err(|e| GraphicsError::ShaderCompilationFailed(format!("WGSL parse error: {e}")))?;
+
+    let mut validator = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    );
+    let info = validator
+        .validate(&module)
+        .map_err(|e| GraphicsError::ShaderCompilationFailed(format!("Validation error: {e}")))?;
+
+    let naga_stage = match stage {
+        ShaderStage::Vertex => naga::ShaderStage::Vertex,
+        ShaderStage::Fragment => naga::ShaderStage::Fragment,
+        ShaderStage::Compute => naga::ShaderStage::Compute,
+        // naga/WGSL has no mesh-shading support at all (#111) — the reason
+        // task/mesh stages are authored in Slang and baked as SPIR-V.
+        ShaderStage::Task | ShaderStage::Mesh => {
+            return Err(GraphicsError::FeatureNotSupported(format!(
+                "WGSL cannot express {stage:?} shaders; author mesh-shading stages in \
+                 Slang (#111)"
+            )));
+        }
+    };
+
+    let _entry_point_index = module
+        .entry_points
+        .iter()
+        .position(|ep| ep.name == entry_point && ep.stage == naga_stage)
+        .ok_or_else(|| {
+            GraphicsError::ShaderCompilationFailed(format!(
+                "Entry point '{}' not found for stage {:?}",
+                entry_point, stage
+            ))
+        })?;
+
+    let options = naga::back::spv::Options {
+        lang_version: (1, 3),
+        flags: naga::back::spv::WriterFlags::empty(),
+        capabilities: None,
+        bounds_check_policies: naga::proc::BoundsCheckPolicies::default(),
+        binding_map: Default::default(),
+        debug_info: None,
+        zero_initialize_workgroup_memory: naga::back::spv::ZeroInitializeWorkgroupMemoryMode::None,
+    };
+
+    let pipeline_options = naga::back::spv::PipelineOptions {
+        shader_stage: naga_stage,
+        entry_point: entry_point.to_string(),
+    };
+
+    let spv = naga::back::spv::write_vec(&module, &info, &options, Some(&pipeline_options))
+        .map_err(|e| {
+            GraphicsError::ShaderCompilationFailed(format!("SPIR-V generation error: {e}"))
+        })?;
+
+    Ok(spv)
 }
 
 /// Whether the SPIR-V module declares a push-constant block.
@@ -1286,6 +1553,49 @@ mod tests {
         // Content differences must produce different keys.
         let c = BindingLayout::new().with_uniform_buffer(0).with_sampler(1);
         assert_ne!(ds_layout_key(&a), ds_layout_key(&c));
+    }
+
+    /// #111: WGSL has no mesh-shading syntax, so task/mesh stages through the
+    /// naga path must fail with the engine-level cause (author in Slang), not
+    /// a confusing missing-entry-point error.
+    #[test]
+    fn wgsl_mesh_stages_are_rejected() {
+        for stage in [ShaderStage::Task, ShaderStage::Mesh] {
+            let result = compile_wgsl_to_spirv(b"", stage, "main");
+            assert!(
+                matches!(result, Err(GraphicsError::FeatureNotSupported(_))),
+                "{stage:?} through the WGSL path must be FeatureNotSupported"
+            );
+        }
+    }
+
+    /// #110: the naga WGSL→SPIR-V path must accept ray-query shaders —
+    /// `acceleration_structure` bindings, `ray_query` state, the intersection
+    /// accessors. This is the shader path the ray-tracing feature stands on;
+    /// a naga upgrade that regresses it should fail here, not in a demo run.
+    #[test]
+    fn wgsl_ray_query_compiles_to_spirv() {
+        const RAY_QUERY_WGSL: &[u8] = br#"
+            @group(0) @binding(0) var tlas: acceleration_structure;
+
+            @fragment
+            fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+                var rq: ray_query;
+                rayQueryInitialize(&rq, tlas,
+                    RayDesc(0x4u, 0xFFu, 0.001, 100.0,
+                            vec3<f32>(pos.xy, 0.0), vec3<f32>(0.0, 0.0, 1.0)));
+                while (rayQueryProceed(&rq)) {}
+                let hit = rayQueryGetCommittedIntersection(&rq);
+                if (hit.kind == RAY_QUERY_INTERSECTION_TRIANGLE) {
+                    return vec4<f32>(hit.barycentrics, hit.t, 1.0);
+                }
+                return vec4<f32>(0.0);
+            }
+        "#;
+
+        let spv = compile_wgsl_to_spirv(RAY_QUERY_WGSL, ShaderStage::Fragment, "fs_main")
+            .expect("ray-query WGSL must compile to SPIR-V");
+        assert!(!spv.is_empty());
     }
 
     #[test]

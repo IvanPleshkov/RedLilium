@@ -35,7 +35,8 @@ struct PipelineKey {
     shader: Guid,
     variant: VariantKey,
     layout: usize,
-    color: TextureFormat,
+    /// `None` for depth-only pipelines (zero color attachments, #129).
+    color: Option<TextureFormat>,
     depth: Option<TextureFormat>,
 }
 
@@ -83,9 +84,46 @@ impl PipelineCache {
             shader: shader_guid,
             variant: variant.clone(),
             layout: Arc::as_ptr(layout) as usize,
-            color,
+            color: Some(color),
             depth: Some(depth),
         };
+        self.get_or_build_with(key, shader_guid, shader, |device, shader| {
+            Self::build(device, shader, variant, layout, color, depth)
+        })
+    }
+
+    /// Get (or build + cache) the **depth-only** specialization of `shader`
+    /// (#129): vertex stage only, zero color attachments. Used by depth-only
+    /// phases (shadow maps, depth prepass) with a shared depth shader; same
+    /// hot-reload/last-good semantics as [`get_or_build`](Self::get_or_build).
+    pub fn get_or_build_depth_only(
+        &mut self,
+        shader_guid: Guid,
+        shader: &Arc<Shader>,
+        layout: &Arc<VertexLayout>,
+        depth: TextureFormat,
+    ) -> Result<Arc<Material>, GraphicsError> {
+        let key = PipelineKey {
+            shader: shader_guid,
+            variant: VariantKey::default(),
+            layout: Arc::as_ptr(layout) as usize,
+            color: None,
+            depth: Some(depth),
+        };
+        self.get_or_build_with(key, shader_guid, shader, |device, shader| {
+            Self::build_depth_only(device, shader, layout, depth)
+        })
+    }
+
+    /// The shared cache-hit / hot-reload / last-good-serving logic behind
+    /// both specialization entry points.
+    fn get_or_build_with(
+        &mut self,
+        key: PipelineKey,
+        shader_guid: Guid,
+        shader: &Arc<Shader>,
+        build: impl Fn(&Arc<GraphicsDevice>, &Arc<Shader>) -> Result<Arc<Material>, GraphicsError>,
+    ) -> Result<Arc<Material>, GraphicsError> {
         if let Some(entry) = self.cache.get_mut(&key) {
             if Arc::ptr_eq(&entry.shader, shader) {
                 return Ok(Arc::clone(&entry.material));
@@ -95,7 +133,7 @@ impl PipelineCache {
             if entry.broken == Some(Arc::as_ptr(shader) as usize) {
                 return Ok(Arc::clone(&entry.material));
             }
-            match Self::build(&self.device, shader, variant, layout, color, depth) {
+            match build(&self.device, shader) {
                 Ok(material) => {
                     entry.shader = Arc::clone(shader);
                     entry.material = Arc::clone(&material);
@@ -110,7 +148,7 @@ impl PipelineCache {
             }
         }
 
-        let material = Self::build(&self.device, shader, variant, layout, color, depth)?;
+        let material = build(&self.device, shader)?;
         self.cache.insert(
             key,
             PipelineEntry {
@@ -159,6 +197,30 @@ impl PipelineCache {
                 // shader's [UpdateRate] blocks classify each set through
                 // reflection (Decision 7) — no hardcoded set indices here.
                 .with_label("opaque"),
+        )
+    }
+
+    /// Compile the depth-only pipeline: vertex stage only, no color formats
+    /// (#129). Cull state matches [`build`](Self::build) so a depth pass
+    /// covers exactly the faces the main pass shades.
+    fn build_depth_only(
+        device: &Arc<GraphicsDevice>,
+        shader: &Arc<Shader>,
+        layout: &Arc<VertexLayout>,
+        depth: TextureFormat,
+    ) -> Result<Arc<Material>, GraphicsError> {
+        device.create_material(
+            &MaterialDescriptor::new()
+                .with_shader(ShaderSource::slang(
+                    ShaderStage::Vertex,
+                    shader.source.clone(),
+                    "vs_main",
+                    vec![],
+                ))
+                .with_vertex_layout(Arc::clone(layout))
+                .with_depth_format(depth)
+                .with_cull_mode(CullMode::Back)
+                .with_label("depth_only"),
         )
     }
 

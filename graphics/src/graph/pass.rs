@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use crate::materials::{BindingType, BoundResource, MaterialInstance, SampledDepthLayout};
 use crate::mesh::Mesh;
-use crate::resources::Buffer;
+use crate::resources::{Blas, Buffer, Tlas};
 use crate::types::{ScissorRect, Viewport};
 
 use super::resource_usage::{
@@ -19,6 +19,11 @@ use super::transfer::{TransferConfig, TransferOperation};
 ///
 /// Passes describe units of GPU work with their resource dependencies.
 /// Each variant has its own configuration specific to that pass type.
+// The size skew is deliberate: passes live in a pooled per-frame Vec
+// (`RenderGraph` reuses capacity across frames), so boxing the large
+// `GraphicsPass` variant would trade one add-time memcpy for a per-pass
+// heap allocation every frame.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Pass {
     /// Graphics pass (vertex/fragment shaders, rasterization).
@@ -27,6 +32,8 @@ pub enum Pass {
     Transfer(TransferPass),
     /// Compute pass (compute shaders).
     Compute(ComputePass),
+    /// Acceleration-structure build pass (BLAS/TLAS builds, #110).
+    AccelerationStructureBuild(AccelerationStructureBuildPass),
 }
 
 impl Pass {
@@ -36,6 +43,7 @@ impl Pass {
             Pass::Graphics(p) => p.name(),
             Pass::Transfer(p) => p.name(),
             Pass::Compute(p) => p.name(),
+            Pass::AccelerationStructureBuild(p) => p.name(),
         }
     }
 
@@ -108,6 +116,20 @@ impl Pass {
         matches!(self, Pass::Compute(_))
     }
 
+    /// Get this pass as an acceleration-structure build pass, if it is one.
+    pub fn as_acceleration_structure_build(&self) -> Option<&AccelerationStructureBuildPass> {
+        if let Pass::AccelerationStructureBuild(p) = self {
+            Some(p)
+        } else {
+            None
+        }
+    }
+
+    /// Check if this is an acceleration-structure build pass.
+    pub fn is_acceleration_structure_build(&self) -> bool {
+        matches!(self, Pass::AccelerationStructureBuild(_))
+    }
+
     /// Infer resource usage from the pass configuration.
     ///
     /// This examines the pass's render targets, material bindings, and transfer
@@ -117,6 +139,7 @@ impl Pass {
             Pass::Graphics(p) => p.infer_resource_usage(),
             Pass::Transfer(p) => p.infer_resource_usage(),
             Pass::Compute(p) => p.infer_resource_usage(),
+            Pass::AccelerationStructureBuild(p) => p.infer_resource_usage(),
         }
     }
 }
@@ -244,6 +267,81 @@ impl std::fmt::Debug for DrawCommand {
             .field("mesh", &self.mesh.label())
             .field("material", &self.material.label())
             .field("instance_count", &self.instance_count)
+            .finish()
+    }
+}
+
+// ============================================================================
+// Mesh-Tasks Draw Command
+// ============================================================================
+
+/// A mesh-shading draw (#111): dispatches `group_count` task (or mesh, when
+/// the material has no task stage) workgroups through a material whose
+/// pipeline is task?+mesh+fragment. There is no [`Mesh`] — geometry lives in
+/// storage buffers bound through the material instance, and the mesh shader
+/// fetches it. Requires
+/// [`DeviceCapabilities::mesh_shading`](crate::DeviceCapabilities::mesh_shading).
+pub struct MeshTasksDrawCommand {
+    /// The material instance with bound resources (meshlet buffers included).
+    pub material: Arc<MaterialInstance>,
+    /// Workgroup counts `[x, y, z]` for `vkCmdDrawMeshTasksEXT`.
+    pub group_count: [u32; 3],
+    /// Optional scissor rectangle for clipping.
+    pub scissor_rect: Option<ScissorRect>,
+    /// Per-bind-group dynamic byte offsets (see
+    /// [`DrawCommand::dynamic_offsets`]).
+    pub dynamic_offsets: Vec<Vec<u32>>,
+}
+
+impl MeshTasksDrawCommand {
+    /// Create a new mesh-tasks draw command.
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if the material has no mesh stage — a classic vertex material
+    /// cannot be dispatched as mesh tasks.
+    pub fn new(material: Arc<MaterialInstance>, group_count: [u32; 3]) -> Self {
+        #[cfg(debug_assertions)]
+        {
+            use crate::materials::ShaderStage;
+            debug_assert!(
+                material
+                    .material()
+                    .shaders()
+                    .iter()
+                    .any(|s| s.stage == ShaderStage::Mesh),
+                "MeshTasksDrawCommand requires a material with a mesh shader stage \
+                 (material {:?})",
+                material.label()
+            );
+        }
+        Self {
+            material,
+            group_count,
+            scissor_rect: None,
+            dynamic_offsets: Vec::new(),
+        }
+    }
+
+    /// Set the scissor rectangle for clipping.
+    pub fn with_scissor_rect(mut self, rect: ScissorRect) -> Self {
+        self.scissor_rect = Some(rect);
+        self
+    }
+
+    /// Set per-bind-group dynamic uniform offsets (see
+    /// [`DrawCommand::dynamic_offsets`]).
+    pub fn with_dynamic_offsets(mut self, offsets: Vec<Vec<u32>>) -> Self {
+        self.dynamic_offsets = offsets;
+        self
+    }
+}
+
+impl std::fmt::Debug for MeshTasksDrawCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MeshTasksDrawCommand")
+            .field("material", &self.material.label())
+            .field("group_count", &self.group_count)
             .finish()
     }
 }
@@ -457,6 +555,7 @@ pub struct GraphicsPass {
     scissor_rect: Option<ScissorRect>,
     draw_commands: Vec<DrawCommand>,
     indirect_draw_commands: Vec<IndirectDrawCommand>,
+    mesh_tasks_commands: Vec<MeshTasksDrawCommand>,
 }
 
 impl GraphicsPass {
@@ -469,6 +568,7 @@ impl GraphicsPass {
             scissor_rect: None,
             draw_commands: Vec::new(),
             indirect_draw_commands: Vec::new(),
+            mesh_tasks_commands: Vec::new(),
         }
     }
 
@@ -577,11 +677,43 @@ impl GraphicsPass {
     pub fn clear_draws(&mut self) {
         self.draw_commands.clear();
         self.indirect_draw_commands.clear();
+        self.mesh_tasks_commands.clear();
     }
 
-    /// Check if this pass has any draw commands (direct or indirect).
+    /// Check if this pass has any draw commands (direct, indirect, or mesh
+    /// tasks).
     pub fn has_draws(&self) -> bool {
-        !self.draw_commands.is_empty() || !self.indirect_draw_commands.is_empty()
+        !self.draw_commands.is_empty()
+            || !self.indirect_draw_commands.is_empty()
+            || !self.mesh_tasks_commands.is_empty()
+    }
+
+    // ========================================================================
+    // Mesh-Tasks Draw Commands (#111)
+    // ========================================================================
+
+    /// Add a mesh-shading draw (#111): dispatch `group_count` task/mesh
+    /// workgroups through a task?+mesh+fragment material. Requires
+    /// [`DeviceCapabilities::mesh_shading`](crate::DeviceCapabilities::mesh_shading);
+    /// there is no [`Mesh`] — the mesh shader fetches geometry from storage
+    /// buffers bound through the material instance.
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if the material has no mesh shader stage.
+    pub fn add_draw_mesh_tasks(&mut self, material: Arc<MaterialInstance>, group_count: [u32; 3]) {
+        self.mesh_tasks_commands
+            .push(MeshTasksDrawCommand::new(material, group_count));
+    }
+
+    /// Add a pre-built mesh-tasks draw command.
+    pub fn add_mesh_tasks_command(&mut self, command: MeshTasksDrawCommand) {
+        self.mesh_tasks_commands.push(command);
+    }
+
+    /// Get all mesh-tasks draw commands.
+    pub fn mesh_tasks_commands(&self) -> &[MeshTasksDrawCommand] {
+        &self.mesh_tasks_commands
     }
 
     // ========================================================================
@@ -798,6 +930,15 @@ impl GraphicsPass {
             );
         }
 
+        // Infer from mesh-tasks draws (#111): material resources only — the
+        // meshlet geometry lives in storage buffers bound through the
+        // material instance, so `extract_material_resources` covers it (a
+        // compute pass writing those buffers gets its barrier from the
+        // StorageRead/StorageReadWrite declarations).
+        for cmd in &self.mesh_tasks_commands {
+            extract_material_resources(&cmd.material, &mut usage, &mut seen);
+        }
+
         // Diagnostic: a texture bound as a depth/stencil attachment AND sampled
         // through a *plain* (ShaderRead) group in the same pass is a layout
         // mistake — the barrier can pick only one layout, so the eagerly-written
@@ -900,6 +1041,36 @@ fn extract_material_resources(
                 }
                 BoundResource::Buffer(buffer) => buffer,
                 BoundResource::BufferRange { buffer, .. } => buffer,
+                // Ray traversal reads the TLAS memory AND the memory of every
+                // BLAS its instances reference (#110) — declare all of them so
+                // the build-to-trace hazard gets a barrier.
+                BoundResource::AccelerationStructure(tlas) => {
+                    seen.add_buffer(
+                        usage,
+                        tlas.backing_buffer(),
+                        BufferAccessMode::AccelerationStructureShaderRead,
+                    );
+                    let (_instances, _count, blases) = tlas.current_build_inputs();
+                    for blas in &blases {
+                        seen.add_buffer(
+                            usage,
+                            blas.backing_buffer(),
+                            BufferAccessMode::AccelerationStructureShaderRead,
+                        );
+                    }
+                    continue;
+                }
+                // The bindless heap (#117): every registered texture may be
+                // sampled by this draw, so declare them all — that is what
+                // keeps automatic layout transitions working (a freshly
+                // uploaded texture moves TransferDst → ShaderReadOnly before
+                // the first bindless draw).
+                BoundResource::BindlessHeap(slots) => {
+                    slots.for_each_live_texture(|texture| {
+                        usage.add_texture(Arc::clone(texture), TextureAccessMode::ShaderRead);
+                    });
+                    continue;
+                }
                 _ => continue,
             };
 
@@ -1159,6 +1330,158 @@ impl ComputePass {
         let mut seen = BufferDeclSet::new();
         for cmd in &self.dispatch_commands {
             extract_material_resources(&cmd.material, &mut usage, &mut seen);
+        }
+
+        usage
+    }
+}
+
+// ============================================================================
+// Acceleration Structure Build Pass
+// ============================================================================
+
+/// One build submitted to an [`AccelerationStructureBuildPass`] (#110).
+#[derive(Debug)]
+pub enum AccelerationStructureBuild {
+    /// Build (or rebuild) a BLAS from its descriptor's geometry buffers.
+    Blas(Arc<Blas>),
+    /// Build (or rebuild) a TLAS from the instances most recently written via
+    /// [`Tlas::write_instances`].
+    Tlas(Arc<Tlas>),
+}
+
+/// A pass that builds acceleration structures on the GPU (#110, ADR-032).
+///
+/// All builds within one pass are **independent** — they may execute without
+/// ordering between them. A build consuming another's output (the classic
+/// BLAS build → TLAS build) must go in a **separate, dependent pass**: the
+/// automatic barrier system works at pass granularity, deriving the
+/// build-to-build and build-to-trace hazards from the AS backing buffers each
+/// pass declares.
+///
+/// Runs on any compute-capable queue (graphics or async compute); a
+/// [`QueuePreference::Transfer`](crate::QueuePreference) graph containing one
+/// falls back — AS builds are not transfer work.
+///
+/// ```ignore
+/// let blas_pass = {
+///     let mut pass = AccelerationStructureBuildPass::new("blas".into());
+///     pass.add_blas_build(Arc::clone(&blas));
+///     graph.add_acceleration_structure_build_pass(pass)
+/// };
+/// tlas.write_instances(&instances)?;
+/// let tlas_pass = {
+///     let mut pass = AccelerationStructureBuildPass::new("tlas".into());
+///     pass.add_tlas_build(Arc::clone(&tlas));
+///     graph.add_acceleration_structure_build_pass(pass)
+/// };
+/// graph.add_dependency(tlas_pass, blas_pass);
+/// ```
+#[derive(Debug)]
+pub struct AccelerationStructureBuildPass {
+    name: String,
+    builds: Vec<AccelerationStructureBuild>,
+}
+
+impl AccelerationStructureBuildPass {
+    /// Create a new acceleration-structure build pass.
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            builds: Vec::new(),
+        }
+    }
+
+    /// Get the pass name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Queue a BLAS build.
+    pub fn add_blas_build(&mut self, blas: Arc<Blas>) {
+        self.builds.push(AccelerationStructureBuild::Blas(blas));
+    }
+
+    /// Queue a TLAS build. Write the frame's instances with
+    /// [`Tlas::write_instances`] **before** the graph executes.
+    pub fn add_tlas_build(&mut self, tlas: Arc<Tlas>) {
+        self.builds.push(AccelerationStructureBuild::Tlas(tlas));
+    }
+
+    /// Get all queued builds.
+    pub fn builds(&self) -> &[AccelerationStructureBuild] {
+        &self.builds
+    }
+
+    /// Check if this pass has any builds.
+    pub fn has_builds(&self) -> bool {
+        !self.builds.is_empty()
+    }
+
+    /// Infer resource usage for automatic barriers (#110).
+    ///
+    /// - BLAS build: geometry buffers as build **input**; backing + scratch
+    ///   as build **write** (scratch is read-write within the build).
+    /// - TLAS build: the active instance buffer as build input; referenced
+    ///   BLAS backings as build **read**; backing + scratch as build write.
+    pub fn infer_resource_usage(&self) -> PassResourceUsage {
+        let mut usage = PassResourceUsage::new();
+        let mut seen = BufferDeclSet::new();
+
+        for build in &self.builds {
+            match build {
+                AccelerationStructureBuild::Blas(blas) => {
+                    for geometry in &blas.descriptor().geometries {
+                        seen.add_buffer(
+                            &mut usage,
+                            &geometry.vertex_buffer,
+                            BufferAccessMode::AccelerationStructureBuildInput,
+                        );
+                        if let Some(index_buffer) = &geometry.index_buffer {
+                            seen.add_buffer(
+                                &mut usage,
+                                index_buffer,
+                                BufferAccessMode::AccelerationStructureBuildInput,
+                            );
+                        }
+                    }
+                    seen.add_buffer(
+                        &mut usage,
+                        blas.backing_buffer(),
+                        BufferAccessMode::AccelerationStructureWrite,
+                    );
+                    seen.add_buffer(
+                        &mut usage,
+                        blas.scratch_buffer(),
+                        BufferAccessMode::AccelerationStructureWrite,
+                    );
+                }
+                AccelerationStructureBuild::Tlas(tlas) => {
+                    let (instance_buffer, _count, blases) = tlas.current_build_inputs();
+                    seen.add_buffer(
+                        &mut usage,
+                        &instance_buffer,
+                        BufferAccessMode::AccelerationStructureBuildInput,
+                    );
+                    for blas in &blases {
+                        seen.add_buffer(
+                            &mut usage,
+                            blas.backing_buffer(),
+                            BufferAccessMode::AccelerationStructureBuildRead,
+                        );
+                    }
+                    seen.add_buffer(
+                        &mut usage,
+                        tlas.backing_buffer(),
+                        BufferAccessMode::AccelerationStructureWrite,
+                    );
+                    seen.add_buffer(
+                        &mut usage,
+                        tlas.scratch_buffer(),
+                        BufferAccessMode::AccelerationStructureWrite,
+                    );
+                }
+            }
         }
 
         usage

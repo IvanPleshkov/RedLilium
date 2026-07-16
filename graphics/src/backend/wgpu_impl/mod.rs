@@ -519,6 +519,16 @@ impl WgpuBackend {
             // No VRAM budget API on wgpu (#98); heaps are empty, the panel
             // falls back to the engine's allocator/resource figures.
             memory_budget: false,
+            // Inline ray tracing is Vulkan-only (#110). wgpu's experimental
+            // ray-query support is a named follow-up (issue #110 phase 4).
+            ray_query: false,
+            // Mesh shading is Vulkan-only (#111): WebGPU has no mesh-shader
+            // stages, and wgpu's experimental native support has no WGSL
+            // front-end for them.
+            mesh_shading: false,
+            // The bindless heap is Vulkan-only (#117): WebGPU has no
+            // runtime-sized update-after-bind descriptor arrays.
+            bindless: false,
         }
     }
 

@@ -45,8 +45,8 @@ mod target;
 mod transfer;
 
 pub use pass::{
-    ComputePass, DispatchCommand, DrawCommand, GraphicsPass, IndirectDrawCommand, Pass,
-    TransferPass,
+    AccelerationStructureBuild, AccelerationStructureBuildPass, ComputePass, DispatchCommand,
+    DrawCommand, GraphicsPass, IndirectDrawCommand, MeshTasksDrawCommand, Pass, TransferPass,
 };
 
 // Re-export compiler types for convenience
@@ -195,6 +195,22 @@ impl RenderGraph {
         self.compiled.release(); // Invalidate cache
         let index = self.passes.len() as u32;
         self.passes.push(Pass::Compute(pass));
+        PassHandle::new(index)
+    }
+
+    /// Add an acceleration-structure build pass to the graph (#110).
+    ///
+    /// The pass should be fully configured before adding.
+    /// Returns a `PassHandle` for referencing this pass.
+    ///
+    /// Note: Adding a pass invalidates any cached compiled graph.
+    pub fn add_acceleration_structure_build_pass(
+        &mut self,
+        pass: AccelerationStructureBuildPass,
+    ) -> PassHandle {
+        self.compiled.release(); // Invalidate cache
+        let index = self.passes.len() as u32;
+        self.passes.push(Pass::AccelerationStructureBuild(pass));
         PassHandle::new(index)
     }
 
@@ -415,6 +431,148 @@ mod tests {
         graph.reset();
 
         assert_eq!(graph.pass_count(), 0);
+    }
+
+    /// The bindless heap group (#117) declares every registered texture as a
+    /// shader read, so a freshly uploaded texture gets its layout transition
+    /// before the first bindless draw.
+    #[test]
+    fn bindless_heap_declares_live_textures() {
+        use std::sync::Arc;
+
+        use crate::graph::resource_usage::TextureAccessMode;
+        use crate::materials::{
+            BindingEntry, BindingGroupDescriptor, BindingLayout, BoundResource, MaterialDescriptor,
+            MaterialInstance, ShaderSource,
+        };
+        use crate::mesh::{MeshDescriptor, VertexLayout};
+
+        let instance = GraphicsInstance::new().unwrap();
+        let device = instance.create_device().unwrap();
+        let texture = device
+            .create_texture(&TextureDescriptor::new_2d(
+                4,
+                4,
+                TextureFormat::Rgba8Unorm,
+                TextureUsage::TEXTURE_BINDING,
+            ))
+            .unwrap();
+
+        // A heap stand-in built directly (the real one is device-owned and
+        // Vulkan-only; inference only walks the slot table).
+        let slots = Arc::new(crate::bindless::BindlessSlots::new(4, 4));
+        slots.allocate_texture(Arc::clone(&texture)).unwrap();
+        let layout = Arc::new(BindingLayout::new().with_bindless_textures(0));
+        let mut descriptor = BindingGroupDescriptor::new();
+        descriptor.entries.push(BindingEntry::new(
+            0,
+            BoundResource::BindlessHeap(Arc::clone(&slots)),
+        ));
+        let group = Arc::new(crate::materials::BindingGroup::new(
+            Arc::clone(&device),
+            Arc::clone(&layout),
+            descriptor,
+            crate::backend::GpuBindingGroup::Dummy,
+        ));
+
+        let material = Arc::new(crate::materials::Material::new(
+            Arc::clone(&device),
+            MaterialDescriptor::new()
+                .with_shader(ShaderSource::vertex(b"vs".to_vec(), "main"))
+                .with_vertex_layout(VertexLayout::position_only())
+                .with_binding_layout(layout),
+            crate::backend::GpuPipeline::Dummy,
+        ));
+        let material_instance = Arc::new(MaterialInstance::new(material).with_binding_group(group));
+        let mesh = device
+            .create_mesh(&MeshDescriptor::new(VertexLayout::position_only()).with_vertex_count(3))
+            .unwrap();
+
+        let mut pass = GraphicsPass::new("bindless".into());
+        pass.add_draw(mesh, material_instance);
+
+        let usage = pass.infer_resource_usage();
+        assert!(
+            usage
+                .texture_usages
+                .iter()
+                .any(|d| Arc::ptr_eq(&d.texture, &texture)
+                    && d.access == TextureAccessMode::ShaderRead),
+            "registered bindless texture must be declared as a shader read"
+        );
+    }
+
+    /// Mesh-tasks draws (#111) declare the material's storage buffers as pass
+    /// inputs (that is their only geometry path — there is no Mesh), so a
+    /// GPU write to a meshlet buffer gets a barrier before the draw.
+    #[test]
+    fn mesh_tasks_draws_declare_material_buffers() {
+        use std::sync::Arc;
+
+        use crate::graph::resource_usage::BufferAccessMode;
+        use crate::materials::{
+            BindingGroupDescriptor, BindingLayout, BindingLayoutEntry, BindingType,
+            MaterialDescriptor, MaterialInstance, ShaderSource, ShaderStage,
+        };
+
+        let instance = GraphicsInstance::new().unwrap();
+        let device = instance.create_device().unwrap();
+
+        let layout = Arc::new(BindingLayout::new().with_entry(BindingLayoutEntry::new(
+            0,
+            BindingType::StorageBufferReadOnly,
+        )));
+        let buffer = device
+            .create_buffer(&BufferDescriptor::new(256, BufferUsage::STORAGE))
+            .unwrap();
+        let group = device
+            .create_binding_group(
+                layout.clone(),
+                BindingGroupDescriptor::new().with_buffer(0, buffer.clone()),
+            )
+            .unwrap();
+
+        // Mesh material built directly around a dummy pipeline handle (no
+        // shader compilation — inference only reads the descriptor and the
+        // bound groups).
+        let descriptor = MaterialDescriptor::new()
+            .with_shader(ShaderSource::slang(
+                ShaderStage::Mesh,
+                b"ms".to_vec(),
+                "ms_main",
+                vec![],
+            ))
+            .with_shader(ShaderSource::slang(
+                ShaderStage::Fragment,
+                b"fs".to_vec(),
+                "fs_main",
+                vec![],
+            ))
+            .with_binding_layout(layout)
+            .with_label("meshlet test material");
+        descriptor.validate_stage_combination().unwrap();
+        let material = Arc::new(crate::materials::Material::new(
+            device.clone(),
+            descriptor,
+            crate::backend::GpuPipeline::Dummy,
+        ));
+        let material_instance = Arc::new(MaterialInstance::new(material).with_binding_group(group));
+
+        let mut pass = GraphicsPass::new("mesh tasks".into());
+        assert!(!pass.has_draws());
+        pass.add_draw_mesh_tasks(material_instance, [4, 2, 1]);
+        assert!(pass.has_draws());
+        assert_eq!(pass.mesh_tasks_commands()[0].group_count, [4, 2, 1]);
+
+        let usage = pass.infer_resource_usage();
+        assert!(
+            usage
+                .buffer_usages
+                .iter()
+                .any(|d| Arc::ptr_eq(&d.buffer, &buffer)
+                    && d.access == BufferAccessMode::StorageRead),
+            "meshlet storage buffer must be declared as a read"
+        );
     }
 
     #[test]

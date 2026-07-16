@@ -186,6 +186,16 @@ where
         None
     }
 
+    /// Seed a resident asset directly, bypassing the load pipeline — the
+    /// programmatic-publish integration point (virtual assets, mirroring
+    /// `MeshManager::insert_external` / `TextureManager::publish_virtual`).
+    /// Replaces any pending load or resident entry and bumps the generation,
+    /// so consumers re-resolve to the new value.
+    pub fn publish(&mut self, guid: Guid, asset: Arc<L::Asset>) {
+        self.pending.remove(&guid);
+        self.cache.publish(guid, asset);
+    }
+
     /// The resident asset for `guid` if loaded — no request side effect.
     pub fn get(&self, guid: Guid) -> Option<&Arc<L::Asset>> {
         self.cache.get(&guid)

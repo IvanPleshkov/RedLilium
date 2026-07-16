@@ -34,7 +34,36 @@ bitflags! {
         ///
         /// [`RingBuffer`]: crate::resources::RingBuffer
         const RING = 1 << 9;
+        /// Buffer feeds acceleration-structure builds as read-only geometry
+        /// input (#110): vertex/index buffers consumed by a BLAS build, or the
+        /// instance buffer consumed by a TLAS build. Vulkan-only
+        /// (`VK_KHR_acceleration_structure`); requires
+        /// [`DeviceCapabilities::ray_query`](crate::device::DeviceCapabilities)
+        /// — buffer creation with this flag fails on other backends.
+        const ACCELERATION_STRUCTURE_INPUT = 1 << 10;
+        /// Backing storage of an acceleration structure (#110). Engine-internal:
+        /// set on the buffers [`GraphicsDevice::create_blas`] /
+        /// [`GraphicsDevice::create_tlas`] allocate for AS storage and build
+        /// scratch; user code never needs it.
+        ///
+        /// [`GraphicsDevice::create_blas`]: crate::GraphicsDevice::create_blas
+        /// [`GraphicsDevice::create_tlas`]: crate::GraphicsDevice::create_tlas
+        const ACCELERATION_STRUCTURE_STORAGE = 1 << 11;
+        /// Buffer needs a GPU device address (`vkGetBufferDeviceAddress`,
+        /// #110). Engine-internal: AS build scratch buffers carry
+        /// `STORAGE | DEVICE_ADDRESS`. The AS input/storage flags imply an
+        /// address on Vulkan without this flag being set.
+        const DEVICE_ADDRESS = 1 << 12;
     }
+}
+
+impl BufferUsage {
+    /// The flags tied to acceleration structures / device addresses (#110) —
+    /// creation with any of these requires
+    /// [`DeviceCapabilities::ray_query`](crate::device::DeviceCapabilities).
+    pub const RAY_TRACING_FLAGS: BufferUsage = BufferUsage::ACCELERATION_STRUCTURE_INPUT
+        .union(BufferUsage::ACCELERATION_STRUCTURE_STORAGE)
+        .union(BufferUsage::DEVICE_ADDRESS);
 }
 
 impl Default for BufferUsage {

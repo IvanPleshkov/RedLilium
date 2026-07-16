@@ -11,7 +11,9 @@ use crate::instance::GraphicsInstance;
 use crate::materials::{Material, MaterialDescriptor};
 use crate::mesh::{CpuMesh, Mesh, MeshDescriptor};
 use crate::pipeline::FramePipeline;
-use crate::resources::{Buffer, Sampler, Texture};
+use crate::resources::{
+    Blas, BlasDescriptor, Buffer, Sampler, Texture, Tlas, TlasDescriptor, instance_buffer_size,
+};
 use crate::types::{
     BufferDescriptor, BufferUsage, CpuSampler, SamplerDescriptor, TextureDescriptor,
 };
@@ -84,6 +86,37 @@ pub struct DeviceCapabilities {
     /// moment). When false, heap `budget`/`usage` are `None` and the stats panel
     /// shows heap sizes + allocator totals only. Always false on wgpu/dummy.
     pub memory_budget: bool,
+    /// Whether inline ray tracing (ray queries against acceleration
+    /// structures) is available (#110). True only on the Vulkan backend when
+    /// `VK_KHR_acceleration_structure` + `VK_KHR_ray_query` (and the
+    /// `bufferDeviceAddress` feature they build on) are enabled. This is a
+    /// capability, not a [`DeviceTier`]: no renderer code path stands on it
+    /// yet (ADR-032) — a future ray-traced-lighting render path introduces
+    /// the tier. Gates [`GraphicsDevice::create_blas`] /
+    /// [`GraphicsDevice::create_tlas`] and
+    /// [`BindingType::AccelerationStructure`](crate::BindingType) bindings.
+    /// Always false on wgpu/dummy and on wasm.
+    pub ray_query: bool,
+    /// Whether mesh-shading pipelines (task + mesh shader stages, #111) are
+    /// available. True only on the Vulkan backend when `VK_EXT_mesh_shader`
+    /// (with its `taskShader` + `meshShader` feature bits) is enabled. Like
+    /// [`ray_query`](Self::ray_query) this is a capability, not a
+    /// [`DeviceTier`]: no renderer path stands on it yet. Gates materials
+    /// with [`ShaderStage::Task`]/[`ShaderStage::Mesh`](crate::ShaderStage)
+    /// stages and [`GraphicsPass::add_draw_mesh_tasks`](crate::GraphicsPass)
+    /// draws. Always false on wgpu/dummy and on wasm (WebGPU has no mesh
+    /// shaders).
+    pub mesh_shading: bool,
+    /// Whether the bindless texture/sampler heap (#117) is available:
+    /// update-after-bind, partially-bound, runtime-sized descriptor arrays
+    /// indexed non-uniformly from shaders. True only on the Vulkan backend
+    /// when the five Vulkan 1.2 descriptor-indexing feature bits are present
+    /// (core since 1.2; the engine baseline is 1.3 — in practice every
+    /// desktop GPU the baseline admits). Like [`ray_query`](Self::ray_query)
+    /// this is a capability, not a [`DeviceTier`]. Gates the bindless
+    /// registration APIs and the `BindlessTextures`/`BindlessSamplers`
+    /// binding types. Always false on wgpu/dummy and on wasm.
+    pub bindless: bool,
 }
 
 impl DeviceCapabilities {
@@ -229,6 +262,20 @@ pub struct GraphicsDevice {
     samplers: RwLock<Vec<Weak<Sampler>>>,
     materials: RwLock<Vec<Weak<Material>>>,
     meshes: RwLock<Vec<Weak<Mesh>>>,
+    /// The bindless heap (#117): slot table + the shared binding group,
+    /// created lazily on first use (group construction needs `Arc<Self>`).
+    /// `None` until then; never populated when `capabilities.bindless` is
+    /// false.
+    bindless: parking_lot::Mutex<Option<BindlessShared>>,
+}
+
+/// The lazily created bindless heap (#117): the slot table and the one
+/// device-owned binding group every bindless material binds.
+#[derive(Clone)]
+struct BindlessShared {
+    slots: Arc<crate::bindless::BindlessSlots>,
+    layout: Arc<crate::materials::BindingLayout>,
+    group: Arc<crate::materials::BindingGroup>,
 }
 
 impl GraphicsDevice {
@@ -244,6 +291,7 @@ impl GraphicsDevice {
             samplers: RwLock::new(Vec::new()),
             materials: RwLock::new(Vec::new()),
             meshes: RwLock::new(Vec::new()),
+            bindless: parking_lot::Mutex::new(None),
         }
     }
 
@@ -403,6 +451,154 @@ impl GraphicsDevice {
         Ok(texture)
     }
 
+    /// Create a bottom-level acceleration structure over triangle geometry
+    /// (#110, ADR-032).
+    ///
+    /// Allocates the AS backing storage and build scratch (engine [`Buffer`]s,
+    /// tracked by the automatic barrier system) and creates the GPU handle.
+    /// The BLAS holds no geometry yet: add it to an
+    /// [`AccelerationStructureBuildPass`](crate::AccelerationStructureBuildPass)
+    /// to build it on the GPU — there is deliberately no direct build method
+    /// (GPU work goes through the frame graph).
+    ///
+    /// Requires [`DeviceCapabilities::ray_query`]; geometry buffers must carry
+    /// [`BufferUsage::ACCELERATION_STRUCTURE_INPUT`](crate::types::BufferUsage).
+    ///
+    /// # Errors
+    ///
+    /// Fails on backends without ray-query support (wgpu; Vulkan devices
+    /// lacking the extensions), on an empty descriptor, or when a geometry
+    /// buffer lacks the AS-input usage flag.
+    pub fn create_blas(
+        self: &Arc<Self>,
+        descriptor: &BlasDescriptor,
+    ) -> Result<Arc<Blas>, GraphicsError> {
+        profile_scope!("create_blas");
+
+        if descriptor.geometries.is_empty() {
+            return Err(GraphicsError::InvalidParameter(
+                "BLAS descriptor has no geometry".to_string(),
+            ));
+        }
+        for geometry in &descriptor.geometries {
+            let input_ok = |buffer: &Buffer| {
+                buffer
+                    .descriptor()
+                    .usage
+                    .contains(crate::types::BufferUsage::ACCELERATION_STRUCTURE_INPUT)
+            };
+            if !input_ok(&geometry.vertex_buffer)
+                || geometry
+                    .index_buffer
+                    .as_deref()
+                    .is_some_and(|b| !input_ok(b))
+            {
+                return Err(GraphicsError::InvalidParameter(format!(
+                    "BLAS '{}' geometry buffers must be created with \
+                     BufferUsage::ACCELERATION_STRUCTURE_INPUT",
+                    descriptor.label.as_deref().unwrap_or("unnamed")
+                )));
+            }
+        }
+
+        let backend = self.instance.backend();
+        let sizes = backend.blas_build_sizes(descriptor)?;
+        let label = descriptor.label.as_deref().unwrap_or("blas");
+        let backing = self.create_buffer(
+            &BufferDescriptor::new(
+                sizes.acceleration_structure_size,
+                BufferUsage::ACCELERATION_STRUCTURE_STORAGE,
+            )
+            .with_label(format!("{label} storage")),
+        )?;
+        let scratch = self.create_buffer(
+            &BufferDescriptor::new(
+                sizes.build_scratch_size,
+                BufferUsage::STORAGE | BufferUsage::DEVICE_ADDRESS,
+            )
+            .with_label(format!("{label} scratch")),
+        )?;
+        let gpu_handle =
+            backend.create_blas_handle(backing.gpu_handle(), sizes.acceleration_structure_size)?;
+
+        Ok(Arc::new(Blas::new(
+            Arc::clone(self),
+            descriptor.clone(),
+            backing,
+            scratch,
+            gpu_handle,
+        )))
+    }
+
+    /// Create a top-level acceleration structure over BLAS instances (#110,
+    /// ADR-032).
+    ///
+    /// Allocates backing storage, build scratch, and one host-visible
+    /// instance buffer per frame slot. Per frame: write the instance array
+    /// with [`Tlas::write_instances`], then add the TLAS to that frame's
+    /// [`AccelerationStructureBuildPass`](crate::AccelerationStructureBuildPass).
+    /// Shaders bind the built TLAS through
+    /// [`BindingType::AccelerationStructure`](crate::BindingType).
+    ///
+    /// # Errors
+    ///
+    /// Fails on backends without ray-query support or when `max_instances`
+    /// is zero.
+    pub fn create_tlas(
+        self: &Arc<Self>,
+        descriptor: &TlasDescriptor,
+    ) -> Result<Arc<Tlas>, GraphicsError> {
+        profile_scope!("create_tlas");
+
+        if descriptor.max_instances == 0 {
+            return Err(GraphicsError::InvalidParameter(
+                "TLAS max_instances cannot be zero".to_string(),
+            ));
+        }
+
+        let backend = self.instance.backend();
+        let sizes = backend.tlas_build_sizes(descriptor.max_instances)?;
+        let label = descriptor.label.as_deref().unwrap_or("tlas");
+        let backing = self.create_buffer(
+            &BufferDescriptor::new(
+                sizes.acceleration_structure_size,
+                BufferUsage::ACCELERATION_STRUCTURE_STORAGE,
+            )
+            .with_label(format!("{label} storage")),
+        )?;
+        let scratch = self.create_buffer(
+            &BufferDescriptor::new(
+                sizes.build_scratch_size,
+                BufferUsage::STORAGE | BufferUsage::DEVICE_ADDRESS,
+            )
+            .with_label(format!("{label} scratch")),
+        )?;
+        // One instance buffer per frame slot: `write_instances` rotates, so
+        // the CPU never touches data an in-flight frame's build still reads.
+        let instance_buffers = (0..crate::pipeline::MAX_FRAMES_IN_FLIGHT)
+            .map(|slot| {
+                self.create_buffer(
+                    &BufferDescriptor::new(
+                        instance_buffer_size(descriptor.max_instances),
+                        BufferUsage::ACCELERATION_STRUCTURE_INPUT | BufferUsage::MAP_WRITE,
+                    )
+                    .with_label(format!("{label} instances[{slot}]")),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let gpu_handle =
+            backend.create_tlas_handle(backing.gpu_handle(), sizes.acceleration_structure_size)?;
+
+        Ok(Arc::new(Tlas::new(
+            Arc::clone(self),
+            descriptor.clone(),
+            backing,
+            scratch,
+            instance_buffers,
+            gpu_handle,
+        )))
+    }
+
     /// Create a texture sampler.
     ///
     /// # Errors
@@ -525,6 +721,28 @@ impl GraphicsDevice {
         // reflection, baked lookups and pipeline compilation below all see
         // the same effective defines.
         let descriptor = &descriptor.resolve_variant()?;
+
+        // Stage-combination sanity (#111): catch a task stage without a mesh
+        // stage, mesh+vertex mixes, and mesh materials with vertex layouts
+        // here, with the material named — not as driver validation errors.
+        descriptor.validate_stage_combination()?;
+
+        // Mesh-shading materials require the capability (#111). The dummy
+        // backend is exempt — it fabricates no capabilities but must keep
+        // descriptor-level tests runnable headless.
+        if descriptor.uses_mesh_shading()
+            && !self.capabilities.mesh_shading
+            && !matches!(
+                &*self.instance.backend(),
+                crate::backend::GpuBackend::Dummy(_)
+            )
+        {
+            return Err(GraphicsError::FeatureNotSupported(format!(
+                "material {:?} uses task/mesh shader stages, which require \
+                 DeviceCapabilities::mesh_shading (#111)",
+                descriptor.label
+            )));
+        }
 
         // Auto-reflect binding layouts from Slang shaders when none are specified
         #[cfg(feature = "slang-shaders")]
@@ -678,6 +896,23 @@ impl GraphicsDevice {
     ) -> Result<Arc<crate::materials::BindingGroup>, GraphicsError> {
         profile_scope!("create_binding_group");
 
+        // The bindless heap group is device-owned (#117): its set lives in a
+        // dedicated update-after-bind pool and is written by registration,
+        // not here. User-built groups cannot declare its binding types.
+        if layout.entries.iter().any(|e| {
+            matches!(
+                e.binding_type,
+                crate::materials::BindingType::BindlessTextures
+                    | crate::materials::BindingType::BindlessSamplers
+            )
+        }) {
+            return Err(GraphicsError::InvalidParameter(
+                "bindless heap bindings cannot be created via create_binding_group; bind \
+                 GraphicsDevice::bindless_heap_group() instead (#117)"
+                    .to_string(),
+            ));
+        }
+
         // Validate every entry against the layout up front (this replaces the
         // per-draw validation the backends used to do in encode_draw_command).
         for entry in &descriptor.entries {
@@ -687,6 +922,25 @@ impl GraphicsDevice {
                     entry.binding
                 )));
             };
+            // AS bindings require the ray-query capability (#110): fail here
+            // with the engine-level cause instead of an invalid descriptor
+            // type reaching the driver. The dummy backend is exempt — it
+            // fabricates no capabilities but must keep graph tests runnable.
+            if matches!(
+                decl.binding_type,
+                crate::materials::BindingType::AccelerationStructure
+            ) && !self.capabilities.ray_query
+                && !matches!(
+                    &*self.instance.backend(),
+                    crate::backend::GpuBackend::Dummy(_)
+                )
+            {
+                return Err(GraphicsError::FeatureNotSupported(format!(
+                    "binding {} declares an acceleration structure, which requires \
+                     DeviceCapabilities::ray_query (#110)",
+                    entry.binding
+                )));
+            }
             if !resource_matches_binding_type(&entry.resource, decl.binding_type) {
                 return Err(GraphicsError::InvalidParameter(format!(
                     "binding {} bound resource does not match the layout's declared type {:?}",
@@ -724,6 +978,228 @@ impl GraphicsDevice {
             descriptor,
             gpu_handle,
         )))
+    }
+
+    // ======================== Bindless heap (#117) ========================
+
+    /// The heap's slot table + shared group, created on first use.
+    fn bindless_shared(self: &Arc<Self>) -> Result<BindlessShared, GraphicsError> {
+        use crate::materials::{
+            BindingEntry, BindingGroupDescriptor, BindingLayout, BindingLayoutEntry, BindingType,
+            BoundResource,
+        };
+
+        if !self.capabilities.bindless {
+            return Err(GraphicsError::FeatureNotSupported(
+                "the bindless heap requires DeviceCapabilities::bindless (#117; Vulkan \
+                 backend with the descriptor-indexing feature bits)"
+                    .to_string(),
+            ));
+        }
+
+        let mut guard = self.bindless.lock();
+        if let Some(shared) = &*guard {
+            return Ok(shared.clone());
+        }
+
+        #[cfg(feature = "vulkan-backend")]
+        let (gpu_handle, capacities, layout) = {
+            let backend = self.instance.backend();
+            let crate::backend::GpuBackend::Vulkan(vulkan) = &*backend else {
+                return Err(GraphicsError::FeatureNotSupported(
+                    "the bindless heap is Vulkan-only (#117)".to_string(),
+                ));
+            };
+            let capacities = vulkan.bindless_capacities();
+            // Phase-1 visibility: the classic shader stages. Task/mesh
+            // visibility joins once a mesh material consumes the heap
+            // (TASK/MESH stage flags require VK_EXT_mesh_shader).
+            let visibility = crate::materials::ShaderStageFlags::VERTEX
+                | crate::materials::ShaderStageFlags::FRAGMENT
+                | crate::materials::ShaderStageFlags::COMPUTE;
+            let layout = std::sync::Arc::new(
+                BindingLayout::new()
+                    .with_entry(
+                        BindingLayoutEntry::new(
+                            crate::bindless::BINDLESS_TEXTURES_BINDING,
+                            BindingType::BindlessTextures,
+                        )
+                        .with_visibility(visibility),
+                    )
+                    .with_entry(
+                        BindingLayoutEntry::new(
+                            crate::bindless::BINDLESS_SAMPLERS_BINDING,
+                            BindingType::BindlessSamplers,
+                        )
+                        .with_visibility(visibility),
+                    )
+                    .with_label("bindless heap"),
+            );
+            (vulkan.create_bindless_group(&layout)?, capacities, layout)
+        };
+        #[cfg(not(feature = "vulkan-backend"))]
+        {
+            return Err(GraphicsError::FeatureNotSupported(
+                "the bindless heap is Vulkan-only (#117)".to_string(),
+            ));
+        }
+
+        #[cfg(feature = "vulkan-backend")]
+        {
+            let slots = Arc::new(crate::bindless::BindlessSlots::new(
+                capacities.0,
+                capacities.1,
+            ));
+            // The group's entries reference the slot table so pass resource
+            // inference can declare the live textures (see
+            // `extract_material_resources`).
+            let mut descriptor = BindingGroupDescriptor::new();
+            descriptor.entries.push(BindingEntry::new(
+                crate::bindless::BINDLESS_TEXTURES_BINDING,
+                BoundResource::BindlessHeap(Arc::clone(&slots)),
+            ));
+            descriptor.entries.push(BindingEntry::new(
+                crate::bindless::BINDLESS_SAMPLERS_BINDING,
+                BoundResource::BindlessHeap(Arc::clone(&slots)),
+            ));
+            descriptor.label = Some("bindless heap".to_string());
+
+            let group = Arc::new(crate::materials::BindingGroup::new(
+                Arc::clone(self),
+                Arc::clone(&layout),
+                descriptor,
+                gpu_handle,
+            ));
+            let shared = BindlessShared {
+                slots,
+                layout,
+                group,
+            };
+            *guard = Some(shared.clone());
+            Ok(shared)
+        }
+    }
+
+    /// The device-owned bindless heap group (#117) — the one binding group
+    /// every bindless material binds at its heap set. Created on first call.
+    ///
+    /// Requires [`DeviceCapabilities::bindless`].
+    pub fn bindless_heap_group(
+        self: &Arc<Self>,
+    ) -> Result<Arc<crate::materials::BindingGroup>, GraphicsError> {
+        Ok(self.bindless_shared()?.group)
+    }
+
+    /// The heap group's binding layout (#117) — pass this `Arc` to
+    /// [`MaterialDescriptor::with_binding_layout`](crate::MaterialDescriptor)
+    /// for the heap set, so material and group share the layout by pointer.
+    pub fn bindless_heap_layout(
+        self: &Arc<Self>,
+    ) -> Result<Arc<crate::materials::BindingLayout>, GraphicsError> {
+        Ok(self.bindless_shared()?.layout)
+    }
+
+    /// Register a sampled texture in the bindless heap (#117) and return its
+    /// slot index — the value shaders index the heap's texture array with
+    /// (`NonUniformResourceIndex`). The heap keeps the texture alive until
+    /// [`bindless_unregister_texture`](Self::bindless_unregister_texture).
+    ///
+    /// # Errors
+    ///
+    /// Fails without [`DeviceCapabilities::bindless`], when the heap is
+    /// full, when the texture lacks `TEXTURE_BINDING` usage, or for
+    /// depth-format textures (phase 1 registers color-sampled textures; the
+    /// heap records `SHADER_READ_ONLY_OPTIMAL`).
+    pub fn bindless_register_texture(
+        self: &Arc<Self>,
+        texture: &Arc<Texture>,
+    ) -> Result<u32, GraphicsError> {
+        if !texture
+            .usage()
+            .contains(crate::types::TextureUsage::TEXTURE_BINDING)
+        {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "bindless textures need TextureUsage::TEXTURE_BINDING (texture {:?})",
+                texture.label()
+            )));
+        }
+        if texture.format().is_depth_stencil() {
+            return Err(GraphicsError::InvalidParameter(format!(
+                "depth-format textures cannot join the bindless heap yet (#117 phase 1; \
+                 texture {:?})",
+                texture.label()
+            )));
+        }
+
+        let shared = self.bindless_shared()?;
+        let slot = shared.slots.allocate_texture(Arc::clone(texture))?;
+
+        #[cfg(feature = "vulkan-backend")]
+        if let crate::backend::GpuBackend::Vulkan(vulkan) = &*self.instance.backend()
+            && let Err(e) = vulkan.bindless_write_texture(
+                shared.group.gpu_handle(),
+                crate::bindless::BINDLESS_TEXTURES_BINDING,
+                slot,
+                texture.gpu_handle(),
+            )
+        {
+            // Roll the slot back through the deferred path (harmless: the
+            // descriptor was never written, the delay only costs reuse).
+            let _ = shared.slots.release_texture(slot);
+            return Err(e);
+        }
+
+        Ok(slot)
+    }
+
+    /// Unregister a bindless texture slot (#117). The texture stays alive —
+    /// and the slot unreusable — until every frame that might still index it
+    /// has passed its fence.
+    pub fn bindless_unregister_texture(&self, slot: u32) -> Result<(), GraphicsError> {
+        let guard = self.bindless.lock();
+        let Some(shared) = &*guard else {
+            return Err(GraphicsError::InvalidParameter(
+                "bindless heap was never created".to_string(),
+            ));
+        };
+        shared.slots.release_texture(slot)
+    }
+
+    /// Register a sampler in the bindless heap (#117); sampler sibling of
+    /// [`bindless_register_texture`](Self::bindless_register_texture).
+    pub fn bindless_register_sampler(
+        self: &Arc<Self>,
+        sampler: &Arc<Sampler>,
+    ) -> Result<u32, GraphicsError> {
+        let shared = self.bindless_shared()?;
+        let slot = shared.slots.allocate_sampler(Arc::clone(sampler))?;
+
+        #[cfg(feature = "vulkan-backend")]
+        if let crate::backend::GpuBackend::Vulkan(vulkan) = &*self.instance.backend()
+            && let Err(e) = vulkan.bindless_write_sampler(
+                shared.group.gpu_handle(),
+                crate::bindless::BINDLESS_SAMPLERS_BINDING,
+                slot,
+                sampler.gpu_handle(),
+            )
+        {
+            let _ = shared.slots.release_sampler(slot);
+            return Err(e);
+        }
+
+        Ok(slot)
+    }
+
+    /// Unregister a bindless sampler slot (#117); sampler sibling of
+    /// [`bindless_unregister_texture`](Self::bindless_unregister_texture).
+    pub fn bindless_unregister_sampler(&self, slot: u32) -> Result<(), GraphicsError> {
+        let guard = self.bindless.lock();
+        let Some(shared) = &*guard else {
+            return Err(GraphicsError::InvalidParameter(
+                "bindless heap was never created".to_string(),
+            ));
+        };
+        shared.slots.release_sampler(slot)
     }
 
     /// Create a mesh with vertex and optional index buffers.
@@ -1005,6 +1481,11 @@ impl GraphicsDevice {
             unsafe { vulkan_backend.advance_frame() };
         }
 
+        // Recycle bindless slots whose retirement window has passed (#117).
+        if let Some(shared) = &*self.bindless.lock() {
+            shared.slots.advance_frame();
+        }
+
         // Clean up dead weak references
         self.cleanup_dead_resources();
     }
@@ -1062,6 +1543,15 @@ fn resource_matches_binding_type(
         BoundResource::CombinedTextureSampler { .. } => {
             matches!(binding_type, BindingType::CombinedTextureSampler)
         }
+        BoundResource::AccelerationStructure(_) => {
+            matches!(binding_type, BindingType::AccelerationStructure)
+        }
+        BoundResource::BindlessHeap(_) => {
+            matches!(
+                binding_type,
+                BindingType::BindlessTextures | BindingType::BindlessSamplers
+            )
+        }
     }
 }
 
@@ -1074,6 +1564,63 @@ mod tests {
     fn create_test_device() -> Arc<GraphicsDevice> {
         let instance = GraphicsInstance::new().unwrap();
         instance.create_device().unwrap()
+    }
+
+    /// User binding groups can never declare the bindless heap's binding
+    /// types (#117) — the heap set is device-owned.
+    #[test]
+    fn bindless_layouts_rejected_in_create_binding_group() {
+        let device = create_test_device();
+        let layout = Arc::new(crate::materials::BindingLayout::new().with_bindless_textures(0));
+        let result =
+            device.create_binding_group(layout, crate::materials::BindingGroupDescriptor::new());
+        assert!(matches!(result, Err(GraphicsError::InvalidParameter(_))));
+    }
+
+    /// Registration round-trips where the capability exists and gates
+    /// cleanly where it does not; invalid textures are rejected either way.
+    #[test]
+    fn bindless_registration_gated_and_validated() {
+        let device = create_test_device();
+        let texture = device
+            .create_texture(&crate::types::TextureDescriptor::new_2d(
+                4,
+                4,
+                TextureFormat::Rgba8Unorm,
+                TextureUsage::TEXTURE_BINDING,
+            ))
+            .unwrap();
+
+        if device.capabilities().bindless {
+            let slot = device.bindless_register_texture(&texture).unwrap();
+            device.bindless_unregister_texture(slot).unwrap();
+            // Double-unregister of the same slot is an error.
+            assert!(device.bindless_unregister_texture(slot).is_err());
+            // The heap group and layout exist and agree.
+            let group = device.bindless_heap_group().unwrap();
+            let layout = device.bindless_heap_layout().unwrap();
+            assert!(Arc::ptr_eq(group.layout(), &layout));
+        } else {
+            assert!(matches!(
+                device.bindless_register_texture(&texture),
+                Err(GraphicsError::FeatureNotSupported(_))
+            ));
+        }
+
+        // A texture without TEXTURE_BINDING usage is rejected before any
+        // capability question.
+        let attachment_only = device
+            .create_texture(&crate::types::TextureDescriptor::new_2d(
+                4,
+                4,
+                TextureFormat::Rgba8Unorm,
+                TextureUsage::RENDER_ATTACHMENT,
+            ))
+            .unwrap();
+        assert!(matches!(
+            device.bindless_register_texture(&attachment_only),
+            Err(GraphicsError::InvalidParameter(_))
+        ));
     }
 
     /// The device is named after the real adapter (XB-L3) — "Dummy Adapter"
