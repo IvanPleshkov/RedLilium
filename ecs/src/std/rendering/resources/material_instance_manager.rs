@@ -139,11 +139,13 @@ impl MaterialInstanceManager {
     /// per-material instances from streamed scene data). Seeds the DATA phase
     /// directly instead of loading a DB record; resolution then flows through
     /// [`drive`](Self::drive) normally — parent template, texture props, static
-    /// binding, hot reload. Re-publishing replaces the record and re-resolves,
-    /// so `AssetRef` holders pick up the new values.
+    /// binding, hot reload. Re-publishing replaces the record and re-resolves
+    /// LAST-GOOD-SERVING: the resident resolution keeps drawing until the new
+    /// one republishes over it (same semantics as hot-reload pull-validation) —
+    /// invalidating here instead would blank every consumer for the frames the
+    /// rebuild takes (a preview re-publishing per gizmo-drag tick flickers).
     pub fn publish_virtual(&mut self, guid: Guid, data: MaterialInstanceData) {
         self.data.publish(guid, Arc::new(data));
-        self.cache.invalidate(&guid);
         self.demanded.insert(guid);
     }
 
